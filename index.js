@@ -404,3 +404,4 @@ async function handleInteraction(request, env) {
     }, 500);
   }
 }
+ 

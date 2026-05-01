@@ -1,0 +1,7 @@
+name = "jarvis-worker"
+main = "index.js"
+compatibility_date = "2026-05-01"
+
+[[kv_namespaces]]
+binding = "JARVIS_KV"
+id = "44e0508c57004fe586b8f41fe28603b7"

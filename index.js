@@ -1,6 +1,6 @@
-// ============================================================  
-// 🧠 JARVIS SYSTEM — CORE  
-// ============================================================  
+// ============================================================
+// 🧠 JARVIS SYSTEM — PHASE 4 FOUNDATION (CLEAN BUILD)
+// ============================================================
 
 export default {
   async fetch(request, env, ctx) {
@@ -11,9 +11,33 @@ export default {
   }
 };
 
-// ============================================================  
-// ⚙️ SYSTEM ROUTER  
-// ============================================================  
+// ============================================================
+// 🧠 SYSTEM STATE (PHASE 4)
+// ============================================================
+
+const SYSTEM_STATE = {
+  version: "3.2.0-Alpha",
+  status: "OPERATIONAL",
+  telemetry: {
+    totalRequests: 0,
+    totalErrors: 0,
+    lastActive: null,
+  },
+  capabilities: {
+    edge_logic: true,
+    heavy_muscle: false,
+    vision_active: false,
+    mutation_ready: false
+  },
+  limits: {
+    kv_writes_today: 0,
+    compute_units_avg: 0
+  }
+};
+
+// ============================================================
+// ⚙️ SYSTEM ROUTER
+// ============================================================
 
 async function systemRouter(request, env, path) {
 
@@ -21,12 +45,13 @@ async function systemRouter(request, env, path) {
     return jsonResponse({
       status: "online",
       system: "JARVIS CORE",
-      phase: 3,
-      version: "v3.1.0",
-      deployedAt: new Date().toISOString(),
-      layers: 10,
-      note: "Execution Core active"
+      version: SYSTEM_STATE.version,
+      phase: 4
     });
+  }
+
+  if (path === "/system-state") {
+    return jsonResponse(SYSTEM_STATE);
   }
 
   if (path === "/root-panel") {
@@ -43,37 +68,31 @@ async function systemRouter(request, env, path) {
 
   return jsonResponse({
     status: "active",
-    message: "JARVIS SYSTEM RUNNING",
-    phase: 3
+    message: "JARVIS SYSTEM RUNNING"
   });
 }
 
-// ============================================================  
-// 🔐 ROOT PANEL AUTH  
-// ============================================================  
+// ============================================================
+// 🔐 ROOT PANEL AUTH
+// ============================================================
 
 async function rootPanelAuthGate(request, env) {
   const url = new URL(request.url);
   const key = url.searchParams.get("key");
 
   if (!key || key !== env.ROOT_KEY) {
-    return jsonResponse({
-      auth: "denied",
-      reason: "invalid_root_key"
-    }, 401);
+    return jsonResponse({ auth: "denied" }, 401);
   }
 
   return jsonResponse({
     panel: "ROOT GOVERNANCE PANEL",
-    auth: "root_key_verified",
-    stage: "password_required_next",
-    note: "Phase 1 auth stub only"
+    auth: "verified"
   });
 }
 
-// ============================================================  
-// 📍 LOCATION TOOL  
-// ============================================================  
+// ============================================================
+// 📍 LOCATION TOOL
+// ============================================================
 
 function locationTool(request) {
   const cf = request.cf || {};
@@ -84,17 +103,24 @@ function locationTool(request) {
       city: cf.city || "unknown",
       region: cf.region || "unknown",
       timezone: cf.timezone || "unknown"
-    },
-    note: "Approximate location (Cloudflare metadata)"
+    }
   });
 }
 
-// ============================================================  
-// 🧠 RESPONSE HELPER  
-// ============================================================  
+// ============================================================
+// 🧠 SAFE RESPONSE HELPER
+// ============================================================
 
 function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
+  let safe;
+
+  try {
+    safe = JSON.stringify(data, null, 2);
+  } catch {
+    safe = JSON.stringify({ error: "serialization_failed" });
+  }
+
+  return new Response(safe, {
     status,
     headers: {
       "Content-Type": "application/json",
@@ -103,19 +129,17 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// ============================================================  
-// 🧮 SAFE CALCULATOR ENGINE  
-// ============================================================  
+// ============================================================
+// 🧮 SAFE CALCULATOR ENGINE (HARDENED)
+// ============================================================
 
 function evalBasic(expr) {
-  const clean = String(expr).replace(/\s+/g, "");
+  const clean = String(expr || "").replace(/\s+/g, "");
+
+  if (!clean) throw new Error("Empty expression");
 
   if (!/^[0-9+\-*/().]+$/.test(clean)) {
     throw new Error("Invalid characters");
-  }
-
-  if (clean.includes("()")) {
-    throw new Error("Empty brackets not allowed");
   }
 
   const tokens = clean.match(/\d+|[+\-*/()]/g);
@@ -130,6 +154,8 @@ function evalBasic(expr) {
     const b = values.pop();
     const a = values.pop();
     const op = ops.pop();
+
+    if (a === undefined || b === undefined || !op) return;
 
     if (op === "+") values.push(a + b);
     if (op === "-") values.push(a - b);
@@ -164,182 +190,44 @@ function evalBasic(expr) {
   return values[0];
 }
 
-// ============================================================  
-// 🧩 TOOL REGISTRY  
-// ============================================================  
-
-const STOPWATCH_STATE = new Map();
+// ============================================================
+// 🧩 TOOL REGISTRY
+// ============================================================
 
 const TOOL_REGISTRY = {
 
-  ping: async (input, context) => {
-    const { memory } = context;
-
-    return {
-      success: true,
-      tool: "ping",
-      message: "PONG",
-      memoryUsed: memory?.length || 0,
-      lastAction: memory?.[memory.length - 1] || null,
-      timestamp: Date.now()
-    };
-  },
+  ping: async (_, context) => ({
+    success: true,
+    message: "PONG",
+    memoryUsed: context.memory?.length || 0
+  }),
 
   calculator: async (input) => {
     try {
-      const expression = String(input || "");
-      const sanitized = expression.replace(/[^0-9+\-*/().]/g, "");
-      const result = evalBasic(sanitized);
-
-      return {
-        success: true,
-        tool: "calculator",
-        expression: sanitized,
-        result,
-        timestamp: Date.now()
-      };
+      const result = evalBasic(input);
+      return { success: true, result };
     } catch (err) {
-      return {
-        success: false,
-        tool: "calculator",
-        error: err.message
-      };
+      return { success: false, error: err.message };
     }
   },
 
-  stopwatch: async (input, context) => {
-    const { request } = context;
-
-    const sessionId =
-      request.headers.get("x-session-id") || "default";
-
-    const action = String(input || "").toLowerCase();
-
-    let state = STOPWATCH_STATE.get(sessionId);
-
-    if (!state) {
-      state = { running: false, startTime: 0, elapsed: 0 };
-      STOPWATCH_STATE.set(sessionId, state);
-    }
-
-    if (action === "start") {
-      state.running = true;
-      state.startTime = Date.now();
-      return { success: true, status: "started" };
-    }
-
-    if (action === "stop") {
-      if (!state.running) {
-        return { success: false, error: "not_running" };
-      }
-
-      state.elapsed += Date.now() - state.startTime;
-      state.running = false;
-
-      return {
-        success: true,
-        status: "stopped",
-        elapsed_ms: state.elapsed
-      };
-    }
-
-    if (action === "reset") {
-      state.running = false;
-      state.startTime = 0;
-      state.elapsed = 0;
-      return { success: true, status: "reset" };
-    }
-
-    if (action === "status") {
-      let current = state.elapsed;
-
-      if (state.running) {
-        current += Date.now() - state.startTime;
-      }
-
-      return {
-        success: true,
-        status: "status",
-        running: state.running,
-        elapsed_ms: current
-      };
-    }
-
-    return {
-      success: false,
-      tool: "stopwatch",
-      error: "invalid_action",
-      message: "use start | stop | reset | status"
-    };
-  },
-
-  memory_set: async (input, context) => {
-    const { env } = context;
-    const { key, value } = input || {};
-
-    if (!key || value === undefined) {
-      return { success: false, error: "missing_key_or_value" };
-    }
-
-    await env.JARVIS_KV.put(key, JSON.stringify(value));
-
-    return { success: true, tool: "memory_set", key };
-  },
-
-  memory_get: async (input, context) => {
-    const { env } = context;
-    const { key } = input || {};
-
-    if (!key) {
-      return { success: false, error: "missing_key" };
-    }
-
-    const value = await env.JARVIS_KV.get(key);
-
-    return {
-      success: true,
-      tool: "memory_get",
-      key,
-      value: value ? JSON.parse(value) : null
-    };
-  },
-
-  time: async () => {
-    const now = new Date();
-
-    return {
-      success: true,
-      tool: "time",
-      data: {
-        iso: now.toISOString(),
-        local: now.toString()
-      }
-    };
-  },
-
-  calendar: async () => {
-    const now = new Date();
-
-    return {
-      success: true,
-      tool: "calendar",
-      data: {
-        year: now.getFullYear(),
-        month: now.getMonth() + 1,
-        day: now.getDate(),
-        weekday: now.toLocaleString("en-US", { weekday: "long" })
-      }
-    };
-  }
+  time: async () => ({
+    success: true,
+    now: new Date().toISOString()
+  })
 };
 
-// ============================================================  
-// 🧠 MEMORY  
-// ============================================================  
+// ============================================================
+// 🧠 MEMORY
+// ============================================================
 
 async function loadMemory(env, sessionId) {
-  const raw = await env.JARVIS_KV.get(`chat:${sessionId}`);
-  return raw ? JSON.parse(raw) : [];
+  try {
+    const raw = await env.JARVIS_KV.get(`chat:${sessionId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function saveMemory(env, sessionId, memory) {
@@ -349,12 +237,21 @@ async function saveMemory(env, sessionId, memory) {
   );
 }
 
-// ============================================================  
-// ⚙️ INTERACTION  
-// ============================================================  
+// ============================================================
+// ⚙️ INTERACTION HANDLER (WITH TELEMETRY)
+// ============================================================
 
 async function handleInteraction(request, env) {
   try {
+
+    // ⚡ TELEMETRY
+    SYSTEM_STATE.telemetry.totalRequests++;
+    SYSTEM_STATE.telemetry.lastActive = new Date().toISOString();
+
+    console.log(
+      `[JARVIS] #${SYSTEM_STATE.telemetry.totalRequests} ACTIVE`
+    );
+
     const body = await request.json();
 
     const sessionId =
@@ -362,46 +259,31 @@ async function handleInteraction(request, env) {
       body.session_id ||
       "default";
 
-    const action = body.action;
-    const input = body.input || null;
-
-    if (!action) {
-      return jsonResponse(
-        { error: "missing_action", message: "Action is required" },
-        400
-      );
-    }
-
-    const tool = TOOL_REGISTRY[action];
+    const tool = TOOL_REGISTRY[body.action];
 
     if (!tool) {
-      return jsonResponse(
-        { status: "error", error: "tool_not_found", action },
-        404
-      );
+      return jsonResponse({ error: "tool_not_found" }, 404);
     }
 
     const memory = await loadMemory(env, sessionId);
+    const result = await tool(body.input, { env, memory });
 
-    const result = await tool(input, { request, env, memory });
-
-    memory.push({ action, input, result, time: Date.now() });
+    memory.push({
+      action: body.action,
+      result
+    });
 
     await saveMemory(env, sessionId, memory);
 
-    return jsonResponse({
-      status: "success",
-      sessionId,
-      action,
-      result,
-      memorySize: memory.length
-    });
+    return jsonResponse({ success: true, result });
 
   } catch (err) {
+
+    SYSTEM_STATE.telemetry.totalErrors++;
+
     return jsonResponse({
       error: "interaction_failed",
       message: err.message
     }, 500);
   }
-} 
- 
+}

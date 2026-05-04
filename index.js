@@ -1,5 +1,5 @@
 // ============================================================
-// 🧠 JARVIS SYSTEM — PHASE 4 FOUNDATION (CLEAN BUILD)
+// 🧠 JARVIS SYSTEM — PHASE 4.3 (ROOT CONTROL FOUNDATION)
 // ============================================================
 
 export default {
@@ -12,11 +12,11 @@ export default {
 };
 
 // ============================================================
-// 🧠 SYSTEM STATE (PHASE 4)
+// 🧠 SYSTEM STATE
 // ============================================================
 
 const SYSTEM_STATE = {
-  version: "3.2.0-Alpha",
+  version: "3.3.0",
   status: "OPERATIONAL",
   telemetry: {
     totalRequests: 0,
@@ -36,22 +36,46 @@ const SYSTEM_STATE = {
 };
 
 // ============================================================
+// 👑 ROOT CONTROL LAYER
+// ============================================================
+
+const SYSTEM_CONTROL = {
+  system_enabled: true,
+  tools_enabled: true,
+  memory_enabled: true,
+  autonomous_enabled: false,
+  mode: "normal"
+};
+
+// ============================================================
 // ⚙️ SYSTEM ROUTER
 // ============================================================
 
 async function systemRouter(request, env, path) {
+
+  // ❌ GLOBAL SYSTEM SHUTDOWN CHECK
+  if (!SYSTEM_CONTROL.system_enabled && path !== "/root-command") {
+    return jsonResponse({ error: "system_disabled" }, 503);
+  }
 
   if (path === "/health") {
     return jsonResponse({
       status: "online",
       system: "JARVIS CORE",
       version: SYSTEM_STATE.version,
-      phase: 4
+      phase: "4.3"
     });
   }
 
   if (path === "/system-state") {
-    return jsonResponse(SYSTEM_STATE);
+    return jsonResponse({
+      ...SYSTEM_STATE,
+      control: SYSTEM_CONTROL
+    });
+  }
+
+  if (path === "/root-command" && request.method === "POST") {
+    return handleRootCommand(request, env);
   }
 
   if (path === "/root-panel") {
@@ -73,7 +97,7 @@ async function systemRouter(request, env, path) {
 }
 
 // ============================================================
-// 🔐 ROOT PANEL AUTH
+// 🔐 ROOT AUTH
 // ============================================================
 
 async function rootPanelAuthGate(request, env) {
@@ -85,9 +109,76 @@ async function rootPanelAuthGate(request, env) {
   }
 
   return jsonResponse({
-    panel: "ROOT GOVERNANCE PANEL",
-    auth: "verified"
+    panel: "ROOT CONTROL ACTIVE",
+    access: "granted"
   });
+}
+
+// ============================================================
+// 👑 ROOT COMMAND HANDLER
+// ============================================================
+
+async function handleRootCommand(request, env) {
+  try {
+    const url = new URL(request.url);
+    const key = url.searchParams.get("key");
+
+    if (!key || key !== env.ROOT_KEY) {
+      return jsonResponse({ error: "unauthorized" }, 401);
+    }
+
+    const body = await request.json();
+    const command = body.command;
+    const value = body.value;
+
+    switch (command) {
+
+      case "kill_switch":
+        SYSTEM_CONTROL.system_enabled = false;
+        return jsonResponse({ success: true, system_enabled: false });
+
+      case "system_on":
+        SYSTEM_CONTROL.system_enabled = true;
+        return jsonResponse({ success: true, system_enabled: true });
+
+      case "tools_off":
+        SYSTEM_CONTROL.tools_enabled = false;
+        return jsonResponse({ success: true, tools_enabled: false });
+
+      case "tools_on":
+        SYSTEM_CONTROL.tools_enabled = true;
+        return jsonResponse({ success: true, tools_enabled: true });
+
+      case "memory_off":
+        SYSTEM_CONTROL.memory_enabled = false;
+        return jsonResponse({ success: true, memory_enabled: false });
+
+      case "memory_on":
+        SYSTEM_CONTROL.memory_enabled = true;
+        return jsonResponse({ success: true, memory_enabled: true });
+
+      case "set_mode":
+        SYSTEM_CONTROL.mode = value || "normal";
+        return jsonResponse({ success: true, mode: SYSTEM_CONTROL.mode });
+
+      case "autonomous_on":
+        SYSTEM_CONTROL.autonomous_enabled = true;
+        return jsonResponse({ success: true, autonomous_enabled: true });
+
+      case "autonomous_off":
+        SYSTEM_CONTROL.autonomous_enabled = false;
+        return jsonResponse({ success: true, autonomous_enabled: false });
+
+      default:
+        return jsonResponse({ error: "unknown_command" }, 400);
+    }
+
+  } catch (err) {
+    return jsonResponse({
+      error: "root_command_failed",
+      message: err.message
+    }, 500);
+  }
 }
 
 // ============================================================
@@ -108,19 +199,11 @@ function locationTool(request) {
 }
 
 // ============================================================
-// 🧠 SAFE RESPONSE HELPER
+// 🧠 RESPONSE HELPER
 // ============================================================
 
 function jsonResponse(data, status = 200) {
-  let safe;
-
-  try {
-    safe = JSON.stringify(data, null, 2);
-  } catch {
-    safe = JSON.stringify({ error: "serialization_failed" });
-  }
-
-  return new Response(safe, {
+  return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
@@ -130,13 +213,11 @@ function jsonResponse(data, status = 200) {
 }
 
 // ============================================================
-// 🧮 SAFE CALCULATOR ENGINE (HARDENED)
+// 🧮 CALCULATOR ENGINE
 // ============================================================
 
 function evalBasic(expr) {
-  const clean = String(expr || "").replace(/\s+/g, "");
-
-  if (!clean) throw new Error("Empty expression");
+  const clean = String(expr).replace(/\s+/g, "");
 
   if (!/^[0-9+\-*/().]+$/.test(clean)) {
     throw new Error("Invalid characters");
@@ -147,15 +228,12 @@ function evalBasic(expr) {
 
   const values = [];
   const ops = [];
-
   const precedence = { "+": 1, "-": 1, "*": 2, "/": 2 };
 
   function applyOp() {
     const b = values.pop();
     const a = values.pop();
     const op = ops.pop();
-
-    if (a === undefined || b === undefined || !op) return;
 
     if (op === "+") values.push(a + b);
     if (op === "-") values.push(a - b);
@@ -164,14 +242,10 @@ function evalBasic(expr) {
   }
 
   for (let token of tokens) {
-    if (!isNaN(token)) {
-      values.push(Number(token));
-    } else if (token === "(") {
-      ops.push(token);
-    } else if (token === ")") {
-      while (ops.length && ops[ops.length - 1] !== "(") {
-        applyOp();
-      }
+    if (!isNaN(token)) values.push(Number(token));
+    else if (token === "(") ops.push(token);
+    else if (token === ")") {
+      while (ops.length && ops[ops.length - 1] !== "(") applyOp();
       ops.pop();
     } else {
       while (
@@ -186,7 +260,6 @@ function evalBasic(expr) {
   }
 
   while (ops.length) applyOp();
-
   return values[0];
 }
 
@@ -196,25 +269,34 @@ function evalBasic(expr) {
 
 const TOOL_REGISTRY = {
 
-  ping: async (_, context) => ({
-    success: true,
-    message: "PONG",
-    memoryUsed: context.memory?.length || 0
-  }),
+  ping: {
+    meta: { name: "ping", domain: "core" },
+    handler: async (_, context) => ({
+      success: true,
+      message: "PONG",
+      memoryUsed: context.memory?.length || 0
+    })
+  },
 
-  calculator: async (input) => {
-    try {
-      const result = evalBasic(input);
-      return { success: true, result };
-    } catch (err) {
-      return { success: false, error: err.message };
+  calculator: {
+    meta: { name: "calculator", domain: "utility" },
+    handler: async (input) => {
+      try {
+        const result = evalBasic(input);
+        return { success: true, result };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
     }
   },
 
-  time: async () => ({
-    success: true,
-    now: new Date().toISOString()
-  })
+  time: {
+    meta: { name: "time", domain: "utility" },
+    handler: async () => ({
+      success: true,
+      now: new Date().toISOString()
+    })
+  }
 };
 
 // ============================================================
@@ -222,12 +304,8 @@ const TOOL_REGISTRY = {
 // ============================================================
 
 async function loadMemory(env, sessionId) {
-  try {
-    const raw = await env.JARVIS_KV.get(`chat:${sessionId}`);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+  const raw = await env.JARVIS_KV.get(`chat:${sessionId}`);
+  return raw ? JSON.parse(raw) : [];
 }
 
 async function saveMemory(env, sessionId, memory) {
@@ -238,19 +316,14 @@ async function saveMemory(env, sessionId, memory) {
 }
 
 // ============================================================
-// ⚙️ INTERACTION HANDLER (WITH TELEMETRY)
+// ⚙️ INTERACTION HANDLER
 // ============================================================
 
 async function handleInteraction(request, env) {
   try {
 
-    // ⚡ TELEMETRY
     SYSTEM_STATE.telemetry.totalRequests++;
     SYSTEM_STATE.telemetry.lastActive = new Date().toISOString();
-
-    console.log(
-      `[JARVIS] #${SYSTEM_STATE.telemetry.totalRequests} ACTIVE`
-    );
 
     const body = await request.json();
 
@@ -259,23 +332,33 @@ async function handleInteraction(request, env) {
       body.session_id ||
       "default";
 
-    const tool = TOOL_REGISTRY[body.action];
+    const toolEntry = TOOL_REGISTRY[body.action];
 
-    if (!tool) {
+    if (!toolEntry) {
       return jsonResponse({ error: "tool_not_found" }, 404);
     }
 
-    const memory = await loadMemory(env, sessionId);
-    const result = await tool(body.input, { env, memory });
+    if (!SYSTEM_CONTROL.tools_enabled) {
+      return jsonResponse({ error: "tools_disabled" }, 403);
+    }
 
-    memory.push({
-      action: body.action,
+    let memory = [];
+    if (SYSTEM_CONTROL.memory_enabled) {
+      memory = await loadMemory(env, sessionId);
+    }
+
+    const result = await toolEntry.handler(body.input, { env, memory });
+
+    if (SYSTEM_CONTROL.memory_enabled) {
+      memory.push({ action: body.action, result });
+      await saveMemory(env, sessionId, memory);
+    }
+
+    return jsonResponse({
+      success: true,
+      tool: toolEntry.meta.name,
       result
     });
-
-    await saveMemory(env, sessionId, memory);
-
-    return jsonResponse({ success: true, result });
 
   } catch (err) {
 
@@ -286,4 +369,4 @@ async function handleInteraction(request, env) {
       message: err.message
     }, 500);
   }
-}
+    }

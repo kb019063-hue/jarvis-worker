@@ -1,0 +1,16 @@
+{
+  "name": "jarvis-worker",
+  "version": "1.0.0",
+  "description": "Jarvis Cloudflare Worker",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests yet\"",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

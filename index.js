@@ -33,7 +33,7 @@
  * PATCH LOG — Round 4 (GPT review v4):
  *  FIX-19 Lock acquisition catch block logged but continued → now fails closed (returns early) so a KV
  *          outage cannot silently open a race window between concurrent workers
- *  FIX-20 retry_queue entries had no TTL → KV would grow unboundedly on sustained Neon outages;
+ *  FIX-20 retry_queue entries had no TTL → KV would grow unboundedly on sustained Neon outages; 
  *          entries now expire after 24h via expirationTtl so the queue self-cleans
  *  NOTE-A  getFp fallback already present at line ~528 — reviewer missed it, no change needed
  *  NOTE-B  Internal parser throws are caught and remapped to ERROR_CODES before surfacing — not an issue

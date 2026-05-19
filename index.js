@@ -33,7 +33,7 @@
  * PATCH LOG — Round 4 (GPT review v4):
  *  FIX-19 Lock acquisition catch block logged but continued → now fails closed (returns early) so a KV
  *          outage cannot silently open a race window between concurrent workers
- *  FIX-20 retry_queue entries had no TTL → KV would grow unboundedly on sustained Neon outages; 
+ *  FIX-20 retry_queue entries had no TTL → KV would grow unboundedly on sustained Neon outages;
  *          entries now expire after 24h via expirationTtl so the queue self-cleans
  *  NOTE-A  getFp fallback already present at line ~528 — reviewer missed it, no change needed
  *  NOTE-B  Internal parser throws are caught and remapped to ERROR_CODES before surfacing — not an issue
@@ -283,6 +283,81 @@
  *  P80-8  handleExecution() — routes task to Koyeb via sendToExternal or local executeGraph
  *  P80-9  verifyExternal() — validates X-External-Key header on inbound Koyeb callbacks
  *  P80-10 /external/event route added — Koyeb callback endpoint; gated by verifyExternal
+ *
+ * PHASE 8.0 — External Awareness Layer (Full Integration):
+ *  P800-1 EXTERNAL_CONFIG hardened — live endpoint https://jarvis-external-1.onrender.com/task
+ *         wired; API key from env.EXTERNAL_API_KEY; timeout 3000ms for render cold starts
+ *  P800-2 classifyTask() — multi-factor task classifier; scores executionCost + input size +
+ *         system mode + node type to decide local vs external routing
+ *  P800-3 runExternalTask() — purpose-built external execution bridge; sends classified task
+ *         with full governance context; returns ToolVM-compatible { result } or { error }
+ *  P800-4 External offload injected into executeGraph AFTER planning but BEFORE ToolVM —
+ *         authority chain preserved: Root→Kernel→Coherence→Mother→Planner→[classify]→ToolVM/External
+ *  P800-5 Fallback guarantee — if external call fails for any reason, execution falls through
+ *         to local ToolVM automatically; no silent failures
+ *  P800-6 External execution logging — every offload attempt stamped into hive.memory.shortTerm
+ *         and registered as external_execution_complete / external_execution_failed event
+ *  P800-7 Self-test ping — lightweight GET /ping to external server once per request;
+ *         result (latency or error) logged to hive.events as external_ping
+ *
+ * PHASE 8.0.1 — Latent Evolution Engine + External Governance Hardening:
+ *  L801-1 hive.lastActiveAt, hive.externalState, hive.evolution added to hive init/merge
+ *  L801-2 runLatentEvolution() — time-delta evolution; triggers after 20s inactivity;
+ *         decays failureMemory, reinforces toolMemory weights, stabilizes mode
+ *  L801-3 leukocytePassiveCycle() — prunes longTerm overflow, cleans invalid toolMemory,
+ *         stabilizes drift; runs at request start
+ *  L801-4 preWakeAdjustment() — rebalances mode after >60s inactivity; fires system_reawakened
+ *  L801-5 externalLeukocyteGuard() — detects malformed/burst failures; increments failureCount;
+ *         sets degraded → offline at threshold 3; quarantine event registered
+ *  L801-6 attemptExternalRecovery() — resets externalState to healthy after offline period
+ *  L801-7 runExternalTask() hardened — checks systemPaused, externalState.status, kernel gate
+ *         before execution; validates response structure; calls guard on malformed
+ *
+ * PHASE 8.0.2 — Shadow Replicator + Internal Counter-Intelligence:
+ *  L802-1 hive.security added — threatLevel, activeThreats, quarantinedSources, shadowReplicas
+ *  L802-2 detectThreatV2() — weighted bus signal scoring; fires threat_detected_v2 event
+ *  L802-3 spawnShadowReplicaV2() — lightweight internal behavior mirror (max 10 replicas)
+ *  L802-4 immuneCycleV2() — prunes threats/replicas/failureMemory; fires immune_cycle_v2
+ *  L802-5 analyzeReplicasV2() — injects shadow analysis into toolMemory as learning signal
+ *  L802-6 quarantineSourceV2() — adds source to quarantinedSources; fires source_quarantined_v2
+ *  L802-7 respondToThreatsV2() — auto-spawns replicas + quarantines on score > 0.7
+ *  L802-8 Root commands: QUARANTINE_SOURCE_V2, CLEAR_THREATS_V2, KILL_REPLICA_V2
+ *
+ * PHASE 8.0.3 — Active Defense + Counter-Control:
+ *  L803-1 hive.security.attackers added — per-IP profiling with score/attempts/status
+ *  L803-2 profileAttacker() — scores bus risk+loop+drift per IP; cumulative threat model
+ *  L803-3 counterControlV2() — restricts attacker at score > 0.6; disables autonomy
+ *  L803-4 enforceDominanceV2() — full block + system pause at score > 0.8
+ *  L803-5 firewallGate() — request-level IP firewall; blocks/restricts before any processing
+ *  L803-6 Root commands: BLOCK_SOURCE, UNBLOCK_SOURCE
+ *
+ * PHASE 8.0.4 — Bio-Immune Architecture + Behavioral Identity + Immune Hardening:
+ *  L804-1 hive.bio — RBC (energy/load/stability/stress) + WBC (scan/threats/immuneState)
+ *  L804-2 updateRBC() — pure stability reporter; no side effects on system mode
+ *  L804-3 stabilizeRBC() — disables autonomy on low oxygen; read-only signal to Root
+ *  L804-4 wbcScan() / wbcClassify() / wbcRespond() — 3-step Root-gated immune pipeline
+ *  L804-5 IMMUNE_RULE constant — enforces WBC/RBC cannot execute; only Root can mutate
+ *  L804-6 rootImmuneGate() — Root override gate for immune actions
+ *  L804-7 hive.identityMap + hive.identityLinks — persistent behavioral identity tracking
+ *  L804-8 computeIdentityFingerprint() — SHA-256 of IP+UA+lang; privacy-safe behavioral ID
+ *  L804-9 profileIdentity() — builds/updates trust+risk+type profile per fingerprint
+ *  L804-10 assignSession() / linkIdentities() — session binding + cross-session heuristic link
+ *  L804-11 firewallV3() — multi-layer: preemptive block + hostile block + risk throttle
+ *  L804-12 predictThreat() — flags attack_likely before execution on risk > 0.6 + interactions > 2
+ *  L804-13 omniLeukocyteDefense() — auto-heal failureMemory; mode → defensive on hostile
+ *  L804-14 escalateDefense() — system pause on profile risk > 0.75
+ *  L804-15 wbcAutoPhage() / fillExecutionGaps() / immuneScan() / autoPhage() / immuneResponse()
+ *  L804-16 Root: BAN_IDENTITY, TRUST_IDENTITY, RESET_IDENTITY, DISABLE_BRAIN, FORCE_BRAIN, RESET_BRAINS
+ *
+ * PHASE 8.0.5 — External Brain Failover Mesh (Render + Koyeb redundancy):
+ *  L805-1 EXTERNAL_BRAINS registry — render (priority 1) + koyeb (priority 2) with health scores
+ *  L805-2 scoreBrain() — composite score: successRate + inverse latency + active flag
+ *  L805-3 selectBestBrain() — picks highest-scored active brain dynamically
+ *  L805-4 runExternalMesh() — executes task on selected brain; updates health metrics
+ *  L805-5 executeWithFailover() — auto-retries on next best brain if first fails
+ *  L805-6 pingBrains() — non-blocking health ping to all brains; updates successRate/latency
+ *  L805-7 rootExternalOverride() — Root commands: DISABLE_BRAIN, FORCE_BRAIN, RESET_BRAINS
+ *  L805-8 Mesh integrated into executeGraph after planner; replaces single sendToExternal call
  */
 
 /*
@@ -395,6 +470,16 @@ const ERROR_CODES = {
   EXTERNAL_DISABLED:           "external_layer_disabled",
   EXTERNAL_UNAUTHORIZED:       "external_source_unauthorized",
   EXTERNAL_TIMEOUT:            "external_request_timeout",
+  // Phase 8.0
+  EXTERNAL_TASK_FAILED:        "external_task_execution_failed",
+  EXTERNAL_PING_FAILED:        "external_ping_failed",
+  // Phase 8.0.1-8.0.5
+  EXTERNAL_QUARANTINED:        "external_brain_quarantined",
+  NO_EXTERNAL_BRAINS:          "no_external_brains_available",
+  ALL_BRAINS_FAILED:           "all_external_brains_failed",
+  ACCESS_DENIED:               "access_denied_firewall",
+  LIMITED_ACCESS:              "limited_access_risk_control",
+  PREEMPTIVE_BLOCK:            "preemptive_block_predicted_threat",
 };
 
 // ============================================================
@@ -560,6 +645,20 @@ function initializeUnifiedHive(existing = null) {
     },
     leukocytes: { activity: 1.0, detectedThreats: [], recycledEnergy: 0, lastSweep: Date.now() },
     awareness:  { lastUpdate: Date.now(), signals: [], environment: {}, active: true },
+    // Phase 8.0.1
+    lastActiveAt:  Date.now(),
+    externalState: { status: "healthy", failureCount: 0, lastCheck: 0 },
+    evolution:     { cycles: 0, lastDelta: 0 },
+    // Phase 8.0.2
+    security: { threatLevel: 0, activeThreats: [], quarantinedSources: [], shadowReplicas: [], attackers: {}, lastScan: 0 },
+    immune:   { cycles: 0, lastHeal: 0, activity: 0, lastSweep: 0, threatLevel: 0 },
+    // Phase 8.0.4
+    bio: {
+      rbc: { energy: 1.0, load: 0, stability: 1.0, stress: 0, lastTick: 0 },
+      wbc: { scan: [], threats: [], immuneState: "idle", lastResponse: 0 }
+    },
+    identityMap:   {},
+    identityLinks: {},
     lastUpdated: Date.now()
   };
 
@@ -593,7 +692,15 @@ function initializeUnifiedHive(existing = null) {
     afl:         existing.afl      ?? { enabled: true, mode: "normal", userOverride: null, rootOverride: null },
     identity:    existing.identity ?? { profile: "polite", tone: "warm", verbosity: 0.8, expressiveness: 0.5, userOverride: null, rootOverride: null, consistencyScore: 1.0, drift: 0, memory: [] },
     leukocytes:  existing.leukocytes ?? { activity: 1.0, detectedThreats: [], recycledEnergy: 0, lastSweep: Date.now() },
-    awareness:   existing.awareness  ?? { lastUpdate: Date.now(), signals: [], environment: {}, active: true }
+    awareness:   existing.awareness  ?? { lastUpdate: Date.now(), signals: [], environment: {}, active: true },
+    lastActiveAt:  existing.lastActiveAt  ?? Date.now(),
+    externalState: existing.externalState ?? { status: "healthy", failureCount: 0, lastCheck: 0 },
+    evolution:     existing.evolution     ?? { cycles: 0, lastDelta: 0 },
+    security:      existing.security      ?? { threatLevel: 0, activeThreats: [], quarantinedSources: [], shadowReplicas: [], attackers: {}, lastScan: 0 },
+    immune:        existing.immune        ?? { cycles: 0, lastHeal: 0, activity: 0, lastSweep: 0, threatLevel: 0 },
+    bio:           existing.bio           ?? { rbc: { energy: 1.0, load: 0, stability: 1.0, stress: 0, lastTick: 0 }, wbc: { scan: [], threats: [], immuneState: "idle", lastResponse: 0 } },
+    identityMap:   existing.identityMap   ?? {},
+    identityLinks: existing.identityLinks ?? {}
   };
 }
 
@@ -1554,7 +1661,32 @@ async function executeGraph(graph, hive, env, controller, kernel, intent, bus = 
       motherSiphonToolSafe(hive, safeStep.action);
     }
 
-    const execResult = await executorSandbox(safeStep, env, hive, kernel);
+    // P800-4: Task classification — after planning, before ToolVM
+    // Authority chain preserved: Root→Kernel→Coherence→Mother→Planner→[classify]→ToolVM/External
+    let execResult;
+    const liveBus     = bus ?? computeIntelligenceBus(hive);
+    const taskRoute   = classifyTask(safeStep, liveBus, hive);
+
+    if (taskRoute === "external") {
+      // P800-3: Attempt external execution
+      const extResult = await runExternalTask(safeStep, hive, liveBus, env);
+
+      if (extResult !== null) {
+        // P800-6: Log successful external execution
+        hive.memory?.shortTerm?.push({ action: safeStep.action, source: "external", ts: Date.now() });
+        if (hive.memory?.shortTerm?.length > 5) hive.memory.shortTerm.shift();
+        registerEvent(hive, "external_execution_complete", { action: safeStep.action, source: extResult._source, ts: Date.now() });
+        execResult = extResult;
+      } else {
+        // P800-5: Fallback — external failed, run locally through ToolVM
+        console.warn(`[P800]: External failed for "${safeStep.action}" — falling back to local ToolVM`);
+        registerEvent(hive, "external_execution_failed", { action: safeStep.action, fallback: "local", ts: Date.now() });
+        execResult = await executorSandbox(safeStep, env, hive, kernel);
+      }
+    } else {
+      // Local execution through ToolVM
+      execResult = await executorSandbox(safeStep, env, hive, kernel);
+    }
 
     // MT4: wraith erase — clean mimicry state after every node execution
     wraithErase(hive);
@@ -2018,13 +2150,31 @@ async function processUserInteraction(req, env, ctx) {
     const rawHive = await loadHiveState(env, userId, controller.signal);
     const hive = initializeUnifiedHive(rawHive);
 
-    // MT23: per-cycle execution isolation — new UUID for each request
+    // MT23: per-cycle execution isolation
     isolateExecutionContext(hive);
-
     // P74-4: initialise unified memory runtime
     initMemory(hive);
+    // L805: init external brain endpoints from env
+    initExternalBrains(env);
 
     ctx.waitUntil(syncOverflow(env, userId));
+    // P800-7: self-test ping (non-blocking)
+    ctx.waitUntil(pingExternalServer(hive, env));
+    // L805-6: ping all external brains (non-blocking)
+    ctx.waitUntil(pingBrains(hive, env));
+
+    // L801-2: latent evolution — runs first, time-delta based
+    runLatentEvolution(hive);
+    // L801-3: leukocyte passive cycle
+    leukocytePassiveCycle(hive);
+    // L802-4: immune cycle v2
+    immuneCycleV2(hive);
+    // L801-6: attempt external recovery if offline
+    attemptExternalRecovery(hive);
+
+    // L803-5: IP-level firewall gate — runs before any processing
+    const fwGate = firewallGate(req.cf, hive);
+    if (fwGate) return fwGate;
 
     // UPG-10: Semantic fallback injection
     let semanticContext = activePromptVector
@@ -2042,18 +2192,70 @@ async function processUserInteraction(req, env, ctx) {
     let bus = computeIntelligenceBus(hive);
     // IC-4: inject identity context into bus
     bus = injectIdentity(bus, hive);
+    // P80-6: inject awareness context into bus
+    bus = injectAwareness(bus, hive);
+
+    // L804-8/9: behavioral identity fingerprint + profile (needs bus for risk signals)
+    const identityProfile = await profileIdentity(req, bus, hive);
+    assignSession(identityProfile, req, hive);
+    linkIdentities(identityProfile, hive);
+
+    // L804-11: behavioral firewall (multi-layer: predicted/hostile/risk)
+    const fwV3 = firewallV3(identityProfile, hive);
+    if (fwV3) return fwV3;
+
     // MT14: adaptive zenith (multi-stage)
     applyZenithAdaptive(hive, bus);
     // MT20: cognitive load balancer
     balanceCognitiveLoad(bus, hive);
     // MT22: autonomous drift correction
     correctSystemDrift(bus, hive);
-    // OL-10: leukocyte cycle — runs before coherence gate
+    // OL-10: leukocyte cycle
     runLeukocyteSystem(hive, bus);
-    // MT6: Prime directive — inject unconsumed Root override into Bus
+    // F791-1: idle cycle cleanup
+    occupyIdleCycles(hive);
+    // F791-3: named threat neutralization
+    const namedThreats = detectLogicThreats(hive, bus);
+    if (namedThreats.length > 0) neutralizeThreats(hive, namedThreats);
+    // F791-2: recycle energy
+    recycleLogicEnergy(hive, namedThreats.length);
+
+    // L802-2: threat detection v2
+    detectThreatV2(bus, req.cf, hive);
+    // L802-7: auto-respond to threats
+    respondToThreatsV2(hive);
+
+    // L803-2/3/4: attacker profiling + counter-control
+    const attacker = profileAttacker(req.cf, bus, hive);
+    counterControlV2(attacker, hive);
+    enforceDominanceV2(attacker, hive);
+
+    // L804-1/2/3: RBC update + stabilize
+    updateRBC(bus, hive);
+    stabilizeRBC(hive);
+
+    // L804-4: WBC 3-step immune pipeline (Root-gated)
+    wbcScan(bus, hive);
+    wbcClassify(hive);
+    wbcRespond(bus, hive);
+    wbcAutoPhage(hive);
+
+    // L804-12/13/14: predict + defend + escalate on identity profile
+    predictThreat(identityProfile, hive);
+    omniLeukocyteDefense(identityProfile, hive);
+    escalateDefense(identityProfile, hive);
+    immuneScan(hive, bus);
+    autoPhage(hive);
+    immuneResponse(identityProfile, hive);
+    fillExecutionGaps(hive);
+
+    // MT6: Prime directive
     bus = applyPrimeDirective(hive, bus);
 
-    // AFL: handle user-supplied afl mode from request body
+    // L801-4: pre-wake adjustment after inactivity
+    preWakeAdjustment(hive, bus);
+
+    // AFL: handle user-supplied afl/identity settings
     if (rawBody.afl?.mode && AFL_PROFILES[rawBody.afl.mode]) {
       hive.afl.userOverride = rawBody.afl.mode;
     }
@@ -2169,11 +2371,19 @@ async function processUserInteraction(req, env, ctx) {
 
     await autonomyEventRouter(hive, env, controller.signal, kernel);
 
+    // L802-5: analyze shadow replicas after execution (learning signal)
+    analyzeReplicasV2(hive);
+
     const tag = detectTag(rawBody.input);
     // P75-10: memoryLock check + P72-3: Mother governance gate
     if (activePromptVector && !hive.rootState?.memoryLock && approveMemoryWrite({ input: rawBody.input, result: finalResultMut })) {
       ctx.waitUntil(persistSemanticMemory(env, activePromptVector, { input: rawBody.input, result: finalResultMut }, tag, userId));
     }
+
+    // L804: non-blocking background external tasks
+    ctx.waitUntil(syncIdentityExternal(identityProfile, env));
+    ctx.waitUntil(externalHeartbeat(hive, env));
+    ctx.waitUntil(externalImmuneLoop(hive, env));
 
     await persistHiveState(env, userId, hive);
 
@@ -2529,6 +2739,493 @@ function runLeukocyteSystem(hive, bus) {
 }
 
 // ============================================================
+// 🧬 PHASE 8.0.1–8.0.5 — EVOLUTION + SHADOW + DEFENSE + BIO-IMMUNE + MESH
+// Version: 8.0.5
+// ============================================================
+
+// ── 8.0.1: LATENT EVOLUTION ENGINE ──────────────────────────
+
+function runLatentEvolution(hive) {
+  const now   = Date.now();
+  const delta = now - (hive.lastActiveAt ?? now);
+  hive.lastActiveAt = now;
+  if (delta < 20000) return; // only evolve after 20s inactivity
+
+  hive.evolution.cycles++;
+  hive.evolution.lastDelta = delta;
+
+  // decay failure memory
+  if (hive.memory?.failureMemory?.length) {
+    hive.memory.failureMemory = hive.memory.failureMemory.slice(-10);
+  }
+  // reinforce tool weights
+  if (hive.memory?.toolMemory) {
+    for (const t of hive.memory.toolMemory) {
+      t.weight = (t.weight ?? 1) * (t.success ? 1.05 : 0.95);
+      t.weight = Math.max(0.1, Math.min(3.0, t.weight));
+    }
+  }
+  // stabilize mode
+  if (hive.mode === "aggressive") hive.mode = "normal";
+
+  if (!Array.isArray(hive.events)) hive.events = [];
+  hive.events.push({ type: "latent_evolution_applied", delta, ts: Date.now() });
+}
+
+function leukocytePassiveCycle(hive) {
+  if (hive.memory?.longTerm?.length > 100) {
+    hive.memory.longTerm = hive.memory.longTerm.slice(-50);
+    hive.longTermMemory  = hive.memory.longTerm;
+  }
+  if (hive.memory?.toolMemory) {
+    hive.memory.toolMemory = hive.memory.toolMemory.filter(t => t && t.toolId);
+  }
+  if ((hive.drift ?? 0) > 0.5) hive.drift = (hive.drift ?? 0) * 0.7;
+  if (!Array.isArray(hive.events)) hive.events = [];
+  hive.events.push({ type: "immune_cycle", ts: Date.now() });
+}
+
+function preWakeAdjustment(hive, bus) {
+  if (!hive.evolution?.lastDelta || hive.evolution.lastDelta < 60000) return;
+  if (bus.stability > 0.7) hive.mode = "normal";
+  if (bus.risk > 0.7)      hive.mode = "safe";
+  hive.events.push({ type: "system_reawakened", delta: hive.evolution.lastDelta, ts: Date.now() });
+}
+
+function externalLeukocyteGuard(hive, reason) {
+  if (!hive.externalState) hive.externalState = { status: "healthy", failureCount: 0, lastCheck: 0 };
+  hive.externalState.failureCount++;
+  if (hive.externalState.failureCount >= 3) {
+    hive.externalState.status = "offline";
+    hive.events.push({ type: "external_quarantined", reason, ts: Date.now() });
+  } else {
+    hive.externalState.status = "degraded";
+    hive.events.push({ type: "external_degraded", reason, ts: Date.now() });
+  }
+}
+
+function attemptExternalRecovery(hive) {
+  if (hive.externalState?.status !== "offline") return;
+  hive.externalState.failureCount = 0;
+  hive.externalState.status       = "healthy";
+  hive.events.push({ type: "external_recovered", ts: Date.now() });
+}
+
+// ── 8.0.2: SHADOW REPLICATOR + COUNTER-INTELLIGENCE ─────────
+
+function detectThreatV2(bus, meta, hive) {
+  let score = 0;
+  score += Math.min((bus.risk ?? 0) * 0.5, 0.5);
+  score += Math.min((bus.loopProbability ?? 0) * 0.3, 0.3);
+  score += Math.min((bus.drift ?? 0) * 0.2, 0.2);
+  const ip = meta?.ip ?? meta?.city ?? "unknown";
+  if (ip && (hive.security?.quarantinedSources ?? []).includes(ip)) score += 0.4;
+  if (score < 0.5) return;
+  const threat = { id: safeGenerateUUID(), score, source: ip, ts: Date.now() };
+  (hive.security.activeThreats ??= []).push(threat);
+  hive.security.threatLevel = Math.max(hive.security.threatLevel ?? 0, score);
+  hive.events.push({ type: "threat_detected_v2", threat });
+}
+
+function spawnShadowReplicaV2(threat, hive) {
+  if ((hive.security.shadowReplicas?.length ?? 0) >= 10) return;
+  const replica = { id: safeGenerateUUID(), threatId: threat.id, weight: threat.score, state: "active", ts: Date.now() };
+  (hive.security.shadowReplicas ??= []).push(replica);
+  hive.events.push({ type: "shadow_spawned_v2", threatId: threat.id });
+}
+
+function immuneCycleV2(hive) {
+  hive.immune.cycles = (hive.immune.cycles ?? 0) + 1;
+  if ((hive.security?.activeThreats?.length ?? 0) > 20) {
+    hive.security.activeThreats = hive.security.activeThreats.slice(-10);
+  }
+  if (hive.security?.shadowReplicas) {
+    hive.security.shadowReplicas = hive.security.shadowReplicas.filter(r => r.state === "active");
+  }
+  if ((hive.memory?.failureMemory?.length ?? 0) > 50) {
+    hive.memory.failureMemory = hive.memory.failureMemory.slice(-20);
+  }
+  hive.events.push({ type: "immune_cycle_v2", ts: Date.now() });
+}
+
+function analyzeReplicasV2(hive) {
+  for (const r of (hive.security?.shadowReplicas ?? [])) {
+    if (r.state !== "active") continue;
+    (hive.memory?.toolMemory ?? []).push({ toolId: "shadow_analysis", success: true, weight: r.weight, ts: Date.now() });
+  }
+  hive.events.push({ type: "replica_analysis_v2", count: hive.security?.shadowReplicas?.length ?? 0 });
+}
+
+function quarantineSourceV2(source, hive) {
+  if (!source) return;
+  if (!(hive.security.quarantinedSources ??= []).includes(source)) {
+    hive.security.quarantinedSources.push(source);
+  }
+  hive.events.push({ type: "source_quarantined_v2", source });
+}
+
+function respondToThreatsV2(hive) {
+  for (const t of (hive.security?.activeThreats ?? [])) {
+    if (t.score > 0.7) {
+      spawnShadowReplicaV2(t, hive);
+      quarantineSourceV2(t.source, hive);
+    }
+  }
+}
+
+// ── 8.0.3: ACTIVE DEFENSE + COUNTER-CONTROL ──────────────────
+
+function profileAttacker(meta, bus, hive) {
+  const id = meta?.ip ?? meta?.city ?? "unknown";
+  if (!hive.security.attackers) hive.security.attackers = {};
+  if (!hive.security.attackers[id]) {
+    hive.security.attackers[id] = { score: 0, attempts: 0, lastSeen: 0, status: "active", source: id };
+  }
+  const a    = hive.security.attackers[id];
+  a.attempts++;
+  a.lastSeen = Date.now();
+  a.score    = Math.min(1, a.score + (bus.risk ?? 0) * 0.4 + (bus.loopProbability ?? 0) * 0.3 + (bus.drift ?? 0) * 0.3);
+  return a;
+}
+
+function counterControlV2(attacker, hive) {
+  if (!attacker || attacker.score < 0.6) return;
+  attacker.status = "restricted";
+  quarantineSourceV2(attacker.source, hive);
+  hive.rootState.autonomyDisabled = true;
+  hive.events.push({ type: "counter_control_engaged", score: attacker.score });
+}
+
+function enforceDominanceV2(attacker, hive) {
+  if (!attacker || attacker.score < 0.8) return;
+  attacker.status             = "blocked";
+  hive.rootState.systemPaused = true;
+  hive.events.push({ type: "dominance_mode_activated", score: attacker.score });
+}
+
+function firewallGate(meta, hive) {
+  const id       = meta?.ip ?? meta?.city ?? "unknown";
+  const attacker = hive.security?.attackers?.[id];
+  if (!attacker) return null;
+  if (attacker.status === "blocked") {
+    return new Response(JSON.stringify({ error: ERROR_CODES.ACCESS_DENIED, reason: "blocked_by_system" }), { status: 403, headers: { "Content-Type": "application/json" } });
+  }
+  if (attacker.status === "restricted") {
+    return new Response(JSON.stringify({ error: ERROR_CODES.LIMITED_ACCESS, reason: "suspicious_activity" }), { status: 429, headers: { "Content-Type": "application/json" } });
+  }
+  return null;
+}
+
+// ── 8.0.4: BIO-IMMUNE + BEHAVIORAL IDENTITY ──────────────────
+
+const IMMUNE_RULE = { WBC_CAN_EXECUTE: false, RBC_CAN_EXECUTE: false, ONLY_ROOT_CAN_MUTATE: true };
+
+function updateRBC(bus, hive) {
+  const rbc    = hive.bio.rbc;
+  rbc.load     = bus.executionCost ?? 0;
+  rbc.stress   = (bus.drift ?? 0) + (bus.loopProbability ?? 0);
+  rbc.stability = Math.max(0, 1 - (rbc.load * 0.4 + rbc.stress * 0.6));
+  rbc.energy    = Math.max(0.2, rbc.stability);
+  rbc.lastTick  = Date.now();
+}
+
+function stabilizeRBC(hive) {
+  if ((hive.bio?.rbc?.energy ?? 1) < 0.4) {
+    hive.rootState.autonomyDisabled = true;
+    hive.events.push({ type: "rbc_low_oxygen", level: hive.bio.rbc.energy });
+  }
+}
+
+function wbcScan(bus, hive) {
+  const scan = [];
+  if ((bus.risk ?? 0) > 0.7)            scan.push("risk");
+  if ((bus.loopProbability ?? 0) > 0.6) scan.push("loop");
+  if ((bus.drift ?? 0) > 0.5)           scan.push("drift");
+  hive.bio.wbc.scan = scan;
+  return scan;
+}
+
+function wbcClassify(hive) {
+  hive.bio.wbc.threats = hive.bio.wbc.scan.map(t => ({
+    type: t, severity: t === "risk" ? 0.9 : t === "loop" ? 0.7 : 0.6
+  }));
+}
+
+function wbcRespond(bus, hive) {
+  if (!hive.rootState?.immuneEnabled) return; // Root must enable immune response
+  const maxThreat = Math.max(...(hive.bio.wbc.threats?.map(t => t.severity) ?? [0]));
+  if (maxThreat > 0.8) {
+    hive.rootState.safeMode = true;
+    hive.events.push({ type: "immune_lock", reason: "high_threat_detected" });
+  }
+  hive.bio.wbc.lastResponse = Date.now();
+}
+
+function rootImmuneGate(hive) {
+  return {
+    immuneEnabled: true,
+    override: (action) => {
+      hive.rootState.lastImmuneOverride = action;
+      hive.events.push({ type: "root_override", action });
+    }
+  };
+}
+
+async function computeIdentityFingerprint(req) {
+  try {
+    const ip   = req.cf?.ip ?? req.headers.get("CF-Connecting-IP") ?? "unknown";
+    const ua   = req.headers.get("user-agent")       ?? "unknown";
+    const lang = req.headers.get("accept-language")  ?? "unknown";
+    const raw  = new TextEncoder().encode(`${ip}|${ua}|${lang}`);
+    const buf  = await crypto.subtle.digest("SHA-256", raw);
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+  } catch { return safeGenerateUUID(); }
+}
+
+async function profileIdentity(req, bus, hive) {
+  const id = await computeIdentityFingerprint(req);
+  if (!hive.identityMap) hive.identityMap = {};
+  if (!hive.identityMap[id]) {
+    hive.identityMap[id] = { id, trust: 0.5, risk: 0, interactions: 0, lastSeen: 0, type: "unknown", sessions: [] };
+  }
+  const p     = hive.identityMap[id];
+  p.interactions++;
+  p.lastSeen  = Date.now();
+  p.risk      = p.risk  * 0.7 + (bus.risk ?? 0) * 0.3;
+  p.trust     = p.trust * 0.7 + (1 - (bus.risk ?? 0)) * 0.3;
+  p.type      = p.risk > 0.7 ? "hostile" : p.trust > 0.7 ? "trusted" : "neutral";
+  return p;
+}
+
+function getSessionId(req) {
+  const cookie = req.headers.get("cookie") ?? "";
+  const match  = cookie.match(/jarvis_session=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+function assignSession(profile, req, hive) {
+  let sid = getSessionId(req);
+  if (!sid) sid = safeGenerateUUID();
+  if (!Array.isArray(profile.sessions)) profile.sessions = [];
+  if (!profile.sessions.includes(sid)) profile.sessions.push(sid);
+  if (!hive.identityLinks) hive.identityLinks = {};
+  hive.identityLinks[sid] = profile.id;
+  return sid;
+}
+
+function linkIdentities(profile, hive) {
+  const similar = Object.values(hive.identityMap ?? {}).find(p =>
+    p.id !== profile.id && Math.abs(p.trust - profile.trust) < 0.1 && Math.abs(p.risk - profile.risk) < 0.1
+  );
+  if (similar) profile.linkedTo = similar.id;
+}
+
+function firewallV3(profile, hive) {
+  if (!profile) return null;
+  if (profile.predicted === "attack_likely") {
+    return new Response(JSON.stringify({ error: ERROR_CODES.PREEMPTIVE_BLOCK, reason: "predicted_threat" }), { status: 403, headers: { "Content-Type": "application/json" } });
+  }
+  if (profile.type === "hostile") {
+    return new Response(JSON.stringify({ error: ERROR_CODES.ACCESS_DENIED, reason: "hostile_identity" }), { status: 403, headers: { "Content-Type": "application/json" } });
+  }
+  if (profile.risk > 0.5) {
+    return new Response(JSON.stringify({ error: ERROR_CODES.LIMITED_ACCESS, reason: "risk_control" }), { status: 429, headers: { "Content-Type": "application/json" } });
+  }
+  return null;
+}
+
+function predictThreat(profile, hive) {
+  if (!profile) return;
+  if (profile.risk > 0.6 && profile.interactions > 2) {
+    profile.predicted = "attack_likely";
+    hive.events.push({ type: "threat_forecast", identity: profile.id });
+  }
+}
+
+function omniLeukocyteDefense(profile, hive) {
+  if ((hive.memory?.failureMemory?.length ?? 0) > 30) {
+    hive.memory.failureMemory = hive.memory.failureMemory.slice(-10);
+  }
+  if (profile?.type === "hostile") hive.mode = "defensive";
+  if (profile?.type === "trusted" && hive.mode === "defensive") hive.mode = "normal";
+  hive.events.push({ type: "immune_response", profile: profile?.type ?? "none" });
+}
+
+function escalateDefense(profile, hive) {
+  if (profile?.risk > 0.75) {
+    hive.rootState.systemPaused = true;
+    hive.events.push({ type: "system_lockdown", identity: profile.id });
+  }
+}
+
+function immuneScan(hive, bus) {
+  const anomalies = [];
+  if ((bus.loopProbability ?? 0) > 0.6) anomalies.push("loop_risk");
+  if ((bus.risk ?? 0) > 0.7)            anomalies.push("high_risk");
+  if ((bus.drift ?? 0) > 0.5)           anomalies.push("drift");
+  hive.immune.threatLevel = anomalies.length / 3;
+  if (anomalies.length) hive.events.push({ type: "immune_scan_detected", anomalies });
+  return anomalies;
+}
+
+function autoPhage(hive) {
+  if ((hive.memory?.longTerm?.length ?? 0) > 100) {
+    hive.memory.longTerm = hive.memory.longTerm.slice(-50);
+    hive.longTermMemory  = hive.memory.longTerm;
+  }
+  if ((hive.memory?.failureMemory?.length ?? 0) > 20) {
+    hive.memory.failureMemory = hive.memory.failureMemory.slice(-10);
+  }
+  hive.events.push({ type: "auto_phage_cleanup" });
+}
+
+function immuneResponse(profile, hive) {
+  if (!profile) return;
+  if (profile.type === "hostile") { hive.mode = "defensive"; hive.rootState.autonomyDisabled = true; }
+  if (profile.risk > 0.8) hive.rootState.systemPaused = true;
+  hive.events.push({ type: "immune_response_applied", profile: profile.type });
+}
+
+function fillExecutionGaps(hive) {
+  hive.immune.activity = Date.now();
+  if (Date.now() - (hive.immune.lastSweep ?? 0) > 2000) {
+    hive.immune.lastSweep = Date.now();
+    hive.events.push({ type: "gap_filled", ts: hive.immune.lastSweep });
+  }
+}
+
+function wbcAutoPhage(hive) {
+  if ((hive.memory?.failureMemory?.length ?? 0) > 20) {
+    hive.memory.failureMemory = hive.memory.failureMemory.slice(-10);
+  }
+  if ((hive.memory?.longTerm?.length ?? 0) > 120) {
+    hive.memory.longTerm = hive.memory.longTerm.slice(-60);
+    hive.longTermMemory  = hive.memory.longTerm;
+  }
+  hive.events.push({ type: "wbc_cleanup" });
+}
+
+// External identity/immune sync helpers (non-blocking ctx.waitUntil calls)
+async function syncIdentityExternal(profile, env) {
+  const cfg = getExternalConfig(env);
+  if (!cfg.enabled) return;
+  try {
+    await fetch(`${cfg.endpoint}/task`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${cfg.apiKey}` }, body: JSON.stringify({ type: "identity_sync", payload: { id: profile.id, trust: profile.trust, risk: profile.risk, type: profile.type } }) });
+  } catch { /* non-critical */ }
+}
+
+async function externalHeartbeat(hive, env) {
+  const cfg = getExternalConfig(env);
+  if (!cfg.enabled) return;
+  try {
+    await fetch(`${cfg.endpoint}/task`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${cfg.apiKey}` }, body: JSON.stringify({ type: "heartbeat", payload: { mode: hive.mode, threat: hive.bio?.wbc?.threatLevel ?? 0, load: hive.bio?.rbc?.load ?? 0 } }) });
+  } catch { /* non-critical */ }
+}
+
+async function externalImmuneLoop(hive, env) {
+  const cfg = getExternalConfig(env);
+  if (!cfg.enabled) return;
+  try {
+    await fetch(`${cfg.endpoint}/task`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${cfg.apiKey}` }, body: JSON.stringify({ type: "immune_tick", payload: { memorySize: hive.memory?.longTerm?.length ?? 0, failures: hive.memory?.failureMemory?.length ?? 0 } }) });
+  } catch { /* non-critical */ }
+}
+
+// ── 8.0.5: EXTERNAL BRAIN FAILOVER MESH ──────────────────────
+
+const EXTERNAL_BRAINS = [
+  { id: "render", endpoint: "https://jarvis-external-1.onrender.com", priority: 1, latency: 0, successRate: 1.0, active: true },
+  { id: "koyeb",  endpoint: "",  priority: 2, latency: 0, successRate: 1.0, active: false }
+  // koyeb endpoint: set env.KOYEB_ENDPOINT to activate
+];
+
+function initExternalBrains(env) {
+  // Wire env endpoints at runtime so secrets stay out of code
+  const render = EXTERNAL_BRAINS.find(b => b.id === "render");
+  if (render && env.EXTERNAL_ENDPOINT) render.endpoint = env.EXTERNAL_ENDPOINT;
+  const koyeb  = EXTERNAL_BRAINS.find(b => b.id === "koyeb");
+  if (koyeb  && env.KOYEB_ENDPOINT)  { koyeb.endpoint  = env.KOYEB_ENDPOINT; koyeb.active = true; }
+}
+
+function scoreBrain(brain) {
+  return (brain.successRate * 0.5) + (1 / (brain.latency + 1)) * 0.3 + (brain.active ? 0.2 : 0);
+}
+
+function selectBestBrain() {
+  return [...EXTERNAL_BRAINS].filter(b => b.active && b.endpoint).sort((a, b) => scoreBrain(b) - scoreBrain(a))[0] ?? null;
+}
+
+async function runExternalMesh(payload, env) {
+  const brain = selectBestBrain();
+  if (!brain) return { error: ERROR_CODES.NO_EXTERNAL_BRAINS };
+
+  const start = Date.now();
+  const apiKey = env.EXTERNAL_API_KEY ?? "";
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 3000);
+    const res  = await fetch(`${brain.endpoint}/task`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body:    JSON.stringify({ ...payload, source: "failover_mesh", brainId: brain.id }),
+      signal:  ctrl.signal
+    });
+    clearTimeout(tid);
+    const latency     = Date.now() - start;
+    brain.latency     = latency;
+    brain.successRate = Math.min(1, brain.successRate * 0.9 + 0.1);
+    if (!res.ok) { brain.successRate *= 0.8; return null; }
+    const data = await res.json();
+    return { ...(data.result !== undefined ? { result: data.result } : data), _source: brain.id, latency };
+  } catch {
+    brain.successRate *= 0.7;
+    brain.active       = brain.successRate > 0.3;
+    return null;
+  }
+}
+
+async function executeWithFailover(payload, env) {
+  let result = await runExternalMesh(payload, env);
+  if (result) return result;
+  // try next best brain
+  const backup = selectBestBrain();
+  if (!backup) return { error: ERROR_CODES.ALL_BRAINS_FAILED };
+  return await runExternalMesh(payload, env);
+}
+
+async function pingBrains(hive, env) {
+  const apiKey = env.EXTERNAL_API_KEY ?? "";
+  for (const brain of EXTERNAL_BRAINS.filter(b => b.endpoint)) {
+    const start = Date.now();
+    try {
+      const res = await fetch(`${brain.endpoint}/ping`, { headers: { "Authorization": `Bearer ${apiKey}` }, signal: AbortSignal.timeout(2000) });
+      brain.latency     = Date.now() - start;
+      brain.successRate = Math.min(1, brain.successRate + 0.02);
+      brain.active      = res.ok;
+      registerEvent(hive, "brain_ping", { brainId: brain.id, ok: res.ok, latency: brain.latency });
+    } catch {
+      brain.successRate *= 0.9;
+      brain.active       = brain.successRate > 0.3;
+      registerEvent(hive, "brain_ping", { brainId: brain.id, ok: false });
+    }
+  }
+}
+
+function rootExternalOverride(action, env) {
+  initExternalBrains(env);
+  switch (action.type) {
+    case "DISABLE_BRAIN": {
+      const b = EXTERNAL_BRAINS.find(x => x.id === action.target); if (b) b.active = false; break;
+    }
+    case "FORCE_BRAIN": {
+      EXTERNAL_BRAINS.forEach(b => b.active = false);
+      const b = EXTERNAL_BRAINS.find(x => x.id === action.target); if (b) b.active = true; break;
+    }
+    case "RESET_BRAINS":
+      EXTERNAL_BRAINS.forEach(b => { b.active = !!(b.endpoint); b.successRate = 1.0; b.latency = 0; }); break;
+  }
+}
+
+// ============================================================
 // 🔬 PHASE 7.9.1 — LEUKOCYTE COMPLETIONS + EXTERNAL AWARENESS
 // Version: 7.9.1
 // ============================================================
@@ -2578,14 +3275,107 @@ function rootShieldCheck(hive, requestMeta) {
 // External runtime NEVER makes governance decisions — it only sends signals back.
 // ============================================================
 
-// P80-1: External config resolved from env at call time (no hardcoded values)
+// P800-1: External config — live endpoint hardened with render-aware timeout
 function getExternalConfig(env) {
   return {
-    enabled:  !!(env.EXTERNAL_ENDPOINT),
-    endpoint: env.EXTERNAL_ENDPOINT ?? "",
+    enabled:  !!(env.EXTERNAL_API_KEY),  // enabled as long as key is set
+    endpoint: env.EXTERNAL_ENDPOINT ?? "https://jarvis-external-1.onrender.com",
     apiKey:   env.EXTERNAL_API_KEY  ?? "",
-    timeout:  1500
+    timeout:  3000   // 3s — accounts for render.com cold starts
   };
+}
+
+// P800-2: Task classifier — multi-factor scoring to decide local vs external routing
+// Returns: "external" | "local"
+function classifyTask(step, bus, hive) {
+  let score = 0;
+
+  // Factor 1: execution cost (heaviest signal)
+  const cost = bus.executionCost ?? 0;
+  if (cost > 3.5) score += 3;
+  else if (cost > 2.5) score += 2;
+  else if (cost > 1.5) score += 1;
+
+  // Factor 2: input size
+  const inputLen = (step.input?.length ?? 0);
+  if (inputLen > 300) score += 2;
+  else if (inputLen > 150) score += 1;
+
+  // Factor 3: system mode
+  if (hive.mode === "aggressive") score += 2;
+  if (hive.mode === "efficient")  score += 1;
+
+  // Factor 4: node type — heavy cognitive/goal nodes are offload candidates
+  if (step.type === "cognitive" && step.action === "execute_goal") score += 1;
+
+  // Factor 5: AFL mode aggressive adds bias toward external
+  const aflMode = resolveAFLMode(hive);
+  if (aflMode === "aggressive") score += 1;
+
+  // Threshold: score >= 4 → external; below → local
+  return score >= 4 ? "external" : "local";
+}
+
+// P800-3 + L801-7: External execution bridge — hardened with governance checks
+// Governance: systemPaused → block, externalState offline → block, kernel.allowExecution → block
+async function runExternalTask(step, hive, bus, env, kernel = null) {
+  // L801-7: governance pre-checks
+  if (hive.rootState?.systemPaused)              return null;
+  if (hive.externalState?.status === "offline")  return null;
+  if (kernel && !kernel.allowExecution)          return null;
+
+  const payload = {
+    task:       { action: step.action, input: step.input, type: step.type ?? "tool" },
+    governance: { mode: hive.mode, aflMode: resolveAFLMode(hive), replanCount: hive.replanCount, depth: hive.depth, risk: bus.risk, confidence: bus.confidence, stability: bus.stability },
+    identity:   { profile: hive.identity?.profile, tone: resolveIdentity(hive)?.tone },
+    memory:     { shortTerm: hive.memory?.shortTerm ?? [], failureCount: hive.memory?.failureMemory?.length ?? 0 }
+  };
+
+  // L805-8: use failover mesh instead of single endpoint
+  const result = await executeWithFailover(payload, env);
+
+  if (!result || result.error) {
+    externalLeukocyteGuard(hive, result?.error ?? "no_response");
+    return null;
+  }
+
+  // L801-7: validate response structure
+  if (typeof result !== "object") {
+    externalLeukocyteGuard(hive, "malformed_response");
+    return null;
+  }
+
+  // Reset failure count on success
+  if (hive.externalState) {
+    hive.externalState.failureCount = Math.max(0, (hive.externalState.failureCount ?? 0) - 1);
+    if (hive.externalState.status === "degraded" && hive.externalState.failureCount === 0) {
+      hive.externalState.status = "healthy";
+    }
+  }
+
+  return result;
+}
+
+// P800-7: Self-test ping — lightweight GET /ping once per request
+// Logs latency or failure into hive.events without blocking execution
+async function pingExternalServer(hive, env) {
+  const cfg = getExternalConfig(env);
+  if (!cfg.enabled) return;
+  const start = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 2000);
+    const res  = await fetch(`${cfg.endpoint}/ping`, {
+      method: "GET",
+      headers: { "Authorization": `Bearer ${cfg.apiKey}` },
+      signal: ctrl.signal
+    });
+    clearTimeout(tid);
+    const latency = Date.now() - start;
+    registerEvent(hive, "external_ping", { success: res.ok, latency, status: res.status, ts: Date.now() });
+  } catch (e) {
+    registerEvent(hive, "external_ping", { success: false, error: e.message, ts: Date.now() });
+  }
 }
 
 // P80-2: Send task to external runtime
@@ -3049,7 +3839,19 @@ const ROOT_ACTIONS = {
   FORCE_AFL_MODE:          true,
   SET_IDENTITY_PROFILE:    true,
   LOCK_IDENTITY:           true,
-  RESET_IDENTITY:          true
+  RESET_IDENTITY:          true,
+  // Phase 8.0.2-8.0.5
+  QUARANTINE_SOURCE_V2:    true,
+  CLEAR_THREATS_V2:        true,
+  KILL_REPLICA_V2:         true,
+  BLOCK_SOURCE:            true,
+  UNBLOCK_SOURCE:          true,
+  BAN_IDENTITY:            true,
+  TRUST_IDENTITY:          true,
+  RESET_IDENTITY_MAP:      true,
+  DISABLE_BRAIN:           true,
+  FORCE_BRAIN:             true,
+  RESET_BRAINS:            true
 };
 
 // F743-4: Snapshot hive before major mutations (rolling 10-entry history)
@@ -3391,6 +4193,26 @@ async function router(request, env, ctx, pathname) {
     return processUserInteraction(request, env, ctx);
   }
 
+  // P80-10: External runtime callback — Koyeb sends events back here
+  if (pathname === "/external/event" && request.method === "POST") {
+    if (!verifyExternal(request, env)) {
+      return new Response(JSON.stringify({ error: ERROR_CODES.EXTERNAL_UNAUTHORIZED }), {
+        status: 401, headers: { "Content-Type": "application/json" }
+      });
+    }
+    const userId  = request.headers.get("X-User-Id") ?? "anonymous";
+    const abortCtl = new AbortController();
+    const rawHive  = await loadHiveState(env, userId, abortCtl.signal);
+    const hive     = initializeUnifiedHive(rawHive);
+    initMemory(hive);
+    const event = await handleExternalEvent(request, hive);
+    registerEvent(hive, "external_signal_received", { event: event.event, ts: Date.now() });
+    await persistHiveState(env, userId, hive);
+    return new Response(JSON.stringify({ received: true, event }), {
+      status: 200, headers: { "Content-Type": "application/json" }
+    });
+  }
+
   // S766: All /root/* routes go through secureRootGate
   if (pathname.startsWith("/root/")) {
     const userId   = request.headers.get("X-User-Id") ?? "anonymous";
@@ -3501,7 +4323,7 @@ async function router(request, env, ctx, pathname) {
   }
 
   if (pathname === "/health") {
-    return new Response(JSON.stringify({ status: "ok", version: "7.9.0", build: "afl-identity-leukocytes" }), {
+    return new Response(JSON.stringify({ status: "ok", version: "8.0.0", build: "external-awareness-full" }), {
       headers: { "Content-Type": "application/json" }
     });
   }

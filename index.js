@@ -6,7 +6,7 @@
  * PATCH LOG — Round 1 (GPT review v1):
  *  FIX-1  Mother Governor loop detection used trail.step/trail.result (always undefined) → trail[0]
  *  FIX-2  replanCount increment had no clamp → Math.min guard added
- *  FIX-3  Neon JSON.parse in loadHiveState not wrapped → try/catch added
+ *  FIX-3  Neon JSON.parse in loadHiveState not wrapped → try/catch added 
  *  FIX-4  KV + Neon writes have no monotonic guard → writeLock timestamp reject added
  *  FIX-5  embedPromptText silent null return → structured { vector, fallback } return
  *  FIX-6  syncOverflow called undefined storeVector() → replaced with persistSemanticMemory()

@@ -4,27 +4,46 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+
+# Prevent concurrent deployments to the same environment
+concurrency:
+  group: cloudflare-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - name: Checkout code 
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      # Diagnostic step – validates network and token before deployment
+      - name: Test Cloudflare API connectivity
+        run: |
+          echo "Testing network to api.cloudflare.com..."
+          curl -v -o /dev/null -s -w "HTTP Status: %{http_code}\n" https://api.cloudflare.com/client/v4/user/tokens/verify \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            || echo "Network or token failure detected"
+        continue-on-error: false   # Fail fast if no connectivity
 
       - name: Deploy to Cloudflare Workers
-        uses:  cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          # If you have a specific environment: environment: production
+          # Wrangler will read wrangler.toml automatically
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

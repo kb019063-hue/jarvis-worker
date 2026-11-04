@@ -19,7 +19,10 @@ SRCS = src/dom/Node.cpp \
        src/js/BytecodeCompiler.cpp \
        src/js/Heap.cpp \
        src/js/VM.cpp \
-       src/js/JsInterpreter.cpp
+       src/js/JsInterpreter.cpp \
+       src/js/EventLoop.cpp \
+       src/net/ResourceLoader.cpp \
+       src/shell/BrowserShell.cpp
 
 OBJS = $(SRCS:src/%.cpp=build/%.o)
 

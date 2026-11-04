@@ -18,10 +18,10 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, DrawShadowCommand>) {
-            int start_col = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset) / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset + arg.rect.width) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset) / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset + arg.rect.height) / m_cell_h), 0, m_rows - 1);
+            int start_col = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             for (int r = start_row; r <= end_row; ++r) {
                 for (int c = start_col; c <= end_col; ++c) {
@@ -29,10 +29,10 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawRectCommand>) {
-            int start_col = std::clamp(static_cast<int>(arg.rect.x / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>(arg.rect.y / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height) / m_cell_h), 0, m_rows - 1);
+            int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             for (int r = start_row; r <= end_row; ++r) {
                 for (int c = start_col; c <= end_col; ++c) {
@@ -40,10 +40,10 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
-            int start_col = std::clamp(static_cast<int>(arg.rect.x / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>(arg.rect.y / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height) / m_cell_h), 0, m_rows - 1);
+            int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             // Horizontal borders
             for (int c = start_col; c <= end_col; ++c) {
@@ -66,8 +66,8 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             m_grid[end_row * m_cols + end_col].ch = '+';
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
-            int col = static_cast<int>(arg.position.x / m_cell_w);
-            int row = static_cast<int>(arg.position.y / m_cell_h);
+            int col = static_cast<int>((arg.position.x - m_scroll_x) / m_cell_w);
+            int row = static_cast<int>((arg.position.y - m_scroll_y) / m_cell_h);
 
             for (char ch : arg.text) {
                 if (col >= 0 && col < m_cols && row >= 0 && row < m_rows) {
@@ -80,6 +80,32 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             }
         }
     }, cmd);
+}
+
+void TerminalRenderer::draw_focus_ring(const Rect& rect, Color color) {
+    int start_col = std::clamp(static_cast<int>((rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+    int end_col   = std::clamp(static_cast<int>((rect.x + rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+    int start_row = std::clamp(static_cast<int>((rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+    int end_row   = std::clamp(static_cast<int>((rect.y + rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+
+    for (int c = start_col; c <= end_col; ++c) {
+        if (start_row >= 0 && start_row < m_rows) {
+            m_grid[start_row * m_cols + c].fg = color;
+            m_grid[start_row * m_cols + c].bold = true;
+        }
+        if (end_row >= 0 && end_row < m_rows) {
+            m_grid[end_row * m_cols + c].fg = color;
+            m_grid[end_row * m_cols + c].bold = true;
+        }
+    }
+    for (int r = start_row; r <= end_row; ++r) {
+        if (r >= 0 && r < m_rows) {
+            m_grid[r * m_cols + start_col].fg = color;
+            m_grid[r * m_cols + start_col].bold = true;
+            m_grid[r * m_cols + end_col].fg = color;
+            m_grid[r * m_cols + end_col].bold = true;
+        }
+    }
 }
 
 void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os) {
@@ -102,6 +128,27 @@ void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os)
         os << "\033[0m\n";
     }
     os << "\033[0m" << std::flush;
+}
+
+std::string TerminalRenderer::to_ansi_string(const DisplayList& display_list) {
+    for (const auto& cmd : display_list.commands()) {
+        execute_command(cmd);
+    }
+
+    std::ostringstream ss;
+    for (int r = 0; r < m_rows; ++r) {
+        for (int c = 0; c < m_cols; ++c) {
+            const auto& cell = m_grid[r * m_cols + c];
+            ss << "\033[38;2;" << (int)cell.fg.r << ";" << (int)cell.fg.g << ";" << (int)cell.fg.b << "m";
+            ss << "\033[48;2;" << (int)cell.bg.r << ";" << (int)cell.bg.g << ";" << (int)cell.bg.b << "m";
+            if (cell.bold) ss << "\033[1m";
+            ss << cell.ch;
+            if (cell.bold) ss << "\033[22m";
+        }
+        ss << "\033[0m\n";
+    }
+    ss << "\033[0m";
+    return ss.str();
 }
 
 } // namespace litebird

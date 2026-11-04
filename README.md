@@ -102,6 +102,20 @@ Litebird implements the complete modern browser rendering pipeline:
   - Real-time DOM mutation: `element.textContent = "..."` updates the live document before layout and rasterization.
   - Event Handling: `element.addEventListener(type, callback)`, `element.click()`, `event.stopPropagation()`, `event.preventDefault()`.
 
+### 7. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
+- **Interactive TUI Browser Shell (`BrowserShell`):**
+  - Terminal User Interface with keyboard-driven browsing: `[Tab]` / `[Shift+Tab]` cycles through links and buttons, `[Enter]` activates focused link or button, `[↑/↓/PgUp/PgDn]` scrolls the viewport smoothly.
+  - Visual focus ring highlighted directly on the rendered terminal grid in ANSI color.
+  - Full navigation history stack (`back()`, `forward()`, `reload()`, `navigate_to()`).
+  - Interactive URL bar with address entry prompt (`[o]` key) supporting local files and remote HTTP URLs.
+  - Integrated DevTools inspector pane (`[d]` key) displaying DOM element count, layout box tree height, and Heap GC memory metrics.
+- **Asynchronous EventLoop & Timers (`EventLoop`):**
+  - High-resolution timer queue executing `setTimeout(callback, delay_ms)` and `setInterval(callback, interval_ms)`.
+  - Dynamic frame tick loop: timer-driven DOM updates automatically trigger relayout and frame repaints.
+- **Resource Loader & Native HTTP Client (`ResourceLoader`):**
+  - Native POSIX socket HTTP/1.1 client supporting GET requests, headers, and status code handling with zero external dependencies.
+  - Relative URL resolver normalizing directory-relative (`../`, `./`) and root-relative paths across navigation.
+
 ---
 
 ## 🚀 Getting Started
@@ -124,23 +138,23 @@ make test
 ### Running Examples
 
 ```bash
-# 1. Run the DOM EventTarget and Mark-and-Sweep GC showcase
+# 1. Launch the Interactive TUI Browser Shell
+./build/litebird --shell examples/browser_portal.html
+
+# 2. Run the live EventLoop Timer & Interactive Counter application
+./build/litebird examples/timer_counter.html
+
+# 3. Run the DOM EventTarget and Mark-and-Sweep GC showcase
 ./build/litebird examples/events_and_gc.html
 
-# 2. Render an Inline Formatting Context (IFC) page with mixed inline badges
+# 4. Render an Inline Formatting Context (IFC) page with mixed inline badges
 ./build/litebird examples/ifc.html
 
-# 3. Render a Flexbox layout with responsive cards and navbar
+# 5. Render a Flexbox layout with responsive cards and navbar
 ./build/litebird examples/flexbox.html
 
-# 4. Inspect the computed Layout Box tree
-./build/litebird --dump-layout examples/events_and_gc.html
-
-# 5. Disassemble JavaScript into bytecode instructions
-./build/litebird --dump-bytecode --run-js "let x = 10; function square(n) { return n * n; } console.log(square(x));"
-
 # 6. Render directly to a 24-bit BMP image
-./build/litebird --render-bmp page.bmp examples/events_and_gc.html
+./build/litebird --render-bmp page.bmp examples/browser_portal.html
 ```
 
 ---
@@ -149,6 +163,7 @@ make test
 
 | Flag | Description |
 | :--- | :--- |
+| `--shell [file/url]` | Launch interactive TUI Browser Shell |
 | `--dump-dom` | Print the hierarchical DOM tree |
 | `--dump-css` | Print parsed CSS rules and specificity calculations |
 | `--dump-layout` | Print the computed Layout Box tree with geometry |
@@ -184,6 +199,9 @@ Running test: anti_aliased_rasterizer_and_shadows... PASSED
 Running test: inline_formatting_context... PASSED
 Running test: garbage_collector_and_cycles... PASSED
 Running test: dom_event_target_and_bubbling... PASSED
+Running test: event_loop_and_timers... PASSED
+Running test: resource_loader_and_url_resolution... PASSED
+Running test: browser_shell_navigation_and_hit_testing... PASSED
 
-All 13 engine test suites passed successfully!
+All 16 engine test suites passed successfully!
 ```

@@ -1,5 +1,6 @@
 #include "litebird/js/VM.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -126,6 +127,44 @@ void VM::init_builtins() {
         }));
         set_global("document", doc_obj);
     }
+
+    // setTimeout(callback, delay)
+    set_global("setTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        int delay = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
+        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
+            callback.call({});
+        }, delay);
+        return JsValue::make_number(id);
+    }));
+
+    // setInterval(callback, interval)
+    set_global("setInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        int interval = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
+        uint32_t id = EventLoop::default_loop().set_interval([callback]() {
+            callback.call({});
+        }, interval);
+        return JsValue::make_number(id);
+    }));
+
+    // clearTimeout(id)
+    set_global("clearTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    // clearInterval(id)
+    set_global("clearInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
 }
 
 JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {

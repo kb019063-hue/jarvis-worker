@@ -59,6 +59,10 @@ public:
     void add_event_listener(const std::string& type, EventListener listener);
     void remove_event_listeners(const std::string& type);
     bool dispatch_event(const std::shared_ptr<Event>& event);
+    bool has_listeners(const std::string& type) const {
+        auto it = m_listeners.find(type);
+        return it != m_listeners.end() && !it->second.empty();
+    }
 
     virtual std::string text_content() const;
     virtual void dump(std::ostream& os, int indent = 0) const;

@@ -1,0 +1,296 @@
+#include "litebird/js/BytecodeCompiler.hpp"
+#include <stdexcept>
+
+namespace litebird {
+
+BytecodeCompiler::BytecodeCompiler(std::shared_ptr<BytecodeFunction> function)
+    : m_function(function ? function : std::make_shared<BytecodeFunction>("__main__", 0)) {
+    // Slot 0 is reserved for function/closure receiver or stack alignment
+    add_local("");
+}
+
+size_t BytecodeCompiler::emit_byte(uint8_t byte) {
+    return m_function->chunk.write(byte);
+}
+
+size_t BytecodeCompiler::emit_opcode(OpCode op) {
+    return m_function->chunk.write_opcode(op);
+}
+
+size_t BytecodeCompiler::emit_constant(JsValue value) {
+    size_t idx = m_function->chunk.add_constant(std::move(value));
+    if (idx > 255) {
+        throw std::runtime_error("Too many constants in one chunk (>255)");
+    }
+    emit_opcode(OpCode::OpConstant);
+    emit_byte(static_cast<uint8_t>(idx));
+    return idx;
+}
+
+size_t BytecodeCompiler::emit_jump(OpCode op) {
+    emit_opcode(op);
+    emit_byte(0xFF);
+    emit_byte(0xFF);
+    return m_function->chunk.code.size() - 2;
+}
+
+void BytecodeCompiler::patch_jump(size_t offset) {
+    // Jump distance is from end of jump instruction to current code size
+    size_t jump = m_function->chunk.code.size() - (offset + 2);
+    if (jump > 65535) {
+        throw std::runtime_error("Too much code to jump over (>65535 bytes)");
+    }
+    m_function->chunk.code[offset] = static_cast<uint8_t>((jump >> 8) & 0xFF);
+    m_function->chunk.code[offset + 1] = static_cast<uint8_t>(jump & 0xFF);
+}
+
+void BytecodeCompiler::emit_loop(size_t loop_start) {
+    emit_opcode(OpCode::OpLoop);
+    size_t jump = m_function->chunk.code.size() - loop_start + 2;
+    if (jump > 65535) {
+        throw std::runtime_error("Loop body too large (>65535 bytes)");
+    }
+    emit_byte(static_cast<uint8_t>((jump >> 8) & 0xFF));
+    emit_byte(static_cast<uint8_t>(jump & 0xFF));
+}
+
+void BytecodeCompiler::begin_scope() {
+    m_scope_depth++;
+}
+
+void BytecodeCompiler::end_scope() {
+    m_scope_depth--;
+    while (!m_locals.empty() && m_locals.back().depth > m_scope_depth) {
+        emit_opcode(OpCode::OpPop);
+        m_locals.pop_back();
+    }
+}
+
+void BytecodeCompiler::add_local(const std::string& name) {
+    if (m_locals.size() >= 256) {
+        throw std::runtime_error("Too many local variables in scope (>256)");
+    }
+    m_locals.push_back({name, m_scope_depth});
+}
+
+int BytecodeCompiler::resolve_local(const std::string& name) {
+    for (int i = static_cast<int>(m_locals.size()) - 1; i >= 0; --i) {
+        if (m_locals[i].name == name) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
+    if (program) {
+        for (const auto& stmt : program->statements) {
+            compile_stmt(stmt.get());
+        }
+    }
+
+    emit_opcode(OpCode::OpUndefined);
+    emit_opcode(OpCode::OpReturn);
+    return m_function;
+}
+
+void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
+    if (!stmt) return;
+
+    if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
+        compile_expr(expr_stmt->expression.get());
+        emit_opcode(OpCode::OpPop);
+    } else if (auto var_decl = dynamic_cast<const VarDeclStmt*>(stmt)) {
+        if (var_decl->initializer) {
+            compile_expr(var_decl->initializer.get());
+        } else {
+            emit_opcode(OpCode::OpUndefined);
+        }
+
+        if (m_scope_depth > 0) {
+            add_local(var_decl->name);
+        } else {
+            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(var_decl->name));
+            emit_opcode(OpCode::OpSetGlobal);
+            emit_byte(static_cast<uint8_t>(name_idx));
+            emit_opcode(OpCode::OpPop);
+        }
+    } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
+        begin_scope();
+        for (const auto& s : block_stmt->statements) {
+            compile_stmt(s.get());
+        }
+        end_scope();
+    } else if (auto if_stmt = dynamic_cast<const IfStmt*>(stmt)) {
+        compile_expr(if_stmt->condition.get());
+        size_t then_jump = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);
+
+        compile_stmt(if_stmt->then_branch.get());
+
+        size_t else_jump = emit_jump(OpCode::OpJump);
+        patch_jump(then_jump);
+        emit_opcode(OpCode::OpPop);
+
+        if (if_stmt->else_branch) {
+            compile_stmt(if_stmt->else_branch.get());
+        }
+        patch_jump(else_jump);
+    } else if (auto while_stmt = dynamic_cast<const WhileStmt*>(stmt)) {
+        size_t loop_start = m_function->chunk.code.size();
+        compile_expr(while_stmt->condition.get());
+
+        size_t exit_jump = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);
+
+        compile_stmt(while_stmt->body.get());
+        emit_loop(loop_start);
+
+        patch_jump(exit_jump);
+        emit_opcode(OpCode::OpPop);
+    } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
+        if (ret_stmt->value) {
+            compile_expr(ret_stmt->value.get());
+        } else {
+            emit_opcode(OpCode::OpUndefined);
+        }
+        emit_opcode(OpCode::OpReturn);
+    } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
+        auto sub_fn = std::make_shared<BytecodeFunction>(fn_decl->name, static_cast<int>(fn_decl->params.size()));
+        BytecodeCompiler sub_compiler(sub_fn);
+
+        // Parameters are local variables in the function scope
+        for (const auto& p : fn_decl->params) {
+            sub_compiler.add_local(p);
+        }
+
+        sub_compiler.compile(fn_decl->body.get());
+
+        // Create a function object holding the compiled bytecode function
+        JsValue fn_obj;
+        fn_obj.type = JsType::Function;
+        fn_obj.params = fn_decl->params;
+        fn_obj.body = fn_decl->body;
+        // Embed the compiled BytecodeFunction pointer into properties
+        fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
+        // Keep a strong reference in properties so it isn't freed
+        fn_obj.set_property("__fn_name__", JsValue::make_string(fn_decl->name));
+
+        size_t const_idx = m_function->chunk.add_constant(fn_obj);
+        emit_opcode(OpCode::OpConstant);
+        emit_byte(static_cast<uint8_t>(const_idx));
+
+        if (m_scope_depth > 0) {
+            add_local(fn_decl->name);
+        } else {
+            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(fn_decl->name));
+            emit_opcode(OpCode::OpSetGlobal);
+            emit_byte(static_cast<uint8_t>(name_idx));
+            emit_opcode(OpCode::OpPop);
+        }
+    }
+}
+
+void BytecodeCompiler::compile_expr(const Expr* expr) {
+    if (!expr) {
+        emit_opcode(OpCode::OpUndefined);
+        return;
+    }
+
+    if (auto lit = dynamic_cast<const LiteralExpr*>(expr)) {
+        switch (lit->value.type) {
+            case JsType::Null:      emit_opcode(OpCode::OpNull); break;
+            case JsType::Undefined: emit_opcode(OpCode::OpUndefined); break;
+            case JsType::Boolean:   emit_opcode(lit->value.bool_val ? OpCode::OpTrue : OpCode::OpFalse); break;
+            default:                emit_constant(lit->value); break;
+        }
+    } else if (auto id = dynamic_cast<const IdentifierExpr*>(expr)) {
+        int local_slot = resolve_local(id->name);
+        if (local_slot != -1) {
+            emit_opcode(OpCode::OpGetLocal);
+            emit_byte(static_cast<uint8_t>(local_slot));
+        } else {
+            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
+            emit_opcode(OpCode::OpGetGlobal);
+            emit_byte(static_cast<uint8_t>(name_idx));
+        }
+    } else if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
+        compile_expr(assign->value.get());
+
+        if (auto id_target = dynamic_cast<const IdentifierExpr*>(assign->target.get())) {
+            int local_slot = resolve_local(id_target->name);
+            if (local_slot != -1) {
+                emit_opcode(OpCode::OpSetLocal);
+                emit_byte(static_cast<uint8_t>(local_slot));
+            } else {
+                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id_target->name));
+                emit_opcode(OpCode::OpSetGlobal);
+                emit_byte(static_cast<uint8_t>(name_idx));
+            }
+        } else if (auto mem_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
+            compile_expr(mem_target->object.get());
+            size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem_target->property));
+            emit_opcode(OpCode::OpSetProperty);
+            emit_byte(static_cast<uint8_t>(prop_idx));
+        }
+    } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
+        compile_expr(unary->operand.get());
+        if (unary->op == JsTokenType::Minus) {
+            emit_opcode(OpCode::OpNegate);
+        } else if (unary->op == JsTokenType::Bang) {
+            emit_opcode(OpCode::OpNot);
+        }
+    } else if (auto binary = dynamic_cast<const BinaryExpr*>(expr)) {
+        // Short-circuit logic
+        if (binary->op == JsTokenType::PipePipe) {
+            compile_expr(binary->left.get());
+            size_t else_jump = emit_jump(OpCode::OpJumpIfFalse);
+            size_t end_jump = emit_jump(OpCode::OpJump);
+            patch_jump(else_jump);
+            emit_opcode(OpCode::OpPop);
+            compile_expr(binary->right.get());
+            patch_jump(end_jump);
+            return;
+        }
+        if (binary->op == JsTokenType::AmpAmp) {
+            compile_expr(binary->left.get());
+            size_t end_jump = emit_jump(OpCode::OpJumpIfFalse);
+            emit_opcode(OpCode::OpPop);
+            compile_expr(binary->right.get());
+            patch_jump(end_jump);
+            return;
+        }
+
+        compile_expr(binary->left.get());
+        compile_expr(binary->right.get());
+
+        switch (binary->op) {
+            case JsTokenType::Plus:         emit_opcode(OpCode::OpAdd); break;
+            case JsTokenType::Minus:        emit_opcode(OpCode::OpSubtract); break;
+            case JsTokenType::Star:         emit_opcode(OpCode::OpMultiply); break;
+            case JsTokenType::Slash:        emit_opcode(OpCode::OpDivide); break;
+            case JsTokenType::Percent:      emit_opcode(OpCode::OpModulo); break;
+            case JsTokenType::EqualEqual:   emit_opcode(OpCode::OpEqual); break;
+            case JsTokenType::NotEqual:     emit_opcode(OpCode::OpNotEqual); break;
+            case JsTokenType::Greater:      emit_opcode(OpCode::OpGreater); break;
+            case JsTokenType::GreaterEqual: emit_opcode(OpCode::OpGreaterEqual); break;
+            case JsTokenType::Less:         emit_opcode(OpCode::OpLess); break;
+            case JsTokenType::LessEqual:    emit_opcode(OpCode::OpLessEqual); break;
+            default: break;
+        }
+    } else if (auto member = dynamic_cast<const MemberExpr*>(expr)) {
+        compile_expr(member->object.get());
+        size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(member->property));
+        emit_opcode(OpCode::OpGetProperty);
+        emit_byte(static_cast<uint8_t>(prop_idx));
+    } else if (auto call = dynamic_cast<const CallExpr*>(expr)) {
+        compile_expr(call->callee.get());
+        for (const auto& arg : call->args) {
+            compile_expr(arg.get());
+        }
+        emit_opcode(OpCode::OpCall);
+        emit_byte(static_cast<uint8_t>(call->args.size()));
+    }
+}
+
+} // namespace litebird

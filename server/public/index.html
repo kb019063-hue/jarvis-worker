@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Litebird Browser Engine — Interactive Workbench</title>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-panel: #1e293b;
+            --bg-editor: #090d16;
+            --border: #334155;
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+            --accent: #38bdf8;
+            --accent-green: #34d399;
+            --accent-pink: #f43f5e;
+            --accent-yellow: #fbbf24;
+            --accent-purple: #c084fc;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Header */
+        header {
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--accent);
+            letter-spacing: 0.5px;
+        }
+        .brand span { color: #fff; }
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        select, button {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        select:hover, button:hover {
+            border-color: var(--accent);
+        }
+        button.primary {
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            border: none;
+            color: #fff;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        button.primary:hover {
+            filter: brightness(1.1);
+        }
+        .status-badge {
+            background: rgba(56, 189, 248, 0.15);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            color: var(--accent);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        /* Main Workspace Grid */
+        .workspace {
+            display: grid;
+            grid-template-columns: 1fr 1.2fr;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Left Column: Code Editor */
+        .editor-container {
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            background-color: var(--bg-editor);
+        }
+        .panel-header {
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        textarea.code-editor {
+            flex: 1;
+            background-color: transparent;
+            color: #e2e8f0;
+            font-family: "Fira Code", "Cascadia Code", Consolas, Menlo, Monaco, monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            padding: 14px;
+            border: none;
+            resize: none;
+            outline: none;
+            white-space: pre;
+            tab-size: 4;
+        }
+
+        /* Right Column: Engine Inspector Tabs */
+        .inspector-container {
+            display: flex;
+            flex-direction: column;
+            background-color: var(--bg-dark);
+            overflow: hidden;
+        }
+        .tabs {
+            display: flex;
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+        }
+        .tab-btn {
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            border-radius: 0;
+            padding: 10px 16px;
+            color: var(--text-dim);
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+        .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+            background-color: rgba(56, 189, 248, 0.05);
+        }
+        .tab-content {
+            flex: 1;
+            overflow: auto;
+            padding: 16px;
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Viewport Tab */
+        .viewport-frame {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #0b0f19;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            min-height: 480px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .viewport-img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 1px solid #3b4252;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        }
+        .viewport-info {
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--text-dim);
+            display: flex;
+            gap: 16px;
+        }
+
+        /* Tree and Code Pre views */
+        pre.tree-view {
+            font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #f1f5f9;
+            background-color: var(--bg-editor);
+            padding: 16px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        /* Loading spinner */
+        .loading-overlay {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 30px;
+            color: var(--accent);
+            font-size: 14px;
+            gap: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            🦅 Litebird <span>Browser Engine</span>
+        </div>
+        <div class="controls">
+            <span class="status-badge">Phase 2: Bytecode VM + Flexbox</span>
+            <select id="example-select">
+                <option value="examples/flexbox.html">flexbox.html (Flexbox & Word Wrap)</option>
+                <option value="examples/interactive.html">interactive.html (In-page JS + DOM)</option>
+                <option value="examples/card.html">card.html (Box Model & Cascade)</option>
+                <option value="examples/hello.html">hello.html (Getting Started)</option>
+            </select>
+            <button class="primary" id="run-btn">
+                <span>▶</span> Render Engine (Ctrl+Enter)
+            </button>
+        </div>
+    </header>
+
+    <div class="workspace">
+        <!-- Left: Code Editor -->
+        <div class="editor-container">
+            <div class="panel-header">
+                <span>Document Source (HTML + CSS + JS)</span>
+                <span id="char-count" style="font-weight: 400; font-size: 11px;">0 chars</span>
+            </div>
+            <textarea class="code-editor" id="code-editor" spellcheck="false"></textarea>
+        </div>
+
+        <!-- Right: Inspector Tabs -->
+        <div class="inspector-container">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="tab-viewport">🖼️ Native Viewport</button>
+                <button class="tab-btn" data-tab="tab-dom">🌳 DOM Tree</button>
+                <button class="tab-btn" data-tab="tab-css">🎨 CSS Cascade</button>
+                <button class="tab-btn" data-tab="tab-layout">📐 Layout Box Model</button>
+                <button class="tab-btn" data-tab="tab-bytecode">⚡ Bytecode VM</button>
+                <button class="tab-btn" data-tab="tab-paint">🖌️ Display List</button>
+            </div>
+
+            <div id="loading" class="loading-overlay">Executing C++20 engine pipeline...</div>
+
+            <!-- Tab 1: Viewport -->
+            <div id="tab-viewport" class="tab-content active">
+                <div class="viewport-frame">
+                    <img id="render-img" class="viewport-img" alt="Litebird Rendered Viewport" />
+                    <div class="viewport-info">
+                        <span>Engine: <b>Litebird Native C++20</b></span>
+                        <span>Resolution: <b>800 × 600 px</b></span>
+                        <span>Pipeline: <b>HTML ➔ Style ➔ Flexbox ➔ 2D Rasterizer</b></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 2: DOM -->
+            <div id="tab-dom" class="tab-content">
+                <pre class="tree-view" id="dom-view"></pre>
+            </div>
+
+            <!-- Tab 3: CSS -->
+            <div id="tab-css" class="tab-content">
+                <pre class="tree-view" id="css-view"></pre>
+            </div>
+
+            <!-- Tab 4: Layout -->
+            <div id="tab-layout" class="tab-content">
+                <pre class="tree-view" id="layout-view"></pre>
+            </div>
+
+            <!-- Tab 5: Bytecode -->
+            <div id="tab-bytecode" class="tab-content">
+                <pre class="tree-view" id="bytecode-view"></pre>
+            </div>
+
+            <!-- Tab 6: Paint -->
+            <div id="tab-paint" class="tab-content">
+                <pre class="tree-view" id="paint-view"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const editor = document.getElementById('code-editor');
+        const exampleSelect = document.getElementById('example-select');
+        const runBtn = document.getElementById('run-btn');
+        const loading = document.getElementById('loading');
+        const charCount = document.getElementById('char-count');
+
+        let examples = {};
+
+        // Tab Switching
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Fetch examples
+        async function loadExamples() {
+            try {
+                const res = await fetch('/api/examples');
+                examples = await res.json();
+                loadSelectedExample();
+            } catch (err) {
+                console.error('Failed to load examples:', err);
+            }
+        }
+
+        function loadSelectedExample() {
+            const sel = exampleSelect.value.replace('examples/', '');
+            if (examples[sel]) {
+                editor.value = examples[sel];
+                updateCharCount();
+                renderCode();
+            }
+        }
+
+        exampleSelect.addEventListener('change', loadSelectedExample);
+
+        function updateCharCount() {
+            charCount.textContent = `${editor.value.length} chars`;
+        }
+        editor.addEventListener('input', updateCharCount);
+
+        // Render code via Litebird backend
+        async function renderCode() {
+            loading.style.display = 'flex';
+            try {
+                const res = await fetch('/api/render', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ html: editor.value })
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    alert('Engine Execution Error:\n' + data.error);
+                    return;
+                }
+
+                // Update Viewport image
+                if (data.bmpBase64) {
+                    document.getElementById('render-img').src = data.bmpBase64;
+                }
+
+                // Update Inspector Views
+                document.getElementById('dom-view').textContent = data.dom || '(No DOM generated)';
+                document.getElementById('css-view').textContent = data.css || '(No CSS rules matched)';
+                document.getElementById('layout-view').textContent = data.layout || '(No layout box tree)';
+                document.getElementById('bytecode-view').textContent = data.bytecode || '(No script executed)';
+                document.getElementById('paint-view').textContent = data.paint || '(No paint commands)';
+
+            } catch (err) {
+                console.error('Render request failed:', err);
+            } finally {
+                loading.style.display = 'none';
+            }
+        }
+
+        runBtn.addEventListener('click', renderCode);
+
+        // Keyboard Shortcut: Ctrl+Enter or Cmd+Enter to run
+        window.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                renderCode();
+            }
+        });
+
+        // Initialize
+        loadExamples();
+    </script>
+</body>
+</html>

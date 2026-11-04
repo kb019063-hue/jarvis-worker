@@ -1,0 +1,5 @@
+build/
+*.o
+*.bmp
+*.ppm
+.DS_Store

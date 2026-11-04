@@ -1,0 +1,73 @@
+#pragma once
+
+#include "litebird/dom/Node.hpp"
+#include "litebird/css/StyleResolver.hpp"
+#include "litebird/layout/Dimensions.hpp"
+#include <vector>
+#include <memory>
+#include <string>
+#include <iostream>
+
+namespace litebird {
+
+enum class BoxType {
+    BlockNode,
+    InlineNode,
+    FlexNode,
+    AnonymousBlock,
+    TextNode
+};
+
+class LayoutBox : public std::enable_shared_from_this<LayoutBox> {
+public:
+    BoxType box_type{BoxType::BlockNode};
+    BoxDimensions dimensions;
+    ComputedStyle style;
+    std::shared_ptr<Node> node;
+    std::string text;
+    std::vector<std::string> lines; // Multi-line wrapped text
+    std::vector<std::shared_ptr<LayoutBox>> children;
+    std::weak_ptr<LayoutBox> parent;
+
+    LayoutBox(BoxType type, std::shared_ptr<Node> n, ComputedStyle s)
+        : box_type(type), style(std::move(s)), node(std::move(n)) {}
+
+    static std::shared_ptr<LayoutBox> create_block(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::BlockNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_flex(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::FlexNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_inline(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::InlineNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_anonymous(ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::AnonymousBlock, nullptr, std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_text(std::shared_ptr<Node> n, std::string t, ComputedStyle s) {
+        auto box = std::make_shared<LayoutBox>(BoxType::TextNode, std::move(n), std::move(s));
+        box->text = std::move(t);
+        return box;
+    }
+
+    void append_child(std::shared_ptr<LayoutBox> child) {
+        if (!child) return;
+        child->parent = shared_from_this();
+        children.push_back(child);
+    }
+
+    void layout(float containing_width, float containing_height = 0.0f);
+    void dump(std::ostream& os, int indent = 0) const;
+
+private:
+    void layout_block(float containing_width);
+    void layout_flex(float containing_width);
+    void layout_inline(float containing_width);
+    void layout_text(float containing_width);
+};
+
+} // namespace litebird

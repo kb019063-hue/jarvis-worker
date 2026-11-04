@@ -17,6 +17,7 @@ SRCS = src/dom/Node.cpp \
        src/js/JsParser.cpp \
        src/js/Bytecode.cpp \
        src/js/BytecodeCompiler.cpp \
+       src/js/Heap.cpp \
        src/js/VM.cpp \
        src/js/JsInterpreter.cpp
 

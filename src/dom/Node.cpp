@@ -6,6 +6,50 @@
 
 namespace litebird {
 
+void Node::add_event_listener(const std::string& type, EventListener listener) {
+    m_listeners[type].push_back(std::move(listener));
+}
+
+void Node::remove_event_listeners(const std::string& type) {
+    m_listeners.erase(type);
+}
+
+bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
+    if (!event) return false;
+
+    event->set_target(shared_from_this());
+
+    // 1. Target Phase
+    event->set_current_target(shared_from_this());
+    auto it = m_listeners.find(event->type());
+    if (it != m_listeners.end()) {
+        auto copy = it->second;
+        for (const auto& listener : copy) {
+            listener(event);
+            if (event->propagation_stopped()) return !event->default_prevented();
+        }
+    }
+
+    // 2. Bubbling Phase
+    if (event->bubbles()) {
+        auto curr = parent();
+        while (curr) {
+            event->set_current_target(curr);
+            auto p_it = curr->m_listeners.find(event->type());
+            if (p_it != curr->m_listeners.end()) {
+                auto p_copy = p_it->second;
+                for (const auto& listener : p_copy) {
+                    listener(event);
+                    if (event->propagation_stopped()) return !event->default_prevented();
+                }
+            }
+            curr = curr->parent();
+        }
+    }
+
+    return !event->default_prevented();
+}
+
 std::string Node::text_content() const {
     std::string res;
     for (const auto& ch : m_children) {

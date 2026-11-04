@@ -1,10 +1,13 @@
 #pragma once
 
+#include "litebird/dom/Event.hpp"
 #include <string>
 #include <vector>
 #include <memory>
 #include <iostream>
 #include <algorithm>
+#include <unordered_map>
+#include <functional>
 
 namespace litebird {
 
@@ -18,6 +21,8 @@ enum class NodeType {
     Text,
     Comment
 };
+
+using EventListener = std::function<void(const std::shared_ptr<Event>&)>;
 
 class Node : public std::enable_shared_from_this<Node> {
 public:
@@ -50,6 +55,11 @@ public:
         }
     }
 
+    // EventTarget implementation
+    void add_event_listener(const std::string& type, EventListener listener);
+    void remove_event_listeners(const std::string& type);
+    bool dispatch_event(const std::shared_ptr<Event>& event);
+
     virtual std::string text_content() const;
     virtual void dump(std::ostream& os, int indent = 0) const;
 
@@ -64,6 +74,7 @@ protected:
     NodeType m_type;
     std::weak_ptr<Node> m_parent;
     std::vector<std::shared_ptr<Node>> m_children;
+    std::unordered_map<std::string, std::vector<EventListener>> m_listeners;
 };
 
 } // namespace litebird

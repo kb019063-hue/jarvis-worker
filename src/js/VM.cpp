@@ -47,7 +47,31 @@ const JsValue& VM::peek(size_t distance) const {
     return m_stack[m_stack.size() - 1 - distance];
 }
 
+GCStats VM::collect_garbage() {
+    std::vector<JsValue*> roots;
+    roots.reserve(m_stack.size() + m_globals.size());
+    for (auto& v : m_stack) {
+        roots.push_back(&v);
+    }
+    for (auto& [k, v] : m_globals) {
+        roots.push_back(&v);
+    }
+    return Heap::default_heap().collect_garbage(roots);
+}
+
 void VM::init_builtins() {
+    // gc function
+    set_global("gc", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+        auto stats = collect_garbage();
+        JsValue res = JsValue::make_object();
+        res.set_property("total_cells", JsValue::make_number(stats.total_cells));
+        res.set_property("alive_cells", JsValue::make_number(stats.alive_cells));
+        res.set_property("collected_cells", JsValue::make_number(stats.collected_cells));
+        res.set_property("bytes_allocated", JsValue::make_number(stats.bytes_allocated));
+        res.set_property("collections_count", JsValue::make_number(stats.collections_count));
+        return res;
+    }));
+
     // console object
     JsValue console_obj = JsValue::make_object();
     console_obj.set_property("log", JsValue::make_native_function([](const std::vector<JsValue>& args) {

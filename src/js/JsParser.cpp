@@ -276,6 +276,44 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         return expr;
     }
 
+    if (match(JsTokenType::Function)) {
+        std::string name;
+        if (match(JsTokenType::Identifier)) {
+            name = previous().text;
+        }
+        consume(JsTokenType::OpenParen, "Expected '(' after function.");
+        std::vector<std::string> params;
+        if (!check(JsTokenType::CloseParen)) {
+            do {
+                params.push_back(consume(JsTokenType::Identifier, "Expected parameter name.").text);
+            } while (match(JsTokenType::Comma));
+        }
+        consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
+        consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
+        auto body = parse_block();
+        return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body));
+    }
+
+    if (match(JsTokenType::OpenBrace)) {
+        std::vector<std::pair<std::string, std::unique_ptr<Expr>>> entries;
+        if (!check(JsTokenType::CloseBrace)) {
+            do {
+                if (check(JsTokenType::CloseBrace)) break;
+                std::string key;
+                if (match(JsTokenType::Identifier) || match(JsTokenType::String)) {
+                    key = previous().text;
+                } else {
+                    throw std::runtime_error("Expected property name in object literal.");
+                }
+                consume(JsTokenType::Colon, "Expected ':' after property name.");
+                auto val = parse_expression();
+                entries.emplace_back(std::move(key), std::move(val));
+            } while (match(JsTokenType::Comma));
+        }
+        consume(JsTokenType::CloseBrace, "Expected '}' after object literal.");
+        return std::make_unique<ObjectLiteralExpr>(std::move(entries));
+    }
+
     throw std::runtime_error("Unexpected token in JS expression: " + peek().text);
 }
 

@@ -42,6 +42,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - Tree navigation (`parent()`, `children()`, `append_child()`, `remove_child()`).
 - DOM query methods: `getElementById()`, `getElementsByTagName()`, `querySelector()`, `querySelectorAll()`.
 - Interactive tree printer (`dumpTree()`).
+- **W3C DOM EventTarget System:** Standard event dispatch and bubbling pipeline (`Event`, `addEventListener()`, `dispatch_event()`, `stopPropagation()`, `preventDefault()`), with synthetic dispatch methods such as `element.click()`.
 
 ### 2. HTML5 Parser (`include/litebird/html/`)
 - Stateful streaming tokenizer (`HtmlTokenizer`).
@@ -84,16 +85,22 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Terminal Renderer:** Renders web pages directly inside your terminal using 24-bit ANSI Truecolor and border characters.
 - **Bitmap Renderer:** Exports an 800x600 uncompressed 24-bit `.bmp` image using an embedded bitmap font. Zero external GUI or graphics libraries required.
 
-### 6. High-Speed Bytecode Virtual Machine (`include/litebird/js/`)
+### 6. High-Speed Bytecode Virtual Machine & Garbage Collection (`include/litebird/js/`)
 - **Instruction Set:** Compact 8-bit opcodes (`OpConstant`, `OpGetLocal`, `OpSetLocal`, `OpGetGlobal`, `OpSetGlobal`, `OpAdd`, `OpSubtract`, `OpCall`, `OpReturn`, `OpJumpIfFalse`, `OpLoop`, etc.).
 - **Bytecode Compiler:** Converts the parsed AST into a linear instruction `Chunk` with constant pooling, local slot allocation, and jump target patching.
 - **Stack-based VM:** High-speed opcode dispatch loop with call-frame stack management.
+- **Mark-and-Sweep Garbage Collector (`Heap`):**
+  - Tracing mark-and-sweep collector capable of detecting and reclaiming isolated cyclic reference graphs (e.g., `A.b = B; B.a = A;`).
+  - Safe root registration scanning active execution stacks, environment frames, and global scopes.
+  - Built-in `gc()` method providing memory diagnostics (`total_cells`, `alive_cells`, `collected_cells`, `bytes_allocated`).
+- **Modern JavaScript Syntactic Extensions:** Support for object literal expressions (`{ key: value }`), first-class anonymous function expressions (`function(e) { ... }`), closure variable binding, and DOM event listener bridging.
 - **Disassembler:** Inspect the compiled bytecode instructions using `--dump-bytecode`.
 - **Global Objects & DOM Bindings:**
   - `console.log(...)`, `console.warn(...)`, `console.error(...)`
   - `Math.floor`, `Math.ceil`, `Math.round`, `Math.abs`, `Math.PI`
   - `document.title`, `document.getElementById(...)`
   - Real-time DOM mutation: `element.textContent = "..."` updates the live document before layout and rasterization.
+  - Event Handling: `element.addEventListener(type, callback)`, `element.click()`, `event.stopPropagation()`, `event.preventDefault()`.
 
 ---
 
@@ -117,17 +124,23 @@ make test
 ### Running Examples
 
 ```bash
-# 1. Render a Flexbox layout with responsive cards and navbar
+# 1. Run the DOM EventTarget and Mark-and-Sweep GC showcase
+./build/litebird examples/events_and_gc.html
+
+# 2. Render an Inline Formatting Context (IFC) page with mixed inline badges
+./build/litebird examples/ifc.html
+
+# 3. Render a Flexbox layout with responsive cards and navbar
 ./build/litebird examples/flexbox.html
 
-# 2. Inspect the computed Flexbox layout tree
-./build/litebird --dump-layout examples/flexbox.html
+# 4. Inspect the computed Layout Box tree
+./build/litebird --dump-layout examples/events_and_gc.html
 
-# 3. Disassemble JavaScript into bytecode instructions
+# 5. Disassemble JavaScript into bytecode instructions
 ./build/litebird --dump-bytecode --run-js "let x = 10; function square(n) { return n * n; } console.log(square(x));"
 
-# 4. Render directly to a 24-bit BMP image
-./build/litebird --render-bmp page.bmp examples/flexbox.html
+# 6. Render directly to a 24-bit BMP image
+./build/litebird --render-bmp page.bmp examples/events_and_gc.html
 ```
 
 ---
@@ -169,6 +182,8 @@ Running test: flexbox_layout... PASSED
 Running test: text_wrapping... PASSED
 Running test: anti_aliased_rasterizer_and_shadows... PASSED
 Running test: inline_formatting_context... PASSED
+Running test: garbage_collector_and_cycles... PASSED
+Running test: dom_event_target_and_bubbling... PASSED
 
-All 11 engine test suites passed successfully!
+All 13 engine test suites passed successfully!
 ```

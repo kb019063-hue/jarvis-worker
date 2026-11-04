@@ -9,6 +9,8 @@
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/Heap.hpp"
+#include "litebird/dom/Event.hpp"
 
 #include <iostream>
 #include <cassert>
@@ -399,6 +401,110 @@ TEST(inline_formatting_context) {
     assert(found_underline);
 }
 
+TEST(garbage_collector_and_cycles) {
+    using namespace litebird;
+    Heap heap;
+
+    // 1. Allocate cyclic objects a and b
+    JsValue a = JsValue::make_object(heap.allocate_object());
+    JsValue b = JsValue::make_object(heap.allocate_object());
+
+    a.set_property("b", b);
+    b.set_property("a", a);
+
+    assert(heap.stats().total_cells >= 2);
+
+    // 2. While 'a' is a root, both 'a' and 'b' must survive GC
+    auto stats = heap.collect_garbage({&a});
+    assert(stats.alive_cells >= 2);
+    assert(stats.collected_cells == 0);
+
+    // 3. Clear roots; cycle (a <-> b) is now unreachable and must be swept
+    a = JsValue::make_undefined();
+    b = JsValue::make_undefined();
+
+    auto after_stats = heap.collect_garbage({});
+    assert(after_stats.collected_cells >= 2);
+    assert(after_stats.alive_cells == 0);
+
+    // 4. Test VM built-in gc() function
+    VM vm;
+    vm.set_global("x", JsValue::make_object());
+    auto gc_fn = vm.get_global("gc");
+    assert(gc_fn.type == JsType::NativeFunction);
+    auto gc_info = gc_fn.native_fn({});
+    assert(gc_info.type == JsType::Object);
+    assert(gc_info.get_property("total_cells").to_number() >= 1.0);
+}
+
+TEST(dom_event_target_and_bubbling) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    auto container = std::make_shared<Element>("div");
+    container->set_attribute("id", "container");
+
+    auto button = std::make_shared<Element>("button");
+    button->set_attribute("id", "btn");
+    button->append_child(std::make_shared<Text>("Click Me"));
+
+    container->append_child(button);
+    doc->append_child(container);
+
+    int button_clicks = 0;
+    int container_clicks = 0;
+
+    // Listeners
+    button->add_event_listener("click", [&](const std::shared_ptr<Event>& ev) {
+        assert(ev->type() == "click");
+        assert(ev->target() == button);
+        assert(ev->current_target() == button);
+        button_clicks++;
+    });
+
+    container->add_event_listener("click", [&](const std::shared_ptr<Event>& ev) {
+        assert(ev->type() == "click");
+        assert(ev->target() == button);
+        assert(ev->current_target() == container);
+        container_clicks++;
+    });
+
+    // 1. Dispatch click on button -> should bubble up to container
+    button->click();
+    assert(button_clicks == 1);
+    assert(container_clicks == 1);
+
+    // 2. Test stop_propagation
+    button->add_event_listener("click", [&](const std::shared_ptr<Event>& ev) {
+        ev->stop_propagation();
+    });
+
+    button->click();
+    assert(button_clicks == 2); // 1 from previous click + 1 from this click
+    assert(container_clicks == 1); // Bubbling was stopped!
+
+    // 3. Test JS DOM Event binding
+    JsValue js_btn = JsValue::make_dom_node(button);
+    auto add_listener_fn = js_btn.get_property("addEventListener");
+    assert(add_listener_fn.type == JsType::NativeFunction);
+
+    int js_event_fired = 0;
+    add_listener_fn.native_fn({
+        JsValue::make_string("custom"),
+        JsValue::make_native_function([&](const std::vector<JsValue>& args) {
+            assert(!args.empty());
+            assert(args[0].get_property("type").to_string() == "custom");
+            js_event_fired++;
+            return JsValue::make_undefined();
+        })
+    });
+
+    auto dispatch_fn = js_btn.get_property("dispatchEvent");
+    assert(dispatch_fn.type == JsType::NativeFunction);
+    dispatch_fn.native_fn({JsValue::make_string("custom")});
+    assert(js_event_fired == 1);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -413,7 +519,9 @@ int main() {
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
     RUN_TEST(inline_formatting_context);
+    RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(dom_event_target_and_bubbling);
 
-    std::cout << "\n\033[1;32mAll 11 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 13 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

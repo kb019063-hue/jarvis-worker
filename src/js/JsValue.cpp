@@ -1,12 +1,25 @@
 #include "litebird/js/JsValue.hpp"
+#include "litebird/js/Heap.hpp"
 #include "litebird/dom/Node.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
+#include "litebird/dom/Event.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cmath>
 
 namespace litebird {
+
+JsValue JsValue::make_object(JsObject* obj) {
+    JsValue v;
+    v.type = JsType::Object;
+    if (obj) {
+        v.object_val = obj;
+    } else {
+        v.object_val = Heap::default_heap().allocate_object();
+    }
+    return v;
+}
 
 bool JsValue::is_truthy() const {
     switch (type) {
@@ -69,6 +82,13 @@ double JsValue::to_number() const {
     }
 }
 
+JsValue JsValue::call(const std::vector<JsValue>& args) const {
+    if (native_fn) {
+        return native_fn(args);
+    }
+    return JsValue::make_undefined();
+}
+
 JsValue JsValue::get_property(const std::string& name) const {
     if (type == JsType::DomNode && dom_node) {
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
@@ -76,12 +96,48 @@ JsValue JsValue::get_property(const std::string& name) const {
             if (name == "id") return JsValue::make_string(el->id());
             if (name == "textContent" || name == "innerText") return JsValue::make_string(el->text_content());
             if (name == "style") {
-                // Return a style object proxy
                 JsValue style_obj = JsValue::make_object();
                 style_obj.set_property("color", JsValue::make_string(el->get_attribute("style")));
                 return style_obj;
             }
+            if (name == "click") {
+                auto node = dom_node;
+                return JsValue::make_native_function([node](const std::vector<JsValue>&) {
+                    if (auto elem = std::dynamic_pointer_cast<Element>(node)) {
+                        elem->click();
+                    }
+                    return JsValue::make_undefined();
+                });
+            }
+            if (name == "addEventListener") {
+                auto node = dom_node;
+                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                    if (args.size() < 2) return JsValue::make_undefined();
+                    std::string ev_type = args[0].to_string();
+                    JsValue cb = args[1];
+                    node->add_event_listener(ev_type, [cb](const std::shared_ptr<Event>& ev) mutable {
+                        JsValue ev_obj = JsValue::make_object();
+                        ev_obj.set_property("type", JsValue::make_string(ev->type()));
+                        cb.call({ev_obj});
+                    });
+                    return JsValue::make_undefined();
+                });
+            }
+            if (name == "dispatchEvent") {
+                auto node = dom_node;
+                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                    std::string ev_type = args.empty() ? "custom" : args[0].to_string();
+                    auto ev = std::make_shared<Event>(ev_type, true, true);
+                    bool ok = node->dispatch_event(ev);
+                    return JsValue::make_boolean(ok);
+                });
+            }
         }
+    }
+
+    if (object_val) {
+        auto it = object_val->properties.find(name);
+        if (it != object_val->properties.end()) return it->second;
     }
 
     if (properties) {
@@ -102,6 +158,11 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         }
     }
 
+    if (object_val) {
+        object_val->properties[name] = std::move(val);
+        return;
+    }
+
     if (!properties) {
         properties = std::make_shared<std::unordered_map<std::string, JsValue>>();
     }
@@ -112,7 +173,7 @@ JsValue JsValue::make_dom_node(std::shared_ptr<Node> node) {
     JsValue v;
     v.type = JsType::DomNode;
     v.dom_node = std::move(node);
-    v.properties = std::make_shared<std::unordered_map<std::string, JsValue>>();
+    v.object_val = Heap::default_heap().allocate_object();
     return v;
 }
 

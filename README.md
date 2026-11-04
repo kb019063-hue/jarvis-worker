@@ -61,18 +61,22 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Built-in User-Agent Stylesheet:** Default styling for headings, paragraphs, lists, and layout blocks.
 - **Style Resolver:** Combines User-Agent styles, Author stylesheets, and inline `style="..."` attributes with property inheritance (`color`, `font-size`, `text-align`).
 
-### 4. Layout Engine: Block + Flexbox + Word Wrapping (`include/litebird/layout/`)
+### 4. Layout Engine: Block + Flexbox + Inline Formatting Context (IFC) (`include/litebird/layout/`)
 - Standard Box Model: `content`, `padding`, `border`, `margin`.
 - Box types: `BlockNode`, `FlexNode`, `InlineNode`, `AnonymousBlock`, `TextNode`.
+- **Inline Formatting Context (IFC 2.1):**
+  - Line box construction (`LineBox`) and inline fragment generation (`InlineFragment`).
+  - True continuous text flowing across mixed inline elements (`<b>`, `<strong>`, `<i>`, `<em>`, `<a>`, `<code>`, `<span>`).
+  - Inline element styling: custom colors, background pills, borders, padding, and text-decoration (`underline`).
+  - Word wrapping across element boundaries with exact baseline alignment.
+  - Text alignment: `text-align: left`, `center`, `right`.
+  - Automatic `AnonymousBlock` synthesis when block containers contain mixed block and inline children.
 - **CSS Flexbox (`display: flex`):**
   - Main Axis & Cross Axis resolution (`flex-direction: row | column`).
   - Space distribution via `flex-grow`, `flex-shrink`, and `flex-basis`.
   - Main-axis alignment via `justify-content` (`flex-start`, `flex-end`, `center`, `space-between`, `space-around`, `space-evenly`).
   - Cross-axis alignment via `align-items` (`stretch`, `flex-start`, `flex-end`, `center`).
   - Item spacing via `gap`.
-- **Multi-Line Text Wrapping:**
-  - Automatic word breaking based on container width constraints.
-  - Multi-line height and vertical text tracking.
 - Visual box tree inspector (`--dump-layout`).
 
 ### 5. Multi-Backend Rendering (`include/litebird/render/`)
@@ -163,6 +167,8 @@ Running test: javascript_engine... PASSED
 Running test: bytecode_virtual_machine... PASSED
 Running test: flexbox_layout... PASSED
 Running test: text_wrapping... PASSED
+Running test: anti_aliased_rasterizer_and_shadows... PASSED
+Running test: inline_formatting_context... PASSED
 
-All 9 engine test suites passed successfully!
+All 11 engine test suites passed successfully!
 ```

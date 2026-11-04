@@ -14,6 +14,16 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         span, a, strong, b, em, i, code {
             display: inline;
         }
+        strong, b {
+            font-weight: 700;
+        }
+        a {
+            color: #0066cc;
+            text-decoration: underline;
+        }
+        code {
+            background-color: #f1f5f9;
+        }
         body {
             margin: 8px;
             color: #222222;
@@ -245,6 +255,8 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         }
     } else if (prop == "text-align") {
         style.text_align = val;
+    } else if (prop == "text-decoration") {
+        style.text_decoration = val;
     }
 }
 

@@ -18,6 +18,23 @@ enum class BoxType {
     TextNode
 };
 
+class LayoutBox;
+
+struct InlineFragment {
+    Rect rect;                      // Exact bounds of fragment (x, y, w, h)
+    std::string text;               // Word or text content
+    ComputedStyle style;            // Visual styling for this fragment
+    std::shared_ptr<LayoutBox> box; // Originating layout box
+    bool is_text{true};
+    bool is_space{false};
+};
+
+struct LineBox {
+    Rect rect;                            // Overall line bounds (x, y, w, h)
+    float baseline{0.0f};                 // Distance from top of line to font baseline
+    std::vector<InlineFragment> fragments; // Inline fragments forming this line
+};
+
 class LayoutBox : public std::enable_shared_from_this<LayoutBox> {
 public:
     BoxType box_type{BoxType::BlockNode};
@@ -26,6 +43,7 @@ public:
     std::shared_ptr<Node> node;
     std::string text;
     std::vector<std::string> lines; // Multi-line wrapped text
+    std::vector<LineBox> line_boxes; // Populated for block boxes establishing an IFC
     std::vector<std::shared_ptr<LayoutBox>> children;
     std::weak_ptr<LayoutBox> parent;
 
@@ -60,6 +78,7 @@ public:
         children.push_back(child);
     }
 
+    bool establishes_ifc() const;
     void layout(float containing_width, float containing_height = 0.0f);
     void dump(std::ostream& os, int indent = 0) const;
 
@@ -68,6 +87,7 @@ private:
     void layout_flex(float containing_width);
     void layout_inline(float containing_width);
     void layout_text(float containing_width);
+    void layout_inline_formatting_context(float containing_width);
 };
 
 } // namespace litebird

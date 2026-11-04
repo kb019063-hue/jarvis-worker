@@ -305,6 +305,100 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     assert(found_rounded_rect);
 }
 
+TEST(inline_formatting_context) {
+    using namespace litebird;
+    std::string html = R"(
+        <body>
+            <p style="width: 500px;">
+                Hello <b>bold world</b> and <a href="#" style="color: #0066cc;">link text</a> with <span style="background-color: #ffff00; color: #ff0000;">highlight</span>.
+            </p>
+            <p style="width: 300px; text-align: center;">
+                Centered line
+            </p>
+            <div>
+                Inline before
+                <p>Block middle</p>
+                Inline after
+            </div>
+        </body>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(root != nullptr);
+    assert(root->children.size() >= 3);
+
+    // 1. Test mixed inline formatting context on first paragraph
+    auto p1 = root->children[0];
+    assert(p1->establishes_ifc());
+    assert(!p1->line_boxes.empty());
+
+    bool found_bold = false;
+    bool found_link = false;
+    bool found_highlight = false;
+
+    for (const auto& line : p1->line_boxes) {
+        for (const auto& frag : line.fragments) {
+            if (frag.text == "bold" || frag.text == "world") {
+                if (frag.style.font_weight == 700) {
+                    found_bold = true;
+                }
+            }
+            if (frag.text == "link" || frag.text == "text") {
+                if (frag.style.color == Color::parse("#0066cc") && frag.style.text_decoration == "underline") {
+                    found_link = true;
+                }
+            }
+            if (frag.text == "highlight") {
+                if (frag.style.background_color == Color::parse("#ffff00") && frag.style.color == Color::parse("#ff0000")) {
+                    found_highlight = true;
+                }
+            }
+        }
+    }
+
+    assert(found_bold);
+    assert(found_link);
+    assert(found_highlight);
+
+    // 2. Test text-align: center
+    auto p2 = root->children[1];
+    assert(p2->establishes_ifc());
+    assert(!p2->line_boxes.empty());
+    assert(!p2->line_boxes[0].fragments.empty());
+    assert(p2->line_boxes[0].fragments[0].rect.x > p2->dimensions.content.x);
+
+    // 3. Test anonymous block creation for mixed block/inline children
+    auto div = root->children[2];
+    assert(div->children.size() == 3);
+    assert(div->children[0]->box_type == BoxType::AnonymousBlock);
+    assert(div->children[1]->box_type == BoxType::BlockNode);
+    assert(div->children[2]->box_type == BoxType::AnonymousBlock);
+
+    // 4. Test DisplayList generation for IFC
+    auto display_list = DisplayList::build(root);
+    bool found_underline = false;
+    bool found_yellow_bg = false;
+
+    for (const auto& cmd : display_list.commands()) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, DrawRectCommand>) {
+                if (arg.color == Color::parse("#ffff00")) {
+                    found_yellow_bg = true;
+                }
+                if (arg.color == Color::parse("#0066cc")) {
+                    found_underline = true;
+                }
+            }
+        }, cmd);
+    }
+
+    assert(found_yellow_bg);
+    assert(found_underline);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -318,7 +412,8 @@ int main() {
     RUN_TEST(flexbox_layout);
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
+    RUN_TEST(inline_formatting_context);
 
-    std::cout << "\n\033[1;32mAll 10 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 11 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

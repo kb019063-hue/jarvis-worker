@@ -256,6 +256,9 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
 
             for (char ch : arg.text) {
                 draw_char(cur_x, cur_y, ch, arg.color, scale);
+                if (arg.font_weight >= 600) {
+                    draw_char(cur_x + 1, cur_y, ch, arg.color, scale);
+                }
                 cur_x += 8 * scale;
             }
         }

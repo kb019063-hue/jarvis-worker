@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Inline Formatting Context (IFC) Showcase</title>
+    <style>
+        body {
+            font-size: 16px;
+            color: #1e293b;
+            background-color: #f8fafc;
+            margin: 20px;
+        }
+        .container {
+            width: 720px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px #000000;
+        }
+        h1 {
+            color: #0f172a;
+            font-size: 26px;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        .subtitle {
+            color: #64748b;
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        .card {
+            background-color: #f1f5f9;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 18px;
+        }
+        .badge {
+            background-color: #3b82f6;
+            color: #ffffff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .highlight {
+            background-color: #fef08a;
+            color: #854d0e;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .danger {
+            background-color: #fee2e2;
+            color: #b91c1c;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .center-p {
+            text-align: center;
+            color: #475569;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Inline Formatting Context <span class="badge">IFC 2.1</span></h1>
+        <p class="subtitle">Real line boxes, inline fragments, word wrapping & mixed inline elements</p>
+
+        <div class="card">
+            <p>
+                In a standard browser engine, paragraphs flow as a continuous stream of text.
+                Here we have <b>bold text</b>, an <a href="#">interactive link</a>, and an inline
+                <span class="highlight">highlighted pill</span> that flow seamlessly on the same line!
+            </p>
+        </div>
+
+        <div class="card">
+            <p>
+                When text reaches the edge of its container, words wrap together regardless of HTML tags:
+                This sentence features <b>strongly weighted words</b> followed by
+                <code>inline code snippets</code> and <span class="danger">critical danger warnings</span>,
+                flowing across multiple line boxes with exact baseline alignment.
+            </p>
+        </div>
+
+        <p class="center-p">
+            Centered paragraph with <b>bold emphasis</b> and an <a href="#">anchor reference</a>.
+        </p>
+    </div>
+</body>
+</html>

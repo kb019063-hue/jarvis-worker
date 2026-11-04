@@ -47,6 +47,15 @@ public:
 
     std::shared_ptr<JsEnvironment> parent() const { return m_parent; }
 
+    void collect_roots(std::vector<JsValue*>& roots) {
+        for (auto& [k, v] : m_values) {
+            roots.push_back(&v);
+        }
+        if (m_parent) {
+            m_parent->collect_roots(roots);
+        }
+    }
+
 private:
     std::shared_ptr<JsEnvironment> m_parent;
     std::unordered_map<std::string, JsValue> m_values;
@@ -80,6 +89,7 @@ private:
 
     std::shared_ptr<JsEnvironment> m_global_env;
     std::shared_ptr<Document> m_document;
+    std::shared_ptr<JsEnvironment> m_current_env;
     VM m_vm;
 };
 

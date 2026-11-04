@@ -51,6 +51,24 @@ JsValue JsInterpreter::eval_ast(std::string_view source) {
 }
 
 void JsInterpreter::init_builtins() {
+    // gc function
+    m_global_env->define("gc", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+        std::vector<JsValue*> roots;
+        if (m_current_env) {
+            m_current_env->collect_roots(roots);
+        } else if (m_global_env) {
+            m_global_env->collect_roots(roots);
+        }
+        auto stats = Heap::default_heap().collect_garbage(roots);
+        JsValue res = JsValue::make_object();
+        res.set_property("total_cells", JsValue::make_number(stats.total_cells));
+        res.set_property("alive_cells", JsValue::make_number(stats.alive_cells));
+        res.set_property("collected_cells", JsValue::make_number(stats.collected_cells));
+        res.set_property("bytes_allocated", JsValue::make_number(stats.bytes_allocated));
+        res.set_property("collections_count", JsValue::make_number(stats.collections_count));
+        return res;
+    }));
+
     // console object
     JsValue console_obj = JsValue::make_object();
     console_obj.set_property("log", JsValue::make_native_function([](const std::vector<JsValue>& args) {
@@ -109,6 +127,7 @@ void JsInterpreter::init_builtins() {
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
     if (!node) return JsValue::make_undefined();
+    m_current_env = env;
 
     if (auto block = dynamic_cast<const BlockStmt*>(node)) {
         JsValue last_val = JsValue::make_undefined();
@@ -164,6 +183,23 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         fn_val.params = fn_decl->params;
         fn_val.body = fn_decl->body;
         fn_val.closure = env;
+
+        auto body_ptr = fn_decl->body;
+        auto params = fn_decl->params;
+        auto closure = env;
+        fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
+            auto fn_env = std::make_shared<JsEnvironment>(closure);
+            for (size_t i = 0; i < params.size(); ++i) {
+                JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
+                fn_env->define(params[i], arg);
+            }
+            try {
+                return execute(body_ptr.get(), fn_env);
+            } catch (const ReturnException& ret) {
+                return ret.value;
+            }
+        };
+
         env->define(fn_decl->name, fn_val);
         return fn_val;
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
@@ -182,6 +218,40 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
 
     if (auto id = dynamic_cast<const IdentifierExpr*>(expr)) {
         return env->get(id->name);
+    }
+
+    if (auto obj_lit = dynamic_cast<const ObjectLiteralExpr*>(expr)) {
+        JsValue obj = JsValue::make_object();
+        for (const auto& [k, v] : obj_lit->entries) {
+            obj.set_property(k, eval_expr(v.get(), env));
+        }
+        return obj;
+    }
+
+    if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
+        JsValue fn_val;
+        fn_val.type = JsType::Function;
+        fn_val.params = fn_expr->params;
+        fn_val.body = fn_expr->body;
+        fn_val.closure = env;
+
+        auto body_ptr = fn_expr->body;
+        auto params = fn_expr->params;
+        auto closure = env;
+        fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
+            auto fn_env = std::make_shared<JsEnvironment>(closure);
+            for (size_t i = 0; i < params.size(); ++i) {
+                JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
+                fn_env->define(params[i], arg);
+            }
+            try {
+                return execute(body_ptr.get(), fn_env);
+            } catch (const ReturnException& ret) {
+                return ret.value;
+            }
+        };
+
+        return fn_val;
     }
 
     if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {

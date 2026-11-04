@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DOM Events & Garbage Collection</title>
+    <style>
+        body {
+            font-size: 16px;
+            color: #1e293b;
+            background-color: #f1f5f9;
+            margin: 20px;
+        }
+        .app-card {
+            width: 680px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px #000000;
+        }
+        h1 {
+            color: #0f172a;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        .status-box {
+            background-color: #e0f2fe;
+            color: #0369a1;
+            padding: 12px;
+            border-radius: 6px;
+            margin: 16px 0;
+            border: 1px solid #bae6fd;
+        }
+        .btn {
+            background-color: #2563eb;
+            color: #ffffff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            display: inline-block;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-card">
+        <h1>DOM Events & Mark-and-Sweep GC</h1>
+        <p>This page tests DOM EventTarget bubbling, click dispatch, and JavaScript cyclic reference garbage collection.</p>
+
+        <div id="status" class="status-box">
+            Status: Initializing engine and allocating cyclic object graphs...
+        </div>
+
+        <div id="click-btn" class="btn">Click Action Target</div>
+    </div>
+
+    <script>
+        console.log("=== Initializing DOM EventTarget & GC Test ===");
+
+        // 1. Create a cyclic reference graph in JavaScript
+        let nodeA = {};
+        let nodeB = {};
+        nodeA.neighbor = nodeB;
+        nodeB.neighbor = nodeA;
+        console.log("Allocated cyclic reference graph (A <-> B)");
+
+        // 2. Perform Garbage Collection
+        let initialMem = gc();
+        console.log("Memory before breaking roots - Alive Cells:", initialMem.alive_cells);
+
+        // Break references from roots
+        nodeA = null;
+        nodeB = null;
+
+        // Collect cycles
+        let afterGC = gc();
+        console.log("Mark-and-Sweep Cycle Collection complete!");
+        console.log("Total swept cells:", afterGC.collected_cells);
+
+        // 3. Test DOM Event listeners
+        let btn = document.getElementById("click-btn");
+        let statusEl = document.getElementById("status");
+
+        if (btn) {
+            btn.addEventListener("click", function(e) {
+                console.log("Click event fired on button!");
+                if (statusEl) {
+                    statusEl.textContent = "Success: GC collected unreachable cycles & Click Event dispatched!";
+                }
+            });
+
+            // Simulate synthetic click dispatch
+            btn.click();
+        }
+    </script>
+</body>
+</html>

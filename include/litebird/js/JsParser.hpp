@@ -13,6 +13,8 @@ public:
     virtual ~AstNode() = default;
 };
 
+class BlockStmt;
+
 // Expressions
 class Expr : public AstNode {};
 
@@ -63,6 +65,23 @@ public:
 
     MemberExpr(std::unique_ptr<Expr> obj, std::string prop)
         : object(std::move(obj)), property(std::move(prop)) {}
+};
+
+class ObjectLiteralExpr : public Expr {
+public:
+    std::vector<std::pair<std::string, std::unique_ptr<Expr>>> entries;
+    explicit ObjectLiteralExpr(std::vector<std::pair<std::string, std::unique_ptr<Expr>>> e)
+        : entries(std::move(e)) {}
+};
+
+class FunctionExpr : public Expr {
+public:
+    std::string name;
+    std::vector<std::string> params;
+    std::shared_ptr<BlockStmt> body;
+
+    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b)
+        : name(std::move(n)), params(std::move(p)), body(std::move(b)) {}
 };
 
 class AssignExpr : public Expr {

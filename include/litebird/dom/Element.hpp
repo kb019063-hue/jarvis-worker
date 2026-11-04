@@ -65,6 +65,11 @@ public:
         return result;
     }
 
+    bool click() {
+        auto ev = std::make_shared<Event>("click", true, true);
+        return dispatch_event(ev);
+    }
+
     void dump(std::ostream& os, int indent = 0) const override;
 
 private:

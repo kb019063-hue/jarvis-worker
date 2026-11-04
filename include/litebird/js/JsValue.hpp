@@ -27,6 +27,7 @@ enum class JsType {
 
 class JsEnvironment;
 class AstNode;
+class JsObject;
 
 class JsValue {
 public:
@@ -37,7 +38,8 @@ public:
     bool bool_val{false};
     std::string string_val;
 
-    // For Objects
+    // For Garbage-Collected Objects
+    JsObject* object_val{nullptr};
     std::shared_ptr<std::unordered_map<std::string, JsValue>> properties;
 
     // For Functions
@@ -77,12 +79,7 @@ public:
         v.string_val = std::move(s);
         return v;
     }
-    static JsValue make_object() {
-        JsValue v;
-        v.type = JsType::Object;
-        v.properties = std::make_shared<std::unordered_map<std::string, JsValue>>();
-        return v;
-    }
+    static JsValue make_object(JsObject* obj = nullptr);
     static JsValue make_native_function(NativeFn fn) {
         JsValue v;
         v.type = JsType::NativeFunction;
@@ -94,6 +91,8 @@ public:
     bool is_truthy() const;
     std::string to_string() const;
     double to_number() const;
+
+    JsValue call(const std::vector<JsValue>& args = {}) const;
 
     JsValue get_property(const std::string& name) const;
     void set_property(const std::string& name, JsValue val);

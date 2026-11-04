@@ -2,6 +2,7 @@
 
 #include "litebird/js/Bytecode.hpp"
 #include "litebird/js/JsValue.hpp"
+#include "litebird/js/Heap.hpp"
 #include "litebird/dom/Document.hpp"
 #include <vector>
 #include <unordered_map>
@@ -29,6 +30,8 @@ public:
     void push(JsValue value);
     JsValue pop();
     const JsValue& peek(size_t distance = 0) const;
+
+    GCStats collect_garbage();
 
 private:
     void init_builtins();

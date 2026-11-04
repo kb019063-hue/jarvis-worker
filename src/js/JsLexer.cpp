@@ -174,6 +174,7 @@ JsToken JsLexer::next_token() {
         case '[': t.type = JsTokenType::OpenBracket; return t;
         case ']': t.type = JsTokenType::CloseBracket; return t;
         case ';': t.type = JsTokenType::Semicolon; return t;
+        case ':': t.type = JsTokenType::Colon; return t;
         case ',': t.type = JsTokenType::Comma; return t;
         case '.': t.type = JsTokenType::Dot; return t;
         case '+': t.type = JsTokenType::Plus; return t;

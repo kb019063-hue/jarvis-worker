@@ -64,6 +64,7 @@ struct ComputedStyle {
     float font_size{16.0f};
     int font_weight{400};
     std::string text_align{"left"};
+    std::string text_decoration{"none"}; // "none", "underline"
 
     // Flexbox properties
     FlexDirection flex_direction{FlexDirection::Row};

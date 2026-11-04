@@ -45,7 +45,58 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         list.add(cmd);
     }
 
-    // 3. Text
+    // 3. Inline Formatting Context Lines (if this box established an IFC)
+    if (!box->line_boxes.empty()) {
+        for (const auto& line : box->line_boxes) {
+            for (const auto& frag : line.fragments) {
+                if (frag.is_space) continue;
+
+                // Fragment background (e.g. <span style="background-color: yellow;">)
+                if (!frag.style.background_color.is_transparent()) {
+                    DrawRectCommand bg_cmd;
+                    bg_cmd.rect = frag.rect;
+                    bg_cmd.color = frag.style.background_color;
+                    bg_cmd.border_radius = frag.style.border_radius;
+                    list.add(bg_cmd);
+                }
+
+                // Fragment border
+                const auto& fbw = frag.style.border_width;
+                if (fbw.top > 0 || fbw.right > 0 || fbw.bottom > 0 || fbw.left > 0) {
+                    DrawBorderCommand b_cmd;
+                    b_cmd.rect = frag.rect;
+                    b_cmd.width = fbw;
+                    b_cmd.color = frag.style.border_color;
+                    b_cmd.border_radius = frag.style.border_radius;
+                    list.add(b_cmd);
+                }
+
+                // Fragment text
+                if (!frag.text.empty()) {
+                    DrawTextCommand text_cmd;
+                    text_cmd.position = Point(frag.rect.x, frag.rect.y);
+                    text_cmd.text = frag.text;
+                    text_cmd.color = frag.style.color;
+                    text_cmd.font_size = frag.style.font_size;
+                    text_cmd.font_weight = frag.style.font_weight;
+                    list.add(text_cmd);
+                }
+
+                // Text decoration (e.g. <a> link underline)
+                if (frag.style.text_decoration == "underline") {
+                    DrawRectCommand u_cmd;
+                    float u_height = std::max(1.0f, frag.style.font_size * 0.08f);
+                    u_cmd.rect = Rect(frag.rect.x, frag.rect.y + frag.rect.height - u_height, frag.rect.width, u_height);
+                    u_cmd.color = frag.style.color;
+                    u_cmd.border_radius = 0.0f;
+                    list.add(u_cmd);
+                }
+            }
+        }
+        return; // All inline children and text runs handled by IFC
+    }
+
+    // 4. Standalone Text Node (fallback if not in IFC)
     if (box->box_type == BoxType::TextNode) {
         float line_h = box->style.font_size * 1.25f;
         if (!box->lines.empty()) {
@@ -69,7 +120,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         }
     }
 
-    // 4. Children
+    // 5. Children
     for (const auto& child : box->children) {
         build_recursive(child, list);
     }

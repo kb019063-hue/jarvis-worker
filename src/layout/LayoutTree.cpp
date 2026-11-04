@@ -27,6 +27,52 @@ static std::string collapse_whitespace(std::string_view s) {
     return res;
 }
 
+static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, const ComputedStyle& parent_style) {
+    if (!box) return;
+    if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock) return;
+    if (box->children.empty()) return;
+
+    bool has_block = false;
+    bool has_inline = false;
+
+    for (const auto& ch : box->children) {
+        if (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::AnonymousBlock) {
+            has_block = true;
+        } else {
+            has_inline = true;
+        }
+    }
+
+    if (!has_block || !has_inline) return;
+
+    std::vector<std::shared_ptr<LayoutBox>> normalized;
+    std::shared_ptr<LayoutBox> current_anon = nullptr;
+
+    for (const auto& ch : box->children) {
+        bool is_block_level = (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::AnonymousBlock);
+        if (is_block_level) {
+            current_anon = nullptr;
+            normalized.push_back(ch);
+        } else {
+            if (ch->box_type == BoxType::TextNode && is_all_whitespace(ch->text)) {
+                continue;
+            }
+            if (!current_anon) {
+                ComputedStyle anon_style = parent_style;
+                anon_style.display = Display::Block;
+                current_anon = LayoutBox::create_anonymous(anon_style);
+                normalized.push_back(current_anon);
+            }
+            current_anon->append_child(ch);
+        }
+    }
+
+    box->children = std::move(normalized);
+    for (auto& ch : box->children) {
+        ch->parent = box;
+    }
+}
+
 std::shared_ptr<LayoutBox> LayoutTree::build_box(
     const std::shared_ptr<Node>& node,
     const StyleResolver& resolver,
@@ -40,6 +86,10 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
         auto text_node = std::static_pointer_cast<Text>(node);
         std::string raw = text_node->text();
         if (is_all_whitespace(raw)) {
+            if (parent_style && parent_style->is_inline()) {
+                ComputedStyle text_style = *parent_style;
+                return LayoutBox::create_text(node, " ", text_style);
+            }
             return nullptr;
         }
 
@@ -74,6 +124,10 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
             if (child_box) {
                 box->append_child(child_box);
             }
+        }
+
+        if (box->box_type == BoxType::BlockNode) {
+            normalize_block_children(box, style);
         }
 
         return box;

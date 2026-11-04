@@ -51,6 +51,7 @@ enum class JsTokenType {
     OpenBracket,
     CloseBracket,
     Semicolon,
+    Colon,
     Comma,
     Dot
 };

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Litebird Browser Shell Portal</title>
+    <style>
+        body {
+            font-size: 15px;
+            color: #0f172a;
+            background-color: #f8fafc;
+            margin: 20px;
+        }
+
+        .portal-header {
+            background-color: #1e293b;
+            color: #ffffff;
+            padding: 18px 24px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px #000000;
+        }
+
+        h1 {
+            font-size: 24px;
+            color: #38bdf8;
+            margin-bottom: 6px;
+        }
+
+        p.subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+        }
+
+        .nav-bar {
+            display: flex;
+            background-color: #ffffff;
+            padding: 12px 18px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 24px;
+            gap: 12px;
+        }
+
+        .nav-link {
+            background-color: #f1f5f9;
+            color: #2563eb;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            display: inline-block;
+            border: 1px solid #cbd5e1;
+        }
+
+        .grid-container {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .showcase-card {
+            background-color: #ffffff;
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+            flex-grow: 1;
+            box-shadow: 0 2px 6px #000000;
+        }
+
+        h2 {
+            font-size: 18px;
+            color: #1e293b;
+            margin-bottom: 8px;
+        }
+
+        .card-desc {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 14px;
+        }
+
+        .btn-launch {
+            background-color: #2563eb;
+            color: #ffffff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            display: inline-block;
+        }
+
+        .status-badge {
+            background-color: #ecfdf5;
+            color: #059669;
+            padding: 10px 16px;
+            border-radius: 8px;
+            border: 1px solid #a7f3d0;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="portal-header">
+        <h1>🦅 Litebird Browser Shell</h1>
+        <p class="subtitle">Next-Generation Native C++20 Browser Engine with EventLoop, Navigation & TUI Shell</p>
+    </div>
+
+    <div class="nav-bar">
+        <a class="nav-link" href="hello.html">Hello Page</a>
+        <a class="nav-link" href="card.html">Box Model</a>
+        <a class="nav-link" href="flexbox.html">CSS Flexbox</a>
+        <a class="nav-link" href="ifc.html">IFC Inlines</a>
+        <a class="nav-link" href="events_and_gc.html">DOM Events & GC</a>
+        <a class="nav-link" href="timer_counter.html">Live Timer & Counter</a>
+    </div>
+
+    <div class="grid-container">
+        <div class="showcase-card">
+            <h2>⏱️ EventLoop & Timers</h2>
+            <p class="card-desc">Tests setTimeout, setInterval, microtask queue, and dynamic tick-based re-rendering.</p>
+            <a class="btn-launch" href="timer_counter.html">Open Timer App</a>
+        </div>
+
+        <div class="showcase-card">
+            <h2>📦 Inline Formatting Context</h2>
+            <p class="card-desc">Tests mixed inline tags, word wrapping across element boundaries, and pill badges.</p>
+            <a class="btn-launch" href="ifc.html">Explore IFC Demo</a>
+        </div>
+
+        <div class="showcase-card">
+            <h2>🧹 Garbage Collector & Events</h2>
+            <p class="card-desc">Tests cyclic graph reclamation, EventTarget bubbling, and interactive clicks.</p>
+            <a class="btn-launch" href="events_and_gc.html">Inspect GC & Events</a>
+        </div>
+    </div>
+
+    <div class="status-badge">
+        <strong>Engine Status:</strong> Interactive Shell active. Use [Tab] to cycle links and [Enter] to navigate!
+    </div>
+</body>
+</html>

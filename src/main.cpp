@@ -8,6 +8,7 @@
 #include "litebird/render/TerminalRenderer.hpp"
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/shell/BrowserShell.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -35,6 +36,7 @@ void print_help(const char* prog) {
     std::cout << "  --render-bmp <file>    Render web page to 24-bit BMP image\n";
     std::cout << "  --run-js <code>        Execute JavaScript code directly\n";
     std::cout << "  --repl                 Start interactive JavaScript REPL\n";
+    std::cout << "  --shell [file/url]     Launch interactive TUI Browser Shell\n";
     std::cout << "  --help, -h             Show this help message\n";
 }
 
@@ -84,6 +86,7 @@ int main(int argc, char* argv[]) {
     std::string bmp_output;
     std::string js_code;
     bool repl_mode = false;
+    bool shell_mode = false;
     std::string input_file;
 
     for (int i = 1; i < argc; ++i) {
@@ -103,6 +106,11 @@ int main(int argc, char* argv[]) {
             dump_bytecode = true;
         } else if (arg == "--render-terminal") {
             render_terminal = true;
+        } else if (arg == "--shell") {
+            shell_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                input_file = argv[++i];
+            }
         } else if (arg == "--render-bmp") {
             if (i + 1 < argc) {
                 bmp_output = argv[++i];
@@ -126,6 +134,14 @@ int main(int argc, char* argv[]) {
 
     if (repl_mode) {
         run_repl();
+        return 0;
+    }
+
+    if (shell_mode) {
+        litebird::BrowserShell shell;
+        std::string start_url = input_file.empty() ? "examples/browser_portal.html" : input_file;
+        shell.navigate_to(start_url);
+        shell.run_interactive();
         return 0;
     }
 

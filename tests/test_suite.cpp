@@ -11,6 +11,9 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/dom/Event.hpp"
+#include "litebird/js/EventLoop.hpp"
+#include "litebird/net/ResourceLoader.hpp"
+#include "litebird/shell/BrowserShell.hpp"
 
 #include <iostream>
 #include <cassert>
@@ -505,6 +508,175 @@ TEST(dom_event_target_and_bubbling) {
     assert(js_event_fired == 1);
 }
 
+TEST(event_loop_and_timers) {
+    using namespace litebird;
+    EventLoop loop;
+
+    int timeout_count = 0;
+    int interval_count = 0;
+
+    // 1. Set a timeout for 20ms
+    loop.set_timeout([&]() {
+        timeout_count++;
+    }, 20);
+
+    // 2. Set an interval for 10ms
+    uint32_t interval_id = loop.set_interval([&]() {
+        interval_count++;
+    }, 10);
+
+    // 3. Post an immediate task
+    int task_run = 0;
+    loop.post_task([&]() {
+        task_run = 1;
+    });
+
+    // Immediate tick: should execute task, but not 10ms/20ms timers
+    auto start = std::chrono::steady_clock::now();
+    size_t ran = loop.tick(start);
+    (void)ran;
+    assert(task_run == 1);
+    assert(timeout_count == 0);
+    assert(interval_count == 0);
+
+    // Advance 15ms: interval should fire once, timeout not yet
+    loop.tick(start + std::chrono::milliseconds(15));
+    assert(interval_count == 1);
+    assert(timeout_count == 0);
+
+    // Advance to 25ms: interval should fire again, timeout should fire
+    loop.tick(start + std::chrono::milliseconds(25));
+    assert(interval_count == 2);
+    assert(timeout_count == 1);
+
+    // Cancel interval
+    loop.clear_timer(interval_id);
+
+    // Advance to 50ms: interval should NOT fire again
+    loop.tick(start + std::chrono::milliseconds(50));
+    assert(interval_count == 2);
+    assert(timeout_count == 1);
+
+    // 4. Test JS integration with default_loop
+    auto doc = std::make_shared<Document>();
+    JsInterpreter interp(doc);
+    EventLoop::default_loop().clear();
+
+    interp.eval_ast(R"(
+        let triggered = 0;
+        setTimeout(function() {
+            triggered = 100;
+        }, 10);
+    )");
+
+    assert(EventLoop::default_loop().has_pending_tasks());
+    auto now = std::chrono::steady_clock::now();
+    EventLoop::default_loop().tick(now);
+    EventLoop::default_loop().tick(now + std::chrono::milliseconds(20));
+    auto triggered_val = interp.eval_ast("triggered;");
+    assert(triggered_val.to_number() == 100.0);
+}
+
+TEST(resource_loader_and_url_resolution) {
+    using namespace litebird;
+
+    // 1. Relative path resolution
+    assert(ResourceLoader::resolve_url("examples/hello.html", "flexbox.html") == "examples/flexbox.html");
+    assert(ResourceLoader::resolve_url("examples/sub/index.html", "../hello.html") == "examples/hello.html");
+    assert(ResourceLoader::resolve_url("http://example.com/pages/index.html", "about.html") == "http://example.com/pages/about.html");
+    assert(ResourceLoader::resolve_url("http://example.com/pages/index.html", "/root.html") == "http://example.com/root.html");
+    assert(ResourceLoader::resolve_url("examples/hello.html", "http://domain.com/app") == "http://domain.com/app");
+
+    // 2. MIME type detection
+    assert(ResourceLoader::detect_mime_type("index.html") == "text/html");
+    assert(ResourceLoader::detect_mime_type("style.css") == "text/css");
+    assert(ResourceLoader::detect_mime_type("app.js") == "application/javascript");
+    assert(ResourceLoader::detect_mime_type("data.json") == "application/json");
+
+    // 3. Local file loading
+    auto resp = ResourceLoader::load("examples/hello.html");
+    assert(resp.success);
+    assert(resp.status_code == 200);
+    assert(resp.content_type == "text/html");
+    assert(!resp.body.empty());
+
+    // 4. Missing file error handling
+    auto missing_resp = ResourceLoader::load("examples/does_not_exist_xyz.html");
+    assert(!missing_resp.success);
+    assert(missing_resp.status_code == 404);
+}
+
+TEST(browser_shell_navigation_and_hit_testing) {
+    using namespace litebird;
+
+    BrowserShell shell(800.0f, 600.0f, 80, 24);
+
+    // 1. Initial navigation to hello.html
+    bool ok = shell.navigate_to("examples/hello.html");
+    assert(ok);
+    assert(shell.current_url() == "examples/hello.html");
+    assert(!shell.can_go_back());
+    assert(!shell.can_go_forward());
+    assert(shell.document() != nullptr);
+    assert(shell.layout_root() != nullptr);
+
+    // 2. Second navigation to card.html
+    ok = shell.navigate_to("examples/card.html");
+    assert(ok);
+    assert(shell.current_url() == "examples/card.html");
+    assert(shell.can_go_back());
+    assert(!shell.can_go_forward());
+
+    // 3. Back navigation
+    ok = shell.back();
+    assert(ok);
+    assert(shell.current_url() == "examples/hello.html");
+    assert(!shell.can_go_back());
+    assert(shell.can_go_forward());
+
+    // 4. Forward navigation
+    ok = shell.forward();
+    assert(ok);
+    assert(shell.current_url() == "examples/card.html");
+    assert(shell.can_go_back());
+    assert(!shell.can_go_forward());
+
+    // 5. Scrolling
+    float initial_scroll = shell.scroll_y();
+    shell.scroll_down(5.0f);
+    assert(shell.scroll_y() >= initial_scroll);
+    shell.scroll_up(5.0f);
+    assert(shell.scroll_y() == 0.0f);
+
+    // 6. Navigation to events_and_gc.html with button and click target
+    ok = shell.navigate_to("examples/events_and_gc.html");
+    assert(ok);
+    const auto& items = shell.interactive_elements();
+    assert(!items.empty());
+    assert(shell.focused_element_index() == 0);
+
+    // Cycle focus
+    int idx0 = shell.focused_element_index();
+    shell.focus_next();
+    shell.focus_prev();
+    assert(shell.focused_element_index() == idx0);
+
+    // Activate focused element (simulates pressing Enter on button)
+    bool activated = shell.activate_focused();
+    assert(activated);
+
+    // 7. Hit testing
+    auto el = shell.element_at(100.0f, 50.0f);
+    assert(el != nullptr);
+
+    // 8. Terminal Frame rendering check
+    std::string frame = shell.render_terminal_frame(true);
+    assert(!frame.empty());
+    assert(frame.find("URL:") != std::string::npos);
+    assert(frame.find("Back") != std::string::npos);
+    assert(frame.find("Litebird DevTools") != std::string::npos);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -521,7 +693,10 @@ int main() {
     RUN_TEST(inline_formatting_context);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
+    RUN_TEST(event_loop_and_timers);
+    RUN_TEST(resource_loader_and_url_resolution);
+    RUN_TEST(browser_shell_navigation_and_hit_testing);
 
-    std::cout << "\n\033[1;32mAll 13 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 16 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

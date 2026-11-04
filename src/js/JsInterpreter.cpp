@@ -1,5 +1,6 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -123,6 +124,44 @@ void JsInterpreter::init_builtins() {
         }));
         m_global_env->define("document", doc_obj);
     }
+
+    // setTimeout(callback, delay)
+    m_global_env->define("setTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        int delay = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
+        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
+            callback.call({});
+        }, delay);
+        return JsValue::make_number(id);
+    }));
+
+    // setInterval(callback, interval)
+    m_global_env->define("setInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        int interval = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
+        uint32_t id = EventLoop::default_loop().set_interval([callback]() {
+            callback.call({});
+        }, interval);
+        return JsValue::make_number(id);
+    }));
+
+    // clearTimeout(id)
+    m_global_env->define("clearTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    // clearInterval(id)
+    m_global_env->define("clearInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
 }
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {

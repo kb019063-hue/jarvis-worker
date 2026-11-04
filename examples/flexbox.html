@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Flexbox & Text Wrapping Showcase</title>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f1f5f9;
+            padding: 12px;
+        }
+        .navbar {
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #1e293b;
+            border: 2px #38bdf8;
+            padding: 8px;
+            margin-bottom: 14px;
+        }
+        .logo {
+            color: #38bdf8;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        .nav-links {
+            display: flex;
+            flex-direction: row;
+            gap: 16px;
+        }
+        .link {
+            color: #a5f3fc;
+        }
+        .grid {
+            display: flex;
+            flex-direction: row;
+            gap: 16px;
+            margin-bottom: 14px;
+        }
+        .card {
+            flex-grow: 1;
+            background-color: #1e293b;
+            border: 1px #64748b;
+            padding: 10px;
+        }
+        .card-title {
+            color: #f43f5e;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .card-desc {
+            color: #cbd5e1;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <div class="logo">Litebird Engine</div>
+        <div class="nav-links">
+            <span class="link">Layout</span>
+            <span class="link">Flexbox</span>
+            <span class="link">VM</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="card-title">Flexbox Main Axis</div>
+            <p class="card-desc">Items distributed dynamically with flex-grow, flex-shrink, and gap spacing.</p>
+        </div>
+        <div class="card">
+            <div class="card-title">Cross Axis Alignment</div>
+            <p class="card-desc">Vertical stretch, center, flex-start, and flex-end alignment support.</p>
+        </div>
+        <div class="card">
+            <div class="card-title">Word Wrapping</div>
+            <p class="card-desc">Paragraphs wrap naturally across multiple lines based on container width.</p>
+        </div>
+    </div>
+</body>
+</html>

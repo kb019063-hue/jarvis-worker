@@ -29,6 +29,7 @@ public:
 
     void set_attribute(const std::string& name, std::string value) {
         m_attributes[name] = std::move(value);
+        mark_needs_layout();
     }
 
     const std::unordered_map<std::string, std::string>& attributes() const {

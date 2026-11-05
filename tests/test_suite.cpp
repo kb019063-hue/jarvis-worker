@@ -21,7 +21,7 @@
 
 #define TEST(name) void test_##name()
 #define RUN_TEST(name) do { \
-    std::cout << "Running test: " #name "... "; \
+    std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
@@ -677,6 +677,254 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(frame.find("Litebird DevTools") != std::string::npos);
 }
 
+TEST(css_positioning_and_stacking_contexts) {
+    using namespace litebird;
+
+    std::string html = R"(
+        <div>
+            <div id="container" style="position: relative; width: 400px; height: 300px; padding: 20px;">
+                <div id="rel" style="position: relative; top: 10px; left: 15px; width: 100px; height: 50px;"></div>
+                <div id="abs" style="position: absolute; top: 30px; left: 40px; width: 80px; height: 60px;"></div>
+                <div id="fixed" style="position: fixed; bottom: 10px; right: 20px; width: 120px; height: 40px;"></div>
+            </div>
+        </div>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(root != nullptr);
+
+    auto container = doc->get_element_by_id("container");
+    auto rel = doc->get_element_by_id("rel");
+    auto abs = doc->get_element_by_id("abs");
+    auto fix = doc->get_element_by_id("fixed");
+
+    std::function<std::shared_ptr<LayoutBox>(const std::shared_ptr<LayoutBox>&, const std::shared_ptr<Element>&)> find_box =
+        [&](const std::shared_ptr<LayoutBox>& b, const std::shared_ptr<Element>& target) -> std::shared_ptr<LayoutBox> {
+        if (!b) return nullptr;
+        if (b->node == target) return b;
+        for (const auto& ch : b->children) {
+            auto found = find_box(ch, target);
+            if (found) return found;
+        }
+        return nullptr;
+    };
+
+    auto container_box = find_box(root, container);
+    auto rel_box = find_box(root, rel);
+    auto abs_box = find_box(root, abs);
+    auto fix_box = find_box(root, fix);
+
+    assert(container_box != nullptr);
+    assert(rel_box != nullptr);
+    assert(abs_box != nullptr);
+    assert(fix_box != nullptr);
+
+    // Relative positioning offset: container content.x = 20, rel child margin=0, pad=0, so x = 20 + 15 = 35, y = 20 + 10 = 30
+    assert(rel_box->dimensions.content.x == 35.0f);
+    assert(rel_box->dimensions.content.y == 30.0f);
+    assert(rel_box->dimensions.content.y == 30.0f);
+
+    // Absolute positioning: container padding box is x=0, y=0, w=440, h=340.
+    // abs top: 30px, left: 40px -> x = 0 + 40 = 40, y = 0 + 30 = 30
+    assert(abs_box->dimensions.content.x == 40.0f);
+    assert(abs_box->dimensions.content.y == 30.0f);
+
+    // Fixed positioning: viewport 800x600, bottom: 10, right: 20, w: 120, h: 40
+    // x = 800 - 20 - 120 = 660, y = 600 - 10 - 40 = 550
+    assert(fix_box->dimensions.content.x == 660.0f);
+    assert(fix_box->dimensions.content.y == 550.0f);
+
+    // Test Stacking Context paint ordering
+    std::string z_html = R"(
+        <div id="wrap">
+            <div id="item_pos" style="position: absolute; z-index: 10; background-color: #ff0000; width: 50px; height: 50px;"></div>
+            <div id="item_neg" style="position: absolute; z-index: -5; background-color: #00ff00; width: 50px; height: 50px;"></div>
+            <div id="item_normal" style="background-color: #0000ff; width: 50px; height: 50px;"></div>
+        </div>
+    )";
+    auto z_doc = HtmlParser::parse(z_html);
+    auto z_root = LayoutTree::build(z_doc, resolver, 800.0f, 600.0f);
+    auto dlist = DisplayList::build(z_root);
+
+    // Negative z-index item green (#00ff00) painted before normal item blue (#0000ff), before positive z-index item red (#ff0000)
+    int neg_idx = -1, norm_idx = -1, pos_idx = -1;
+    for (size_t i = 0; i < dlist.commands().size(); ++i) {
+        if (auto rect_cmd = std::get_if<DrawRectCommand>(&dlist.commands()[i])) {
+            if (rect_cmd->color.g == 255 && rect_cmd->color.r == 0) neg_idx = static_cast<int>(i);
+            if (rect_cmd->color.b == 255 && rect_cmd->color.r == 0) norm_idx = static_cast<int>(i);
+            if (rect_cmd->color.r == 255 && rect_cmd->color.g == 0) pos_idx = static_cast<int>(i);
+        }
+    }
+    assert(neg_idx != -1 && norm_idx != -1 && pos_idx != -1);
+    assert(neg_idx < norm_idx && norm_idx < pos_idx);
+}
+
+TEST(box_sizing_and_constraints) {
+    using namespace litebird;
+
+    std::string html = R"(
+        <div>
+            <div id="content_box" style="box-sizing: content-box; width: 200px; height: 100px; padding: 15px; border-width: 5px;"></div>
+            <div id="border_box" style="box-sizing: border-box; width: 200px; height: 100px; padding: 15px; border-width: 5px;"></div>
+            <div id="clamped_min" style="box-sizing: border-box; width: 50px; min-width: 120px; height: 40px; min-height: 80px;"></div>
+            <div id="clamped_max" style="box-sizing: border-box; width: 500px; max-width: 250px; height: 300px; max-height: 150px;"></div>
+            <div id="centered" style="width: 200px; margin-left: auto; margin-right: auto; height: 50px;"></div>
+        </div>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+
+    std::function<std::shared_ptr<LayoutBox>(const std::shared_ptr<LayoutBox>&, const std::string&)> find_by_id =
+        [&](const std::shared_ptr<LayoutBox>& b, const std::string& id) -> std::shared_ptr<LayoutBox> {
+        if (!b) return nullptr;
+        if (b->node && b->node->is_element()) {
+            if (b->node->as_element()->id() == id) return b;
+        }
+        for (const auto& ch : b->children) {
+            auto f = find_by_id(ch, id);
+            if (f) return f;
+        }
+        return nullptr;
+    };
+
+    auto c_box = find_by_id(root, "content_box");
+    auto b_box = find_by_id(root, "border_box");
+    auto min_box = find_by_id(root, "clamped_min");
+    auto max_box = find_by_id(root, "clamped_max");
+    auto center_box = find_by_id(root, "centered");
+
+    assert(c_box != nullptr && b_box != nullptr && min_box != nullptr && max_box != nullptr && center_box != nullptr);
+
+    // Content box: content.width = 200px, border_box.width = 200 + 30 (padding) + 10 (border) = 240px
+    assert(c_box->dimensions.content.width == 200.0f);
+    assert(c_box->dimensions.border_box().width == 240.0f);
+
+    // Border box: border_box.width = 200px, content.width = 200 - 30 (padding) - 10 (border) = 160px
+    assert(b_box->dimensions.border_box().width == 200.0f);
+    assert(b_box->dimensions.content.width == 160.0f);
+
+    // Clamped min: min-width: 120px clamped width to 120px, min-height clamped to 80px
+    assert(min_box->dimensions.content.width == 120.0f);
+    assert(min_box->dimensions.content.height == 80.0f);
+
+    // Clamped max: max-width: 250px clamped width to 250px, max-height clamped to 150px
+    assert(max_box->dimensions.content.width == 250.0f);
+    assert(max_box->dimensions.content.height == 150.0f);
+
+    // Centered: 800px containing width, 200px width -> (800 - 200) / 2 = 300px left and right margins
+    assert(center_box->dimensions.margin.left == 300.0f);
+    assert(center_box->dimensions.margin.right == 300.0f);
+    assert(center_box->dimensions.content.x == 300.0f);
+}
+
+TEST(javascript_prototype_chain_and_arrays) {
+    using namespace litebird;
+
+    JsInterpreter interp;
+
+    // 1. Prototype inheritance via __proto__ and delegation
+    JsValue proto_res = interp.eval(R"(
+        var animal = { legs: 4, sound: "generic" };
+        var dog = { sound: "woof" };
+        dog.__proto__ = animal;
+        dog.legs + " " + dog.sound;
+    )");
+    assert(proto_res.to_string() == "4 woof");
+
+    // 2. Object.create and Object.getPrototypeOf
+    JsValue obj_res = interp.eval(R"(
+        var proto = { greeting: "hello" };
+        var child = Object.create(proto);
+        child.name = "world";
+        var p = Object.getPrototypeOf(child);
+        child.greeting + " " + child.name + " " + (p == proto);
+    )");
+    assert(obj_res.to_string() == "hello world true");
+
+    // 3. Array literal, indexing, length, push, pop
+    JsValue arr_res = interp.eval(R"(
+        var list = [10, 20, 30];
+        list.push(40);
+        var popped = list.pop();
+        list[1] = 99;
+        list.length + " " + list[0] + " " + list[1] + " " + popped;
+    )");
+    assert(arr_res.to_string() == "3 10 99 40");
+
+    // 4. Array.map and Array.filter with functions
+    JsValue map_res = interp.eval(R"(
+        var nums = [1, 2, 3, 4, 5];
+        var doubled = nums.map(function(x) { return x * 2; });
+        var evens = doubled.filter(function(x) { return x > 5; });
+        evens.join("-");
+    )");
+    assert(map_res.to_string() == "6-8-10");
+
+    // 5. Array.isArray
+    JsValue is_arr = interp.eval(R"(
+        Array.isArray([1, 2]) + " " + Array.isArray({ a: 1 });
+    )");
+    assert(is_arr.to_string() == "true false");
+}
+
+TEST(incremental_layout_and_invalidation) {
+    using namespace litebird;
+
+    std::string html = R"(
+        <div id="parent">
+            <div id="child1"><span>Initial</span></div>
+            <div id="child2"><p>Clean Subtree</p></div>
+        </div>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+
+    auto parent = doc->get_element_by_id("parent");
+    auto child1 = doc->get_element_by_id("child1");
+    auto child2 = doc->get_element_by_id("child2");
+
+    assert(parent != nullptr && child1 != nullptr && child2 != nullptr);
+
+    // Initially, layout has executed and flags cleared
+    doc->clear_layout_flags();
+    parent->clear_layout_flags();
+    child1->clear_layout_flags();
+    child2->clear_layout_flags();
+    root->clear_layout_flags();
+
+    assert(!child1->needs_layout());
+    assert(!parent->child_needs_layout());
+
+    // Mutate child1 attribute
+    child1->set_attribute("class", "updated");
+
+    // Verification: child1 is dirty, and child_needs_layout propagated up to parent and document!
+    assert(child1->needs_layout());
+    assert(parent->child_needs_layout());
+    assert(doc->child_needs_layout());
+
+    // child2 was not mutated and remains clean!
+    assert(!child2->needs_layout());
+    assert(!child2->child_needs_layout());
+
+    // Now test LayoutBox invalidation
+    assert(!root->needs_layout);
+    root->children[0]->mark_needs_layout();
+    assert(root->children[0]->needs_layout);
+    assert(root->child_needs_layout);
+
+    // Relayout clears dirty flags
+    root->layout(800.0f, 600.0f);
+    assert(!root->needs_layout);
+    assert(!root->child_needs_layout);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -696,7 +944,11 @@ int main() {
     RUN_TEST(event_loop_and_timers);
     RUN_TEST(resource_loader_and_url_resolution);
     RUN_TEST(browser_shell_navigation_and_hit_testing);
+    RUN_TEST(css_positioning_and_stacking_contexts);
+    RUN_TEST(box_sizing_and_constraints);
+    RUN_TEST(javascript_prototype_chain_and_arrays);
+    RUN_TEST(incremental_layout_and_invalidation);
 
-    std::cout << "\n\033[1;32mAll 16 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 20 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

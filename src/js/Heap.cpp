@@ -4,8 +4,14 @@
 namespace litebird {
 
 void JsObject::trace(Heap& heap) {
+    if (prototype) {
+        heap.mark_object(prototype);
+    }
     for (auto& [k, v] : properties) {
         heap.mark_value(v);
+    }
+    for (auto& elem : array_elements) {
+        heap.mark_value(elem);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "litebird/render/PaintCommand.hpp"
+#include <algorithm>
 
 namespace litebird {
 
@@ -120,8 +121,45 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         }
     }
 
-    // 5. Children
+    // 5. Partition and paint children according to CSS Stacking Context rules
+    std::vector<std::shared_ptr<LayoutBox>> neg_z_children;
+    std::vector<std::shared_ptr<LayoutBox>> normal_children;
+    std::vector<std::shared_ptr<LayoutBox>> pos_z_children;
+
     for (const auto& child : box->children) {
+        if (child->style.is_positioned() && child->style.has_z_index) {
+            if (child->style.z_index < 0) {
+                neg_z_children.push_back(child);
+            } else if (child->style.z_index > 0) {
+                pos_z_children.push_back(child);
+            } else {
+                normal_children.push_back(child);
+            }
+        } else {
+            normal_children.push_back(child);
+        }
+    }
+
+    std::stable_sort(neg_z_children.begin(), neg_z_children.end(), [](const auto& a, const auto& b) {
+        return a->style.z_index < b->style.z_index;
+    });
+
+    std::stable_sort(pos_z_children.begin(), pos_z_children.end(), [](const auto& a, const auto& b) {
+        return a->style.z_index < b->style.z_index;
+    });
+
+    // 1. Negative z-index elements paint first (behind normal flow)
+    for (const auto& child : neg_z_children) {
+        build_recursive(child, list);
+    }
+
+    // 2. Normal flow / auto z-index elements paint next
+    for (const auto& child : normal_children) {
+        build_recursive(child, list);
+    }
+
+    // 3. Positive z-index elements paint on top (ordered by z-index ascending)
+    for (const auto& child : pos_z_children) {
         build_recursive(child, list);
     }
 }

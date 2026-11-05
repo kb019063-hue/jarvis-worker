@@ -10,6 +10,16 @@ void Node::add_event_listener(const std::string& type, EventListener listener) {
     m_listeners[type].push_back(std::move(listener));
 }
 
+void Node::mark_needs_layout() {
+    m_needs_layout = true;
+    auto curr = parent();
+    while (curr) {
+        if (curr->m_child_needs_layout) break;
+        curr->m_child_needs_layout = true;
+        curr = curr->parent();
+    }
+}
+
 void Node::remove_event_listeners(const std::string& type) {
     m_listeners.erase(type);
 }

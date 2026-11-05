@@ -79,6 +79,16 @@ size_t Chunk::disassemble_instruction(std::ostream& os, size_t offset) const {
             os << " args=" << (int)arg_count << "\n";
             return offset + 2;
         }
+        case OpCode::OpNewArray: {
+            uint8_t count = code[offset + 1];
+            os << " count=" << (int)count << "\n";
+            return offset + 2;
+        }
+        case OpCode::OpNewObject: {
+            uint8_t count = code[offset + 1];
+            os << " entries=" << (int)count << "\n";
+            return offset + 2;
+        }
         default:
             os << "\n";
             return offset + 1;

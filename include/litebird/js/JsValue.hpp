@@ -80,6 +80,7 @@ public:
         return v;
     }
     static JsValue make_object(JsObject* obj = nullptr);
+    static JsValue make_array(const std::vector<JsValue>& elements = {});
     static JsValue make_native_function(NativeFn fn) {
         JsValue v;
         v.type = JsType::NativeFunction;
@@ -89,8 +90,12 @@ public:
     static JsValue make_dom_node(std::shared_ptr<Node> node);
 
     bool is_truthy() const;
+    bool is_array() const;
     std::string to_string() const;
     double to_number() const;
+
+    using FunctionCaller = std::function<JsValue(const JsValue& fn, const std::vector<JsValue>& args)>;
+    static void set_function_caller(FunctionCaller caller);
 
     JsValue call(const std::vector<JsValue>& args = {}) const;
 

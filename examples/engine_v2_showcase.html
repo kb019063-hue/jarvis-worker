@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Litebird Engine Hardening Showcase</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 24px;
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: sans-serif;
+        }
+
+        .header {
+            width: 720px;
+            margin-left: auto;
+            margin-right: auto;
+            background-color: #1e293b;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+            margin-bottom: 24px;
+        }
+
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #38bdf8;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+        }
+
+        .grid {
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            width: 720px;
+            margin-left: auto;
+            margin-right: auto;
+            gap: 16px;
+        }
+
+        .card {
+            box-sizing: border-box;
+            width: 350px;
+            min-height: 220px;
+            background-color: #1e293b;
+            padding: 16px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #334155;
+            position: relative;
+        }
+
+        .badge-fixed {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background-color: #0284c7;
+            color: #ffffff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .layer-base {
+            background-color: #334155;
+            padding: 12px;
+            border-radius: 6px;
+            position: relative;
+            margin-top: 24px;
+            height: 100px;
+        }
+
+        .layer-pos {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 180px;
+            height: 60px;
+            background-color: #3b82f6;
+            color: #ffffff;
+            padding: 8px;
+            border-radius: 4px;
+            z-index: 10;
+        }
+
+        .layer-neg {
+            position: absolute;
+            top: 35px;
+            left: 50px;
+            width: 180px;
+            height: 60px;
+            background-color: #ef4444;
+            color: #ffffff;
+            padding: 8px;
+            border-radius: 4px;
+            z-index: 2;
+        }
+
+        .status-box {
+            margin-top: 16px;
+            padding: 10px;
+            background-color: #0f172a;
+            border-radius: 6px;
+            color: #4ade80;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">Litebird Engine Core Upgrades</div>
+        <div class="subtitle">Positioning, Stacking Contexts, Box-Sizing Constraints & JS Prototype Delegation</div>
+    </div>
+
+    <div class="grid">
+        <div class="card" id="card-positioning">
+            <span class="badge-fixed">STACKING</span>
+            <div style="font-size: 16px; font-weight: bold; color: #f1f5f9;">Positioning & Z-Index</div>
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Absolute & relative insets with z-index stacking</div>
+
+            <div class="layer-base">
+                <div class="layer-pos">Z-Index 10 (Foreground)</div>
+                <div class="layer-neg">Z-Index 2 (Midground)</div>
+            </div>
+        </div>
+
+        <div class="card" id="card-js">
+            <span class="badge-fixed">PROTOTYPE</span>
+            <div style="font-size: 16px; font-weight: bold; color: #f1f5f9;">Prototypes & Array Engine</div>
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Dynamic built-in evaluation</div>
+
+            <div class="status-box" id="js-output">
+                Evaluating JS Arrays & Prototypes...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var items = [10, 25, 40, 55];
+        var mapped = items.map(function(n) { return n * 2; });
+        var filtered = mapped.filter(function(n) { return n >= 50; });
+
+        var proto = { engine: "Litebird Engine v2", status: "Active" };
+        var child = Object.create(proto);
+        child.features = "IFC + Flex + Pos + Prototypes";
+
+        var out = document.getElementById("js-output");
+        if (out) {
+            out.textContent = child.engine + " [" + filtered.join(", ") + "] - " + child.status;
+        }
+    </script>
+</body>
+</html>

@@ -164,6 +164,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     root_box->dimensions.content.x = 0.0f;
     root_box->dimensions.content.y = 0.0f;
     root_box->layout(viewport_width, viewport_height);
+    LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
     return root_box;
 }
 

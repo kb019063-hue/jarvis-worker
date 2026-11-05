@@ -235,6 +235,10 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
         if (match(JsTokenType::Dot)) {
             const auto& prop_token = consume(JsTokenType::Identifier, "Expected property name after '.'.");
             expr = std::make_unique<MemberExpr>(std::move(expr), prop_token.text);
+        } else if (match(JsTokenType::OpenBracket)) {
+            auto idx = parse_expression();
+            consume(JsTokenType::CloseBracket, "Expected ']' after index expression.");
+            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(idx));
         } else if (match(JsTokenType::OpenParen)) {
             std::vector<std::unique_ptr<Expr>> args;
             if (!check(JsTokenType::CloseParen)) {
@@ -292,6 +296,18 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
         auto body = parse_block();
         return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body));
+    }
+
+    if (match(JsTokenType::OpenBracket)) {
+        std::vector<std::unique_ptr<Expr>> elements;
+        if (!check(JsTokenType::CloseBracket)) {
+            do {
+                if (check(JsTokenType::CloseBracket)) break;
+                elements.push_back(parse_expression());
+            } while (match(JsTokenType::Comma));
+        }
+        consume(JsTokenType::CloseBracket, "Expected ']' after array elements.");
+        return std::make_unique<ArrayLiteralExpr>(std::move(elements));
     }
 
     if (match(JsTokenType::OpenBrace)) {

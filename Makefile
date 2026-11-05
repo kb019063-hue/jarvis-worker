@@ -1,5 +1,5 @@
 CXX ?= g++
-CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -Iinclude
+CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
 
 SRCS = src/dom/Node.cpp \
        src/dom/Document.cpp \
@@ -45,6 +45,8 @@ $(TARGET): $(OBJS) build/main.o
 build/main.o: src/main.cpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+-include $(OBJS:.o=.d) build/main.d
 
 $(TEST_TARGET): $(OBJS) tests/test_suite.cpp
 	@mkdir -p build

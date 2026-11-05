@@ -186,16 +186,68 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         style.width = parse_length(val, -1.0f);
     } else if (prop == "height") {
         style.height = parse_length(val, -1.0f);
+    } else if (prop == "min-width") {
+        style.min_width = parse_length(val, -1.0f);
+    } else if (prop == "max-width") {
+        style.max_width = parse_length(val, -1.0f);
+    } else if (prop == "min-height") {
+        style.min_height = parse_length(val, -1.0f);
+    } else if (prop == "max-height") {
+        style.max_height = parse_length(val, -1.0f);
+    } else if (prop == "box-sizing") {
+        if (val == "border-box") style.box_sizing = BoxSizing::BorderBox;
+        else if (val == "content-box") style.box_sizing = BoxSizing::ContentBox;
+    } else if (prop == "position") {
+        if (val == "static") style.position = Position::Static;
+        else if (val == "relative") style.position = Position::Relative;
+        else if (val == "absolute") style.position = Position::Absolute;
+        else if (val == "fixed") style.position = Position::Fixed;
+    } else if (prop == "top") {
+        style.top = parse_length(val, 0.0f);
+        style.has_top = true;
+    } else if (prop == "right") {
+        style.right = parse_length(val, 0.0f);
+        style.has_right = true;
+    } else if (prop == "bottom") {
+        style.bottom = parse_length(val, 0.0f);
+        style.has_bottom = true;
+    } else if (prop == "left") {
+        style.left = parse_length(val, 0.0f);
+        style.has_left = true;
+    } else if (prop == "z-index") {
+        try {
+            style.z_index = std::stoi(val);
+            style.has_z_index = true;
+        } catch (...) {}
     } else if (prop == "margin") {
+        std::stringstream mss(val);
+        std::vector<std::string> tokens;
+        std::string tok;
+        while (mss >> tok) tokens.push_back(tok);
         style.margin = parse_box_edges(val);
+        if (tokens.size() == 1 && tokens[0] == "auto") {
+            style.margin_top_auto = style.margin_right_auto = style.margin_bottom_auto = style.margin_left_auto = true;
+        } else if (tokens.size() == 2) {
+            if (tokens[0] == "auto") style.margin_top_auto = style.margin_bottom_auto = true;
+            if (tokens[1] == "auto") style.margin_left_auto = style.margin_right_auto = true;
+        } else if (tokens.size() >= 4) {
+            if (tokens[0] == "auto") style.margin_top_auto = true;
+            if (tokens[1] == "auto") style.margin_right_auto = true;
+            if (tokens[2] == "auto") style.margin_bottom_auto = true;
+            if (tokens[3] == "auto") style.margin_left_auto = true;
+        }
     } else if (prop == "margin-top") {
-        style.margin.top = parse_length(val, 0.0f);
+        if (val == "auto") style.margin_top_auto = true;
+        else style.margin.top = parse_length(val, 0.0f);
     } else if (prop == "margin-right") {
-        style.margin.right = parse_length(val, 0.0f);
+        if (val == "auto") style.margin_right_auto = true;
+        else style.margin.right = parse_length(val, 0.0f);
     } else if (prop == "margin-bottom") {
-        style.margin.bottom = parse_length(val, 0.0f);
+        if (val == "auto") style.margin_bottom_auto = true;
+        else style.margin.bottom = parse_length(val, 0.0f);
     } else if (prop == "margin-left") {
-        style.margin.left = parse_length(val, 0.0f);
+        if (val == "auto") style.margin_left_auto = true;
+        else style.margin.left = parse_length(val, 0.0f);
     } else if (prop == "padding") {
         style.padding = parse_box_edges(val);
     } else if (prop == "padding-top") {

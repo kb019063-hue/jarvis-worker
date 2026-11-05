@@ -41,6 +41,18 @@ enum class AlignItems {
     Center
 };
 
+enum class Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed
+};
+
+enum class BoxSizing {
+    ContentBox,
+    BorderBox
+};
+
 struct BoxShadow {
     float x_offset{0.0f};
     float y_offset{0.0f};
@@ -66,6 +78,30 @@ struct ComputedStyle {
     std::string text_align{"left"};
     std::string text_decoration{"none"}; // "none", "underline"
 
+    // Positioning properties
+    Position position{Position::Static};
+    float top{0.0f};
+    float right{0.0f};
+    float bottom{0.0f};
+    float left{0.0f};
+    bool has_top{false};
+    bool has_right{false};
+    bool has_bottom{false};
+    bool has_left{false};
+    int z_index{0};
+    bool has_z_index{false};
+
+    // Box Sizing & Constraints
+    BoxSizing box_sizing{BoxSizing::ContentBox};
+    float min_width{-1.0f};
+    float max_width{-1.0f};
+    float min_height{-1.0f};
+    float max_height{-1.0f};
+    bool margin_top_auto{false};
+    bool margin_bottom_auto{false};
+    bool margin_left_auto{false};
+    bool margin_right_auto{false};
+
     // Flexbox properties
     FlexDirection flex_direction{FlexDirection::Row};
     JustifyContent justify_content{JustifyContent::FlexStart};
@@ -79,6 +115,9 @@ struct ComputedStyle {
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }
     bool is_none() const { return display == Display::None; }
+
+    bool is_positioned() const { return position != Position::Static; }
+    bool is_out_of_flow() const { return position == Position::Absolute || position == Position::Fixed; }
 };
 
 class StyleResolver {

@@ -7,6 +7,10 @@ namespace litebird {
 
 void LayoutBox::layout(float containing_width, float containing_height) {
     (void)containing_height;
+    if (!needs_layout && !child_needs_layout) {
+        return;
+    }
+
     dimensions.margin = style.margin;
     dimensions.padding = style.padding;
     dimensions.border = style.border_width;
@@ -26,6 +30,8 @@ void LayoutBox::layout(float containing_width, float containing_height) {
             layout_text(containing_width);
             break;
     }
+
+    clear_layout_flags();
 }
 
 bool LayoutBox::establishes_ifc() const {
@@ -49,79 +55,167 @@ void LayoutBox::layout_block(float containing_width) {
         return;
     }
 
-    // 1. Calculate Content Width
-    float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right +
-                                    dimensions.border.left + dimensions.border.right +
-                                    dimensions.padding.left + dimensions.padding.right;
+    float h_padding_border = dimensions.border.left + dimensions.border.right +
+                            dimensions.padding.left + dimensions.padding.right;
+    float v_padding_border = dimensions.border.top + dimensions.border.bottom +
+                            dimensions.padding.top + dimensions.padding.bottom;
+    float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
 
+    // 1. Calculate Content Width with BoxSizing & Min/Max constraints
     if (style.width >= 0.0f) {
-        dimensions.content.width = style.width;
+        if (style.box_sizing == BoxSizing::BorderBox) {
+            dimensions.content.width = std::max(0.0f, style.width - h_padding_border);
+        } else {
+            dimensions.content.width = style.width;
+        }
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
+    }
+
+    if (style.min_width >= 0.0f) {
+        float min_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.min_width - h_padding_border) : style.min_width;
+        dimensions.content.width = std::max(dimensions.content.width, min_w);
+    }
+    if (style.max_width >= 0.0f) {
+        float max_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.max_width - h_padding_border) : style.max_width;
+        dimensions.content.width = std::min(dimensions.content.width, max_w);
+    }
+
+    // Margin: auto centering
+    float remaining_h = std::max(0.0f, containing_width - (dimensions.content.width + h_padding_border));
+    if (style.margin_left_auto && style.margin_right_auto) {
+        dimensions.margin.left = remaining_h / 2.0f;
+        dimensions.margin.right = remaining_h / 2.0f;
+    } else if (style.margin_left_auto) {
+        dimensions.margin.left = remaining_h;
+    } else if (style.margin_right_auto) {
+        dimensions.margin.right = remaining_h;
     }
 
     // 2. Layout Children and compute content height
     float y_cursor = 0.0f;
     for (auto& child : children) {
+        if (child->style.is_out_of_flow()) {
+            continue; // Handled in out-of-flow pass
+        }
+
         child->layout(dimensions.content.width);
 
-        child->dimensions.content.x = dimensions.content.x +
-                                     child->dimensions.margin.left +
-                                     child->dimensions.border.left +
-                                     child->dimensions.padding.left;
+        float new_x = dimensions.content.x +
+                      child->dimensions.margin.left +
+                      child->dimensions.border.left +
+                      child->dimensions.padding.left;
 
-        child->dimensions.content.y = dimensions.content.y + y_cursor +
-                                     child->dimensions.margin.top +
-                                     child->dimensions.border.top +
-                                     child->dimensions.padding.top;
+        float new_y = dimensions.content.y + y_cursor +
+                      child->dimensions.margin.top +
+                      child->dimensions.border.top +
+                      child->dimensions.padding.top;
+
+        // Relative positioning offset
+        if (child->style.position == Position::Relative) {
+            if (child->style.has_left) new_x += child->style.left;
+            else if (child->style.has_right) new_x -= child->style.right;
+            if (child->style.has_top) new_y += child->style.top;
+            else if (child->style.has_bottom) new_y -= child->style.bottom;
+        }
+
+        float dx = new_x - child->dimensions.content.x;
+        float dy = new_y - child->dimensions.content.y;
+        child->shift_position(dx, dy);
 
         y_cursor += child->dimensions.margin_box().height;
     }
 
-    // 3. Content Height
+    // 3. Content Height with BoxSizing & Min/Max constraints
     if (style.height >= 0.0f) {
-        dimensions.content.height = style.height;
+        if (style.box_sizing == BoxSizing::BorderBox) {
+            dimensions.content.height = std::max(0.0f, style.height - v_padding_border);
+        } else {
+            dimensions.content.height = style.height;
+        }
     } else {
         dimensions.content.height = y_cursor;
+    }
+
+    if (style.min_height >= 0.0f) {
+        float min_h = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.min_height - v_padding_border) : style.min_height;
+        dimensions.content.height = std::max(dimensions.content.height, min_h);
+    }
+    if (style.max_height >= 0.0f) {
+        float max_h = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.max_height - v_padding_border) : style.max_height;
+        dimensions.content.height = std::min(dimensions.content.height, max_h);
     }
 }
 
 void LayoutBox::layout_flex(float containing_width) {
-    float total_h_spacing = dimensions.margin.left + dimensions.margin.right +
-                           dimensions.border.left + dimensions.border.right +
-                           dimensions.padding.left + dimensions.padding.right;
+    float h_padding_border = dimensions.border.left + dimensions.border.right +
+                            dimensions.padding.left + dimensions.padding.right;
+    float v_padding_border = dimensions.border.top + dimensions.border.bottom +
+                            dimensions.padding.top + dimensions.padding.bottom;
+    float total_h_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
 
     if (style.width >= 0.0f) {
-        dimensions.content.width = style.width;
+        if (style.box_sizing == BoxSizing::BorderBox) {
+            dimensions.content.width = std::max(0.0f, style.width - h_padding_border);
+        } else {
+            dimensions.content.width = style.width;
+        }
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_h_spacing);
     }
 
-    if (children.empty()) {
-        dimensions.content.height = (style.height >= 0.0f) ? style.height : 0.0f;
+    if (style.min_width >= 0.0f) {
+        float min_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.min_width - h_padding_border) : style.min_width;
+        dimensions.content.width = std::max(dimensions.content.width, min_w);
+    }
+    if (style.max_width >= 0.0f) {
+        float max_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.max_width - h_padding_border) : style.max_width;
+        dimensions.content.width = std::min(dimensions.content.width, max_w);
+    }
+
+    // Filter in-flow children
+    std::vector<std::shared_ptr<LayoutBox>> in_flow;
+    for (const auto& child : children) {
+        if (!child->style.is_out_of_flow()) {
+            in_flow.push_back(child);
+        }
+    }
+
+    if (in_flow.empty()) {
+        float h = (style.height >= 0.0f) ? style.height : 0.0f;
+        if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
+            h = std::max(0.0f, h - v_padding_border);
+        }
+        dimensions.content.height = h;
         return;
     }
 
     bool is_row = (style.flex_direction == FlexDirection::Row || style.flex_direction == FlexDirection::RowReverse);
 
     if (is_row) {
-        // Initial layout pass for all items
+        // Initial layout pass for all in-flow items
         float total_items_width = 0.0f;
         float total_grow = 0.0f;
 
-        for (auto& child : children) {
-            float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / children.size());
+        for (auto& child : in_flow) {
+            float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
             child->layout(child_avail_w);
             total_items_width += child->dimensions.margin_box().width;
             total_grow += child->style.flex_grow;
         }
 
-        float total_gaps = (children.size() > 1) ? (children.size() - 1) * style.gap : 0.0f;
+        float total_gaps = (in_flow.size() > 1) ? (in_flow.size() - 1) * style.gap : 0.0f;
         float free_space = dimensions.content.width - (total_items_width + total_gaps);
 
         // Distribute flex-grow if free space exists
         if (free_space > 0.0f && total_grow > 0.0f) {
-            for (auto& child : children) {
+            for (auto& child : in_flow) {
                 if (child->style.flex_grow > 0.0f) {
                     float extra = (child->style.flex_grow / total_grow) * free_space;
                     child->dimensions.content.width += extra;
@@ -132,13 +226,13 @@ void LayoutBox::layout_flex(float containing_width) {
 
         // Compute max child height for cross axis
         float max_child_h = 0.0f;
-        for (const auto& child : children) {
+        for (const auto& child : in_flow) {
             max_child_h = std::max(max_child_h, child->dimensions.margin_box().height);
         }
 
         // Justify-content spacing along Main Axis (X)
         float total_used_w = 0.0f;
-        for (const auto& child : children) {
+        for (const auto& child : in_flow) {
             total_used_w += child->dimensions.margin_box().width;
         }
         float remaining = dimensions.content.width - (total_used_w + total_gaps);
@@ -157,20 +251,20 @@ void LayoutBox::layout_flex(float containing_width) {
                 x_cursor = std::max(0.0f, remaining / 2.0f);
                 break;
             case JustifyContent::SpaceBetween:
-                if (children.size() > 1) {
-                    gap_spacing += std::max(0.0f, remaining / (children.size() - 1));
+                if (in_flow.size() > 1) {
+                    gap_spacing += std::max(0.0f, remaining / (in_flow.size() - 1));
                 }
                 break;
             case JustifyContent::SpaceAround:
-                if (!children.empty()) {
-                    float space = std::max(0.0f, remaining / children.size());
+                if (!in_flow.empty()) {
+                    float space = std::max(0.0f, remaining / in_flow.size());
                     x_cursor = space / 2.0f;
                     gap_spacing += space;
                 }
                 break;
             case JustifyContent::SpaceEvenly:
-                if (!children.empty()) {
-                    float space = std::max(0.0f, remaining / (children.size() + 1));
+                if (!in_flow.empty()) {
+                    float space = std::max(0.0f, remaining / (in_flow.size() + 1));
                     x_cursor = space;
                     gap_spacing += space;
                 }
@@ -178,7 +272,7 @@ void LayoutBox::layout_flex(float containing_width) {
         }
 
         // Position items
-        for (auto& child : children) {
+        for (auto& child : in_flow) {
             float y_offset = 0.0f;
             float child_h = child->dimensions.margin_box().height;
 
@@ -200,29 +294,59 @@ void LayoutBox::layout_flex(float containing_width) {
                     break;
             }
 
-            child->dimensions.content.x = dimensions.content.x + x_cursor + child->dimensions.margin.left;
-            child->dimensions.content.y = dimensions.content.y + y_offset + child->dimensions.margin.top;
+            float new_x = dimensions.content.x + x_cursor + child->dimensions.margin.left;
+            float new_y = dimensions.content.y + y_offset + child->dimensions.margin.top;
+
+            if (child->style.position == Position::Relative) {
+                if (child->style.has_left) new_x += child->style.left;
+                else if (child->style.has_right) new_x -= child->style.right;
+                if (child->style.has_top) new_y += child->style.top;
+                else if (child->style.has_bottom) new_y -= child->style.bottom;
+            }
+
+            float dx = new_x - child->dimensions.content.x;
+            float dy = new_y - child->dimensions.content.y;
+            child->shift_position(dx, dy);
 
             x_cursor += child->dimensions.margin_box().width + gap_spacing;
         }
 
-        dimensions.content.height = (style.height >= 0.0f) ? style.height : max_child_h;
+        float final_h = (style.height >= 0.0f) ? style.height : max_child_h;
+        if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
+            final_h = std::max(0.0f, final_h - v_padding_border);
+        }
+        dimensions.content.height = final_h;
     } else {
         // Column layout: main axis is vertical (Y), cross axis is horizontal (X)
         float y_cursor = 0.0f;
         float max_child_w = 0.0f;
 
-        for (auto& child : children) {
+        for (auto& child : in_flow) {
             child->layout(dimensions.content.width);
             max_child_w = std::max(max_child_w, child->dimensions.margin_box().width);
 
-            child->dimensions.content.x = dimensions.content.x + child->dimensions.margin.left;
-            child->dimensions.content.y = dimensions.content.y + y_cursor + child->dimensions.margin.top;
+            float new_x = dimensions.content.x + child->dimensions.margin.left;
+            float new_y = dimensions.content.y + y_cursor + child->dimensions.margin.top;
+
+            if (child->style.position == Position::Relative) {
+                if (child->style.has_left) new_x += child->style.left;
+                else if (child->style.has_right) new_x -= child->style.right;
+                if (child->style.has_top) new_y += child->style.top;
+                else if (child->style.has_bottom) new_y -= child->style.bottom;
+            }
+
+            float dx = new_x - child->dimensions.content.x;
+            float dy = new_y - child->dimensions.content.y;
+            child->shift_position(dx, dy);
 
             y_cursor += child->dimensions.margin_box().height + style.gap;
         }
 
-        dimensions.content.height = (style.height >= 0.0f) ? style.height : y_cursor;
+        float final_h = (style.height >= 0.0f) ? style.height : y_cursor;
+        if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
+            final_h = std::max(0.0f, final_h - v_padding_border);
+        }
+        dimensions.content.height = final_h;
     }
 }
 
@@ -510,6 +634,113 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
                 child->lines.push_back(child->text);
             }
             child->dimensions = dimensions;
+        }
+    }
+}
+
+void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& root, float viewport_w, float viewport_h) {
+    if (!root) return;
+
+    std::function<void(const std::shared_ptr<LayoutBox>&, const std::shared_ptr<LayoutBox>&)> pass =
+        [&](const std::shared_ptr<LayoutBox>& box, const std::shared_ptr<LayoutBox>& positioned_ancestor) {
+        if (!box) return;
+
+        if (box->style.is_out_of_flow()) {
+            Rect cb;
+            if (box->style.position == Position::Fixed) {
+                cb = Rect(0.0f, 0.0f, viewport_w, viewport_h);
+            } else {
+                auto cb_box = positioned_ancestor ? positioned_ancestor : root;
+                cb.x = cb_box->dimensions.content.x - cb_box->dimensions.padding.left;
+                cb.y = cb_box->dimensions.content.y - cb_box->dimensions.padding.top;
+                cb.width = cb_box->dimensions.padding_box().width;
+                cb.height = cb_box->dimensions.padding_box().height;
+            }
+
+            box->layout(cb.width, cb.height);
+
+            // If both insets are given and dimension is auto, size to insets
+            if (box->style.has_left && box->style.has_right && box->style.width < 0.0f) {
+                float total_h = box->dimensions.margin.left + box->dimensions.margin.right +
+                                box->dimensions.border.left + box->dimensions.border.right +
+                                box->dimensions.padding.left + box->dimensions.padding.right;
+                box->dimensions.content.width = std::max(0.0f, cb.width - box->style.left - box->style.right - total_h);
+            }
+            if (box->style.has_top && box->style.has_bottom && box->style.height < 0.0f) {
+                float total_v = box->dimensions.margin.top + box->dimensions.margin.bottom +
+                                box->dimensions.border.top + box->dimensions.border.bottom +
+                                box->dimensions.padding.top + box->dimensions.padding.bottom;
+                box->dimensions.content.height = std::max(0.0f, cb.height - box->style.top - box->style.bottom - total_v);
+            }
+
+            // Position X
+            if (box->style.has_left) {
+                box->dimensions.content.x = cb.x + box->style.left +
+                                            box->dimensions.margin.left +
+                                            box->dimensions.border.left +
+                                            box->dimensions.padding.left;
+            } else if (box->style.has_right) {
+                box->dimensions.content.x = cb.x + cb.width - box->style.right -
+                                            box->dimensions.margin.right -
+                                            box->dimensions.border.right -
+                                            box->dimensions.padding.right -
+                                            box->dimensions.content.width;
+            } else {
+                box->dimensions.content.x = cb.x + box->dimensions.margin.left +
+                                            box->dimensions.border.left +
+                                            box->dimensions.padding.left;
+            }
+
+            // Position Y
+            if (box->style.has_top) {
+                box->dimensions.content.y = cb.y + box->style.top +
+                                            box->dimensions.margin.top +
+                                            box->dimensions.border.top +
+                                            box->dimensions.padding.top;
+            } else if (box->style.has_bottom) {
+                box->dimensions.content.y = cb.y + cb.height - box->style.bottom -
+                                            box->dimensions.margin.bottom -
+                                            box->dimensions.border.bottom -
+                                            box->dimensions.padding.bottom -
+                                            box->dimensions.content.height;
+            } else {
+                box->dimensions.content.y = cb.y + box->dimensions.margin.top +
+                                            box->dimensions.border.top +
+                                            box->dimensions.padding.top;
+            }
+        }
+
+        std::shared_ptr<LayoutBox> next_positioned = positioned_ancestor;
+        if (box->style.is_positioned()) {
+            next_positioned = box;
+        }
+
+        for (const auto& child : box->children) {
+            pass(child, next_positioned);
+        }
+    };
+
+    std::shared_ptr<LayoutBox> root_pos = root->style.is_positioned() ? root : nullptr;
+    for (const auto& child : root->children) {
+        pass(child, root_pos);
+    }
+}
+
+void LayoutBox::shift_position(float dx, float dy) {
+    if (dx == 0.0f && dy == 0.0f) return;
+    dimensions.content.x += dx;
+    dimensions.content.y += dy;
+    for (auto& line : line_boxes) {
+        line.rect.x += dx;
+        line.rect.y += dy;
+        for (auto& frag : line.fragments) {
+            frag.rect.x += dx;
+            frag.rect.y += dy;
+        }
+    }
+    for (auto& child : children) {
+        if (!child->style.is_out_of_flow()) {
+            child->shift_position(dx, dy);
         }
     }
 }

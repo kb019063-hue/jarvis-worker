@@ -23,7 +23,10 @@ public:
 
 class JsObject : public HeapObject {
 public:
+    JsObject* prototype{nullptr};
     std::unordered_map<std::string, JsValue> properties;
+    std::vector<JsValue> array_elements;
+    bool is_array{false};
 
     void trace(Heap& heap) override;
 };

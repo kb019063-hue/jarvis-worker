@@ -83,8 +83,17 @@ int BytecodeCompiler::resolve_local(const std::string& name) {
 }
 
 std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
-    if (program) {
-        for (const auto& stmt : program->statements) {
+    if (program && !program->statements.empty()) {
+        for (size_t i = 0; i < program->statements.size(); ++i) {
+            const auto& stmt = program->statements[i];
+            bool is_last = (i + 1 == program->statements.size());
+            if (is_last) {
+                if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt.get())) {
+                    compile_expr(expr_stmt->expression.get());
+                    emit_opcode(OpCode::OpReturn);
+                    return m_function;
+                }
+            }
             compile_stmt(stmt.get());
         }
     }
@@ -232,6 +241,10 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem_target->property));
             emit_opcode(OpCode::OpSetProperty);
             emit_byte(static_cast<uint8_t>(prop_idx));
+        } else if (auto idx_target = dynamic_cast<const IndexExpr*>(assign->target.get())) {
+            compile_expr(idx_target->object.get());
+            compile_expr(idx_target->index.get());
+            emit_opcode(OpCode::OpSetIndex);
         }
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
         compile_expr(unary->operand.get());
@@ -283,6 +296,25 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(member->property));
         emit_opcode(OpCode::OpGetProperty);
         emit_byte(static_cast<uint8_t>(prop_idx));
+    } else if (auto idx_expr = dynamic_cast<const IndexExpr*>(expr)) {
+        compile_expr(idx_expr->object.get());
+        compile_expr(idx_expr->index.get());
+        emit_opcode(OpCode::OpGetIndex);
+    } else if (auto arr = dynamic_cast<const ArrayLiteralExpr*>(expr)) {
+        for (const auto& elem : arr->elements) {
+            compile_expr(elem.get());
+        }
+        emit_opcode(OpCode::OpNewArray);
+        emit_byte(static_cast<uint8_t>(arr->elements.size()));
+    } else if (auto obj_lit = dynamic_cast<const ObjectLiteralExpr*>(expr)) {
+        for (const auto& [k, v] : obj_lit->entries) {
+            size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(k));
+            emit_opcode(OpCode::OpConstant);
+            emit_byte(static_cast<uint8_t>(key_idx));
+            compile_expr(v.get());
+        }
+        emit_opcode(OpCode::OpNewObject);
+        emit_byte(static_cast<uint8_t>(obj_lit->entries.size()));
     } else if (auto call = dynamic_cast<const CallExpr*>(expr)) {
         compile_expr(call->callee.get());
         for (const auto& arg : call->args) {
@@ -290,6 +322,8 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         }
         emit_opcode(OpCode::OpCall);
         emit_byte(static_cast<uint8_t>(call->args.size()));
+    } else {
+        throw std::runtime_error("Unsupported expression in bytecode compiler");
     }
 }
 

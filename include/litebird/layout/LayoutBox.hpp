@@ -81,6 +81,27 @@ public:
     bool establishes_ifc() const;
     void layout(float containing_width, float containing_height = 0.0f);
     void dump(std::ostream& os, int indent = 0) const;
+    void shift_position(float dx, float dy);
+
+    bool needs_layout{true};
+    bool child_needs_layout{true};
+
+    void mark_needs_layout() {
+        needs_layout = true;
+        auto p = parent.lock();
+        while (p) {
+            if (p->child_needs_layout) break;
+            p->child_needs_layout = true;
+            p = p->parent.lock();
+        }
+    }
+
+    void clear_layout_flags() {
+        needs_layout = false;
+        child_needs_layout = false;
+    }
+
+    static void resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& root, float viewport_w, float viewport_h);
 
 private:
     void layout_block(float containing_width);

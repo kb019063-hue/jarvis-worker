@@ -30,8 +30,7 @@ JsValue JsInterpreter::eval(std::string_view source) {
     try {
         auto fn = compile_to_bytecode(source);
         return m_vm.interpret(fn);
-    } catch (const std::exception& ex) {
-        std::cerr << "Bytecode VM Exception: " << ex.what() << ", falling back to AST interpreter\n";
+    } catch (const std::exception&) {
         return eval_ast(source);
     }
 }
@@ -162,6 +161,59 @@ void JsInterpreter::init_builtins() {
         }
         return JsValue::make_undefined();
     }));
+
+    // Function caller for callbacks
+    JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args) {
+        auto fn_env = std::make_shared<JsEnvironment>(fn.closure);
+        for (size_t i = 0; i < fn.params.size(); ++i) {
+            JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
+            fn_env->define(fn.params[i], arg);
+        }
+        try {
+            return execute(fn.body.get(), fn_env);
+        } catch (const ReturnException& ret) {
+            return ret.value;
+        }
+    });
+
+    // Object built-ins
+    JsValue object_obj = JsValue::make_object();
+    object_obj.set_property("create", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue obj = JsValue::make_object();
+        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val) {
+            obj.object_val->prototype = args[0].object_val;
+        }
+        return obj;
+    }));
+    object_obj.set_property("getPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val && args[0].object_val->prototype) {
+            return JsValue::make_object(args[0].object_val->prototype);
+        }
+        return JsValue::make_null();
+    }));
+    object_obj.set_property("setPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.size() >= 2 && args[0].type == JsType::Object && args[0].object_val) {
+            if (args[1].type == JsType::Object && args[1].object_val) {
+                args[0].object_val->prototype = args[1].object_val;
+            } else if (args[1].type == JsType::Null) {
+                args[0].object_val->prototype = nullptr;
+            }
+        }
+        return args.empty() ? JsValue::make_undefined() : args[0];
+    }));
+    m_global_env->define("Object", object_obj);
+
+    // Array built-ins
+    JsValue array_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        return JsValue::make_array(args);
+    });
+    array_ctor.set_property("isArray", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            return JsValue::make_boolean(args[0].is_array());
+        }
+        return JsValue::make_boolean(false);
+    }));
+    m_global_env->define("Array", array_ctor);
 }
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
@@ -302,6 +354,13 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             JsValue obj = eval_expr(member_target->object.get(), env);
             obj.set_property(member_target->property, right);
             return right;
+        } else if (auto index_target = dynamic_cast<const IndexExpr*>(assign->target.get())) {
+            JsValue obj = eval_expr(index_target->object.get(), env);
+            JsValue idx_val = eval_expr(index_target->index.get(), env);
+            std::string prop = (idx_val.type == JsType::Number) ?
+                std::to_string(static_cast<int64_t>(idx_val.number_val)) : idx_val.to_string();
+            obj.set_property(prop, right);
+            return right;
         }
         return right;
     }
@@ -373,6 +432,22 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
     if (auto member = dynamic_cast<const MemberExpr*>(expr)) {
         JsValue obj = eval_expr(member->object.get(), env);
         return obj.get_property(member->property);
+    }
+
+    if (auto index_expr = dynamic_cast<const IndexExpr*>(expr)) {
+        JsValue obj = eval_expr(index_expr->object.get(), env);
+        JsValue idx_val = eval_expr(index_expr->index.get(), env);
+        std::string prop = (idx_val.type == JsType::Number) ?
+            std::to_string(static_cast<int64_t>(idx_val.number_val)) : idx_val.to_string();
+        return obj.get_property(prop);
+    }
+
+    if (auto array_lit = dynamic_cast<const ArrayLiteralExpr*>(expr)) {
+        std::vector<JsValue> elements;
+        for (const auto& elem : array_lit->elements) {
+            elements.push_back(eval_expr(elem.get(), env));
+        }
+        return JsValue::make_array(elements);
     }
 
     if (auto call = dynamic_cast<const CallExpr*>(expr)) {

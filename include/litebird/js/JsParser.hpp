@@ -67,11 +67,27 @@ public:
         : object(std::move(obj)), property(std::move(prop)) {}
 };
 
+class IndexExpr : public Expr {
+public:
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> index;
+
+    IndexExpr(std::unique_ptr<Expr> obj, std::unique_ptr<Expr> idx)
+        : object(std::move(obj)), index(std::move(idx)) {}
+};
+
 class ObjectLiteralExpr : public Expr {
 public:
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> entries;
     explicit ObjectLiteralExpr(std::vector<std::pair<std::string, std::unique_ptr<Expr>>> e)
         : entries(std::move(e)) {}
+};
+
+class ArrayLiteralExpr : public Expr {
+public:
+    std::vector<std::unique_ptr<Expr>> elements;
+    explicit ArrayLiteralExpr(std::vector<std::unique_ptr<Expr>> elems)
+        : elements(std::move(elems)) {}
 };
 
 class FunctionExpr : public Expr {

@@ -263,6 +263,47 @@ JsValue VM::run() {
                 obj.set_property(prop, val);
                 break;
             }
+            case OpCode::OpGetIndex: {
+                JsValue idx = pop();
+                JsValue obj = pop();
+                std::string prop = (idx.type == JsType::Number) ?
+                    std::to_string(static_cast<int64_t>(idx.number_val)) : idx.to_string();
+                push(obj.get_property(prop));
+                break;
+            }
+            case OpCode::OpSetIndex: {
+                JsValue idx = pop();
+                JsValue obj = pop();
+                JsValue val = peek(0);
+                std::string prop = (idx.type == JsType::Number) ?
+                    std::to_string(static_cast<int64_t>(idx.number_val)) : idx.to_string();
+                obj.set_property(prop, val);
+                break;
+            }
+            case OpCode::OpNewArray: {
+                uint8_t count = read_byte();
+                std::vector<JsValue> elems(count);
+                for (int i = static_cast<int>(count) - 1; i >= 0; --i) {
+                    elems[i] = pop();
+                }
+                push(JsValue::make_array(elems));
+                break;
+            }
+            case OpCode::OpNewObject: {
+                uint8_t count = read_byte();
+                JsValue obj = JsValue::make_object();
+                std::vector<std::pair<std::string, JsValue>> entries(count);
+                for (int i = static_cast<int>(count) - 1; i >= 0; --i) {
+                    JsValue val = pop();
+                    JsValue key = pop();
+                    entries[i] = {key.string_val, std::move(val)};
+                }
+                for (auto& [k, v] : entries) {
+                    obj.set_property(k, std::move(v));
+                }
+                push(obj);
+                break;
+            }
 
             case OpCode::OpAdd: {
                 JsValue b = pop();

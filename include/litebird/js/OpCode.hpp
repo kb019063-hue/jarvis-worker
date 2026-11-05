@@ -19,9 +19,13 @@ enum class OpCode : uint8_t {
     OpGetGlobal,
     OpSetGlobal,
 
-    // Object properties
+    // Object properties & indexing
     OpGetProperty,
     OpSetProperty,
+    OpGetIndex,
+    OpSetIndex,
+    OpNewArray,
+    OpNewObject,
 
     // Arithmetic
     OpAdd,
@@ -64,6 +68,10 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpSetGlobal:    return "OP_SET_GLOBAL";
         case OpCode::OpGetProperty:  return "OP_GET_PROPERTY";
         case OpCode::OpSetProperty:  return "OP_SET_PROPERTY";
+        case OpCode::OpGetIndex:     return "OP_GET_INDEX";
+        case OpCode::OpSetIndex:     return "OP_SET_INDEX";
+        case OpCode::OpNewArray:     return "OP_NEW_ARRAY";
+        case OpCode::OpNewObject:    return "OP_NEW_OBJECT";
         case OpCode::OpAdd:          return "OP_ADD";
         case OpCode::OpSubtract:     return "OP_SUBTRACT";
         case OpCode::OpMultiply:     return "OP_MULTIPLY";

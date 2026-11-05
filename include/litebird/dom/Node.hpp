@@ -45,6 +45,7 @@ public:
         if (!child) return;
         child->set_parent(shared_from_this());
         m_children.push_back(child);
+        mark_needs_layout();
     }
 
     void remove_child(std::shared_ptr<Node> child) {
@@ -52,7 +53,17 @@ public:
         if (it != m_children.end()) {
             (*it)->m_parent.reset();
             m_children.erase(it);
+            mark_needs_layout();
         }
+    }
+
+    // Invalidation / dirty tracking
+    bool needs_layout() const { return m_needs_layout; }
+    bool child_needs_layout() const { return m_child_needs_layout; }
+    void mark_needs_layout();
+    void clear_layout_flags() {
+        m_needs_layout = false;
+        m_child_needs_layout = false;
     }
 
     // EventTarget implementation
@@ -79,6 +90,8 @@ protected:
     std::weak_ptr<Node> m_parent;
     std::vector<std::shared_ptr<Node>> m_children;
     std::unordered_map<std::string, std::vector<EventListener>> m_listeners;
+    bool m_needs_layout{true};
+    bool m_child_needs_layout{true};
 };
 
 } // namespace litebird

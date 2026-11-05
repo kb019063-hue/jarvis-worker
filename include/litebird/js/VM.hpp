@@ -25,6 +25,8 @@ public:
 
     void set_global(const std::string& name, JsValue value);
     JsValue get_global(const std::string& name) const;
+    const std::unordered_map<std::string, JsValue>& globals() const { return m_globals; }
+    std::unordered_map<std::string, JsValue>& globals() { return m_globals; }
     void set_document(std::shared_ptr<Document> doc);
 
     void push(JsValue value);

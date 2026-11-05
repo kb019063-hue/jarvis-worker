@@ -40,13 +40,30 @@ struct DrawTextCommand {
     int font_weight{400};
 };
 
-using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand>;
+struct DrawImageCommand {
+    Rect rect{};
+    std::shared_ptr<ImageData> image{nullptr};
+    float border_radius{0.0f};
+
+    DrawImageCommand() : rect{}, image{nullptr}, border_radius{0.0f} {}
+    DrawImageCommand(const Rect& r, std::shared_ptr<ImageData> img, float br = 0.0f)
+        : rect(r), image(std::move(img)), border_radius(br) {}
+};
+
+using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand>;
 
 class DisplayList {
 public:
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
     void add(PaintCommand cmd) {
         m_commands.push_back(std::move(cmd));
     }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
     const std::vector<PaintCommand>& commands() const { return m_commands; }
 

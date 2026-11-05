@@ -124,6 +124,24 @@ JsValue JsValue::get_property(const std::string& name) const {
                 style_obj.set_property("color", JsValue::make_string(el->get_attribute("style")));
                 return style_obj;
             }
+            if (name == "value") return JsValue::make_string(el->value());
+            if (name == "disabled") return JsValue::make_boolean(el->disabled());
+            if (name == "checked") return JsValue::make_boolean(el->checked());
+            if (name == "type") return JsValue::make_string(el->input_type());
+            if (name == "focus") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
+                    elem->focus();
+                    return JsValue::make_undefined();
+                });
+            }
+            if (name == "blur") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
+                    elem->blur();
+                    return JsValue::make_undefined();
+                });
+            }
             if (name == "click") {
                 auto node = dom_node;
                 return JsValue::make_native_function([node](const std::vector<JsValue>&) {
@@ -139,11 +157,32 @@ JsValue JsValue::get_property(const std::string& name) const {
                     if (args.size() < 2) return JsValue::make_undefined();
                     std::string ev_type = args[0].to_string();
                     JsValue cb = args[1];
+                    bool use_capture = (args.size() > 2) ? args[2].is_truthy() : false;
                     node->add_event_listener(ev_type, [cb](const std::shared_ptr<Event>& ev) mutable {
                         JsValue ev_obj = JsValue::make_object();
                         ev_obj.set_property("type", JsValue::make_string(ev->type()));
+                        ev_obj.set_property("eventPhase", JsValue::make_number(static_cast<int>(ev->event_phase())));
+                        ev_obj.set_property("bubbles", JsValue::make_boolean(ev->bubbles()));
+                        ev_obj.set_property("cancelable", JsValue::make_boolean(ev->cancelable()));
+                        ev_obj.set_property("defaultPrevented", JsValue::make_boolean(ev->default_prevented()));
+                        ev_obj.set_property("data", JsValue::make_string(ev->data));
+                        ev_obj.set_property("key", JsValue::make_string(ev->key));
+
+                        if (ev->target()) ev_obj.set_property("target", JsValue::make_dom_node(ev->target()));
+                        if (ev->current_target()) ev_obj.set_property("currentTarget", JsValue::make_dom_node(ev->current_target()));
+
+                        auto ev_ptr = ev;
+                        ev_obj.set_property("stopPropagation", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
+                            ev_ptr->stop_propagation();
+                            return JsValue::make_undefined();
+                        }));
+                        ev_obj.set_property("preventDefault", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
+                            ev_ptr->prevent_default();
+                            return JsValue::make_undefined();
+                        }));
+
                         cb.call({ev_obj});
-                    });
+                    }, use_capture);
                     return JsValue::make_undefined();
                 });
             }
@@ -210,6 +249,18 @@ void JsValue::set_property(const std::string& name, JsValue val) {
             if (name == "textContent" || name == "innerText") {
                 el->children().clear();
                 el->append_child(std::make_shared<Text>(val.to_string()));
+                return;
+            }
+            if (name == "value") {
+                el->set_value(val.to_string());
+                return;
+            }
+            if (name == "disabled") {
+                el->set_disabled(val.is_truthy());
+                return;
+            }
+            if (name == "checked") {
+                el->set_checked(val.is_truthy());
                 return;
             }
         }

@@ -78,6 +78,26 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
                 col++;
             }
+        } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
+            if (arg.image && arg.image->is_valid()) {
+                int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+                int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+                int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+                int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+
+                int span_cols = std::max(1, end_col - start_col);
+                int span_rows = std::max(1, end_row - start_row);
+
+                for (int r = start_row; r <= end_row; ++r) {
+                    for (int c = start_col; c <= end_col; ++c) {
+                        int sx = std::clamp((c - start_col) * arg.image->width / span_cols, 0, arg.image->width - 1);
+                        int sy = std::clamp((r - start_row) * arg.image->height / span_rows, 0, arg.image->height - 1);
+                        Color pixel = arg.image->get_pixel_color(sx, sy);
+                        m_grid[r * m_cols + c].bg = pixel;
+                        m_grid[r * m_cols + c].ch = ' ';
+                    }
+                }
+            }
         }
     }, cmd);
 }

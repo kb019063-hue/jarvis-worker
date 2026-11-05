@@ -117,6 +117,7 @@ JsToken JsLexer::scan_identifier() {
         {"if", JsTokenType::If},
         {"else", JsTokenType::Else},
         {"while", JsTokenType::While},
+        {"new", JsTokenType::New},
         {"true", JsTokenType::True},
         {"false", JsTokenType::False},
         {"null", JsTokenType::Null},

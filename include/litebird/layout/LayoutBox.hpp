@@ -3,6 +3,7 @@
 #include "litebird/dom/Node.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/Dimensions.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 #include <vector>
 #include <memory>
 #include <string>
@@ -14,6 +15,8 @@ enum class BoxType {
     BlockNode,
     InlineNode,
     FlexNode,
+    GridNode,
+    ImageNode,
     AnonymousBlock,
     TextNode
 };
@@ -42,6 +45,7 @@ public:
     ComputedStyle style;
     std::shared_ptr<Node> node;
     std::string text;
+    std::shared_ptr<ImageData> image;
     std::vector<std::string> lines; // Multi-line wrapped text
     std::vector<LineBox> line_boxes; // Populated for block boxes establishing an IFC
     std::vector<std::shared_ptr<LayoutBox>> children;
@@ -58,8 +62,18 @@ public:
         return std::make_shared<LayoutBox>(BoxType::FlexNode, std::move(n), std::move(s));
     }
 
+    static std::shared_ptr<LayoutBox> create_grid(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::GridNode, std::move(n), std::move(s));
+    }
+
     static std::shared_ptr<LayoutBox> create_inline(std::shared_ptr<Node> n, ComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::InlineNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_image(std::shared_ptr<Node> n, ComputedStyle s, std::shared_ptr<ImageData> img = nullptr) {
+        auto box = std::make_shared<LayoutBox>(BoxType::ImageNode, std::move(n), std::move(s));
+        box->image = std::move(img);
+        return box;
     }
 
     static std::shared_ptr<LayoutBox> create_anonymous(ComputedStyle s) {
@@ -106,6 +120,8 @@ public:
 private:
     void layout_block(float containing_width);
     void layout_flex(float containing_width);
+    void layout_grid(float containing_width);
+    void layout_image(float containing_width);
     void layout_inline(float containing_width);
     void layout_text(float containing_width);
     void layout_inline_formatting_context(float containing_width);

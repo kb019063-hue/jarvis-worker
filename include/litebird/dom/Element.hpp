@@ -58,6 +58,51 @@ public:
         return std::find(list.begin(), list.end(), class_name) != list.end();
     }
 
+    // Form Controls
+    std::string value() const {
+        if (has_attribute("value")) return get_attribute("value");
+        if (m_tag_name == "textarea") return text_content();
+        return "";
+    }
+
+    void set_value(std::string val) {
+        set_attribute("value", std::move(val));
+    }
+
+    bool disabled() const {
+        return has_attribute("disabled");
+    }
+
+    void set_disabled(bool d) {
+        if (d) set_attribute("disabled", "");
+        else m_attributes.erase("disabled");
+        mark_needs_layout();
+    }
+
+    bool checked() const {
+        return has_attribute("checked");
+    }
+
+    void set_checked(bool c) {
+        if (c) set_attribute("checked", "");
+        else m_attributes.erase("checked");
+    }
+
+    std::string input_type() const {
+        std::string t = get_attribute("type");
+        return t.empty() ? "text" : t;
+    }
+
+    void focus() {
+        auto ev = std::make_shared<Event>("focus", false, false);
+        dispatch_event(ev);
+    }
+
+    void blur() {
+        auto ev = std::make_shared<Event>("blur", false, false);
+        dispatch_event(ev);
+    }
+
     std::string text_content() const override {
         std::string result;
         for (const auto& child : m_children) {

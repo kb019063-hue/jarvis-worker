@@ -1,6 +1,9 @@
 #include "litebird/js/VM.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/Promise.hpp"
+#include "litebird/js/Json.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -164,6 +167,110 @@ void VM::init_builtins() {
             EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
         }
         return JsValue::make_undefined();
+    }));
+
+    // Object built-ins
+    JsValue object_obj = JsValue::make_object();
+    object_obj.set_property("create", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue obj = JsValue::make_object();
+        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val) {
+            obj.object_val->prototype = args[0].object_val;
+        }
+        return obj;
+    }));
+    object_obj.set_property("getPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val && args[0].object_val->prototype) {
+            return JsValue::make_object(args[0].object_val->prototype);
+        }
+        return JsValue::make_null();
+    }));
+    object_obj.set_property("setPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.size() >= 2 && args[0].type == JsType::Object && args[0].object_val) {
+            if (args[1].type == JsType::Object && args[1].object_val) {
+                args[0].object_val->prototype = args[1].object_val;
+            } else if (args[1].type == JsType::Null) {
+                args[0].object_val->prototype = nullptr;
+            }
+        }
+        return args.empty() ? JsValue::make_undefined() : args[0];
+    }));
+    set_global("Object", object_obj);
+
+    // Array built-ins
+    JsValue array_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        return JsValue::make_array(args);
+    });
+    array_ctor.set_property("isArray", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty()) {
+            return JsValue::make_boolean(args[0].is_array());
+        }
+        return JsValue::make_boolean(false);
+    }));
+    set_global("Array", array_ctor);
+
+    // Promise built-in
+    set_global("Promise", Promise::create_constructor());
+
+    // JSON built-in
+    JsValue json_obj = JsValue::make_object();
+    json_obj.set_property("parse", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        try {
+            return Json::parse(args[0].to_string());
+        } catch (const std::exception& ex) {
+            std::cerr << "JSON.parse Error: " << ex.what() << std::endl;
+            return JsValue::make_null();
+        }
+    }));
+    json_obj.set_property("stringify", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        return JsValue::make_string(Json::stringify(args[0]));
+    }));
+    set_global("JSON", json_obj);
+
+    // fetch(url, options) built-in
+    set_global("fetch", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) {
+            return Promise::make_rejected(JsValue::make_string("fetch requires a URL argument"));
+        }
+        std::string url = args[0].to_string();
+        auto pdata = std::make_shared<PromiseData>();
+        JsValue pval = Promise::create_promise_instance(pdata);
+
+        EventLoop::default_loop().post_task([url, pdata]() {
+            ResourceResponse resp = ResourceLoader::load(url);
+            if (resp.success) {
+                JsValue res_obj = JsValue::make_object();
+                res_obj.set_property("ok", JsValue::make_boolean(resp.status_code >= 200 && resp.status_code < 300));
+                res_obj.set_property("status", JsValue::make_number(resp.status_code));
+                res_obj.set_property("statusText", JsValue::make_string(resp.status_code == 200 ? "OK" : "Error"));
+                res_obj.set_property("url", JsValue::make_string(url));
+
+                JsValue headers = JsValue::make_object();
+                headers.set_property("content-type", JsValue::make_string(resp.content_type));
+                res_obj.set_property("headers", headers);
+
+                std::string body = resp.body;
+                res_obj.set_property("text", JsValue::make_native_function([body](const std::vector<JsValue>&) {
+                    return Promise::make_resolved(JsValue::make_string(body));
+                }));
+
+                res_obj.set_property("json", JsValue::make_native_function([body](const std::vector<JsValue>&) {
+                    try {
+                        JsValue parsed = Json::parse(body);
+                        return Promise::make_resolved(parsed);
+                    } catch (const std::exception& ex) {
+                        return Promise::make_rejected(JsValue::make_string(ex.what()));
+                    }
+                }));
+
+                Promise::resolve(pdata, res_obj);
+            } else {
+                Promise::reject(pdata, JsValue::make_string(resp.error_message.empty() ? "Network request failed" : resp.error_message));
+            }
+        });
+
+        return pval;
     }));
 }
 

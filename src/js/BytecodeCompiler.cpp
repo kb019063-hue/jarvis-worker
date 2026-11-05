@@ -322,6 +322,33 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         }
         emit_opcode(OpCode::OpCall);
         emit_byte(static_cast<uint8_t>(call->args.size()));
+    } else if (auto new_expr = dynamic_cast<const NewExpr*>(expr)) {
+        compile_expr(new_expr->callee.get());
+        for (const auto& arg : new_expr->args) {
+            compile_expr(arg.get());
+        }
+        emit_opcode(OpCode::OpCall);
+        emit_byte(static_cast<uint8_t>(new_expr->args.size()));
+    } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
+        auto sub_fn = std::make_shared<BytecodeFunction>(fn_expr->name.empty() ? "__anon__" : fn_expr->name, static_cast<int>(fn_expr->params.size()));
+        BytecodeCompiler sub_compiler(sub_fn);
+
+        for (const auto& p : fn_expr->params) {
+            sub_compiler.add_local(p);
+        }
+
+        sub_compiler.compile(fn_expr->body.get());
+
+        JsValue fn_obj;
+        fn_obj.type = JsType::Function;
+        fn_obj.params = fn_expr->params;
+        fn_obj.body = fn_expr->body;
+        fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
+        fn_obj.set_property("__fn_name__", JsValue::make_string(fn_expr->name));
+
+        size_t const_idx = m_function->chunk.add_constant(fn_obj);
+        emit_opcode(OpCode::OpConstant);
+        emit_byte(static_cast<uint8_t>(const_idx));
     } else {
         throw std::runtime_error("Unsupported expression in bytecode compiler");
     }

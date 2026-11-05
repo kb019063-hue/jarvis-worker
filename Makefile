@@ -10,6 +10,7 @@ SRCS = src/dom/Node.cpp \
        src/layout/LayoutBox.cpp \
        src/layout/LayoutTree.cpp \
        src/render/PaintCommand.cpp \
+       src/render/ImageDecoder.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/BitmapRenderer.cpp \
        src/js/JsValue.cpp \
@@ -20,6 +21,8 @@ SRCS = src/dom/Node.cpp \
        src/js/Heap.cpp \
        src/js/VM.cpp \
        src/js/JsInterpreter.cpp \
+       src/js/Json.cpp \
+       src/js/Promise.cpp \
        src/js/EventLoop.cpp \
        src/net/ResourceLoader.cpp \
        src/shell/BrowserShell.cpp

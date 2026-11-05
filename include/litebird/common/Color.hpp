@@ -22,6 +22,22 @@ struct Color {
 
     bool is_transparent() const { return a == 0; }
 
+    constexpr uint32_t to_argb() const {
+        return (static_cast<uint32_t>(a) << 24) |
+               (static_cast<uint32_t>(r) << 16) |
+               (static_cast<uint32_t>(g) << 8) |
+               static_cast<uint32_t>(b);
+    }
+
+    static constexpr Color from_argb(uint32_t val) {
+        return Color(
+            static_cast<uint8_t>((val >> 16) & 0xFF),
+            static_cast<uint8_t>((val >> 8) & 0xFF),
+            static_cast<uint8_t>(val & 0xFF),
+            static_cast<uint8_t>((val >> 24) & 0xFF)
+        );
+    }
+
     static Color transparent() { return Color(0, 0, 0, 0); }
     static Color black()       { return Color(0, 0, 0, 255); }
     static Color white()       { return Color(255, 255, 255, 255); }

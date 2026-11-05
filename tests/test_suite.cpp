@@ -8,8 +8,12 @@
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
+#include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/Json.hpp"
+#include "litebird/js/Promise.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
@@ -925,6 +929,363 @@ TEST(incremental_layout_and_invalidation) {
     assert(!root->child_needs_layout);
 }
 
+TEST(js_async_promises_and_json) {
+    using namespace litebird;
+
+    // 1. JSON parsing and stringifying
+    std::string json_input = R"({"name":"litebird","version":2.5,"active":true,"features":["dom","async","grid"],"nested":{"code":200},"empty":null})";
+    JsValue parsed = Json::parse(json_input);
+    assert(parsed.type == JsType::Object);
+    assert(parsed.get_property("name").to_string() == "litebird");
+    assert(parsed.get_property("version").to_number() == 2.5);
+    assert(parsed.get_property("active").bool_val == true);
+    assert(parsed.get_property("empty").type == JsType::Null);
+
+    JsValue features = parsed.get_property("features");
+    assert(features.is_array());
+    assert(features.object_val->array_elements.size() == 3);
+    assert(features.object_val->array_elements[0].to_string() == "dom");
+    assert(features.object_val->array_elements[1].to_string() == "async");
+    assert(features.object_val->array_elements[2].to_string() == "grid");
+
+    assert(parsed.get_property("nested").get_property("code").to_number() == 200.0);
+
+    // Serialization & round-trip
+    std::string stringified = Json::stringify(parsed);
+    JsValue round_tripped = Json::parse(stringified);
+    assert(round_tripped.get_property("name").to_string() == "litebird");
+    assert(round_tripped.get_property("features").object_val->array_elements.size() == 3);
+
+    // 2. Native Promises & Chaining
+    JsInterpreter interp;
+    int step1 = 0;
+    int step2 = 0;
+
+    JsValue p = Promise::make_resolved(JsValue::make_number(10));
+    JsValue p_chained = p.get_property("then").call({
+        JsValue::make_native_function([&step1](const std::vector<JsValue>& args) {
+            step1 = static_cast<int>(args[0].to_number()) * 2; // 20
+            return JsValue::make_number(step1);
+        })
+    });
+    p_chained.get_property("then").call({
+        JsValue::make_native_function([&step2](const std::vector<JsValue>& args) {
+            step2 = static_cast<int>(args[0].to_number()) + 5; // 25
+            return JsValue::make_number(step2);
+        })
+    });
+
+    EventLoop::default_loop().run_microtasks();
+    assert(step1 == 20);
+    assert(step2 == 25);
+
+    // 3. Microtask queue drains before macrotasks (Timers)
+    std::vector<std::string> exec_order;
+    EventLoop::default_loop().set_timeout([&exec_order]() {
+        exec_order.push_back("macrotask_timer");
+    }, 0);
+    EventLoop::default_loop().post_microtask([&exec_order]() {
+        exec_order.push_back("microtask_1");
+    });
+    EventLoop::default_loop().post_microtask([&exec_order]() {
+        exec_order.push_back("microtask_2");
+    });
+
+    EventLoop::default_loop().run_microtasks();
+    assert(exec_order.size() == 2);
+    assert(exec_order[0] == "microtask_1");
+    assert(exec_order[1] == "microtask_2");
+
+    EventLoop::default_loop().tick(std::chrono::steady_clock::now() + std::chrono::milliseconds(10));
+    assert(exec_order.size() == 3);
+    assert(exec_order[2] == "macrotask_timer");
+
+    // 4. Promise.all
+    JsValue p_all_1 = Promise::make_resolved(JsValue::make_string("alpha"));
+    JsValue p_all_2 = Promise::make_resolved(JsValue::make_string("beta"));
+    JsValue p_ctor = interp.eval("Promise");
+    JsValue all_fn = p_ctor.get_property("all");
+    JsValue all_res = all_fn.call({JsValue::make_array({p_all_1, p_all_2})});
+    bool all_passed = false;
+    all_res.get_property("then").call({
+        JsValue::make_native_function([&all_passed](const std::vector<JsValue>& args) {
+            if (args[0].is_array() && args[0].object_val->array_elements.size() == 2) {
+                if (args[0].object_val->array_elements[0].to_string() == "alpha" &&
+                    args[0].object_val->array_elements[1].to_string() == "beta") {
+                    all_passed = true;
+                }
+            }
+            return JsValue::make_undefined();
+        })
+    });
+    EventLoop::default_loop().run_microtasks();
+    assert(all_passed);
+
+    // 5. fetch() with Data URI and .json()
+    interp.eval("var _code = 0; function set_code(x) { _code = x; }");
+    interp.eval(R"(
+        fetch("data:application/json,{\"status\":200,\"msg\":\"ok\"}").then(function(resp) {
+            return resp.json();
+        }).then(function(json_data) {
+            set_code(json_data.status);
+        });
+    )");
+    EventLoop::default_loop().tick(std::chrono::steady_clock::now() + std::chrono::milliseconds(10));
+    EventLoop::default_loop().run_microtasks();
+    auto result_code = interp.eval("_code");
+    assert(result_code.to_number() == 200.0);
+}
+
+TEST(css_flex_wrapping_and_grid_layout) {
+    using namespace litebird;
+
+    // 1. Flex Wrap Multi-Line Positioning
+    std::string flex_html = "<body><div id=\"flex\" style=\"display: flex; flex-direction: row; flex-wrap: wrap; width: 300px;\"><div id=\"item1\" style=\"width: 180px; height: 50px;\"></div><div id=\"item2\" style=\"width: 150px; height: 60px;\"></div><div id=\"item3\" style=\"width: 100px; height: 40px;\"></div></div></body>";
+    auto flex_doc = HtmlParser::parse(flex_html);
+    StyleResolver resolver;
+    auto flex_root = LayoutTree::build(flex_doc, resolver, 300.0f, 600.0f);
+    assert(flex_root != nullptr);
+
+    auto flex_box = flex_root->children[0];
+    assert(flex_box->box_type == BoxType::FlexNode);
+    assert(flex_box->children.size() == 3);
+
+    auto item1 = flex_box->children[0];
+    auto item2 = flex_box->children[1];
+    auto item3 = flex_box->children[2];
+
+    // item1 fits on line 1 at (0, 0)
+    assert(item1->dimensions.content.x == 0.0f);
+    assert(item1->dimensions.content.y == 0.0f);
+    assert(item1->dimensions.content.width == 180.0f);
+    assert(item1->dimensions.content.height == 50.0f);
+
+    // item2 overflows line 1 (180 + 150 = 330 > 300), so wraps to line 2 at (0, 50)
+    assert(item2->dimensions.content.x == 0.0f);
+    assert(item2->dimensions.content.y == 50.0f);
+    assert(item2->dimensions.content.width == 150.0f);
+    assert(item2->dimensions.content.height == 60.0f);
+
+    // item3 fits on line 2 (150 + 100 = 250 <= 300) at (150, 50)
+    assert(item3->dimensions.content.x == 150.0f);
+    assert(item3->dimensions.content.y == 50.0f);
+    assert(item3->dimensions.content.width == 100.0f);
+    assert(item3->dimensions.content.height == 40.0f);
+
+    // Total flex container height = line1_h (50) + line2_h (60) = 110
+    assert(flex_box->dimensions.content.height == 110.0f);
+
+    // 2. CSS Grid Multi-Column and Multi-Row Track Placement
+    std::string grid_html = "<body><div id=\"grid\" style=\"display: grid; grid-template-columns: 100px 1fr 2fr; gap: 20px; width: 360px;\"><div id=\"g1\" style=\"height: 40px;\"></div><div id=\"g2\" style=\"height: 40px;\"></div><div id=\"g3\" style=\"height: 40px;\"></div><div id=\"g4\" style=\"height: 30px;\"></div></div></body>";
+    auto grid_doc = HtmlParser::parse(grid_html);
+    auto grid_root = LayoutTree::build(grid_doc, resolver, 360.0f, 600.0f);
+    assert(grid_root != nullptr);
+
+    auto grid_box = grid_root->children[0];
+    assert(grid_box->box_type == BoxType::GridNode);
+    assert(grid_box->children.size() == 4);
+
+    auto g1 = grid_box->children[0];
+    auto g2 = grid_box->children[1];
+    auto g3 = grid_box->children[2];
+    auto g4 = grid_box->children[3];
+
+    // Col 0: 100px, Col 1: (360 - 40 - 100)/3 = 73.33px, Col 2: 146.67px
+    assert(std::abs(g1->dimensions.content.x - 0.0f) < 0.1f);
+    assert(std::abs(g1->dimensions.content.width - 100.0f) < 0.1f);
+
+    assert(std::abs(g2->dimensions.content.x - 120.0f) < 0.1f);
+    assert(std::abs(g2->dimensions.content.width - (220.0f / 3.0f)) < 0.1f);
+
+    assert(std::abs(g3->dimensions.content.x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g3->dimensions.content.width - (440.0f / 3.0f)) < 0.1f);
+
+    // g4 wraps to next row!
+    assert(std::abs(g4->dimensions.content.x - 0.0f) < 0.1f);
+    assert(std::abs(g4->dimensions.content.y - (40.0f + 20.0f)) < 0.1f);
+}
+
+TEST(dom_3phase_events_and_form_controls) {
+    using namespace litebird;
+
+    // 1. 3-Phase Event Dispatch (Capturing -> AtTarget -> Bubbling)
+    auto grandparent = std::make_shared<Element>("div");
+    grandparent->set_attribute("id", "grandparent");
+
+    auto parent = std::make_shared<Element>("div");
+    parent->set_attribute("id", "parent");
+
+    auto child = std::make_shared<Element>("button");
+    child->set_attribute("id", "child");
+
+    grandparent->append_child(parent);
+    parent->append_child(child);
+
+    std::vector<std::string> log;
+
+    grandparent->add_event_listener("click", [&log](const std::shared_ptr<Event>& ev) {
+        assert(ev->event_phase() == EventPhase::Capturing);
+        log.push_back("grandparent_capture");
+    }, true);
+
+    grandparent->add_event_listener("click", [&log](const std::shared_ptr<Event>& ev) {
+        assert(ev->event_phase() == EventPhase::Bubbling);
+        log.push_back("grandparent_bubble");
+    }, false);
+
+    parent->add_event_listener("click", [&log](const std::shared_ptr<Event>& ev) {
+        assert(ev->event_phase() == EventPhase::Capturing);
+        log.push_back("parent_capture");
+    }, true);
+
+    parent->add_event_listener("click", [&log](const std::shared_ptr<Event>& ev) {
+        assert(ev->event_phase() == EventPhase::Bubbling);
+        log.push_back("parent_bubble");
+    }, false);
+
+    child->add_event_listener("click", [&log](const std::shared_ptr<Event>& ev) {
+        assert(ev->event_phase() == EventPhase::AtTarget);
+        log.push_back("child_target");
+    }, false);
+
+    auto click_event = std::make_shared<Event>("click", true, true);
+    child->dispatch_event(click_event);
+
+    assert(log.size() == 5);
+    assert(log[0] == "grandparent_capture");
+    assert(log[1] == "parent_capture");
+    assert(log[2] == "child_target");
+    assert(log[3] == "parent_bubble");
+    assert(log[4] == "grandparent_bubble");
+
+    // Test stop_propagation during capture phase
+    log.clear();
+    parent->add_event_listener("cancel_test", [&log](const std::shared_ptr<Event>& ev) {
+        log.push_back("parent_capture_stop");
+        ev->stop_propagation();
+    }, true);
+
+    child->add_event_listener("cancel_test", [&log](const std::shared_ptr<Event>&) {
+        log.push_back("child_target_unreachable");
+    }, false);
+
+    auto cancel_event = std::make_shared<Event>("cancel_test", true, true);
+    child->dispatch_event(cancel_event);
+    assert(log.size() == 1);
+    assert(log[0] == "parent_capture_stop");
+
+    // 2. Form Controls: Element properties & JS Bridge
+    auto input_el = std::make_shared<Element>("input");
+    input_el->set_attribute("type", "text");
+    input_el->set_attribute("value", "initial_username");
+
+    assert(input_el->input_type() == "text");
+    assert(input_el->value() == "initial_username");
+    assert(!input_el->disabled());
+    assert(!input_el->checked());
+
+    input_el->set_value("updated_username");
+    assert(input_el->value() == "updated_username");
+
+    input_el->set_disabled(true);
+    assert(input_el->disabled());
+
+    input_el->set_checked(true);
+    assert(input_el->checked());
+
+    // JS DOM Node binding reflection
+    JsValue js_node = JsValue::make_dom_node(input_el);
+    assert(js_node.get_property("value").to_string() == "updated_username");
+    assert(js_node.get_property("disabled").bool_val == true);
+    assert(js_node.get_property("checked").bool_val == true);
+
+    // Set value via JS property
+    js_node.set_property("value", JsValue::make_string("js_controlled_value"));
+    assert(input_el->value() == "js_controlled_value");
+
+    // Focus / Blur events
+    bool focused = false;
+    bool blurred = false;
+    input_el->add_event_listener("focus", [&focused](const std::shared_ptr<Event>&) { focused = true; });
+    input_el->add_event_listener("blur", [&blurred](const std::shared_ptr<Event>&) { blurred = true; });
+
+    js_node.get_property("focus").call({});
+    assert(focused);
+
+    js_node.get_property("blur").call({});
+    assert(blurred);
+}
+
+TEST(image_decoding_and_rendering) {
+    using namespace litebird;
+
+    // 1. PPM P3 ASCII Decoding
+    std::string ppm_p3 = "P3\n2 2\n255\n255 0 0  0 255 0\n0 0 255  255 255 255\n";
+    auto img_p3 = ImageDecoder::decode_ppm(reinterpret_cast<const uint8_t*>(ppm_p3.data()), ppm_p3.size());
+    assert(img_p3 != nullptr);
+    assert(img_p3->is_valid());
+    assert(img_p3->width == 2 && img_p3->height == 2);
+    assert(img_p3->get_pixel(0, 0) == 0xFFFF0000); // Red
+    assert(img_p3->get_pixel(1, 0) == 0xFF00FF00); // Green
+    assert(img_p3->get_pixel(0, 1) == 0xFF0000FF); // Blue
+    assert(img_p3->get_pixel(1, 1) == 0xFFFFFFFF); // White
+
+    // 2. BMP Generation and Test Pattern
+    auto pattern = ImageDecoder::create_test_pattern(16, 16, Color(255, 128, 0));
+    assert(pattern != nullptr && pattern->is_valid());
+    assert(pattern->width == 16 && pattern->height == 16);
+    assert(pattern->get_pixel_color(0, 0).r == 255);
+    assert(pattern->get_pixel_color(0, 0).g == 128);
+
+    // 3. Base64 Data URI Decoding
+    // "P3\n1 1\n255\n0 255 0\n" base64 is "UDMKMSAxCjI1NQowIDI1NSAwCg=="
+    auto data_uri_img = ImageDecoder::decode_data_uri("data:image/ppm;base64,UDMKMSAxCjI1NQowIDI1NSAwCg==");
+    assert(data_uri_img != nullptr);
+    assert(data_uri_img->is_valid());
+    assert(data_uri_img->width == 1 && data_uri_img->height == 1);
+    assert(data_uri_img->get_pixel_color(0, 0).g == 255);
+
+    // 4. End-to-End Image Pipeline: HTML -> Layout -> DisplayList -> Bitmap Rasterization
+    std::string html = "<body><div style=\"width: 100px; height: 100px;\"><img id=\"test_img\" src=\"data:image/ppm;base64,UDMKMSAxCjI1NQowIDI1NSAwCg==\" style=\"width: 50px; height: 50px;\" /></div></body>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 100.0f, 100.0f);
+    assert(root != nullptr);
+
+    auto img_el = doc->get_element_by_id("test_img");
+    assert(img_el != nullptr);
+
+    auto container_box = root->children[0];
+    auto img_box = container_box->children[0];
+    assert(img_box->box_type == BoxType::ImageNode);
+    assert(img_box->image != nullptr);
+    assert(img_box->dimensions.content.width == 50.0f);
+    assert(img_box->dimensions.content.height == 50.0f);
+
+    // Build DisplayList
+    DisplayList dlist = DisplayList::build(root);
+    bool found_cmd = false;
+    for (const auto& cmd : dlist.commands()) {
+        if (std::holds_alternative<DrawImageCommand>(cmd)) {
+            found_cmd = true;
+            const auto& img_cmd = std::get<DrawImageCommand>(cmd);
+            assert(img_cmd.rect.width == 50.0f);
+            assert(img_cmd.rect.height == 50.0f);
+            assert(img_cmd.image != nullptr);
+        }
+    }
+    assert(found_cmd);
+
+    // Rasterize into BitmapRenderer
+    BitmapRenderer renderer(100, 100);
+    renderer.clear(Color::white());
+    renderer.render(dlist);
+
+    // The image was rendered at (0, 0) to (50, 50) with green color (0, 255, 0)
+    Color pixel = renderer.get_pixel(25, 25);
+    assert(pixel.r == 0 && pixel.g == 255 && pixel.b == 0);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -948,7 +1309,11 @@ int main() {
     RUN_TEST(box_sizing_and_constraints);
     RUN_TEST(javascript_prototype_chain_and_arrays);
     RUN_TEST(incremental_layout_and_invalidation);
+    RUN_TEST(js_async_promises_and_json);
+    RUN_TEST(css_flex_wrapping_and_grid_layout);
+    RUN_TEST(dom_3phase_events_and_form_controls);
+    RUN_TEST(image_decoding_and_rendering);
 
-    std::cout << "\n\033[1;32mAll 20 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 24 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

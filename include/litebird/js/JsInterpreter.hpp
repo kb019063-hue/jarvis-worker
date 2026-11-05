@@ -46,6 +46,7 @@ public:
     }
 
     std::shared_ptr<JsEnvironment> parent() const { return m_parent; }
+    const std::unordered_map<std::string, JsValue>& values() const { return m_values; }
 
     void collect_roots(std::vector<JsValue*>& roots) {
         for (auto& [k, v] : m_values) {

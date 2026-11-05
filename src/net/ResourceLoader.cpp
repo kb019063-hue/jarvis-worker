@@ -112,6 +112,49 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
 }
 
 ResourceResponse ResourceLoader::load(const std::string& url) {
+    if (url.rfind("data:", 0) == 0) {
+        ResourceResponse resp;
+        resp.status_code = 200;
+        resp.success = true;
+        auto comma_pos = url.find(',');
+        if (comma_pos != std::string::npos) {
+            std::string header = url.substr(5, comma_pos - 5);
+            std::string payload = url.substr(comma_pos + 1);
+            bool is_base64 = false;
+            if (auto semi = header.find(';'); semi != std::string::npos) {
+                if (header.substr(semi + 1) == "base64") {
+                    is_base64 = true;
+                    header = header.substr(0, semi);
+                }
+            }
+            resp.content_type = header.empty() ? "text/plain" : header;
+            if (is_base64) {
+                const std::string_view BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                std::vector<int> T(256, -1);
+                for (int i = 0; i < 64; i++) T[static_cast<unsigned char>(BASE64_CHARS[i])] = i;
+
+                int val = 0, valb = -8;
+                std::string decoded;
+                for (char c : payload) {
+                    if (T[static_cast<unsigned char>(c)] == -1) {
+                        if (c == '=') break;
+                        continue;
+                    }
+                    val = (val << 6) + T[static_cast<unsigned char>(c)];
+                    valb += 6;
+                    if (valb >= 0) {
+                        decoded.push_back(static_cast<char>((val >> valb) & 0xFF));
+                        valb -= 8;
+                    }
+                }
+                resp.body = decoded;
+            } else {
+                resp.body = payload;
+            }
+        }
+        return resp;
+    }
+
     if (url.rfind("http://", 0) == 0) {
         return load_http(url);
     }

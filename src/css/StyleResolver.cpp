@@ -135,17 +135,67 @@ EdgeSizes StyleResolver::parse_box_edges(std::string_view val) const {
     return EdgeSizes(0.0f);
 }
 
+static std::vector<float> parse_grid_tracks(std::string_view val) {
+    std::vector<float> tracks;
+    std::string s(val);
+    size_t rep_pos = s.find("repeat(");
+    while (rep_pos != std::string::npos) {
+        size_t close_pos = s.find(")", rep_pos);
+        if (close_pos != std::string::npos) {
+            std::string inside = s.substr(rep_pos + 7, close_pos - (rep_pos + 7));
+            size_t comma = inside.find(",");
+            if (comma != std::string::npos) {
+                int count = 1;
+                try { count = std::stoi(inside.substr(0, comma)); } catch (...) {}
+                std::string item = inside.substr(comma + 1);
+                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+                std::string rep_expanded;
+                for (int i = 0; i < count; ++i) {
+                    if (i > 0) rep_expanded += " ";
+                    rep_expanded += item;
+                }
+                s.replace(rep_pos, close_pos - rep_pos + 1, rep_expanded);
+            }
+        }
+        rep_pos = s.find("repeat(", rep_pos + 1);
+    }
+
+    std::stringstream ss(s);
+    std::string token;
+    while (ss >> token) {
+        if (token.ends_with("fr")) {
+            std::string num_part = token.substr(0, token.size() - 2);
+            float fr = 1.0f;
+            try { fr = std::stof(num_part); } catch (...) {}
+            tracks.push_back(-std::max(0.1f, fr));
+        } else if (token == "auto") {
+            tracks.push_back(-1.0f);
+        } else {
+            float px = 0.0f;
+            try { px = std::stof(token); } catch (...) {}
+            tracks.push_back(px);
+        }
+    }
+    return tracks;
+}
+
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& val) const {
     if (prop == "display") {
         if (val == "block") style.display = Display::Block;
         else if (val == "inline") style.display = Display::Inline;
         else if (val == "flex") style.display = Display::Flex;
+        else if (val == "grid") style.display = Display::Grid;
         else if (val == "none") style.display = Display::None;
     } else if (prop == "flex-direction") {
         if (val == "row") style.flex_direction = FlexDirection::Row;
         else if (val == "column") style.flex_direction = FlexDirection::Column;
         else if (val == "row-reverse") style.flex_direction = FlexDirection::RowReverse;
         else if (val == "column-reverse") style.flex_direction = FlexDirection::ColumnReverse;
+    } else if (prop == "flex-wrap") {
+        if (val == "wrap") style.flex_wrap = FlexWrap::Wrap;
+        else if (val == "wrap-reverse") style.flex_wrap = FlexWrap::WrapReverse;
+        else if (val == "nowrap") style.flex_wrap = FlexWrap::NoWrap;
     } else if (prop == "justify-content") {
         if (val == "flex-start" || val == "start") style.justify_content = JustifyContent::FlexStart;
         else if (val == "flex-end" || val == "end") style.justify_content = JustifyContent::FlexEnd;
@@ -158,8 +208,24 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         else if (val == "flex-start" || val == "start") style.align_items = AlignItems::FlexStart;
         else if (val == "flex-end" || val == "end") style.align_items = AlignItems::FlexEnd;
         else if (val == "center") style.align_items = AlignItems::Center;
-    } else if (prop == "gap") {
-        style.gap = parse_length(val, 0.0f);
+    } else if (prop == "align-content") {
+        if (val == "stretch") style.align_content = AlignContent::Stretch;
+        else if (val == "flex-start" || val == "start") style.align_content = AlignContent::FlexStart;
+        else if (val == "flex-end" || val == "end") style.align_content = AlignContent::FlexEnd;
+        else if (val == "center") style.align_content = AlignContent::Center;
+        else if (val == "space-between") style.align_content = AlignContent::SpaceBetween;
+        else if (val == "space-around") style.align_content = AlignContent::SpaceAround;
+        else if (val == "space-evenly") style.align_content = AlignContent::SpaceEvenly;
+    } else if (prop == "grid-template-columns") {
+        style.grid_template_columns = parse_grid_tracks(val);
+    } else if (prop == "grid-template-rows") {
+        style.grid_template_rows = parse_grid_tracks(val);
+    } else if (prop == "grid-gap" || prop == "gap") {
+        style.gap = style.grid_column_gap = style.grid_row_gap = parse_length(val, 0.0f);
+    } else if (prop == "column-gap" || prop == "grid-column-gap") {
+        style.grid_column_gap = parse_length(val, 0.0f);
+    } else if (prop == "row-gap" || prop == "grid-row-gap") {
+        style.grid_row_gap = parse_length(val, 0.0f);
     } else if (prop == "flex-grow") {
         try { style.flex_grow = std::stof(val); } catch (...) {}
     } else if (prop == "flex-shrink") {

@@ -67,7 +67,12 @@ public:
     }
 
     // EventTarget implementation
-    void add_event_listener(const std::string& type, EventListener listener);
+    struct EventListenerEntry {
+        EventListener listener;
+        bool use_capture{false};
+    };
+
+    void add_event_listener(const std::string& type, EventListener listener, bool use_capture = false);
     void remove_event_listeners(const std::string& type);
     bool dispatch_event(const std::shared_ptr<Event>& event);
     bool has_listeners(const std::string& type) const {
@@ -89,7 +94,7 @@ protected:
     NodeType m_type;
     std::weak_ptr<Node> m_parent;
     std::vector<std::shared_ptr<Node>> m_children;
-    std::unordered_map<std::string, std::vector<EventListener>> m_listeners;
+    std::unordered_map<std::string, std::vector<EventListenerEntry>> m_listeners;
     bool m_needs_layout{true};
     bool m_child_needs_layout{true};
 };

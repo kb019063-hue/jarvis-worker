@@ -1,6 +1,9 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/Json.hpp"
+#include "litebird/js/Promise.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -27,11 +30,22 @@ std::shared_ptr<BytecodeFunction> JsInterpreter::compile_to_bytecode(std::string
 }
 
 JsValue JsInterpreter::eval(std::string_view source) {
+    for (const auto& [k, v] : m_global_env->values()) {
+        m_vm.set_global(k, v);
+    }
     try {
         auto fn = compile_to_bytecode(source);
-        return m_vm.interpret(fn);
+        JsValue res = m_vm.interpret(fn);
+        for (const auto& [k, v] : m_vm.globals()) {
+            m_global_env->define(k, v);
+        }
+        return res;
     } catch (const std::exception&) {
-        return eval_ast(source);
+        JsValue res = eval_ast(source);
+        for (const auto& [k, v] : m_global_env->values()) {
+            m_vm.set_global(k, v);
+        }
+        return res;
     }
 }
 
@@ -58,6 +72,9 @@ void JsInterpreter::init_builtins() {
             m_current_env->collect_roots(roots);
         } else if (m_global_env) {
             m_global_env->collect_roots(roots);
+        }
+        for (auto& [k, v] : m_vm.globals()) {
+            roots.push_back(&v);
         }
         auto stats = Heap::default_heap().collect_garbage(roots);
         JsValue res = JsValue::make_object();
@@ -164,14 +181,24 @@ void JsInterpreter::init_builtins() {
 
     // Function caller for callbacks
     JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args) {
-        auto fn_env = std::make_shared<JsEnvironment>(fn.closure);
+        for (const auto& [k, v] : m_vm.globals()) {
+            m_global_env->define(k, v);
+        }
+        auto fn_env = std::make_shared<JsEnvironment>(fn.closure ? fn.closure : m_global_env);
         for (size_t i = 0; i < fn.params.size(); ++i) {
             JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
             fn_env->define(fn.params[i], arg);
         }
         try {
-            return execute(fn.body.get(), fn_env);
+            JsValue res = execute(fn.body.get(), fn_env);
+            for (const auto& [k, v] : m_global_env->values()) {
+                m_vm.set_global(k, v);
+            }
+            return res;
         } catch (const ReturnException& ret) {
+            for (const auto& [k, v] : m_global_env->values()) {
+                m_vm.set_global(k, v);
+            }
             return ret.value;
         }
     });
@@ -214,6 +241,71 @@ void JsInterpreter::init_builtins() {
         return JsValue::make_boolean(false);
     }));
     m_global_env->define("Array", array_ctor);
+
+    // Promise built-in
+    m_global_env->define("Promise", Promise::create_constructor());
+
+    // JSON built-in
+    JsValue json_obj = JsValue::make_object();
+    json_obj.set_property("parse", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        try {
+            return Json::parse(args[0].to_string());
+        } catch (const std::exception& ex) {
+            std::cerr << "JSON.parse Error: " << ex.what() << std::endl;
+            return JsValue::make_null();
+        }
+    }));
+    json_obj.set_property("stringify", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        return JsValue::make_string(Json::stringify(args[0]));
+    }));
+    m_global_env->define("JSON", json_obj);
+
+    // fetch(url, options) built-in
+    m_global_env->define("fetch", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) {
+            return Promise::make_rejected(JsValue::make_string("fetch requires a URL argument"));
+        }
+        std::string url = args[0].to_string();
+        auto pdata = std::make_shared<PromiseData>();
+        JsValue pval = Promise::create_promise_instance(pdata);
+
+        EventLoop::default_loop().post_task([url, pdata]() {
+            ResourceResponse resp = ResourceLoader::load(url);
+            if (resp.success) {
+                JsValue res_obj = JsValue::make_object();
+                res_obj.set_property("ok", JsValue::make_boolean(resp.status_code >= 200 && resp.status_code < 300));
+                res_obj.set_property("status", JsValue::make_number(resp.status_code));
+                res_obj.set_property("statusText", JsValue::make_string(resp.status_code == 200 ? "OK" : "Error"));
+                res_obj.set_property("url", JsValue::make_string(url));
+
+                JsValue headers = JsValue::make_object();
+                headers.set_property("content-type", JsValue::make_string(resp.content_type));
+                res_obj.set_property("headers", headers);
+
+                std::string body = resp.body;
+                res_obj.set_property("text", JsValue::make_native_function([body](const std::vector<JsValue>&) {
+                    return Promise::make_resolved(JsValue::make_string(body));
+                }));
+
+                res_obj.set_property("json", JsValue::make_native_function([body](const std::vector<JsValue>&) {
+                    try {
+                        JsValue parsed = Json::parse(body);
+                        return Promise::make_resolved(parsed);
+                    } catch (const std::exception& ex) {
+                        return Promise::make_rejected(JsValue::make_string(ex.what()));
+                    }
+                }));
+
+                Promise::resolve(pdata, res_obj);
+            } else {
+                Promise::reject(pdata, JsValue::make_string(resp.error_message.empty() ? "Network request failed" : resp.error_message));
+            }
+        });
+
+        return pval;
+    }));
 }
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
@@ -279,19 +371,32 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         auto params = fn_decl->params;
         auto closure = env;
         fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
-            auto fn_env = std::make_shared<JsEnvironment>(closure);
+            for (const auto& [k, v] : m_vm.globals()) {
+                m_global_env->define(k, v);
+            }
+            auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
             for (size_t i = 0; i < params.size(); ++i) {
                 JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
                 fn_env->define(params[i], arg);
             }
             try {
-                return execute(body_ptr.get(), fn_env);
+                JsValue res = execute(body_ptr.get(), fn_env);
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return res;
             } catch (const ReturnException& ret) {
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
                 return ret.value;
             }
         };
 
         env->define(fn_decl->name, fn_val);
+        if (env == m_global_env) {
+            m_vm.set_global(fn_decl->name, fn_val);
+        }
         return fn_val;
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
         JsValue ret_val = ret_stmt->value ? eval_expr(ret_stmt->value.get(), env) : JsValue::make_undefined();
@@ -330,14 +435,24 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         auto params = fn_expr->params;
         auto closure = env;
         fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
-            auto fn_env = std::make_shared<JsEnvironment>(closure);
+            for (const auto& [k, v] : m_vm.globals()) {
+                m_global_env->define(k, v);
+            }
+            auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
             for (size_t i = 0; i < params.size(); ++i) {
                 JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
                 fn_env->define(params[i], arg);
             }
             try {
-                return execute(body_ptr.get(), fn_env);
+                JsValue res = execute(body_ptr.get(), fn_env);
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return res;
             } catch (const ReturnException& ret) {
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
                 return ret.value;
             }
         };
@@ -454,6 +569,38 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         JsValue callee_val = eval_expr(call->callee.get(), env);
         std::vector<JsValue> arg_vals;
         for (const auto& a : call->args) {
+            arg_vals.push_back(eval_expr(a.get(), env));
+        }
+
+        if (callee_val.type == JsType::NativeFunction && callee_val.native_fn) {
+            return callee_val.native_fn(arg_vals);
+        }
+
+        if (callee_val.type == JsType::Function) {
+            auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
+            for (size_t i = 0; i < callee_val.params.size(); ++i) {
+                JsValue arg = (i < arg_vals.size()) ? arg_vals[i] : JsValue::make_undefined();
+                fn_env->define(callee_val.params[i], arg);
+            }
+            try {
+                JsValue res = execute(callee_val.body.get(), fn_env);
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return res;
+            } catch (const ReturnException& ret) {
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return ret.value;
+            }
+        }
+    }
+
+    if (auto new_expr = dynamic_cast<const NewExpr*>(expr)) {
+        JsValue callee_val = eval_expr(new_expr->callee.get(), env);
+        std::vector<JsValue> arg_vals;
+        for (const auto& a : new_expr->args) {
             arg_vals.push_back(eval_expr(a.get(), env));
         }
 

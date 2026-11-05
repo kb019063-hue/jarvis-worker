@@ -83,6 +83,15 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                     list.add(text_cmd);
                 }
 
+                // Fragment image
+                if (frag.box && frag.box->image) {
+                    DrawImageCommand img_cmd;
+                    img_cmd.rect = frag.rect;
+                    img_cmd.image = frag.box->image;
+                    img_cmd.border_radius = frag.style.border_radius;
+                    list.add(img_cmd);
+                }
+
                 // Text decoration (e.g. <a> link underline)
                 if (frag.style.text_decoration == "underline") {
                     DrawRectCommand u_cmd;
@@ -119,6 +128,15 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
             cmd.font_weight = box->style.font_weight;
             list.add(cmd);
         }
+    }
+
+    // 4b. Image Node
+    if (box->image) {
+        DrawImageCommand cmd;
+        cmd.rect = box->dimensions.content;
+        cmd.image = box->image;
+        cmd.border_radius = box->style.border_radius;
+        list.add(cmd);
     }
 
     // 5. Partition and paint children according to CSS Stacking Context rules

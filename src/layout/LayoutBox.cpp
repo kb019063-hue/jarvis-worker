@@ -19,12 +19,18 @@ void LayoutBox::layout(float containing_width, float containing_height) {
         case BoxType::FlexNode:
             layout_flex(containing_width);
             break;
+        case BoxType::GridNode:
+            layout_grid(containing_width);
+            break;
         case BoxType::BlockNode:
         case BoxType::AnonymousBlock:
             layout_block(containing_width);
             break;
         case BoxType::InlineNode:
             layout_inline(containing_width);
+            break;
+        case BoxType::ImageNode:
+            layout_image(containing_width);
             break;
         case BoxType::TextNode:
             layout_text(containing_width);
@@ -42,6 +48,7 @@ bool LayoutBox::establishes_ifc() const {
     for (const auto& child : children) {
         if (child->box_type == BoxType::BlockNode ||
             child->box_type == BoxType::FlexNode ||
+            child->box_type == BoxType::GridNode ||
             child->box_type == BoxType::AnonymousBlock) {
             return false;
         }
@@ -199,119 +206,151 @@ void LayoutBox::layout_flex(float containing_width) {
     bool is_row = (style.flex_direction == FlexDirection::Row || style.flex_direction == FlexDirection::RowReverse);
 
     if (is_row) {
-        // Initial layout pass for all in-flow items
-        float total_items_width = 0.0f;
-        float total_grow = 0.0f;
+        struct FlexLine {
+            std::vector<std::shared_ptr<LayoutBox>> items;
+            float line_items_width{0.0f};
+            float total_grow{0.0f};
+            float max_height{0.0f};
+        };
 
-        for (auto& child : in_flow) {
-            float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
-            child->layout(child_avail_w);
-            total_items_width += child->dimensions.margin_box().width;
-            total_grow += child->style.flex_grow;
+        std::vector<FlexLine> lines;
+        if (style.flex_wrap == FlexWrap::Wrap) {
+            FlexLine cur_line;
+            for (auto& child : in_flow) {
+                float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
+                child->layout(child_avail_w);
+                float item_w = child->dimensions.margin_box().width;
+                float item_h = child->dimensions.margin_box().height;
+
+                float test_w = cur_line.items.empty() ? item_w : (cur_line.line_items_width + (cur_line.items.size() * style.gap) + item_w);
+
+                if (!cur_line.items.empty() && test_w > dimensions.content.width) {
+                    lines.push_back(std::move(cur_line));
+                    cur_line = FlexLine();
+                }
+
+                cur_line.items.push_back(child);
+                cur_line.line_items_width += item_w;
+                cur_line.total_grow += child->style.flex_grow;
+                cur_line.max_height = std::max(cur_line.max_height, item_h);
+            }
+            if (!cur_line.items.empty()) {
+                lines.push_back(std::move(cur_line));
+            }
+        } else {
+            FlexLine single;
+            for (auto& child : in_flow) {
+                float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
+                child->layout(child_avail_w);
+                single.items.push_back(child);
+                single.line_items_width += child->dimensions.margin_box().width;
+                single.total_grow += child->style.flex_grow;
+                single.max_height = std::max(single.max_height, child->dimensions.margin_box().height);
+            }
+            lines.push_back(std::move(single));
         }
 
-        float total_gaps = (in_flow.size() > 1) ? (in_flow.size() - 1) * style.gap : 0.0f;
-        float free_space = dimensions.content.width - (total_items_width + total_gaps);
+        float y_line_cursor = 0.0f;
+        for (auto& line : lines) {
+            float total_gaps = (line.items.size() > 1) ? (line.items.size() - 1) * style.gap : 0.0f;
+            float free_space = dimensions.content.width - (line.line_items_width + total_gaps);
 
-        // Distribute flex-grow if free space exists
-        if (free_space > 0.0f && total_grow > 0.0f) {
-            for (auto& child : in_flow) {
-                if (child->style.flex_grow > 0.0f) {
-                    float extra = (child->style.flex_grow / total_grow) * free_space;
-                    child->dimensions.content.width += extra;
-                    child->layout(child->dimensions.content.width);
+            if (free_space > 0.0f && line.total_grow > 0.0f) {
+                for (auto& child : line.items) {
+                    if (child->style.flex_grow > 0.0f) {
+                        float extra = (child->style.flex_grow / line.total_grow) * free_space;
+                        child->dimensions.content.width += extra;
+                        child->layout(child->dimensions.content.width);
+                    }
                 }
             }
-        }
 
-        // Compute max child height for cross axis
-        float max_child_h = 0.0f;
-        for (const auto& child : in_flow) {
-            max_child_h = std::max(max_child_h, child->dimensions.margin_box().height);
-        }
+            float total_used_w = 0.0f;
+            float cur_line_max_h = 0.0f;
+            for (const auto& child : line.items) {
+                total_used_w += child->dimensions.margin_box().width;
+                cur_line_max_h = std::max(cur_line_max_h, child->dimensions.margin_box().height);
+            }
+            float remaining = dimensions.content.width - (total_used_w + total_gaps);
 
-        // Justify-content spacing along Main Axis (X)
-        float total_used_w = 0.0f;
-        for (const auto& child : in_flow) {
-            total_used_w += child->dimensions.margin_box().width;
-        }
-        float remaining = dimensions.content.width - (total_used_w + total_gaps);
+            float x_cursor = 0.0f;
+            float gap_spacing = style.gap;
 
-        float x_cursor = 0.0f;
-        float gap_spacing = style.gap;
-
-        switch (style.justify_content) {
-            case JustifyContent::FlexStart:
-                x_cursor = 0.0f;
-                break;
-            case JustifyContent::FlexEnd:
-                x_cursor = std::max(0.0f, remaining);
-                break;
-            case JustifyContent::Center:
-                x_cursor = std::max(0.0f, remaining / 2.0f);
-                break;
-            case JustifyContent::SpaceBetween:
-                if (in_flow.size() > 1) {
-                    gap_spacing += std::max(0.0f, remaining / (in_flow.size() - 1));
-                }
-                break;
-            case JustifyContent::SpaceAround:
-                if (!in_flow.empty()) {
-                    float space = std::max(0.0f, remaining / in_flow.size());
-                    x_cursor = space / 2.0f;
-                    gap_spacing += space;
-                }
-                break;
-            case JustifyContent::SpaceEvenly:
-                if (!in_flow.empty()) {
-                    float space = std::max(0.0f, remaining / (in_flow.size() + 1));
-                    x_cursor = space;
-                    gap_spacing += space;
-                }
-                break;
-        }
-
-        // Position items
-        for (auto& child : in_flow) {
-            float y_offset = 0.0f;
-            float child_h = child->dimensions.margin_box().height;
-
-            switch (style.align_items) {
-                case AlignItems::Stretch:
-                    if (child->style.height < 0.0f && max_child_h > 0.0f) {
-                        child->dimensions.content.height = max_child_h;
+            switch (style.justify_content) {
+                case JustifyContent::FlexStart:
+                    x_cursor = 0.0f;
+                    break;
+                case JustifyContent::FlexEnd:
+                    x_cursor = std::max(0.0f, remaining);
+                    break;
+                case JustifyContent::Center:
+                    x_cursor = std::max(0.0f, remaining / 2.0f);
+                    break;
+                case JustifyContent::SpaceBetween:
+                    if (line.items.size() > 1) {
+                        gap_spacing += std::max(0.0f, remaining / (line.items.size() - 1));
                     }
                     break;
-                case AlignItems::FlexEnd:
-                    y_offset = max_child_h - child_h;
+                case JustifyContent::SpaceAround:
+                    if (!line.items.empty()) {
+                        float space = std::max(0.0f, remaining / line.items.size());
+                        x_cursor = space / 2.0f;
+                        gap_spacing += space;
+                    }
                     break;
-                case AlignItems::Center:
-                    y_offset = (max_child_h - child_h) / 2.0f;
-                    break;
-                case AlignItems::FlexStart:
-                default:
-                    y_offset = 0.0f;
+                case JustifyContent::SpaceEvenly:
+                    if (!line.items.empty()) {
+                        float space = std::max(0.0f, remaining / (line.items.size() + 1));
+                        x_cursor = space;
+                        gap_spacing += space;
+                    }
                     break;
             }
 
-            float new_x = dimensions.content.x + x_cursor + child->dimensions.margin.left;
-            float new_y = dimensions.content.y + y_offset + child->dimensions.margin.top;
+            for (auto& child : line.items) {
+                float y_offset = 0.0f;
+                float child_h = child->dimensions.margin_box().height;
 
-            if (child->style.position == Position::Relative) {
-                if (child->style.has_left) new_x += child->style.left;
-                else if (child->style.has_right) new_x -= child->style.right;
-                if (child->style.has_top) new_y += child->style.top;
-                else if (child->style.has_bottom) new_y -= child->style.bottom;
+                switch (style.align_items) {
+                    case AlignItems::Stretch:
+                        if (child->style.height < 0.0f && cur_line_max_h > 0.0f) {
+                            child->dimensions.content.height = cur_line_max_h;
+                        }
+                        break;
+                    case AlignItems::FlexEnd:
+                        y_offset = cur_line_max_h - child_h;
+                        break;
+                    case AlignItems::Center:
+                        y_offset = (cur_line_max_h - child_h) / 2.0f;
+                        break;
+                    case AlignItems::FlexStart:
+                    default:
+                        y_offset = 0.0f;
+                        break;
+                }
+
+                float new_x = dimensions.content.x + x_cursor + child->dimensions.margin.left;
+                float new_y = dimensions.content.y + y_line_cursor + y_offset + child->dimensions.margin.top;
+
+                if (child->style.position == Position::Relative) {
+                    if (child->style.has_left) new_x += child->style.left;
+                    else if (child->style.has_right) new_x -= child->style.right;
+                    if (child->style.has_top) new_y += child->style.top;
+                    else if (child->style.has_bottom) new_y -= child->style.bottom;
+                }
+
+                float dx = new_x - child->dimensions.content.x;
+                float dy = new_y - child->dimensions.content.y;
+                child->shift_position(dx, dy);
+
+                x_cursor += child->dimensions.margin_box().width + gap_spacing;
             }
 
-            float dx = new_x - child->dimensions.content.x;
-            float dy = new_y - child->dimensions.content.y;
-            child->shift_position(dx, dy);
-
-            x_cursor += child->dimensions.margin_box().width + gap_spacing;
+            y_line_cursor += cur_line_max_h + style.gap;
         }
 
-        float final_h = (style.height >= 0.0f) ? style.height : max_child_h;
+        float total_h = y_line_cursor > 0.0f ? (y_line_cursor - style.gap) : 0.0f;
+        float final_h = (style.height >= 0.0f) ? style.height : total_h;
         if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
             final_h = std::max(0.0f, final_h - v_padding_border);
         }
@@ -348,6 +387,144 @@ void LayoutBox::layout_flex(float containing_width) {
         }
         dimensions.content.height = final_h;
     }
+}
+
+void LayoutBox::layout_grid(float containing_width) {
+    float h_padding_border = dimensions.border.left + dimensions.border.right +
+                            dimensions.padding.left + dimensions.padding.right;
+    float v_padding_border = dimensions.border.top + dimensions.border.bottom +
+                            dimensions.padding.top + dimensions.padding.bottom;
+    float total_h_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
+
+    if (style.width >= 0.0f) {
+        if (style.box_sizing == BoxSizing::BorderBox) {
+            dimensions.content.width = std::max(0.0f, style.width - h_padding_border);
+        } else {
+            dimensions.content.width = style.width;
+        }
+    } else {
+        dimensions.content.width = std::max(0.0f, containing_width - total_h_spacing);
+    }
+
+    if (style.min_width >= 0.0f) {
+        float min_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.min_width - h_padding_border) : style.min_width;
+        dimensions.content.width = std::max(dimensions.content.width, min_w);
+    }
+    if (style.max_width >= 0.0f) {
+        float max_w = (style.box_sizing == BoxSizing::BorderBox) ?
+            std::max(0.0f, style.max_width - h_padding_border) : style.max_width;
+        dimensions.content.width = std::min(dimensions.content.width, max_w);
+    }
+
+    // Filter in-flow children
+    std::vector<std::shared_ptr<LayoutBox>> in_flow;
+    for (const auto& child : children) {
+        if (!child->style.is_out_of_flow()) {
+            in_flow.push_back(child);
+        }
+    }
+
+    if (in_flow.empty()) {
+        float h = (style.height >= 0.0f) ? style.height : 0.0f;
+        if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
+            h = std::max(0.0f, h - v_padding_border);
+        }
+        dimensions.content.height = h;
+        return;
+    }
+
+    // Compute column track widths
+    std::vector<float> col_widths;
+    const auto& col_template = style.grid_template_columns.empty() ?
+        std::vector<float>{-1.0f} : style.grid_template_columns;
+    size_t num_cols = col_template.size();
+
+    float col_gap = style.grid_column_gap > 0.0f ? style.grid_column_gap : style.gap;
+    float row_gap = style.grid_row_gap > 0.0f ? style.grid_row_gap : style.gap;
+
+    float total_gaps = (num_cols > 1) ? (num_cols - 1) * col_gap : 0.0f;
+    float avail_for_tracks = std::max(0.0f, dimensions.content.width - total_gaps);
+
+    float fixed_sum = 0.0f;
+    float total_fr = 0.0f;
+    for (float track : col_template) {
+        if (track >= 0.0f) {
+            fixed_sum += track;
+        } else {
+            total_fr += (-track);
+        }
+    }
+
+    float fr_space = std::max(0.0f, avail_for_tracks - fixed_sum);
+    for (float track : col_template) {
+        if (track >= 0.0f) {
+            col_widths.push_back(track);
+        } else {
+            float fr_w = (total_fr > 0.0f) ? ((-track) / total_fr) * fr_space : 0.0f;
+            col_widths.push_back(fr_w);
+        }
+    }
+
+    std::vector<float> col_x(num_cols, 0.0f);
+    float cur_x = 0.0f;
+    for (size_t c = 0; c < num_cols; ++c) {
+        col_x[c] = cur_x;
+        cur_x += col_widths[c] + col_gap;
+    }
+
+    size_t num_rows = (in_flow.size() + num_cols - 1) / num_cols;
+    std::vector<float> row_heights(num_rows, 0.0f);
+
+    for (size_t i = 0; i < in_flow.size(); ++i) {
+        size_t c = i % num_cols;
+        size_t r = i / num_cols;
+        float item_w = col_widths[c];
+        in_flow[i]->layout(item_w);
+        float item_h = in_flow[i]->dimensions.margin_box().height;
+        row_heights[r] = std::max(row_heights[r], item_h);
+    }
+
+    for (size_t r = 0; r < num_rows && r < style.grid_template_rows.size(); ++r) {
+        float explicit_h = style.grid_template_rows[r];
+        if (explicit_h >= 0.0f) {
+            row_heights[r] = std::max(row_heights[r], explicit_h);
+        }
+    }
+
+    std::vector<float> row_y(num_rows, 0.0f);
+    float cur_y = 0.0f;
+    for (size_t r = 0; r < num_rows; ++r) {
+        row_y[r] = cur_y;
+        cur_y += row_heights[r] + row_gap;
+    }
+
+    for (size_t i = 0; i < in_flow.size(); ++i) {
+        size_t c = i % num_cols;
+        size_t r = i / num_cols;
+
+        auto& child = in_flow[i];
+        float new_x = dimensions.content.x + col_x[c] + child->dimensions.margin.left;
+        float new_y = dimensions.content.y + row_y[r] + child->dimensions.margin.top;
+
+        if (child->style.position == Position::Relative) {
+            if (child->style.has_left) new_x += child->style.left;
+            else if (child->style.has_right) new_x -= child->style.right;
+            if (child->style.has_top) new_y += child->style.top;
+            else if (child->style.has_bottom) new_y -= child->style.bottom;
+        }
+
+        float dx = new_x - child->dimensions.content.x;
+        float dy = new_y - child->dimensions.content.y;
+        child->shift_position(dx, dy);
+    }
+
+    float total_grid_h = cur_y > 0.0f ? (cur_y - row_gap) : 0.0f;
+    float final_h = (style.height >= 0.0f) ? style.height : total_grid_h;
+    if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
+        final_h = std::max(0.0f, final_h - v_padding_border);
+    }
+    dimensions.content.height = final_h;
 }
 
 void LayoutBox::layout_inline(float containing_width) {
@@ -499,6 +676,15 @@ static void collect_items(
                 }
             }
         }
+    } else if (box->box_type == BoxType::ImageNode) {
+        box->layout(0.0f);
+        InlineItem item;
+        item.type = InlineItem::Type::Text;
+        item.width = box->dimensions.content.width;
+        item.height = box->dimensions.content.height;
+        item.style = box->style;
+        item.source_box = box;
+        items.push_back(item);
     }
 }
 
@@ -634,6 +820,15 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
                 child->lines.push_back(child->text);
             }
             child->dimensions = dimensions;
+        } else if (child->box_type == BoxType::ImageNode) {
+            for (const auto& line : line_boxes) {
+                for (const auto& frag : line.fragments) {
+                    if (frag.box == child) {
+                        child->dimensions.content = frag.rect;
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -745,14 +940,31 @@ void LayoutBox::shift_position(float dx, float dy) {
     }
 }
 
+void LayoutBox::layout_image(float containing_width) {
+    (void)containing_width;
+    float w = (style.width >= 0.0f) ? style.width : (image ? static_cast<float>(image->width) : 100.0f);
+    float h = (style.height >= 0.0f) ? style.height : (image ? static_cast<float>(image->height) : 100.0f);
+
+    if (style.box_sizing == BoxSizing::BorderBox) {
+        float h_pb = dimensions.border.left + dimensions.border.right + dimensions.padding.left + dimensions.padding.right;
+        float v_pb = dimensions.border.top + dimensions.border.bottom + dimensions.padding.top + dimensions.padding.bottom;
+        w = std::max(0.0f, w - h_pb);
+        h = std::max(0.0f, h - v_pb);
+    }
+    dimensions.content.width = w;
+    dimensions.content.height = h;
+}
+
 void LayoutBox::dump(std::ostream& os, int indent) const {
     std::string spaces(indent * 2, ' ');
     os << spaces;
 
     switch (box_type) {
         case BoxType::FlexNode: os << "FlexBox"; break;
+        case BoxType::GridNode: os << "GridBox"; break;
         case BoxType::BlockNode: os << "BlockBox"; break;
         case BoxType::InlineNode: os << "InlineBox"; break;
+        case BoxType::ImageNode: os << "ImageBox"; break;
         case BoxType::AnonymousBlock: os << "AnonymousBlock"; break;
         case BoxType::TextNode: os << "TextBox"; break;
     }

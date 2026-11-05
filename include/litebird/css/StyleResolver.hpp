@@ -15,6 +15,7 @@ enum class Display {
     Inline,
     Block,
     Flex,
+    Grid,
     None
 };
 
@@ -23,6 +24,12 @@ enum class FlexDirection {
     Column,
     RowReverse,
     ColumnReverse
+};
+
+enum class FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse
 };
 
 enum class JustifyContent {
@@ -39,6 +46,16 @@ enum class AlignItems {
     FlexStart,
     FlexEnd,
     Center
+};
+
+enum class AlignContent {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly
 };
 
 enum class Position {
@@ -104,16 +121,25 @@ struct ComputedStyle {
 
     // Flexbox properties
     FlexDirection flex_direction{FlexDirection::Row};
+    FlexWrap flex_wrap{FlexWrap::NoWrap};
     JustifyContent justify_content{JustifyContent::FlexStart};
     AlignItems align_items{AlignItems::Stretch};
+    AlignContent align_content{AlignContent::Stretch};
     float gap{0.0f};
     float flex_grow{0.0f};
     float flex_shrink{1.0f};
     float flex_basis{-1.0f}; // -1 indicates auto
 
+    // Grid properties
+    std::vector<float> grid_template_columns; // >0: fixed px, <0: fr units (-1.0f = 1fr)
+    std::vector<float> grid_template_rows;
+    float grid_column_gap{0.0f};
+    float grid_row_gap{0.0f};
+
     bool is_block() const { return display == Display::Block; }
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }
+    bool is_grid() const { return display == Display::Grid; }
     bool is_none() const { return display == Display::None; }
 
     bool is_positioned() const { return position != Position::Static; }

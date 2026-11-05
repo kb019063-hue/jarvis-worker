@@ -6,8 +6,8 @@
 
 namespace litebird {
 
-void Node::add_event_listener(const std::string& type, EventListener listener) {
-    m_listeners[type].push_back(std::move(listener));
+void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture) {
+    m_listeners[type].push_back({std::move(listener), use_capture});
 }
 
 void Node::mark_needs_layout() {
@@ -29,31 +29,59 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
 
     event->set_target(shared_from_this());
 
-    // 1. Target Phase
+    // Build ancestor list from root down to target's parent
+    std::vector<std::shared_ptr<Node>> ancestors;
+    auto curr = parent();
+    while (curr) {
+        ancestors.push_back(curr);
+        curr = curr->parent();
+    }
+    std::reverse(ancestors.begin(), ancestors.end());
+
+    // Phase 1: Capturing Phase (downwards from document to parent)
+    event->set_event_phase(EventPhase::Capturing);
+    for (const auto& anc : ancestors) {
+        event->set_current_target(anc);
+        auto it = anc->m_listeners.find(event->type());
+        if (it != anc->m_listeners.end()) {
+            auto copy = it->second;
+            for (const auto& entry : copy) {
+                if (entry.use_capture) {
+                    entry.listener(event);
+                    if (event->propagation_stopped()) return !event->default_prevented();
+                }
+            }
+        }
+    }
+
+    // Phase 2: Target Phase (at target)
+    event->set_event_phase(EventPhase::AtTarget);
     event->set_current_target(shared_from_this());
     auto it = m_listeners.find(event->type());
     if (it != m_listeners.end()) {
         auto copy = it->second;
-        for (const auto& listener : copy) {
-            listener(event);
+        for (const auto& entry : copy) {
+            entry.listener(event);
             if (event->propagation_stopped()) return !event->default_prevented();
         }
     }
 
-    // 2. Bubbling Phase
+    // Phase 3: Bubbling Phase (upwards from parent to document)
     if (event->bubbles()) {
-        auto curr = parent();
-        while (curr) {
-            event->set_current_target(curr);
-            auto p_it = curr->m_listeners.find(event->type());
-            if (p_it != curr->m_listeners.end()) {
+        event->set_event_phase(EventPhase::Bubbling);
+        for (auto r_it = ancestors.rbegin(); r_it != ancestors.rend(); ++r_it) {
+            const auto& anc = *r_it;
+            event->set_current_target(anc);
+            auto p_it = anc->m_listeners.find(event->type());
+            if (p_it != anc->m_listeners.end()) {
                 auto p_copy = p_it->second;
-                for (const auto& listener : p_copy) {
-                    listener(event);
-                    if (event->propagation_stopped()) return !event->default_prevented();
+                for (const auto& entry : p_copy) {
+                    if (!entry.use_capture) {
+                        entry.listener(event);
+                        if (event->propagation_stopped()) return !event->default_prevented();
+                    }
                 }
             }
-            curr = curr->parent();
         }
     }
 

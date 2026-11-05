@@ -21,6 +21,7 @@ enum class JsTokenType {
     If,
     Else,
     While,
+    New,
     True,
     False,
     Null,

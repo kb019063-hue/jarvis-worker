@@ -36,7 +36,7 @@ static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, cons
     bool has_inline = false;
 
     for (const auto& ch : box->children) {
-        if (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::AnonymousBlock) {
+        if (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::GridNode || ch->box_type == BoxType::AnonymousBlock) {
             has_block = true;
         } else {
             has_inline = true;
@@ -49,7 +49,7 @@ static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, cons
     std::shared_ptr<LayoutBox> current_anon = nullptr;
 
     for (const auto& ch : box->children) {
-        bool is_block_level = (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::AnonymousBlock);
+        bool is_block_level = (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::GridNode || ch->box_type == BoxType::AnonymousBlock);
         if (is_block_level) {
             current_anon = nullptr;
             normalized.push_back(ch);
@@ -112,6 +112,8 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
         std::shared_ptr<LayoutBox> box;
         if (style.is_flex()) {
             box = LayoutBox::create_flex(element, style);
+        } else if (style.is_grid()) {
+            box = LayoutBox::create_grid(element, style);
         } else if (style.is_block()) {
             box = LayoutBox::create_block(element, style);
         } else {
@@ -128,6 +130,37 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
 
         if (box->box_type == BoxType::BlockNode) {
             normalize_block_children(box, style);
+        }
+
+        if (tag == "img") {
+            box->box_type = BoxType::ImageNode;
+            std::string src = element->get_attribute("src");
+            std::shared_ptr<ImageData> img_data = nullptr;
+            if (src.starts_with("data:image/")) {
+                img_data = ImageDecoder::decode_data_uri(src);
+            } else if (!src.empty()) {
+                img_data = ImageDecoder::decode_file(src);
+            }
+
+            if (box->style.width < 0.0f) {
+                if (element->has_attribute("width")) {
+                    try { box->style.width = std::stof(element->get_attribute("width")); } catch (...) {}
+                } else if (img_data) {
+                    box->style.width = static_cast<float>(img_data->width);
+                } else {
+                    box->style.width = 100.0f;
+                }
+            }
+            if (box->style.height < 0.0f) {
+                if (element->has_attribute("height")) {
+                    try { box->style.height = std::stof(element->get_attribute("height")); } catch (...) {}
+                } else if (img_data) {
+                    box->style.height = static_cast<float>(img_data->height);
+                } else {
+                    box->style.height = 100.0f;
+                }
+            }
+            box->image = img_data;
         }
 
         return box;

@@ -261,6 +261,38 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                 }
                 cur_x += 8 * scale;
             }
+        } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
+            if (arg.image && arg.image->is_valid()) {
+                int dst_x = static_cast<int>(arg.rect.x);
+                int dst_y = static_cast<int>(arg.rect.y);
+                int dst_w = static_cast<int>(arg.rect.width);
+                int dst_h = static_cast<int>(arg.rect.height);
+
+                if (dst_w > 0 && dst_h > 0) {
+                    int src_w = arg.image->width;
+                    int src_h = arg.image->height;
+
+                    int x0 = std::clamp(dst_x, 0, m_width);
+                    int y0 = std::clamp(dst_y, 0, m_height);
+                    int x1 = std::clamp(dst_x + dst_w, 0, m_width);
+                    int y1 = std::clamp(dst_y + dst_h, 0, m_height);
+
+                    float r = std::min({arg.border_radius, dst_w / 2.0f, dst_h / 2.0f});
+
+                    for (int y = y0; y < y1; ++y) {
+                        for (int x = x0; x < x1; ++x) {
+                            if (r > 0.5f) {
+                                float dist = rounded_box_sdf(x + 0.5f, y + 0.5f, dst_x, dst_y, dst_w, dst_h, r);
+                                if (dist > 0.5f) continue;
+                            }
+                            int sx = std::clamp((x - dst_x) * src_w / dst_w, 0, src_w - 1);
+                            int sy = std::clamp((y - dst_y) * src_h / dst_h, 0, src_h - 1);
+                            Color c = arg.image->get_pixel_color(sx, sy);
+                            set_pixel(x, y, c);
+                        }
+                    }
+                }
+            }
         }
     }, cmd);
 }

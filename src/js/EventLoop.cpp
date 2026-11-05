@@ -50,10 +50,34 @@ void EventLoop::post_task(std::function<void()> task) {
     }
 }
 
+void EventLoop::post_microtask(std::function<void()> microtask) {
+    if (microtask) {
+        m_microtask_queue.push_back(std::move(microtask));
+    }
+}
+
+size_t EventLoop::run_microtasks() {
+    size_t count = 0;
+    while (!m_microtask_queue.empty()) {
+        auto microtasks = std::move(m_microtask_queue);
+        m_microtask_queue.clear();
+        for (auto& task : microtasks) {
+            if (task) {
+                task();
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
     size_t executed_count = 0;
 
-    // 1. Drain microtasks / immediate task queue
+    // 1. Drain microtask queue first
+    executed_count += run_microtasks();
+
+    // 2. Drain macrotask immediate queue
     if (!m_task_queue.empty()) {
         auto tasks = std::move(m_task_queue);
         m_task_queue.clear();
@@ -63,9 +87,11 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
                 executed_count++;
             }
         }
+        // Microtask checkpoint after task
+        executed_count += run_microtasks();
     }
 
-    // 2. Identify due timers
+    // 3. Identify due timers
     std::vector<TimerTask> due_timers;
     for (auto& t : m_timers) {
         if (!t.cancelled && t.trigger_time <= now) {
@@ -108,7 +134,7 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
 }
 
 bool EventLoop::has_pending_tasks() const {
-    if (!m_task_queue.empty()) return true;
+    if (!m_task_queue.empty() || !m_microtask_queue.empty()) return true;
     for (const auto& t : m_timers) {
         if (!t.cancelled) return true;
     }
@@ -124,7 +150,7 @@ size_t EventLoop::active_timer_count() const {
 }
 
 std::optional<std::chrono::milliseconds> EventLoop::time_until_next(std::chrono::steady_clock::time_point now) const {
-    if (!m_task_queue.empty()) {
+    if (!m_task_queue.empty() || !m_microtask_queue.empty()) {
         return std::chrono::milliseconds(0);
     }
 
@@ -145,6 +171,7 @@ std::optional<std::chrono::milliseconds> EventLoop::time_until_next(std::chrono:
 void EventLoop::clear() {
     m_timers.clear();
     m_task_queue.clear();
+    m_microtask_queue.clear();
 }
 
 } // namespace litebird

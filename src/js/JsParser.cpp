@@ -225,6 +225,19 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
         auto right = parse_unary();
         return std::make_unique<UnaryExpr>(op, std::move(right));
     }
+    if (match(JsTokenType::New)) {
+        auto callee = parse_primary();
+        std::vector<std::unique_ptr<Expr>> args;
+        if (match(JsTokenType::OpenParen)) {
+            if (!check(JsTokenType::CloseParen)) {
+                do {
+                    args.push_back(parse_expression());
+                } while (match(JsTokenType::Comma));
+            }
+            consume(JsTokenType::CloseParen, "Expected ')' after constructor arguments.");
+        }
+        return std::make_unique<NewExpr>(std::move(callee), std::move(args));
+    }
     return parse_call_or_member();
 }
 

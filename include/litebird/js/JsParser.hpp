@@ -58,6 +58,15 @@ public:
         : callee(std::move(c)), args(std::move(a)) {}
 };
 
+class NewExpr : public Expr {
+public:
+    std::unique_ptr<Expr> callee;
+    std::vector<std::unique_ptr<Expr>> args;
+
+    NewExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
+        : callee(std::move(c)), args(std::move(a)) {}
+};
+
 class MemberExpr : public Expr {
 public:
     std::unique_ptr<Expr> object;

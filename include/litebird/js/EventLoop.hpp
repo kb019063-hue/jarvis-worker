@@ -31,6 +31,8 @@ public:
     void clear_timer(uint32_t id);
 
     void post_task(std::function<void()> task);
+    void post_microtask(std::function<void()> microtask);
+    size_t run_microtasks();
 
     // Processes all tasks and timers ready at 'now'.
     // Returns the total number of callbacks and tasks executed.
@@ -46,6 +48,7 @@ private:
     uint32_t m_next_id{1};
     std::vector<TimerTask> m_timers;
     std::vector<std::function<void()>> m_task_queue;
+    std::vector<std::function<void()>> m_microtask_queue;
 };
 
 } // namespace litebird

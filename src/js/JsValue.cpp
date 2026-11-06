@@ -255,6 +255,13 @@ JsValue JsValue::get_property(const std::string& name) const {
             }
         }
 
+        if (name == "size") {
+            auto it_size = object_val->properties.find("__get_size__");
+            if (it_size != object_val->properties.end() && it_size->second.native_fn) {
+                return it_size->second.native_fn({});
+            }
+        }
+
         // Own properties
         auto it = object_val->properties.find(name);
         if (it != object_val->properties.end()) return it->second;
@@ -281,6 +288,12 @@ JsValue JsValue::get_property(const std::string& name) const {
     }
 
     if (properties) {
+        if (name == "size") {
+            auto it_sz = properties->find("__get_size__");
+            if (it_sz != properties->end() && it_sz->second.native_fn) {
+                return it_sz->second.native_fn({});
+            }
+        }
         auto it = properties->find(name);
         if (it != properties->end()) return it->second;
     }

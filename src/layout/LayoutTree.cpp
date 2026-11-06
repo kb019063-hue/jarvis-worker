@@ -1,5 +1,6 @@
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/SvgRenderer.hpp"
 #include <cctype>
 
 namespace litebird {
@@ -186,6 +187,25 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
             if (ctx) {
                 box->image = ctx->image_data();
             }
+        } else if (tag == "svg") {
+            box->box_type = BoxType::ImageNode;
+            float svg_w = -1.0f;
+            float svg_h = -1.0f;
+            if (box->style.width >= 0.0f) svg_w = box->style.width;
+            else if (element->has_attribute("width")) {
+                try { svg_w = std::stof(element->get_attribute("width")); } catch (...) {}
+            }
+            if (box->style.height >= 0.0f) svg_h = box->style.height;
+            else if (element->has_attribute("height")) {
+                try { svg_h = std::stof(element->get_attribute("height")); } catch (...) {}
+            }
+
+            if (svg_w <= 0.0f) svg_w = 300.0f;
+            if (svg_h <= 0.0f) svg_h = 150.0f;
+
+            box->style.width = svg_w;
+            box->style.height = svg_h;
+            box->image = SvgRenderer::render(element, svg_w, svg_h);
         }
 
         return box;

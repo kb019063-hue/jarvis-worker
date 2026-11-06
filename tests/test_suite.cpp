@@ -16,6 +16,7 @@
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/SvgRenderer.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
@@ -1477,6 +1478,281 @@ void test_css_media_queries() {
     assert(style_tablet.font_size == 14.0f);
 }
 
+TEST(css_pseudo_classes) {
+    using namespace litebird;
+    std::string html = R"(
+        <ul id="list">
+            <li class="item" id="first">Item 1</li>
+            <li class="item active" id="second">Item 2</li>
+            <li class="item">Item 3</li>
+            <li class="item" id="last">Item 4</li>
+        </ul>
+        <input type="checkbox" id="chk" checked>
+        <button id="btn" disabled>Disabled Btn</button>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    auto list = doc->get_element_by_id("list");
+    auto first = doc->get_element_by_id("first");
+    auto second = doc->get_element_by_id("second");
+    auto last = doc->get_element_by_id("last");
+    auto chk = doc->get_element_by_id("chk");
+    auto btn = doc->get_element_by_id("btn");
+
+    std::string css = R"(
+        li:first-child { color: red; }
+        li:last-child { color: blue; }
+        li:nth-child(even) { background-color: #222222; }
+        li:nth-child(2n+1) { background-color: #111111; }
+        li:not(.active) { font-size: 12px; }
+        input:checked { border-color: green; }
+        button:disabled { opacity: 0.5; }
+        button:hover { color: yellow; }
+    )";
+
+    auto sheet = CssParser::parse(css);
+    StyleResolver resolver;
+    resolver.add_stylesheet(sheet);
+
+    // Verify :first-child
+    auto style_first = resolver.resolve_style(first);
+    assert(style_first.color == Color::parse("red"));
+
+    // Verify :last-child
+    auto style_last = resolver.resolve_style(last);
+    assert(style_last.color == Color::parse("blue"));
+
+    // Verify :nth-child(even) and :nth-child(2n+1)
+    // Item 1 is index 1 (odd) -> background #111111
+    assert(style_first.background_color == Color::parse("#111111"));
+    // Item 4 is index 4 (even) -> background #222222
+    assert(style_last.background_color == Color::parse("#222222"));
+
+    // Verify :not(.active)
+    assert(style_first.font_size == 12.0f);
+    auto style_item2 = resolver.resolve_style(second);
+    assert(style_item2.font_size == 16.0f); // Default font-size, not 12px because it has .active!
+
+    // Verify :checked
+    auto style_chk = resolver.resolve_style(chk);
+    assert(style_chk.border_color == Color::parse("green"));
+
+    // Verify :disabled
+    auto style_btn = resolver.resolve_style(btn);
+    assert(style_btn.opacity == 0.5f);
+
+    // Verify :hover dynamic state
+    assert(style_btn.color != Color::parse("yellow"));
+    btn->set_hovered(true);
+    auto style_btn_hover = resolver.resolve_style(btn);
+    assert(style_btn_hover.color == Color::parse("yellow"));
+}
+
+TEST(svg_vector_rendering) {
+    using namespace litebird;
+    std::string html = R"(
+        <body>
+            <svg width="80" height="60" viewBox="0 0 80 60">
+                <rect x="5" y="5" width="30" height="20" fill="#ff0000" stroke="#000000" stroke-width="1" />
+                <circle cx="55" cy="20" r="12" fill="#00ff00" />
+                <line x1="10" y1="40" x2="70" y2="40" stroke="#0000ff" stroke-width="2" />
+                <polygon points="40,35 50,55 30,55" fill="#ffff00" />
+                <path d="M 60 45 L 75 45 L 75 55 Z" fill="#ff00ff" />
+            </svg>
+        </body>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    auto svgs = doc->get_elements_by_tag_name("svg");
+    assert(!svgs.empty());
+    auto svg_el = svgs[0];
+    assert(svg_el != nullptr && svg_el->tag_name() == "svg");
+
+    auto img = SvgRenderer::render(svg_el, 80.0f, 60.0f);
+    assert(img != nullptr);
+    assert(img->width == 80 && img->height == 60);
+
+    // Center of rect (10, 10) should be red (#ff0000)
+    Color c_rect = img->get_pixel_color(10, 10);
+    assert(c_rect.r == 255 && c_rect.g == 0 && c_rect.b == 0);
+
+    // Center of circle (55, 20) should be green (#00ff00)
+    Color c_circle = img->get_pixel_color(55, 20);
+    assert(c_circle.r == 0 && c_circle.g == 255 && c_circle.b == 0);
+
+    // On line (20, 40) should be blue (#0000ff)
+    Color c_line = img->get_pixel_color(20, 40);
+    assert(c_line.r == 0 && c_line.g == 0 && c_line.b == 255);
+
+    // Verify layout integration as BoxType::ImageNode
+    StyleResolver resolver;
+    LayoutTree layout_tree;
+    auto root_box = layout_tree.build(doc, resolver);
+    root_box->layout(800.0f);
+
+    std::shared_ptr<LayoutBox> svg_box = nullptr;
+    for (const auto& ch : root_box->children) {
+        if (ch->box_type == BoxType::ImageNode) {
+            svg_box = ch;
+            break;
+        }
+    }
+    assert(svg_box != nullptr);
+    assert(svg_box->dimensions.content.width == 80.0f);
+    assert(svg_box->dimensions.content.height == 60.0f);
+    assert(svg_box->image != nullptr);
+}
+
+TEST(es6_map_set_and_destructuring) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Map API
+    std::string map_script = R"(
+        const m = new Map([["apple", 5], ["banana", 10]]);
+        m.set("orange", 15);
+        const appleCount = m.get("apple");
+        const hasBanana = m.has("banana");
+        const initSize = m.size;
+        m.delete("banana");
+        const postSize = m.size;
+        const hasDeleted = m.has("banana");
+    )";
+    js.eval_ast(map_script);
+    assert(js.global_env()->get("appleCount").to_number() == 5);
+    assert(js.global_env()->get("hasBanana").bool_val == true);
+    assert(js.global_env()->get("initSize").to_number() == 3);
+    assert(js.global_env()->get("postSize").to_number() == 2);
+    assert(js.global_env()->get("hasDeleted").bool_val == false);
+
+    // 2. Set API
+    std::string set_script = R"(
+        const s = new Set(["alpha", "beta"]);
+        s.add("gamma");
+        s.add("alpha"); // duplicate ignored
+        const setSize = s.size;
+        const hasAlpha = s.has("alpha");
+        s.delete("beta");
+        const setSizeAfter = s.size;
+        const hasBeta = s.has("beta");
+    )";
+    js.eval_ast(set_script);
+    assert(js.global_env()->get("setSize").to_number() == 3);
+    assert(js.global_env()->get("hasAlpha").bool_val == true);
+    assert(js.global_env()->get("setSizeAfter").to_number() == 2);
+    assert(js.global_env()->get("hasBeta").bool_val == false);
+
+    // 3. Default Function Parameters
+    std::string default_script = R"(
+        const multiply = (x, y = 10) => x * y;
+        const r1 = multiply(5);
+        const r2 = multiply(5, 3);
+        const formatInfo = (eng = "Litebird", ver = "Next", extraCount = 0) => eng + ver;
+        const r3 = formatInfo();
+    )";
+    js.eval_ast(default_script);
+    assert(js.global_env()->get("r1").to_number() == 50);
+    assert(js.global_env()->get("r2").to_number() == 15);
+    assert(js.global_env()->get("r3").to_string() == "LitebirdNext");
+
+    // 4. Destructuring Declarations
+    std::string destruct_script = R"(
+        const [firstNum, secondNum] = [100, 200];
+        const { username, role } = { username: "agent", role: "admin" };
+    )";
+    js.eval_ast(destruct_script);
+    assert(js.global_env()->get("firstNum").to_number() == 100);
+    assert(js.global_env()->get("secondNum").to_number() == 200);
+    assert(js.global_env()->get("username").to_string() == "agent");
+    assert(js.global_env()->get("role").to_string() == "admin");
+}
+
+TEST(css_transitions_and_animations) {
+    using namespace litebird;
+    std::string css = R"(
+        @keyframes slide_fade {
+            0% {
+                opacity: 0.0;
+                width: 100px;
+                color: #000000;
+            }
+            100% {
+                opacity: 1.0;
+                width: 300px;
+                color: #ffffff;
+            }
+        }
+
+        .animated-box {
+            animation-name: slide_fade;
+            animation-duration: 2s;
+            animation-timing-function: linear;
+            transition: opacity 0.5s ease;
+        }
+    )";
+
+    auto sheet = CssParser::parse(css);
+    assert(sheet.keyframes.size() == 1);
+    assert(sheet.keyframes[0].name == "slide_fade");
+    assert(sheet.keyframes[0].keyframes.size() == 2);
+    assert(sheet.keyframes[0].keyframes[0].offset == 0.0f);
+    assert(sheet.keyframes[0].keyframes[1].offset == 1.0f);
+
+    StyleResolver resolver;
+    resolver.add_stylesheet(sheet);
+
+    auto kfr = resolver.find_keyframes("slide_fade");
+    assert(kfr != nullptr);
+    assert(kfr->name == "slide_fade");
+
+    ComputedStyle base_style;
+    base_style.animation_name = "slide_fade";
+    base_style.animation_duration = 2.0f;
+    base_style.animation_timing_function = "linear";
+
+    // At t = 0.0s (start)
+    ComputedStyle style_0 = base_style;
+    resolver.apply_animation(style_0, 0.0f);
+    assert(style_0.opacity == 0.0f);
+    assert(style_0.width == 100.0f);
+
+    // At t = 1.0s (midpoint of 2.0s linear animation) -> 50% interpolation
+    ComputedStyle style_mid = base_style;
+    resolver.apply_animation(style_mid, 1.0f);
+    assert(std::abs(style_mid.opacity - 0.5f) < 0.01f);
+    assert(std::abs(style_mid.width - 200.0f) < 1.0f);
+
+    // At t = 2.0s (end)
+    ComputedStyle style_end = base_style;
+    resolver.apply_animation(style_end, 2.0f);
+    assert(style_end.opacity == 1.0f);
+    assert(style_end.width == 300.0f);
+
+    // Direct interpolation helper test
+    ComputedStyle from_style;
+    from_style.opacity = 0.2f;
+    from_style.color = Color(0, 0, 0);
+    ComputedStyle to_style;
+    to_style.opacity = 0.8f;
+    to_style.color = Color(200, 100, 50);
+    ComputedStyle target;
+    StyleResolver::interpolate_styles(target, from_style, to_style, 0.5f);
+    assert(std::abs(target.opacity - 0.5f) < 0.001f);
+    assert(target.color.r == 100 && target.color.g == 50 && target.color.b == 25);
+
+    // requestAnimationFrame test
+    JsInterpreter js;
+    std::string raf_script = R"(
+        let called = false;
+        requestAnimationFrame(() => {
+            called = true;
+        });
+    )";
+    js.eval_ast(raf_script);
+    EventLoop::default_loop().tick(std::chrono::steady_clock::now() + std::chrono::milliseconds(50));
+    assert(js.global_env()->get("called").bool_val == true);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -1508,7 +1784,11 @@ int main() {
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(css_media_queries);
+    RUN_TEST(css_pseudo_classes);
+    RUN_TEST(svg_vector_rendering);
+    RUN_TEST(es6_map_set_and_destructuring);
+    RUN_TEST(css_transitions_and_animations);
 
-    std::cout << "\n\033[1;32mAll 28 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 32 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

@@ -136,6 +136,17 @@ struct ComputedStyle {
     float grid_column_gap{0.0f};
     float grid_row_gap{0.0f};
 
+    // Transitions and Animations
+    float opacity{1.0f};
+    std::string animation_name;
+    float animation_duration{0.0f}; // in seconds
+    std::string animation_timing_function{"ease"};
+    float animation_iteration_count{1.0f}; // -1 for infinite
+    std::string transition_property;
+    float transition_duration{0.0f};
+    std::string transition_timing_function{"ease"};
+    float transition_delay{0.0f};
+
     bool is_block() const { return display == Display::Block; }
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }
@@ -156,6 +167,10 @@ public:
     float viewport_height() const { return m_viewport_height; }
 
     ComputedStyle resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style = nullptr) const;
+
+    const KeyframesRule* find_keyframes(const std::string& name) const;
+    void apply_animation(ComputedStyle& style, float elapsed_seconds) const;
+    static void interpolate_styles(ComputedStyle& target, const ComputedStyle& from, const ComputedStyle& to, float t);
 
 private:
     static StyleSheet default_user_agent_stylesheet();

@@ -12,6 +12,7 @@ SRCS = src/dom/Node.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
        src/render/Canvas2D.cpp \
+       src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/BitmapRenderer.cpp \
        src/js/JsValue.cpp \

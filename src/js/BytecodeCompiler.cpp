@@ -124,6 +124,8 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(static_cast<uint8_t>(name_idx));
             emit_opcode(OpCode::OpPop);
         }
+    } else if (dynamic_cast<const ArrayDestructuringDeclStmt*>(stmt) || dynamic_cast<const ObjectDestructuringDeclStmt*>(stmt)) {
+        throw std::runtime_error("Destructuring declaration falling back to AST interpreter");
     } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
         begin_scope();
         for (const auto& s : block_stmt->statements) {

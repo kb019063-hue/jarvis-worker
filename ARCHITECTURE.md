@@ -20,6 +20,10 @@
    - [4.7 Web Storage & Cookie Engine](#47-web-storage--cookie-engine)
    - [4.8 Canvas 2D Rasterizer](#48-canvas-2d-rasterizer)
    - [4.9 Network, EventLoop & TUI Shell](#49-network-eventloop--tui-shell)
+   - [4.10 SVG Vector Graphics Engine](#410-svg-vector-graphics-engine)
+   - [4.11 CSS Transitions & Keyframe Animations](#411-css-transitions--keyframe-animations)
+   - [4.12 Advanced CSS Pseudo-Classes & Selectors](#412-advanced-css-pseudo-classes--selectors)
+   - [4.13 ES6 Collections & Language Expansion](#413-es6-collections--language-expansion)
 5. [Critical Memory & ABI Safety Rules](#5-critical-memory--abi-safety-rules)
 6. [Extension Playbooks (How to Add Features)](#6-extension-playbooks-how-to-add-features)
    - [Adding a New DOM API / Method](#adding-a-new-dom-api--method)
@@ -208,6 +212,43 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
   - Keyboard-driven interactive TUI browser with navigation history (`back`, `forward`, `reload`).
   - URL entry prompt (`[o]`) and DevTools inspector pane (`[d]`).
 
+### 4.10 SVG Vector Graphics Engine (`include/litebird/render/SvgRenderer.hpp`)
+- **Direct DOM Integration:** `<svg>` root elements are recognized in `LayoutTree::build()` and converted directly into `BoxType::ImageNode` layout boxes.
+- **ViewBox Coordinate Normalization:** Computes scaling factors (`scale_x = width / vb_w`, `scale_y = height / vb_h`) to map abstract coordinate space onto physical pixel buffers.
+- **Vector Shape Rasterization:**
+  - `<rect>`: Rendered with fill and stroke bounding outlines.
+  - `<circle>` & `<ellipse>`: Midpoint and scanline rasterization.
+  - `<line>`, `<polyline>`, `<polygon>`: Bresenham lines and point-in-polygon scanline fills.
+  - `<path>`: Parses SVG path data commands (`M`/`m`, `L`/`l`, `H`/`h`, `V`/`v`, `Z`/`z`) into vector polygon vertices and fills/strokes via `Canvas2D`.
+- **ImageData Generation:** Creates ARGB 32-bit pixel buffers (`ImageData`) embedded into the layout box tree for immediate painting by terminal or bitmap renderers.
+
+### 4.11 CSS Transitions & Keyframe Animations (`include/litebird/css/StyleSheet.hpp`)
+- **`@keyframes` Rule Engine:** Parses percentage keyframe steps (`0%`, `50%`, `100%`, `from`, `to`) and stores animated properties (`KeyframeRule`, `KeyframeStep`).
+- **Timing Functions:** Supports standard cubic bezier approximations: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out` (`StyleResolver::evaluate_timing_function`).
+- **Property Interpolation:** High-precision numerical interpolation for continuous transitions and keyframe steps (`StyleResolver::interpolate_property`, `interpolate_color`) across `opacity`, `width`, `height`, `color`, and `background-color`.
+- **Animation Properties:** Full support for `animation-name`, `animation-duration`, `animation-timing-function`, `animation-delay`, `animation-iteration-count`, `transition-property`, and `transition-duration`.
+- **Frame Ticks (`requestAnimationFrame`):** Bound to the global window / JS scope, enqueuing frame callbacks with high-resolution timestamps.
+
+### 4.12 Advanced CSS Pseudo-Classes & Selectors (`include/litebird/css/StyleResolver.hpp`)
+- **Structural Pseudo-Classes:**
+  - `:first-child`, `:last-child`: Evaluates child index among sibling elements.
+  - `:nth-child(An+B)` & `:nth-of-type(An+B)`: Supports integer indices, `even` (`2n`), `odd` (`2n+1`), and arbitrary `An+B` linear patterns.
+- **User Action & State Pseudo-Classes:**
+  - `:hover`, `:focus`, `:active`: Evaluates interactive UI states tracked on DOM elements.
+  - `:disabled`, `:checked`: Matches form control attributes on buttons, checkboxes, and inputs.
+- **Negation Pseudo-Class (`:not(...)`):**
+  - Parses nested simple selectors inside `:not(...)` and inverts match evaluation.
+
+### 4.13 ES6 Collections & Language Expansion (`include/litebird/js/`)
+- **ES6 `Map` Collection:** Implements key-value mapping with arbitrary key types, insertion-ordered iteration, `.set(k, v)`, `.get(k)`, `.has(k)`, `.delete(k)`, `.clear()`, and dynamic `.size` getter.
+- **ES6 `Set` Collection:** Implements unique value collection with `.add(v)`, `.has(v)`, `.delete(v)`, `.clear()`, and dynamic `.size` getter.
+- **Destructuring Declarations:**
+  - Array destructuring: `const [a, b, c] = [1, 2, 3];`
+  - Object destructuring: `const { x, y } = { x: 10, y: 20 };`
+  - Fully integrated in AST evaluator and fallback bytecode compiler.
+- **Default Function Parameters:**
+  - Supports default parameter values in function declarations `function foo(x, y = 10) { ... }` and arrow functions `(a, b = 2) => a + b`.
+
 ---
 
 ## 5. Critical Memory & ABI Safety Rules
@@ -275,4 +316,4 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 4** | CSS Positioning (Relative/Absolute/Fixed), Box Sizing Constraints, JS Prototypes & Arrays, Incremental Layout | ✅ Completed |
 | **Phase 5** | Promises & Microtasks, JSON, CSS Grid Layout, Multi-line Flex Wrapping, 3-Phase DOM Events, Image Decoding | ✅ Completed |
 | **Phase 8** | HTML5 `<canvas>` 2D Context, Web Storage (`localStorage`/`sessionStorage`), `document.cookie`, CSS Media Queries (`@media`), ES6 Arrow Functions & Template Literals | ✅ Completed (28/28 tests passing) |
-| **Phase 9** | CSS Transitions & `@keyframes` Animations, SVG Vector Graphics (`<svg>`), Advanced CSS Pseudo-Classes (`:nth-child`, `:hover`, `:focus`), ES6 Map/Set Collections | 🚀 Ready for Implementation |
+| **Phase 9** | CSS Transitions & `@keyframes` Animations, SVG Vector Graphics (`<svg>`), Advanced CSS Pseudo-Classes (`:nth-child`, `:hover`, `:focus`, `:not`), ES6 Map/Set Collections & Destructuring | ✅ Completed (32/32 tests passing) |

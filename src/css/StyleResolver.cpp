@@ -2,6 +2,7 @@
 #include "litebird/css/CssParser.hpp"
 #include <sstream>
 #include <cctype>
+#include <cmath>
 
 namespace litebird {
 
@@ -58,6 +59,57 @@ void StyleResolver::add_stylesheet(const StyleSheet& sheet) {
     m_author_sheets.push_back(sheet);
 }
 
+static bool match_nth_formula(int idx, std::string formula) {
+    std::transform(formula.begin(), formula.end(), formula.begin(), ::tolower);
+    while (!formula.empty() && std::isspace(formula.front())) formula.erase(formula.begin());
+    while (!formula.empty() && std::isspace(formula.back())) formula.pop_back();
+
+    if (formula.empty()) return false;
+    if (formula == "odd") return (idx % 2 != 0);
+    if (formula == "even") return (idx % 2 == 0);
+
+    size_t n_pos = formula.find('n');
+    if (n_pos == std::string::npos) {
+        try {
+            int b = std::stoi(formula);
+            return idx == b;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    int a = 1;
+    if (n_pos == 0) {
+        a = 1;
+    } else if (n_pos == 1 && formula[0] == '-') {
+        a = -1;
+    } else if (n_pos == 1 && formula[0] == '+') {
+        a = 1;
+    } else {
+        try {
+            a = std::stoi(formula.substr(0, n_pos));
+        } catch (...) {
+            a = 1;
+        }
+    }
+
+    int b = 0;
+    std::string rest = formula.substr(n_pos + 1);
+    while (!rest.empty() && std::isspace(rest.front())) rest.erase(rest.begin());
+    if (!rest.empty()) {
+        try {
+            b = std::stoi(rest);
+        } catch (...) {
+            b = 0;
+        }
+    }
+
+    if (a == 0) return idx == b;
+    int diff = idx - b;
+    if (diff % a != 0) return false;
+    return (diff / a) >= 0;
+}
+
 bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& element, const SimpleSelector& sel) const {
     if (!sel.tag_name.empty() && sel.tag_name != "*" && sel.tag_name != element->tag_name()) {
         return false;
@@ -78,6 +130,76 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
             return false;
         }
     }
+
+    // Match pseudo-classes
+    if (!sel.pseudo_classes.empty()) {
+        auto parent = element->parent();
+        std::vector<std::shared_ptr<Element>> sibling_elements;
+        if (parent) {
+            for (const auto& child : parent->children()) {
+                if (auto el_child = std::dynamic_pointer_cast<Element>(child)) {
+                    sibling_elements.push_back(el_child);
+                }
+            }
+        }
+
+        for (const auto& pc : sel.pseudo_classes) {
+            const std::string& name = pc.name;
+            const std::string& arg = pc.argument;
+
+            if (name == "first-child") {
+                if (sibling_elements.empty() || sibling_elements.front() != element) return false;
+            } else if (name == "last-child") {
+                if (sibling_elements.empty() || sibling_elements.back() != element) return false;
+            } else if (name == "nth-child") {
+                int idx = 1;
+                bool found = false;
+                for (size_t i = 0; i < sibling_elements.size(); ++i) {
+                    if (sibling_elements[i] == element) {
+                        idx = static_cast<int>(i) + 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found || !match_nth_formula(idx, arg)) return false;
+            } else if (name == "nth-of-type") {
+                int idx = 1;
+                bool found = false;
+                int count = 0;
+                for (const auto& sib : sibling_elements) {
+                    if (sib->tag_name() == element->tag_name()) {
+                        count++;
+                        if (sib == element) {
+                            idx = count;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found || !match_nth_formula(idx, arg)) return false;
+            } else if (name == "hover") {
+                if (!element->is_hovered()) return false;
+            } else if (name == "focus") {
+                if (!element->is_focused()) return false;
+            } else if (name == "active") {
+                if (!element->is_active()) return false;
+            } else if (name == "disabled") {
+                if (!element->disabled()) return false;
+            } else if (name == "checked") {
+                if (!element->checked()) return false;
+            } else if (name == "not") {
+                // Negation pseudo-class: if inner selector matches, then :not fails
+                SimpleSelector sub_sel;
+                if (!arg.empty()) {
+                    if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
+                    else if (arg[0] == '#') sub_sel.id = arg.substr(1);
+                    else sub_sel.tag_name = arg;
+                    if (matches_simple_selector(element, sub_sel)) return false;
+                }
+            }
+        }
+    }
+
     return true;
 }
 
@@ -383,6 +505,86 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         style.text_align = val;
     } else if (prop == "text-decoration") {
         style.text_decoration = val;
+    } else if (prop == "opacity") {
+        try { style.opacity = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
+    } else if (prop == "animation-name") {
+        style.animation_name = val;
+    } else if (prop == "animation-duration") {
+        auto parse_sec = [](std::string_view s) -> float {
+            std::string str(s);
+            while (!str.empty() && std::isspace(str.front())) str.erase(str.begin());
+            while (!str.empty() && std::isspace(str.back())) str.pop_back();
+            if (str.size() > 2 && str.substr(str.size() - 2) == "ms") {
+                try { return std::stof(str.substr(0, str.size() - 2)) / 1000.0f; } catch (...) { return 0.0f; }
+            } else if (!str.empty() && str.back() == 's') {
+                try { return std::stof(str.substr(0, str.size() - 1)); } catch (...) { return 0.0f; }
+            }
+            try { return std::stof(str); } catch (...) { return 0.0f; }
+        };
+        style.animation_duration = parse_sec(val);
+    } else if (prop == "animation-timing-function") {
+        style.animation_timing_function = val;
+    } else if (prop == "animation-iteration-count") {
+        if (val == "infinite") style.animation_iteration_count = -1.0f;
+        else { try { style.animation_iteration_count = std::stof(val); } catch (...) {} }
+    } else if (prop == "animation") {
+        // e.g. "slidein 2s ease infinite" or "fade 1s"
+        std::stringstream ss(val);
+        std::string token;
+        int idx = 0;
+        while (ss >> token) {
+            if (idx == 0) {
+                style.animation_name = token;
+            } else if (token.find('s') != std::string::npos || std::isdigit(token[0])) {
+                std::string s = token;
+                if (s.size() > 2 && s.substr(s.size() - 2) == "ms") {
+                    try { style.animation_duration = std::stof(s.substr(0, s.size() - 2)) / 1000.0f; } catch (...) {}
+                } else if (s.back() == 's') {
+                    try { style.animation_duration = std::stof(s.substr(0, s.size() - 1)); } catch (...) {}
+                }
+            } else if (token == "linear" || token == "ease" || token == "ease-in" || token == "ease-out" || token == "ease-in-out") {
+                style.animation_timing_function = token;
+            } else if (token == "infinite") {
+                style.animation_iteration_count = -1.0f;
+            } else if (std::isdigit(token[0])) {
+                try { style.animation_iteration_count = std::stof(token); } catch (...) {}
+            }
+            idx++;
+        }
+    } else if (prop == "transition-property") {
+        style.transition_property = val;
+    } else if (prop == "transition-duration") {
+        auto parse_sec = [](std::string_view s) -> float {
+            std::string str(s);
+            while (!str.empty() && std::isspace(str.front())) str.erase(str.begin());
+            while (!str.empty() && std::isspace(str.back())) str.pop_back();
+            if (str.size() > 2 && str.substr(str.size() - 2) == "ms") {
+                try { return std::stof(str.substr(0, str.size() - 2)) / 1000.0f; } catch (...) { return 0.0f; }
+            } else if (!str.empty() && str.back() == 's') {
+                try { return std::stof(str.substr(0, str.size() - 1)); } catch (...) { return 0.0f; }
+            }
+            try { return std::stof(str); } catch (...) { return 0.0f; }
+        };
+        style.transition_duration = parse_sec(val);
+    } else if (prop == "transition-timing-function") {
+        style.transition_timing_function = val;
+    } else if (prop == "transition") {
+        // e.g. "opacity 0.5s ease"
+        std::stringstream ss(val);
+        std::string token;
+        if (ss >> token) {
+            style.transition_property = token;
+            if (ss >> token) {
+                if (token.size() > 2 && token.substr(token.size() - 2) == "ms") {
+                    try { style.transition_duration = std::stof(token.substr(0, token.size() - 2)) / 1000.0f; } catch (...) {}
+                } else if (!token.empty() && token.back() == 's') {
+                    try { style.transition_duration = std::stof(token.substr(0, token.size() - 1)); } catch (...) {}
+                }
+                if (ss >> token) {
+                    style.transition_timing_function = token;
+                }
+            }
+        }
     }
 }
 
@@ -462,6 +664,122 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     }
 
     return style;
+}
+
+const KeyframesRule* StyleResolver::find_keyframes(const std::string& name) const {
+    if (name.empty()) return nullptr;
+    for (const auto& sheet : m_author_sheets) {
+        for (const auto& kf : sheet.keyframes) {
+            if (kf.name == name) return &kf;
+        }
+    }
+    for (const auto& kf : m_ua_sheet.keyframes) {
+        if (kf.name == name) return &kf;
+    }
+    return nullptr;
+}
+
+static float lerp_f(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static Color lerp_color(const Color& a, const Color& b, float t) {
+    uint8_t nr = static_cast<uint8_t>(std::clamp(std::round(lerp_f(a.r, b.r, t)), 0.0f, 255.0f));
+    uint8_t ng = static_cast<uint8_t>(std::clamp(std::round(lerp_f(a.g, b.g, t)), 0.0f, 255.0f));
+    uint8_t nb = static_cast<uint8_t>(std::clamp(std::round(lerp_f(a.b, b.b, t)), 0.0f, 255.0f));
+    uint8_t na = static_cast<uint8_t>(std::clamp(std::round(lerp_f(a.a, b.a, t)), 0.0f, 255.0f));
+    return Color(nr, ng, nb, na);
+}
+
+void StyleResolver::interpolate_styles(ComputedStyle& target, const ComputedStyle& from, const ComputedStyle& to, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    target = from;
+
+    target.opacity = lerp_f(from.opacity, to.opacity, t);
+    target.color = lerp_color(from.color, to.color, t);
+    target.background_color = lerp_color(from.background_color, to.background_color, t);
+    target.border_color = lerp_color(from.border_color, to.border_color, t);
+
+    if (from.width >= 0.0f && to.width >= 0.0f) target.width = lerp_f(from.width, to.width, t);
+    if (from.height >= 0.0f && to.height >= 0.0f) target.height = lerp_f(from.height, to.height, t);
+    if (from.font_size > 0.0f && to.font_size > 0.0f) target.font_size = lerp_f(from.font_size, to.font_size, t);
+
+    target.margin.top = lerp_f(from.margin.top, to.margin.top, t);
+    target.margin.right = lerp_f(from.margin.right, to.margin.right, t);
+    target.margin.bottom = lerp_f(from.margin.bottom, to.margin.bottom, t);
+    target.margin.left = lerp_f(from.margin.left, to.margin.left, t);
+
+    target.padding.top = lerp_f(from.padding.top, to.padding.top, t);
+    target.padding.right = lerp_f(from.padding.right, to.padding.right, t);
+    target.padding.bottom = lerp_f(from.padding.bottom, to.padding.bottom, t);
+    target.padding.left = lerp_f(from.padding.left, to.padding.left, t);
+
+    target.border_width.top = lerp_f(from.border_width.top, to.border_width.top, t);
+    target.border_width.right = lerp_f(from.border_width.right, to.border_width.right, t);
+    target.border_width.bottom = lerp_f(from.border_width.bottom, to.border_width.bottom, t);
+    target.border_width.left = lerp_f(from.border_width.left, to.border_width.left, t);
+
+    if (from.has_top && to.has_top) target.top = lerp_f(from.top, to.top, t);
+    if (from.has_left && to.has_left) target.left = lerp_f(from.left, to.left, t);
+    if (from.has_right && to.has_right) target.right = lerp_f(from.right, to.right, t);
+    if (from.has_bottom && to.has_bottom) target.bottom = lerp_f(from.bottom, to.bottom, t);
+}
+
+void StyleResolver::apply_animation(ComputedStyle& style, float elapsed_seconds) const {
+    if (style.animation_name.empty() || style.animation_duration <= 0.0f) return;
+
+    const KeyframesRule* kfr = find_keyframes(style.animation_name);
+    if (!kfr || kfr->keyframes.empty()) return;
+
+    float t = 0.0f;
+    if (style.animation_iteration_count > 0.0f && elapsed_seconds >= style.animation_duration * style.animation_iteration_count) {
+        t = 1.0f;
+    } else {
+        t = std::fmod(elapsed_seconds, style.animation_duration) / style.animation_duration;
+    }
+
+    // Apply timing function
+    if (style.animation_timing_function == "ease" || style.animation_timing_function == "ease-in-out") {
+        t = t * t * (3.0f - 2.0f * t);
+    } else if (style.animation_timing_function == "ease-in") {
+        t = t * t;
+    } else if (style.animation_timing_function == "ease-out") {
+        t = t * (2.0f - t);
+    } else if (style.animation_timing_function == "step" || style.animation_timing_function == "step-end") {
+        t = (t >= 1.0f) ? 1.0f : 0.0f;
+    }
+
+    if (t <= kfr->keyframes.front().offset) {
+        for (const auto& decl : kfr->keyframes.front().declarations) {
+            apply_declaration(style, decl.property, decl.value);
+        }
+        return;
+    }
+    if (t >= kfr->keyframes.back().offset) {
+        for (const auto& decl : kfr->keyframes.back().declarations) {
+            apply_declaration(style, decl.property, decl.value);
+        }
+        return;
+    }
+
+    // Find bounding keyframes
+    for (size_t i = 0; i + 1 < kfr->keyframes.size(); ++i) {
+        const auto& k1 = kfr->keyframes[i];
+        const auto& k2 = kfr->keyframes[i + 1];
+        if (t >= k1.offset && t <= k2.offset) {
+            float seg_range = k2.offset - k1.offset;
+            float seg_t = (seg_range > 0.0001f) ? ((t - k1.offset) / seg_range) : 0.0f;
+
+            ComputedStyle style1 = style;
+            for (const auto& d : k1.declarations) apply_declaration(style1, d.property, d.value);
+
+            ComputedStyle style2 = style;
+            for (const auto& d : k2.declarations) apply_declaration(style2, d.property, d.value);
+
+            interpolate_styles(style, style1, style2, seg_t);
+            break;
+        }
+    }
 }
 
 } // namespace litebird

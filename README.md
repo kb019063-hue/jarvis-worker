@@ -12,14 +12,14 @@ Litebird implements the complete modern browser rendering pipeline:
 ```text
 [Raw HTML] ───► HTML Tokenizer ───► HTML Parser ───► DOM Tree
                                                          │
-[Raw CSS]  ───► CSS Tokenizer  ───► CSS Parser  ───► Style Rules (@media queries)
+[Raw CSS]  ───► CSS Tokenizer  ───► CSS Parser  ───► Style Rules (@media, @keyframes)
                                                          │
                                                          ▼
-                                                 Style Resolver (Cascade & Viewport)
+                                                 Style Resolver (Cascade, Viewport & Pseudo-Classes)
                                                          │
                                                          ▼
                                                  Layout Box Tree
-                                                 (Block / Flexbox / Grid / IFC / Canvas / Image)
+                                                 (Block / Flexbox / Grid / IFC / Canvas / Image / SVG)
                                                          │
                                                          ▼
                                                  Display List
@@ -36,8 +36,10 @@ Litebird implements the complete modern browser rendering pipeline:
                                                                          │
                                                  ├──► DOM Bindings (getElementById, textContent)
                                                  ├──► HTML5 Canvas 2D (getContext("2d"))
+                                                 ├──► SVG Vector Graphics (<svg>, <path>, <circle>)
+                                                 ├──► ES6 Collections (Map, Set) & Destructuring
                                                  ├──► Web Storage & Cookies (localStorage, cookies)
-                                                 └──► Async / Promises / EventLoop (fetch, setTimeout)
+                                                 └──► Async / Promises / EventLoop (fetch, setTimeout, rAF)
 ```
 
 ### 1. DOM Core & W3C EventTarget (`include/litebird/dom/`)
@@ -55,7 +57,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - Raw text mode for `<style>` and `<script>` tags.
 - Character entity decoding (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;`).
 
-### 3. CSS Engine, Cascade & Media Queries (`include/litebird/css/`)
+### 3. CSS Engine, Cascade, Animations & Pseudo-Classes (`include/litebird/css/`)
 - Selector parser supporting:
   - Universal (`*`)
   - Type / Tag selectors (`div`, `h1`, `p`)
@@ -63,6 +65,15 @@ Litebird implements the complete modern browser rendering pipeline:
   - ID selectors (`#header`, `#main`)
   - Attribute selectors (`[attr]`, `[attr="value"]`)
   - Descendant combinators (`div .card p`)
+  - **Advanced CSS Pseudo-Classes:**
+    - Structural: `:first-child`, `:last-child`, `:nth-child(An+B)`, `:nth-of-type(An+B)` (supports `odd`, `even`, and linear index formulas).
+    - User Action & State: `:hover`, `:focus`, `:active`, `:disabled`, `:checked`.
+    - Negation: `:not(...)` functional selector inversion.
+- **CSS Transitions & Keyframe Animations (`@keyframes`):**
+  - Declarative `@keyframes` rule parsing with percentage offsets (`0%`, `50%`, `100%`) and `from`/`to`.
+  - Animation properties: `animation-name`, `animation-duration`, `animation-timing-function`, `animation-delay`, `animation-iteration-count`, `transition-property`, `transition-duration`.
+  - Timing function calculation: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out`.
+  - Continuous property interpolation for `opacity`, `width`, `height`, `color`, and `background-color`.
 - **CSS Media Queries (`@media`):** Supports responsive breakpoints (`(max-width: ...)`, `(min-width: ...)`, `(max-height: ...)`, `(min-height: ...)`). Dynamically re-evaluates rule application against active viewport dimensions.
 - **Specificity Calculation:** Computes `(ID, Class, Tag)` triples for accurate cascade resolution.
 - **Built-in User-Agent Stylesheet:** Default styling for headings, paragraphs, lists, and layout blocks.
@@ -82,7 +93,12 @@ Litebird implements the complete modern browser rendering pipeline:
   - Word wrapping across element boundaries with exact baseline alignment.
 - **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 
-### 5. Multi-Backend Rendering, Canvas 2D & Image Decoding (`include/litebird/render/`)
+### 5. Multi-Backend Rendering, SVG Vector Graphics, Canvas 2D & Image Decoding (`include/litebird/render/`)
+- **Native SVG Vector Graphics Engine (`SvgRenderer`):**
+  - Direct rasterization of `<svg>` DOM trees into `ImageNode` layout boxes.
+  - Coordinate normalization via `viewBox` attribute scaling factors.
+  - Shape rasterization: `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, and `<path>` (commands `M`/`m`, `L`/`l`, `H`/`h`, `V`/`v`, `Z`/`z`).
+  - Native fill colors, stroke outlines, and stroke widths.
 - **HTML5 `<canvas>` 2D Context API (`CanvasRenderingContext2D`):**
   - Vector path building: `beginPath()`, `moveTo()`, `lineTo()`, `closePath()`, `stroke()`, `fill()`.
   - Geometric primitives: `fillRect()`, `clearRect()`, `strokeRect()`, `arc()`.
@@ -93,8 +109,11 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
-### 6. Modern JavaScript Engine, Bytecode VM & Web Storage (`include/litebird/js/`)
-- **ES6 Syntactic Extensions:**
+### 6. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web Storage (`include/litebird/js/`)
+- **ES6 Collections & Syntactic Extensions:**
+  - **`Map` & `Set` Collections:** Standard ES6 collections with `.set()`, `.get()`, `.add()`, `.has()`, `.delete()`, `.clear()`, and dynamic `.size` property getters.
+  - **Destructuring Declarations:** Array destructuring (`const [a, b] = [1, 2]`) and object destructuring (`const { name, role } = user`).
+  - **Default Function Parameters:** Default argument evaluation for function declarations and arrow functions (`(x = 1, y = 2) => x + y`).
   - **Arrow Functions:** `(x, y) => x + y` and block bodies `(val) => { ... }` with lexical scope binding.
   - **Template Literals:** Multi-part interpolation `` `Value: ${val}, count: ${count + 1}` `` with expression evaluation.
   - **Prototype Chain & Built-ins:** `Object.create()`, `prototype` inheritance, and `Array.prototype` methods (`map`, `filter`, `reduce`, `push`, `pop`, `join`).
@@ -140,32 +159,35 @@ Litebird implements the complete modern browser rendering pipeline:
 # Build the main litebird CLI
 make
 
-# Run the full 28-suite test suite
+# Run the full 32-suite test suite
 make test
 ```
 
 ### Running Examples
 
 ```bash
-# 1. Run the Next-Gen Feature Showcase (Canvas 2D + Grid + Storage + ES6)
+# 1. Run the Phase 9 Super-Showcase (SVG Vector Graphics + Animations + Pseudo-Classes + ES6 Map/Set)
+./build/litebird examples/phase9_showcase.html
+
+# 2. Run the Next-Gen Feature Showcase (Canvas 2D + Grid + Storage + ES6)
 ./build/litebird examples/nextgen_showcase.html
 
-# 2. Launch the Interactive TUI Browser Shell
+# 3. Launch the Interactive TUI Browser Shell
 ./build/litebird --shell examples/browser_portal.html
 
-# 3. Export showcase page directly to a 24-bit BMP image
-./build/litebird --render-bmp showcase.bmp examples/nextgen_showcase.html
+# 4. Export showcase page directly to a 24-bit BMP image
+./build/litebird --render-bmp showcase.bmp examples/phase9_showcase.html
 
-# 4. Run the live EventLoop Timer & Interactive Counter application
+# 5. Run the live EventLoop Timer & Interactive Counter application
 ./build/litebird examples/timer_counter.html
 
-# 5. Run the DOM EventTarget and Mark-and-Sweep GC showcase
+# 6. Run the DOM EventTarget and Mark-and-Sweep GC showcase
 ./build/litebird examples/events_and_gc.html
 
-# 6. Render an Inline Formatting Context (IFC) page with mixed inline badges
+# 7. Render an Inline Formatting Context (IFC) page with mixed inline badges
 ./build/litebird examples/ifc.html
 
-# 7. Render a Flexbox layout with responsive cards and navbar
+# 8. Render a Flexbox layout with responsive cards and navbar
 ./build/litebird examples/flexbox.html
 ```
 
@@ -226,6 +248,10 @@ Running test: js_template_literals_and_arrow_functions... PASSED
 Running test: web_storage_and_cookies... PASSED
 Running test: html5_canvas_2d_context... PASSED
 Running test: css_media_queries... PASSED
+Running test: css_pseudo_classes... PASSED
+Running test: svg_vector_rendering... PASSED
+Running test: es6_map_set_and_destructuring... PASSED
+Running test: css_transitions_and_animations... PASSED
 
-All 28 engine test suites passed successfully!
+All 32 engine test suites passed successfully!
 ```

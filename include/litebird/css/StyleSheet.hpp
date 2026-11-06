@@ -28,16 +28,22 @@ struct Specificity {
     }
 };
 
+struct PseudoClass {
+    std::string name; // "first-child", "last-child", "nth-child", "nth-of-type", "hover", "focus", "active", "disabled", "checked", "not"
+    std::string argument;
+};
+
 struct SimpleSelector {
     std::string tag_name;
     std::string id;
     std::vector<std::string> classes;
     std::vector<std::pair<std::string, std::string>> attributes;
+    std::vector<PseudoClass> pseudo_classes;
 
     Specificity specificity() const {
         Specificity s;
         if (!id.empty()) s.ids += 1;
-        s.classes += static_cast<int>(classes.size() + attributes.size());
+        s.classes += static_cast<int>(classes.size() + attributes.size() + pseudo_classes.size());
         if (!tag_name.empty() && tag_name != "*") s.tags += 1;
         return s;
     }
@@ -67,14 +73,28 @@ struct Declaration {
 struct MediaQuery {
     float max_width{-1.0f};
     float min_width{-1.0f};
+    float max_height{-1.0f};
+    float min_height{-1.0f};
     std::string media_type{"all"};
 
-    bool matches(float viewport_w, float /*viewport_h*/ = 0.0f, const std::string& type = "screen") const {
+    bool matches(float viewport_w, float viewport_h = 0.0f, const std::string& type = "screen") const {
         if (!media_type.empty() && media_type != "all" && media_type != type) return false;
         if (max_width >= 0.0f && viewport_w > max_width) return false;
         if (min_width >= 0.0f && viewport_w < min_width) return false;
+        if (max_height >= 0.0f && viewport_h > max_height) return false;
+        if (min_height >= 0.0f && viewport_h < min_height) return false;
         return true;
     }
+};
+
+struct Keyframe {
+    float offset{0.0f}; // 0.0 to 1.0
+    std::vector<Declaration> declarations;
+};
+
+struct KeyframesRule {
+    std::string name;
+    std::vector<Keyframe> keyframes;
 };
 
 struct Rule {
@@ -85,6 +105,7 @@ struct Rule {
 
 struct StyleSheet {
     std::vector<Rule> rules;
+    std::vector<KeyframesRule> keyframes;
 };
 
 } // namespace litebird

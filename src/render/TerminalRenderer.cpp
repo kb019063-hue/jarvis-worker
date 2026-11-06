@@ -17,11 +17,17 @@ TerminalRenderer::TerminalRenderer(int cols, int rows, float cell_w, float cell_
 void TerminalRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, DrawShadowCommand>) {
-            int start_col = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.x_offset + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.y_offset + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+        if constexpr (std::is_same_v<T, PushTransformCommand>) {
+            auto curr = current_transform();
+            m_transform_stack.push_back(curr.multiply(arg.matrix));
+        } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
+            if (!m_transform_stack.empty()) m_transform_stack.pop_back();
+        } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {
+            Rect tr = current_transform().map_rect(arg.rect);
+            int start_col = std::clamp(static_cast<int>((tr.x + arg.x_offset - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((tr.x + arg.x_offset + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((tr.y + arg.y_offset - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((tr.y + arg.y_offset + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             for (int r = start_row; r <= end_row; ++r) {
                 for (int c = start_col; c <= end_col; ++c) {
@@ -29,10 +35,11 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawRectCommand>) {
-            int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            Rect tr = current_transform().map_rect(arg.rect);
+            int start_col = std::clamp(static_cast<int>((tr.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((tr.x + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             for (int r = start_row; r <= end_row; ++r) {
                 for (int c = start_col; c <= end_col; ++c) {
@@ -40,10 +47,11 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
-            int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            Rect tr = current_transform().map_rect(arg.rect);
+            int start_col = std::clamp(static_cast<int>((tr.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int end_col   = std::clamp(static_cast<int>((tr.x + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+            int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+            int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
             // Horizontal borders
             for (int c = start_col; c <= end_col; ++c) {
@@ -66,8 +74,9 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             m_grid[end_row * m_cols + end_col].ch = '+';
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
-            int col = static_cast<int>((arg.position.x - m_scroll_x) / m_cell_w);
-            int row = static_cast<int>((arg.position.y - m_scroll_y) / m_cell_h);
+            Point tp = current_transform().map_point(arg.position);
+            int col = static_cast<int>((tp.x - m_scroll_x) / m_cell_w);
+            int row = static_cast<int>((tp.y - m_scroll_y) / m_cell_h);
 
             for (char ch : arg.text) {
                 if (col >= 0 && col < m_cols && row >= 0 && row < m_rows) {
@@ -80,10 +89,11 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             }
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {
-                int start_col = std::clamp(static_cast<int>((arg.rect.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-                int end_col   = std::clamp(static_cast<int>((arg.rect.x + arg.rect.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-                int start_row = std::clamp(static_cast<int>((arg.rect.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-                int end_row   = std::clamp(static_cast<int>((arg.rect.y + arg.rect.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+                Rect tr = current_transform().map_rect(arg.rect);
+                int start_col = std::clamp(static_cast<int>((tr.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+                int end_col   = std::clamp(static_cast<int>((tr.x + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
+                int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
+                int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
                 int span_cols = std::max(1, end_col - start_col);
                 int span_rows = std::max(1, end_row - start_row);

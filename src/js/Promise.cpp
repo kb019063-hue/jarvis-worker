@@ -95,6 +95,7 @@ void Promise::reject(const std::shared_ptr<PromiseData>& data, JsValue reason) {
 
 JsValue Promise::create_promise_instance(std::shared_ptr<PromiseData> data) {
     JsValue p = JsValue::make_object();
+    p.promise_data = data;
     p.set_property("__is_promise__", JsValue::make_boolean(true));
 
     p.set_property("then", JsValue::make_native_function([data](const std::vector<JsValue>& args) {

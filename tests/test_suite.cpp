@@ -1753,6 +1753,204 @@ TEST(css_transitions_and_animations) {
     assert(js.global_env()->get("called").bool_val == true);
 }
 
+TEST(css_2d_transforms) {
+    using namespace litebird;
+
+    // 1. Matrix operations
+    TransformMatrix2D t = TransformMatrix2D::translation(20.0f, 30.0f);
+    Point p = t.map_point(10.0f, 5.0f);
+    assert(p.x == 30.0f && p.y == 35.0f);
+
+    TransformMatrix2D s = TransformMatrix2D::scale(2.0f, 3.0f);
+    Point ps = s.map_point(10.0f, 5.0f);
+    assert(ps.x == 20.0f && ps.y == 15.0f);
+
+    TransformMatrix2D inv = t.inverse();
+    Point orig = inv.map_point(p);
+    assert(std::abs(orig.x - 10.0f) < 0.001f && std::abs(orig.y - 5.0f) < 0.001f);
+
+    // 2. CSS Transform parsing and cascade
+    std::string html = R"(
+        <html>
+        <head>
+            <style>
+                .box {
+                    transform: translate(15px, 25px) scale(2.0);
+                }
+            </style>
+        </head>
+        <body>
+            <div id="target" class="box" style="width: 50px; height: 50px; background-color: #ff0000;"></div>
+        </body>
+        </html>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto target = doc->get_element_by_id("target");
+    assert(target != nullptr);
+    auto style = resolver.resolve_style(target);
+    assert(style.has_transform == true);
+    assert(!style.transform_matrix.is_identity());
+
+    // 3. Layout & DisplayList contains PushTransform / PopTransform
+    auto root_box = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+    assert(root_box != nullptr);
+    DisplayList dl = DisplayList::build(root_box);
+
+    bool found_push = false;
+    bool found_pop = false;
+    for (const auto& cmd : dl.commands()) {
+        if (std::holds_alternative<PushTransformCommand>(cmd)) found_push = true;
+        if (std::holds_alternative<PopTransformCommand>(cmd)) found_pop = true;
+    }
+    assert(found_push == true);
+    assert(found_pop == true);
+}
+
+TEST(canvas_gradients_and_curves) {
+    using namespace litebird;
+    CanvasRenderingContext2D ctx(100, 100);
+
+    // 1. Linear Gradient
+    auto lin_grad = ctx.create_linear_gradient(0.0f, 0.0f, 100.0f, 0.0f);
+    lin_grad->add_color_stop(0.0f, Color(255, 0, 0));   // Red
+    lin_grad->add_color_stop(1.0f, Color(0, 0, 255));   // Blue
+
+    Color c_start = lin_grad->sample_at(0.0f, 50.0f);
+    assert(c_start.r == 255 && c_start.b == 0);
+
+    Color c_end = lin_grad->sample_at(100.0f, 50.0f);
+    assert(c_end.r == 0 && c_end.b == 255);
+
+    Color c_mid = lin_grad->sample_at(50.0f, 50.0f);
+    assert(c_mid.r > 100 && c_mid.b > 100);
+
+    // 2. Fill rect with gradient
+    ctx.fill_gradient = lin_grad;
+    ctx.fill_rect(0.0f, 0.0f, 100.0f, 100.0f);
+    Color px_left = ctx.image_data()->get_pixel_color(5, 50);
+    Color px_right = ctx.image_data()->get_pixel_color(95, 50);
+    assert(px_left.r > px_left.b);
+    assert(px_right.b > px_right.r);
+
+    // 3. Radial Gradient
+    auto rad_grad = ctx.create_radial_gradient(50.0f, 50.0f, 0.0f, 50.0f, 50.0f, 50.0f);
+    rad_grad->add_color_stop(0.0f, Color(0, 255, 0));   // Green center
+    rad_grad->add_color_stop(1.0f, Color(0, 0, 0));     // Black edge
+    Color rad_center = rad_grad->sample_at(50.0f, 50.0f);
+    Color rad_edge = rad_grad->sample_at(99.0f, 50.0f);
+    assert(rad_center.g == 255);
+    assert(rad_edge.g < 50);
+
+    // 4. Bézier curves in path
+    ctx.begin_path();
+    ctx.move_to(10.0f, 10.0f);
+    ctx.quadratic_curve_to(50.0f, 90.0f, 90.0f, 10.0f);
+    ctx.close_path();
+
+    ctx.begin_path();
+    ctx.move_to(0.0f, 0.0f);
+    ctx.bezier_curve_to(20.0f, 80.0f, 80.0f, 80.0f, 100.0f, 0.0f);
+    ctx.close_path();
+}
+
+TEST(es6_classes_and_inheritance) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    std::string class_script = R"(
+        class Animal {
+            constructor(name) {
+                this.name = name;
+            }
+            speak() {
+                return this.name + " makes a noise";
+            }
+            static species() {
+                return "Fauna";
+            }
+        }
+
+        class Dog extends Animal {
+            constructor(name, breed) {
+                super(name);
+                this.breed = breed;
+            }
+            speak() {
+                return this.name + " barks";
+            }
+            parentSpeak() {
+                return super.speak();
+            }
+        }
+
+        const a = new Animal("Generic");
+        const a_name = a.name;
+        const a_sound = a.speak();
+        const a_species = Animal.species();
+
+        const d = new Dog("Rover", "Retriever");
+        const d_name = d.name;
+        const d_breed = d.breed;
+        const d_sound = d.speak();
+        const d_parent_sound = d.parentSpeak();
+
+        const isDogInstance = (d instanceof Dog);
+        const isAnimalInstance = (d instanceof Animal);
+        const isAnimalDog = (a instanceof Dog);
+    )";
+
+    js.eval_ast(class_script);
+    assert(js.global_env()->get("a_name").to_string() == "Generic");
+    assert(js.global_env()->get("a_sound").to_string() == "Generic makes a noise");
+    assert(js.global_env()->get("a_species").to_string() == "Fauna");
+
+    assert(js.global_env()->get("d_name").to_string() == "Rover");
+    assert(js.global_env()->get("d_breed").to_string() == "Retriever");
+    assert(js.global_env()->get("d_sound").to_string() == "Rover barks");
+    assert(js.global_env()->get("d_parent_sound").to_string() == "Rover makes a noise");
+
+    assert(js.global_env()->get("isDogInstance").bool_val == true);
+    assert(js.global_env()->get("isAnimalInstance").bool_val == true);
+    assert(js.global_env()->get("isAnimalDog").bool_val == false);
+}
+
+TEST(async_await_language_sugar) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    std::string async_script = R"(
+        async function fetchValue(x) {
+            return x * 3;
+        }
+
+        const multiplyAsync = async (a, b) => {
+            return a * b;
+        };
+
+        async function compute() {
+            const a = await fetchValue(7);
+            const b = await fetchValue(5);
+            const m = await multiplyAsync(a, 2);
+            return m + b;
+        }
+
+        let result = 0;
+        compute().then((val) => {
+            result = val;
+        });
+    )";
+
+    js.eval_ast(async_script);
+    EventLoop::default_loop().tick();
+    assert(js.global_env()->get("result").to_number() == 57);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -1788,7 +1986,11 @@ int main() {
     RUN_TEST(svg_vector_rendering);
     RUN_TEST(es6_map_set_and_destructuring);
     RUN_TEST(css_transitions_and_animations);
+    RUN_TEST(css_2d_transforms);
+    RUN_TEST(canvas_gradients_and_curves);
+    RUN_TEST(es6_classes_and_inheritance);
+    RUN_TEST(async_await_language_sugar);
 
-    std::cout << "\n\033[1;32mAll 32 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 36 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

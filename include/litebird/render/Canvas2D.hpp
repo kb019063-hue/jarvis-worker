@@ -7,8 +7,34 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <algorithm>
 
 namespace litebird {
+
+struct ColorStop {
+    float offset{0.0f}; // 0.0 to 1.0
+    Color color;
+};
+
+class CanvasGradient {
+public:
+    enum class Type { Linear, Radial } type{Type::Linear};
+    // Linear coordinates
+    float x0{0.0f}, y0{0.0f}, x1{0.0f}, y1{0.0f};
+    // Radial coordinates
+    float r0{0.0f}, r1{0.0f};
+    std::vector<ColorStop> stops;
+
+    void add_color_stop(float offset, const Color& color) {
+        stops.push_back({std::clamp(offset, 0.0f, 1.0f), color});
+        std::sort(stops.begin(), stops.end(), [](const ColorStop& a, const ColorStop& b) {
+            return a.offset < b.offset;
+        });
+    }
+
+    Color sample_at(float px, float py) const;
+    JsValue to_js_value(std::shared_ptr<CanvasGradient> self);
+};
 
 class CanvasRenderingContext2D {
 public:
@@ -25,6 +51,13 @@ public:
     Color stroke_style{Color::black()};
     float line_width{1.0f};
 
+    // Gradients
+    std::shared_ptr<CanvasGradient> fill_gradient{nullptr};
+    std::shared_ptr<CanvasGradient> stroke_gradient{nullptr};
+
+    std::shared_ptr<CanvasGradient> create_linear_gradient(float x0, float y0, float x1, float y1);
+    std::shared_ptr<CanvasGradient> create_radial_gradient(float x0, float y0, float r0, float x1, float y1, float r1);
+
     // Rectangles
     void fill_rect(float x, float y, float w, float h);
     void stroke_rect(float x, float y, float w, float h);
@@ -36,6 +69,8 @@ public:
     void move_to(float x, float y);
     void line_to(float x, float y);
     void arc(float cx, float cy, float radius, float start_angle, float end_angle);
+    void quadratic_curve_to(float cpx, float cpy, float x, float y);
+    void bezier_curve_to(float cp1x, float cp1y, float cp2x, float cp2y, float x, float y);
     void stroke();
     void fill();
 

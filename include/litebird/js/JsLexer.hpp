@@ -27,6 +27,15 @@ enum class JsTokenType {
     Null,
     Undefined,
 
+    // ES6 Classes & Async/Await
+    Class,
+    Extends,
+    Super,
+    Static,
+    InstanceOf,
+    Async,
+    Await,
+
     // Operators
     Plus,
     Minus,

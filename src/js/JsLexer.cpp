@@ -121,7 +121,14 @@ JsToken JsLexer::scan_identifier() {
         {"true", JsTokenType::True},
         {"false", JsTokenType::False},
         {"null", JsTokenType::Null},
-        {"undefined", JsTokenType::Undefined}
+        {"undefined", JsTokenType::Undefined},
+        {"class", JsTokenType::Class},
+        {"extends", JsTokenType::Extends},
+        {"super", JsTokenType::Super},
+        {"static", JsTokenType::Static},
+        {"instanceof", JsTokenType::InstanceOf},
+        {"async", JsTokenType::Async},
+        {"await", JsTokenType::Await}
     };
 
     JsToken t;

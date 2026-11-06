@@ -42,11 +42,94 @@ void CanvasRenderingContext2D::set_pixel_safe(int x, int y, Color c) {
     }
 }
 
+Color CanvasGradient::sample_at(float px, float py) const {
+    if (stops.empty()) return Color::black();
+    float t = 0.0f;
+    if (type == Type::Linear) {
+        float dx = x1 - x0;
+        float dy = y1 - y0;
+        float len2 = dx * dx + dy * dy;
+        if (len2 > 0.0001f) {
+            t = ((px - x0) * dx + (py - y0) * dy) / len2;
+        }
+    } else {
+        float dist = std::sqrt((px - x0) * (px - x0) + (py - y0) * (py - y0));
+        float dr = r1 - r0;
+        if (std::abs(dr) > 0.0001f) {
+            t = (dist - r0) / dr;
+        } else {
+            t = (dist >= r1) ? 1.0f : 0.0f;
+        }
+    }
+    t = std::clamp(t, 0.0f, 1.0f);
+
+    if (t <= stops.front().offset) return stops.front().color;
+    if (t >= stops.back().offset) return stops.back().color;
+
+    for (size_t i = 0; i + 1 < stops.size(); ++i) {
+        if (t >= stops[i].offset && t <= stops[i + 1].offset) {
+            float span = stops[i + 1].offset - stops[i].offset;
+            float u = (span > 0.00001f) ? (t - stops[i].offset) / span : 0.0f;
+            uint8_t r = static_cast<uint8_t>(stops[i].color.r + (stops[i + 1].color.r - stops[i].color.r) * u);
+            uint8_t g = static_cast<uint8_t>(stops[i].color.g + (stops[i + 1].color.g - stops[i].color.g) * u);
+            uint8_t b = static_cast<uint8_t>(stops[i].color.b + (stops[i + 1].color.b - stops[i].color.b) * u);
+            uint8_t a = static_cast<uint8_t>(stops[i].color.a + (stops[i + 1].color.a - stops[i].color.a) * u);
+            return Color(r, g, b, a);
+        }
+    }
+    return stops.back().color;
+}
+
+JsValue CanvasGradient::to_js_value(std::shared_ptr<CanvasGradient> self) {
+    JsValue obj = JsValue::make_object();
+    obj.canvas_gradient = self;
+    obj.set_property("addColorStop", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
+        if (args.size() >= 2 && self) {
+            float offset = static_cast<float>(args[0].to_number());
+            Color c = Color::parse(args[1].to_string());
+            self->add_color_stop(offset, c);
+        }
+        return JsValue::make_undefined();
+    }));
+    return obj;
+}
+
+std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_linear_gradient(float x0, float y0, float x1, float y1) {
+    auto grad = std::make_shared<CanvasGradient>();
+    grad->type = CanvasGradient::Type::Linear;
+    grad->x0 = x0;
+    grad->y0 = y0;
+    grad->x1 = x1;
+    grad->y1 = y1;
+    return grad;
+}
+
+std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_radial_gradient(float x0, float y0, float r0, float x1, float y1, float r1) {
+    auto grad = std::make_shared<CanvasGradient>();
+    grad->type = CanvasGradient::Type::Radial;
+    grad->x0 = x0;
+    grad->y0 = y0;
+    grad->r0 = r0;
+    grad->x1 = x1;
+    grad->y1 = y1;
+    grad->r1 = r1;
+    return grad;
+}
+
 void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
     int x0 = std::max(0, static_cast<int>(std::round(x)));
     int y0 = std::max(0, static_cast<int>(std::round(y)));
     int x1 = std::min(m_width, static_cast<int>(std::round(x + w)));
     int y1 = std::min(m_height, static_cast<int>(std::round(y + h)));
+
+    if (fill_gradient) {
+        for (int py = y0; py < y1; ++py) {
+            for (int px = x0; px < x1; ++px) {
+                set_pixel_safe(px, py, fill_gradient->sample_at(static_cast<float>(px), static_cast<float>(py)));
+            }
+        }
+        return;
+    }
 
     uint32_t argb = fill_style.to_argb();
     for (int py = y0; py < y1; ++py) {
@@ -120,6 +203,42 @@ void CanvasRenderingContext2D::arc(float cx, float cy, float radius, float start
         } else {
             line_to(px, py);
         }
+    }
+}
+
+void CanvasRenderingContext2D::quadratic_curve_to(float cpx, float cpy, float x, float y) {
+    Point p0(0.0f, 0.0f);
+    if (!m_paths.empty() && !m_paths.back().points.empty()) {
+        p0 = m_paths.back().points.back();
+    } else {
+        move_to(p0.x, p0.y);
+    }
+
+    const int steps = 24;
+    for (int s = 1; s <= steps; ++s) {
+        float t = static_cast<float>(s) / static_cast<float>(steps);
+        float inv = 1.0f - t;
+        float px = inv * inv * p0.x + 2.0f * inv * t * cpx + t * t * x;
+        float py = inv * inv * p0.y + 2.0f * inv * t * cpy + t * t * y;
+        m_paths.back().points.push_back(Point(px, py));
+    }
+}
+
+void CanvasRenderingContext2D::bezier_curve_to(float cp1x, float cp1y, float cp2x, float cp2y, float x, float y) {
+    Point p0(0.0f, 0.0f);
+    if (!m_paths.empty() && !m_paths.back().points.empty()) {
+        p0 = m_paths.back().points.back();
+    } else {
+        move_to(p0.x, p0.y);
+    }
+
+    const int steps = 32;
+    for (int s = 1; s <= steps; ++s) {
+        float t = static_cast<float>(s) / static_cast<float>(steps);
+        float inv = 1.0f - t;
+        float px = inv * inv * inv * p0.x + 3.0f * inv * inv * t * cp1x + 3.0f * inv * t * t * cp2x + t * t * t * x;
+        float py = inv * inv * inv * p0.y + 3.0f * inv * inv * t * cp1y + 3.0f * inv * t * t * cp2y + t * t * t * y;
+        m_paths.back().points.push_back(Point(px, py));
     }
 }
 
@@ -218,7 +337,11 @@ void CanvasRenderingContext2D::fill() {
                 int px0 = std::max(0, static_cast<int>(std::round(node_x[i])));
                 int px1 = std::min(m_width, static_cast<int>(std::round(node_x[i + 1])));
                 for (int px = px0; px < px1; ++px) {
-                    set_pixel_safe(px, y, fill_style);
+                    if (fill_gradient) {
+                        set_pixel_safe(px, y, fill_gradient->sample_at(static_cast<float>(px), static_cast<float>(y)));
+                    } else {
+                        set_pixel_safe(px, y, fill_style);
+                    }
                 }
             }
         }
@@ -316,6 +439,48 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
                 static_cast<float>(args[4].to_number()));
         }
         return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("quadraticCurveTo", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+        if (args.size() >= 4) {
+            quadratic_curve_to(static_cast<float>(args[0].to_number()),
+                               static_cast<float>(args[1].to_number()),
+                               static_cast<float>(args[2].to_number()),
+                               static_cast<float>(args[3].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("bezierCurveTo", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+        if (args.size() >= 6) {
+            bezier_curve_to(static_cast<float>(args[0].to_number()),
+                            static_cast<float>(args[1].to_number()),
+                            static_cast<float>(args[2].to_number()),
+                            static_cast<float>(args[3].to_number()),
+                            static_cast<float>(args[4].to_number()),
+                            static_cast<float>(args[5].to_number()));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("createLinearGradient", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+        float x0 = args.size() > 0 ? static_cast<float>(args[0].to_number()) : 0.0f;
+        float y0 = args.size() > 1 ? static_cast<float>(args[1].to_number()) : 0.0f;
+        float x1 = args.size() > 2 ? static_cast<float>(args[2].to_number()) : 0.0f;
+        float y1 = args.size() > 3 ? static_cast<float>(args[3].to_number()) : 0.0f;
+        auto grad = create_linear_gradient(x0, y0, x1, y1);
+        return grad->to_js_value(grad);
+    }));
+
+    ctx.set_property("createRadialGradient", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+        float x0 = args.size() > 0 ? static_cast<float>(args[0].to_number()) : 0.0f;
+        float y0 = args.size() > 1 ? static_cast<float>(args[1].to_number()) : 0.0f;
+        float r0 = args.size() > 2 ? static_cast<float>(args[2].to_number()) : 0.0f;
+        float x1 = args.size() > 3 ? static_cast<float>(args[3].to_number()) : 0.0f;
+        float y1 = args.size() > 4 ? static_cast<float>(args[4].to_number()) : 0.0f;
+        float r1 = args.size() > 5 ? static_cast<float>(args[5].to_number()) : 0.0f;
+        auto grad = create_radial_gradient(x0, y0, r0, x1, y1, r1);
+        return grad->to_js_value(grad);
     }));
 
     ctx.set_property("stroke", JsValue::make_native_function([this](const std::vector<JsValue>&) {

@@ -14,6 +14,11 @@ DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
 void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
     if (!box) return;
 
+    bool has_t = box->style.has_transform && !box->style.transform_matrix.is_identity();
+    if (has_t) {
+        list.add(PushTransformCommand{box->style.transform_matrix});
+    }
+
     // 0. Box Shadow (rendered underneath background)
     if (box->style.box_shadow.has_shadow && !box->style.box_shadow.color.is_transparent()) {
         DrawShadowCommand shadow;
@@ -179,6 +184,10 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     // 3. Positive z-index elements paint on top (ordered by z-index ascending)
     for (const auto& child : pos_z_children) {
         build_recursive(child, list);
+    }
+
+    if (has_t) {
+        list.add(PopTransformCommand{});
     }
 }
 

@@ -50,7 +50,13 @@ struct DrawImageCommand {
         : rect(r), image(std::move(img)), border_radius(br) {}
 };
 
-using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand>;
+struct PushTransformCommand {
+    TransformMatrix2D matrix;
+};
+
+struct PopTransformCommand {};
+
+using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand>;
 
 class DisplayList {
 public:

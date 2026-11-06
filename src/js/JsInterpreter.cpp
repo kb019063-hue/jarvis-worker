@@ -545,12 +545,15 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         for (const auto& d : fn_decl->default_values) fn_val.default_values.push_back(d);
         fn_val.body = fn_decl->body;
         fn_val.closure = env;
+        fn_val.is_async = fn_decl->is_async;
 
         auto body_ptr = fn_decl->body;
         auto params = fn_decl->params;
         auto defs = fn_decl->default_values;
         auto closure = env;
-        fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+        bool is_async = fn_decl->is_async;
+
+        fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
             for (const auto& [k, v] : m_vm.globals()) {
                 m_global_env->define(k, v);
             }
@@ -562,6 +565,23 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                 }
                 fn_env->define(params[i], arg);
             }
+
+            if (is_async) {
+                auto p_data = std::make_shared<PromiseData>();
+                try {
+                    JsValue res = execute(body_ptr.get(), fn_env);
+                    Promise::resolve(p_data, res);
+                } catch (const ReturnException& ret) {
+                    Promise::resolve(p_data, ret.value);
+                } catch (const std::exception& ex) {
+                    Promise::reject(p_data, JsValue::make_string(ex.what()));
+                }
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return Promise::create_promise_instance(p_data);
+            }
+
             try {
                 JsValue res = execute(body_ptr.get(), fn_env);
                 for (const auto& [k, v] : m_global_env->values()) {
@@ -581,6 +601,146 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
             m_vm.set_global(fn_decl->name, fn_val);
         }
         return fn_val;
+    } else if (auto class_decl = dynamic_cast<const ClassDeclStmt*>(stmt)) {
+        JsValue super_ctor = JsValue::make_undefined();
+        if (!class_decl->super_class.empty()) {
+            super_ctor = env->get(class_decl->super_class);
+        }
+
+        const MethodDefinition* ctor_def = nullptr;
+        for (const auto& m : class_decl->methods) {
+            if (m.is_constructor) {
+                ctor_def = &m;
+                break;
+            }
+        }
+
+        JsValue proto_obj = JsValue::make_object(Heap::default_heap().allocate_object());
+        if (super_ctor.type == JsType::Function || super_ctor.type == JsType::NativeFunction) {
+            JsValue super_proto = super_ctor.get_property("prototype");
+            if (super_proto.type == JsType::Object && super_proto.object_val) {
+                proto_obj.object_val->prototype = super_proto.object_val;
+            }
+        }
+
+        JsValue ctor_fn;
+        ctor_fn.type = JsType::Function;
+        ctor_fn.closure = env;
+        ctor_fn.params = ctor_def ? ctor_def->params : std::vector<std::string>{};
+        if (ctor_def) {
+            for (const auto& d : ctor_def->default_values) ctor_fn.default_values.push_back(d);
+        }
+        ctor_fn.body = ctor_def ? ctor_def->body : nullptr;
+
+        auto ctor_params = ctor_fn.params;
+        auto ctor_defs = ctor_fn.default_values;
+        auto ctor_body = ctor_fn.body;
+        auto closure = env;
+
+        ctor_fn.native_fn = [this, ctor_body, ctor_params, ctor_defs, closure, super_ctor](const std::vector<JsValue>& args) {
+            for (const auto& [k, v] : m_vm.globals()) {
+                m_global_env->define(k, v);
+            }
+            auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+
+            for (size_t i = 0; i < ctor_params.size(); ++i) {
+                JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                if (arg.type == JsType::Undefined && i < ctor_defs.size() && ctor_defs[i]) {
+                    arg = eval_expr(dynamic_cast<const Expr*>(ctor_defs[i].get()), fn_env);
+                }
+                fn_env->define(ctor_params[i], arg);
+            }
+
+            if (super_ctor.is_truthy()) {
+                fn_env->define("__super_constructor__", super_ctor);
+            }
+
+            if (ctor_body) {
+                try {
+                    execute(ctor_body.get(), fn_env);
+                } catch (const ReturnException& ret) {
+                    return ret.value;
+                }
+            } else if (super_ctor.native_fn) {
+                super_ctor.native_fn(args);
+            }
+
+            try {
+                return fn_env->get("this");
+            } catch (...) {
+                return JsValue::make_undefined();
+            }
+        };
+
+        if (super_ctor.is_truthy()) {
+            ctor_fn.set_property("__super_constructor__", super_ctor);
+        }
+        proto_obj.set_property("constructor", ctor_fn);
+        ctor_fn.set_property("prototype", proto_obj);
+
+        for (const auto& m : class_decl->methods) {
+            if (m.is_constructor) continue;
+
+            auto m_body = m.body;
+            auto m_params = m.params;
+            auto m_defs = m.default_values;
+            bool m_async = m.is_async;
+
+            JsValue m_fn;
+            m_fn.type = JsType::Function;
+            m_fn.closure = env;
+            m_fn.params = m.params;
+            for (const auto& d : m.default_values) m_fn.default_values.push_back(d);
+            m_fn.body = m.body;
+            m_fn.is_async = m.is_async;
+            m_fn.native_fn = [this, m_body, m_params, m_defs, closure, m_async](const std::vector<JsValue>& args) {
+                for (const auto& [k, v] : m_vm.globals()) {
+                    m_global_env->define(k, v);
+                }
+                auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+                for (size_t i = 0; i < m_params.size(); ++i) {
+                    JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                    if (arg.type == JsType::Undefined && i < m_defs.size() && m_defs[i]) {
+                        arg = eval_expr(m_defs[i].get(), fn_env);
+                    }
+                    fn_env->define(m_params[i], arg);
+                }
+
+                if (m_async) {
+                    auto p_data = std::make_shared<PromiseData>();
+                    try {
+                        JsValue r = execute(m_body.get(), fn_env);
+                        Promise::resolve(p_data, r);
+                    } catch (const ReturnException& ret) {
+                        Promise::resolve(p_data, ret.value);
+                    } catch (const std::exception& ex) {
+                        Promise::reject(p_data, JsValue::make_string(ex.what()));
+                    }
+                    return Promise::create_promise_instance(p_data);
+                }
+
+                try {
+                    return execute(m_body.get(), fn_env);
+                } catch (const ReturnException& ret) {
+                    return ret.value;
+                }
+            };
+
+            if (m.is_static) {
+                ctor_fn.set_property(m.name, m_fn);
+            } else {
+                if (super_ctor.is_truthy()) {
+                    m_fn.set_property("__super_constructor__", super_ctor);
+                }
+                proto_obj.set_property(m.name, m_fn);
+            }
+        }
+
+        env->define(class_decl->name, ctor_fn);
+        if (env == m_global_env) {
+            m_vm.set_global(class_decl->name, ctor_fn);
+        }
+        return ctor_fn;
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
         JsValue ret_val = ret_stmt->value ? eval_expr(ret_stmt->value.get(), env) : JsValue::make_undefined();
         throw ReturnException(ret_val);
@@ -614,12 +774,15 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         for (const auto& d : fn_expr->default_values) fn_val.default_values.push_back(d);
         fn_val.body = fn_expr->body;
         fn_val.closure = env;
+        fn_val.is_async = fn_expr->is_async;
 
         auto body_ptr = fn_expr->body;
         auto params = fn_expr->params;
         auto defs = fn_expr->default_values;
         auto closure = env;
-        fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+        bool is_async = fn_expr->is_async;
+
+        fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
             for (const auto& [k, v] : m_vm.globals()) {
                 m_global_env->define(k, v);
             }
@@ -631,6 +794,23 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 }
                 fn_env->define(params[i], arg);
             }
+
+            if (is_async) {
+                auto p_data = std::make_shared<PromiseData>();
+                try {
+                    JsValue res = execute(body_ptr.get(), fn_env);
+                    Promise::resolve(p_data, res);
+                } catch (const ReturnException& ret) {
+                    Promise::resolve(p_data, ret.value);
+                } catch (const std::exception& ex) {
+                    Promise::reject(p_data, JsValue::make_string(ex.what()));
+                }
+                for (const auto& [k, v] : m_global_env->values()) {
+                    m_vm.set_global(k, v);
+                }
+                return Promise::create_promise_instance(p_data);
+            }
+
             try {
                 JsValue res = execute(body_ptr.get(), fn_env);
                 for (const auto& [k, v] : m_global_env->values()) {
@@ -655,6 +835,104 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             result += val.to_string();
         }
         return JsValue::make_string(result);
+    }
+
+    if (auto await_expr = dynamic_cast<const AwaitExpr*>(expr)) {
+        JsValue val = eval_expr(await_expr->expression.get(), env);
+        if (val.promise_data) {
+            while (val.promise_data->state == PromiseState::Pending) {
+                EventLoop::default_loop().tick();
+            }
+            if (val.promise_data->state == PromiseState::Fulfilled) {
+                return val.promise_data->result;
+            }
+            if (val.promise_data->state == PromiseState::Rejected) {
+                throw std::runtime_error(val.promise_data->result.to_string());
+            }
+        }
+        return val;
+    }
+
+    if (auto sup = dynamic_cast<const SuperExpr*>(expr)) {
+        JsValue this_val;
+        try {
+            this_val = env->get("this");
+        } catch (...) {
+            this_val = JsValue::make_undefined();
+        }
+
+        JsValue super_ctor;
+        try {
+            super_ctor = env->get("__super_constructor__");
+        } catch (...) {
+            super_ctor = JsValue::make_undefined();
+        }
+        if (!super_ctor.is_truthy() && this_val.type == JsType::Object) {
+            JsValue ctor = this_val.get_property("constructor");
+            if (ctor.is_truthy()) {
+                super_ctor = ctor.get_property("__super_constructor__");
+            }
+        }
+
+        std::vector<JsValue> arg_vals;
+        for (const auto& a : sup->args) {
+            arg_vals.push_back(eval_expr(a.get(), env));
+        }
+
+        if (sup->method_name.empty()) {
+            if (super_ctor.type == JsType::Function || super_ctor.type == JsType::NativeFunction) {
+                if (super_ctor.body) {
+                    auto s_env = std::make_shared<JsEnvironment>(super_ctor.closure ? super_ctor.closure : m_global_env);
+                    s_env->define("this", this_val);
+                    JsValue parent_super = super_ctor.get_property("__super_constructor__");
+                    if (parent_super.is_truthy()) {
+                        s_env->define("__super_constructor__", parent_super);
+                    }
+                    for (size_t i = 0; i < super_ctor.params.size(); ++i) {
+                        JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
+                        if (arg.type == JsType::Undefined && i < super_ctor.default_values.size() && super_ctor.default_values[i]) {
+                            arg = eval_expr(dynamic_cast<const Expr*>(super_ctor.default_values[i].get()), s_env);
+                        }
+                        s_env->define(super_ctor.params[i], arg);
+                    }
+                    try {
+                        execute(super_ctor.body.get(), s_env);
+                    } catch (...) {}
+                } else if (super_ctor.native_fn) {
+                    super_ctor.native_fn(arg_vals);
+                }
+            }
+            return this_val;
+        } else {
+            JsValue super_proto = super_ctor.get_property("prototype");
+            JsValue method = super_proto.get_property(sup->method_name);
+            if (sup->is_call) {
+                if (method.type == JsType::Function || method.type == JsType::NativeFunction) {
+                    auto fn_env = std::make_shared<JsEnvironment>(method.closure ? method.closure : m_global_env);
+                    fn_env->define("this", this_val);
+                    JsValue p_super = super_ctor.get_property("__super_constructor__");
+                    if (p_super.is_truthy()) {
+                        fn_env->define("__super_constructor__", p_super);
+                    }
+                    for (size_t i = 0; i < method.params.size(); ++i) {
+                        JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
+                        fn_env->define(method.params[i], arg);
+                    }
+                    if (method.body) {
+                        try {
+                            return execute(method.body.get(), fn_env);
+                        } catch (const ReturnException& ret) {
+                            return ret.value;
+                        }
+                    }
+                    if (method.native_fn) {
+                        return method.native_fn(arg_vals);
+                    }
+                }
+                return JsValue::make_undefined();
+            }
+            return method;
+        }
     }
 
     if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
@@ -736,6 +1014,21 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 return JsValue::make_boolean(left.to_number() > right.to_number());
             case JsTokenType::GreaterEqual:
                 return JsValue::make_boolean(left.to_number() >= right.to_number());
+            case JsTokenType::InstanceOf: {
+                if (left.type != JsType::Object || left.object_val == nullptr) {
+                    return JsValue::make_boolean(false);
+                }
+                JsValue right_proto = right.get_property("prototype");
+                if (right_proto.type != JsType::Object || right_proto.object_val == nullptr) {
+                    return JsValue::make_boolean(false);
+                }
+                JsObject* curr = left.object_val->prototype;
+                while (curr) {
+                    if (curr == right_proto.object_val) return JsValue::make_boolean(true);
+                    curr = curr->prototype;
+                }
+                return JsValue::make_boolean(false);
+            }
             default:
                 break;
         }
@@ -769,12 +1062,24 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             arg_vals.push_back(eval_expr(a.get(), env));
         }
 
+        JsValue this_val = JsValue::make_undefined();
+        if (auto mem = dynamic_cast<const MemberExpr*>(call->callee.get())) {
+            this_val = eval_expr(mem->object.get(), env);
+        }
+
         if (callee_val.type == JsType::NativeFunction && callee_val.native_fn) {
             return callee_val.native_fn(arg_vals);
         }
 
         if (callee_val.type == JsType::Function) {
             auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
+            if (this_val.type == JsType::Object) {
+                fn_env->define("this", this_val);
+            }
+            JsValue super_c = callee_val.get_property("__super_constructor__");
+            if (super_c.is_truthy()) {
+                fn_env->define("__super_constructor__", super_c);
+            }
             for (size_t i = 0; i < callee_val.params.size(); ++i) {
                 JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
                 if (arg.type == JsType::Undefined && i < callee_val.default_values.size() && callee_val.default_values[i]) {
@@ -782,18 +1087,40 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 }
                 fn_env->define(callee_val.params[i], arg);
             }
-            try {
-                JsValue res = execute(callee_val.body.get(), fn_env);
+            if (callee_val.is_async) {
+                auto p_data = std::make_shared<PromiseData>();
+                try {
+                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    Promise::resolve(p_data, res);
+                } catch (const ReturnException& ret) {
+                    Promise::resolve(p_data, ret.value);
+                } catch (const std::exception& ex) {
+                    Promise::reject(p_data, JsValue::make_string(ex.what()));
+                }
                 for (const auto& [k, v] : m_global_env->values()) {
                     m_vm.set_global(k, v);
                 }
-                return res;
-            } catch (const ReturnException& ret) {
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return ret.value;
+                return Promise::create_promise_instance(p_data);
             }
+
+            if (callee_val.body) {
+                try {
+                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return res;
+                } catch (const ReturnException& ret) {
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return ret.value;
+                }
+            }
+            if (callee_val.native_fn) {
+                return callee_val.native_fn(arg_vals);
+            }
+            return JsValue::make_undefined();
         }
     }
 
@@ -809,16 +1136,54 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         }
 
         if (callee_val.type == JsType::Function) {
-            auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure);
+            JsValue instance = JsValue::make_object(Heap::default_heap().allocate_object());
+            JsValue proto = callee_val.get_property("prototype");
+            if (proto.type == JsType::Object && proto.object_val) {
+                instance.object_val->prototype = proto.object_val;
+            }
+
+            auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
+            fn_env->define("this", instance);
+
+            JsValue super_c = callee_val.get_property("__super_constructor__");
+            if (super_c.is_truthy()) {
+                fn_env->define("__super_constructor__", super_c);
+            }
+
             for (size_t i = 0; i < callee_val.params.size(); ++i) {
-                JsValue arg = (i < arg_vals.size()) ? arg_vals[i] : JsValue::make_undefined();
+                JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
+                if (arg.type == JsType::Undefined && i < callee_val.default_values.size() && callee_val.default_values[i]) {
+                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.default_values[i].get()), fn_env);
+                }
                 fn_env->define(callee_val.params[i], arg);
             }
-            try {
-                return execute(callee_val.body.get(), fn_env);
-            } catch (const ReturnException& ret) {
-                return ret.value;
+
+            if (callee_val.body) {
+                try {
+                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    if (res.type == JsType::Object && res.object_val != nullptr) return res;
+                    return instance;
+                } catch (const ReturnException& ret) {
+                    if (ret.value.type == JsType::Object && ret.value.object_val != nullptr) return ret.value;
+                    return instance;
+                }
+            } else if (super_c.type == JsType::Function && super_c.body) {
+                auto s_env = std::make_shared<JsEnvironment>(super_c.closure ? super_c.closure : m_global_env);
+                s_env->define("this", instance);
+                for (size_t i = 0; i < super_c.params.size(); ++i) {
+                    JsValue arg = (i < arg_vals.size()) ? arg_vals[i] : JsValue::make_undefined();
+                    s_env->define(super_c.params[i], arg);
+                }
+                try {
+                    execute(super_c.body.get(), s_env);
+                } catch (...) {}
+                return instance;
+            } else if (callee_val.native_fn) {
+                JsValue res = callee_val.native_fn(arg_vals);
+                if (res.type == JsType::Object && res.object_val != nullptr) return res;
+                return instance;
             }
+            return instance;
         }
     }
 

@@ -112,9 +112,26 @@ public:
     std::vector<std::string> params;
     std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
+    bool is_async{false};
 
-    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {})
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)) {}
+    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false)
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag) {}
+};
+
+class AwaitExpr : public Expr {
+public:
+    std::unique_ptr<Expr> expression;
+    explicit AwaitExpr(std::unique_ptr<Expr> expr) : expression(std::move(expr)) {}
+};
+
+class SuperExpr : public Expr {
+public:
+    std::vector<std::unique_ptr<Expr>> args;
+    std::string method_name;
+    bool is_call{false};
+
+    SuperExpr(std::vector<std::unique_ptr<Expr>> a, std::string m = "", bool call = false)
+        : args(std::move(a)), method_name(std::move(m)), is_call(call) {}
 };
 
 class AssignExpr : public Expr {
@@ -201,9 +218,30 @@ public:
     std::vector<std::string> params;
     std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
+    bool is_async{false};
 
-    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {})
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)) {}
+    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false)
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag) {}
+};
+
+struct MethodDefinition {
+    std::string name;
+    bool is_static{false};
+    bool is_constructor{false};
+    bool is_async{false};
+    std::vector<std::string> params;
+    std::vector<std::shared_ptr<Expr>> default_values;
+    std::shared_ptr<BlockStmt> body;
+};
+
+class ClassDeclStmt : public Stmt {
+public:
+    std::string name;
+    std::string super_class; // empty if no extends
+    std::vector<MethodDefinition> methods;
+
+    ClassDeclStmt(std::string n, std::string sup, std::vector<MethodDefinition> m)
+        : name(std::move(n)), super_class(std::move(sup)), methods(std::move(m)) {}
 };
 
 class JsParser {
@@ -227,6 +265,7 @@ private:
     std::unique_ptr<Stmt> parse_while_statement();
     std::unique_ptr<Stmt> parse_return_statement();
     std::unique_ptr<FunctionDeclStmt> parse_function_declaration();
+    std::unique_ptr<ClassDeclStmt> parse_class_declaration();
     std::unique_ptr<BlockStmt> parse_block();
 
     std::unique_ptr<Expr> parse_expression();

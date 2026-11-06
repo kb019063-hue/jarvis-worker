@@ -29,6 +29,9 @@ public:
 
 private:
     void execute_command(const PaintCommand& cmd);
+    TransformMatrix2D current_transform() const {
+        return m_transform_stack.empty() ? TransformMatrix2D::identity() : m_transform_stack.back();
+    }
 
     int m_cols;
     int m_rows;
@@ -37,6 +40,7 @@ private:
     float m_scroll_x{0.0f};
     float m_scroll_y{0.0f};
     std::vector<TerminalCell> m_grid;
+    std::vector<TransformMatrix2D> m_transform_stack;
 };
 
 } // namespace litebird

@@ -382,7 +382,15 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
     std::function<void(const std::shared_ptr<LayoutBox>&)> search = [&](const std::shared_ptr<LayoutBox>& box) {
         if (!box) return;
         Rect b_rect = box->dimensions.border_box();
-        if (b_rect.contains(adjusted_x, adjusted_y)) {
+        bool inside = false;
+        if (box->style.has_transform && !box->style.transform_matrix.is_identity()) {
+            Point local_p = box->style.transform_matrix.inverse().map_point(adjusted_x, adjusted_y);
+            inside = b_rect.contains(local_p.x, local_p.y);
+        } else {
+            inside = b_rect.contains(adjusted_x, adjusted_y);
+        }
+
+        if (inside) {
             if (box->node) {
                 if (auto el = std::dynamic_pointer_cast<Element>(box->node)) {
                     hit_element = el;

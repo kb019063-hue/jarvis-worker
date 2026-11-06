@@ -126,6 +126,18 @@ void VM::init_builtins() {
     JsValue win_obj = JsValue::make_object();
     win_obj.set_property("localStorage", local_store);
     win_obj.set_property("sessionStorage", session_store);
+
+    JsValue raf = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
+            callback.call({JsValue::make_number(16.0)});
+        }, 16);
+        return JsValue::make_number(id);
+    });
+    set_global("requestAnimationFrame", raf);
+    win_obj.set_property("requestAnimationFrame", raf);
+
     set_global("window", win_obj);
 
     // document object
@@ -285,6 +297,143 @@ void VM::init_builtins() {
 
         return pval;
     }));
+
+    // Map Constructor
+    JsValue map_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue map_inst = JsValue::make_object();
+        auto map_store = std::make_shared<std::vector<std::pair<std::string, JsValue>>>();
+
+        map_inst.set_property("__get_size__", JsValue::make_native_function([map_store](const std::vector<JsValue>&) {
+            return JsValue::make_number(map_store->size());
+        }));
+
+        map_inst.set_property("set", JsValue::make_native_function([map_inst, map_store](const std::vector<JsValue>& sargs) {
+            if (!sargs.empty()) {
+                std::string k = sargs[0].to_string();
+                JsValue v = (sargs.size() > 1) ? sargs[1] : JsValue::make_undefined();
+                bool found = false;
+                for (auto& pair : *map_store) {
+                    if (pair.first == k) {
+                        pair.second = v;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    map_store->emplace_back(k, v);
+                }
+            }
+            return map_inst;
+        }));
+
+        map_inst.set_property("get", JsValue::make_native_function([map_store](const std::vector<JsValue>& gargs) {
+            if (gargs.empty()) return JsValue::make_undefined();
+            std::string k = gargs[0].to_string();
+            for (const auto& pair : *map_store) {
+                if (pair.first == k) return pair.second;
+            }
+            return JsValue::make_undefined();
+        }));
+
+        map_inst.set_property("has", JsValue::make_native_function([map_store](const std::vector<JsValue>& hargs) {
+            if (hargs.empty()) return JsValue::make_boolean(false);
+            std::string k = hargs[0].to_string();
+            for (const auto& pair : *map_store) {
+                if (pair.first == k) return JsValue::make_boolean(true);
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        map_inst.set_property("delete", JsValue::make_native_function([map_store](const std::vector<JsValue>& dargs) {
+            if (dargs.empty()) return JsValue::make_boolean(false);
+            std::string k = dargs[0].to_string();
+            for (auto it = map_store->begin(); it != map_store->end(); ++it) {
+                if (it->first == k) {
+                    map_store->erase(it);
+                    return JsValue::make_boolean(true);
+                }
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        map_inst.set_property("clear", JsValue::make_native_function([map_store](const std::vector<JsValue>&) {
+            map_store->clear();
+            return JsValue::make_undefined();
+        }));
+
+        if (!args.empty() && args[0].is_array()) {
+            JsValue arr = args[0];
+            double len = arr.get_property("length").to_number();
+            for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                JsValue entry = arr.get_property(std::to_string(i));
+                if (entry.is_array()) {
+                    std::string ek = entry.get_property("0").to_string();
+                    JsValue ev = entry.get_property("1");
+                    map_store->emplace_back(ek, ev);
+                }
+            }
+        }
+
+        return map_inst;
+    });
+    set_global("Map", map_ctor);
+
+    // Set Constructor
+    JsValue set_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue set_inst = JsValue::make_object();
+        auto set_store = std::make_shared<std::vector<std::string>>();
+
+        set_inst.set_property("__get_size__", JsValue::make_native_function([set_store](const std::vector<JsValue>&) {
+            return JsValue::make_number(set_store->size());
+        }));
+
+        set_inst.set_property("add", JsValue::make_native_function([set_inst, set_store](const std::vector<JsValue>& sargs) {
+            if (!sargs.empty()) {
+                std::string k = sargs[0].to_string();
+                if (std::find(set_store->begin(), set_store->end(), k) == set_store->end()) {
+                    set_store->push_back(k);
+                }
+            }
+            return set_inst;
+        }));
+
+        set_inst.set_property("has", JsValue::make_native_function([set_store](const std::vector<JsValue>& hargs) {
+            if (hargs.empty()) return JsValue::make_boolean(false);
+            std::string k = hargs[0].to_string();
+            bool found = (std::find(set_store->begin(), set_store->end(), k) != set_store->end());
+            return JsValue::make_boolean(found);
+        }));
+
+        set_inst.set_property("delete", JsValue::make_native_function([set_store](const std::vector<JsValue>& dargs) {
+            if (dargs.empty()) return JsValue::make_boolean(false);
+            std::string k = dargs[0].to_string();
+            auto it = std::find(set_store->begin(), set_store->end(), k);
+            if (it != set_store->end()) {
+                set_store->erase(it);
+                return JsValue::make_boolean(true);
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        set_inst.set_property("clear", JsValue::make_native_function([set_store](const std::vector<JsValue>&) {
+            set_store->clear();
+            return JsValue::make_undefined();
+        }));
+
+        if (!args.empty() && args[0].is_array()) {
+            JsValue arr = args[0];
+            double len = arr.get_property("length").to_number();
+            for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                std::string val = arr.get_property(std::to_string(i)).to_string();
+                if (std::find(set_store->begin(), set_store->end(), val) == set_store->end()) {
+                    set_store->push_back(val);
+                }
+            }
+        }
+
+        return set_inst;
+    });
+    set_global("Set", set_ctor);
 }
 
 JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {

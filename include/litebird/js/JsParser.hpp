@@ -110,10 +110,11 @@ class FunctionExpr : public Expr {
 public:
     std::string name;
     std::vector<std::string> params;
+    std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
 
-    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b)
-        : name(std::move(n)), params(std::move(p)), body(std::move(b)) {}
+    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {})
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)) {}
 };
 
 class AssignExpr : public Expr {
@@ -141,6 +142,24 @@ public:
 
     VarDeclStmt(std::string n, std::unique_ptr<Expr> init)
         : name(std::move(n)), initializer(std::move(init)) {}
+};
+
+class ArrayDestructuringDeclStmt : public Stmt {
+public:
+    std::vector<std::string> names;
+    std::unique_ptr<Expr> initializer;
+
+    ArrayDestructuringDeclStmt(std::vector<std::string> n, std::unique_ptr<Expr> init)
+        : names(std::move(n)), initializer(std::move(init)) {}
+};
+
+class ObjectDestructuringDeclStmt : public Stmt {
+public:
+    std::vector<std::pair<std::string, std::string>> bindings; // property -> variable name
+    std::unique_ptr<Expr> initializer;
+
+    ObjectDestructuringDeclStmt(std::vector<std::pair<std::string, std::string>> b, std::unique_ptr<Expr> init)
+        : bindings(std::move(b)), initializer(std::move(init)) {}
 };
 
 class BlockStmt : public Stmt {
@@ -180,10 +199,11 @@ class FunctionDeclStmt : public Stmt {
 public:
     std::string name;
     std::vector<std::string> params;
+    std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
 
-    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b)
-        : name(std::move(n)), params(std::move(p)), body(std::move(b)) {}
+    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {})
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)) {}
 };
 
 class JsParser {

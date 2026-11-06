@@ -78,6 +78,41 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
+    if (match(JsTokenType::OpenBracket)) {
+        std::vector<std::string> names;
+        if (!check(JsTokenType::CloseBracket)) {
+            do {
+                if (check(JsTokenType::CloseBracket)) break;
+                names.push_back(consume(JsTokenType::Identifier, "Expected variable name in array destructuring.").text);
+            } while (match(JsTokenType::Comma));
+        }
+        consume(JsTokenType::CloseBracket, "Expected ']' after array destructuring pattern.");
+        consume(JsTokenType::Equal, "Expected '=' in destructuring declaration.");
+        auto init = parse_expression();
+        match(JsTokenType::Semicolon);
+        return std::make_unique<ArrayDestructuringDeclStmt>(std::move(names), std::move(init));
+    }
+
+    if (match(JsTokenType::OpenBrace)) {
+        std::vector<std::pair<std::string, std::string>> bindings;
+        if (!check(JsTokenType::CloseBrace)) {
+            do {
+                if (check(JsTokenType::CloseBrace)) break;
+                std::string prop = consume(JsTokenType::Identifier, "Expected property name in object destructuring.").text;
+                std::string var_name = prop;
+                if (match(JsTokenType::Colon)) {
+                    var_name = consume(JsTokenType::Identifier, "Expected binding variable name.").text;
+                }
+                bindings.emplace_back(std::move(prop), std::move(var_name));
+            } while (match(JsTokenType::Comma));
+        }
+        consume(JsTokenType::CloseBrace, "Expected '}' after object destructuring pattern.");
+        consume(JsTokenType::Equal, "Expected '=' in destructuring declaration.");
+        auto init = parse_expression();
+        match(JsTokenType::Semicolon);
+        return std::make_unique<ObjectDestructuringDeclStmt>(std::move(bindings), std::move(init));
+    }
+
     const auto& name_token = consume(JsTokenType::Identifier, "Expected variable name.");
     std::unique_ptr<Expr> init = nullptr;
 
@@ -86,6 +121,27 @@ std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
     }
     match(JsTokenType::Semicolon);
     return std::make_unique<VarDeclStmt>(name_token.text, std::move(init));
+}
+
+std::unique_ptr<FunctionDeclStmt> JsParser::parse_function_declaration() {
+    const auto& name_token = consume(JsTokenType::Identifier, "Expected function name.");
+    consume(JsTokenType::OpenParen, "Expected '(' after function name.");
+    std::vector<std::string> params;
+    std::vector<std::shared_ptr<Expr>> defs;
+    if (!check(JsTokenType::CloseParen)) {
+        do {
+            params.push_back(consume(JsTokenType::Identifier, "Expected parameter name.").text);
+            std::shared_ptr<Expr> def_val = nullptr;
+            if (match(JsTokenType::Equal)) {
+                def_val = parse_expression();
+            }
+            defs.push_back(std::move(def_val));
+        } while (match(JsTokenType::Comma));
+    }
+    consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
+    consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
+    auto body = parse_block();
+    return std::make_unique<FunctionDeclStmt>(name_token.text, std::move(params), std::move(body), std::move(defs));
 }
 
 std::unique_ptr<Stmt> JsParser::parse_if_statement() {
@@ -117,21 +173,6 @@ std::unique_ptr<Stmt> JsParser::parse_return_statement() {
     }
     match(JsTokenType::Semicolon);
     return std::make_unique<ReturnStmt>(std::move(val));
-}
-
-std::unique_ptr<FunctionDeclStmt> JsParser::parse_function_declaration() {
-    const auto& name_token = consume(JsTokenType::Identifier, "Expected function name.");
-    consume(JsTokenType::OpenParen, "Expected '(' after function name.");
-    std::vector<std::string> params;
-    if (!check(JsTokenType::CloseParen)) {
-        do {
-            params.push_back(consume(JsTokenType::Identifier, "Expected parameter name.").text);
-        } while (match(JsTokenType::Comma));
-    }
-    consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
-    consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
-    auto body = parse_block();
-    return std::make_unique<FunctionDeclStmt>(name_token.text, std::move(params), std::move(body));
 }
 
 std::unique_ptr<BlockStmt> JsParser::parse_block() {
@@ -340,15 +381,34 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         }
 
         auto first_expr = parse_expression();
+        std::shared_ptr<Expr> first_def = nullptr;
+        std::string first_name;
+        if (auto ident = dynamic_cast<IdentifierExpr*>(first_expr.get())) {
+            first_name = ident->name;
+        } else if (auto assign = dynamic_cast<AssignExpr*>(first_expr.get())) {
+            if (auto ident_target = dynamic_cast<IdentifierExpr*>(assign->target.get())) {
+                first_name = ident_target->name;
+                first_def = std::move(assign->value);
+            }
+        }
+
         if (match(JsTokenType::Comma)) {
             std::vector<std::string> params;
-            if (auto ident = dynamic_cast<IdentifierExpr*>(first_expr.get())) {
-                params.push_back(ident->name);
+            std::vector<std::shared_ptr<Expr>> defs;
+            if (!first_name.empty()) {
+                params.push_back(first_name);
+                defs.push_back(first_def);
             } else {
                 throw std::runtime_error("Expected identifier in arrow parameter list.");
             }
             do {
-                params.push_back(consume(JsTokenType::Identifier, "Expected parameter name in arrow function.").text);
+                std::string p = consume(JsTokenType::Identifier, "Expected parameter name in arrow function.").text;
+                std::shared_ptr<Expr> d = nullptr;
+                if (match(JsTokenType::Equal)) {
+                    d = parse_expression();
+                }
+                params.push_back(p);
+                defs.push_back(d);
             } while (match(JsTokenType::Comma));
 
             consume(JsTokenType::CloseParen, "Expected ')' after arrow parameters.");
@@ -363,14 +423,16 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
                 stmts.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
                 body = std::make_shared<BlockStmt>(std::move(stmts));
             }
-            return std::make_unique<FunctionExpr>("", std::move(params), std::move(body));
+            return std::make_unique<FunctionExpr>("", std::move(params), std::move(body), std::move(defs));
         }
 
         consume(JsTokenType::CloseParen, "Expected ')' after expression.");
         if (match(JsTokenType::Arrow)) {
             std::vector<std::string> params;
-            if (auto ident = dynamic_cast<IdentifierExpr*>(first_expr.get())) {
-                params.push_back(ident->name);
+            std::vector<std::shared_ptr<Expr>> defs;
+            if (!first_name.empty()) {
+                params.push_back(first_name);
+                defs.push_back(first_def);
             } else {
                 throw std::runtime_error("Expected identifier in arrow parameter list.");
             }
@@ -384,7 +446,7 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
                 stmts.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
                 body = std::make_shared<BlockStmt>(std::move(stmts));
             }
-            return std::make_unique<FunctionExpr>("", std::move(params), std::move(body));
+            return std::make_unique<FunctionExpr>("", std::move(params), std::move(body), std::move(defs));
         }
 
         return first_expr;
@@ -397,15 +459,21 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         }
         consume(JsTokenType::OpenParen, "Expected '(' after function.");
         std::vector<std::string> params;
+        std::vector<std::shared_ptr<Expr>> defs;
         if (!check(JsTokenType::CloseParen)) {
             do {
                 params.push_back(consume(JsTokenType::Identifier, "Expected parameter name.").text);
+                std::shared_ptr<Expr> def_val = nullptr;
+                if (match(JsTokenType::Equal)) {
+                    def_val = parse_expression();
+                }
+                defs.push_back(std::move(def_val));
             } while (match(JsTokenType::Comma));
         }
         consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
         consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
         auto body = parse_block();
-        return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body));
+        return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body), std::move(defs));
     }
 
     if (match(JsTokenType::OpenBracket)) {

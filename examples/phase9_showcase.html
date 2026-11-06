@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Phase 9 Showcase — SVG, Animations, Pseudo-Classes & ES6</title>
+    <style>
+        body {
+            margin: 14px;
+            background-color: #0b0f19;
+            color: #f1f5f9;
+            font-size: 13px;
+        }
+
+        .header {
+            background-color: #1e293b;
+            padding: 12px 18px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            margin-bottom: 14px;
+        }
+
+        h1 {
+            color: #38bdf8;
+            font-size: 20px;
+            margin: 0 0 4px 0;
+        }
+
+        p.subtitle {
+            color: #94a3b8;
+            font-size: 12px;
+            margin: 0;
+        }
+
+        /* 2-Column Grid */
+        .showcase-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+
+        .card h2 {
+            font-size: 15px;
+            color: #38bdf8;
+            margin: 0 0 8px 0;
+        }
+
+        /* CSS Keyframe Animations */
+        @keyframes pulse_glow {
+            0% {
+                opacity: 0.4;
+                border-color: #0284c7;
+            }
+            50% {
+                opacity: 1.0;
+                border-color: #38bdf8;
+            }
+            100% {
+                opacity: 0.4;
+                border-color: #0284c7;
+            }
+        }
+
+        .animated-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            background-color: #0369a1;
+            color: #ffffff;
+            border: 1px solid #38bdf8;
+            border-radius: 12px;
+            font-weight: bold;
+            font-size: 11px;
+            animation: pulse_glow 2s ease infinite;
+            transition: opacity 0.3s ease;
+        }
+
+        /* Advanced Pseudo-Classes */
+        .feature-list {
+            margin: 8px 0;
+            padding: 0;
+        }
+
+        .feature-list li {
+            padding: 5px 8px;
+            margin-bottom: 4px;
+            border-radius: 4px;
+        }
+
+        .feature-list li:first-child {
+            color: #38bdf8;
+            font-weight: bold;
+        }
+
+        .feature-list li:last-child {
+            color: #34d399;
+        }
+
+        .feature-list li:nth-child(even) {
+            background-color: #0f172a;
+        }
+
+        .feature-list li:nth-child(odd) {
+            background-color: #182234;
+        }
+
+        .feature-list li:not(.standard) {
+            border-left: 3px solid #f59e0b;
+        }
+
+        input[type="checkbox"]:checked {
+            border-color: #34d399;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button {
+            background-color: #2563eb;
+            color: #ffffff;
+            border: none;
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .badge-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .tag {
+            background-color: #334155;
+            color: #e2e8f0;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🦅 Litebird Phase 9 Super-Showcase</h1>
+        <p class="subtitle">SVG Vector Graphics + CSS Animations (@keyframes) + Pseudo-Classes + ES6 Map/Set/Destructuring</p>
+    </div>
+
+    <div class="showcase-grid">
+        <!-- Card 1: Native SVG Vector Graphics -->
+        <div class="card">
+            <h2>📐 Native SVG Vector Graphics</h2>
+            <p>Direct rasterization of SVG primitives into LayoutBox ImageNode:</p>
+            <svg width="240" height="85" viewBox="0 0 240 85">
+                <!-- Background box -->
+                <rect x="0" y="0" width="240" height="85" fill="#090d16" stroke="#334155" stroke-width="1" />
+                <!-- Vector shapes -->
+                <rect x="15" y="18" width="50" height="50" rx="4" fill="#0284c7" stroke="#38bdf8" stroke-width="2" />
+                <circle cx="105" cy="43" r="24" fill="#34d399" stroke="#059669" stroke-width="2" />
+                <polygon points="175,18 215,70 145,70" fill="#f59e0b" stroke="#d97706" stroke-width="2" />
+                <line x1="20" y1="78" x2="220" y2="78" stroke="#64748b" stroke-width="2" />
+            </svg>
+            <div class="badge-bar">
+                <span class="tag">&lt;rect&gt;</span>
+                <span class="tag">&lt;circle&gt;</span>
+                <span class="tag">&lt;polygon&gt;</span>
+                <span class="tag">&lt;line&gt;</span>
+                <span class="tag">&lt;path&gt;</span>
+                <span class="tag">viewBox</span>
+            </div>
+        </div>
+
+        <!-- Card 2: CSS Animations & Pseudo-Classes -->
+        <div class="card">
+            <h2>✨ CSS Animations & Pseudo-Classes</h2>
+            <span class="animated-badge">Live @keyframes Pulse</span>
+            <ul class="feature-list">
+                <li class="standard">Item 1 (:first-child cyan highlight)</li>
+                <li class="special">Item 2 (:nth-child(even) &amp; :not(.standard))</li>
+                <li class="standard">Item 3 (:nth-child(odd))</li>
+                <li class="standard">Item 4 (:last-child emerald text)</li>
+            </ul>
+            <div style="margin-top: 8px;">
+                <input type="checkbox" checked id="chk1"> <label for="chk1">:checked</label>
+                <button disabled style="margin-left: 8px;">:disabled Button</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ES6 Collections & Language Expansion Log -->
+    <div class="card">
+        <h2>⚡ ES6 Map, Set, Destructuring &amp; Default Parameters</h2>
+        <p id="es6Status" style="color: #38bdf8; font-family: monospace; font-size: 12px; margin: 0;"></p>
+    </div>
+
+    <script>
+        // 1. ES6 Map Collection
+        const registry = new Map([
+            ["engine", "Litebird C++20"],
+            ["version", "Phase 9"]
+        ]);
+        registry.set("status", "Active");
+
+        // 2. ES6 Set Collection
+        const tags = new Set(["svg", "keyframes", "pseudo", "es6"]);
+        tags.add("collections");
+
+        // 3. Destructuring Declarations
+        const [primaryLang, buildTarget] = ["C++20", "Native Binary"];
+        const { engine, version } = { engine: registry.get("engine"), version: registry.get("version") };
+
+        // 4. Default Function Parameters
+        const formatInfo = (eng = "Litebird", ver = "Next", extraCount = 0) =>
+            `${eng} (${ver}) | Map Size: ${registry.size} | Set Size: ${tags.size} | Extras: ${extraCount}`;
+
+        // 5. requestAnimationFrame
+        requestAnimationFrame(() => {
+            const statusEl = document.getElementById("es6Status");
+            if (statusEl) {
+                statusEl.textContent = formatInfo(engine, version, tags.size);
+            }
+        });
+    </script>
+</body>
+</html>

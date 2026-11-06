@@ -61,6 +61,12 @@ StyleSheet CssParser::parse_stylesheet() {
             while (m_cursor < m_css.size() && std::isalpha(peek())) {
                 at_keyword += advance();
             }
+            if (at_keyword == "keyframes") {
+                consume_whitespace_and_comments();
+                sheet.keyframes.push_back(parse_keyframes());
+                continue;
+            }
+
             if (at_keyword == "media") {
                 consume_whitespace_and_comments();
                 std::string media_query_str;
@@ -223,9 +229,29 @@ SimpleSelector CssParser::parse_simple_selector() {
                 s.attributes.emplace_back(std::move(attr_str), "");
             }
         } else if (peek() == ':') {
-            advance();
+            advance(); // consume ':'
+            if (peek() == ':') advance(); // support pseudo-element '::'
+            std::string pseudo_name;
             while (std::isalnum(peek()) || peek() == '-') {
-                advance();
+                pseudo_name += advance();
+            }
+            std::string pseudo_arg;
+            if (peek() == '(') {
+                advance(); // consume '('
+                int paren_depth = 1;
+                while (m_cursor < m_css.size() && paren_depth > 0) {
+                    if (peek() == '(') paren_depth++;
+                    else if (peek() == ')') paren_depth--;
+                    if (paren_depth > 0) {
+                        pseudo_arg += advance();
+                    } else {
+                        advance(); // consume ')'
+                        break;
+                    }
+                }
+            }
+            if (!pseudo_name.empty()) {
+                s.pseudo_classes.push_back({pseudo_name, pseudo_arg});
             }
         } else {
             break;
@@ -290,7 +316,67 @@ MediaQuery CssParser::parse_media_query(std::string_view str) {
 
     parse_feature("max-width", mq.max_width);
     parse_feature("min-width", mq.min_width);
+    parse_feature("max-height", mq.max_height);
+    parse_feature("min-height", mq.min_height);
     return mq;
+}
+
+KeyframesRule CssParser::parse_keyframes() {
+    KeyframesRule kr;
+    consume_whitespace_and_comments();
+    while (m_cursor < m_css.size() && !std::isspace(peek()) && peek() != '{') {
+        kr.name += advance();
+    }
+    consume_whitespace_and_comments();
+    if (!match('{')) return kr;
+
+    while (m_cursor < m_css.size()) {
+        consume_whitespace_and_comments();
+        if (peek() == '}' || m_cursor >= m_css.size()) {
+            if (peek() == '}') advance();
+            break;
+        }
+
+        // Parse keyframe selector: e.g. "0%", "100%", "from", "to", "50%"
+        std::string sel_str;
+        while (m_cursor < m_css.size() && peek() != '{') {
+            sel_str += advance();
+        }
+        while (!sel_str.empty() && std::isspace(sel_str.front())) sel_str.erase(sel_str.begin());
+        while (!sel_str.empty() && std::isspace(sel_str.back())) sel_str.pop_back();
+
+        float offset = 0.0f;
+        if (sel_str == "from" || sel_str == "0%") {
+            offset = 0.0f;
+        } else if (sel_str == "to" || sel_str == "100%") {
+            offset = 1.0f;
+        } else if (!sel_str.empty() && sel_str.back() == '%') {
+            try {
+                offset = std::stof(sel_str.substr(0, sel_str.size() - 1)) / 100.0f;
+            } catch (...) {}
+        }
+
+        if (match('{')) {
+            Keyframe kf;
+            kf.offset = offset;
+            while (m_cursor < m_css.size()) {
+                consume_whitespace_and_comments();
+                if (peek() == '}' || m_cursor >= m_css.size()) {
+                    if (peek() == '}') advance();
+                    break;
+                }
+                kf.declarations.push_back(parse_declaration());
+            }
+            kr.keyframes.push_back(std::move(kf));
+        }
+    }
+
+    // Sort keyframes by offset ascending
+    std::sort(kr.keyframes.begin(), kr.keyframes.end(), [](const Keyframe& a, const Keyframe& b) {
+        return a.offset < b.offset;
+    });
+
+    return kr;
 }
 
 } // namespace litebird

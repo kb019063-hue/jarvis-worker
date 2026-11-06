@@ -136,6 +136,18 @@ void JsInterpreter::init_builtins() {
     JsValue win_obj = JsValue::make_object();
     win_obj.set_property("localStorage", local_store);
     win_obj.set_property("sessionStorage", session_store);
+
+    JsValue raf = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_number(0);
+        JsValue callback = args[0];
+        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
+            callback.call({JsValue::make_number(16.0)});
+        }, 16);
+        return JsValue::make_number(id);
+    });
+    m_global_env->define("requestAnimationFrame", raf);
+    win_obj.set_property("requestAnimationFrame", raf);
+
     m_global_env->define("window", win_obj);
 
     // document object
@@ -319,6 +331,145 @@ void JsInterpreter::init_builtins() {
 
         return pval;
     }));
+
+    // Map Constructor
+    JsValue map_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue map_inst = JsValue::make_object();
+        auto map_store = std::make_shared<std::vector<std::pair<std::string, JsValue>>>();
+
+        map_inst.set_property("__get_size__", JsValue::make_native_function([map_store](const std::vector<JsValue>&) {
+            return JsValue::make_number(map_store->size());
+        }));
+
+        map_inst.set_property("set", JsValue::make_native_function([map_inst, map_store](const std::vector<JsValue>& sargs) {
+            if (!sargs.empty()) {
+                std::string k = sargs[0].to_string();
+                JsValue v = (sargs.size() > 1) ? sargs[1] : JsValue::make_undefined();
+                bool found = false;
+                for (auto& pair : *map_store) {
+                    if (pair.first == k) {
+                        pair.second = v;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    map_store->emplace_back(k, v);
+                }
+            }
+            return map_inst;
+        }));
+
+        map_inst.set_property("get", JsValue::make_native_function([map_store](const std::vector<JsValue>& gargs) {
+            if (gargs.empty()) return JsValue::make_undefined();
+            std::string k = gargs[0].to_string();
+            for (const auto& pair : *map_store) {
+                if (pair.first == k) return pair.second;
+            }
+            return JsValue::make_undefined();
+        }));
+
+        map_inst.set_property("has", JsValue::make_native_function([map_store](const std::vector<JsValue>& hargs) {
+            if (hargs.empty()) return JsValue::make_boolean(false);
+            std::string k = hargs[0].to_string();
+            for (const auto& pair : *map_store) {
+                if (pair.first == k) return JsValue::make_boolean(true);
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        map_inst.set_property("delete", JsValue::make_native_function([map_store](const std::vector<JsValue>& dargs) {
+            if (dargs.empty()) return JsValue::make_boolean(false);
+            std::string k = dargs[0].to_string();
+            for (auto it = map_store->begin(); it != map_store->end(); ++it) {
+                if (it->first == k) {
+                    map_store->erase(it);
+                    return JsValue::make_boolean(true);
+                }
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        map_inst.set_property("clear", JsValue::make_native_function([map_store](const std::vector<JsValue>&) {
+            map_store->clear();
+            return JsValue::make_undefined();
+        }));
+
+        // Populate entries if passed an array of pairs e.g. [["k", 1], ["k2", 2]]
+        if (!args.empty() && args[0].is_array()) {
+            JsValue arr = args[0];
+            double len = arr.get_property("length").to_number();
+            for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                JsValue entry = arr.get_property(std::to_string(i));
+                if (entry.is_array()) {
+                    std::string ek = entry.get_property("0").to_string();
+                    JsValue ev = entry.get_property("1");
+                    map_store->emplace_back(ek, ev);
+                }
+            }
+        }
+
+        return map_inst;
+    });
+    m_global_env->define("Map", map_ctor);
+
+    // Set Constructor
+    JsValue set_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue set_inst = JsValue::make_object();
+        auto set_store = std::make_shared<std::vector<std::string>>();
+
+        set_inst.set_property("__get_size__", JsValue::make_native_function([set_store](const std::vector<JsValue>&) {
+            return JsValue::make_number(set_store->size());
+        }));
+
+        set_inst.set_property("add", JsValue::make_native_function([set_inst, set_store](const std::vector<JsValue>& sargs) {
+            if (!sargs.empty()) {
+                std::string k = sargs[0].to_string();
+                if (std::find(set_store->begin(), set_store->end(), k) == set_store->end()) {
+                    set_store->push_back(k);
+                }
+            }
+            return set_inst;
+        }));
+
+        set_inst.set_property("has", JsValue::make_native_function([set_store](const std::vector<JsValue>& hargs) {
+            if (hargs.empty()) return JsValue::make_boolean(false);
+            std::string k = hargs[0].to_string();
+            bool found = (std::find(set_store->begin(), set_store->end(), k) != set_store->end());
+            return JsValue::make_boolean(found);
+        }));
+
+        set_inst.set_property("delete", JsValue::make_native_function([set_store](const std::vector<JsValue>& dargs) {
+            if (dargs.empty()) return JsValue::make_boolean(false);
+            std::string k = dargs[0].to_string();
+            auto it = std::find(set_store->begin(), set_store->end(), k);
+            if (it != set_store->end()) {
+                set_store->erase(it);
+                return JsValue::make_boolean(true);
+            }
+            return JsValue::make_boolean(false);
+        }));
+
+        set_inst.set_property("clear", JsValue::make_native_function([set_store](const std::vector<JsValue>&) {
+            set_store->clear();
+            return JsValue::make_undefined();
+        }));
+
+        // Populate elements if passed an array
+        if (!args.empty() && args[0].is_array()) {
+            JsValue arr = args[0];
+            double len = arr.get_property("length").to_number();
+            for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                std::string val = arr.get_property(std::to_string(i)).to_string();
+                if (std::find(set_store->begin(), set_store->end(), val) == set_store->end()) {
+                    set_store->push_back(val);
+                }
+            }
+        }
+
+        return set_inst;
+    });
+    m_global_env->define("Set", set_ctor);
 }
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
@@ -353,6 +504,20 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         JsValue init_val = var_decl->initializer ? eval_expr(var_decl->initializer.get(), env) : JsValue::make_undefined();
         env->define(var_decl->name, init_val);
         return init_val;
+    } else if (auto arr_destruct = dynamic_cast<const ArrayDestructuringDeclStmt*>(stmt)) {
+        JsValue init_val = arr_destruct->initializer ? eval_expr(arr_destruct->initializer.get(), env) : JsValue::make_undefined();
+        for (size_t i = 0; i < arr_destruct->names.size(); ++i) {
+            JsValue item = init_val.get_property(std::to_string(i));
+            env->define(arr_destruct->names[i], item);
+        }
+        return init_val;
+    } else if (auto obj_destruct = dynamic_cast<const ObjectDestructuringDeclStmt*>(stmt)) {
+        JsValue init_val = obj_destruct->initializer ? eval_expr(obj_destruct->initializer.get(), env) : JsValue::make_undefined();
+        for (const auto& [prop, var_name] : obj_destruct->bindings) {
+            JsValue item = init_val.get_property(prop);
+            env->define(var_name, item);
+        }
+        return init_val;
     } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
         auto block_env = std::make_shared<JsEnvironment>(env);
         JsValue last = JsValue::make_undefined();
@@ -377,19 +542,24 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         JsValue fn_val;
         fn_val.type = JsType::Function;
         fn_val.params = fn_decl->params;
+        for (const auto& d : fn_decl->default_values) fn_val.default_values.push_back(d);
         fn_val.body = fn_decl->body;
         fn_val.closure = env;
 
         auto body_ptr = fn_decl->body;
         auto params = fn_decl->params;
+        auto defs = fn_decl->default_values;
         auto closure = env;
-        fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
+        fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
             for (const auto& [k, v] : m_vm.globals()) {
                 m_global_env->define(k, v);
             }
             auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
             for (size_t i = 0; i < params.size(); ++i) {
-                JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
+                JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
+                    arg = eval_expr(defs[i].get(), fn_env);
+                }
                 fn_env->define(params[i], arg);
             }
             try {
@@ -441,19 +611,24 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         JsValue fn_val;
         fn_val.type = JsType::Function;
         fn_val.params = fn_expr->params;
+        for (const auto& d : fn_expr->default_values) fn_val.default_values.push_back(d);
         fn_val.body = fn_expr->body;
         fn_val.closure = env;
 
         auto body_ptr = fn_expr->body;
         auto params = fn_expr->params;
+        auto defs = fn_expr->default_values;
         auto closure = env;
-        fn_val.native_fn = [this, body_ptr, params, closure](const std::vector<JsValue>& args) {
+        fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
             for (const auto& [k, v] : m_vm.globals()) {
                 m_global_env->define(k, v);
             }
             auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
             for (size_t i = 0; i < params.size(); ++i) {
-                JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
+                JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
+                    arg = eval_expr(defs[i].get(), fn_env);
+                }
                 fn_env->define(params[i], arg);
             }
             try {
@@ -601,7 +776,10 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         if (callee_val.type == JsType::Function) {
             auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
             for (size_t i = 0; i < callee_val.params.size(); ++i) {
-                JsValue arg = (i < arg_vals.size()) ? arg_vals[i] : JsValue::make_undefined();
+                JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
+                if (arg.type == JsType::Undefined && i < callee_val.default_values.size() && callee_val.default_values[i]) {
+                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.default_values[i].get()), fn_env);
+                }
                 fn_env->define(callee_val.params[i], arg);
             }
             try {

@@ -96,14 +96,25 @@ public:
     }
 
     void focus() {
+        m_is_focused = true;
         auto ev = std::make_shared<Event>("focus", false, false);
         dispatch_event(ev);
     }
 
     void blur() {
+        m_is_focused = false;
         auto ev = std::make_shared<Event>("blur", false, false);
         dispatch_event(ev);
     }
+
+    bool is_hovered() const { return m_is_hovered; }
+    void set_hovered(bool h) { m_is_hovered = h; }
+
+    bool is_focused() const { return m_is_focused; }
+    void set_focused(bool f) { m_is_focused = f; }
+
+    bool is_active() const { return m_is_active; }
+    void set_active(bool a) { m_is_active = a; }
 
     std::string text_content() const override {
         std::string result;
@@ -128,6 +139,9 @@ private:
     std::string m_tag_name;
     std::unordered_map<std::string, std::string> m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
+    bool m_is_hovered{false};
+    bool m_is_focused{false};
+    bool m_is_active{false};
 };
 
 } // namespace litebird

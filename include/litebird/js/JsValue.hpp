@@ -46,6 +46,7 @@ public:
 
     // For Functions
     std::vector<std::string> params;
+    std::vector<std::shared_ptr<AstNode>> default_values;
     std::shared_ptr<AstNode> body;
     std::shared_ptr<JsEnvironment> closure;
     std::shared_ptr<BytecodeFunction> bytecode_fn;

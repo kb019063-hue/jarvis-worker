@@ -3,6 +3,7 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/Storage.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include <cmath>
 #include <iostream>
@@ -126,10 +127,22 @@ void JsInterpreter::init_builtins() {
     }));
     m_global_env->define("Math", math_obj);
 
+    // Web Storage API
+    JsValue local_store = Storage::local_storage().to_js_value();
+    JsValue session_store = Storage::session_storage().to_js_value();
+    m_global_env->define("localStorage", local_store);
+    m_global_env->define("sessionStorage", session_store);
+
+    JsValue win_obj = JsValue::make_object();
+    win_obj.set_property("localStorage", local_store);
+    win_obj.set_property("sessionStorage", session_store);
+    m_global_env->define("window", win_obj);
+
     // document object
     if (m_document) {
         JsValue doc_obj = JsValue::make_object();
         doc_obj.set_property("title", JsValue::make_string(m_document->title()));
+        doc_obj.set_property("cookie", JsValue::make_string(CookieJar::default_jar().get_document_cookie()));
         doc_obj.set_property("getElementById", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
             if (args.empty() || !m_document) return JsValue::make_null();
             auto el = m_document->get_element_by_id(args[0].to_string());
@@ -458,6 +471,15 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         };
 
         return fn_val;
+    }
+
+    if (auto tle = dynamic_cast<const TemplateLiteralExpr*>(expr)) {
+        std::string result;
+        for (const auto& part : tle->parts) {
+            JsValue val = eval_expr(part.get(), env);
+            result += val.to_string();
+        }
+        return JsValue::make_string(result);
     }
 
     if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {

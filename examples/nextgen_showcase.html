@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Next-Gen Showcase</title>
+    <style>
+        body {
+            margin: 12px;
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-size: 14px;
+        }
+
+        .header {
+            background-color: #1e293b;
+            padding: 12px 18px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            margin-bottom: 14px;
+        }
+
+        h1 {
+            color: #38bdf8;
+            font-size: 22px;
+            margin: 0 0 6px 0;
+        }
+
+        p.subtitle {
+            color: #94a3b8;
+            font-size: 13px;
+            margin: 0;
+        }
+
+        /* CSS Grid Container */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        .card h2 {
+            font-size: 16px;
+            color: #38bdf8;
+            margin: 0 0 8px 0;
+        }
+
+        /* Flexbox Wrap Container */
+        .badge-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .badge {
+            background-color: #334155;
+            color: #e2e8f0;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .badge-accent {
+            background-color: #0284c7;
+            color: #ffffff;
+        }
+
+        /* Form Controls */
+        .form-row {
+            margin-bottom: 8px;
+        }
+
+        input[type="text"] {
+            background-color: #090d16;
+            color: #ffffff;
+            border: 1px solid #475569;
+            padding: 6px 10px;
+            border-radius: 4px;
+            width: 180px;
+        }
+
+        button {
+            background-color: #2563eb;
+            color: #ffffff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        /* Media Query: Narrow screen */
+        @media (max-width: 600px) {
+            .dashboard-grid {
+                display: block;
+            }
+            .card {
+                margin-bottom: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🦅 Litebird Next-Gen Engine Showcase</h1>
+        <p class="subtitle">HTML5 Canvas 2D + CSS Grid & Wrap + Web Storage + ES6 Arrow & Template Literals</p>
+    </div>
+
+    <div class="dashboard-grid">
+        <!-- Card 1: HTML5 Canvas -->
+        <div class="card">
+            <h2>🎨 HTML5 2D Canvas</h2>
+            <p>Direct vector rendering via CanvasRenderingContext2D:</p>
+            <canvas id="heroCanvas" width="220" height="70" style="border: 1px solid #475569;"></canvas>
+            <div class="badge-list">
+                <span class="badge badge-accent">2D Context</span>
+                <span class="badge">fillRect</span>
+                <span class="badge">strokeRect</span>
+                <span class="badge">Bresenham Path</span>
+            </div>
+        </div>
+
+        <!-- Card 2: Interactive Controls & Storage -->
+        <div class="card">
+            <h2>💾 Web Storage & Forms</h2>
+            <div class="form-row">
+                <input type="text" id="userInput" value="Litebird Explorer" />
+                <button id="saveBtn">Save State</button>
+            </div>
+            <p id="storageStatus" style="color: #34d399; font-size: 12px; margin-top: 6px;">Status: Ready</p>
+            <div class="badge-list">
+                <span class="badge badge-accent">localStorage</span>
+                <span class="badge">sessionStorage</span>
+                <span class="badge">document.cookie</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. Draw onto HTML5 Canvas
+        const canvas = document.getElementById("heroCanvas");
+        if (canvas) {
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                // Background
+                ctx.fillStyle = "#090d16";
+                ctx.fillRect(0, 0, 220, 70);
+
+                // Cyan & Blue Accents
+                ctx.fillStyle = "#0284c7";
+                ctx.fillRect(10, 15, 45, 40);
+
+                ctx.fillStyle = "#38bdf8";
+                ctx.fillRect(65, 20, 45, 30);
+
+                ctx.fillStyle = "#34d399";
+                ctx.fillRect(120, 10, 40, 50);
+
+                // Stroke borders
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(170, 15, 35, 40);
+            }
+        }
+
+        // 2. ES6 Arrow Functions and Template Literals
+        const formatMsg = (key, count) => `Saved ${key} (version ${count + 1}) to localStorage`;
+
+        // 3. Web Storage Persistence
+        const visitCount = localStorage.getItem("visitCount");
+        const currentVisits = visitCount ? parseInt(visitCount) : 0;
+        localStorage.setItem("visitCount", (currentVisits + 1).toString());
+
+        document.cookie = "session_mode=nextgen_showcase; Path=/";
+
+        const saveBtn = document.getElementById("saveBtn");
+        const statusEl = document.getElementById("storageStatus");
+        const inputEl = document.getElementById("userInput");
+
+        if (saveBtn) {
+            saveBtn.addEventListener("click", () => {
+                const val = inputEl ? inputEl.value : "Default";
+                localStorage.setItem("savedUser", val);
+                if (statusEl) {
+                    statusEl.textContent = formatMsg(val, currentVisits);
+                }
+            });
+        }
+    </script>
+</body>
+</html>

@@ -99,6 +99,13 @@ public:
         : elements(std::move(elems)) {}
 };
 
+class TemplateLiteralExpr : public Expr {
+public:
+    std::vector<std::unique_ptr<Expr>> parts;
+    explicit TemplateLiteralExpr(std::vector<std::unique_ptr<Expr>> p)
+        : parts(std::move(p)) {}
+};
+
 class FunctionExpr : public Expr {
 public:
     std::string name;
@@ -139,6 +146,9 @@ public:
 class BlockStmt : public Stmt {
 public:
     std::vector<std::unique_ptr<Stmt>> statements;
+    BlockStmt() = default;
+    explicit BlockStmt(std::vector<std::unique_ptr<Stmt>> stmts)
+        : statements(std::move(stmts)) {}
 };
 
 class IfStmt : public Stmt {

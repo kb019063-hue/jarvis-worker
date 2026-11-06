@@ -22,6 +22,7 @@ private:
     SimpleSelector parse_simple_selector();
     Declaration parse_declaration();
     Rule parse_rule();
+    MediaQuery parse_media_query(std::string_view str);
 
     std::string_view m_css;
     size_t m_cursor{0};

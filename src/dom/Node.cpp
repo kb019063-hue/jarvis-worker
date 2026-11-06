@@ -2,6 +2,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
+#include "litebird/render/Canvas2D.hpp"
 #include <iomanip>
 
 namespace litebird {
@@ -154,6 +155,21 @@ void Text::dump(std::ostream& os, int indent) const {
         else os << c;
     }
     os << "\"\n";
+}
+
+std::shared_ptr<CanvasRenderingContext2D> Element::get_or_create_canvas_context_2d() {
+    if (!m_canvas_context) {
+        int w = 300;
+        int h = 150;
+        if (has_attribute("width")) {
+            try { w = std::max(1, std::stoi(get_attribute("width"))); } catch (...) {}
+        }
+        if (has_attribute("height")) {
+            try { h = std::max(1, std::stoi(get_attribute("height"))); } catch (...) {}
+        }
+        m_canvas_context = std::make_shared<CanvasRenderingContext2D>(w, h);
+    }
+    return m_canvas_context;
 }
 
 } // namespace litebird

@@ -136,6 +136,94 @@ JsToken JsLexer::scan_identifier() {
     return t;
 }
 
+JsToken JsLexer::scan_template_start() {
+    JsToken t;
+    t.line = m_line;
+    std::string str;
+
+    while (m_cursor < m_source.size()) {
+        char ch = peek();
+        if (ch == '`') {
+            advance();
+            t.type = JsTokenType::NoSubstitutionTemplate;
+            t.text = str;
+            return t;
+        }
+        if (ch == '$' && peek(1) == '{') {
+            advance(); advance();
+            m_template_brace_stack.push_back(m_brace_depth);
+            t.type = JsTokenType::TemplateHead;
+            t.text = str;
+            return t;
+        }
+        if (ch == '\\') {
+            advance();
+            char esc = advance();
+            switch (esc) {
+                case 'n': str += '\n'; break;
+                case 't': str += '\t'; break;
+                case 'r': str += '\r'; break;
+                case '\\': str += '\\'; break;
+                case '`': str += '`'; break;
+                case '$': str += '$'; break;
+                case '"': str += '"'; break;
+                case '\'': str += '\''; break;
+                default: str += esc; break;
+            }
+        } else {
+            str += advance();
+        }
+    }
+
+    t.type = JsTokenType::NoSubstitutionTemplate;
+    t.text = str;
+    return t;
+}
+
+JsToken JsLexer::scan_template_continuation() {
+    JsToken t;
+    t.line = m_line;
+    std::string str;
+
+    while (m_cursor < m_source.size()) {
+        char ch = peek();
+        if (ch == '`') {
+            advance();
+            t.type = JsTokenType::TemplateTail;
+            t.text = str;
+            return t;
+        }
+        if (ch == '$' && peek(1) == '{') {
+            advance(); advance();
+            m_template_brace_stack.push_back(m_brace_depth);
+            t.type = JsTokenType::TemplateMiddle;
+            t.text = str;
+            return t;
+        }
+        if (ch == '\\') {
+            advance();
+            char esc = advance();
+            switch (esc) {
+                case 'n': str += '\n'; break;
+                case 't': str += '\t'; break;
+                case 'r': str += '\r'; break;
+                case '\\': str += '\\'; break;
+                case '`': str += '`'; break;
+                case '$': str += '$'; break;
+                case '"': str += '"'; break;
+                case '\'': str += '\''; break;
+                default: str += esc; break;
+            }
+        } else {
+            str += advance();
+        }
+    }
+
+    t.type = JsTokenType::TemplateTail;
+    t.text = str;
+    return t;
+}
+
 JsToken JsLexer::next_token() {
     skip_whitespace_and_comments();
 
@@ -157,6 +245,11 @@ JsToken JsLexer::next_token() {
         return scan_string(c);
     }
 
+    if (c == '`') {
+        advance();
+        return scan_template_start();
+    }
+
     if (std::isalpha(c) || c == '_' || c == '$') {
         return scan_identifier();
     }
@@ -170,8 +263,18 @@ JsToken JsLexer::next_token() {
     switch (c) {
         case '(': t.type = JsTokenType::OpenParen; return t;
         case ')': t.type = JsTokenType::CloseParen; return t;
-        case '{': t.type = JsTokenType::OpenBrace; return t;
-        case '}': t.type = JsTokenType::CloseBrace; return t;
+        case '{':
+            m_brace_depth++;
+            t.type = JsTokenType::OpenBrace;
+            return t;
+        case '}':
+            if (!m_template_brace_stack.empty() && m_brace_depth == m_template_brace_stack.back()) {
+                m_template_brace_stack.pop_back();
+                return scan_template_continuation();
+            }
+            if (m_brace_depth > 0) m_brace_depth--;
+            t.type = JsTokenType::CloseBrace;
+            return t;
         case '[': t.type = JsTokenType::OpenBracket; return t;
         case ']': t.type = JsTokenType::CloseBracket; return t;
         case ';': t.type = JsTokenType::Semicolon; return t;
@@ -188,6 +291,9 @@ JsToken JsLexer::next_token() {
                 t.type = JsTokenType::EqualEqual;
                 t.text = "==";
                 if (match('=')) t.text = "==="; // handle ===
+            } else if (match('>')) {
+                t.type = JsTokenType::Arrow;
+                t.text = "=>";
             } else {
                 t.type = JsTokenType::Equal;
             }

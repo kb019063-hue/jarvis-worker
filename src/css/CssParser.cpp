@@ -55,8 +55,51 @@ StyleSheet CssParser::parse_stylesheet() {
         consume_whitespace_and_comments();
         if (m_cursor >= m_css.size()) break;
 
-        // Skip @rules like @media or @import for now if encountered
         if (peek() == '@') {
+            advance(); // consume '@'
+            std::string at_keyword;
+            while (m_cursor < m_css.size() && std::isalpha(peek())) {
+                at_keyword += advance();
+            }
+            if (at_keyword == "media") {
+                consume_whitespace_and_comments();
+                std::string media_query_str;
+                while (m_cursor < m_css.size() && peek() != '{') {
+                    media_query_str += advance();
+                }
+                if (match('{')) {
+                    MediaQuery mq = parse_media_query(media_query_str);
+                    while (m_cursor < m_css.size()) {
+                        consume_whitespace_and_comments();
+                        if (peek() == '}') {
+                            advance();
+                            break;
+                        }
+                        if (peek() == '@') {
+                            // Skip nested @rule
+                            while (m_cursor < m_css.size() && peek() != ';' && peek() != '{') advance();
+                            if (peek() == '{') {
+                                int depth = 1;
+                                advance();
+                                while (m_cursor < m_css.size() && depth > 0) {
+                                    if (peek() == '{') depth++;
+                                    else if (peek() == '}') depth--;
+                                    advance();
+                                }
+                            } else if (peek() == ';') {
+                                advance();
+                            }
+                        } else {
+                            Rule inner_rule = parse_rule();
+                            inner_rule.media_queries.push_back(mq);
+                            sheet.rules.push_back(std::move(inner_rule));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Skip other @rules like @import or @keyframes
             while (m_cursor < m_css.size() && peek() != ';' && peek() != '{') advance();
             if (peek() == '{') {
                 int depth = 1;
@@ -118,11 +161,12 @@ Selector CssParser::parse_selector() {
         consume_whitespace_and_comments();
         if (peek() == '{' || peek() == ',' || m_cursor >= m_css.size()) break;
 
-        sel.parts.push_back(parse_simple_selector());
+        size_t cursor_before = m_cursor;
+        auto simple = parse_simple_selector();
+        sel.parts.push_back(std::move(simple));
 
-        // Check if there is whitespace separating simple selectors (descendant combinator)
-        if (peek() != '{' && peek() != ',' && !std::isspace(peek(-1))) {
-            // Keep going
+        if (m_cursor == cursor_before) {
+            advance();
         }
     }
 
@@ -140,7 +184,7 @@ SimpleSelector CssParser::parse_simple_selector() {
         std::transform(s.tag_name.begin(), s.tag_name.end(), s.tag_name.begin(), ::tolower);
     }
 
-    // Check for #id or .class attached
+    // Check for #id, .class, [attr=val], or :pseudo attached
     while (m_cursor < m_css.size()) {
         if (peek() == '#') {
             advance();
@@ -154,6 +198,35 @@ SimpleSelector CssParser::parse_simple_selector() {
                 cls += advance();
             }
             if (!cls.empty()) s.classes.push_back(cls);
+        } else if (peek() == '[') {
+            advance();
+            std::string attr_str;
+            while (m_cursor < m_css.size() && peek() != ']') {
+                attr_str += advance();
+            }
+            if (peek() == ']') advance();
+
+            auto eq = attr_str.find('=');
+            if (eq != std::string::npos) {
+                std::string k = attr_str.substr(0, eq);
+                std::string v = attr_str.substr(eq + 1);
+                auto strip = [](std::string& str) {
+                    while (!str.empty() && (std::isspace(str.front()) || str.front() == '"' || str.front() == '\'')) str.erase(str.begin());
+                    while (!str.empty() && (std::isspace(str.back()) || str.back() == '"' || str.back() == '\'')) str.pop_back();
+                };
+                strip(k);
+                strip(v);
+                s.attributes.emplace_back(std::move(k), std::move(v));
+            } else {
+                while (!attr_str.empty() && std::isspace(attr_str.front())) attr_str.erase(attr_str.begin());
+                while (!attr_str.empty() && std::isspace(attr_str.back())) attr_str.pop_back();
+                s.attributes.emplace_back(std::move(attr_str), "");
+            }
+        } else if (peek() == ':') {
+            advance();
+            while (std::isalnum(peek()) || peek() == '-') {
+                advance();
+            }
         } else {
             break;
         }
@@ -187,6 +260,37 @@ Declaration CssParser::parse_declaration() {
     if (peek() == ';') advance();
 
     return decl;
+}
+
+MediaQuery CssParser::parse_media_query(std::string_view str) {
+    MediaQuery mq;
+    std::string s(str);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+
+    if (s.find("screen") != std::string::npos) mq.media_type = "screen";
+    else if (s.find("print") != std::string::npos) mq.media_type = "print";
+
+    auto parse_feature = [&](const std::string& feat_name, float& target) {
+        auto pos = s.find(feat_name);
+        if (pos != std::string::npos) {
+            auto colon = s.find(':', pos);
+            if (colon != std::string::npos) {
+                size_t num_start = colon + 1;
+                while (num_start < s.size() && std::isspace(s[num_start])) num_start++;
+                size_t num_end = num_start;
+                while (num_end < s.size() && (std::isdigit(s[num_end]) || s[num_end] == '.')) num_end++;
+                if (num_end > num_start) {
+                    try {
+                        target = std::stof(s.substr(num_start, num_end - num_start));
+                    } catch (...) {}
+                }
+            }
+        }
+    };
+
+    parse_feature("max-width", mq.max_width);
+    parse_feature("min-width", mq.min_width);
+    return mq;
 }
 
 } // namespace litebird

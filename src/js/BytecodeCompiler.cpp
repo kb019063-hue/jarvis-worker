@@ -180,6 +180,8 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         fn_obj.type = JsType::Function;
         fn_obj.params = fn_decl->params;
         fn_obj.body = fn_decl->body;
+        fn_obj.bytecode_fn = sub_fn;
+        m_function->sub_functions.push_back(sub_fn);
         // Embed the compiled BytecodeFunction pointer into properties
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         // Keep a strong reference in properties so it isn't freed
@@ -343,12 +345,22 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         fn_obj.type = JsType::Function;
         fn_obj.params = fn_expr->params;
         fn_obj.body = fn_expr->body;
+        fn_obj.bytecode_fn = sub_fn;
+        m_function->sub_functions.push_back(sub_fn);
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         fn_obj.set_property("__fn_name__", JsValue::make_string(fn_expr->name));
 
         size_t const_idx = m_function->chunk.add_constant(fn_obj);
         emit_opcode(OpCode::OpConstant);
         emit_byte(static_cast<uint8_t>(const_idx));
+    } else if (auto tle = dynamic_cast<const TemplateLiteralExpr*>(expr)) {
+        size_t empty_idx = m_function->chunk.add_constant(JsValue::make_string(""));
+        emit_opcode(OpCode::OpConstant);
+        emit_byte(static_cast<uint8_t>(empty_idx));
+        for (const auto& part : tle->parts) {
+            compile_expr(part.get());
+            emit_opcode(OpCode::OpAdd);
+        }
     } else {
         throw std::runtime_error("Unsupported expression in bytecode compiler");
     }

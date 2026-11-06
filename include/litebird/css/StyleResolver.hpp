@@ -151,6 +151,9 @@ public:
     StyleResolver();
 
     void add_stylesheet(const StyleSheet& sheet);
+    void set_viewport(float w, float h) { m_viewport_width = w; m_viewport_height = h; }
+    float viewport_width() const { return m_viewport_width; }
+    float viewport_height() const { return m_viewport_height; }
 
     ComputedStyle resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style = nullptr) const;
 
@@ -165,6 +168,8 @@ private:
 
     StyleSheet m_ua_sheet;
     std::vector<StyleSheet> m_author_sheets;
+    float m_viewport_width{800.0f};
+    float m_viewport_height{600.0f};
 };
 
 } // namespace litebird

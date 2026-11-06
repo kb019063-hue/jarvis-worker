@@ -27,6 +27,7 @@ struct BytecodeFunction {
     std::string name;
     int arity{0};
     Chunk chunk;
+    std::vector<std::shared_ptr<BytecodeFunction>> sub_functions;
 
     BytecodeFunction(std::string n = "", int a = 0)
         : name(std::move(n)), arity(a) {}

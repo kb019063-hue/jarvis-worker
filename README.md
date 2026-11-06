@@ -12,18 +12,18 @@ Litebird implements the complete modern browser rendering pipeline:
 ```text
 [Raw HTML] ───► HTML Tokenizer ───► HTML Parser ───► DOM Tree
                                                          │
-[Raw CSS]  ───► CSS Tokenizer  ───► CSS Parser  ───► Style Rules
+[Raw CSS]  ───► CSS Tokenizer  ───► CSS Parser  ───► Style Rules (@media queries)
                                                          │
                                                          ▼
-                                                 Style Resolver (Cascade)
+                                                 Style Resolver (Cascade & Viewport)
                                                          │
                                                          ▼
                                                  Layout Box Tree
-                                                 (Block / Flexbox / Inline / Text)
+                                                 (Block / Flexbox / Grid / IFC / Canvas / Image)
                                                          │
                                                          ▼
                                                  Display List
-                                                 (DrawRect, DrawBorder, DrawText)
+                                                 (DrawRect, DrawBorder, DrawText, DrawImage)
                                                          │
                                         ┌────────────────┴────────────────┐
                                         ▼                                 ▼
@@ -34,87 +34,96 @@ Litebird implements the complete modern browser rendering pipeline:
                                                  │
 [JavaScript] ───► Lexer ───► AST Parser ───► Bytecode Compiler ───► Stack VM
                                                                          │
-                                                 └──► DOM Bindings (getElementById, textContent)
+                                                 ├──► DOM Bindings (getElementById, textContent)
+                                                 ├──► HTML5 Canvas 2D (getContext("2d"))
+                                                 ├──► Web Storage & Cookies (localStorage, cookies)
+                                                 └──► Async / Promises / EventLoop (fetch, setTimeout)
 ```
 
-### 1. DOM Core (`include/litebird/dom/`)
+### 1. DOM Core & W3C EventTarget (`include/litebird/dom/`)
 - Polymorphic node hierarchy (`Node`, `Element`, `Text`, `Document`).
 - Tree navigation (`parent()`, `children()`, `append_child()`, `remove_child()`).
 - DOM query methods: `getElementById()`, `getElementsByTagName()`, `querySelector()`, `querySelectorAll()`.
 - Interactive tree printer (`dumpTree()`).
-- **W3C DOM EventTarget System:** Standard event dispatch and bubbling pipeline (`Event`, `addEventListener()`, `dispatch_event()`, `stopPropagation()`, `preventDefault()`), with synthetic dispatch methods such as `element.click()`.
+- **W3C 3-Phase DOM Event Dispatch:** Standard capture, target, and bubbling phases (`Event`, `addEventListener(type, listener, useCapture)`, `dispatchEvent()`, `stopPropagation()`, `preventDefault()`).
+- **HTML Form Controls:** Native DOM state and change event dispatch for `<input type="text|checkbox">`, `<textarea>`, `<button>`, and `<select>`.
 
 ### 2. HTML5 Parser (`include/litebird/html/`)
 - Stateful streaming tokenizer (`HtmlTokenizer`).
-- Supports start tags, end tags, attributes (quoted/unquoted), comments, and DOCTYPEs.
+- Supports start tags, end tags, attributes (quoted/unquoted, boolean), comments, and DOCTYPEs.
 - Automatic handling of void elements (`<img />`, `<br>`, `<input>`, `<hr>`, `<meta>`, `<link>`).
 - Raw text mode for `<style>` and `<script>` tags.
 - Character entity decoding (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;`).
 
-### 3. CSS Engine & Cascade (`include/litebird/css/`)
+### 3. CSS Engine, Cascade & Media Queries (`include/litebird/css/`)
 - Selector parser supporting:
   - Universal (`*`)
   - Type / Tag selectors (`div`, `h1`, `p`)
   - Class selectors (`.card`, `.btn`, `.navbar`)
   - ID selectors (`#header`, `#main`)
+  - Attribute selectors (`[attr]`, `[attr="value"]`)
   - Descendant combinators (`div .card p`)
+- **CSS Media Queries (`@media`):** Supports responsive breakpoints (`(max-width: ...)`, `(min-width: ...)`, `(max-height: ...)`, `(min-height: ...)`). Dynamically re-evaluates rule application against active viewport dimensions.
 - **Specificity Calculation:** Computes `(ID, Class, Tag)` triples for accurate cascade resolution.
 - **Built-in User-Agent Stylesheet:** Default styling for headings, paragraphs, lists, and layout blocks.
 - **Style Resolver:** Combines User-Agent styles, Author stylesheets, and inline `style="..."` attributes with property inheritance (`color`, `font-size`, `text-align`).
 
-### 4. Layout Engine: Block + Flexbox + Inline Formatting Context (IFC) (`include/litebird/layout/`)
+### 4. Layout Engine: Block, Flexbox, Grid, Positioning & IFC (`include/litebird/layout/`)
 - Standard Box Model: `content`, `padding`, `border`, `margin`.
-- Box types: `BlockNode`, `FlexNode`, `InlineNode`, `AnonymousBlock`, `TextNode`.
+- Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`.
+- **CSS Box Sizing & Constraints:** Full support for `box-sizing: content-box | border-box`, plus `min-width`, `max-width`, `min-height`, and `max-height`.
+- **CSS Positioning & Stacking Contexts:** `position: static | relative | absolute | fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and hierarchical `z-index` stacking context sorting.
+- **CSS Grid Layout (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), cell auto-placement, item alignment, and grid gap spacing.
+- **CSS Multi-line Flexbox (`display: flex; flex-wrap: wrap`):** Multi-line flex container line breaking, cross-axis line alignment, and space distribution.
 - **Inline Formatting Context (IFC 2.1):**
   - Line box construction (`LineBox`) and inline fragment generation (`InlineFragment`).
   - True continuous text flowing across mixed inline elements (`<b>`, `<strong>`, `<i>`, `<em>`, `<a>`, `<code>`, `<span>`).
   - Inline element styling: custom colors, background pills, borders, padding, and text-decoration (`underline`).
   - Word wrapping across element boundaries with exact baseline alignment.
-  - Text alignment: `text-align: left`, `center`, `right`.
-  - Automatic `AnonymousBlock` synthesis when block containers contain mixed block and inline children.
-- **CSS Flexbox (`display: flex`):**
-  - Main Axis & Cross Axis resolution (`flex-direction: row | column`).
-  - Space distribution via `flex-grow`, `flex-shrink`, and `flex-basis`.
-  - Main-axis alignment via `justify-content` (`flex-start`, `flex-end`, `center`, `space-between`, `space-around`, `space-evenly`).
-  - Cross-axis alignment via `align-items` (`stretch`, `flex-start`, `flex-end`, `center`).
-  - Item spacing via `gap`.
-- Visual box tree inspector (`--dump-layout`).
+- **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 
-### 5. Multi-Backend Rendering (`include/litebird/render/`)
-- Intermediate **Display List** with atomic commands (`DrawRect`, `DrawBorder`, `DrawText`).
-- **Terminal Renderer:** Renders web pages directly inside your terminal using 24-bit ANSI Truecolor and border characters.
-- **Bitmap Renderer:** Exports an 800x600 uncompressed 24-bit `.bmp` image using an embedded bitmap font. Zero external GUI or graphics libraries required.
+### 5. Multi-Backend Rendering, Canvas 2D & Image Decoding (`include/litebird/render/`)
+- **HTML5 `<canvas>` 2D Context API (`CanvasRenderingContext2D`):**
+  - Vector path building: `beginPath()`, `moveTo()`, `lineTo()`, `closePath()`, `stroke()`, `fill()`.
+  - Geometric primitives: `fillRect()`, `clearRect()`, `strokeRect()`, `arc()`.
+  - Integer Bresenham line drawing and multi-node scanline polygon rasterization.
+  - Alpha blending and image blitting via `drawImage()`.
+  - Direct integration into the Layout Tree as an `ImageNode`.
+- **Native Image Decoders (`ImageDecoder`):** Decodes PNG (DEFLATE / uncompressed), JPEG baseline, Netpbm PPM, and BMP formats directly into 32-bit ARGB pixel buffers with bilinear filtering.
+- **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
+- **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
-### 6. High-Speed Bytecode Virtual Machine & Garbage Collection (`include/litebird/js/`)
-- **Instruction Set:** Compact 8-bit opcodes (`OpConstant`, `OpGetLocal`, `OpSetLocal`, `OpGetGlobal`, `OpSetGlobal`, `OpAdd`, `OpSubtract`, `OpCall`, `OpReturn`, `OpJumpIfFalse`, `OpLoop`, etc.).
-- **Bytecode Compiler:** Converts the parsed AST into a linear instruction `Chunk` with constant pooling, local slot allocation, and jump target patching.
-- **Stack-based VM:** High-speed opcode dispatch loop with call-frame stack management.
+### 6. Modern JavaScript Engine, Bytecode VM & Web Storage (`include/litebird/js/`)
+- **ES6 Syntactic Extensions:**
+  - **Arrow Functions:** `(x, y) => x + y` and block bodies `(val) => { ... }` with lexical scope binding.
+  - **Template Literals:** Multi-part interpolation `` `Value: ${val}, count: ${count + 1}` `` with expression evaluation.
+  - **Prototype Chain & Built-ins:** `Object.create()`, `prototype` inheritance, and `Array.prototype` methods (`map`, `filter`, `reduce`, `push`, `pop`, `join`).
+- **Asynchronous Promises & JSON:** ECMAScript Promises (`new Promise()`, `.then()`, `.catch()`, `Promise.resolve()`, `Promise.reject()`), microtask execution queue, and `JSON.parse()` / `JSON.stringify()`.
+- **Web Storage & Cookie Jar:**
+  - `localStorage`: Key-value storage persisted across navigation.
+  - `sessionStorage`: In-memory session key-value storage.
+  - `document.cookie`: RFC-compliant cookie jar supporting `key=value`, `Path`, `Max-Age`, and `Expires`.
+- **Instruction Set & Bytecode Virtual Machine:** Compact 8-bit opcodes, constant pooling, local slot indexing, jump patching, and stack frame call dispatch.
 - **Mark-and-Sweep Garbage Collector (`Heap`):**
-  - Tracing mark-and-sweep collector capable of detecting and reclaiming isolated cyclic reference graphs (e.g., `A.b = B; B.a = A;`).
-  - Safe root registration scanning active execution stacks, environment frames, and global scopes.
-  - Built-in `gc()` method providing memory diagnostics (`total_cells`, `alive_cells`, `collected_cells`, `bytes_allocated`).
-- **Modern JavaScript Syntactic Extensions:** Support for object literal expressions (`{ key: value }`), first-class anonymous function expressions (`function(e) { ... }`), closure variable binding, and DOM event listener bridging.
-- **Disassembler:** Inspect the compiled bytecode instructions using `--dump-bytecode`.
-- **Global Objects & DOM Bindings:**
-  - `console.log(...)`, `console.warn(...)`, `console.error(...)`
-  - `Math.floor`, `Math.ceil`, `Math.round`, `Math.abs`, `Math.PI`
-  - `document.title`, `document.getElementById(...)`
-  - Real-time DOM mutation: `element.textContent = "..."` updates the live document before layout and rasterization.
-  - Event Handling: `element.addEventListener(type, callback)`, `element.click()`, `event.stopPropagation()`, `event.preventDefault()`.
+  - Tracing cycle collector detecting and reclaiming isolated circular reference graphs.
+  - Memory diagnostics via `gc()` (`total_cells`, `alive_cells`, `collected_cells`, `bytes_allocated`).
+- **DOM & Web API Bindings:**
+  - `window`, `document`, `console.log/warn/error`, `Math.*`
+  - `fetch(url)` integrating native socket HTTP requests with JavaScript Promises.
+  - `canvas.getContext("2d")` returning live 2D drawing contexts.
 
 ### 7. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
 - **Interactive TUI Browser Shell (`BrowserShell`):**
-  - Terminal User Interface with keyboard-driven browsing: `[Tab]` / `[Shift+Tab]` cycles through links and buttons, `[Enter]` activates focused link or button, `[↑/↓/PgUp/PgDn]` scrolls the viewport smoothly.
-  - Visual focus ring highlighted directly on the rendered terminal grid in ANSI color.
-  - Full navigation history stack (`back()`, `forward()`, `reload()`, `navigate_to()`).
-  - Interactive URL bar with address entry prompt (`[o]` key) supporting local files and remote HTTP URLs.
-  - Integrated DevTools inspector pane (`[d]` key) displaying DOM element count, layout box tree height, and Heap GC memory metrics.
+  - Terminal User Interface with keyboard-driven browsing: `[Tab]` / `[Shift+Tab]` cycles focus, `[Enter]` activates links and buttons, `[↑/↓/PgUp/PgDn]` scrolls viewport.
+  - Navigation history (`back()`, `forward()`, `reload()`, `navigate_to()`).
+  - Interactive URL bar (`[o]` key) supporting local files and remote HTTP URLs.
+  - Integrated DevTools inspector pane (`[d]` key) with live DOM and Heap memory metrics.
 - **Asynchronous EventLoop & Timers (`EventLoop`):**
-  - High-resolution timer queue executing `setTimeout(callback, delay_ms)` and `setInterval(callback, interval_ms)`.
-  - Dynamic frame tick loop: timer-driven DOM updates automatically trigger relayout and frame repaints.
+  - High-resolution timer queue for `setTimeout()` and `setInterval()`.
+  - Timer-driven DOM mutations trigger reactive relayout and repaints.
 - **Resource Loader & Native HTTP Client (`ResourceLoader`):**
-  - Native POSIX socket HTTP/1.1 client supporting GET requests, headers, and status code handling with zero external dependencies.
-  - Relative URL resolver normalizing directory-relative (`../`, `./`) and root-relative paths across navigation.
+  - Native POSIX socket HTTP/1.1 client supporting GET requests and headers without external dependencies.
+  - Full relative URL path resolution.
 
 ---
 
@@ -131,30 +140,33 @@ Litebird implements the complete modern browser rendering pipeline:
 # Build the main litebird CLI
 make
 
-# Run the full test suite
+# Run the full 28-suite test suite
 make test
 ```
 
 ### Running Examples
 
 ```bash
-# 1. Launch the Interactive TUI Browser Shell
+# 1. Run the Next-Gen Feature Showcase (Canvas 2D + Grid + Storage + ES6)
+./build/litebird examples/nextgen_showcase.html
+
+# 2. Launch the Interactive TUI Browser Shell
 ./build/litebird --shell examples/browser_portal.html
 
-# 2. Run the live EventLoop Timer & Interactive Counter application
+# 3. Export showcase page directly to a 24-bit BMP image
+./build/litebird --render-bmp showcase.bmp examples/nextgen_showcase.html
+
+# 4. Run the live EventLoop Timer & Interactive Counter application
 ./build/litebird examples/timer_counter.html
 
-# 3. Run the DOM EventTarget and Mark-and-Sweep GC showcase
+# 5. Run the DOM EventTarget and Mark-and-Sweep GC showcase
 ./build/litebird examples/events_and_gc.html
 
-# 4. Render an Inline Formatting Context (IFC) page with mixed inline badges
+# 6. Render an Inline Formatting Context (IFC) page with mixed inline badges
 ./build/litebird examples/ifc.html
 
-# 5. Render a Flexbox layout with responsive cards and navbar
+# 7. Render a Flexbox layout with responsive cards and navbar
 ./build/litebird examples/flexbox.html
-
-# 6. Render directly to a 24-bit BMP image
-./build/litebird --render-bmp page.bmp examples/browser_portal.html
 ```
 
 ---
@@ -202,6 +214,18 @@ Running test: dom_event_target_and_bubbling... PASSED
 Running test: event_loop_and_timers... PASSED
 Running test: resource_loader_and_url_resolution... PASSED
 Running test: browser_shell_navigation_and_hit_testing... PASSED
+Running test: css_positioning_and_stacking_contexts... PASSED
+Running test: box_sizing_and_constraints... PASSED
+Running test: javascript_prototype_chain_and_arrays... PASSED
+Running test: incremental_layout_and_invalidation... PASSED
+Running test: js_async_promises_and_json... PASSED
+Running test: css_flex_wrapping_and_grid_layout... PASSED
+Running test: dom_3phase_events_and_form_controls... PASSED
+Running test: image_decoding_and_rendering... PASSED
+Running test: js_template_literals_and_arrow_functions... PASSED
+Running test: web_storage_and_cookies... PASSED
+Running test: html5_canvas_2d_context... PASSED
+Running test: css_media_queries... PASSED
 
-All 16 engine test suites passed successfully!
+All 28 engine test suites passed successfully!
 ```

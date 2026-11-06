@@ -9,6 +9,8 @@
 
 namespace litebird {
 
+class CanvasRenderingContext2D;
+
 class Element : public Node {
 public:
     explicit Element(std::string tag_name)
@@ -116,11 +118,16 @@ public:
         return dispatch_event(ev);
     }
 
+    std::shared_ptr<CanvasRenderingContext2D> canvas_context() const { return m_canvas_context; }
+    void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> ctx) { m_canvas_context = std::move(ctx); }
+    std::shared_ptr<CanvasRenderingContext2D> get_or_create_canvas_context_2d();
+
     void dump(std::ostream& os, int indent = 0) const override;
 
 private:
     std::string m_tag_name;
     std::unordered_map<std::string, std::string> m_attributes;
+    std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
 };
 
 } // namespace litebird

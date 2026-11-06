@@ -70,6 +70,14 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
             return false;
         }
     }
+    for (const auto& [attr_name, attr_val] : sel.attributes) {
+        if (!element->has_attribute(attr_name)) {
+            return false;
+        }
+        if (!attr_val.empty() && element->get_attribute(attr_name) != attr_val) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -411,6 +419,15 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     // 2. Author Stylesheets
     for (const auto& sheet : m_author_sheets) {
         for (const auto& rule : sheet.rules) {
+            bool media_matches = true;
+            for (const auto& mq : rule.media_queries) {
+                if (!mq.matches(m_viewport_width, m_viewport_height)) {
+                    media_matches = false;
+                    break;
+                }
+            }
+            if (!media_matches) continue;
+
             for (const auto& sel : rule.selectors) {
                 if (matches_selector(element, sel)) {
                     auto spec = sel.specificity();

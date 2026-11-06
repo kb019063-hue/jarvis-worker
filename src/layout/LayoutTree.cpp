@@ -1,4 +1,5 @@
 #include "litebird/layout/LayoutTree.hpp"
+#include "litebird/render/Canvas2D.hpp"
 #include <cctype>
 
 namespace litebird {
@@ -161,6 +162,30 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
                 }
             }
             box->image = img_data;
+        } else if (tag == "canvas") {
+            box->box_type = BoxType::ImageNode;
+            auto ctx = element->get_or_create_canvas_context_2d();
+            if (box->style.width < 0.0f) {
+                if (element->has_attribute("width")) {
+                    try { box->style.width = std::stof(element->get_attribute("width")); } catch (...) {}
+                } else if (ctx) {
+                    box->style.width = static_cast<float>(ctx->width());
+                } else {
+                    box->style.width = 300.0f;
+                }
+            }
+            if (box->style.height < 0.0f) {
+                if (element->has_attribute("height")) {
+                    try { box->style.height = std::stof(element->get_attribute("height")); } catch (...) {}
+                } else if (ctx) {
+                    box->style.height = static_cast<float>(ctx->height());
+                } else {
+                    box->style.height = 150.0f;
+                }
+            }
+            if (ctx) {
+                box->image = ctx->image_data();
+            }
         }
 
         return box;

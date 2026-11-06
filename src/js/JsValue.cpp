@@ -1,9 +1,11 @@
 #include "litebird/js/JsValue.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/Storage.hpp"
 #include "litebird/dom/Node.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Event.hpp"
+#include "litebird/render/Canvas2D.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -195,6 +197,38 @@ JsValue JsValue::get_property(const std::string& name) const {
                     return JsValue::make_boolean(ok);
                 });
             }
+            if (name == "getContext") {
+                auto node = dom_node;
+                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_null();
+                    std::string ctx_type = args[0].to_string();
+                    if (ctx_type == "2d" || ctx_type == "2D") {
+                        if (auto el = std::dynamic_pointer_cast<Element>(node)) {
+                            auto ctx = el->get_or_create_canvas_context_2d();
+                            if (ctx) {
+                                return ctx->to_js_value(ctx);
+                            }
+                        }
+                    }
+                    return JsValue::make_null();
+                });
+            }
+            if (name == "width") {
+                if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
+                    if (el->tag_name() == "canvas") {
+                        auto ctx = el->get_or_create_canvas_context_2d();
+                        return JsValue::make_number(ctx->width());
+                    }
+                }
+            }
+            if (name == "height") {
+                if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
+                    if (el->tag_name() == "canvas") {
+                        auto ctx = el->get_or_create_canvas_context_2d();
+                        return JsValue::make_number(ctx->height());
+                    }
+                }
+            }
         }
     }
 
@@ -236,6 +270,16 @@ JsValue JsValue::get_property(const std::string& name) const {
         }
     }
 
+    if (canvas_ctx) {
+        if (name == "fillStyle") return JsValue::make_string(canvas_ctx->fill_style.to_hex());
+        if (name == "strokeStyle") return JsValue::make_string(canvas_ctx->stroke_style.to_hex());
+        if (name == "lineWidth") return JsValue::make_number(canvas_ctx->line_width);
+    }
+
+    if (name == "cookie") {
+        return JsValue::make_string(CookieJar::default_jar().get_document_cookie());
+    }
+
     if (properties) {
         auto it = properties->find(name);
         if (it != properties->end()) return it->second;
@@ -244,6 +288,23 @@ JsValue JsValue::get_property(const std::string& name) const {
 }
 
 void JsValue::set_property(const std::string& name, JsValue val) {
+    if (canvas_ctx) {
+        if (name == "fillStyle") {
+            canvas_ctx->fill_style = Color::parse(val.to_string());
+        } else if (name == "strokeStyle") {
+            canvas_ctx->stroke_style = Color::parse(val.to_string());
+        } else if (name == "lineWidth") {
+            canvas_ctx->line_width = static_cast<float>(val.to_number());
+        }
+    }
+
+    if (name == "cookie") {
+        CookieJar::default_jar().set_document_cookie(val.to_string());
+        if (object_val) object_val->properties[name] = JsValue::make_string(CookieJar::default_jar().get_document_cookie());
+        else if (properties) (*properties)[name] = JsValue::make_string(CookieJar::default_jar().get_document_cookie());
+        return;
+    }
+
     if (type == JsType::DomNode && dom_node) {
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
             if (name == "textContent" || name == "innerText") {
@@ -261,6 +322,20 @@ void JsValue::set_property(const std::string& name, JsValue val) {
             }
             if (name == "checked") {
                 el->set_checked(val.is_truthy());
+                return;
+            }
+            if (name == "width" && el->tag_name() == "canvas") {
+                int w = std::max(1, static_cast<int>(val.to_number()));
+                el->set_attribute("width", std::to_string(w));
+                auto ctx = el->get_or_create_canvas_context_2d();
+                ctx->resize(w, ctx->height());
+                return;
+            }
+            if (name == "height" && el->tag_name() == "canvas") {
+                int h = std::max(1, static_cast<int>(val.to_number()));
+                el->set_attribute("height", std::to_string(h));
+                auto ctx = el->get_or_create_canvas_context_2d();
+                ctx->resize(ctx->width(), h);
                 return;
             }
         }

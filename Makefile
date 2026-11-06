@@ -11,6 +11,7 @@ SRCS = src/dom/Node.cpp \
        src/layout/LayoutTree.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
+       src/render/Canvas2D.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/BitmapRenderer.cpp \
        src/js/JsValue.cpp \
@@ -23,6 +24,7 @@ SRCS = src/dom/Node.cpp \
        src/js/JsInterpreter.cpp \
        src/js/Json.cpp \
        src/js/Promise.cpp \
+       src/js/Storage.cpp \
        src/js/EventLoop.cpp \
        src/net/ResourceLoader.cpp \
        src/shell/BrowserShell.cpp

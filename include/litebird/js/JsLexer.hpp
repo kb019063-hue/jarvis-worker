@@ -43,6 +43,13 @@ enum class JsTokenType {
     AmpAmp,
     PipePipe,
     Bang,
+    Arrow,
+
+    // Template Literals
+    TemplateHead,
+    TemplateMiddle,
+    TemplateTail,
+    NoSubstitutionTemplate,
 
     // Punctuation
     OpenParen,
@@ -80,10 +87,14 @@ private:
     JsToken scan_number();
     JsToken scan_string(char quote);
     JsToken scan_identifier();
+    JsToken scan_template_start();
+    JsToken scan_template_continuation();
 
     std::string_view m_source;
     size_t m_cursor{0};
     int m_line{1};
+    int m_brace_depth{0};
+    std::vector<int> m_template_brace_stack;
 };
 
 } // namespace litebird

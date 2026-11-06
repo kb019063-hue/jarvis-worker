@@ -28,6 +28,8 @@ enum class JsType {
 class JsEnvironment;
 class AstNode;
 class JsObject;
+struct BytecodeFunction;
+class CanvasRenderingContext2D;
 
 class JsValue {
 public:
@@ -46,12 +48,16 @@ public:
     std::vector<std::string> params;
     std::shared_ptr<AstNode> body;
     std::shared_ptr<JsEnvironment> closure;
+    std::shared_ptr<BytecodeFunction> bytecode_fn;
 
     // For Native Functions
     NativeFn native_fn;
 
     // For DOM Nodes
     std::shared_ptr<Node> dom_node;
+
+    // For HTML5 Canvas 2D Context
+    std::shared_ptr<CanvasRenderingContext2D> canvas_ctx;
 
     JsValue() : type(JsType::Undefined) {}
 

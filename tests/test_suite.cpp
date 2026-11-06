@@ -14,6 +14,8 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/Storage.hpp"
+#include "litebird/render/Canvas2D.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
@@ -1286,6 +1288,195 @@ TEST(image_decoding_and_rendering) {
     assert(pixel.r == 0 && pixel.g == 255 && pixel.b == 0);
 }
 
+void test_js_template_literals_and_arrow_functions() {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter interp(doc);
+
+    // 1. Arrow functions
+    interp.eval("const square = x => x * x;");
+    interp.eval("const add = (a, b) => a + b;");
+    interp.eval("const getConst = () => 42;");
+
+    JsValue res1 = interp.eval("square(9);");
+    assert(res1.to_number() == 81.0);
+
+    JsValue res2 = interp.eval("add(15, 27);");
+    assert(res2.to_number() == 42.0);
+
+    JsValue res3 = interp.eval("getConst();");
+    assert(res3.to_number() == 42.0);
+
+    // Arrow function with block body
+    interp.eval("const max = (a, b) => { if (a > b) return a; else return b; };");
+    JsValue res4 = interp.eval("max(10, 25);");
+    assert(res4.to_number() == 25.0);
+
+    // 2. Template literals
+    interp.eval("const name = 'Litebird';");
+    interp.eval("const ver = 2;");
+    JsValue res5 = interp.eval("`Welcome to ${name} v${ver}! 5 * 5 = ${square(5)}`;");
+    assert(res5.to_string() == "Welcome to Litebird v2! 5 * 5 = 25");
+
+    // Template literal with no substitution
+    JsValue res6 = interp.eval("`Plain template string`;");
+    assert(res6.to_string() == "Plain template string");
+
+    // Template literal with nested expression
+    JsValue res7 = interp.eval("`Result: ${ (x => x + 10)(20) }`;");
+    assert(res7.to_string() == "Result: 30");
+}
+
+void test_web_storage_and_cookies() {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter interp(doc);
+
+    // 1. localStorage API
+    interp.eval("localStorage.clear();");
+    assert(interp.eval("localStorage.length;").to_number() == 0.0);
+
+    interp.eval("localStorage.setItem('engine', 'Litebird');");
+    interp.eval("localStorage.setItem('phase', '8');");
+    assert(interp.eval("localStorage.length;").to_number() == 2.0);
+    assert(interp.eval("localStorage.getItem('engine');").to_string() == "Litebird");
+    assert(interp.eval("localStorage.getItem('phase');").to_string() == "8");
+    assert(interp.eval("localStorage.getItem('nonexistent');").type == JsType::Null);
+
+    interp.eval("localStorage.removeItem('phase');");
+    assert(interp.eval("localStorage.length;").to_number() == 1.0);
+    assert(interp.eval("localStorage.getItem('phase');").type == JsType::Null);
+
+    // 2. sessionStorage API
+    interp.eval("sessionStorage.setItem('sessionKey', 'val123');");
+    assert(interp.eval("sessionStorage.getItem('sessionKey');").to_string() == "val123");
+    assert(interp.eval("window.sessionStorage.getItem('sessionKey');").to_string() == "val123");
+
+    // 3. document.cookie & CookieJar
+    CookieJar::default_jar().clear();
+    interp.eval("document.cookie = 'user=admin; Path=/';");
+    interp.eval("document.cookie = 'theme=dark; Path=/';");
+    std::string cookies = interp.eval("document.cookie;").to_string();
+    assert(cookies.find("user=admin") != std::string::npos);
+    assert(cookies.find("theme=dark") != std::string::npos);
+
+    std::string req_header = CookieJar::default_jar().get_cookie_header();
+    assert(req_header.find("user=admin") != std::string::npos);
+    assert(req_header.find("theme=dark") != std::string::npos);
+}
+
+void test_html5_canvas_2d_context() {
+    using namespace litebird;
+    std::string html = R"(
+        <body>
+            <canvas id="myCanvas" width="80" height="60"></canvas>
+        </body>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    JsInterpreter interp(doc);
+
+    // Retrieve canvas and context
+    interp.eval("const canvas = document.getElementById('myCanvas');");
+    interp.eval("const ctx = canvas.getContext('2d');");
+
+    // Verify context properties
+    assert(interp.eval("canvas.width;").to_number() == 80.0);
+    assert(interp.eval("canvas.height;").to_number() == 60.0);
+
+    // Fill rectangle with red color #ff0000
+    interp.eval("ctx.fillStyle = '#ff0000';");
+    interp.eval("ctx.fillRect(10, 10, 30, 20);");
+
+    // Fill another rectangle with green color #00ff00
+    interp.eval("ctx.fillStyle = '#00ff00';");
+    interp.eval("ctx.fillRect(50, 10, 20, 20);");
+
+    // Clear a sub-portion with clearRect
+    interp.eval("ctx.clearRect(15, 15, 10, 10);");
+
+    // Check pixel data on element's canvas context
+    auto canvas_el = doc->get_element_by_id("myCanvas");
+    assert(canvas_el != nullptr);
+    auto ctx_ptr = canvas_el->canvas_context();
+    assert(ctx_ptr != nullptr);
+    auto img = ctx_ptr->image_data();
+    assert(img != nullptr);
+    assert(img->width == 80 && img->height == 60);
+
+    // Pixel at (12, 12) is filled with red (255, 0, 0, 255)
+    Color c_red = img->get_pixel_color(12, 12);
+    assert(c_red.r == 255 && c_red.g == 0 && c_red.b == 0);
+
+    // Pixel at (16, 16) was cleared to transparent
+    assert(img->get_pixel(16, 16) == 0);
+
+    // Pixel at (55, 15) is filled with green (0, 255, 0, 255)
+    Color c_green = img->get_pixel_color(55, 15);
+    assert(c_green.r == 0 && c_green.g == 255 && c_green.b == 0);
+
+    // Layout verification: canvas builds as BoxType::ImageNode with 80x60
+    StyleResolver resolver;
+    LayoutTree layout_tree;
+    auto root_box = layout_tree.build(doc, resolver);
+    root_box->layout(800.0f);
+
+    auto canvas_box = root_box->children[0];
+    assert(canvas_box->box_type == BoxType::ImageNode);
+    assert(canvas_box->dimensions.content.width == 80.0f);
+    assert(canvas_box->dimensions.content.height == 60.0f);
+    assert(canvas_box->image == img);
+}
+
+void test_css_media_queries() {
+    using namespace litebird;
+    std::string css = R"(
+        .responsive-box {
+            color: #000000;
+            font-size: 14px;
+        }
+
+        @media (max-width: 600px) {
+            .responsive-box {
+                color: #ff0000;
+                font-size: 12px;
+            }
+        }
+
+        @media (min-width: 800px) {
+            .responsive-box {
+                color: #0000ff;
+                font-size: 18px;
+            }
+        }
+    )";
+
+    auto sheet = CssParser::parse(css);
+    StyleResolver resolver;
+    resolver.add_stylesheet(sheet);
+
+    auto el = std::make_shared<Element>("div");
+    el->set_attribute("class", "responsive-box");
+
+    // Case 1: Small screen (mobile, 480px width) -> max-width: 600px matches
+    resolver.set_viewport(480.0f, 800.0f);
+    ComputedStyle style_mobile = resolver.resolve_style(el);
+    assert(style_mobile.color.r == 255 && style_mobile.color.g == 0 && style_mobile.color.b == 0);
+    assert(style_mobile.font_size == 12.0f);
+
+    // Case 2: Large screen (desktop, 1024px width) -> min-width: 800px matches
+    resolver.set_viewport(1024.0f, 768.0f);
+    ComputedStyle style_desktop = resolver.resolve_style(el);
+    assert(style_desktop.color.r == 0 && style_desktop.color.g == 0 && style_desktop.color.b == 255);
+    assert(style_desktop.font_size == 18.0f);
+
+    // Case 3: Medium screen (tablet, 700px width) -> neither media query matches, default applies
+    resolver.set_viewport(700.0f, 900.0f);
+    ComputedStyle style_tablet = resolver.resolve_style(el);
+    assert(style_tablet.color.r == 0 && style_tablet.color.g == 0 && style_tablet.color.b == 0);
+    assert(style_tablet.font_size == 14.0f);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -1313,7 +1504,11 @@ int main() {
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
+    RUN_TEST(js_template_literals_and_arrow_functions);
+    RUN_TEST(web_storage_and_cookies);
+    RUN_TEST(html5_canvas_2d_context);
+    RUN_TEST(css_media_queries);
 
-    std::cout << "\n\033[1;32mAll 24 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 28 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

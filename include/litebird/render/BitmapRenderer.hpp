@@ -24,9 +24,14 @@ private:
     void fill_rect(int rx, int ry, int rw, int rh, Color color);
     void draw_char(int x, int y, char c, Color color, int scale = 2);
 
+    TransformMatrix2D current_transform() const {
+        return m_transform_stack.empty() ? TransformMatrix2D::identity() : m_transform_stack.back();
+    }
+
     int m_width;
     int m_height;
     std::vector<Color> m_pixels;
+    std::vector<TransformMatrix2D> m_transform_stack;
 };
 
 } // namespace litebird

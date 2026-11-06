@@ -176,11 +176,17 @@ void BitmapRenderer::draw_char(int x, int y, char c, Color color, int scale) {
 void BitmapRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, DrawShadowCommand>) {
-            float sx = arg.rect.x + arg.x_offset;
-            float sy = arg.rect.y + arg.y_offset;
-            float sw = arg.rect.width;
-            float sh = arg.rect.height;
+        if constexpr (std::is_same_v<T, PushTransformCommand>) {
+            auto curr = current_transform();
+            m_transform_stack.push_back(curr.multiply(arg.matrix));
+        } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
+            if (!m_transform_stack.empty()) m_transform_stack.pop_back();
+        } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {
+            Rect tr = current_transform().map_rect(arg.rect);
+            float sx = tr.x + arg.x_offset;
+            float sy = tr.y + arg.y_offset;
+            float sw = tr.width;
+            float sh = tr.height;
             float blur = std::max(1.0f, arg.blur);
             float r = arg.border_radius;
 
@@ -202,19 +208,20 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawRectCommand>) {
+            Rect tr = current_transform().map_rect(arg.rect);
             if (arg.border_radius <= 0.5f) {
                 fill_rect(
-                    static_cast<int>(arg.rect.x),
-                    static_cast<int>(arg.rect.y),
-                    static_cast<int>(arg.rect.width),
-                    static_cast<int>(arg.rect.height),
+                    static_cast<int>(tr.x),
+                    static_cast<int>(tr.y),
+                    static_cast<int>(tr.width),
+                    static_cast<int>(tr.height),
                     arg.color
                 );
             } else {
-                float rx = arg.rect.x;
-                float ry = arg.rect.y;
-                float rw = arg.rect.width;
-                float rh = arg.rect.height;
+                float rx = tr.x;
+                float ry = tr.y;
+                float rw = tr.width;
+                float rh = tr.height;
                 float r = std::min({arg.border_radius, rw / 2.0f, rh / 2.0f});
 
                 int x0 = std::clamp(static_cast<int>(rx), 0, m_width);
@@ -235,10 +242,11 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
-            int x = static_cast<int>(arg.rect.x);
-            int y = static_cast<int>(arg.rect.y);
-            int w = static_cast<int>(arg.rect.width);
-            int h = static_cast<int>(arg.rect.height);
+            Rect tr = current_transform().map_rect(arg.rect);
+            int x = static_cast<int>(tr.x);
+            int y = static_cast<int>(tr.y);
+            int w = static_cast<int>(tr.width);
+            int h = static_cast<int>(tr.height);
 
             // Top
             fill_rect(x, y, w, static_cast<int>(arg.width.top), arg.color);
@@ -250,9 +258,10 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             fill_rect(x + w - static_cast<int>(arg.width.right), y, static_cast<int>(arg.width.right), h, arg.color);
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
+            Point tp = current_transform().map_point(arg.position);
             int scale = std::max(1, static_cast<int>(arg.font_size / 8.0f));
-            int cur_x = static_cast<int>(arg.position.x);
-            int cur_y = static_cast<int>(arg.position.y);
+            int cur_x = static_cast<int>(tp.x);
+            int cur_y = static_cast<int>(tp.y);
 
             for (char ch : arg.text) {
                 draw_char(cur_x, cur_y, ch, arg.color, scale);
@@ -263,10 +272,11 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             }
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {
-                int dst_x = static_cast<int>(arg.rect.x);
-                int dst_y = static_cast<int>(arg.rect.y);
-                int dst_w = static_cast<int>(arg.rect.width);
-                int dst_h = static_cast<int>(arg.rect.height);
+                Rect tr = current_transform().map_rect(arg.rect);
+                int dst_x = static_cast<int>(tr.x);
+                int dst_y = static_cast<int>(tr.y);
+                int dst_w = static_cast<int>(tr.width);
+                int dst_h = static_cast<int>(tr.height);
 
                 if (dst_w > 0 && dst_h > 0) {
                     int src_w = arg.image->width;

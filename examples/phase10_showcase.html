@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Phase 10 Showcase — Transforms, Gradients, Classes & Async/Await</title>
+    <style>
+        body {
+            margin: 14px;
+            background-color: #0b0f19;
+            color: #f1f5f9;
+            font-size: 13px;
+            font-family: sans-serif;
+        }
+
+        .header {
+            background-color: #1e293b;
+            padding: 14px 20px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            margin-bottom: 14px;
+        }
+
+        h1 {
+            color: #38bdf8;
+            font-size: 20px;
+            margin: 0 0 6px 0;
+        }
+
+        p.subtitle {
+            color: #94a3b8;
+            font-size: 12px;
+            margin: 0;
+        }
+
+        /* 2-Column Grid */
+        .showcase-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            margin-bottom: 14px;
+        }
+
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 14px 18px;
+        }
+
+        .card h2 {
+            font-size: 15px;
+            color: #38bdf8;
+            margin: 0 0 10px 0;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 6px;
+        }
+
+        /* Pillar 1: CSS 2D Transforms */
+        .transform-stage {
+            background-color: #0f172a;
+            border: 1px dashed #475569;
+            border-radius: 6px;
+            height: 160px;
+            position: relative;
+            padding: 10px;
+        }
+
+        .transform-box {
+            width: 100px;
+            height: 60px;
+            background-color: #0284c7;
+            border: 2px solid #38bdf8;
+            border-radius: 6px;
+            color: #ffffff;
+            font-weight: bold;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+
+        .box-translated {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            transform: translate(20px, 15px) rotate(8deg);
+            background-color: #4f46e5;
+            border-color: #818cf8;
+        }
+
+        .box-scaled-skewed {
+            position: absolute;
+            top: 40px;
+            left: 170px;
+            transform: scale(1.1, 1.05) skew(6deg, 3deg);
+            background-color: #059669;
+            border-color: #34d399;
+        }
+
+        /* Pillar 2: Canvas 2D Gradients & Bézier Curves */
+        .canvas-container {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            display: flex;
+            justify-content: center;
+            padding: 8px;
+        }
+
+        canvas {
+            background-color: #020617;
+            border-radius: 4px;
+        }
+
+        /* Pillar 3 & 4: Output consoles */
+        .console-box {
+            background-color: #020617;
+            border: 1px solid #1e293b;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #38bdf8;
+            min-height: 120px;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+
+        .tag-badge {
+            display: inline-block;
+            background-color: #0369a1;
+            color: #f0f9ff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            margin-right: 4px;
+        }
+
+        .action-button {
+            background-color: #0284c7;
+            color: #ffffff;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 8px;
+        }
+
+        .action-button:hover {
+            background-color: #0369a1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🦅 Litebird Browser Engine — Phase 10 Interactive Showcase</h1>
+        <p class="subtitle">CSS 2D Transforms & Matrix Math | Canvas Gradients & Bézier Curves | ES6 Classes & Inheritance | Async / Await Engine</p>
+    </div>
+
+    <div class="showcase-grid">
+
+        <!-- Pillar 1: CSS 2D Transforms -->
+        <div class="card">
+            <h2>Pillar 1: CSS 2D Affine Transforms</h2>
+            <p style="color: #94a3b8; font-size: 11px; margin-top: 0;">Affine matrix composition rendering translate(), rotate(), scale(), and skew():</p>
+            <div class="transform-stage">
+                <div class="transform-box box-translated">
+                    rotate(8deg)<br>translate(20px)
+                </div>
+                <div class="transform-box box-scaled-skewed">
+                    scale(1.1)<br>skew(6deg)
+                </div>
+            </div>
+            <p style="color: #64748b; font-size: 10px; margin-top: 8px; margin-bottom: 0;">
+                <span class="tag-badge">TransformMatrix2D</span> Hit-testing maps coordinates through inverse affine transformation matrices.
+            </p>
+        </div>
+
+        <!-- Pillar 2: Canvas Gradients & Curves -->
+        <div class="card">
+            <h2>Pillar 2: Canvas 2D Gradients & Bézier Curves</h2>
+            <div class="canvas-container">
+                <canvas id="canvasPillar2" width="300" height="150"></canvas>
+            </div>
+            <p style="color: #64748b; font-size: 10px; margin-top: 8px; margin-bottom: 0;">
+                <span class="tag-badge">CanvasGradient</span> Linear & radial gradients, color interpolation, quadratic and cubic Bézier paths.
+            </p>
+        </div>
+
+        <!-- Pillar 3: ES6 Classes -->
+        <div class="card">
+            <h2>Pillar 3: ES6 Classes & instanceof</h2>
+            <div id="classConsole" class="console-box">Initializing ES6 Class hierarchy...</div>
+            <button id="btnRunClasses" class="action-button">Instantiate & Inspect Classes</button>
+        </div>
+
+        <!-- Pillar 4: Async / Await -->
+        <div class="card">
+            <h2>Pillar 4: async / await Engine Support</h2>
+            <div id="asyncConsole" class="console-box">Async / Await runtime ready.</div>
+            <button id="btnRunAsync" class="action-button">Run Async Pipeline</button>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Pillar 2: Render Canvas Gradients & Bézier Curves ---
+        const canvas = document.getElementById("canvasPillar2");
+        if (canvas && canvas.getContext) {
+            const ctx = canvas.getContext("2d");
+
+            // Linear Gradient background
+            const linGrad = ctx.createLinearGradient(0, 0, 300, 0);
+            linGrad.addColorStop(0.0, "#0369a1");
+            linGrad.addColorStop(0.5, "#4f46e5");
+            linGrad.addColorStop(1.0, "#9333ea");
+            ctx.fillStyle = linGrad;
+            ctx.fillRect(0, 0, 300, 70);
+
+            // Radial Gradient sphere
+            const radGrad = ctx.createRadialGradient(70, 110, 0, 70, 110, 35);
+            radGrad.addColorStop(0.0, "#38bdf8");
+            radGrad.addColorStop(0.7, "#0284c7");
+            radGrad.addColorStop(1.0, "#082f49");
+            ctx.fillStyle = radGrad;
+            ctx.beginPath();
+            ctx.arc(70, 110, 32, 0, 6.28);
+            ctx.fill();
+
+            // Quadratic and Cubic Bézier Curves
+            ctx.strokeStyle = "#38bdf8";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(130, 130);
+            ctx.quadraticCurveTo(180, 75, 230, 130);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#34d399";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(150, 140);
+            ctx.bezierCurveTo(190, 90, 240, 160, 280, 90);
+            ctx.stroke();
+        }
+
+        // --- Pillar 3: ES6 Classes & Inheritance Demonstration ---
+        class Component {
+            constructor(id) {
+                this.id = id;
+            }
+            render() {
+                return "[Component: " + this.id + "]";
+            }
+            static category() {
+                return "UI Framework Core";
+            }
+        }
+
+        class CardWidget extends Component {
+            constructor(id, title) {
+                super(id);
+                this.title = title;
+            }
+            render() {
+                return super.render() + " -> Card: " + this.title;
+            }
+        }
+
+        function runClassesDemo() {
+            const out = document.getElementById("classConsole");
+            const card = new CardWidget("card-01", "Vector Display");
+
+            let log = "=== ES6 Class & Inheritance Verification ===\n";
+            log = log + "Static method: " + Component.category() + "\n";
+            log = log + "card.id: " + card.id + "\n";
+            log = log + "card.title: " + card.title + "\n";
+            log = log + "card.render(): " + card.render() + "\n";
+            log = log + "card instanceof CardWidget: " + (card instanceof CardWidget) + "\n";
+            log = log + "card instanceof Component: " + (card instanceof Component) + "\n";
+            log = log + "card instanceof Object: " + (card instanceof Object) + "\n";
+            log = log + "Status: Class prototype chain linked successfully!";
+            out.textContent = log;
+        }
+
+        const btnClasses = document.getElementById("btnRunClasses");
+        if (btnClasses) {
+            btnClasses.addEventListener("click", runClassesDemo);
+        }
+        runClassesDemo();
+
+        // --- Pillar 4: async / await Engine Demonstration ---
+        async function fetchPayload(stage) {
+            return "Stage " + stage + " payload resolved (" + (stage * 128) + " bytes)";
+        }
+
+        const calculateChecksum = async (val) => {
+            return val * 17;
+        };
+
+        async function executeAsyncPipeline() {
+            const out = document.getElementById("asyncConsole");
+            out.textContent = "Running async pipeline...\n";
+
+            const p1 = await fetchPayload(1);
+            out.textContent = out.textContent + "[1] " + p1 + "\n";
+
+            const p2 = await fetchPayload(2);
+            out.textContent = out.textContent + "[2] " + p2 + "\n";
+
+            const checksum = await calculateChecksum(42);
+            out.textContent = out.textContent + "[3] Checksum computed: " + checksum + "\n";
+            out.textContent = out.textContent + "Status: Async/await event loop promise resolution complete!";
+        }
+
+        const btnAsync = document.getElementById("btnRunAsync");
+        if (btnAsync) {
+            btnAsync.addEventListener("click", executeAsyncPipeline);
+        }
+        executeAsyncPipeline();
+    </script>
+</body>
+</html>

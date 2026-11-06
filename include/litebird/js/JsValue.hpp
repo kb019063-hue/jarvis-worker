@@ -30,6 +30,7 @@ class AstNode;
 class JsObject;
 struct BytecodeFunction;
 class CanvasRenderingContext2D;
+class CanvasGradient;
 
 class JsValue {
 public:
@@ -50,6 +51,7 @@ public:
     std::shared_ptr<AstNode> body;
     std::shared_ptr<JsEnvironment> closure;
     std::shared_ptr<BytecodeFunction> bytecode_fn;
+    bool is_async{false};
 
     // For Native Functions
     NativeFn native_fn;
@@ -57,8 +59,12 @@ public:
     // For DOM Nodes
     std::shared_ptr<Node> dom_node;
 
-    // For HTML5 Canvas 2D Context
+    // For HTML5 Canvas 2D Context & Gradients
     std::shared_ptr<CanvasRenderingContext2D> canvas_ctx;
+    std::shared_ptr<CanvasGradient> canvas_gradient;
+
+    // For Promises
+    std::shared_ptr<struct PromiseData> promise_data;
 
     JsValue() : type(JsType::Undefined) {}
 

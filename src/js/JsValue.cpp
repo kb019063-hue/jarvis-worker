@@ -278,8 +278,14 @@ JsValue JsValue::get_property(const std::string& name) const {
     }
 
     if (canvas_ctx) {
-        if (name == "fillStyle") return JsValue::make_string(canvas_ctx->fill_style.to_hex());
-        if (name == "strokeStyle") return JsValue::make_string(canvas_ctx->stroke_style.to_hex());
+        if (name == "fillStyle") {
+            if (canvas_ctx->fill_gradient) return JsValue::make_string("[CanvasGradient]");
+            return JsValue::make_string(canvas_ctx->fill_style.to_hex());
+        }
+        if (name == "strokeStyle") {
+            if (canvas_ctx->stroke_gradient) return JsValue::make_string("[CanvasGradient]");
+            return JsValue::make_string(canvas_ctx->stroke_style.to_hex());
+        }
         if (name == "lineWidth") return JsValue::make_number(canvas_ctx->line_width);
     }
 
@@ -303,9 +309,19 @@ JsValue JsValue::get_property(const std::string& name) const {
 void JsValue::set_property(const std::string& name, JsValue val) {
     if (canvas_ctx) {
         if (name == "fillStyle") {
-            canvas_ctx->fill_style = Color::parse(val.to_string());
+            if (val.canvas_gradient) {
+                canvas_ctx->fill_gradient = val.canvas_gradient;
+            } else {
+                canvas_ctx->fill_gradient = nullptr;
+                canvas_ctx->fill_style = Color::parse(val.to_string());
+            }
         } else if (name == "strokeStyle") {
-            canvas_ctx->stroke_style = Color::parse(val.to_string());
+            if (val.canvas_gradient) {
+                canvas_ctx->stroke_gradient = val.canvas_gradient;
+            } else {
+                canvas_ctx->stroke_gradient = nullptr;
+                canvas_ctx->stroke_style = Color::parse(val.to_string());
+            }
         } else if (name == "lineWidth") {
             canvas_ctx->line_width = static_cast<float>(val.to_number());
         }

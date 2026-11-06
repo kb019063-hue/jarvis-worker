@@ -147,6 +147,12 @@ struct ComputedStyle {
     std::string transition_timing_function{"ease"};
     float transition_delay{0.0f};
 
+    // 2D Transforms
+    bool has_transform{false};
+    TransformMatrix2D transform_matrix{TransformMatrix2D::identity()};
+    std::string transform_str;
+    std::string transform_origin{"50% 50%"};
+
     bool is_block() const { return display == Display::Block; }
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }

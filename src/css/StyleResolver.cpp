@@ -585,7 +585,102 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
                 }
             }
         }
+    } else if (prop == "transform") {
+        style.transform_str = val;
+        style.has_transform = true;
+    } else if (prop == "transform-origin") {
+        style.transform_origin = val;
     }
+}
+
+static TransformMatrix2D parse_transform_matrix(const std::string& str) {
+    TransformMatrix2D result = TransformMatrix2D::identity();
+    size_t i = 0;
+    while (i < str.size()) {
+        while (i < str.size() && (std::isspace(str[i]) || str[i] == ',')) i++;
+        if (i >= str.size()) break;
+
+        size_t open_paren = str.find('(', i);
+        if (open_paren == std::string::npos) break;
+        std::string func = str.substr(i, open_paren - i);
+        while (!func.empty() && std::isspace(func.front())) func.erase(func.begin());
+        while (!func.empty() && std::isspace(func.back())) func.pop_back();
+
+        size_t close_paren = str.find(')', open_paren);
+        if (close_paren == std::string::npos) break;
+        std::string args_str = str.substr(open_paren + 1, close_paren - open_paren - 1);
+        i = close_paren + 1;
+
+        std::vector<std::string> args;
+        std::stringstream ss(args_str);
+        std::string arg;
+        while (std::getline(ss, arg, ',')) {
+            while (!arg.empty() && std::isspace(arg.front())) arg.erase(arg.begin());
+            while (!arg.empty() && std::isspace(arg.back())) arg.pop_back();
+            if (!arg.empty()) args.push_back(arg);
+        }
+        if (args.empty()) {
+            std::stringstream ss2(args_str);
+            while (ss2 >> arg) args.push_back(arg);
+        }
+
+        auto parse_f = [](const std::string& s) -> float {
+            try { return std::stof(s); } catch (...) { return 0.0f; }
+        };
+
+        auto parse_angle = [&](const std::string& s) -> float {
+            float v = parse_f(s);
+            if (s.find("deg") != std::string::npos) {
+                return v * 3.14159265358979323846f / 180.0f;
+            }
+            if (s.find("rad") != std::string::npos) {
+                return v;
+            }
+            return v * 3.14159265358979323846f / 180.0f;
+        };
+
+        TransformMatrix2D op = TransformMatrix2D::identity();
+        if (func == "translate") {
+            float tx = !args.empty() ? parse_f(args[0]) : 0.0f;
+            float ty = args.size() > 1 ? parse_f(args[1]) : 0.0f;
+            op = TransformMatrix2D::translation(tx, ty);
+        } else if (func == "translateX") {
+            float tx = !args.empty() ? parse_f(args[0]) : 0.0f;
+            op = TransformMatrix2D::translation(tx, 0.0f);
+        } else if (func == "translateY") {
+            float ty = !args.empty() ? parse_f(args[0]) : 0.0f;
+            op = TransformMatrix2D::translation(0.0f, ty);
+        } else if (func == "scale") {
+            float sx = !args.empty() ? parse_f(args[0]) : 1.0f;
+            float sy = args.size() > 1 ? parse_f(args[1]) : sx;
+            op = TransformMatrix2D::scale(sx, sy);
+        } else if (func == "scaleX") {
+            float sx = !args.empty() ? parse_f(args[0]) : 1.0f;
+            op = TransformMatrix2D::scale(sx, 1.0f);
+        } else if (func == "scaleY") {
+            float sy = !args.empty() ? parse_f(args[0]) : 1.0f;
+            op = TransformMatrix2D::scale(1.0f, sy);
+        } else if (func == "rotate") {
+            float rad = !args.empty() ? parse_angle(args[0]) : 0.0f;
+            op = TransformMatrix2D::rotation(rad);
+        } else if (func == "skew") {
+            float ax = !args.empty() ? parse_angle(args[0]) : 0.0f;
+            float ay = args.size() > 1 ? parse_angle(args[1]) : 0.0f;
+            op = TransformMatrix2D::skew(ax, ay);
+        } else if (func == "skewX") {
+            float ax = !args.empty() ? parse_angle(args[0]) : 0.0f;
+            op = TransformMatrix2D::skew(ax, 0.0f);
+        } else if (func == "skewY") {
+            float ay = !args.empty() ? parse_angle(args[0]) : 0.0f;
+            op = TransformMatrix2D::skew(0.0f, ay);
+        } else if (func == "matrix" && args.size() >= 6) {
+            op = TransformMatrix2D(parse_f(args[0]), parse_f(args[1]), parse_f(args[2]),
+                                  parse_f(args[3]), parse_f(args[4]), parse_f(args[5]));
+        }
+
+        result = result.multiply(op);
+    }
+    return result;
 }
 
 ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style) const {
@@ -661,6 +756,10 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
                 apply_declaration(style, d.property, d.value);
             }
         }
+    }
+
+    if (style.has_transform && !style.transform_str.empty()) {
+        style.transform_matrix = parse_transform_matrix(style.transform_str);
     }
 
     return style;

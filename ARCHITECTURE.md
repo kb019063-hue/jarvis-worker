@@ -1,0 +1,278 @@
+# 🦅 Litebird Browser Engine — Comprehensive Architecture & Contributor Guide
+
+> **Notice for Future AI Agents & Human Developers:**
+> This document is designed as a self-contained reference and onboarding manual. It details the internal design, subsystem contracts, memory lifecycle, data flows, and expansion playbooks across the entire codebase. When implementing new features or debugging, consult this guide first.
+
+---
+
+## 📑 Table of Contents
+
+1. [High-Level Philosophy & Constraints](#1-high-level-philosophy--constraints)
+2. [Repository Layout & Module Structure](#2-repository-layout--module-structure)
+3. [End-to-End Pipeline & Data Flow](#3-end-to-end-pipeline--data-flow)
+4. [Subsystem Deep Dives](#4-subsystem-deep-dives)
+   - [4.1 DOM Core & Event Dispatch](#41-dom-core--event-dispatch)
+   - [4.2 HTML5 Tokenizer & Parser](#42-html5-tokenizer--parser)
+   - [4.3 CSS Parser, Cascade & Media Queries](#43-css-parser-cascade--media-queries)
+   - [4.4 Layout Box Tree & Formatting Contexts](#44-layout-box-tree--formatting-contexts)
+   - [4.5 Display List & Multi-Backend Rendering](#45-display-list--multi-backend-rendering)
+   - [4.6 JavaScript Engine, Bytecode VM & GC](#46-javascript-engine-bytecode-vm--gc)
+   - [4.7 Web Storage & Cookie Engine](#47-web-storage--cookie-engine)
+   - [4.8 Canvas 2D Rasterizer](#48-canvas-2d-rasterizer)
+   - [4.9 Network, EventLoop & TUI Shell](#49-network-eventloop--tui-shell)
+5. [Critical Memory & ABI Safety Rules](#5-critical-memory--abi-safety-rules)
+6. [Extension Playbooks (How to Add Features)](#6-extension-playbooks-how-to-add-features)
+   - [Adding a New DOM API / Method](#adding-a-new-dom-api--method)
+   - [Adding a New CSS Property](#adding-a-new-css-property)
+   - [Adding a New JavaScript Bytecode Opcode](#adding-a-new-javascript-bytecode-opcode)
+   - [Adding a Test Suite Entry](#adding-a-test-suite-entry)
+7. [Current Phase Status & Roadmap](#7-current-phase-status--roadmap)
+
+---
+
+## 1. High-Level Philosophy & Constraints
+
+- **Language Standard:** C++20 (`-std=c++20 -O2 -Wall -Wextra`).
+- **Zero Third-Party Dependencies:** Zero dependencies outside the C++ standard library and standard POSIX sockets (`<sys/socket.h>`, `<unistd.h>`). No external graphical libraries (no Skia, Cairo, WebKit, V8, or Qt).
+- **Dual Rendering Modes:**
+  1. Terminal ANSI 24-bit Truecolor renderer for interactive TUI browsing and CLI inspection.
+  2. Software Bitmap (.bmp) rasterizer generating standalone 24-bit uncompressed image files using an embedded bitmap font.
+- **Modularity:** Each engine phase (DOM, HTML, CSS, Layout, Paint, JS, Net, Shell) is decoupled and independently testable via unit tests.
+
+---
+
+## 2. Repository Layout & Module Structure
+
+```text
+/home/user/jarvis-worker/
+├── include/litebird/
+│   ├── dom/               # Node, Element, Document, EventTarget, Form controls
+│   ├── html/              # HtmlTokenizer, HtmlParser
+│   ├── css/               # CssParser, StyleSheet, StyleResolver, Media Queries
+│   ├── layout/            # LayoutBox, LayoutTree, InlineFormattingContext
+│   ├── render/            # PaintCommand, DisplayList, TerminalRenderer, BitmapRenderer,
+│   │                      # ImageDecoder, Canvas2D
+│   ├── js/                # JsValue, JsLexer, JsParser, AST, Bytecode, VM,
+│   │                      # Heap (GC), Promise, Json, Storage, EventLoop
+│   ├── net/               # ResourceLoader (POSIX HTTP/1.1 client, URL resolution)
+│   └── shell/             # BrowserShell (TUI keyboard navigation & DevTools)
+├── src/                   # C++ implementation files matching include/
+├── tests/
+│   └── test_suite.cpp     # Comprehensive monolithic unit & integration test runner
+├── examples/              # Visual showcase HTML pages
+├── Makefile               # Build scripts for CLI (litebird) and test suite
+├── README.md              # Public project documentation
+└── ARCHITECTURE.md        # This guide
+```
+
+---
+
+## 3. End-to-End Pipeline & Data Flow
+
+```text
+[Raw HTML String]
+       │
+       ▼
+HtmlTokenizer ───► HtmlParser ───► Document DOM Tree
+                                           │
+[Raw CSS / Inline <style>]                  │
+       │                                   │
+       ▼                                   │
+CssParser ───► StyleSheet Rules ───────────┤
+       │                                   │
+       ▼                                   ▼
+StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
+                                           │
+                                           ▼
+                                   LayoutTree::build()
+                                           │
+                                           ▼
+                                   LayoutBox Root Box
+                               (Block / Flex / Grid / IFC / Canvas)
+                                           │
+                                           ▼
+                               LayoutBox::layout(viewport_w, viewport_h)
+                               (Calculates content.x, y, width, height)
+                                           │
+                                           ▼
+                                  DisplayList::build()
+                                           │
+                                           ▼
+                        Atomic Paint Commands (DrawRect, DrawText, etc.)
+                                           │
+                          ┌────────────────┴────────────────┐
+                          ▼                                 ▼
+                  TerminalRenderer                    BitmapRenderer
+               (ANSI 24-bit Truecolor)               (24-bit BMP image)
+```
+
+---
+
+## 4. Subsystem Deep Dives
+
+### 4.1 DOM Core & Event Dispatch
+- **Base Hierarchy:** `Node` is the abstract base class with `NodeType` (Document, Element, Text, Comment).
+- **Element:** Subclasses `Node`, inherits from `EventTarget`. Holds tag name, attribute dictionary (`m_attributes`), class list, and computed inline/resolved styles.
+- **EventTarget:** Manages `addEventListener(type, listener, useCapture)` and `removeEventListener`.
+- **W3C 3-Phase Event Pipeline:**
+  1. **Capture Phase:** Traverses down from `Document` to the target's immediate parent invoking listeners registered with `useCapture = true`.
+  2. **Target Phase:** Invokes all listeners on the target node.
+  3. **Bubble Phase:** Traverses up from the target's immediate parent back to `Document` (unless `event.stopPropagation()` is invoked or `event.bubbles = false`).
+- **Form Controls:** `<input>`, `<textarea>`, `<button>`, `<select>` retain live values in DOM properties (`value`, `checked`). Mutating via UI triggers synthetic `"change"` and `"input"` events.
+
+### 4.2 HTML5 Tokenizer & Parser
+- **Streaming State Machine (`HtmlTokenizer`):** Handles `Data`, `TagOpen`, `TagName`, `BeforeAttributeName`, `AttributeName`, `BeforeAttributeValue`, `AttributeValueQuoted`, `SelfClosingStartTag`, and raw text modes.
+- **Void Elements:** `<area>`, `<base>`, `<br>`, `<col>`, `<embed>`, `<hr>`, `<img>`, `<input>`, `<link>`, `<meta>`, `<param>`, `<source>`, `<track>`, `<wbr>`. The parser never expects matching closing tags for void elements.
+- **Raw Text Modes:** Switched on encounter of `<style>` or `<script>` tags, ensuring CSS and JS syntax characters (`<`, `>`, `&`) are treated as literal characters until the matching `</style>` or `</script>` end tag.
+
+### 4.3 CSS Parser, Cascade & Media Queries
+- **Selectors:** Supports tag names, `#id`, `.class`, attribute selectors `[attr]` and `[attr="value"]`, pseudo-classes, and descendant space combinators.
+- **Specificity:** Represented as `Specificity { int ids, int classes, int tags }`. Triple lexicographical comparison resolves rule precedence.
+- **Media Queries (`@media`):**
+  - Evaluated in `StyleResolver::collect_matching_rules`.
+  - Condition metrics: `min-width`, `max-width`, `min-height`, `max-height`.
+  - Dynamically tested against `m_viewport_width` and `m_viewport_height`.
+- **Style Cascade Priority:**
+  1. Default User-Agent Stylesheet (`ua.css` defaults built into code).
+  2. Author Stylesheet Rules (sorted by specificity, then source order).
+  3. Element Inline `style="..."` attribute (highest specificity).
+  4. Inherited properties (`color`, `font-size`, `text-align`, etc.) propagated down the DOM hierarchy.
+
+### 4.4 Layout Box Tree & Formatting Contexts
+- **LayoutBox:** Core geometry representation using the box model:
+  ```cpp
+  struct Dimensions {
+      Rect content;
+      EdgeSizes padding;
+      EdgeSizes border;
+      EdgeSizes margin;
+  };
+  ```
+- **Formatting Contexts:**
+  - **Block Formatting:** Vertical flow, auto margins, collapsing vertical margins.
+  - **Flexbox (`display: flex`):** Main and cross axis alignment, `flex-grow`, `flex-shrink`, `flex-basis`, `flex-wrap: wrap`, and `gap`.
+  - **Grid (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), cell placement, and track gaps.
+  - **Inline Formatting Context (IFC):** Continuous inline flowing across text and elements (`<span>`, `<b>`, `<a>`), line breaking into `LineBox`es, and word wrapping.
+  - **Positioning:** `static`, `relative`, `absolute`, `fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and `z-index` stacking context sorting.
+- **Incremental Layout:** Elements track an `m_is_dirty` flag. Calling `mark_dirty()` invalidates ancestors up to the formatting root, avoiding full-tree recomputations when only small subtrees mutate.
+
+### 4.5 Display List & Multi-Backend Rendering
+- **DisplayList:** An ordered `std::vector<PaintCommand>` of atomic draw calls:
+  - `DrawRectCommand`: Filled rectangle with background color and border radius.
+  - `DrawBorderCommand`: Individual border sides with color, width, and style.
+  - `DrawTextCommand`: Text fragment at `(x, y)` with font color and style.
+  - `DrawImageCommand`: Raster image blit with scaling and alpha blending.
+- **TerminalRenderer:** Projects display list commands onto an 80x25 character grid using ANSI 24-bit Truecolor foreground/background escape sequences (`\033[38;2;R;G;Bm`).
+- **BitmapRenderer:** Rasterizes commands into a 2D ARGB pixel buffer and outputs a standard uncompressed Windows BMP file (54-byte header + BGR pixel rows with 4-byte padding).
+
+### 4.6 JavaScript Engine, Bytecode VM & GC
+- **Ast & Bytecode:**
+  - `JsLexer` -> `JsParser` produces AST nodes (`Stmt`, `Expr`).
+  - `BytecodeCompiler` compiles AST into a `BytecodeFunction` containing an array of 8-bit opcodes and a constant pool.
+- **Stack VM (`VM`):**
+  - Manages `CallFrame` stack with local variable slot offsets.
+  - Opcodes include `OpConstant`, `OpGetLocal`, `OpSetLocal`, `OpGetGlobal`, `OpSetGlobal`, `OpAdd`, `OpSubtract`, `OpMultiply`, `OpDivide`, `OpModulo`, `OpNegate`, `OpNot`, `OpEqual`, `OpNotEqual`, `OpLess`, `OpGreater`, `OpJump`, `OpJumpIfFalse`, `OpLoop`, `OpCall`, `OpReturn`, `OpPop`.
+- **Mark-and-Sweep Garbage Collector (`Heap`):**
+  - Allocates GC-managed cells (`JsObject`, `JsArray`, `JsFunction`).
+  - Cyclic reference graphs (e.g. `A.b = B; B.a = A`) are collected by tracing roots (stack frames, global environment, and registered handles) and sweeping unreached cells.
+- **ES6 Features:**
+  - Arrow functions (`(a, b) => expr` and `(x) => { ... }`) with lexical environment capture.
+  - Template literals (`` `Hello ${name}!` ``) with expression interpolation.
+  - Promises (`new Promise()`, `.then()`, `.catch()`, `Promise.resolve()`, `Promise.reject()`) executed via microtask queues.
+  - JSON serialization/deserialization (`JSON.parse`, `JSON.stringify`).
+
+### 4.7 Web Storage & Cookie Engine
+- **Storage (`include/litebird/js/Storage.hpp`):**
+  - Key-value string map supporting W3C `Storage` interface: `getItem`, `setItem`, `removeItem`, `clear`, `key`, and `length`.
+  - Instantiated for `window.localStorage` and `window.sessionStorage`.
+- **CookieJar (`include/litebird/js/Storage.hpp`):**
+  - Parses RFC cookie assignment strings: `name=value; Path=/; Max-Age=3600; Expires=...`.
+  - Serializes matching active cookies into a formatted header string when `document.cookie` is queried.
+
+### 4.8 Canvas 2D Rasterizer
+- **Canvas2D (`include/litebird/render/Canvas2D.hpp`):**
+  - Rasterizer maintaining an underlying `ImageData` buffer (32-bit ARGB `0xAARRGGBB`).
+  - Supports path commands: `beginPath`, `moveTo`, `lineTo`, `closePath`, `stroke`, `fill`.
+  - Integer Bresenham line algorithm for strokes and multi-node scanline polygon filling.
+  - Direct primitives: `fillRect`, `clearRect`, `strokeRect`, and `arc`.
+  - Integrated into `LayoutTree` as `BoxType::ImageNode`, enabling `<canvas>` to be laid out and rendered seamlessly.
+
+### 4.9 Network, EventLoop & TUI Shell
+- **ResourceLoader (`include/litebird/net/ResourceLoader.hpp`):**
+  - Zero-dependency POSIX socket HTTP/1.1 client.
+  - Resolves relative URLs (`../`, `./`, `/`).
+- **EventLoop (`include/litebird/js/EventLoop.hpp`):**
+  - High-resolution timer queue executing `setTimeout` and `setInterval` tasks.
+  - Dynamically triggers layout and repaint on DOM mutations.
+- **BrowserShell (`include/litebird/shell/BrowserShell.hpp`):**
+  - Keyboard-driven interactive TUI browser with navigation history (`back`, `forward`, `reload`).
+  - URL entry prompt (`[o]`) and DevTools inspector pane (`[d]`).
+
+---
+
+## 5. Critical Memory & ABI Safety Rules
+
+1. **Header Layout vs. Make Dependency Tracking:**
+   - When modifying class member layouts in core headers (such as `include/litebird/dom/Node.hpp`, `Element.hpp`, `JsValue.hpp`, or `LayoutBox.hpp`), **ALWAYS** execute `make clean && make -j$(nproc)` before running tests or CLI binaries.
+   - *Reason:* Object files compiled against older header definitions will experience binary structure misalignment leading to fatal `std::bad_alloc` or segmentation faults.
+2. **Bytecode Stack Call Frame Offsets:**
+   - In `VM::OpCall`, local slots must be offset by `m_stack.size() - arg_count - 1` to account for the function receiver on the stack.
+   - In `VM::OpReturn`, the return value must be stored at `frame->slots_offset` before truncating the stack.
+3. **Canvas Pixel Format:**
+   - `ImageData::pixels` stores 32-bit ARGB integer values (`uint32_t`), indexed as `pixels[y * width + x]`. Do not treat `ImageData::pixels` as a `uint8_t` byte array.
+
+---
+
+## 6. Extension Playbooks (How to Add Features)
+
+### Adding a New DOM API / Method
+1. Declare the method in `include/litebird/dom/Element.hpp` (or `Node.hpp`).
+2. Implement the method logic in `src/dom/Node.cpp`.
+3. In `src/js/JsValue.cpp` (`JsValue::get_property`), add the method name to the DOM element property dispatch table:
+   ```cpp
+   if (prop == "myNewMethod") {
+       return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+           // unwrap args and call node->my_new_method(...)
+           return JsValue::make_undefined();
+       });
+   }
+   ```
+4. Add unit test assertions in `tests/test_suite.cpp`.
+
+### Adding a New CSS Property
+1. Add property enum value or data field to `ComputedStyle` in `include/litebird/css/StyleSheet.hpp`.
+2. In `src/css/StyleResolver.cpp` (`apply_declaration`), add a handler mapping the CSS string property (e.g., `"opacity"`) to the computed field.
+3. In `src/layout/LayoutBox.cpp` or `src/render/PaintCommand.cpp`, incorporate the property into box dimensions or display list commands.
+
+### Adding a New JavaScript Bytecode Opcode
+1. Add the opcode identifier to `enum class OpCode : uint8_t` in `include/litebird/js/Bytecode.hpp`.
+2. Add disassembly formatting in `src/js/Bytecode.cpp`.
+3. In `src/js/BytecodeCompiler.cpp`, emit the opcode during AST traversal (`emit_byte(OpCode::OpMyOp)`).
+4. In `src/js/VM.cpp`, add the `case OpCode::OpMyOp:` dispatch branch inside `VM::run()`.
+
+### Adding a Test Suite Entry
+1. Open `tests/test_suite.cpp`.
+2. Write a self-contained test function:
+   ```cpp
+   void test_my_feature() {
+       // Setup document or JS environment
+       // Execute logic
+       // assert(...)
+   }
+   ```
+3. Register the function inside `main()` with `RUN_TEST(test_my_feature);`.
+4. Run `make test` and ensure all suites pass.
+
+---
+
+## 7. Current Phase Status & Roadmap
+
+| Phase | Milestone Description | Status |
+| :--- | :--- | :--- |
+| **Phase 1** | Initial Engine Core (HTML, CSS Specificity, Block Layout, Bitmap/Terminal Render, Basic JS) | ✅ Completed |
+| **Phase 2** | Inline Formatting Context (IFC), Mark-and-Sweep Tracing GC, DOM EventTarget Bubbling | ✅ Completed |
+| **Phase 3** | Interactive TUI Browser Shell, Asynchronous EventLoop with Timers, Resource Loader | ✅ Completed |
+| **Phase 4** | CSS Positioning (Relative/Absolute/Fixed), Box Sizing Constraints, JS Prototypes & Arrays, Incremental Layout | ✅ Completed |
+| **Phase 5** | Promises & Microtasks, JSON, CSS Grid Layout, Multi-line Flex Wrapping, 3-Phase DOM Events, Image Decoding | ✅ Completed |
+| **Phase 8** | HTML5 `<canvas>` 2D Context, Web Storage (`localStorage`/`sessionStorage`), `document.cookie`, CSS Media Queries (`@media`), ES6 Arrow Functions & Template Literals | ✅ Completed (28/28 tests passing) |
+| **Phase 9** | CSS Transitions & `@keyframes` Animations, SVG Vector Graphics (`<svg>`), Advanced CSS Pseudo-Classes (`:nth-child`, `:hover`, `:focus`), ES6 Map/Set Collections | 🚀 Ready for Implementation |

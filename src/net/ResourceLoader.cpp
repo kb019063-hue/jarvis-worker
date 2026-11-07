@@ -45,9 +45,12 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
 
     // If starts with '/', treat as root-relative
     if (relative_url.front() == '/') {
-        if (base_url.rfind("http://", 0) == 0) {
-            // Find end of host:port
-            auto slash_pos = base_url.find('/', 7);
+        size_t scheme_len = 0;
+        if (base_url.rfind("http://", 0) == 0) scheme_len = 7;
+        else if (base_url.rfind("https://", 0) == 0) scheme_len = 8;
+
+        if (scheme_len > 0) {
+            auto slash_pos = base_url.find('/', scheme_len);
             if (slash_pos == std::string_view::npos) {
                 return std::string(base_url) + std::string(relative_url);
             }
@@ -72,10 +75,11 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
     std::string segment;
     std::stringstream ss(combined);
     bool is_http = combined.rfind("http://", 0) == 0;
+    bool is_https = combined.rfind("https://", 0) == 0;
     std::string prefix;
-    if (is_http) {
-        prefix = "http://";
-        std::string without_scheme = combined.substr(7);
+    if (is_http || is_https) {
+        prefix = is_https ? "https://" : "http://";
+        std::string without_scheme = combined.substr(prefix.size());
         std::stringstream ss2(without_scheme);
         while (std::getline(ss2, segment, '/')) {
             if (segment.empty() || segment == ".") continue;
@@ -111,7 +115,12 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
     return res.empty() ? "." : res;
 }
 
-ResourceResponse ResourceLoader::load(const std::string& url) {
+ResourceResponse ResourceLoader::load(
+    const std::string& url,
+    const std::string& method,
+    const std::unordered_map<std::string, std::string>& headers,
+    const std::string& body
+) {
     if (url.rfind("data:", 0) == 0) {
         ResourceResponse resp;
         resp.status_code = 200;
@@ -152,11 +161,13 @@ ResourceResponse ResourceLoader::load(const std::string& url) {
                 resp.body = payload;
             }
         }
+        resp.headers["content-type"] = resp.content_type;
+        resp.headers["content-length"] = std::to_string(resp.body.size());
         return resp;
     }
 
     if (url.rfind("http://", 0) == 0) {
-        return load_http(url);
+        return load_http(url, method, headers, body);
     }
 
     std::string path = url;
@@ -182,10 +193,17 @@ ResourceResponse ResourceLoader::load_file(const std::string& file_path) {
     resp.status_code = 200;
     resp.success = true;
     resp.content_type = detect_mime_type(file_path);
+    resp.headers["content-type"] = resp.content_type;
+    resp.headers["content-length"] = std::to_string(resp.body.size());
     return resp;
 }
 
-ResourceResponse ResourceLoader::load_http(const std::string& url) {
+ResourceResponse ResourceLoader::load_http(
+    const std::string& url,
+    const std::string& method,
+    const std::unordered_map<std::string, std::string>& headers,
+    const std::string& body
+) {
     ResourceResponse resp;
     // Expected format: http://host[:port][/path]
     if (url.rfind("http://", 0) != 0) {
@@ -243,12 +261,25 @@ ResourceResponse ResourceLoader::load_http(const std::string& url) {
     }
     freeaddrinfo(res);
 
-    // Send HTTP GET request
-    std::string request = "GET " + path + " HTTP/1.1\r\n" +
+    // Build HTTP request
+    std::string req_method = method.empty() ? "GET" : method;
+    std::string request = req_method + " " + path + " HTTP/1.1\r\n" +
                           "Host: " + host + "\r\n" +
                           "User-Agent: Litebird/1.0 (Native Engine)\r\n" +
-                          "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n" +
-                          "Connection: close\r\n\r\n";
+                          "Accept: text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8\r\n";
+
+    for (const auto& [hk, hv] : headers) {
+        request += hk + ": " + hv + "\r\n";
+    }
+
+    if (!body.empty() && headers.find("content-length") == headers.end()) {
+        request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    }
+
+    request += "Connection: close\r\n\r\n";
+    if (!body.empty()) {
+        request += body;
+    }
 
     if (send(sockfd, request.c_str(), request.size(), 0) < 0) {
         close(sockfd);
@@ -303,6 +334,7 @@ ResourceResponse ResourceLoader::load_http(const std::string& url) {
                 header_val.erase(header_val.begin());
             }
             std::transform(header_name.begin(), header_name.end(), header_name.begin(), ::tolower);
+            resp.headers[header_name] = header_val;
             if (header_name == "content-type") {
                 resp.content_type = header_val;
             }

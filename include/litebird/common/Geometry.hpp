@@ -44,6 +44,8 @@ struct EdgeSizes {
         : top(t), right(r), bottom(b), left(l) {}
     constexpr explicit EdgeSizes(float all)
         : top(all), right(all), bottom(all), left(all) {}
+
+    bool operator==(const EdgeSizes& other) const = default;
 };
 
 /**

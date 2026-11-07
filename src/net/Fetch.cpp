@@ -216,6 +216,7 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
     std::string method = "GET";
     std::unordered_map<std::string, std::string> req_headers;
     std::string req_body;
+    JsValue signal_val = JsValue::make_undefined();
 
     if (args.size() > 1 && args[1].type == JsType::Object) {
         JsValue opts = args[1];
@@ -224,6 +225,8 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
 
         JsValue b = opts.get_property("body");
         if (b.is_truthy()) req_body = b.to_string();
+
+        signal_val = opts.get_property("signal");
 
         JsValue h = opts.get_property("headers");
         if (h.type == JsType::Object) {
@@ -235,11 +238,42 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
         }
     }
 
+    if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
+        JsValue reason = signal_val.get_property("reason");
+        return Promise::make_rejected(reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
+    }
+
     auto pdata = std::make_shared<PromiseData>();
     JsValue pval = Promise::create_promise_instance(pdata);
 
-    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata]() {
+    if (signal_val.is_object()) {
+        JsValue add_el = signal_val.get_property("addEventListener");
+        if (add_el.is_callable()) {
+            add_el.call_with_this(signal_val, {
+                JsValue::make_string("abort"),
+                JsValue::make_native_function([pdata, signal_val](const std::vector<JsValue>&) {
+                    JsValue reason = signal_val.get_property("reason");
+                    Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
+                    return JsValue::make_undefined();
+                })
+            });
+        }
+    }
+
+    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata, signal_val]() {
+        if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
+            JsValue reason = signal_val.get_property("reason");
+            Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
+            return;
+        }
+
         ResourceResponse resp = ResourceLoader::load(url, method, req_headers, req_body);
+        if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
+            JsValue reason = signal_val.get_property("reason");
+            Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
+            return;
+        }
+
         if (resp.success) {
             std::string st = (resp.status_code == 200) ? "OK" : ("Status " + std::to_string(resp.status_code));
             JsValue res_obj = ResponseObject::create_js_instance(

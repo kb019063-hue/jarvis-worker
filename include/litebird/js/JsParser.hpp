@@ -113,9 +113,18 @@ public:
     std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
     bool is_async{false};
+    bool is_generator{false};
 
-    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false)
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag) {}
+    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false, bool gen_flag = false)
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag), is_generator(gen_flag) {}
+};
+
+class YieldExpr : public Expr {
+public:
+    std::unique_ptr<Expr> argument;
+    bool delegate{false}; // yield*
+    explicit YieldExpr(std::unique_ptr<Expr> arg, bool del = false)
+        : argument(std::move(arg)), delegate(del) {}
 };
 
 class AwaitExpr : public Expr {
@@ -212,6 +221,15 @@ public:
     explicit ReturnStmt(std::unique_ptr<Expr> v) : value(std::move(v)) {}
 };
 
+class ForOfStmt : public Stmt {
+public:
+    std::string variable_name;
+    std::unique_ptr<Expr> iterable;
+    std::unique_ptr<Stmt> body;
+    ForOfStmt(std::string var, std::unique_ptr<Expr> iter, std::unique_ptr<Stmt> b)
+        : variable_name(std::move(var)), iterable(std::move(iter)), body(std::move(b)) {}
+};
+
 class FunctionDeclStmt : public Stmt {
 public:
     std::string name;
@@ -219,9 +237,10 @@ public:
     std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
     bool is_async{false};
+    bool is_generator{false};
 
-    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false)
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag) {}
+    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false, bool gen_flag = false)
+        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag), is_generator(gen_flag) {}
 };
 
 struct MethodDefinition {
@@ -229,6 +248,7 @@ struct MethodDefinition {
     bool is_static{false};
     bool is_constructor{false};
     bool is_async{false};
+    bool is_generator{false};
     std::vector<std::string> params;
     std::vector<std::shared_ptr<Expr>> default_values;
     std::shared_ptr<BlockStmt> body;
@@ -263,6 +283,7 @@ private:
     std::unique_ptr<Stmt> parse_var_declaration();
     std::unique_ptr<Stmt> parse_if_statement();
     std::unique_ptr<Stmt> parse_while_statement();
+    std::unique_ptr<Stmt> parse_for_statement();
     std::unique_ptr<Stmt> parse_return_statement();
     std::unique_ptr<FunctionDeclStmt> parse_function_declaration();
     std::unique_ptr<ClassDeclStmt> parse_class_declaration();

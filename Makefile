@@ -6,6 +6,9 @@ SRCS = src/dom/Node.cpp \
        src/dom/MutationObserver.cpp \
        src/dom/ShadowRoot.cpp \
        src/dom/CustomElementRegistry.cpp \
+       src/dom/IntersectionObserver.cpp \
+       src/dom/ResizeObserver.cpp \
+       src/dom/History.cpp \
        src/html/HtmlTokenizer.cpp \
        src/html/HtmlParser.cpp \
        src/css/CssParser.cpp \
@@ -18,6 +21,7 @@ SRCS = src/dom/Node.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/BitmapRenderer.cpp \
+       src/render/ImageFilter.cpp \
        src/js/JsValue.cpp \
        src/js/JsLexer.cpp \
        src/js/JsParser.cpp \
@@ -31,10 +35,12 @@ SRCS = src/dom/Node.cpp \
        src/js/Storage.cpp \
        src/js/EventLoop.cpp \
        src/js/Worker.cpp \
+       src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
        src/net/URL.cpp \
        src/net/Fetch.cpp \
        src/net/WebSocket.cpp \
+       src/net/AbortController.cpp \
        src/shell/BrowserShell.cpp
 
 OBJS = $(SRCS:src/%.cpp=build/%.o)

@@ -104,6 +104,10 @@ public:
         needs_layout = true;
         auto p = parent.lock();
         while (p) {
+            if (p->style.contains_layout()) {
+                p->child_needs_layout = true;
+                break;
+            }
             if (p->child_needs_layout) break;
             p->child_needs_layout = true;
             p = p->parent.lock();

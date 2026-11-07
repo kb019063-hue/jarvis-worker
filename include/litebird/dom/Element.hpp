@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/dom/Node.hpp"
+#include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
 #include <string>
 #include <unordered_map>
@@ -21,6 +22,9 @@ public:
     }
 
     const std::string& tag_name() const { return m_tag_name; }
+
+    const Rect& bounding_box() const { return m_bounding_box; }
+    void set_bounding_box(const Rect& r) { m_bounding_box = r; }
 
     bool has_attribute(const std::string& name) const {
         return m_attributes.find(name) != m_attributes.end();
@@ -156,6 +160,7 @@ private:
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
     JsValue m_custom_element_instance;
+    Rect m_bounding_box;
     bool m_is_hovered{false};
     bool m_is_focused{false};
     bool m_is_active{false};

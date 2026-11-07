@@ -26,6 +26,11 @@
 #include "litebird/dom/MutationObserver.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/dom/IntersectionObserver.hpp"
+#include "litebird/dom/ResizeObserver.hpp"
+#include "litebird/dom/History.hpp"
+#include "litebird/render/ImageFilter.hpp"
+#include "litebird/net/AbortController.hpp"
 
 #include <iostream>
 #include <cassert>
@@ -2662,6 +2667,437 @@ TEST(shadow_dom_and_slot_projection) {
     assert(found_slotted_text == true);
 }
 
+TEST(intersection_and_resize_observers) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    auto root = doc->create_element("div");
+    root->set_attribute("id", "viewport");
+    root->set_bounding_box(Rect(0.0f, 0.0f, 800.0f, 600.0f));
+
+    auto target = doc->create_element("div");
+    target->set_attribute("id", "target");
+    target->set_bounding_box(Rect(100.0f, 100.0f, 200.0f, 200.0f));
+    root->append_child(target);
+    doc->append_child(root);
+
+    bool callback_called = false;
+    size_t entries_count = 0;
+    float observed_ratio = 0.0f;
+
+    JsValue cb = JsValue::make_native_function([&](const std::vector<JsValue>& args) {
+        callback_called = true;
+        if (!args.empty() && args[0].is_array()) {
+            entries_count = args[0].array_elements().size();
+            if (entries_count > 0) {
+                observed_ratio = static_cast<float>(args[0].array_elements()[0].get_property("intersectionRatio").to_number());
+            }
+        }
+        return JsValue::make_undefined();
+    });
+
+    IntersectionObserverInit opts;
+    opts.root = root;
+    opts.thresholds = {0.0f, 0.5f, 1.0f};
+
+    auto observer = std::make_shared<IntersectionObserver>(cb, opts);
+    observer->observe(target);
+    observer->check_intersections(Rect(0.0f, 0.0f, 800.0f, 600.0f));
+    EventLoop::default_loop().run_microtasks();
+
+    assert(callback_called == true);
+    assert(entries_count == 1);
+    assert(observed_ratio > 0.99f);
+
+    // ResizeObserver
+    bool resize_called = false;
+    float content_w = 0.0f;
+    float content_h = 0.0f;
+
+    JsValue rcb = JsValue::make_native_function([&](const std::vector<JsValue>& args) {
+        resize_called = true;
+        if (!args.empty() && args[0].is_array() && !args[0].array_elements().empty()) {
+            auto rect = args[0].array_elements()[0].get_property("contentRect");
+            content_w = static_cast<float>(rect.get_property("width").to_number());
+            content_h = static_cast<float>(rect.get_property("height").to_number());
+        }
+        return JsValue::make_undefined();
+    });
+
+    auto resize_obs = std::make_shared<ResizeObserver>(rcb);
+    resize_obs->observe(target);
+    resize_obs->check_resizes();
+    EventLoop::default_loop().run_microtasks();
+
+    assert(resize_called == true);
+    assert(content_w == 200.0f);
+    assert(content_h == 200.0f);
+
+    // Test getBoundingClientRect via JS
+    JsInterpreter interp(doc);
+    interp.eval("var el = document.getElementById('target'); var rect = el.getBoundingClientRect();");
+    auto rect_val = interp.eval("rect.width");
+    assert(rect_val.to_number() == 200.0);
+}
+
+TEST(history_api_and_client_routing) {
+    using namespace litebird;
+    History history;
+    assert(history.length() == 1);
+
+    std::string navigated_url;
+    history.set_navigation_callback([&](const std::string& url, const JsValue&) {
+        navigated_url = url;
+    });
+
+    bool popstate_fired = false;
+    JsValue popstate_state = JsValue::make_undefined();
+    history.set_popstate_dispatcher([&](const JsValue& st) {
+        popstate_fired = true;
+        popstate_state = st;
+    });
+
+    JsValue s1 = JsValue::make_string("state-1");
+    history.push_state(s1, "Title 1", "/dashboard");
+    assert(history.length() == 2);
+    assert(history.current_url() == "/dashboard");
+
+    JsValue s2 = JsValue::make_string("state-2");
+    history.push_state(s2, "Title 2", "/settings");
+    assert(history.length() == 3);
+    assert(history.current_url() == "/settings");
+
+    JsValue s2_rev = JsValue::make_string("state-2-revised");
+    history.replace_state(s2_rev, "Title 2 Rev", "/settings/profile");
+    assert(history.length() == 3);
+    assert(history.current_url() == "/settings/profile");
+
+    history.back();
+    assert(popstate_fired == true);
+    assert(popstate_state.to_string() == "state-1");
+    assert(history.current_url() == "/dashboard");
+
+    popstate_fired = false;
+    history.forward();
+    assert(popstate_fired == true);
+    assert(popstate_state.to_string() == "state-2-revised");
+    assert(history.current_url() == "/settings/profile");
+
+    // Test with JS interpreter
+    auto doc = std::make_shared<Document>();
+    JsInterpreter interp(doc);
+    interp.eval(R"(
+        var popCount = 0;
+        var lastState = null;
+        window.addEventListener("popstate", function(e) {
+            popCount = popCount + 1;
+            lastState = e.state;
+        });
+        history.pushState("js-page-1", "P1", "/js1");
+        history.pushState("js-page-2", "P2", "/js2");
+        history.back();
+    )");
+
+    auto pop_count = interp.eval("popCount");
+    assert(pop_count.to_number() == 1.0);
+    auto last_state = interp.eval("lastState");
+    assert(last_state.to_string() == "js-page-1");
+}
+
+TEST(css_filters_and_canvas_blending) {
+    using namespace litebird;
+    // 1. ImageFilter algorithms
+    std::vector<Color> pixels = {
+        Color(100, 100, 100, 255),
+        Color(150, 150, 150, 255),
+        Color(200, 50, 50, 255),
+        Color(50, 200, 50, 255)
+    };
+    ImageFilter::brightness(pixels, 1.5f);
+    assert(pixels[0].r > 100);
+
+    ImageFilter::grayscale(pixels, 1.0f);
+    assert(pixels[0].r == pixels[0].g && pixels[0].g == pixels[0].b);
+
+    ImageFilter::invert(pixels, 1.0f);
+    assert(pixels[0].a == 255);
+
+    // 2. CSS Filter Parsing & Cascade
+    auto sheet = CssParser::parse(R"(
+        .filtered-box {
+            filter: blur(5px) brightness(120%) contrast(150%) drop-shadow(4px 4px black);
+            backdrop-filter: blur(10px) grayscale(80%);
+        }
+    )");
+    StyleResolver resolver;
+    resolver.add_stylesheet(sheet);
+
+    auto doc = std::make_shared<Document>();
+    auto el = doc->create_element("div");
+    el->set_attribute("class", "filtered-box");
+    doc->append_child(el);
+
+    auto style = resolver.resolve_style(el);
+    assert(style.filters.size() == 4);
+    assert(style.filters[0].type == FilterType::Blur);
+    assert(style.filters[0].blur_radius == 5.0f);
+    assert(style.filters[1].type == FilterType::Brightness);
+    assert(style.filters[1].amount == 1.2f);
+    assert(style.filters[2].type == FilterType::Contrast);
+    assert(style.filters[2].amount == 1.5f);
+    assert(style.filters[3].type == FilterType::DropShadow);
+    assert(style.filters[3].dx == 4.0f);
+    assert(style.filters[3].dy == 4.0f);
+
+    assert(style.backdrop_filters.size() == 2);
+    assert(style.backdrop_filters[0].type == FilterType::Blur);
+    assert(style.backdrop_filters[1].type == FilterType::Grayscale);
+    assert(style.backdrop_filters[1].amount == 0.8f);
+
+    // 3. Canvas 2D Blending
+    auto canvas = std::make_shared<CanvasRenderingContext2D>(20, 20);
+    assert(canvas->global_composite_operation == "source-over");
+    canvas->global_composite_operation = "multiply";
+    assert(canvas->global_composite_operation == "multiply");
+    canvas->fill_style = Color(255, 0, 0, 255);
+    canvas->fill_rect(0, 0, 20, 20);
+    canvas->global_composite_operation = "screen";
+    assert(canvas->global_composite_operation == "screen");
+}
+
+TEST(js_generators_iterators_and_for_of) {
+    using namespace litebird;
+    JsInterpreter interp;
+
+    // 1. Basic generator and yield
+    interp.eval(R"(
+        function* countTo3() {
+            yield 10;
+            yield 20;
+            return 30;
+        }
+        var gen = countTo3();
+        var step1 = gen.next();
+        var step2 = gen.next();
+        var step3 = gen.next();
+        var step4 = gen.next();
+    )");
+
+    assert(interp.eval("step1.value").to_number() == 10.0);
+    assert(interp.eval("step1.done").is_truthy() == false);
+    assert(interp.eval("step2.value").to_number() == 20.0);
+    assert(interp.eval("step2.done").is_truthy() == false);
+    assert(interp.eval("step3.value").to_number() == 30.0);
+    assert(interp.eval("step3.done").is_truthy() == true);
+    assert(interp.eval("step4.done").is_truthy() == true);
+
+    // 2. for...of loop with array
+    interp.eval(R"(
+        var sum = 0;
+        for (var x of [1, 2, 3, 4, 5]) {
+            sum = sum + x;
+        }
+    )");
+    assert(interp.eval("sum").to_number() == 15.0);
+
+    // 3. for...of loop with generator
+    interp.eval(R"(
+        function* genValues() {
+            yield 100;
+            yield 200;
+            yield 300;
+        }
+        var total = 0;
+        for (var v of genValues()) {
+            total = total + v;
+        }
+    )");
+    assert(interp.eval("total").to_number() == 600.0);
+
+    // 4. yield* delegation
+    interp.eval(R"(
+        function* subGen() {
+            yield 2;
+            yield 3;
+        }
+        function* mainGen() {
+            yield 1;
+            yield* subGen();
+            yield 4;
+        }
+        var delegatedList = [];
+        for (var item of mainGen()) {
+            delegatedList.push(item);
+        }
+    )");
+    assert(interp.eval("delegatedList.length").to_number() == 4.0);
+    assert(interp.eval("delegatedList[0]").to_number() == 1.0);
+    assert(interp.eval("delegatedList[1]").to_number() == 2.0);
+    assert(interp.eval("delegatedList[2]").to_number() == 3.0);
+    assert(interp.eval("delegatedList[3]").to_number() == 4.0);
+}
+
+TEST(abort_controller_and_fetch_cancellation) {
+    using namespace litebird;
+    JsInterpreter interp;
+
+    // 1. AbortController lifecycle
+    interp.eval(R"(
+        var ctrl = new AbortController();
+        var sig = ctrl.signal;
+        var initialAborted = sig.aborted;
+        var abortFired = false;
+        var eventType = "";
+
+        sig.addEventListener("abort", function(e) {
+            abortFired = true;
+            eventType = e.type;
+        });
+
+        ctrl.abort("Operation cancelled");
+        var finalAborted = sig.aborted;
+        var reason = sig.reason;
+    )");
+
+    assert(interp.eval("initialAborted").is_truthy() == false);
+    assert(interp.eval("finalAborted").is_truthy() == true);
+    assert(interp.eval("abortFired").is_truthy() == true);
+    assert(interp.eval("eventType").to_string() == "abort");
+    assert(interp.eval("reason").to_string() == "Operation cancelled");
+
+    // 2. AbortSignal.abort() and AbortSignal.timeout()
+    interp.eval(R"(
+        var staticSig = AbortSignal.abort("immediate-stop");
+        var staticAborted = staticSig.aborted;
+        var staticReason = staticSig.reason;
+
+        var timeoutSig = AbortSignal.timeout(100);
+        var timeoutInitial = timeoutSig.aborted;
+    )");
+    assert(interp.eval("staticAborted").is_truthy() == true);
+    assert(interp.eval("staticReason").to_string() == "immediate-stop");
+    assert(interp.eval("timeoutInitial").is_truthy() == false);
+
+    // 3. fetch cancellation with aborted signal
+    interp.eval(R"(
+        var fetchRejected = false;
+        var fetchError = "";
+        var preAbortedCtrl = new AbortController();
+        preAbortedCtrl.abort("Manual fetch cancel");
+
+        fetch("http://example.com/data", { signal: preAbortedCtrl.signal }).catch(function(err) {
+            fetchRejected = true;
+            fetchError = err;
+        });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(interp.eval("fetchRejected").is_truthy() == true);
+    assert(interp.eval("fetchError").to_string() == "Manual fetch cancel");
+}
+
+TEST(css_grid_template_areas_and_containment) {
+    using namespace litebird;
+    // 1. Grid template areas parsing
+    auto sheet = CssParser::parse(R"(
+        .grid-container {
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            grid-template-areas:
+                "header header"
+                "sidebar content"
+                "footer footer";
+            row-gap: 10px;
+            contain: layout paint;
+        }
+        .header-item {
+            grid-area: header;
+            height: 50px;
+        }
+        .sidebar-item {
+            grid-area: sidebar;
+            height: 100px;
+        }
+        .content-item {
+            grid-area: content;
+            height: 100px;
+        }
+        .footer-item {
+            grid-area: footer;
+            height: 40px;
+        }
+        .strict-container {
+            contain: strict;
+        }
+    )");
+
+    StyleResolver resolver;
+    resolver.add_stylesheet(sheet);
+
+    auto doc = std::make_shared<Document>();
+    auto container = doc->create_element("div");
+    container->set_attribute("class", "grid-container");
+
+    auto header = doc->create_element("div");
+    header->set_attribute("class", "header-item");
+    auto sidebar = doc->create_element("div");
+    sidebar->set_attribute("class", "sidebar-item");
+    auto content = doc->create_element("div");
+    content->set_attribute("class", "content-item");
+    auto footer = doc->create_element("div");
+    footer->set_attribute("class", "footer-item");
+
+    container->append_child(header);
+    container->append_child(sidebar);
+    container->append_child(content);
+    container->append_child(footer);
+    doc->append_child(container);
+
+    auto container_style = resolver.resolve_style(container);
+    assert(container_style.grid_named_areas.find("header") != container_style.grid_named_areas.end());
+    assert(container_style.grid_named_areas["header"].row_start == 1);
+    assert(container_style.grid_named_areas["header"].row_end == 2);
+    assert(container_style.grid_named_areas["header"].col_start == 1);
+    assert(container_style.grid_named_areas["header"].col_end == 3);
+
+    assert(container_style.grid_named_areas["sidebar"].row_start == 2);
+    assert(container_style.grid_named_areas["sidebar"].col_start == 1);
+    assert(container_style.grid_named_areas["sidebar"].col_end == 2);
+
+    assert(container_style.grid_named_areas["content"].row_start == 2);
+    assert(container_style.grid_named_areas["content"].col_start == 2);
+    assert(container_style.grid_named_areas["content"].col_end == 3);
+
+    assert(container_style.grid_named_areas["footer"].row_start == 3);
+    assert(container_style.grid_named_areas["footer"].col_start == 1);
+    assert(container_style.grid_named_areas["footer"].col_end == 3);
+
+    // Containment flags
+    assert(container_style.contains_layout() == true);
+    assert(container_style.contains_paint() == true);
+    assert(container_style.contains_size() == false);
+
+    auto strict_el = doc->create_element("div");
+    strict_el->set_attribute("class", "strict-container");
+    auto strict_style = resolver.resolve_style(strict_el);
+    assert(strict_style.contains_layout() == true);
+    assert(strict_style.contains_paint() == true);
+    assert(strict_style.contains_size() == true);
+
+    // 2. Grid Area Layout Positioning
+    auto grid_box = LayoutTree::build(container, resolver, 600.0f, 800.0f);
+    assert(grid_box != nullptr);
+    assert(grid_box->children.size() == 4);
+
+    auto header_box = grid_box->children[0];
+    auto sidebar_box = grid_box->children[1];
+    auto content_box = grid_box->children[2];
+    auto footer_box = grid_box->children[3];
+
+    assert(header_box->dimensions.content.y < sidebar_box->dimensions.content.y);
+    assert(sidebar_box->dimensions.content.x < content_box->dimensions.content.x);
+    assert(sidebar_box->dimensions.content.y == content_box->dimensions.content.y);
+    assert(content_box->dimensions.content.y < footer_box->dimensions.content.y);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -2711,7 +3147,13 @@ int main() {
     RUN_TEST(mutation_observer_api);
     RUN_TEST(custom_elements_api);
     RUN_TEST(shadow_dom_and_slot_projection);
+    RUN_TEST(intersection_and_resize_observers);
+    RUN_TEST(history_api_and_client_routing);
+    RUN_TEST(css_filters_and_canvas_blending);
+    RUN_TEST(js_generators_iterators_and_for_of);
+    RUN_TEST(abort_controller_and_fetch_cancellation);
+    RUN_TEST(css_grid_template_areas_and_containment);
 
-    std::cout << "\n\033[1;32mAll 46 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 52 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

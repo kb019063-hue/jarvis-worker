@@ -262,6 +262,18 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     root_box->dimensions.content.y = 0.0f;
     root_box->layout(viewport_width, viewport_height);
     LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
+
+    std::function<void(const std::shared_ptr<LayoutBox>&)> sync_boxes = [&](const std::shared_ptr<LayoutBox>& box) {
+        if (!box) return;
+        if (box->node && box->node->is_element()) {
+            box->node->as_element()->set_bounding_box(box->dimensions.border_box());
+        }
+        for (const auto& ch : box->children) {
+            sync_boxes(ch);
+        }
+    };
+    sync_boxes(root_box);
+
     return root_box;
 }
 

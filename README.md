@@ -144,7 +144,29 @@ Litebird implements the complete modern browser rendering pipeline:
   - `fetch(url)` integrating native socket HTTP requests with JavaScript Promises.
   - `canvas.getContext("2d")` returning live 2D drawing contexts.
 
-### 7. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
+### 7. Modern Browser Capabilities & Advanced Engine Platform (Phase 14) (`include/litebird/dom/`, `include/litebird/render/`, `include/litebird/net/`, `include/litebird/js/`)
+- **IntersectionObserver API:** Viewport and root-relative intersection detection, threshold crossing calculations (`thresholds`, `rootMargin`), ratio computation, entry records, and EventLoop microtask delivery.
+- **ResizeObserver API:** Element content and border box size change observation (`contentRect`, `borderBoxSize`), target tracking, and reactive microtask dispatch.
+- **History API & Client-Side SPA Routing:** Session history stack management (`pushState`, `replaceState`, `back`, `forward`, `go`), navigation listeners, and standard `popstate` window event dispatch.
+- **CSS Visual Filters & Backdrop Filters:** Full parsing and software rasterization for CSS `filter` and `backdrop-filter` operations:
+  - Separable Gaussian-approximation box blur (`blur()`).
+  - Color channel adjustments: `brightness()`, `contrast()`, `grayscale()`, `sepia()`, `invert()`, and `opacity()`.
+  - Multi-parameter drop shadows: `drop-shadow(dx dy blur color)`.
+- **Canvas 2D Blend Modes (`globalCompositeOperation`):** Standard Porter-Duff and color blending algorithms implemented in software: `source-over`, `copy`, `multiply`, `screen`, `lighter`, `destination-over`.
+- **JavaScript Generators & Iteration Protocol:**
+  - Generator functions: `function*`, cooperative suspension/resumption via `yield` expressions, and delegated iteration (`yield*`).
+  - Generator objects with standard `.next()`, `.return()`, and `.throw()` methods.
+  - Well-known Symbol `Symbol.iterator` support on arrays, generators, and custom iterables.
+  - `for...of` iteration statement over arrays, strings, and generator sequences.
+- **AbortController & Network Cancellation:**
+  - Standard `AbortController` and `AbortSignal` APIs (`aborted`, `reason`, `abort()`, `throwIfAborted()`, `AbortSignal.timeout(ms)`).
+  - Integration with `fetch(url, { signal })` to cleanly abort inflight network requests and immediately reject pending promises with `AbortError`.
+- **CSS Grid Named Areas & Layout Containment:**
+  - `grid-template-areas`: Multi-row and multi-column visual ASCII grid template definitions.
+  - `grid-area`: Item placement into named template areas or explicit grid line coordinates (`row-start / col-start / row-end / col-end`).
+  - CSS Containment (`contain: none | strict | content | layout | paint | size`): Layout isolation stopping dirty bit propagation at containment boundaries and size containment.
+
+### 8. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
 - **Interactive TUI Browser Shell (`BrowserShell`):**
   - Terminal User Interface with keyboard-driven browsing: `[Tab]` / `[Shift+Tab]` cycles focus, `[Enter]` activates links and buttons, `[↑/↓/PgUp/PgDn]` scrolls viewport.
   - Navigation history (`back()`, `forward()`, `reload()`, `navigate_to()`).
@@ -179,19 +201,22 @@ make test
 ### Running Examples
 
 ```bash
-# 1. Run the Phase 9 Super-Showcase (SVG Vector Graphics + Animations + Pseudo-Classes + ES6 Map/Set)
+# 1. Run the Phase 14 Super-Showcase (Observers + Visual Filters & Blending + Generators + Grid Areas)
+./build/litebird examples/phase14_showcase.html
+
+# 2. Run the Phase 9 Super-Showcase (SVG Vector Graphics + Animations + Pseudo-Classes + ES6 Map/Set)
 ./build/litebird examples/phase9_showcase.html
 
-# 2. Run the Next-Gen Feature Showcase (Canvas 2D + Grid + Storage + ES6)
+# 3. Run the Next-Gen Feature Showcase (Canvas 2D + Grid + Storage + ES6)
 ./build/litebird examples/nextgen_showcase.html
 
-# 3. Launch the Interactive TUI Browser Shell
+# 4. Launch the Interactive TUI Browser Shell
 ./build/litebird --shell examples/browser_portal.html
 
-# 4. Export showcase page directly to a 24-bit BMP image
-./build/litebird --render-bmp showcase.bmp examples/phase9_showcase.html
+# 5. Export Phase 14 showcase directly to a 24-bit BMP image
+./build/litebird --render-bmp phase14_showcase.bmp examples/phase14_showcase.html
 
-# 5. Run the live EventLoop Timer & Interactive Counter application
+# 6. Run the live EventLoop Timer & Interactive Counter application
 ./build/litebird examples/timer_counter.html
 
 # 6. Run the DOM EventTarget and Mark-and-Sweep GC showcase
@@ -274,6 +299,12 @@ Running test: websocket_rfc6455_client_and_handshake... PASSED
 Running test: mutation_observer_api... PASSED
 Running test: custom_elements_api... PASSED
 Running test: shadow_dom_and_slot_projection... PASSED
+Running test: intersection_and_resize_observers... PASSED
+Running test: history_api_and_client_routing... PASSED
+Running test: css_filters_and_canvas_blending... PASSED
+Running test: js_generators_iterators_and_for_of... PASSED
+Running test: abort_controller_and_fetch_cancellation... PASSED
+Running test: css_grid_template_areas_and_containment... PASSED
 
-All 46 engine test suites passed successfully!
+All 52 engine test suites passed successfully!
 ```

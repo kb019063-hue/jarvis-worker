@@ -166,7 +166,12 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_opcode(OpCode::OpUndefined);
         }
         emit_opcode(OpCode::OpReturn);
+    } else if (dynamic_cast<const ForOfStmt*>(stmt)) {
+        throw std::runtime_error("ForOf compiled via AST interpreter");
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
+        if (fn_decl->is_generator) {
+            throw std::runtime_error("Generator compiled via AST interpreter");
+        }
         auto sub_fn = std::make_shared<BytecodeFunction>(fn_decl->name, static_cast<int>(fn_decl->params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
 
@@ -333,7 +338,12 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         }
         emit_opcode(OpCode::OpCall);
         emit_byte(static_cast<uint8_t>(new_expr->args.size()));
+    } else if (dynamic_cast<const YieldExpr*>(expr)) {
+        throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
+        if (fn_expr->is_generator) {
+            throw std::runtime_error("Generator compiled via AST interpreter");
+        }
         auto sub_fn = std::make_shared<BytecodeFunction>(fn_expr->name.empty() ? "__anon__" : fn_expr->name, static_cast<int>(fn_expr->params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
 

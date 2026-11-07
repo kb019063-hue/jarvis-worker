@@ -23,11 +23,54 @@ void CanvasRenderingContext2D::resize(int w, int h) {
 void CanvasRenderingContext2D::set_pixel_safe(int x, int y, Color c) {
     if (x < 0 || x >= m_width || y < 0 || y >= m_height) return;
     size_t idx = static_cast<size_t>(y * m_width + x);
+    Color dst = Color::from_argb(m_image->pixels[idx]);
 
+    if (global_composite_operation == "copy") {
+        m_image->pixels[idx] = c.to_argb();
+        return;
+    }
+    if (global_composite_operation == "multiply") {
+        uint8_t r = static_cast<uint8_t>((static_cast<int>(c.r) * dst.r) / 255);
+        uint8_t g = static_cast<uint8_t>((static_cast<int>(c.g) * dst.g) / 255);
+        uint8_t b = static_cast<uint8_t>((static_cast<int>(c.b) * dst.b) / 255);
+        uint8_t a = std::max(c.a, dst.a);
+        m_image->pixels[idx] = Color(r, g, b, a).to_argb();
+        return;
+    }
+    if (global_composite_operation == "screen") {
+        uint8_t r = static_cast<uint8_t>(255 - ((255 - c.r) * (255 - dst.r)) / 255);
+        uint8_t g = static_cast<uint8_t>(255 - ((255 - c.g) * (255 - dst.g)) / 255);
+        uint8_t b = static_cast<uint8_t>(255 - ((255 - c.b) * (255 - dst.b)) / 255);
+        uint8_t a = std::max(c.a, dst.a);
+        m_image->pixels[idx] = Color(r, g, b, a).to_argb();
+        return;
+    }
+    if (global_composite_operation == "lighter") {
+        uint8_t r = static_cast<uint8_t>(std::min(255, static_cast<int>(c.r) + dst.r));
+        uint8_t g = static_cast<uint8_t>(std::min(255, static_cast<int>(c.g) + dst.g));
+        uint8_t b = static_cast<uint8_t>(std::min(255, static_cast<int>(c.b) + dst.b));
+        uint8_t a = static_cast<uint8_t>(std::min(255, static_cast<int>(c.a) + dst.a));
+        m_image->pixels[idx] = Color(r, g, b, a).to_argb();
+        return;
+    }
+    if (global_composite_operation == "destination-over") {
+        if (dst.a == 255) return;
+        float da = dst.a / 255.0f;
+        float sa = (c.a / 255.0f) * (1.0f - da);
+        float out_a = da + sa;
+        if (out_a > 0.0f) {
+            uint8_t r = static_cast<uint8_t>((dst.r * da + c.r * sa) / out_a);
+            uint8_t g = static_cast<uint8_t>((dst.g * da + c.g * sa) / out_a);
+            uint8_t b = static_cast<uint8_t>((dst.b * da + c.b * sa) / out_a);
+            m_image->pixels[idx] = Color(r, g, b, static_cast<uint8_t>(out_a * 255.0f)).to_argb();
+        }
+        return;
+    }
+
+    // Default "source-over"
     if (c.a == 255) {
         m_image->pixels[idx] = c.to_argb();
     } else if (c.a > 0) {
-        Color dst = Color::from_argb(m_image->pixels[idx]);
         float sa = c.a / 255.0f;
         float da = dst.a / 255.0f;
         float out_a = sa + da * (1.0f - sa);

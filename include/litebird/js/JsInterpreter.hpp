@@ -82,6 +82,8 @@ public:
     VM& vm() { return m_vm; }
     void set_document(std::shared_ptr<Document> doc);
 
+    std::shared_ptr<class History> history() const { return m_history; }
+
 private:
     void init_builtins();
 
@@ -90,6 +92,7 @@ private:
 
     std::shared_ptr<JsEnvironment> m_global_env;
     std::shared_ptr<Document> m_document;
+    std::shared_ptr<class History> m_history;
     std::shared_ptr<JsEnvironment> m_current_env;
     VM m_vm;
 };

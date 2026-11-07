@@ -128,7 +128,10 @@ JsToken JsLexer::scan_identifier() {
         {"static", JsTokenType::Static},
         {"instanceof", JsTokenType::InstanceOf},
         {"async", JsTokenType::Async},
-        {"await", JsTokenType::Await}
+        {"await", JsTokenType::Await},
+        {"yield", JsTokenType::Yield},
+        {"for", JsTokenType::For},
+        {"of", JsTokenType::Of}
     };
 
     JsToken t;

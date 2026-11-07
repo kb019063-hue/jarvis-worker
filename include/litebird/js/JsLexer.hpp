@@ -36,6 +36,11 @@ enum class JsTokenType {
     Async,
     Await,
 
+    // ES6 Generators & Iterators
+    Yield,
+    For,
+    Of,
+
     // Operators
     Plus,
     Minus,

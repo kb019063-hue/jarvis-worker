@@ -6,6 +6,7 @@
 #include <optional>
 #include <cstdint>
 #include <algorithm>
+#include <mutex>
 
 namespace litebird {
 
@@ -46,6 +47,7 @@ public:
 
 private:
     uint32_t m_next_id{1};
+    mutable std::mutex m_mutex;
     std::vector<TimerTask> m_timers;
     std::vector<std::function<void()>> m_task_queue;
     std::vector<std::function<void()>> m_microtask_queue;

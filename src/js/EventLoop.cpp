@@ -8,6 +8,7 @@ EventLoop& EventLoop::default_loop() {
 }
 
 uint32_t EventLoop::set_timeout(TimerCallback cb, int delay_ms) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     uint32_t id = m_next_id++;
     auto now = std::chrono::steady_clock::now();
     TimerTask task;
@@ -21,6 +22,7 @@ uint32_t EventLoop::set_timeout(TimerCallback cb, int delay_ms) {
 }
 
 uint32_t EventLoop::set_interval(TimerCallback cb, int interval_ms) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     uint32_t id = m_next_id++;
     int delay = std::max(1, interval_ms);
     auto now = std::chrono::steady_clock::now();
@@ -36,6 +38,7 @@ uint32_t EventLoop::set_interval(TimerCallback cb, int interval_ms) {
 }
 
 void EventLoop::clear_timer(uint32_t id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& t : m_timers) {
         if (t.id == id) {
             t.cancelled = true;
@@ -46,21 +49,28 @@ void EventLoop::clear_timer(uint32_t id) {
 
 void EventLoop::post_task(std::function<void()> task) {
     if (task) {
+        std::lock_guard<std::mutex> lock(m_mutex);
         m_task_queue.push_back(std::move(task));
     }
 }
 
 void EventLoop::post_microtask(std::function<void()> microtask) {
     if (microtask) {
+        std::lock_guard<std::mutex> lock(m_mutex);
         m_microtask_queue.push_back(std::move(microtask));
     }
 }
 
 size_t EventLoop::run_microtasks() {
     size_t count = 0;
-    while (!m_microtask_queue.empty()) {
-        auto microtasks = std::move(m_microtask_queue);
-        m_microtask_queue.clear();
+    while (true) {
+        std::vector<std::function<void()>> microtasks;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_microtask_queue.empty()) break;
+            microtasks = std::move(m_microtask_queue);
+            m_microtask_queue.clear();
+        }
         for (auto& task : microtasks) {
             if (task) {
                 task();
@@ -78,62 +88,76 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
     executed_count += run_microtasks();
 
     // 2. Drain macrotask immediate queue
-    if (!m_task_queue.empty()) {
-        auto tasks = std::move(m_task_queue);
-        m_task_queue.clear();
-        for (auto& task : tasks) {
-            if (task) {
-                task();
-                executed_count++;
-            }
+    std::vector<std::function<void()>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_task_queue.empty()) {
+            tasks = std::move(m_task_queue);
+            m_task_queue.clear();
         }
-        // Microtask checkpoint after task
-        executed_count += run_microtasks();
     }
+    for (auto& task : tasks) {
+        if (task) {
+            task();
+            executed_count++;
+        }
+    }
+    // Microtask checkpoint after task
+    executed_count += run_microtasks();
 
     // 3. Identify due timers
     std::vector<TimerTask> due_timers;
-    for (auto& t : m_timers) {
-        if (!t.cancelled && t.trigger_time <= now) {
-            due_timers.push_back(t);
-            if (t.is_interval && !t.cancelled) {
-                t.trigger_time = now + t.interval;
-            } else {
-                t.cancelled = true; // Mark one-shot timer as consumed
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& t : m_timers) {
+            if (!t.cancelled && t.trigger_time <= now) {
+                due_timers.push_back(t);
+                if (t.is_interval && !t.cancelled) {
+                    t.trigger_time = now + t.interval;
+                } else {
+                    t.cancelled = true; // Mark one-shot timer as consumed
+                }
             }
         }
     }
 
     // Execute due timers
     for (const auto& dt : due_timers) {
-        // Re-check if this timer was cancelled by an earlier timer in the same batch
         bool still_active = true;
-        for (const auto& t : m_timers) {
-            if (t.id == dt.id && t.cancelled && !dt.is_interval) {
-                // Was one-shot and already marked
-            } else if (t.id == dt.id && t.cancelled) {
-                still_active = false;
-                break;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (const auto& t : m_timers) {
+                if (t.id == dt.id && t.cancelled && !dt.is_interval) {
+                    // Was one-shot and already marked
+                } else if (t.id == dt.id && t.cancelled) {
+                    still_active = false;
+                    break;
+                }
             }
         }
         if (still_active && dt.callback) {
             dt.callback();
             executed_count++;
+            executed_count += run_microtasks();
         }
     }
 
-    // 3. Remove cancelled timers
-    m_timers.erase(
-        std::remove_if(m_timers.begin(), m_timers.end(), [](const TimerTask& t) {
-            return t.cancelled;
-        }),
-        m_timers.end()
-    );
+    // 4. Remove cancelled timers
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_timers.erase(
+            std::remove_if(m_timers.begin(), m_timers.end(), [](const TimerTask& t) {
+                return t.cancelled;
+            }),
+            m_timers.end()
+        );
+    }
 
     return executed_count;
 }
 
 bool EventLoop::has_pending_tasks() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_task_queue.empty() || !m_microtask_queue.empty()) return true;
     for (const auto& t : m_timers) {
         if (!t.cancelled) return true;
@@ -142,6 +166,7 @@ bool EventLoop::has_pending_tasks() const {
 }
 
 size_t EventLoop::active_timer_count() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
     size_t count = 0;
     for (const auto& t : m_timers) {
         if (!t.cancelled) count++;
@@ -150,6 +175,7 @@ size_t EventLoop::active_timer_count() const {
 }
 
 std::optional<std::chrono::milliseconds> EventLoop::time_until_next(std::chrono::steady_clock::time_point now) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_task_queue.empty() || !m_microtask_queue.empty()) {
         return std::chrono::milliseconds(0);
     }
@@ -169,6 +195,7 @@ std::optional<std::chrono::milliseconds> EventLoop::time_until_next(std::chrono:
 }
 
 void EventLoop::clear() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_timers.clear();
     m_task_queue.clear();
     m_microtask_queue.clear();

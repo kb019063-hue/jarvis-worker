@@ -15,6 +15,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 void print_banner() {
     std::cout << "\033[1;36m";
@@ -154,6 +156,14 @@ int main(int argc, char* argv[]) {
             fn->chunk.disassemble(std::cout, "CLI Script");
         } else {
             interp.eval(js_code);
+            auto start_wait = std::chrono::steady_clock::now();
+            while (litebird::EventLoop::default_loop().has_pending_tasks()) {
+                litebird::EventLoop::default_loop().tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (std::chrono::steady_clock::now() - start_wait > std::chrono::milliseconds(2000)) {
+                    break;
+                }
+            }
         }
         return 0;
     }

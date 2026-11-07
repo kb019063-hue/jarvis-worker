@@ -21,10 +21,16 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/shell/BrowserShell.hpp"
+#include "litebird/js/Worker.hpp"
+#include "litebird/net/WebSocket.hpp"
 
 #include <iostream>
 #include <cassert>
 #include <string>
+#include <thread>
+#include <chrono>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define TEST(name) void test_##name()
 #define RUN_TEST(name) do { \
@@ -2158,6 +2164,258 @@ TEST(url_and_url_search_params) {
     assert(js.global_env()->get("relHref").to_string() == "https://example.org/docs/guide");
 }
 
+TEST(web_workers_and_concurrent_execution) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+
+    std::string script = R"(
+        var workerResponse = 0;
+        var workerSender = "";
+        var workerError = "";
+
+        const workerCode = "data:text/javascript,self.onmessage = function(e) { postMessage({ doubled: e.data.val * 2, sender: 'worker-thread' }); };";
+        const w = new Worker(workerCode);
+
+        w.onmessage = function(e) {
+            workerResponse = e.data.doubled;
+            workerSender = e.data.sender;
+        };
+
+        w.onerror = function(err) {
+            workerError = err.message;
+        };
+
+        w.postMessage({ val: 21 });
+    )";
+
+    js.eval(script);
+
+    auto start = std::chrono::steady_clock::now();
+    while (js.global_env()->get("workerResponse").to_number() == 0.0) {
+        EventLoop::default_loop().tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(2000)) {
+            break;
+        }
+    }
+
+    assert(js.global_env()->get("workerResponse").to_number() == 42.0);
+    assert(js.global_env()->get("workerSender").to_string() == "worker-thread");
+    assert(js.global_env()->get("workerError").to_string().empty());
+
+    js.eval("w.terminate();");
+}
+
+TEST(css_flexbox_and_grid_modern_refinements) {
+    using namespace litebird;
+
+    // 1. Flexbox row layout with gap: 15px
+    {
+        std::string html = R"(
+            <body>
+            <div id="flex-row" style="display: flex; flex-direction: row; gap: 15px; width: 400px;">
+                <div id="i1" style="width: 100px; height: 30px;">Item 1</div>
+                <div id="i2" style="width: 100px; height: 30px;">Item 2</div>
+                <div id="i3" style="width: 100px; height: 30px;">Item 3</div>
+            </div>
+            </body>
+        )";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root_box != nullptr);
+
+        auto flex_box = root_box->children[0];
+        assert(flex_box->box_type == BoxType::FlexNode);
+        assert(flex_box->children.size() == 3);
+
+        float x0 = flex_box->children[0]->dimensions.content.x;
+        float x1 = flex_box->children[1]->dimensions.content.x;
+        float x2 = flex_box->children[2]->dimensions.content.x;
+
+        assert(x1 - x0 == 115.0f);
+        assert(x2 - x1 == 115.0f);
+    }
+
+    // 2. Flexbox column layout with row-gap: 20px
+    {
+        std::string html = R"(
+            <body>
+            <div id="flex-col" style="display: flex; flex-direction: column; row-gap: 20px; width: 200px;">
+                <div id="c1" style="width: 100px; height: 40px;">Col 1</div>
+                <div id="c2" style="width: 100px; height: 40px;">Col 2</div>
+            </div>
+            </body>
+        )";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root_box != nullptr);
+
+        auto flex_box = root_box->children[0];
+        assert(flex_box->children.size() == 2);
+        float y0 = flex_box->children[0]->dimensions.content.y;
+        float y1 = flex_box->children[1]->dimensions.content.y;
+
+        assert(y1 - y0 == 60.0f);
+        assert(flex_box->dimensions.content.height == 100.0f);
+    }
+
+    // 3. CSS Grid with minmax(100px, 1fr) minmax(200px, 2fr)
+    {
+        std::string html = R"(
+            <body>
+            <div id="grid-minmax" style="display: grid; grid-template-columns: minmax(100px, 1fr) minmax(200px, 2fr); gap: 0px; width: 600px;">
+                <div id="g1">Grid 1</div>
+                <div id="g2">Grid 2</div>
+            </div>
+            </body>
+        )";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root_box != nullptr);
+
+        auto grid_box = root_box->children[0];
+        assert(grid_box->box_type == BoxType::GridNode);
+        assert(grid_box->children.size() == 2);
+
+        float w1 = grid_box->children[0]->dimensions.content.width;
+        float w2 = grid_box->children[1]->dimensions.content.width;
+
+        assert(w1 == 200.0f);
+        assert(w2 == 400.0f);
+    }
+
+    // 4. CSS Grid with repeat(auto-fit, minmax(150px, 1fr))
+    {
+        std::string html = R"(
+            <body>
+            <div id="grid-autofit" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; width: 470px;">
+                <div id="af1">Item 1</div>
+                <div id="af2">Item 2</div>
+                <div id="af3">Item 3</div>
+            </div>
+            </body>
+        )";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root_box != nullptr);
+
+        auto grid_box = root_box->children[0];
+        assert(grid_box->box_type == BoxType::GridNode);
+        assert(grid_box->children.size() == 3);
+        float w1 = grid_box->children[0]->dimensions.content.width;
+        assert(w1 == 150.0f);
+    }
+}
+
+TEST(websocket_rfc6455_client_and_handshake) {
+    using namespace litebird;
+
+    // 1. Verify RFC 6455 Accept Key derivation
+    std::string test_client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    std::string accept_key = WebSocketObject::calculate_accept_key(test_client_key);
+    assert(accept_key == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+
+    // 2. Start loopback WebSocket test server on 127.0.0.1
+    std::atomic<bool> server_got_msg{false};
+    std::string received_from_client;
+
+    auto loopback = WebSocketObject::start_loopback_server([&](int client_fd) {
+        std::string req;
+        char ch;
+        while (::recv(client_fd, &ch, 1, 0) > 0) {
+            req.push_back(ch);
+            if (req.size() >= 4 && req.substr(req.size() - 4) == "\r\n\r\n") break;
+        }
+
+        std::string key_header = "Sec-WebSocket-Key: ";
+        size_t kpos = req.find(key_header);
+        std::string client_k;
+        if (kpos != std::string::npos) {
+            size_t endpos = req.find("\r\n", kpos);
+            client_k = req.substr(kpos + key_header.size(), endpos - (kpos + key_header.size()));
+        }
+
+        std::string s_accept = WebSocketObject::calculate_accept_key(client_k);
+        std::ostringstream resp;
+        resp << "HTTP/1.1 101 Switching Protocols\r\n"
+             << "Upgrade: websocket\r\n"
+             << "Connection: Upgrade\r\n"
+             << "Sec-WebSocket-Accept: " << s_accept << "\r\n\r\n";
+        std::string resp_str = resp.str();
+        ::send(client_fd, resp_str.data(), resp_str.size(), 0);
+
+        uint8_t hdr[2];
+        ::recv(client_fd, hdr, 2, 0);
+        uint8_t plen = hdr[1] & 0x7F;
+        uint8_t mask[4];
+        ::recv(client_fd, mask, 4, 0);
+        std::vector<uint8_t> payload(plen);
+        ::recv(client_fd, payload.data(), plen, 0);
+        for (size_t i = 0; i < plen; ++i) {
+            payload[i] ^= mask[i % 4];
+        }
+        received_from_client = std::string(payload.begin(), payload.end());
+        server_got_msg = true;
+
+        std::string reply = "pong-from-server";
+        std::vector<uint8_t> reply_frame;
+        reply_frame.push_back(0x81); // FIN + Text
+        reply_frame.push_back(static_cast<uint8_t>(reply.size())); // Unmasked
+        reply_frame.insert(reply_frame.end(), reply.begin(), reply.end());
+        ::send(client_fd, reply_frame.data(), reply_frame.size(), 0);
+
+        std::vector<uint8_t> close_frame = {0x88, 0x02, 0x03, 0xE8}; // 1000 OK
+        ::send(client_fd, close_frame.data(), close_frame.size(), 0);
+        ::close(client_fd);
+    });
+
+    // 3. Connect client using JavaScript
+    JsInterpreter js(nullptr);
+
+    std::string test_js = R"(
+        var wsOpened = false;
+        var wsReply = "";
+        var wsClosed = false;
+
+        const ws = new WebSocket("ws://127.0.0.1:)" + std::to_string(loopback->port) + R"(/chat");
+
+        ws.onopen = function() {
+            wsOpened = true;
+            ws.send("ping-from-client");
+        };
+
+        ws.onmessage = function(e) {
+            wsReply = e.data;
+        };
+
+        ws.onclose = function(e) {
+            wsClosed = true;
+        };
+    )";
+
+    js.eval(test_js);
+
+    auto start_t = std::chrono::steady_clock::now();
+    while (!js.global_env()->get("wsClosed").is_truthy()) {
+        EventLoop::default_loop().tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (std::chrono::steady_clock::now() - start_t > std::chrono::milliseconds(2000)) {
+            break;
+        }
+    }
+
+    assert(js.global_env()->get("wsOpened").is_truthy() == true);
+    assert(server_got_msg == true);
+    assert(received_from_client == "ping-from-client");
+    assert(js.global_env()->get("wsReply").to_string() == "pong-from-server");
+    assert(js.global_env()->get("wsClosed").is_truthy() == true);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -2201,7 +2459,10 @@ int main() {
     RUN_TEST(css_calc_expressions);
     RUN_TEST(fetch_api_and_headers);
     RUN_TEST(url_and_url_search_params);
+    RUN_TEST(web_workers_and_concurrent_execution);
+    RUN_TEST(css_flexbox_and_grid_modern_refinements);
+    RUN_TEST(websocket_rfc6455_client_and_handshake);
 
-    std::cout << "\n\033[1;32mAll 40 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 43 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

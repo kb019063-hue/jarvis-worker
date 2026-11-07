@@ -6,6 +6,7 @@
 #include <memory>
 #include <functional>
 #include <cstdint>
+#include <mutex>
 
 namespace litebird {
 
@@ -61,6 +62,7 @@ public:
 private:
     void sweep();
 
+    mutable std::mutex m_mutex;
     HeapObject* m_head{nullptr};
     std::vector<HeapObject*> m_gray_stack;
     std::vector<JsValue*> m_registered_roots;

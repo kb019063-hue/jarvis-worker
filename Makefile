@@ -27,9 +27,11 @@ SRCS = src/dom/Node.cpp \
        src/js/Promise.cpp \
        src/js/Storage.cpp \
        src/js/EventLoop.cpp \
+       src/js/Worker.cpp \
        src/net/ResourceLoader.cpp \
        src/net/URL.cpp \
        src/net/Fetch.cpp \
+       src/net/WebSocket.cpp \
        src/shell/BrowserShell.cpp
 
 OBJS = $(SRCS:src/%.cpp=build/%.o)

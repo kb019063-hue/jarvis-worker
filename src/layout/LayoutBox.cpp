@@ -205,6 +205,9 @@ void LayoutBox::layout_flex(float containing_width) {
 
     bool is_row = (style.flex_direction == FlexDirection::Row || style.flex_direction == FlexDirection::RowReverse);
 
+    float col_gap = style.grid_column_gap > 0.0f ? style.grid_column_gap : style.gap;
+    float row_gap = style.grid_row_gap > 0.0f ? style.grid_row_gap : style.gap;
+
     if (is_row) {
         struct FlexLine {
             std::vector<std::shared_ptr<LayoutBox>> items;
@@ -222,7 +225,7 @@ void LayoutBox::layout_flex(float containing_width) {
                 float item_w = child->dimensions.margin_box().width;
                 float item_h = child->dimensions.margin_box().height;
 
-                float test_w = cur_line.items.empty() ? item_w : (cur_line.line_items_width + (cur_line.items.size() * style.gap) + item_w);
+                float test_w = cur_line.items.empty() ? item_w : (cur_line.line_items_width + (cur_line.items.size() * col_gap) + item_w);
 
                 if (!cur_line.items.empty() && test_w > dimensions.content.width) {
                     lines.push_back(std::move(cur_line));
@@ -274,7 +277,7 @@ void LayoutBox::layout_flex(float containing_width) {
             float remaining = dimensions.content.width - (total_used_w + total_gaps);
 
             float x_cursor = 0.0f;
-            float gap_spacing = style.gap;
+            float gap_spacing = col_gap;
 
             switch (style.justify_content) {
                 case JustifyContent::FlexStart:
@@ -346,10 +349,10 @@ void LayoutBox::layout_flex(float containing_width) {
                 x_cursor += child->dimensions.margin_box().width + gap_spacing;
             }
 
-            y_line_cursor += cur_line_max_h + style.gap;
+            y_line_cursor += cur_line_max_h + row_gap;
         }
 
-        float total_h = y_line_cursor > 0.0f ? (y_line_cursor - style.gap) : 0.0f;
+        float total_h = y_line_cursor > 0.0f ? (y_line_cursor - row_gap) : 0.0f;
         float final_h = (style.height >= 0.0f) ? style.height : total_h;
         if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
             final_h = std::max(0.0f, final_h - v_padding_border);
@@ -378,10 +381,11 @@ void LayoutBox::layout_flex(float containing_width) {
             float dy = new_y - child->dimensions.content.y;
             child->shift_position(dx, dy);
 
-            y_cursor += child->dimensions.margin_box().height + style.gap;
+            y_cursor += child->dimensions.margin_box().height + row_gap;
         }
 
-        float final_h = (style.height >= 0.0f) ? style.height : y_cursor;
+        float total_h = y_cursor > 0.0f ? (y_cursor - row_gap) : 0.0f;
+        float final_h = (style.height >= 0.0f) ? style.height : total_h;
         if (style.box_sizing == BoxSizing::BorderBox && style.height >= 0.0f) {
             final_h = std::max(0.0f, final_h - v_padding_border);
         }
@@ -435,35 +439,53 @@ void LayoutBox::layout_grid(float containing_width) {
     }
 
     // Compute column track widths
-    std::vector<float> col_widths;
-    const auto& col_template = style.grid_template_columns.empty() ?
-        std::vector<float>{-1.0f} : style.grid_template_columns;
-    size_t num_cols = col_template.size();
-
     float col_gap = style.grid_column_gap > 0.0f ? style.grid_column_gap : style.gap;
     float row_gap = style.grid_row_gap > 0.0f ? style.grid_row_gap : style.gap;
 
-    float total_gaps = (num_cols > 1) ? (num_cols - 1) * col_gap : 0.0f;
-    float avail_for_tracks = std::max(0.0f, dimensions.content.width - total_gaps);
-
-    float fixed_sum = 0.0f;
-    float total_fr = 0.0f;
-    for (float track : col_template) {
-        if (track >= 0.0f) {
-            fixed_sum += track;
+    std::vector<ComputedStyle::GridTrackDef> tracks = style.grid_col_track_defs;
+    if (style.grid_auto_fit_columns) {
+        float min_track = style.grid_auto_fit_def.min_px > 0.0f ? style.grid_auto_fit_def.min_px : 100.0f;
+        int num_fit = std::max(1, static_cast<int>(std::floor((dimensions.content.width + col_gap) / (min_track + col_gap))));
+        tracks.clear();
+        for (int k = 0; k < num_fit; ++k) {
+            tracks.push_back(style.grid_auto_fit_def);
+        }
+    } else if (tracks.empty()) {
+        if (!style.grid_template_columns.empty()) {
+            for (float t : style.grid_template_columns) {
+                ComputedStyle::GridTrackDef d;
+                if (t < 0.0f) d.max_fr = -t;
+                else { d.min_px = t; d.max_px = t; }
+                tracks.push_back(d);
+            }
         } else {
-            total_fr += (-track);
+            ComputedStyle::GridTrackDef d;
+            d.max_fr = 1.0f;
+            tracks.push_back(d);
         }
     }
 
-    float fr_space = std::max(0.0f, avail_for_tracks - fixed_sum);
-    for (float track : col_template) {
-        if (track >= 0.0f) {
-            col_widths.push_back(track);
-        } else {
-            float fr_w = (total_fr > 0.0f) ? ((-track) / total_fr) * fr_space : 0.0f;
-            col_widths.push_back(fr_w);
+    size_t num_cols = tracks.size();
+    float total_gaps = (num_cols > 1) ? (num_cols - 1) * col_gap : 0.0f;
+    float avail_for_tracks = std::max(0.0f, dimensions.content.width - total_gaps);
+
+    float sum_min = 0.0f;
+    float total_fr = 0.0f;
+    for (const auto& tr : tracks) {
+        sum_min += tr.min_px;
+        total_fr += tr.max_fr;
+    }
+
+    float fr_space = std::max(0.0f, avail_for_tracks - sum_min);
+    std::vector<float> col_widths;
+    for (const auto& tr : tracks) {
+        float w = tr.min_px;
+        if (total_fr > 0.0f && tr.max_fr > 0.0f) {
+            w += (tr.max_fr / total_fr) * fr_space;
+        } else if (tr.max_px > tr.min_px) {
+            w = std::min(tr.max_px, tr.min_px + fr_space);
         }
+        col_widths.push_back(w);
     }
 
     std::vector<float> col_x(num_cols, 0.0f);

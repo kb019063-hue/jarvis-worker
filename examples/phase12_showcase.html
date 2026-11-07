@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Phase 12 Showcase — Web Workers, Modern Grid/Flexbox Gap & WebSocket</title>
+    <style>
+        :root {
+            --bg-dark: #090d16;
+            --surface-dark: #131b2e;
+            --card-border: #1e293b;
+            --text-light: #f8fafc;
+            --text-dim: #94a3b8;
+            --primary-accent: #38bdf8;
+            --worker-accent: #a855f7;
+            --grid-accent: #10b981;
+            --ws-accent: #f59e0b;
+            --base-gap: 14px;
+        }
+
+        body {
+            margin: var(--base-gap);
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: sans-serif;
+            font-size: 13px;
+        }
+
+        .header {
+            background-color: var(--surface-dark);
+            padding: calc(var(--base-gap) + 2px);
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            margin-bottom: var(--base-gap);
+        }
+
+        h1 {
+            color: var(--primary-accent);
+            font-size: 19px;
+            margin: 0 0 4px 0;
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 11px;
+            margin: 0;
+        }
+
+        /* Responsive 3-Column Grid utilizing auto-fit & minmax */
+        .showcase-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: var(--base-gap);
+            margin-bottom: var(--base-gap);
+        }
+
+        .card {
+            background-color: var(--surface-dark);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        .card h2 {
+            font-size: 14px;
+            margin: 0 0 10px 0;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        .card.worker h2 { color: var(--worker-accent); }
+        .card.layout h2 { color: var(--grid-accent); }
+        .card.socket h2 { color: var(--ws-accent); }
+
+        /* Pillar 1: Worker Controls */
+        .console-box {
+            background-color: #030712;
+            border: 1px solid var(--card-border);
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--primary-accent);
+            min-height: 120px;
+            white-space: pre-wrap;
+            line-height: 1.45;
+        }
+
+        .btn {
+            background-color: #2563eb;
+            color: #ffffff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+
+        .btn:hover { background-color: #1d4ed8; }
+
+        /* Pillar 2: Modern Flexbox with gap & row-gap */
+        .flex-demo-row {
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            background-color: #030712;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+
+        .flex-chip {
+            background-color: #065f46;
+            color: #a7f3d0;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        /* Modern Grid with minmax */
+        .grid-demo-minmax {
+            display: grid;
+            grid-template-columns: minmax(80px, 1fr) minmax(140px, 2fr);
+            gap: 8px;
+            background-color: #030712;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+
+        .grid-cell {
+            background-color: #047857;
+            color: #ffffff;
+            padding: 6px;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 10px;
+            font-weight: bold;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            margin-right: 4px;
+            background-color: #334155;
+            color: #f1f5f9;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🦅 Litebird Engine — Phase 12 Showcase</h1>
+        <p class="subtitle">Concurrent Web Workers (postMessage/onmessage) | Flexbox & Grid Modern Gap Engine (minmax, auto-fit) | RFC 6455 WebSocket Client</p>
+    </div>
+
+    <div class="showcase-container">
+
+        <!-- Pillar 1: Web Workers -->
+        <div class="card worker">
+            <h2>Pillar 1: Web Workers & Threading</h2>
+            <div id="workerConsole" class="console-box">Initializing Web Worker thread...</div>
+            <button id="btnDispatchWorker" class="btn" style="background-color: #7e22ce;">Dispatch Heavy Computation</button>
+            <p style="color: var(--text-dim); font-size: 10px; margin-top: 6px; margin-bottom: 0;">
+                <span class="badge">Worker</span> Isolated thread JS execution with thread-safe IPC postMessage dispatch.
+            </p>
+        </div>
+
+        <!-- Pillar 2: Modern Layouts (Gap, minmax, auto-fit) -->
+        <div class="card layout">
+            <h2>Pillar 2: Modern Flexbox & Grid Gap</h2>
+            <div style="font-size: 11px; color: #a7f3d0; margin-bottom: 4px;">Flexbox Main-Axis gap: 10px</div>
+            <div class="flex-demo-row">
+                <div class="flex-chip">Item A</div>
+                <div class="flex-chip">Item B</div>
+                <div class="flex-chip">Item C</div>
+            </div>
+
+            <div style="font-size: 11px; color: #a7f3d0; margin-bottom: 4px;">Grid minmax(80px, 1fr) minmax(140px, 2fr)</div>
+            <div class="grid-demo-minmax">
+                <div class="grid-cell">1fr (Min 80px)</div>
+                <div class="grid-cell">2fr (Min 140px)</div>
+            </div>
+            <p style="color: var(--text-dim); font-size: 10px; margin-top: 6px; margin-bottom: 0;">
+                <span class="badge">CSS Gap</span> True sub-pixel gap calculation across flex wrap lines and minmax tracks.
+            </p>
+        </div>
+
+        <!-- Pillar 3: WebSocket -->
+        <div class="card socket">
+            <h2>Pillar 3: RFC 6455 WebSocket Client</h2>
+            <div id="wsConsole" class="console-box">Inspecting WebSocket protocol engine...</div>
+            <button id="btnWsCheck" class="btn" style="background-color: #d97706;">Verify Handshake & State</button>
+            <p style="color: var(--text-dim); font-size: 10px; margin-top: 6px; margin-bottom: 0;">
+                <span class="badge">RFC 6455</span> POSIX socket client with SHA-1 handshake and masked client framing.
+            </p>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Pillar 1 Demo: Web Worker ---
+        const workerOut = document.getElementById("workerConsole");
+        let workerLog = "=== Background Worker Initialization ===\n";
+        workerLog = workerLog + "Spawning dedicated background worker thread...\n";
+        workerOut.textContent = workerLog;
+
+        const workerScript = "data:text/javascript,self.onmessage = function(e) { " +
+            "var n = e.data.n; " +
+            "var count = 0; " +
+            "var i = 2; " +
+            "while (i <= n) { " +
+            "  var prime = true; " +
+            "  var d = 2; " +
+            "  while (d * d <= i) { " +
+            "    if (i % d === 0) { prime = false; break; } " +
+            "    d = d + 1; " +
+            "  } " +
+            "  if (prime) count = count + 1; " +
+            "  i = i + 1; " +
+            "} " +
+            "postMessage({ primesFound: count, limit: n, status: 'complete' }); " +
+            "};";
+
+        const worker = new Worker(workerScript);
+
+        worker.onmessage = function(e) {
+            let msg = "=== Worker Response Received ===\n";
+            msg = msg + "Primes calculated up to " + e.data.limit + ": " + e.data.primesFound + "\n";
+            msg = msg + "Thread status: " + e.data.status + "\n";
+            msg = msg + "Main EventLoop successfully dispatched worker message task!";
+            workerOut.textContent = msg;
+        };
+
+        function dispatchWorkerTask() {
+            workerOut.textContent = "Dispatched calculation task to worker thread...\nComputing primes up to 500...";
+            worker.postMessage({ n: 500 });
+        }
+
+        const btnWorker = document.getElementById("btnDispatchWorker");
+        if (btnWorker) {
+            btnWorker.addEventListener("click", dispatchWorkerTask);
+        }
+        dispatchWorkerTask();
+
+        // --- Pillar 3 Demo: WebSocket Verification ---
+        const wsOut = document.getElementById("wsConsole");
+        function renderWsStatus() {
+            let log = "=== RFC 6455 WebSocket Protocol State ===\n";
+            log = log + "WebSocket.CONNECTING: " + WebSocket.CONNECTING + "\n";
+            log = log + "WebSocket.OPEN: " + WebSocket.OPEN + "\n";
+            log = log + "WebSocket.CLOSING: " + WebSocket.CLOSING + "\n";
+            log = log + "WebSocket.CLOSED: " + WebSocket.CLOSED + "\n";
+
+            log = log + "Handshake derivation:\n";
+            log = log + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n";
+            log = log + "Expected Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n";
+            log = log + "Status: Ready for full-duplex socket streaming!";
+            wsOut.textContent = log;
+        }
+
+        const btnWs = document.getElementById("btnWsCheck");
+        if (btnWs) {
+            btnWs.addEventListener("click", renderWsStatus);
+        }
+        renderWsStatus();
+    </script>
+</body>
+</html>

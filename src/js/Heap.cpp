@@ -33,6 +33,7 @@ Heap& Heap::default_heap() {
 }
 
 JsObject* Heap::allocate_object() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     auto* obj = new JsObject();
     obj->is_marked = false;
     obj->next_cell = m_head;
@@ -59,11 +60,13 @@ void Heap::mark_object(HeapObject* obj) {
 
 void Heap::register_root(JsValue* val) {
     if (val) {
+        std::lock_guard<std::mutex> lock(m_mutex);
         m_registered_roots.push_back(val);
     }
 }
 
 void Heap::unregister_root(JsValue* val) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     for (auto it = m_registered_roots.begin(); it != m_registered_roots.end(); ++it) {
         if (*it == val) {
             m_registered_roots.erase(it);
@@ -73,6 +76,7 @@ void Heap::unregister_root(JsValue* val) {
 }
 
 GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_stats.collections_count++;
     m_gray_stack.clear();
 

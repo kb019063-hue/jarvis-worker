@@ -12,7 +12,7 @@
 
 namespace litebird {
 
-static JsValue::FunctionCaller s_function_caller = nullptr;
+static thread_local JsValue::FunctionCaller s_function_caller = nullptr;
 
 void JsValue::set_function_caller(FunctionCaller caller) {
     s_function_caller = std::move(caller);
@@ -261,6 +261,12 @@ JsValue JsValue::get_property(const std::string& name) const {
                 return it_size->second.native_fn({});
             }
         }
+        if (name == "readyState") {
+            auto it_rs = object_val->properties.find("__get_readyState__");
+            if (it_rs != object_val->properties.end() && it_rs->second.native_fn) {
+                return it_rs->second.native_fn({});
+            }
+        }
 
         // Own properties
         auto it = object_val->properties.find(name);
@@ -298,6 +304,12 @@ JsValue JsValue::get_property(const std::string& name) const {
             auto it_sz = properties->find("__get_size__");
             if (it_sz != properties->end() && it_sz->second.native_fn) {
                 return it_sz->second.native_fn({});
+            }
+        }
+        if (name == "readyState") {
+            auto it_rs = properties->find("__get_readyState__");
+            if (it_rs != properties->end() && it_rs->second.native_fn) {
+                return it_rs->second.native_fn({});
             }
         }
         auto it = properties->find(name);

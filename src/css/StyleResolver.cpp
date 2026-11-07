@@ -270,49 +270,139 @@ EdgeSizes StyleResolver::parse_box_edges(std::string_view val) const {
     return EdgeSizes(0.0f);
 }
 
-static std::vector<float> parse_grid_tracks(std::string_view val) {
-    std::vector<float> tracks;
+static ComputedStyle::GridTrackDef parse_single_grid_track(const std::string& token) {
+    ComputedStyle::GridTrackDef def;
+    if (token.starts_with("minmax(") && token.ends_with(")")) {
+        std::string inside = token.substr(7, token.size() - 8);
+        size_t comma = inside.find(',');
+        if (comma != std::string::npos) {
+            std::string min_part = inside.substr(0, comma);
+            std::string max_part = inside.substr(comma + 1);
+            while (!min_part.empty() && std::isspace(static_cast<unsigned char>(min_part.front()))) min_part.erase(min_part.begin());
+            while (!min_part.empty() && std::isspace(static_cast<unsigned char>(min_part.back()))) min_part.pop_back();
+            while (!max_part.empty() && std::isspace(static_cast<unsigned char>(max_part.front()))) max_part.erase(max_part.begin());
+            while (!max_part.empty() && std::isspace(static_cast<unsigned char>(max_part.back()))) max_part.pop_back();
+
+            if (min_part.ends_with("px")) {
+                try { def.min_px = std::stof(min_part.substr(0, min_part.size() - 2)); } catch (...) {}
+            } else if (min_part != "0") {
+                try { def.min_px = std::stof(min_part); } catch (...) {}
+            }
+
+            if (max_part.ends_with("fr")) {
+                float fr = 1.0f;
+                try { fr = std::stof(max_part.substr(0, max_part.size() - 2)); } catch (...) {}
+                def.max_fr = std::max(0.1f, fr);
+            } else if (max_part == "auto") {
+                def.max_fr = 1.0f;
+            } else if (max_part.ends_with("px")) {
+                try { def.max_px = std::stof(max_part.substr(0, max_part.size() - 2)); } catch (...) {}
+            } else {
+                try { def.max_px = std::stof(max_part); } catch (...) {}
+            }
+        }
+        return def;
+    }
+
+    if (token.ends_with("fr")) {
+        std::string num_part = token.substr(0, token.size() - 2);
+        float fr = 1.0f;
+        try { fr = std::stof(num_part); } catch (...) {}
+        def.max_fr = std::max(0.1f, fr);
+    } else if (token == "auto") {
+        def.max_fr = 1.0f;
+    } else {
+        float px = 0.0f;
+        try { px = std::stof(token); } catch (...) {}
+        def.min_px = px;
+        def.max_px = px;
+    }
+    return def;
+}
+
+static void parse_grid_template(std::string_view val,
+                                std::vector<float>& legacy_tracks,
+                                std::vector<ComputedStyle::GridTrackDef>& defs,
+                                bool& is_auto_fit,
+                                ComputedStyle::GridTrackDef& auto_fit_def) {
+    legacy_tracks.clear();
+    defs.clear();
+    is_auto_fit = false;
+
     std::string s(val);
+
     size_t rep_pos = s.find("repeat(");
     while (rep_pos != std::string::npos) {
-        size_t close_pos = s.find(")", rep_pos);
+        int depth = 0;
+        size_t close_pos = std::string::npos;
+        for (size_t i = rep_pos; i < s.size(); ++i) {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')') {
+                depth--;
+                if (depth == 0) {
+                    close_pos = i;
+                    break;
+                }
+            }
+        }
+
         if (close_pos != std::string::npos) {
             std::string inside = s.substr(rep_pos + 7, close_pos - (rep_pos + 7));
-            size_t comma = inside.find(",");
+            size_t comma = inside.find(',');
             if (comma != std::string::npos) {
-                int count = 1;
-                try { count = std::stoi(inside.substr(0, comma)); } catch (...) {}
-                std::string item = inside.substr(comma + 1);
-                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
-                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
-                std::string rep_expanded;
-                for (int i = 0; i < count; ++i) {
-                    if (i > 0) rep_expanded += " ";
-                    rep_expanded += item;
+                std::string count_str = inside.substr(0, comma);
+                std::string item_str = inside.substr(comma + 1);
+                while (!count_str.empty() && std::isspace(static_cast<unsigned char>(count_str.front()))) count_str.erase(count_str.begin());
+                while (!count_str.empty() && std::isspace(static_cast<unsigned char>(count_str.back()))) count_str.pop_back();
+                while (!item_str.empty() && std::isspace(static_cast<unsigned char>(item_str.front()))) item_str.erase(item_str.begin());
+                while (!item_str.empty() && std::isspace(static_cast<unsigned char>(item_str.back()))) item_str.pop_back();
+
+                if (count_str == "auto-fit" || count_str == "auto-fill") {
+                    is_auto_fit = true;
+                    auto_fit_def = parse_single_grid_track(item_str);
+                    auto_fit_def.is_auto_fit = (count_str == "auto-fit");
+                    auto_fit_def.is_auto_fill = (count_str == "auto-fill");
+                    s.erase(rep_pos, close_pos - rep_pos + 1);
+                    break;
+                } else {
+                    int count = 1;
+                    try { count = std::stoi(count_str); } catch (...) {}
+                    std::string rep_expanded;
+                    for (int i = 0; i < count; ++i) {
+                        if (i > 0) rep_expanded += " ";
+                        rep_expanded += item_str;
+                    }
+                    s.replace(rep_pos, close_pos - rep_pos + 1, rep_expanded);
                 }
-                s.replace(rep_pos, close_pos - rep_pos + 1, rep_expanded);
             }
         }
         rep_pos = s.find("repeat(", rep_pos + 1);
     }
 
-    std::stringstream ss(s);
-    std::string token;
-    while (ss >> token) {
-        if (token.ends_with("fr")) {
-            std::string num_part = token.substr(0, token.size() - 2);
-            float fr = 1.0f;
-            try { fr = std::stof(num_part); } catch (...) {}
-            tracks.push_back(-std::max(0.1f, fr));
-        } else if (token == "auto") {
-            tracks.push_back(-1.0f);
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+        if (i >= s.size()) break;
+        size_t token_start = i;
+        int pdepth = 0;
+        while (i < s.size()) {
+            if (s[i] == '(') pdepth++;
+            else if (s[i] == ')') pdepth--;
+            else if (std::isspace(static_cast<unsigned char>(s[i])) && pdepth == 0) {
+                break;
+            }
+            i++;
+        }
+        std::string token = s.substr(token_start, i - token_start);
+        auto def = parse_single_grid_track(token);
+        defs.push_back(def);
+
+        if (def.max_fr > 0.0f) {
+            legacy_tracks.push_back(-def.max_fr);
         } else {
-            float px = 0.0f;
-            try { px = std::stof(token); } catch (...) {}
-            tracks.push_back(px);
+            legacy_tracks.push_back(def.min_px);
         }
     }
-    return tracks;
 }
 
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
@@ -365,11 +455,24 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         else if (val == "space-around") style.align_content = AlignContent::SpaceAround;
         else if (val == "space-evenly") style.align_content = AlignContent::SpaceEvenly;
     } else if (prop == "grid-template-columns") {
-        style.grid_template_columns = parse_grid_tracks(val);
+        parse_grid_template(val, style.grid_template_columns, style.grid_col_track_defs,
+                            style.grid_auto_fit_columns, style.grid_auto_fit_def);
     } else if (prop == "grid-template-rows") {
-        style.grid_template_rows = parse_grid_tracks(val);
+        bool dummy_af = false;
+        ComputedStyle::GridTrackDef dummy_def;
+        parse_grid_template(val, style.grid_template_rows, style.grid_row_track_defs,
+                            dummy_af, dummy_def);
     } else if (prop == "grid-gap" || prop == "gap") {
-        style.gap = style.grid_column_gap = style.grid_row_gap = parse_length(val, 0.0f);
+        std::stringstream ss(val);
+        std::string part1, part2;
+        ss >> part1;
+        if (ss >> part2) {
+            style.grid_row_gap = parse_length(part1, 0.0f);
+            style.grid_column_gap = parse_length(part2, 0.0f);
+            style.gap = style.grid_row_gap;
+        } else {
+            style.gap = style.grid_column_gap = style.grid_row_gap = parse_length(val, 0.0f);
+        }
     } else if (prop == "column-gap" || prop == "grid-column-gap") {
         style.grid_column_gap = parse_length(val, 0.0f);
     } else if (prop == "row-gap" || prop == "grid-row-gap") {

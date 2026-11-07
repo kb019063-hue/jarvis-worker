@@ -69,6 +69,9 @@ Litebird implements the complete modern browser rendering pipeline:
     - Structural: `:first-child`, `:last-child`, `:nth-child(An+B)`, `:nth-of-type(An+B)` (supports `odd`, `even`, and linear index formulas).
     - User Action & State: `:hover`, `:focus`, `:active`, `:disabled`, `:checked`.
     - Negation: `:not(...)` functional selector inversion.
+- **CSS Variables & Custom Properties (`var()`):** Lexical custom property cascade (`--custom-name: value`) with inheritance down DOM subtrees and recursive nested fallback evaluation (`var(--color, var(--fallback, #fff))`).
+- **CSS Math Expression Engine (`calc()`):** Recursive descent arithmetic evaluator resolving additions, subtractions, multiplications, divisions, percentages, and variable substitutions.
+- **CSS 2D Transforms & Affine Matrix Math:** Homogeneous 3x3 transform matrices (`TransformMatrix2D`) implementing `translate()`, `rotate()`, `scale()`, `skew()`, and `transform-origin`, complete with inverse-matrix hit-testing.
 - **CSS Transitions & Keyframe Animations (`@keyframes`):**
   - Declarative `@keyframes` rule parsing with percentage offsets (`0%`, `50%`, `100%`) and `from`/`to`.
   - Animation properties: `animation-name`, `animation-duration`, `animation-timing-function`, `animation-delay`, `animation-iteration-count`, `transition-property`, `transition-duration`.
@@ -102,6 +105,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **HTML5 `<canvas>` 2D Context API (`CanvasRenderingContext2D`):**
   - Vector path building: `beginPath()`, `moveTo()`, `lineTo()`, `closePath()`, `stroke()`, `fill()`.
   - Geometric primitives: `fillRect()`, `clearRect()`, `strokeRect()`, `arc()`.
+  - **Gradients & Smooth Curves:** Linear and radial gradients (`createLinearGradient`, `createRadialGradient`, `addColorStop`), quadratic Bézier curves (`quadraticCurveTo`), and cubic Bézier curves (`bezierCurveTo`).
   - Integer Bresenham line drawing and multi-node scanline polygon rasterization.
   - Alpha blending and image blitting via `drawImage()`.
   - Direct integration into the Layout Tree as an `ImageNode`.
@@ -109,7 +113,11 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
-### 6. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web Storage (`include/litebird/js/`)
+### 6. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web APIs (`include/litebird/js/`, `include/litebird/net/`)
+- **ES6 Classes & Prototype Inheritance:** Full syntactic support for `class`, `extends`, `super(...)`, `super.method()`, static methods, instance methods, and runtime `instanceof` prototype chain traversal.
+- **Async Functions & Await Syntax:** First-class `async function`, async arrow functions, and `await` operator, coordinated with the engine microtask EventLoop.
+- **Modern Fetch API & Network Stack:** Standard `fetch(url, options)`, `Response` object (`status`, `statusText`, `ok`, `headers`, `json()`, `text()`), and case-insensitive `Headers` object.
+- **URL & URLSearchParams Standards:** Complete WHATWG URL decomposition (`href`, `origin`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`) and `URLSearchParams` query manipulation with live bidirectional synchronization.
 - **ES6 Collections & Syntactic Extensions:**
   - **`Map` & `Set` Collections:** Standard ES6 collections with `.set()`, `.get()`, `.add()`, `.has()`, `.delete()`, `.clear()`, and dynamic `.size` property getters.
   - **Destructuring Declarations:** Array destructuring (`const [a, b] = [1, 2]`) and object destructuring (`const { name, role } = user`).
@@ -251,7 +259,10 @@ Running test: css_media_queries... PASSED
 Running test: css_pseudo_classes... PASSED
 Running test: svg_vector_rendering... PASSED
 Running test: es6_map_set_and_destructuring... PASSED
-Running test: css_transitions_and_animations... PASSED
+Running test: css_variables_and_cascade... PASSED
+Running test: css_calc_expressions... PASSED
+Running test: fetch_api_and_headers... PASSED
+Running test: url_and_url_search_params... PASSED
 
-All 32 engine test suites passed successfully!
+All 40 engine test suites passed successfully!
 ```

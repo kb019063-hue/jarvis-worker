@@ -5,6 +5,8 @@
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/URL.hpp"
+#include "litebird/net/Fetch.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -287,50 +289,14 @@ void JsInterpreter::init_builtins() {
     }));
     m_global_env->define("JSON", json_obj);
 
-    // fetch(url, options) built-in
-    m_global_env->define("fetch", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) {
-            return Promise::make_rejected(JsValue::make_string("fetch requires a URL argument"));
-        }
-        std::string url = args[0].to_string();
-        auto pdata = std::make_shared<PromiseData>();
-        JsValue pval = Promise::create_promise_instance(pdata);
+    // fetch, Headers, Response built-ins
+    m_global_env->define("Headers", HeadersObject::create_constructor());
+    m_global_env->define("Response", ResponseObject::create_constructor());
+    m_global_env->define("fetch", JsValue::make_native_function(FetchAPI::fetch));
 
-        EventLoop::default_loop().post_task([url, pdata]() {
-            ResourceResponse resp = ResourceLoader::load(url);
-            if (resp.success) {
-                JsValue res_obj = JsValue::make_object();
-                res_obj.set_property("ok", JsValue::make_boolean(resp.status_code >= 200 && resp.status_code < 300));
-                res_obj.set_property("status", JsValue::make_number(resp.status_code));
-                res_obj.set_property("statusText", JsValue::make_string(resp.status_code == 200 ? "OK" : "Error"));
-                res_obj.set_property("url", JsValue::make_string(url));
-
-                JsValue headers = JsValue::make_object();
-                headers.set_property("content-type", JsValue::make_string(resp.content_type));
-                res_obj.set_property("headers", headers);
-
-                std::string body = resp.body;
-                res_obj.set_property("text", JsValue::make_native_function([body](const std::vector<JsValue>&) {
-                    return Promise::make_resolved(JsValue::make_string(body));
-                }));
-
-                res_obj.set_property("json", JsValue::make_native_function([body](const std::vector<JsValue>&) {
-                    try {
-                        JsValue parsed = Json::parse(body);
-                        return Promise::make_resolved(parsed);
-                    } catch (const std::exception& ex) {
-                        return Promise::make_rejected(JsValue::make_string(ex.what()));
-                    }
-                }));
-
-                Promise::resolve(pdata, res_obj);
-            } else {
-                Promise::reject(pdata, JsValue::make_string(resp.error_message.empty() ? "Network request failed" : resp.error_message));
-            }
-        });
-
-        return pval;
-    }));
+    // URL & URLSearchParams built-ins
+    m_global_env->define("URLSearchParams", URLSearchParamsObject::create_constructor());
+    m_global_env->define("URL", URLObject::create_constructor());
 
     // Map Constructor
     JsValue map_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {

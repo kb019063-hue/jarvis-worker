@@ -1951,6 +1951,213 @@ TEST(async_await_language_sugar) {
     assert(js.global_env()->get("result").to_number() == 57);
 }
 
+TEST(css_variables_and_cascade) {
+    using namespace litebird;
+
+    std::string html = R"(
+        <html>
+        <head>
+            <style>
+                :root {
+                    --main-bg: #0f172a;
+                    --primary-color: #38bdf8;
+                    --base-pad: 14px;
+                }
+                .container {
+                    background-color: var(--main-bg);
+                    padding: var(--base-pad);
+                    --local-color: #34d399;
+                }
+                .child {
+                    color: var(--local-color);
+                    margin: var(--unknown-margin, 20px);
+                    padding-left: var(--missing1, var(--missing2, 8px));
+                }
+            </style>
+        </head>
+        <body>
+            <div id="cont" class="container">
+                <div id="item" class="child">Content</div>
+            </div>
+        </body>
+        </html>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto cont = doc->get_element_by_id("cont");
+    assert(cont != nullptr);
+    auto cont_style = resolver.resolve_style(cont);
+    assert(cont_style.background_color == Color::parse("#0f172a"));
+    assert(cont_style.padding == EdgeSizes(14.0f));
+    assert(cont_style.custom_properties.find("--local-color") != cont_style.custom_properties.end());
+    assert(cont_style.custom_properties.find("--main-bg") != cont_style.custom_properties.end());
+
+    auto item = doc->get_element_by_id("item");
+    assert(item != nullptr);
+    auto item_style = resolver.resolve_style(item, &cont_style);
+    assert(item_style.color == Color::parse("#34d399"));
+    assert(item_style.margin == EdgeSizes(20.0f));
+    assert(item_style.padding.left == 8.0f);
+}
+
+TEST(css_calc_expressions) {
+    using namespace litebird;
+
+    StyleResolver resolver;
+    float val1 = resolver.evaluate_calc_expression("100px - 20px");
+    assert(val1 == 80.0f);
+
+    float val2 = resolver.evaluate_calc_expression("2 * (50px + 10px)");
+    assert(val2 == 120.0f);
+
+    float val3 = resolver.evaluate_calc_expression("200px / 4 + 15px");
+    assert(val3 == 65.0f);
+
+    float val4 = resolver.evaluate_calc_expression("50% - 30px", 400.0f);
+    assert(val4 == 170.0f);
+
+    std::string html = R"(
+        <html>
+        <head>
+            <style>
+                :root {
+                    --item-size: 40px;
+                    --margin-base: 6px;
+                }
+                .box {
+                    width: calc(var(--item-size) * 3 + 10px);
+                    height: calc(200px / 2);
+                    margin: calc(var(--margin-base) + 4px);
+                }
+            </style>
+        </head>
+        <body>
+            <div id="target" class="box"></div>
+        </body>
+        </html>
+    )";
+
+    auto doc = HtmlParser::parse(html);
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto target = doc->get_element_by_id("target");
+    assert(target != nullptr);
+    auto style = resolver.resolve_style(target);
+    assert(style.width == 130.0f);
+    assert(style.height == 100.0f);
+    assert(style.margin == EdgeSizes(10.0f));
+}
+
+TEST(fetch_api_and_headers) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    std::string script = R"(
+        const h = new Headers({ "content-type": "application/json", "X-Custom": "test-val" });
+        const hasCT = h.has("Content-Type");
+        const ctVal = h.get("Content-Type");
+        h.set("Accept", "text/html");
+        h.append("X-Custom", "extra");
+        const acceptVal = h.get("accept");
+        const customVal = h.get("x-custom");
+
+        const resp = new Response('{"status":"ok","code":200}', {
+            status: 200,
+            statusText: "OK",
+            headers: { "Content-Type": "application/json" }
+        });
+
+        const isOk = resp.ok;
+        const resStatus = resp.status;
+        const resHeader = resp.headers.get("content-type");
+
+        let fetchedJsonVal = "";
+        fetch("data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=").then((res) => {
+            return res.json();
+        }).then((data) => {
+            fetchedJsonVal = data.hello;
+        });
+    )";
+
+    js.eval_ast(script);
+    EventLoop::default_loop().tick();
+
+    assert(js.global_env()->get("hasCT").bool_val == true);
+    assert(js.global_env()->get("ctVal").to_string() == "application/json");
+    assert(js.global_env()->get("acceptVal").to_string() == "text/html");
+    assert(js.global_env()->get("customVal").to_string() == "test-val, extra");
+
+    assert(js.global_env()->get("isOk").bool_val == true);
+    assert(js.global_env()->get("resStatus").to_number() == 200);
+    assert(js.global_env()->get("resHeader").to_string() == "application/json");
+
+    assert(js.global_env()->get("fetchedJsonVal").to_string() == "world");
+}
+
+TEST(url_and_url_search_params) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    std::string script = R"(
+        const sp = new URLSearchParams("?topic=browser&sort=asc&page=1");
+        const topic = sp.get("topic");
+        const hasSort = sp.has("sort");
+        sp.set("page", "2");
+        sp.append("filter", "engine");
+        sp.delete("sort");
+        const spString = sp.toString();
+
+        const u = new URL("https://api.example.com:8080/v1/search?q=litebird#results");
+        const uProtocol = u.protocol;
+        const uHostname = u.hostname;
+        const uPort = u.port;
+        const uHost = u.host;
+        const uPathname = u.pathname;
+        const uSearch = u.search;
+        const uHash = u.hash;
+        const uOrigin = u.origin;
+        const uQueryParam = u.searchParams.get("q");
+
+        u.searchParams.set("q", "browser-engine");
+        u.searchParams.append("sort", "desc");
+        const uNewSearch = u.search;
+        const uNewHref = u.href;
+
+        const relUrl = new URL("/docs/guide", "https://example.org/home/index.html");
+        const relHref = relUrl.href;
+    )";
+
+    js.eval_ast(script);
+
+    assert(js.global_env()->get("topic").to_string() == "browser");
+    assert(js.global_env()->get("hasSort").bool_val == true);
+    assert(js.global_env()->get("spString").to_string().find("page=2") != std::string::npos);
+    assert(js.global_env()->get("spString").to_string().find("filter=engine") != std::string::npos);
+    assert(js.global_env()->get("spString").to_string().find("sort") == std::string::npos);
+
+    assert(js.global_env()->get("uProtocol").to_string() == "https:");
+    assert(js.global_env()->get("uHostname").to_string() == "api.example.com");
+    assert(js.global_env()->get("uPort").to_string() == "8080");
+    assert(js.global_env()->get("uHost").to_string() == "api.example.com:8080");
+    assert(js.global_env()->get("uPathname").to_string() == "/v1/search");
+    assert(js.global_env()->get("uSearch").to_string() == "?q=litebird");
+    assert(js.global_env()->get("uHash").to_string() == "#results");
+    assert(js.global_env()->get("uOrigin").to_string() == "https://api.example.com:8080");
+    assert(js.global_env()->get("uQueryParam").to_string() == "litebird");
+
+    assert(js.global_env()->get("uNewSearch").to_string().find("q=browser-engine") != std::string::npos);
+    assert(js.global_env()->get("uNewHref").to_string().find("api.example.com:8080/v1/search?") != std::string::npos);
+
+    assert(js.global_env()->get("relHref").to_string() == "https://example.org/docs/guide");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -1990,7 +2197,11 @@ int main() {
     RUN_TEST(canvas_gradients_and_curves);
     RUN_TEST(es6_classes_and_inheritance);
     RUN_TEST(async_await_language_sugar);
+    RUN_TEST(css_variables_and_cascade);
+    RUN_TEST(css_calc_expressions);
+    RUN_TEST(fetch_api_and_headers);
+    RUN_TEST(url_and_url_search_params);
 
-    std::cout << "\n\033[1;32mAll 36 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 40 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

@@ -153,6 +153,9 @@ struct ComputedStyle {
     std::string transform_str;
     std::string transform_origin{"50% 50%"};
 
+    // CSS Custom Properties (Variables)
+    std::unordered_map<std::string, std::string> custom_properties;
+
     bool is_block() const { return display == Display::Block; }
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }
@@ -177,6 +180,11 @@ public:
     const KeyframesRule* find_keyframes(const std::string& name) const;
     void apply_animation(ComputedStyle& style, float elapsed_seconds) const;
     static void interpolate_styles(ComputedStyle& target, const ComputedStyle& from, const ComputedStyle& to, float t);
+
+    // CSS Variables and Calc Resolvers
+    std::string resolve_var_functions(const std::string& value, const std::unordered_map<std::string, std::string>& custom_props, int depth = 0) const;
+    float evaluate_calc_expression(std::string_view expr, float reference_size = 0.0f) const;
+    std::string resolve_calc_functions(const std::string& value, float reference_size = 0.0f) const;
 
 private:
     static StyleSheet default_user_agent_stylesheet();

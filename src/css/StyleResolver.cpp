@@ -236,6 +236,11 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
     while (!val.empty() && std::isspace(val.back())) val.remove_suffix(1);
     if (val.empty() || val == "auto") return default_val;
 
+    if (val.find("calc(") != std::string_view::npos) {
+        std::string resolved = resolve_calc_functions(std::string(val), m_viewport_width);
+        return parse_length(resolved, default_val);
+    }
+
     try {
         size_t idx = 0;
         float num = std::stof(std::string(val), &idx);
@@ -310,7 +315,20 @@ static std::vector<float> parse_grid_tracks(std::string_view val) {
     return tracks;
 }
 
-void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& val) const {
+void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
+    if (prop.starts_with("--")) {
+        style.custom_properties[prop] = raw_val;
+        return;
+    }
+
+    std::string val = raw_val;
+    if (val.find("var(") != std::string::npos) {
+        val = resolve_var_functions(val, style.custom_properties);
+    }
+    if (val.find("calc(") != std::string::npos) {
+        val = resolve_calc_functions(val, m_viewport_width);
+    }
+
     if (prop == "display") {
         if (val == "block") style.display = Display::Block;
         else if (val == "inline") style.display = Display::Inline;
@@ -683,6 +701,219 @@ static TransformMatrix2D parse_transform_matrix(const std::string& str) {
     return result;
 }
 
+std::string StyleResolver::resolve_var_functions(
+    const std::string& value,
+    const std::unordered_map<std::string, std::string>& custom_props,
+    int depth
+) const {
+    if (depth > 12) return "";
+
+    std::string result = value;
+    size_t var_pos = 0;
+    while ((var_pos = result.find("var(", var_pos)) != std::string::npos) {
+        size_t content_start = var_pos + 4;
+        int paren_depth = 1;
+        size_t i = content_start;
+        for (; i < result.size() && paren_depth > 0; ++i) {
+            if (result[i] == '(') paren_depth++;
+            else if (result[i] == ')') paren_depth--;
+        }
+        if (paren_depth != 0) {
+            var_pos += 4;
+            continue;
+        }
+        size_t content_end = i - 1;
+        std::string inner = result.substr(content_start, content_end - content_start);
+
+        std::string var_name;
+        std::string fallback;
+        bool has_fallback = false;
+        int inner_depth = 0;
+        size_t comma_idx = std::string::npos;
+        for (size_t c = 0; c < inner.size(); ++c) {
+            if (inner[c] == '(') inner_depth++;
+            else if (inner[c] == ')') inner_depth--;
+            else if (inner[c] == ',' && inner_depth == 0) {
+                comma_idx = c;
+                break;
+            }
+        }
+
+        if (comma_idx != std::string::npos) {
+            var_name = inner.substr(0, comma_idx);
+            fallback = inner.substr(comma_idx + 1);
+            has_fallback = true;
+        } else {
+            var_name = inner;
+        }
+
+        auto trim = [](std::string& s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        };
+        trim(var_name);
+        trim(fallback);
+
+        std::string replacement;
+        auto it = custom_props.find(var_name);
+        if (it != custom_props.end()) {
+            replacement = resolve_var_functions(it->second, custom_props, depth + 1);
+        } else if (has_fallback) {
+            replacement = resolve_var_functions(fallback, custom_props, depth + 1);
+        } else {
+            replacement = "";
+        }
+
+        result.replace(var_pos, content_end - var_pos + 1, replacement);
+        var_pos += replacement.size();
+    }
+    return result;
+}
+
+namespace {
+struct CalcLexer {
+    std::string_view text;
+    size_t pos{0};
+
+    void skip_whitespace() {
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) {
+            pos++;
+        }
+    }
+
+    bool has_more() {
+        skip_whitespace();
+        return pos < text.size();
+    }
+
+    char peek() {
+        skip_whitespace();
+        if (pos >= text.size()) return '\0';
+        return text[pos];
+    }
+
+    char get() {
+        skip_whitespace();
+        if (pos >= text.size()) return '\0';
+        return text[pos++];
+    }
+};
+
+static float parse_calc_primary(CalcLexer& lex, float ref_size);
+static float parse_calc_term(CalcLexer& lex, float ref_size);
+static float parse_calc_expr(CalcLexer& lex, float ref_size);
+
+static float parse_calc_primary(CalcLexer& lex, float ref_size) {
+    lex.skip_whitespace();
+    if (!lex.has_more()) return 0.0f;
+
+    char c = lex.peek();
+    if (c == '+') {
+        lex.get();
+        return parse_calc_primary(lex, ref_size);
+    }
+    if (c == '-') {
+        lex.get();
+        return -parse_calc_primary(lex, ref_size);
+    }
+    if (c == '(') {
+        lex.get(); // consume '('
+        float val = parse_calc_expr(lex, ref_size);
+        if (lex.peek() == ')') {
+            lex.get(); // consume ')'
+        }
+        return val;
+    }
+
+    size_t start = lex.pos;
+    while (lex.pos < lex.text.size()) {
+        char ch = lex.text[lex.pos];
+        if (std::isdigit(static_cast<unsigned char>(ch)) || ch == '.' ||
+            std::isalpha(static_cast<unsigned char>(ch)) || ch == '%') {
+            lex.pos++;
+        } else {
+            break;
+        }
+    }
+
+    std::string token(lex.text.substr(start, lex.pos - start));
+    if (token.empty()) return 0.0f;
+
+    if (token.ends_with("px")) {
+        try { return std::stof(token.substr(0, token.size() - 2)); } catch (...) { return 0.0f; }
+    }
+    if (token.ends_with("%")) {
+        try { return (std::stof(token.substr(0, token.size() - 1)) / 100.0f) * ref_size; } catch (...) { return 0.0f; }
+    }
+    if (token.ends_with("em") || token.ends_with("rem")) {
+        try { return std::stof(token.substr(0, token.size() - (token.ends_with("rem") ? 3 : 2))) * 16.0f; } catch (...) { return 0.0f; }
+    }
+    if (token.ends_with("pt")) {
+        try { return std::stof(token.substr(0, token.size() - 2)) * 1.33333f; } catch (...) { return 0.0f; }
+    }
+
+    try { return std::stof(token); } catch (...) { return 0.0f; }
+}
+
+static float parse_calc_term(CalcLexer& lex, float ref_size) {
+    float left = parse_calc_primary(lex, ref_size);
+    while (lex.has_more()) {
+        char op = lex.peek();
+        if (op != '*' && op != '/') break;
+        lex.get();
+        float right = parse_calc_primary(lex, ref_size);
+        if (op == '*') left *= right;
+        else if (op == '/' && right != 0.0f) left /= right;
+    }
+    return left;
+}
+
+static float parse_calc_expr(CalcLexer& lex, float ref_size) {
+    float left = parse_calc_term(lex, ref_size);
+    while (lex.has_more()) {
+        char op = lex.peek();
+        if (op != '+' && op != '-') break;
+        lex.get();
+        float right = parse_calc_term(lex, ref_size);
+        if (op == '+') left += right;
+        else if (op == '-') left -= right;
+    }
+    return left;
+}
+} // namespace
+
+float StyleResolver::evaluate_calc_expression(std::string_view expr, float reference_size) const {
+    CalcLexer lex{expr, 0};
+    return parse_calc_expr(lex, reference_size);
+}
+
+std::string StyleResolver::resolve_calc_functions(const std::string& value, float reference_size) const {
+    std::string result = value;
+    size_t calc_pos = 0;
+    while ((calc_pos = result.find("calc(", calc_pos)) != std::string::npos) {
+        size_t content_start = calc_pos + 5;
+        int paren_depth = 1;
+        size_t i = content_start;
+        for (; i < result.size() && paren_depth > 0; ++i) {
+            if (result[i] == '(') paren_depth++;
+            else if (result[i] == ')') paren_depth--;
+        }
+        if (paren_depth != 0) {
+            calc_pos += 5;
+            continue;
+        }
+        size_t content_end = i - 1;
+        std::string inner = result.substr(content_start, content_end - content_start);
+
+        float val = evaluate_calc_expression(inner, reference_size);
+        std::string replacement = std::to_string(val) + "px";
+
+        result.replace(calc_pos, content_end - calc_pos + 1, replacement);
+        calc_pos += replacement.size();
+    }
+    return result;
+}
+
 ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style) const {
     ComputedStyle style;
 
@@ -692,6 +923,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
+        style.custom_properties = parent_style->custom_properties;
     }
 
     struct MatchedRule {

@@ -1,5 +1,6 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/dom/Text.hpp"
 #include <queue>
 
 namespace litebird {
@@ -15,8 +16,15 @@ std::shared_ptr<Element> Document::document_element() const {
 
 std::shared_ptr<Element> Document::head() const {
     auto doc_el = document_element();
-    if (!doc_el) return nullptr;
-    for (const auto& ch : doc_el->children()) {
+    if (doc_el) {
+        if (doc_el->tag_name() == "head") return doc_el;
+        for (const auto& ch : doc_el->children()) {
+            if (auto el = std::dynamic_pointer_cast<Element>(ch)) {
+                if (el->tag_name() == "head") return el;
+            }
+        }
+    }
+    for (const auto& ch : m_children) {
         if (auto el = std::dynamic_pointer_cast<Element>(ch)) {
             if (el->tag_name() == "head") return el;
         }
@@ -26,8 +34,15 @@ std::shared_ptr<Element> Document::head() const {
 
 std::shared_ptr<Element> Document::body() const {
     auto doc_el = document_element();
-    if (!doc_el) return nullptr;
-    for (const auto& ch : doc_el->children()) {
+    if (doc_el) {
+        if (doc_el->tag_name() == "body") return doc_el;
+        for (const auto& ch : doc_el->children()) {
+            if (auto el = std::dynamic_pointer_cast<Element>(ch)) {
+                if (el->tag_name() == "body") return el;
+            }
+        }
+    }
+    for (const auto& ch : m_children) {
         if (auto el = std::dynamic_pointer_cast<Element>(ch)) {
             if (el->tag_name() == "body") return el;
         }
@@ -101,6 +116,19 @@ std::vector<std::shared_ptr<Element>> Document::query_selector_all(const std::st
 std::shared_ptr<Element> Document::query_selector(const std::string& selector) const {
     auto all = query_selector_all(selector);
     return all.empty() ? nullptr : all.front();
+}
+
+std::shared_ptr<Element> Document::create_element(const std::string& tag_name) {
+    auto el = std::make_shared<Element>(tag_name);
+    return el;
+}
+
+std::shared_ptr<Text> Document::create_text_node(const std::string& text) {
+    return std::make_shared<Text>(text);
+}
+
+std::shared_ptr<Node> Document::create_document_fragment() {
+    return std::make_shared<Node>(NodeType::DocumentFragment);
 }
 
 void Document::dump(std::ostream& os, int indent) const {

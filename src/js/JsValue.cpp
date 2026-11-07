@@ -5,6 +5,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Event.hpp"
+#include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include <sstream>
 #include <iomanip>
@@ -51,6 +52,19 @@ bool JsValue::is_truthy() const {
 
 bool JsValue::is_array() const {
     return type == JsType::Object && object_val && object_val->is_array;
+}
+
+std::vector<JsValue>& JsValue::array_elements() {
+    if (!object_val) {
+        object_val = Heap::default_heap().allocate_object();
+        object_val->is_array = true;
+    }
+    return object_val->array_elements;
+}
+
+const std::vector<JsValue>& JsValue::array_elements() const {
+    static const std::vector<JsValue> s_empty;
+    return (object_val && object_val->is_array) ? object_val->array_elements : s_empty;
 }
 
 std::string JsValue::to_string() const {
@@ -106,11 +120,21 @@ double JsValue::to_number() const {
 }
 
 JsValue JsValue::call(const std::vector<JsValue>& args) const {
+    if (type == JsType::Function && s_function_caller) {
+        return s_function_caller(*this, args, nullptr);
+    }
     if (native_fn) {
         return native_fn(args);
     }
+    return JsValue::make_undefined();
+}
+
+JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsValue>& args) const {
     if (type == JsType::Function && s_function_caller) {
-        return s_function_caller(*this, args);
+        return s_function_caller(*this, args, &this_val);
+    }
+    if (native_fn) {
+        return native_fn(args);
     }
     return JsValue::make_undefined();
 }
@@ -121,6 +145,8 @@ JsValue JsValue::get_property(const std::string& name) const {
             if (name == "tagName") return JsValue::make_string(el->tag_name());
             if (name == "id") return JsValue::make_string(el->id());
             if (name == "textContent" || name == "innerText") return JsValue::make_string(el->text_content());
+            if (name == "innerHTML") return JsValue::make_string(el->inner_html());
+            if (name == "outerHTML") return JsValue::make_string(el->outer_html());
             if (name == "style") {
                 JsValue style_obj = JsValue::make_object();
                 style_obj.set_property("color", JsValue::make_string(el->get_attribute("style")));
@@ -130,6 +156,104 @@ JsValue JsValue::get_property(const std::string& name) const {
             if (name == "disabled") return JsValue::make_boolean(el->disabled());
             if (name == "checked") return JsValue::make_boolean(el->checked());
             if (name == "type") return JsValue::make_string(el->input_type());
+            if (name == "shadowRoot") {
+                auto sr = el->shadow_root();
+                if (sr && sr->mode() == ShadowRootMode::Open) {
+                    return JsValue::make_dom_node(sr);
+                }
+                return JsValue::make_null();
+            }
+            if (name == "attachShadow") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    std::string mode = "open";
+                    if (!args.empty() && args[0].type == JsType::Object) {
+                        mode = args[0].get_property("mode").to_string();
+                    }
+                    auto sr = elem->attach_shadow(mode);
+                    if (!sr) return JsValue::make_null();
+                    return JsValue::make_dom_node(sr);
+                });
+            }
+            if (name == "setAttribute") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    if (args.size() >= 2) {
+                        elem->set_attribute(args[0].to_string(), args[1].to_string());
+                    }
+                    return JsValue::make_undefined();
+                });
+            }
+            if (name == "getAttribute") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_null();
+                    std::string attr = args[0].to_string();
+                    if (elem->has_attribute(attr)) {
+                        return JsValue::make_string(elem->get_attribute(attr));
+                    }
+                    return JsValue::make_null();
+                });
+            }
+            if (name == "hasAttribute") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_boolean(false);
+                    return JsValue::make_boolean(elem->has_attribute(args[0].to_string()));
+                });
+            }
+            if (name == "removeAttribute") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    if (!args.empty()) {
+                        elem->remove_attribute(args[0].to_string());
+                    }
+                    return JsValue::make_undefined();
+                });
+            }
+            if (name == "assignedNodes") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
+                    auto nodes = ShadowRoot::assigned_nodes(elem);
+                    JsValue arr = JsValue::make_array();
+                    for (const auto& n : nodes) {
+                        arr.array_elements().push_back(JsValue::make_dom_node(n));
+                    }
+                    return arr;
+                });
+            }
+            if (name == "assignedElements") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
+                    auto elems = ShadowRoot::assigned_elements(elem);
+                    JsValue arr = JsValue::make_array();
+                    for (const auto& e : elems) {
+                        arr.array_elements().push_back(JsValue::make_dom_node(e));
+                    }
+                    return arr;
+                });
+            }
+            if (name == "querySelector") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_null();
+                    auto found = elem->query_selector(args[0].to_string());
+                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
+                });
+            }
+            if (name == "querySelectorAll") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
+                    JsValue arr = JsValue::make_array();
+                    if (!args.empty()) {
+                        auto list = elem->query_selector_all(args[0].to_string());
+                        for (const auto& item : list) {
+                            arr.array_elements().push_back(JsValue::make_dom_node(item));
+                        }
+                    }
+                    return arr;
+                });
+            }
             if (name == "focus") {
                 auto elem = el;
                 return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
@@ -230,6 +354,115 @@ JsValue JsValue::get_property(const std::string& name) const {
                 }
             }
         }
+
+        if (auto sr = std::dynamic_pointer_cast<ShadowRoot>(dom_node)) {
+            if (name == "host") {
+                auto h = sr->host();
+                return h ? JsValue::make_dom_node(h) : JsValue::make_null();
+            }
+            if (name == "mode") {
+                return JsValue::make_string(sr->mode_str());
+            }
+            if (name == "innerHTML") {
+                return JsValue::make_string(sr->inner_html());
+            }
+            if (name == "getElementById") {
+                auto sroot = sr;
+                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_null();
+                    auto found = sroot->get_element_by_id(args[0].to_string());
+                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
+                });
+            }
+            if (name == "querySelector") {
+                auto sroot = sr;
+                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
+                    if (args.empty()) return JsValue::make_null();
+                    auto found = sroot->query_selector(args[0].to_string());
+                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
+                });
+            }
+            if (name == "querySelectorAll") {
+                auto sroot = sr;
+                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
+                    JsValue arr = JsValue::make_array();
+                    if (!args.empty()) {
+                        auto list = sroot->query_selector_all(args[0].to_string());
+                        for (const auto& item : list) {
+                            arr.array_elements().push_back(JsValue::make_dom_node(item));
+                        }
+                    }
+                    return arr;
+                });
+            }
+        }
+
+        // Generic Node properties & methods
+        if (name == "appendChild") {
+            auto node = dom_node;
+            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
+                node->append_child(args[0].dom_node);
+                return args[0];
+            });
+        }
+        if (name == "removeChild") {
+            auto node = dom_node;
+            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
+                node->remove_child(args[0].dom_node);
+                return args[0];
+            });
+        }
+        if (name == "insertBefore") {
+            auto node = dom_node;
+            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
+                auto new_ch = args[0].dom_node;
+                auto ref_ch = (args.size() > 1) ? args[1].dom_node : nullptr;
+                node->insert_before(new_ch, ref_ch);
+                return args[0];
+            });
+        }
+        if (name == "parentNode" || name == "parentElement") {
+            auto p = dom_node->parent();
+            return p ? JsValue::make_dom_node(p) : JsValue::make_null();
+        }
+        if (name == "firstChild") {
+            auto fc = dom_node->first_child();
+            return fc ? JsValue::make_dom_node(fc) : JsValue::make_null();
+        }
+        if (name == "lastChild") {
+            auto lc = dom_node->last_child();
+            return lc ? JsValue::make_dom_node(lc) : JsValue::make_null();
+        }
+        if (name == "previousSibling") {
+            auto ps = dom_node->previous_sibling();
+            return ps ? JsValue::make_dom_node(ps) : JsValue::make_null();
+        }
+        if (name == "nextSibling") {
+            auto ns = dom_node->next_sibling();
+            return ns ? JsValue::make_dom_node(ns) : JsValue::make_null();
+        }
+        if (name == "childNodes") {
+            JsValue arr = JsValue::make_array();
+            for (const auto& ch : dom_node->children()) {
+                arr.array_elements().push_back(JsValue::make_dom_node(ch));
+            }
+            return arr;
+        }
+        if (name == "children") {
+            JsValue arr = JsValue::make_array();
+            for (const auto& ch : dom_node->children()) {
+                if (ch->is_element()) {
+                    arr.array_elements().push_back(JsValue::make_dom_node(ch));
+                }
+            }
+            return arr;
+        }
+        if (name == "isConnected") {
+            return JsValue::make_boolean(dom_node->is_connected());
+        }
     }
 
     if (object_val) {
@@ -265,6 +498,24 @@ JsValue JsValue::get_property(const std::string& name) const {
             auto it_rs = object_val->properties.find("__get_readyState__");
             if (it_rs != object_val->properties.end() && it_rs->second.native_fn) {
                 return it_rs->second.native_fn({});
+            }
+        }
+        if (name == "body") {
+            auto it_b = object_val->properties.find("__get_body__");
+            if (it_b != object_val->properties.end() && it_b->second.native_fn) {
+                return it_b->second.native_fn({});
+            }
+        }
+        if (name == "head") {
+            auto it_h = object_val->properties.find("__get_head__");
+            if (it_h != object_val->properties.end() && it_h->second.native_fn) {
+                return it_h->second.native_fn({});
+            }
+        }
+        if (name == "documentElement") {
+            auto it_d = object_val->properties.find("__get_documentElement__");
+            if (it_d != object_val->properties.end() && it_d->second.native_fn) {
+                return it_d->second.native_fn({});
             }
         }
 
@@ -312,6 +563,24 @@ JsValue JsValue::get_property(const std::string& name) const {
                 return it_rs->second.native_fn({});
             }
         }
+        if (name == "body") {
+            auto it_b = properties->find("__get_body__");
+            if (it_b != properties->end() && it_b->second.native_fn) {
+                return it_b->second.native_fn({});
+            }
+        }
+        if (name == "head") {
+            auto it_h = properties->find("__get_head__");
+            if (it_h != properties->end() && it_h->second.native_fn) {
+                return it_h->second.native_fn({});
+            }
+        }
+        if (name == "documentElement") {
+            auto it_d = properties->find("__get_documentElement__");
+            if (it_d != properties->end() && it_d->second.native_fn) {
+                return it_d->second.native_fn({});
+            }
+        }
         auto it = properties->find(name);
         if (it != properties->end()) return it->second;
     }
@@ -347,6 +616,16 @@ void JsValue::set_property(const std::string& name, JsValue val) {
     }
 
     if (type == JsType::DomNode && dom_node) {
+        if (name == "innerHTML") {
+            if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
+                el->set_inner_html(val.to_string());
+                return;
+            }
+            if (auto sr = std::dynamic_pointer_cast<ShadowRoot>(dom_node)) {
+                sr->set_inner_html(val.to_string());
+                return;
+            }
+        }
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
             if (name == "textContent" || name == "innerText") {
                 el->children().clear();

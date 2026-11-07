@@ -3,6 +3,9 @@ CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
 
 SRCS = src/dom/Node.cpp \
        src/dom/Document.cpp \
+       src/dom/MutationObserver.cpp \
+       src/dom/ShadowRoot.cpp \
+       src/dom/CustomElementRegistry.cpp \
        src/html/HtmlTokenizer.cpp \
        src/html/HtmlParser.cpp \
        src/css/CssParser.cpp \

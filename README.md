@@ -42,13 +42,16 @@ Litebird implements the complete modern browser rendering pipeline:
                                                  └──► Async / Promises / EventLoop (fetch, setTimeout, rAF)
 ```
 
-### 1. DOM Core & W3C EventTarget (`include/litebird/dom/`)
-- Polymorphic node hierarchy (`Node`, `Element`, `Text`, `Document`).
+### 1. DOM Core, W3C EventTarget & Web Components (`include/litebird/dom/`)
+- Polymorphic node hierarchy (`Node`, `Element`, `Text`, `Document`, `DocumentFragment`).
 - Tree navigation (`parent()`, `children()`, `append_child()`, `remove_child()`).
 - DOM query methods: `getElementById()`, `getElementsByTagName()`, `querySelector()`, `querySelectorAll()`.
 - Interactive tree printer (`dumpTree()`).
 - **W3C 3-Phase DOM Event Dispatch:** Standard capture, target, and bubbling phases (`Event`, `addEventListener(type, listener, useCapture)`, `dispatchEvent()`, `stopPropagation()`, `preventDefault()`).
 - **HTML Form Controls:** Native DOM state and change event dispatch for `<input type="text|checkbox">`, `<textarea>`, `<button>`, and `<select>`.
+- **MutationObserver API:** Observation of DOM mutations (`childList`, `attributes`, `attributeOldValue`, `subtree`, `attributeFilter`), microtask batching, and `takeRecords()`.
+- **Autonomous Custom Elements:** `customElements.define()`, `whenDefined()`, dynamic element upgrade, and lifecycle callbacks (`connectedCallback`, `disconnectedCallback`, `attributeChangedCallback`).
+- **Shadow DOM & Slot Content Projection:** `attachShadow({ mode: 'open' | 'closed' })`, `shadowRoot`, scoped CSS encapsulation with `:host` rules, and `<slot>` content projection (`assignedNodes()`, `assignedElements()`).
 
 ### 2. HTML5 Parser (`include/litebird/html/`)
 - Stateful streaming tokenizer (`HtmlTokenizer`).
@@ -265,6 +268,12 @@ Running test: css_variables_and_cascade... PASSED
 Running test: css_calc_expressions... PASSED
 Running test: fetch_api_and_headers... PASSED
 Running test: url_and_url_search_params... PASSED
+Running test: web_workers_and_concurrent_execution... PASSED
+Running test: css_flexbox_and_grid_modern_refinements... PASSED
+Running test: websocket_rfc6455_client_and_handshake... PASSED
+Running test: mutation_observer_api... PASSED
+Running test: custom_elements_api... PASSED
+Running test: shadow_dom_and_slot_projection... PASSED
 
-All 40 engine test suites passed successfully!
+All 46 engine test suites passed successfully!
 ```

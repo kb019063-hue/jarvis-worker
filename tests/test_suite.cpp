@@ -23,6 +23,9 @@
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/js/Worker.hpp"
 #include "litebird/net/WebSocket.hpp"
+#include "litebird/dom/MutationObserver.hpp"
+#include "litebird/dom/ShadowRoot.hpp"
+#include "litebird/dom/CustomElementRegistry.hpp"
 
 #include <iostream>
 #include <cassert>
@@ -2416,6 +2419,249 @@ TEST(websocket_rfc6455_client_and_handshake) {
     assert(js.global_env()->get("wsClosed").is_truthy() == true);
 }
 
+TEST(mutation_observer_api) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    auto container = std::make_shared<Element>("div");
+    container->set_attribute("id", "container");
+    doc->append_child(container);
+
+    JsInterpreter js(doc);
+
+    std::string script = R"(
+        var recordsReceived = 0;
+        var lastType = "";
+        var lastOldValue = "";
+        var lastAddedCount = 0;
+
+        var target = document.getElementById("container");
+        var observer = new MutationObserver(function(mutations, obs) {
+            recordsReceived = recordsReceived + mutations.length;
+            var last = mutations[mutations.length - 1];
+            lastType = last.type;
+            if (last.oldValue) {
+                lastOldValue = last.oldValue;
+            }
+            if (last.addedNodes) {
+                lastAddedCount = last.addedNodes.length;
+            }
+        });
+
+        observer.observe(target, {
+            childList: true,
+            attributes: true,
+            attributeOldValue: true,
+            subtree: true
+        });
+
+        // 1. Child mutation
+        var p = document.createElement("p");
+        p.setAttribute("class", "msg");
+        target.appendChild(p);
+
+        // 2. Attribute mutation
+        target.setAttribute("title", "initial-title");
+    )";
+
+    js.eval_ast(script);
+
+    // Microtasks run asynchronously
+    EventLoop::default_loop().run_microtasks();
+
+    assert(js.global_env()->get("recordsReceived").to_number() >= 2.0);
+    assert(js.global_env()->get("lastType").to_string() == "attributes");
+
+    // 3. Attribute change with oldValue tracking
+    js.eval_ast(R"(
+        target.setAttribute("title", "updated-title");
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.global_env()->get("lastOldValue").to_string() == "initial-title");
+
+    // 4. takeRecords drains queued records immediately
+    js.eval_ast(R"(
+        target.setAttribute("data-test", "val1");
+        var drained = observer.takeRecords();
+        var drainedCount = drained.length;
+        var drainedType = drained[0].type;
+    )");
+    assert(js.global_env()->get("drainedCount").to_number() == 1.0);
+    assert(js.global_env()->get("drainedType").to_string() == "attributes");
+
+    // After draining, microtask callback receives nothing
+    double count_before = js.global_env()->get("recordsReceived").to_number();
+    EventLoop::default_loop().run_microtasks();
+    assert(js.global_env()->get("recordsReceived").to_number() == count_before);
+
+    // 5. Disconnect stops observing
+    js.eval_ast(R"(
+        observer.disconnect();
+        target.setAttribute("title", "after-disconnect");
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.global_env()->get("recordsReceived").to_number() == count_before);
+}
+
+TEST(custom_elements_api) {
+    using namespace litebird;
+    CustomElementRegistry::default_registry().clear();
+
+    auto doc = std::make_shared<Document>();
+    auto body = std::make_shared<Element>("body");
+    doc->append_child(body);
+
+    JsInterpreter js(doc);
+
+    // Validate name checks
+    assert(CustomElementRegistry::is_valid_custom_element_name("my-element") == true);
+    assert(CustomElementRegistry::is_valid_custom_element_name("user-profile-card") == true);
+    assert(CustomElementRegistry::is_valid_custom_element_name("div") == false);
+    assert(CustomElementRegistry::is_valid_custom_element_name("font-face") == false);
+
+    js.eval_ast("var whenDefinedResolved = false;");
+    js.eval_ast("var connectedFired = false;");
+    js.eval_ast("var disconnectedFired = false;");
+    js.eval_ast("var observedAttrChange = '';");
+    js.eval_ast("var observedOldVal = '';");
+    js.eval_ast("var observedNewVal = '';");
+
+    js.eval_ast(R"(
+        customElements.whenDefined("fancy-button").then(function() {
+            whenDefinedResolved = true;
+        });
+
+        class FancyButton extends HTMLElement {
+            static observedAttributes() {
+                return ["label", "theme"];
+            }
+            connectedCallback() {
+                connectedFired = true;
+            }
+            disconnectedCallback() {
+                disconnectedFired = true;
+            }
+            attributeChangedCallback(name, oldVal, newVal) {
+                observedAttrChange = name;
+                observedOldVal = oldVal;
+                observedNewVal = newVal;
+            }
+        }
+
+        var isDefinedBefore = (customElements.get("fancy-button") !== undefined);
+        customElements.define("fancy-button", FancyButton);
+        var isDefinedAfter = (customElements.get("fancy-button") !== undefined);
+
+        var btn = document.createElement("fancy-button");
+        btn.setAttribute("label", "Click Me");
+        document.body.appendChild(btn);
+        btn.setAttribute("label", "Submit");
+    )");
+
+    EventLoop::default_loop().run_microtasks();
+
+    assert(js.global_env()->get("isDefinedBefore").is_truthy() == false);
+    assert(js.global_env()->get("isDefinedAfter").is_truthy() == true);
+    assert(js.global_env()->get("whenDefinedResolved").is_truthy() == true);
+    assert(js.global_env()->get("connectedFired").is_truthy() == true);
+    assert(js.global_env()->get("observedAttrChange").to_string() == "label");
+    assert(js.global_env()->get("observedOldVal").to_string() == "Click Me");
+    assert(js.global_env()->get("observedNewVal").to_string() == "Submit");
+
+    // Removal triggers disconnectedCallback
+    js.eval_ast(R"(
+        document.body.removeChild(btn);
+    )");
+    assert(js.global_env()->get("disconnectedFired").is_truthy() == true);
+}
+
+TEST(shadow_dom_and_slot_projection) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    auto body = std::make_shared<Element>("body");
+    doc->append_child(body);
+
+    auto host = std::make_shared<Element>("my-widget");
+    body->append_child(host);
+
+    // Light DOM children
+    auto light_span = std::make_shared<Element>("span");
+    light_span->append_child(std::make_shared<Text>("Slotted Content"));
+    host->append_child(light_span);
+
+    auto light_named = std::make_shared<Element>("h3");
+    light_named->set_attribute("slot", "header");
+    light_named->append_child(std::make_shared<Text>("Widget Header"));
+    host->append_child(light_named);
+
+    JsInterpreter js(doc);
+
+    std::string script = R"(
+        var widget = document.querySelector("my-widget");
+        var shadow = widget.attachShadow({ mode: "open" });
+        var hasShadowRoot = (widget.shadowRoot === shadow);
+        var shadowMode = shadow.mode;
+        var shadowHost = (shadow.host === widget);
+
+        shadow.innerHTML = "<style>:host { display: block; border: 2px solid #000; } p { color: #f00; }</style>" +
+                           "<div class='wrapper'>" +
+                           "  <slot name='header'></slot>" +
+                           "  <p>Shadow Internal Text</p>" +
+                           "  <slot></slot>" +
+                           "</div>";
+
+        var headerSlot = shadow.querySelector("slot");
+        var assignedHeaderNodes = headerSlot.assignedNodes().length;
+    )";
+
+    js.eval_ast(script);
+
+    assert(js.global_env()->get("hasShadowRoot").is_truthy() == true);
+    assert(js.global_env()->get("shadowMode").to_string() == "open");
+    assert(js.global_env()->get("shadowHost").is_truthy() == true);
+    assert(js.global_env()->get("assignedHeaderNodes").to_number() >= 1.0);
+
+    // Verify Scoped Styling & :host
+    StyleResolver resolver;
+    StyleSheet doc_sheet = CssParser::parse("p { color: #0000ff; }");
+    resolver.add_stylesheet(doc_sheet);
+
+    // Light DOM p would be blue; shadow DOM p must be red (#f00) because shadow scoped style applies
+    auto shadow_p = host->shadow_root()->query_selector("p");
+    assert(shadow_p != nullptr);
+    ComputedStyle p_style = resolver.resolve_style(shadow_p);
+    assert(p_style.color.r == 255 && p_style.color.g == 0 && p_style.color.b == 0);
+
+    // Host element has border: 2px solid #000 from :host
+    ComputedStyle host_style = resolver.resolve_style(host);
+    assert(host_style.border_width.top == 2.0f);
+
+    // Verify Layout Tree projects slotted light children inside shadow structure
+    auto box_tree = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(box_tree != nullptr);
+
+    // Check that layout tree has rendered box containing the slotted nodes
+    bool found_header_text = false;
+    bool found_shadow_text = false;
+    bool found_slotted_text = false;
+
+    std::function<void(const std::shared_ptr<LayoutBox>&)> walk_box = [&](const std::shared_ptr<LayoutBox>& box) {
+        if (!box) return;
+        if (box->box_type == BoxType::TextNode) {
+            if (box->text.find("Widget Header") != std::string::npos) found_header_text = true;
+            if (box->text.find("Shadow Internal Text") != std::string::npos) found_shadow_text = true;
+            if (box->text.find("Slotted Content") != std::string::npos) found_slotted_text = true;
+        }
+        for (const auto& ch : box->children) {
+            walk_box(ch);
+        }
+    };
+    walk_box(box_tree);
+
+    assert(found_header_text == true);
+    assert(found_shadow_text == true);
+    assert(found_slotted_text == true);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -2462,7 +2708,10 @@ int main() {
     RUN_TEST(web_workers_and_concurrent_execution);
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
+    RUN_TEST(mutation_observer_api);
+    RUN_TEST(custom_elements_api);
+    RUN_TEST(shadow_dom_and_slot_projection);
 
-    std::cout << "\n\033[1;32mAll 43 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 46 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

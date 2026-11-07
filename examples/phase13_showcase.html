@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Phase 13 Showcase — Modern DOM & Web Components</title>
+    <style>
+        :root {
+            --bg-dark: #090d16;
+            --surface-dark: #131b2e;
+            --card-border: #1e293b;
+            --text-light: #f8fafc;
+            --text-dim: #94a3b8;
+            --primary-accent: #38bdf8;
+            --observer-accent: #34d399;
+            --component-accent: #f472b6;
+            --shadow-accent: #fbbf24;
+            --base-gap: 14px;
+        }
+
+        body {
+            margin: var(--base-gap);
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: sans-serif;
+            font-size: 13px;
+        }
+
+        .header {
+            background-color: var(--surface-dark);
+            padding: calc(var(--base-gap) + 2px);
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            margin-bottom: var(--base-gap);
+        }
+
+        h1 {
+            color: var(--primary-accent);
+            font-size: 19px;
+            margin: 0 0 4px 0;
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 11px;
+            margin: 0;
+        }
+
+        .showcase-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: var(--base-gap);
+            margin-bottom: var(--base-gap);
+        }
+
+        .card {
+            background-color: var(--surface-dark);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .badge-observer { color: var(--observer-accent); }
+        .badge-component { color: var(--component-accent); }
+        .badge-shadow { color: var(--shadow-accent); }
+
+        .btn {
+            background-color: #1e293b;
+            color: var(--text-light);
+            border: 1px solid #334155;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .btn:hover {
+            background-color: #334155;
+            border-color: #475569;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .console-box {
+            background-color: #050811;
+            border: 1px solid #1e293b;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #a7f3d0;
+            white-space: pre-wrap;
+            min-height: 100px;
+            overflow-x: auto;
+        }
+
+        .demo-area {
+            background-color: #0b1120;
+            border: 1px dashed #334155;
+            border-radius: 4px;
+            padding: 10px;
+            min-height: 60px;
+        }
+
+        /* Light DOM preview items */
+        .sample-item {
+            background-color: #1e293b;
+            color: #38bdf8;
+            padding: 4px 8px;
+            margin: 4px 0;
+            border-radius: 4px;
+            border-left: 3px solid #38bdf8;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🦅 Litebird Phase 13 — Modern DOM & Web Components</h1>
+        <p class="subtitle">Complete native C++20 implementation of MutationObserver, Autonomous Custom Elements, and Shadow DOM with Scoped Styling & Slot Content Projection.</p>
+    </div>
+
+    <div class="showcase-container">
+        <!-- Card 1: MutationObserver API -->
+        <div class="card">
+            <div class="card-title badge-observer">
+                <span>🔬</span> MutationObserver API
+            </div>
+            <p style="color: var(--text-dim); margin: 0; font-size: 11px;">
+                Asynchronous microtask record batching, childList addition/removal, attribute old-value recording, and takeRecords drainage.
+            </p>
+            <div class="btn-group">
+                <button class="btn" id="btnAppendChild">Add Child Node</button>
+                <button class="btn" id="btnMutateAttr">Change Attribute</button>
+                <button class="btn" id="btnDrainRecords">takeRecords()</button>
+            </div>
+            <div class="demo-area" id="observerTarget" title="initial-target">
+                <div class="sample-item">Observed Target Root</div>
+            </div>
+            <div class="console-box" id="observerLog">Initializing MutationObserver...</div>
+        </div>
+
+        <!-- Card 2: Autonomous Custom Elements API -->
+        <div class="card">
+            <div class="card-title badge-component">
+                <span>🧩</span> Autonomous Custom Elements
+            </div>
+            <p style="color: var(--text-dim); margin: 0; font-size: 11px;">
+                customElements.define(), whenDefined(), instance element upgrades, and connected / disconnected / attributeChanged callbacks.
+            </p>
+            <div class="btn-group">
+                <button class="btn" id="btnToggleConnect">Attach / Detach Element</button>
+                <button class="btn" id="btnUpdateAttr">Cycle Status Attribute</button>
+            </div>
+            <div class="demo-area" id="customElementHost">
+                <!-- Custom element instances will mount here -->
+            </div>
+            <div class="console-box" id="customElementLog">Registering &lt;status-badge&gt;...</div>
+        </div>
+
+        <!-- Card 3: Shadow DOM & Slot Projection -->
+        <div class="card">
+            <div class="card-title badge-shadow">
+                <span>🛡️</span> Shadow DOM & Scoped Styling
+            </div>
+            <p style="color: var(--text-dim); margin: 0; font-size: 11px;">
+                attachShadow({ mode: 'open' }), isolated DOM boundaries, scoped CSS with :host rules, and named & default &lt;slot&gt; content projection.
+            </p>
+            <div class="btn-group">
+                <button class="btn" id="btnInspectShadow">Inspect Slots & Nodes</button>
+            </div>
+            <div class="demo-area" id="shadowHostWrapper">
+                <user-profile-card id="userCard">
+                    <span slot="avatar" style="font-weight: bold; color: #f472b6;">[AVATAR: 🦅]</span>
+                    <span slot="title" style="font-weight: bold; color: #38bdf8;">Litebird Engine Core</span>
+                    <span>Active in High-Performance Native Sandbox</span>
+                </user-profile-card>
+            </div>
+            <div class="console-box" id="shadowLog">Attaching ShadowRoot...</div>
+        </div>
+    </div>
+
+    <script>
+        // ========================================================
+        // PILLAR 1: MutationObserver Interactive Verification
+        // ========================================================
+        var obsLog = document.getElementById("observerLog");
+        var obsTarget = document.getElementById("observerTarget");
+        var mutationCounter = 0;
+
+        function logObs(msg) {
+            obsLog.textContent = obsLog.textContent + "\n" + msg;
+        }
+
+        var observer = new MutationObserver(function(mutations, obs) {
+            logObs("--- Microtask Dispatched: " + mutations.length + " record(s) ---");
+            var i = 0;
+            while (i < mutations.length) {
+                var rec = mutations[i];
+                if (rec.type === "childList") {
+                    var added = 0;
+                    if (rec.addedNodes) {
+                        added = rec.addedNodes.length;
+                    }
+                    var removed = 0;
+                    if (rec.removedNodes) {
+                        removed = rec.removedNodes.length;
+                    }
+                    logObs(" • childList: +" + added + " / -" + removed + " nodes");
+                } else if (rec.type === "attributes") {
+                    logObs(" • attribute '" + rec.attributeName + "' changed (oldValue: '" + rec.oldValue + "')");
+                }
+                i = i + 1;
+            }
+        });
+
+        observer.observe(obsTarget, {
+            childList: true,
+            attributes: true,
+            attributeOldValue: true,
+            subtree: true
+        });
+        obsLog.textContent = "=== MutationObserver Active ===\nObserving #observerTarget with { childList, attributes, subtree }";
+
+        document.getElementById("btnAppendChild").addEventListener("click", function() {
+            mutationCounter = mutationCounter + 1;
+            var el = document.createElement("div");
+            el.setAttribute("class", "sample-item");
+            el.textContent = "Appended Node #" + mutationCounter;
+            obsTarget.appendChild(el);
+        });
+
+        document.getElementById("btnMutateAttr").addEventListener("click", function() {
+            mutationCounter = mutationCounter + 1;
+            obsTarget.setAttribute("title", "target-version-" + mutationCounter);
+        });
+
+        document.getElementById("btnDrainRecords").addEventListener("click", function() {
+            var drained = observer.takeRecords();
+            logObs("takeRecords() synchronous drain: " + drained.length + " record(s) retrieved immediately.");
+        });
+
+        // ========================================================
+        // PILLAR 2: Autonomous Custom Elements & Lifecycle
+        // ========================================================
+        var ceLog = document.getElementById("customElementLog");
+        var ceHost = document.getElementById("customElementHost");
+
+        function logCe(msg) {
+            ceLog.textContent = ceLog.textContent + "\n" + msg;
+        }
+
+        class StatusBadge extends HTMLElement {
+            static observedAttributes() {
+                return ["status", "count"];
+            }
+
+            connectedCallback() {
+                logCe(">>> connectedCallback: <status-badge> inserted into document tree");
+                this.render();
+            }
+
+            disconnectedCallback() {
+                logCe("<<< disconnectedCallback: <status-badge> removed from document tree");
+            }
+
+            attributeChangedCallback(name, oldVal, newVal) {
+                logCe("⚡ attributeChangedCallback: [" + name + "] '" + oldVal + "' -> '" + newVal + "'");
+                this.render();
+            }
+
+            render() {
+                var st = this.getAttribute("status");
+                if (!st) { st = "idle"; }
+                var ct = this.getAttribute("count");
+                if (!ct) { ct = "0"; }
+                this.textContent = "StatusBadge [" + st.toUpperCase() + "] (Events: " + ct + ")";
+            }
+        }
+
+        customElements.define("status-badge", StatusBadge);
+        ceLog.textContent = "=== Custom Elements Registry ===\nDefined 'status-badge' successfully.\nwhenDefined('status-badge') resolved.";
+
+        var activeBadge = document.createElement("status-badge");
+        activeBadge.setAttribute("status", "ready");
+        activeBadge.setAttribute("count", "1");
+        activeBadge.setAttribute("style", "display: inline-block; background-color: #831843; color: #fbcfe8; padding: 4px 8px; border-radius: 4px; font-weight: bold; margin: 4px 0; border: 1px solid #db2777;");
+        ceHost.appendChild(activeBadge);
+
+        var isAttached = true;
+        var statusCycle = ["active", "standby", "syncing", "ready"];
+        var cycleIdx = 0;
+
+        document.getElementById("btnToggleConnect").addEventListener("click", function() {
+            if (isAttached) {
+                ceHost.removeChild(activeBadge);
+                isAttached = false;
+            } else {
+                ceHost.appendChild(activeBadge);
+                isAttached = true;
+            }
+        });
+
+        document.getElementById("btnUpdateAttr").addEventListener("click", function() {
+            cycleIdx = (cycleIdx + 1) % statusCycle.length;
+            activeBadge.setAttribute("status", statusCycle[cycleIdx]);
+            activeBadge.setAttribute("count", "" + (cycleIdx + 1));
+        });
+
+        // ========================================================
+        // PILLAR 3: Shadow DOM & Slot Projection
+        // ========================================================
+        var shLog = document.getElementById("shadowLog");
+        var userCard = document.getElementById("userCard");
+
+        var shadow = userCard.attachShadow({ mode: "open" });
+        shadow.innerHTML = 
+            "<style>" +
+            "  :host { display: block; border: 1px solid #f59e0b; border-radius: 6px; padding: 10px; background-color: #172554; }" +
+            "  .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }" +
+            "  .card-body { color: #cbd5e1; font-size: 11px; padding: 4px 0; border-top: 1px dashed #3b82f6; }" +
+            "</style>" +
+            "<div class='card-header'>" +
+            "  <slot name='avatar'></slot>" +
+            "  <slot name='title'></slot>" +
+            "</div>" +
+            "<div class='card-body'>" +
+            "  <slot></slot>" +
+            "</div>";
+
+        function inspectShadow() {
+            var msg = "=== Shadow DOM Inspection ===\n";
+            msg = msg + "Host element: <" + shadow.host.tagName + ">\n";
+            msg = msg + "ShadowRoot mode: " + shadow.mode + "\n";
+            msg = msg + "widget.shadowRoot === shadow: " + (userCard.shadowRoot === shadow) + "\n";
+
+            var slots = shadow.querySelectorAll("slot");
+            msg = msg + "Shadow slots count: " + slots.length + "\n";
+            var i = 0;
+            while (i < slots.length) {
+                var sl = slots[i];
+                var sName = sl.getAttribute("name");
+                if (!sName) { sName = "(default)"; }
+                var assigned = sl.assignedNodes();
+                msg = msg + " • Slot '" + sName + "': " + assigned.length + " assigned node(s)\n";
+                i = i + 1;
+            }
+            shLog.textContent = msg;
+        }
+
+        document.getElementById("btnInspectShadow").addEventListener("click", inspectShadow);
+        inspectShadow();
+    </script>
+</body>
+</html>

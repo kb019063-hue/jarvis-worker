@@ -104,14 +104,19 @@ public:
 
     bool is_truthy() const;
     bool is_array() const;
+    bool is_undefined() const { return type == JsType::Undefined; }
     bool is_function() const { return type == JsType::Function || type == JsType::NativeFunction; }
+    bool is_callable() const { return is_function(); }
+    std::vector<JsValue>& array_elements();
+    const std::vector<JsValue>& array_elements() const;
     std::string to_string() const;
     double to_number() const;
 
-    using FunctionCaller = std::function<JsValue(const JsValue& fn, const std::vector<JsValue>& args)>;
+    using FunctionCaller = std::function<JsValue(const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val)>;
     static void set_function_caller(FunctionCaller caller);
 
     JsValue call(const std::vector<JsValue>& args = {}) const;
+    JsValue call_with_this(const JsValue& this_val, const std::vector<JsValue>& args = {}) const;
 
     JsValue get_property(const std::string& name) const;
     void set_property(const std::string& name, JsValue val);

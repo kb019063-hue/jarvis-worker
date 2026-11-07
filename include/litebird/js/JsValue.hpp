@@ -52,6 +52,7 @@ public:
     std::shared_ptr<JsEnvironment> closure;
     std::shared_ptr<BytecodeFunction> bytecode_fn;
     bool is_async{false};
+    bool is_generator{false};
 
     // For Native Functions
     NativeFn native_fn;
@@ -65,6 +66,9 @@ public:
 
     // For Promises
     std::shared_ptr<struct PromiseData> promise_data;
+
+    // For Generators
+    std::shared_ptr<struct GeneratorData> generator_data;
 
     JsValue() : type(JsType::Undefined) {}
 
@@ -104,9 +108,11 @@ public:
 
     bool is_truthy() const;
     bool is_array() const;
+    bool is_object() const { return type == JsType::Object; }
     bool is_undefined() const { return type == JsType::Undefined; }
     bool is_function() const { return type == JsType::Function || type == JsType::NativeFunction; }
     bool is_callable() const { return is_function(); }
+    bool has_property(const std::string& name) const;
     std::vector<JsValue>& array_elements();
     const std::vector<JsValue>& array_elements() const;
     std::string to_string() const;

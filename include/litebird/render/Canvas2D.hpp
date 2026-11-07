@@ -50,6 +50,7 @@ public:
     Color fill_style{Color::black()};
     Color stroke_style{Color::black()};
     float line_width{1.0f};
+    std::string global_composite_operation{"source-over"};
 
     // Gradients
     std::shared_ptr<CanvasGradient> fill_gradient{nullptr};

@@ -416,6 +416,159 @@ static void parse_grid_template(std::string_view val,
     }
 }
 
+static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
+    std::vector<FilterFunction> filters;
+    std::string s(val);
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (std::isspace(static_cast<unsigned char>(s[i])) || s[i] == ',')) i++;
+        if (i >= s.size()) break;
+        size_t open_p = s.find('(', i);
+        if (open_p == std::string::npos) break;
+        std::string name = s.substr(i, open_p - i);
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+
+        size_t close_p = s.find(')', open_p);
+        if (close_p == std::string::npos) break;
+        std::string arg = s.substr(open_p + 1, close_p - (open_p + 1));
+        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.front()))) arg.erase(arg.begin());
+        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.back()))) arg.pop_back();
+
+        FilterFunction fn;
+        if (name == "blur") {
+            fn.type = FilterType::Blur;
+            try { fn.blur_radius = std::stof(arg); } catch (...) {}
+            fn.amount = fn.blur_radius;
+        } else if (name == "brightness") {
+            fn.type = FilterType::Brightness;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "contrast") {
+            fn.type = FilterType::Contrast;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "grayscale") {
+            fn.type = FilterType::Grayscale;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "sepia") {
+            fn.type = FilterType::Sepia;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "invert") {
+            fn.type = FilterType::Invert;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "opacity") {
+            fn.type = FilterType::Opacity;
+            float v = 1.0f;
+            if (!arg.empty() && arg.back() == '%') {
+                try { v = std::stof(arg.substr(0, arg.size() - 1)) / 100.0f; } catch (...) {}
+            } else {
+                try { v = std::stof(arg); } catch (...) {}
+            }
+            fn.amount = v;
+        } else if (name == "drop-shadow") {
+            fn.type = FilterType::DropShadow;
+            std::stringstream ss(arg);
+            std::string tok1, tok2, tok3;
+            if (ss >> tok1 >> tok2) {
+                try { fn.dx = std::stof(tok1); } catch (...) {}
+                try { fn.dy = std::stof(tok2); } catch (...) {}
+                if (ss >> tok3) {
+                    if (std::isdigit(static_cast<unsigned char>(tok3[0])) || tok3[0] == '-') {
+                        try { fn.blur_radius = std::stof(tok3); } catch (...) {}
+                        std::string color_part;
+                        std::getline(ss, color_part);
+                        while (!color_part.empty() && std::isspace(static_cast<unsigned char>(color_part.front()))) color_part.erase(color_part.begin());
+                        if (!color_part.empty()) {
+                            fn.color = Color::parse(color_part);
+                        } else {
+                            fn.color = Color::black();
+                        }
+                    } else {
+                        fn.color = Color::parse(tok3);
+                    }
+                }
+            }
+        }
+        if (fn.type != FilterType::None) {
+            filters.push_back(fn);
+        }
+        i = close_p + 1;
+    }
+    return filters;
+}
+
+static void parse_grid_template_areas(std::string_view val, std::unordered_map<std::string, ComputedStyle::GridAreaRect>& areas) {
+    areas.clear();
+    std::string s(val);
+    int current_row = 1;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t q_start = s.find('"', i);
+        if (q_start == std::string::npos) {
+            q_start = s.find('\'', i);
+        }
+        if (q_start == std::string::npos) break;
+        char quote = s[q_start];
+        size_t q_end = s.find(quote, q_start + 1);
+        if (q_end == std::string::npos) break;
+
+        std::string row_str = s.substr(q_start + 1, q_end - (q_start + 1));
+        std::stringstream ss(row_str);
+        std::string cell;
+        int current_col = 1;
+        while (ss >> cell) {
+            if (cell != "." && cell != "...") {
+                auto it = areas.find(cell);
+                if (it == areas.end()) {
+                    ComputedStyle::GridAreaRect r;
+                    r.row_start = current_row;
+                    r.row_end = current_row + 1;
+                    r.col_start = current_col;
+                    r.col_end = current_col + 1;
+                    areas[cell] = r;
+                } else {
+                    it->second.row_start = std::min(it->second.row_start, current_row);
+                    it->second.row_end = std::max(it->second.row_end, current_row + 1);
+                    it->second.col_start = std::min(it->second.col_start, current_col);
+                    it->second.col_end = std::max(it->second.col_end, current_col + 1);
+                }
+            }
+            current_col++;
+        }
+        current_row++;
+        i = q_end + 1;
+    }
+}
+
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
     if (prop.starts_with("--")) {
         style.custom_properties[prop] = raw_val;
@@ -722,6 +875,60 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         style.has_transform = true;
     } else if (prop == "transform-origin") {
         style.transform_origin = val;
+    } else if (prop == "filter") {
+        if (val == "none") {
+            style.filters.clear();
+        } else {
+            style.filters = parse_css_filters(val);
+        }
+    } else if (prop == "backdrop-filter" || prop == "-webkit-backdrop-filter") {
+        if (val == "none") {
+            style.backdrop_filters.clear();
+        } else {
+            style.backdrop_filters = parse_css_filters(val);
+        }
+    } else if (prop == "grid-template-areas") {
+        parse_grid_template_areas(val, style.grid_named_areas);
+    } else if (prop == "grid-area") {
+        if (val.find('/') != std::string::npos) {
+            std::stringstream ss(val);
+            std::string part;
+            std::vector<int> lines;
+            while (std::getline(ss, part, '/')) {
+                while (!part.empty() && std::isspace(static_cast<unsigned char>(part.front()))) part.erase(part.begin());
+                while (!part.empty() && std::isspace(static_cast<unsigned char>(part.back()))) part.pop_back();
+                try { lines.push_back(std::stoi(part)); } catch (...) { lines.push_back(0); }
+            }
+            if (lines.size() >= 1) style.grid_row_start = lines[0];
+            if (lines.size() >= 2) style.grid_column_start = lines[1];
+            if (lines.size() >= 3) style.grid_row_end = lines[2];
+            if (lines.size() >= 4) style.grid_column_end = lines[3];
+        } else {
+            style.grid_area_name = val;
+        }
+    } else if (prop == "contain") {
+        uint8_t flags = 0;
+        std::stringstream ss(val);
+        std::string tok;
+        while (ss >> tok) {
+            if (tok == "none") {
+                flags = 0;
+                break;
+            } else if (tok == "strict") {
+                flags = static_cast<uint8_t>(Containment::Strict);
+            } else if (tok == "content") {
+                flags = static_cast<uint8_t>(Containment::Content);
+            } else if (tok == "layout") {
+                flags |= static_cast<uint8_t>(Containment::Layout);
+            } else if (tok == "paint") {
+                flags |= static_cast<uint8_t>(Containment::Paint);
+            } else if (tok == "size") {
+                flags |= static_cast<uint8_t>(Containment::Size);
+            } else if (tok == "style") {
+                flags |= static_cast<uint8_t>(Containment::Style);
+            }
+        }
+        style.containment = flags;
     }
 }
 

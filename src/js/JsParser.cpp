@@ -61,6 +61,9 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
     if (match(JsTokenType::While)) {
         return parse_while_statement();
     }
+    if (match(JsTokenType::For)) {
+        return parse_for_statement();
+    }
     if (match(JsTokenType::Return)) {
         return parse_return_statement();
     }
@@ -133,6 +136,7 @@ std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
 }
 
 std::unique_ptr<FunctionDeclStmt> JsParser::parse_function_declaration() {
+    bool is_gen = match(JsTokenType::Star);
     const auto& name_token = consume(JsTokenType::Identifier, "Expected function name.");
     consume(JsTokenType::OpenParen, "Expected '(' after function name.");
     std::vector<std::string> params;
@@ -150,7 +154,7 @@ std::unique_ptr<FunctionDeclStmt> JsParser::parse_function_declaration() {
     consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
     consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
     auto body = parse_block();
-    return std::make_unique<FunctionDeclStmt>(name_token.text, std::move(params), std::move(body), std::move(defs));
+    return std::make_unique<FunctionDeclStmt>(name_token.text, std::move(params), std::move(body), std::move(defs), false, is_gen);
 }
 
 std::unique_ptr<ClassDeclStmt> JsParser::parse_class_declaration() {
@@ -165,6 +169,7 @@ std::unique_ptr<ClassDeclStmt> JsParser::parse_class_declaration() {
     while (!check(JsTokenType::CloseBrace) && !is_at_end()) {
         bool is_static = match(JsTokenType::Static);
         bool is_async = match(JsTokenType::Async);
+        bool is_gen = match(JsTokenType::Star);
 
         std::string method_name = consume(JsTokenType::Identifier, "Expected method name in class.").text;
         bool is_constructor = (method_name == "constructor");
@@ -191,6 +196,7 @@ std::unique_ptr<ClassDeclStmt> JsParser::parse_class_declaration() {
         m.is_static = is_static;
         m.is_constructor = is_constructor;
         m.is_async = is_async;
+        m.is_generator = is_gen;
         m.params = std::move(params);
         m.default_values = std::move(defs);
         m.body = std::move(body);
@@ -220,6 +226,50 @@ std::unique_ptr<Stmt> JsParser::parse_while_statement() {
 
     auto body = parse_statement();
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+std::unique_ptr<Stmt> JsParser::parse_for_statement() {
+    consume(JsTokenType::OpenParen, "Expected '(' after 'for'.");
+    bool is_decl = false;
+    if (match(JsTokenType::Var) || match(JsTokenType::Let) || match(JsTokenType::Const)) {
+        is_decl = true;
+    }
+    std::string var_name = consume(JsTokenType::Identifier, "Expected variable name in for loop.").text;
+
+    if (match(JsTokenType::Of)) {
+        auto iterable = parse_expression();
+        consume(JsTokenType::CloseParen, "Expected ')' after for-of expression.");
+        auto body = parse_statement();
+        return std::make_unique<ForOfStmt>(var_name, std::move(iterable), std::move(body));
+    }
+
+    // Traditional for loop fallback: for (var_name = init; cond; update)
+    consume(JsTokenType::Equal, "Expected '=' in for loop init.");
+    auto init_val = parse_expression();
+    consume(JsTokenType::Semicolon, "Expected ';' after for loop init.");
+    auto condition = parse_expression();
+    consume(JsTokenType::Semicolon, "Expected ';' after for loop condition.");
+    auto update = parse_expression();
+    consume(JsTokenType::CloseParen, "Expected ')' after for loop clause.");
+    auto body = parse_statement();
+
+    auto block = std::make_unique<BlockStmt>();
+    if (is_decl) {
+        block->statements.push_back(std::make_unique<VarDeclStmt>(var_name, std::move(init_val)));
+    } else {
+        auto target_id = std::make_unique<IdentifierExpr>(var_name);
+        auto assign = std::make_unique<AssignExpr>(std::move(target_id), std::move(init_val));
+        block->statements.push_back(std::make_unique<ExprStmt>(std::move(assign)));
+    }
+
+    auto while_body = std::make_unique<BlockStmt>();
+    if (body) {
+        while_body->statements.push_back(std::move(body));
+    }
+    while_body->statements.push_back(std::make_unique<ExprStmt>(std::move(update)));
+
+    block->statements.push_back(std::make_unique<WhileStmt>(std::move(condition), std::move(while_body)));
+    return block;
 }
 
 std::unique_ptr<Stmt> JsParser::parse_return_statement() {
@@ -606,7 +656,19 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         return first_expr;
     }
 
+    if (match(JsTokenType::Yield)) {
+        bool del = match(JsTokenType::Star);
+        std::unique_ptr<Expr> arg = nullptr;
+        if (!check(JsTokenType::Semicolon) && !check(JsTokenType::CloseParen) &&
+            !check(JsTokenType::CloseBrace) && !check(JsTokenType::CloseBracket) &&
+            !check(JsTokenType::Comma) && !is_at_end()) {
+            arg = parse_expression();
+        }
+        return std::make_unique<YieldExpr>(std::move(arg), del);
+    }
+
     if (match(JsTokenType::Function)) {
+        bool is_gen = match(JsTokenType::Star);
         std::string name;
         if (match(JsTokenType::Identifier)) {
             name = previous().text;
@@ -627,7 +689,7 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         consume(JsTokenType::CloseParen, "Expected ')' after parameters.");
         consume(JsTokenType::OpenBrace, "Expected '{' before function body.");
         auto body = parse_block();
-        return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body), std::move(defs));
+        return std::make_unique<FunctionExpr>(name, std::move(params), std::move(body), std::move(defs), false, is_gen);
     }
 
     if (match(JsTokenType::OpenBracket)) {

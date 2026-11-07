@@ -14,14 +14,106 @@
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/WebSocket.hpp"
 #include "litebird/js/Worker.hpp"
+#include "litebird/js/Generator.hpp"
+#include "litebird/dom/IntersectionObserver.hpp"
+#include "litebird/dom/ResizeObserver.hpp"
+#include "litebird/dom/History.hpp"
+#include "litebird/net/AbortController.hpp"
 #include <cmath>
 #include <iostream>
 
 namespace litebird {
 
 JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
-    : m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)), m_vm(m_document) {
+    : m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)), m_history(std::make_shared<History>()), m_vm(m_document) {
     init_builtins();
+}
+
+static JsValue create_generator_instance(JsInterpreter* interp,
+                                         std::shared_ptr<AstNode> body_ptr,
+                                         const std::vector<std::string>& params,
+                                         const std::vector<std::shared_ptr<Expr>>& defs,
+                                         std::shared_ptr<JsEnvironment> closure,
+                                         const std::vector<JsValue>& args) {
+    auto gen_data = std::make_shared<GeneratorData>();
+    auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : interp->global_env());
+    for (size_t i = 0; i < params.size(); ++i) {
+        JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+        if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
+            arg = interp->execute(defs[i].get(), fn_env);
+        }
+        fn_env->define(params[i], arg);
+    }
+
+    gen_data->worker = std::thread([interp, gen_data, body_ptr, fn_env]() {
+        GeneratorContext::set_active(gen_data.get());
+        {
+            std::unique_lock<std::mutex> lock(gen_data->mtx);
+            gen_data->cv_gen.wait(lock, [&] {
+                return gen_data->started || gen_data->should_terminate;
+            });
+            if (gen_data->should_terminate) {
+                GeneratorContext::set_active(nullptr);
+                return;
+            }
+        }
+
+        try {
+            JsValue res = interp->execute(body_ptr.get(), fn_env);
+            std::unique_lock<std::mutex> lock(gen_data->mtx);
+            gen_data->yielded_value = res;
+            gen_data->is_done = true;
+            gen_data->finished = true;
+            gen_data->cv_main.notify_one();
+        } catch (const ReturnException& ret) {
+            std::unique_lock<std::mutex> lock(gen_data->mtx);
+            gen_data->yielded_value = ret.value;
+            gen_data->is_done = true;
+            gen_data->finished = true;
+            gen_data->cv_main.notify_one();
+        } catch (const GeneratorAbortException&) {
+            // cleanly aborted
+        } catch (...) {
+            std::unique_lock<std::mutex> lock(gen_data->mtx);
+            gen_data->is_done = true;
+            gen_data->finished = true;
+            gen_data->cv_main.notify_one();
+        }
+        GeneratorContext::set_active(nullptr);
+    });
+
+    JsValue gen_obj = JsValue::make_object();
+    gen_obj.generator_data = gen_data;
+    gen_obj.is_generator = true;
+
+    gen_obj.set_property("next", JsValue::make_native_function([gen_data](const std::vector<JsValue>& nargs) {
+        JsValue send_val = nargs.empty() ? JsValue::make_undefined() : nargs[0];
+        return gen_data->step(send_val);
+    }));
+
+    gen_obj.set_property("return", JsValue::make_native_function([gen_data](const std::vector<JsValue>& rargs) {
+        gen_data->terminate();
+        gen_data->is_done = true;
+        JsValue r = JsValue::make_object();
+        r.set_property("value", rargs.empty() ? JsValue::make_undefined() : rargs[0]);
+        r.set_property("done", JsValue::make_boolean(true));
+        return r;
+    }));
+
+    gen_obj.set_property("throw", JsValue::make_native_function([gen_data](const std::vector<JsValue>& targs) -> JsValue {
+        gen_data->terminate();
+        gen_data->is_done = true;
+        throw std::runtime_error(targs.empty() ? "Generator error" : targs[0].to_string());
+        return JsValue::make_undefined();
+    }));
+
+    auto iter_fn = JsValue::make_native_function([gen_obj](const std::vector<JsValue>&) {
+        return gen_obj;
+    });
+    gen_obj.set_property("@@iterator", iter_fn);
+    gen_obj.set_property("Symbol.iterator", iter_fn);
+
+    return gen_obj;
 }
 
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {
@@ -148,6 +240,83 @@ void JsInterpreter::init_builtins() {
     JsValue win_obj = JsValue::make_object();
     win_obj.set_property("localStorage", local_store);
     win_obj.set_property("sessionStorage", session_store);
+
+    auto window_listeners = std::make_shared<std::unordered_map<std::string, std::vector<JsValue>>>();
+    JsValue win_add_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+        if (args.size() >= 2) {
+            (*window_listeners)[args[0].to_string()].push_back(args[1]);
+        }
+        return JsValue::make_undefined();
+    });
+    JsValue win_dispatch = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_boolean(false);
+        std::string type = args[0].is_object() ? args[0].get_property("type").to_string() : args[0].to_string();
+        auto it = window_listeners->find(type);
+        if (it != window_listeners->end()) {
+            for (const auto& cb : it->second) {
+                cb.call(args);
+            }
+        }
+        return JsValue::make_boolean(true);
+    });
+    win_obj.set_property("addEventListener", win_add_el);
+    win_obj.set_property("dispatchEvent", win_dispatch);
+
+    if (!m_history) {
+        m_history = std::make_shared<History>();
+    }
+    JsValue history_obj = JsValue::make_object();
+    auto hist = m_history;
+    history_obj.set_property("pushState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+        JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
+        std::string title = args.size() > 1 ? args[1].to_string() : "";
+        std::string url = args.size() > 2 ? args[2].to_string() : "";
+        hist->push_state(state, title, url);
+        return JsValue::make_undefined();
+    }));
+    history_obj.set_property("replaceState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+        JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
+        std::string title = args.size() > 1 ? args[1].to_string() : "";
+        std::string url = args.size() > 2 ? args[2].to_string() : "";
+        hist->replace_state(state, title, url);
+        return JsValue::make_undefined();
+    }));
+    history_obj.set_property("back", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+        hist->back();
+        return JsValue::make_undefined();
+    }));
+    history_obj.set_property("forward", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+        hist->forward();
+        return JsValue::make_undefined();
+    }));
+    history_obj.set_property("go", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+        int delta = args.empty() ? 0 : static_cast<int>(args[0].to_number());
+        hist->go(delta);
+        return JsValue::make_undefined();
+    }));
+    history_obj.set_property("__get_length__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+        return JsValue::make_number(hist->length());
+    }));
+    history_obj.set_property("__get_state__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+        return hist->state();
+    }));
+    history_obj.set_property("length", JsValue::make_number(hist->length()));
+    history_obj.set_property("state", hist->state());
+
+    m_history->set_popstate_dispatcher([window_listeners](const JsValue& state) {
+        JsValue event = JsValue::make_object();
+        event.set_property("type", JsValue::make_string("popstate"));
+        event.set_property("state", state);
+        auto it = window_listeners->find("popstate");
+        if (it != window_listeners->end()) {
+            for (const auto& cb : it->second) {
+                cb.call({event});
+            }
+        }
+    });
+
+    m_global_env->define("history", history_obj);
+    win_obj.set_property("history", history_obj);
 
     JsValue raf = JsValue::make_native_function([](const std::vector<JsValue>& args) {
         if (args.empty()) return JsValue::make_number(0);
@@ -331,6 +500,9 @@ void JsInterpreter::init_builtins() {
 
     // Function caller for callbacks
     JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val) {
+        if (fn.is_generator && fn.native_fn) {
+            return fn.native_fn(args);
+        }
         for (const auto& [k, v] : m_vm.globals()) {
             if (k != "document" && k != "window") {
                 m_global_env->define(k, v);
@@ -573,6 +745,76 @@ void JsInterpreter::init_builtins() {
     });
     m_global_env->define("Set", set_ctor);
 
+    // Symbol
+    JsValue symbol_obj = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        std::string desc = args.empty() ? "" : args[0].to_string();
+        return JsValue::make_string("Symbol(" + desc + ")");
+    });
+    symbol_obj.set_property("iterator", JsValue::make_string("@@iterator"));
+    symbol_obj.set_property("toStringTag", JsValue::make_string("@@toStringTag"));
+    m_global_env->define("Symbol", symbol_obj);
+
+    // AbortController and AbortSignal
+    JsValue abort_ctrl_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {
+        auto ctrl = std::make_shared<AbortController>();
+        return ctrl->to_js_value();
+    });
+    m_global_env->define("AbortController", abort_ctrl_ctor);
+
+    JsValue abort_sig_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {
+        return JsValue::make_undefined();
+    });
+    abort_sig_ctor.set_property("abort", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        JsValue reason = args.empty() ? JsValue::make_string("AbortError") : args[0];
+        auto sig = AbortSignal::abort(reason);
+        return sig->to_js_value();
+    }));
+    abort_sig_ctor.set_property("timeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        uint32_t ms = args.empty() ? 0 : static_cast<uint32_t>(args[0].to_number());
+        auto sig = AbortSignal::timeout(ms);
+        return sig->to_js_value();
+    }));
+    m_global_env->define("AbortSignal", abort_sig_ctor);
+
+    // IntersectionObserver
+    JsValue intersection_obs_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        JsValue callback = args[0];
+        IntersectionObserverInit opts;
+        if (args.size() > 1 && args[1].is_object()) {
+            JsValue root_val = args[1].get_property("root");
+            if (root_val.dom_node) {
+                opts.root = std::dynamic_pointer_cast<Element>(root_val.dom_node);
+            }
+            JsValue rm_val = args[1].get_property("rootMargin");
+            if (rm_val.type == JsType::String) {
+                opts.root_margin = rm_val.to_string();
+            }
+            JsValue th_val = args[1].get_property("threshold");
+            if (th_val.type == JsType::Number) {
+                opts.thresholds = {static_cast<float>(th_val.to_number())};
+            } else if (th_val.is_array()) {
+                double len = th_val.get_property("length").to_number();
+                opts.thresholds.clear();
+                for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                    opts.thresholds.push_back(static_cast<float>(th_val.get_property(std::to_string(i)).to_number()));
+                }
+            }
+        }
+        auto obs = std::make_shared<IntersectionObserver>(callback, opts);
+        return obs->to_js_value();
+    });
+    m_global_env->define("IntersectionObserver", intersection_obs_ctor);
+
+    // ResizeObserver
+    JsValue resize_obs_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        JsValue callback = args[0];
+        auto obs = std::make_shared<ResizeObserver>(callback);
+        return obs->to_js_value();
+    });
+    m_global_env->define("ResizeObserver", resize_obs_ctor);
+
     for (const auto& [k, v] : m_global_env->values()) {
         m_vm.set_global(k, v);
     }
@@ -644,6 +886,48 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
             last = exec_stmt(while_stmt->body.get(), env);
         }
         return last;
+    } else if (auto for_of = dynamic_cast<const ForOfStmt*>(stmt)) {
+        JsValue iterable = eval_expr(for_of->iterable.get(), env);
+        std::vector<JsValue> items;
+        if (iterable.is_array()) {
+            double len = iterable.get_property("length").to_number();
+            for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                items.push_back(iterable.get_property(std::to_string(i)));
+            }
+        } else if (iterable.is_generator || iterable.generator_data != nullptr || iterable.has_property("next")) {
+            while (true) {
+                JsValue next_fn = iterable.get_property("next");
+                if (!next_fn.is_callable()) break;
+                JsValue step = next_fn.call_with_this(iterable, {});
+                if (step.get_property("done").is_truthy()) break;
+                items.push_back(step.get_property("value"));
+            }
+        } else if (iterable.has_property("@@iterator") || iterable.has_property("Symbol.iterator")) {
+            JsValue iter_fn = iterable.has_property("@@iterator") ? iterable.get_property("@@iterator") : iterable.get_property("Symbol.iterator");
+            if (iter_fn.is_callable()) {
+                JsValue iter = iter_fn.call_with_this(iterable, {});
+                while (true) {
+                    JsValue next_fn = iter.get_property("next");
+                    if (!next_fn.is_callable()) break;
+                    JsValue step = next_fn.call_with_this(iter, {});
+                    if (step.get_property("done").is_truthy()) break;
+                    items.push_back(step.get_property("value"));
+                }
+            }
+        } else if (iterable.type == JsType::String) {
+            std::string s = iterable.to_string();
+            for (char c : s) {
+                items.push_back(JsValue::make_string(std::string(1, c)));
+            }
+        }
+
+        JsValue last = JsValue::make_undefined();
+        for (const auto& item : items) {
+            auto loop_env = std::make_shared<JsEnvironment>(env);
+            loop_env->define(for_of->variable_name, item);
+            last = exec_stmt(for_of->body.get(), loop_env);
+        }
+        return last;
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
         JsValue fn_val;
         fn_val.type = JsType::Function;
@@ -652,55 +936,63 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         fn_val.body = fn_decl->body;
         fn_val.closure = env;
         fn_val.is_async = fn_decl->is_async;
+        fn_val.is_generator = fn_decl->is_generator;
 
         auto body_ptr = fn_decl->body;
         auto params = fn_decl->params;
         auto defs = fn_decl->default_values;
         auto closure = env;
         bool is_async = fn_decl->is_async;
+        bool is_gen = fn_decl->is_generator;
 
-        fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
-            for (const auto& [k, v] : m_vm.globals()) {
-                m_global_env->define(k, v);
-            }
-            auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
-            for (size_t i = 0; i < params.size(); ++i) {
-                JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
-                if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
-                    arg = eval_expr(defs[i].get(), fn_env);
+        if (is_gen) {
+            fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+                return create_generator_instance(this, body_ptr, params, defs, closure, args);
+            };
+        } else {
+            fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
+                for (const auto& [k, v] : m_vm.globals()) {
+                    m_global_env->define(k, v);
                 }
-                fn_env->define(params[i], arg);
-            }
+                auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+                for (size_t i = 0; i < params.size(); ++i) {
+                    JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                    if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
+                        arg = eval_expr(defs[i].get(), fn_env);
+                    }
+                    fn_env->define(params[i], arg);
+                }
 
-            if (is_async) {
-                auto p_data = std::make_shared<PromiseData>();
+                if (is_async) {
+                    auto p_data = std::make_shared<PromiseData>();
+                    try {
+                        JsValue res = execute(body_ptr.get(), fn_env);
+                        Promise::resolve(p_data, res);
+                    } catch (const ReturnException& ret) {
+                        Promise::resolve(p_data, ret.value);
+                    } catch (const std::exception& ex) {
+                        Promise::reject(p_data, JsValue::make_string(ex.what()));
+                    }
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return Promise::create_promise_instance(p_data);
+                }
+
                 try {
                     JsValue res = execute(body_ptr.get(), fn_env);
-                    Promise::resolve(p_data, res);
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return res;
                 } catch (const ReturnException& ret) {
-                    Promise::resolve(p_data, ret.value);
-                } catch (const std::exception& ex) {
-                    Promise::reject(p_data, JsValue::make_string(ex.what()));
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return ret.value;
                 }
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return Promise::create_promise_instance(p_data);
-            }
-
-            try {
-                JsValue res = execute(body_ptr.get(), fn_env);
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return res;
-            } catch (const ReturnException& ret) {
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return ret.value;
-            }
-        };
+            };
+        }
 
         env->define(fn_decl->name, fn_val);
         if (env == m_global_env) {
@@ -799,38 +1091,45 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
             for (const auto& d : m.default_values) m_fn.default_values.push_back(d);
             m_fn.body = m.body;
             m_fn.is_async = m.is_async;
-            m_fn.native_fn = [this, m_body, m_params, m_defs, closure, m_async](const std::vector<JsValue>& args) {
-                for (const auto& [k, v] : m_vm.globals()) {
-                    m_global_env->define(k, v);
-                }
-                auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
-                for (size_t i = 0; i < m_params.size(); ++i) {
-                    JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
-                    if (arg.type == JsType::Undefined && i < m_defs.size() && m_defs[i]) {
-                        arg = eval_expr(m_defs[i].get(), fn_env);
+            m_fn.is_generator = m.is_generator;
+            if (m.is_generator) {
+                m_fn.native_fn = [this, m_body, m_params, m_defs, closure](const std::vector<JsValue>& args) {
+                    return create_generator_instance(this, m_body, m_params, m_defs, closure, args);
+                };
+            } else {
+                m_fn.native_fn = [this, m_body, m_params, m_defs, closure, m_async](const std::vector<JsValue>& args) {
+                    for (const auto& [k, v] : m_vm.globals()) {
+                        m_global_env->define(k, v);
                     }
-                    fn_env->define(m_params[i], arg);
-                }
+                    auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+                    for (size_t i = 0; i < m_params.size(); ++i) {
+                        JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                        if (arg.type == JsType::Undefined && i < m_defs.size() && m_defs[i]) {
+                            arg = eval_expr(m_defs[i].get(), fn_env);
+                        }
+                        fn_env->define(m_params[i], arg);
+                    }
 
-                if (m_async) {
-                    auto p_data = std::make_shared<PromiseData>();
+                    if (m_async) {
+                        auto p_data = std::make_shared<PromiseData>();
+                        try {
+                            JsValue r = execute(m_body.get(), fn_env);
+                            Promise::resolve(p_data, r);
+                        } catch (const ReturnException& ret) {
+                            Promise::resolve(p_data, ret.value);
+                        } catch (const std::exception& ex) {
+                            Promise::reject(p_data, JsValue::make_string(ex.what()));
+                        }
+                        return Promise::create_promise_instance(p_data);
+                    }
+
                     try {
-                        JsValue r = execute(m_body.get(), fn_env);
-                        Promise::resolve(p_data, r);
+                        return execute(m_body.get(), fn_env);
                     } catch (const ReturnException& ret) {
-                        Promise::resolve(p_data, ret.value);
-                    } catch (const std::exception& ex) {
-                        Promise::reject(p_data, JsValue::make_string(ex.what()));
+                        return ret.value;
                     }
-                    return Promise::create_promise_instance(p_data);
-                }
-
-                try {
-                    return execute(m_body.get(), fn_env);
-                } catch (const ReturnException& ret) {
-                    return ret.value;
-                }
-            };
+                };
+            }
 
             if (m.is_static) {
                 ctor_fn.set_property(m.name, m_fn);
@@ -881,57 +1180,106 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         fn_val.body = fn_expr->body;
         fn_val.closure = env;
         fn_val.is_async = fn_expr->is_async;
+        fn_val.is_generator = fn_expr->is_generator;
 
         auto body_ptr = fn_expr->body;
         auto params = fn_expr->params;
         auto defs = fn_expr->default_values;
         auto closure = env;
         bool is_async = fn_expr->is_async;
+        bool is_gen = fn_expr->is_generator;
 
-        fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
-            for (const auto& [k, v] : m_vm.globals()) {
-                m_global_env->define(k, v);
-            }
-            auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
-            for (size_t i = 0; i < params.size(); ++i) {
-                JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
-                if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
-                    arg = eval_expr(defs[i].get(), fn_env);
+        if (is_gen) {
+            fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+                return create_generator_instance(this, body_ptr, params, defs, closure, args);
+            };
+        } else {
+            fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
+                for (const auto& [k, v] : m_vm.globals()) {
+                    m_global_env->define(k, v);
                 }
-                fn_env->define(params[i], arg);
-            }
+                auto fn_env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+                for (size_t i = 0; i < params.size(); ++i) {
+                    JsValue arg = (i < args.size() && args[i].type != JsType::Undefined) ? args[i] : JsValue::make_undefined();
+                    if (arg.type == JsType::Undefined && i < defs.size() && defs[i]) {
+                        arg = eval_expr(defs[i].get(), fn_env);
+                    }
+                    fn_env->define(params[i], arg);
+                }
 
-            if (is_async) {
-                auto p_data = std::make_shared<PromiseData>();
+                if (is_async) {
+                    auto p_data = std::make_shared<PromiseData>();
+                    try {
+                        JsValue res = execute(body_ptr.get(), fn_env);
+                        Promise::resolve(p_data, res);
+                    } catch (const ReturnException& ret) {
+                        Promise::resolve(p_data, ret.value);
+                    } catch (const std::exception& ex) {
+                        Promise::reject(p_data, JsValue::make_string(ex.what()));
+                    }
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return Promise::create_promise_instance(p_data);
+                }
+
                 try {
                     JsValue res = execute(body_ptr.get(), fn_env);
-                    Promise::resolve(p_data, res);
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return res;
                 } catch (const ReturnException& ret) {
-                    Promise::resolve(p_data, ret.value);
-                } catch (const std::exception& ex) {
-                    Promise::reject(p_data, JsValue::make_string(ex.what()));
+                    for (const auto& [k, v] : m_global_env->values()) {
+                        m_vm.set_global(k, v);
+                    }
+                    return ret.value;
                 }
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return Promise::create_promise_instance(p_data);
-            }
-
-            try {
-                JsValue res = execute(body_ptr.get(), fn_env);
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return res;
-            } catch (const ReturnException& ret) {
-                for (const auto& [k, v] : m_global_env->values()) {
-                    m_vm.set_global(k, v);
-                }
-                return ret.value;
-            }
-        };
+            };
+        }
 
         return fn_val;
+    }
+
+    if (auto yield_expr = dynamic_cast<const YieldExpr*>(expr)) {
+        auto active_gen = GeneratorContext::get_active();
+        if (!active_gen) {
+            return JsValue::make_undefined();
+        }
+
+        if (yield_expr->delegate) {
+            JsValue iterable = yield_expr->argument ? eval_expr(yield_expr->argument.get(), env) : JsValue::make_undefined();
+            if (iterable.is_array()) {
+                double len = iterable.get_property("length").to_number();
+                for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
+                    active_gen->yield_to_main(iterable.get_property(std::to_string(i)));
+                }
+            } else if (iterable.is_generator || iterable.generator_data != nullptr || iterable.has_property("next")) {
+                while (true) {
+                    JsValue next_fn = iterable.get_property("next");
+                    if (!next_fn.is_callable()) break;
+                    JsValue step = next_fn.call_with_this(iterable, {});
+                    if (step.get_property("done").is_truthy()) break;
+                    active_gen->yield_to_main(step.get_property("value"));
+                }
+            } else if (iterable.has_property("@@iterator") || iterable.has_property("Symbol.iterator")) {
+                JsValue iter_fn = iterable.has_property("@@iterator") ? iterable.get_property("@@iterator") : iterable.get_property("Symbol.iterator");
+                if (iter_fn.is_callable()) {
+                    JsValue iter = iter_fn.call_with_this(iterable, {});
+                    while (true) {
+                        JsValue next_fn = iter.get_property("next");
+                        if (!next_fn.is_callable()) break;
+                        JsValue step = next_fn.call_with_this(iter, {});
+                        if (step.get_property("done").is_truthy()) break;
+                        active_gen->yield_to_main(step.get_property("value"));
+                    }
+                }
+            }
+            return JsValue::make_undefined();
+        }
+
+        JsValue val = yield_expr->argument ? eval_expr(yield_expr->argument.get(), env) : JsValue::make_undefined();
+        return active_gen->yield_to_main(val);
     }
 
     if (auto tle = dynamic_cast<const TemplateLiteralExpr*>(expr)) {
@@ -1174,6 +1522,10 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         }
 
         if (callee_val.type == JsType::NativeFunction && callee_val.native_fn) {
+            return callee_val.native_fn(arg_vals);
+        }
+
+        if (callee_val.is_generator && callee_val.native_fn) {
             return callee_val.native_fn(arg_vals);
         }
 

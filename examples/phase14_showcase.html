@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🦅 Litebird Phase 14 Showcase — Modern Browser Capabilities & Advanced Engine Platform</title>
+    <style>
+        :root {
+            --bg-dark: #070a13;
+            --surface-dark: #0f172a;
+            --card-border: #1e293b;
+            --card-hover: #334155;
+            --text-light: #f8fafc;
+            --text-dim: #94a3b8;
+            --accent-p1: #38bdf8;  /* Sky Blue - Observers & Routing */
+            --accent-p2: #ec4899;  /* Pink - Filters & Canvas Blending */
+            --accent-p3: #a855f7;  /* Purple - Generators & AbortController */
+            --accent-p4: #10b981;  /* Emerald - Grid Areas & Containment */
+            --base-gap: 16px;
+        }
+
+        body {
+            margin: var(--base-gap);
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .header {
+            background-color: var(--surface-dark);
+            padding: 16px 20px;
+            border-radius: 10px;
+            border: 1px solid var(--card-border);
+            margin-bottom: var(--base-gap);
+        }
+
+        h1 {
+            color: var(--text-light);
+            font-size: 20px;
+            margin: 0 0 6px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge-phase {
+            background-color: #0284c7;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            text-transform: uppercase;
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 12px;
+            margin: 0;
+        }
+
+        .pillar-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: var(--base-gap);
+            margin-bottom: var(--base-gap);
+        }
+
+        .card {
+            background-color: var(--surface-dark);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 10px;
+        }
+
+        .card-title {
+            font-size: 15px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .p1-title { color: var(--accent-p1); }
+        .p2-title { color: var(--accent-p2); }
+        .p3-title { color: var(--accent-p3); }
+        .p4-title { color: var(--accent-p4); }
+
+        .btn {
+            background-color: #1e293b;
+            color: var(--text-light);
+            border: 1px solid #334155;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover {
+            background-color: #334155;
+            border-color: #475569;
+        }
+
+        .btn-primary {
+            background-color: #2563eb;
+            border-color: #3b82f6;
+        }
+
+        .btn-primary:hover {
+            background-color: #1d4ed8;
+        }
+
+        .btn-danger {
+            background-color: #dc2626;
+            border-color: #ef4444;
+        }
+
+        .btn-danger:hover {
+            background-color: #b91c1c;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .console-box {
+            background-color: #030712;
+            border: 1px solid #1f2937;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #38bdf8;
+            max-height: 120px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        /* Filter Demos */
+        .filter-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }
+
+        .filter-sample {
+            background-color: #e11d48;
+            height: 50px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: white;
+            font-size: 11px;
+            border: 1px solid #fda4af;
+        }
+
+        .filter-blur { filter: blur(3px); }
+        .filter-bright { filter: brightness(140%); }
+        .filter-contrast { filter: contrast(180%); }
+        .filter-grayscale { filter: grayscale(100%); }
+        .filter-sepia { filter: sepia(90%); }
+        .filter-invert { filter: invert(100%); }
+        .filter-shadow { filter: drop-shadow(3px 3px 6px rgba(0,0,0,0.8)); }
+
+        /* Canvas Blend Demo */
+        .canvas-container {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        canvas {
+            background-color: #030712;
+            border: 1px solid #334155;
+            border-radius: 6px;
+        }
+
+        /* Grid Template Areas Demo */
+        .grid-areas-demo {
+            display: grid;
+            grid-template-columns: 100px 1fr;
+            grid-template-areas:
+                "header header"
+                "sidebar content"
+                "footer footer";
+            gap: 6px;
+            background-color: #030712;
+            padding: 8px;
+            border-radius: 6px;
+            contain: layout paint;
+        }
+
+        .area-header {
+            grid-area: header;
+            background-color: #1e3a8a;
+            color: #93c5fd;
+            padding: 8px;
+            border-radius: 4px;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .area-sidebar {
+            grid-area: sidebar;
+            background-color: #064e3b;
+            color: #6ee7b7;
+            padding: 12px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .area-content {
+            grid-area: content;
+            background-color: #312e81;
+            color: #c7d2fe;
+            padding: 12px;
+            border-radius: 4px;
+        }
+
+        .area-footer {
+            grid-area: footer;
+            background-color: #701a75;
+            color: #f5d0fe;
+            padding: 6px;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 11px;
+        }
+
+        .url-bar {
+            background-color: #030712;
+            border: 1px solid #334155;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-family: monospace;
+            color: #38bdf8;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>
+            <span>Litebird Platform</span>
+            <span class="badge-phase">Phase 14 Complete</span>
+        </h1>
+        <p class="subtitle">Modern Browser Capabilities: Observers & SPA Routing, CSS Filters & Canvas Blending, JS Generators/Iterators & AbortController, Grid Areas & Containment.</p>
+    </div>
+
+    <div class="pillar-grid">
+
+        <!-- Pillar 1: Observers & Client-Side SPA Routing -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title p1-title">[Pillar 1] Observers &amp; Routing</span>
+                <span style="color: var(--text-dim); font-size: 11px;">History API | Intersection | Resize</span>
+            </div>
+
+            <div class="url-bar">
+                <span style="color: var(--text-dim);">URL:</span>
+                <span id="spa-current-url">https://litebird.engine/spa/dashboard</span>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn" id="btn-nav-dashboard">/dashboard</button>
+                <button class="btn" id="btn-nav-analytics">/analytics</button>
+                <button class="btn" id="btn-nav-settings">/settings</button>
+                <button class="btn" id="btn-history-back">&lt; Back</button>
+                <button class="btn" id="btn-history-forward">Forward &gt;</button>
+            </div>
+
+            <div class="console-box" id="observer-console">Observer Stream initialized...
+Listening for IntersectionObserver &amp; ResizeObserver events...</div>
+        </div>
+
+        <!-- Pillar 2: CSS Visual Filters & Canvas Blending -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title p2-title">[Pillar 2] Filters &amp; Blending</span>
+                <span style="color: var(--text-dim); font-size: 11px;">Filters | Backdrop | Blend Modes</span>
+            </div>
+
+            <div class="filter-row">
+                <div class="filter-sample filter-blur">Blur (3px)</div>
+                <div class="filter-sample filter-bright">Bright (140%)</div>
+                <div class="filter-sample filter-contrast">Contrast (180%)</div>
+                <div class="filter-sample filter-grayscale">Grayscale</div>
+            </div>
+
+            <div class="filter-row">
+                <div class="filter-sample filter-sepia">Sepia (90%)</div>
+                <div class="filter-sample filter-invert">Invert</div>
+                <div class="filter-sample filter-shadow">Drop-Shadow</div>
+                <div class="filter-sample" style="backdrop-filter: blur(8px); background-color: rgba(255,255,255,0.1);">Backdrop</div>
+            </div>
+
+            <div class="canvas-container">
+                <canvas id="blend-canvas" width="160" height="70"></canvas>
+                <div style="font-size: 11px; color: var(--text-dim);">
+                    <strong>Canvas2D Blending:</strong><br>
+                    GlobalCompositeOperation: <span id="current-blend-mode" style="color: #ec4899; font-weight: bold;">multiply</span><br>
+                    <div class="btn-group" style="margin-top: 6px;">
+                        <button class="btn" id="btn-blend-mult">Multiply</button>
+                        <button class="btn" id="btn-blend-screen">Screen</button>
+                        <button class="btn" id="btn-blend-light">Lighter</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pillar 3: JS Generators, Iterators & AbortController -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title p3-title">[Pillar 3] Generators &amp; Abort</span>
+                <span style="color: var(--text-dim); font-size: 11px;">function* | yield | for-of | Abort</span>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-gen-step">Step Generator (next)</button>
+                <button class="btn" id="btn-gen-run-all">Run for...of Loop</button>
+                <button class="btn btn-danger" id="btn-abort-action">AbortController.abort()</button>
+                <button class="btn" id="btn-abort-timeout">Timeout (500ms)</button>
+            </div>
+
+            <div class="console-box" id="generator-console">Generator State: ready
+AbortSignal: aborted=false, reason=none</div>
+        </div>
+
+        <!-- Pillar 4: CSS Grid Named Areas & Layout Containment -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title p4-title">[Pillar 4] Grid Areas &amp; Contain</span>
+                <span style="color: var(--text-dim); font-size: 11px;">grid-template-areas | contain: layout</span>
+            </div>
+
+            <div class="grid-areas-demo" id="grid-container">
+                <div class="area-header">Header (grid-area: header)</div>
+                <div class="area-sidebar">Sidebar<br>(grid-area: sidebar)</div>
+                <div class="area-content">
+                    <strong>Main Content Area</strong> (grid-area: content)<br>
+                    <span style="font-size: 11px; color: #94a3b8;">Container uses <code>contain: layout paint</code> for isolated subtree reflow boundaries.</span>
+                </div>
+                <div class="area-footer">Footer Area (grid-area: footer)</div>
+            </div>
+
+            <div style="font-size: 11px; color: var(--text-dim); display: flex; justify-content: space-between;">
+                <span>Containment Boundary: <strong style="color: #10b981;">Active</strong></span>
+                <span>Named Areas: <strong style="color: #38bdf8;">header, sidebar, content, footer</strong></span>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // === Pillar 1: History API & Client Routing ===
+        var currentUrlEl = document.getElementById("spa-current-url");
+        var obsConsole = document.getElementById("observer-console");
+
+        function logObs(msg) {
+            obsConsole.textContent = obsConsole.textContent + "\n" + msg;
+        }
+
+        window.addEventListener("popstate", function(e) {
+            logObs("[popstate] Navigated to state: " + JSON.stringify(e.state));
+            if (history.state) {
+                currentUrlEl.textContent = "https://litebird.engine" + history.state.route;
+            }
+        });
+
+        document.getElementById("btn-nav-dashboard").addEventListener("click", function() {
+            history.pushState({ route: "/spa/dashboard" }, "Dashboard", "/spa/dashboard");
+            currentUrlEl.textContent = "https://litebird.engine/spa/dashboard";
+            logObs("[history.pushState] Pushed /spa/dashboard");
+        });
+
+        document.getElementById("btn-nav-analytics").addEventListener("click", function() {
+            history.pushState({ route: "/spa/analytics" }, "Analytics", "/spa/analytics");
+            currentUrlEl.textContent = "https://litebird.engine/spa/analytics";
+            logObs("[history.pushState] Pushed /spa/analytics");
+        });
+
+        document.getElementById("btn-nav-settings").addEventListener("click", function() {
+            history.pushState({ route: "/spa/settings" }, "Settings", "/spa/settings");
+            currentUrlEl.textContent = "https://litebird.engine/spa/settings";
+            logObs("[history.pushState] Pushed /spa/settings");
+        });
+
+        document.getElementById("btn-history-back").addEventListener("click", function() {
+            history.back();
+            logObs("[history.back] Triggered back navigation");
+        });
+
+        document.getElementById("btn-history-forward").addEventListener("click", function() {
+            history.forward();
+            logObs("[history.forward] Triggered forward navigation");
+        });
+
+        // Observers Demo
+        var gridEl = document.getElementById("grid-container");
+        var resizeObs = new ResizeObserver(function(entries) {
+            for (var i = 0; i < entries.length; i = i + 1) {
+                var r = entries[i].contentRect;
+                logObs("[ResizeObserver] Element size: " + r.width + "x" + r.height);
+            }
+        });
+        resizeObs.observe(gridEl);
+
+        // === Pillar 2: Canvas 2D Blending ===
+        var canvas = document.getElementById("blend-canvas");
+        var ctx = canvas.getContext("2d");
+        var blendLabel = document.getElementById("current-blend-mode");
+
+        function renderCanvasBlend(mode) {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.fillStyle = "#030712";
+            ctx.fillRect(0, 0, 160, 70);
+
+            // Draw Base Red Disc
+            ctx.fillStyle = "#ef4444";
+            ctx.fillRect(20, 15, 45, 40);
+
+            // Draw Overlapping Cyan Disc with blend mode
+            ctx.globalCompositeOperation = mode;
+            ctx.fillStyle = "#06b6d4";
+            ctx.fillRect(45, 15, 45, 40);
+
+            // Draw Overlapping Yellow Disc
+            ctx.fillStyle = "#eab308";
+            ctx.fillRect(70, 15, 45, 40);
+
+            blendLabel.textContent = mode;
+        }
+        renderCanvasBlend("multiply");
+
+        document.getElementById("btn-blend-mult").addEventListener("click", function() {
+            renderCanvasBlend("multiply");
+        });
+        document.getElementById("btn-blend-screen").addEventListener("click", function() {
+            renderCanvasBlend("screen");
+        });
+        document.getElementById("btn-blend-light").addEventListener("click", function() {
+            renderCanvasBlend("lighter");
+        });
+
+        // === Pillar 3: JS Generators & AbortController ===
+        var genConsole = document.getElementById("generator-console");
+        function logGen(msg) {
+            genConsole.textContent = genConsole.textContent + "\n" + msg;
+        }
+
+        function* transactionSequence() {
+            yield "Step 1: Authenticating Token";
+            yield "Step 2: Resolving DNS & Socket handshake";
+            yield* ["Step 3a: Loading Cache", "Step 3b: Validating Hashes"];
+            yield "Step 4: Committing Transaction";
+            return "Transaction Complete (Done)";
+        }
+
+        var activeGen = transactionSequence();
+
+        document.getElementById("btn-gen-step").addEventListener("click", function() {
+            var res = activeGen.next();
+            logGen("[Generator.next()] value: '" + res.value + "', done=" + res.done);
+            if (res.done) {
+                activeGen = transactionSequence();
+                logGen("--- Generator reset for next round ---");
+            }
+        });
+
+        document.getElementById("btn-gen-run-all").addEventListener("click", function() {
+            logGen("--- Starting for...of loop over generator ---");
+            var runner = transactionSequence();
+            for (var item of runner) {
+                logGen(" > for...of item: " + item);
+            }
+            logGen("--- for...of iteration finished ---");
+        });
+
+        var currentCtrl = new AbortController();
+        currentCtrl.signal.addEventListener("abort", function(e) {
+            logGen("[AbortSignal Event] Signal aborted! Reason: " + currentCtrl.signal.reason);
+        });
+
+        document.getElementById("btn-abort-action").addEventListener("click", function() {
+            currentCtrl.abort("User triggered abort");
+            logGen("[AbortController.abort] signal.aborted=" + currentCtrl.signal.aborted);
+            currentCtrl = new AbortController();
+            currentCtrl.signal.addEventListener("abort", function(e) {
+                logGen("[AbortSignal Event] Signal aborted! Reason: " + currentCtrl.signal.reason);
+            });
+        });
+
+        document.getElementById("btn-abort-timeout").addEventListener("click", function() {
+            logGen("[AbortSignal.timeout] Initiated 500ms timeout countdown...");
+            var sig = AbortSignal.timeout(500);
+            sig.addEventListener("abort", function(e) {
+                logGen("[AbortSignal.timeout Event] Aborted after 500ms! Reason: " + sig.reason);
+            });
+        });
+    </script>
+</body>
+</html>

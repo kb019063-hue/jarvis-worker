@@ -465,6 +465,18 @@ void LayoutBox::layout_grid(float containing_width) {
         }
     }
 
+    int max_area_col = 0;
+    int max_area_row = 0;
+    for (const auto& [name, rect] : style.grid_named_areas) {
+        max_area_col = std::max(max_area_col, rect.col_end - 1);
+        max_area_row = std::max(max_area_row, rect.row_end - 1);
+    }
+    while (tracks.size() < static_cast<size_t>(max_area_col)) {
+        ComputedStyle::GridTrackDef d;
+        d.max_fr = 1.0f;
+        tracks.push_back(d);
+    }
+
     size_t num_cols = tracks.size();
     float total_gaps = (num_cols > 1) ? (num_cols - 1) * col_gap : 0.0f;
     float avail_for_tracks = std::max(0.0f, dimensions.content.width - total_gaps);
@@ -495,16 +507,69 @@ void LayoutBox::layout_grid(float containing_width) {
         cur_x += col_widths[c] + col_gap;
     }
 
-    size_t num_rows = (in_flow.size() + num_cols - 1) / num_cols;
+    struct ItemPlacement {
+        size_t c_start{0};
+        size_t c_end{1};
+        size_t r_start{0};
+        size_t r_end{1};
+    };
+    std::vector<ItemPlacement> placements(in_flow.size());
+    size_t auto_c = 0;
+    size_t auto_r = 0;
+    size_t max_placed_row = (max_area_row > 0) ? static_cast<size_t>(max_area_row) : ((in_flow.size() + num_cols - 1) / num_cols);
+
+    for (size_t i = 0; i < in_flow.size(); ++i) {
+        auto& child = in_flow[i];
+        bool placed = false;
+        if (!child->style.grid_area_name.empty()) {
+            auto it = style.grid_named_areas.find(child->style.grid_area_name);
+            if (it != style.grid_named_areas.end()) {
+                placements[i].c_start = static_cast<size_t>(std::max(0, it->second.col_start - 1));
+                placements[i].c_end = std::max(placements[i].c_start + 1, static_cast<size_t>(it->second.col_end - 1));
+                placements[i].r_start = static_cast<size_t>(std::max(0, it->second.row_start - 1));
+                placements[i].r_end = std::max(placements[i].r_start + 1, static_cast<size_t>(it->second.row_end - 1));
+                placed = true;
+            }
+        }
+        if (!placed && (child->style.grid_column_start > 0 || child->style.grid_row_start > 0)) {
+            size_t cs = child->style.grid_column_start > 0 ? static_cast<size_t>(child->style.grid_column_start - 1) : 0;
+            size_t ce = child->style.grid_column_end > child->style.grid_column_start ? static_cast<size_t>(child->style.grid_column_end - 1) : cs + 1;
+            size_t rs = child->style.grid_row_start > 0 ? static_cast<size_t>(child->style.grid_row_start - 1) : 0;
+            size_t re = child->style.grid_row_end > child->style.grid_row_start ? static_cast<size_t>(child->style.grid_row_end - 1) : rs + 1;
+            placements[i] = {cs, ce, rs, re};
+            placed = true;
+        }
+        if (!placed) {
+            placements[i] = {auto_c, auto_c + 1, auto_r, auto_r + 1};
+            auto_c++;
+            if (auto_c >= num_cols) {
+                auto_c = 0;
+                auto_r++;
+            }
+        }
+        max_placed_row = std::max(max_placed_row, placements[i].r_end);
+    }
+
+    size_t num_rows = std::max(size_t(1), max_placed_row);
     std::vector<float> row_heights(num_rows, 0.0f);
 
     for (size_t i = 0; i < in_flow.size(); ++i) {
-        size_t c = i % num_cols;
-        size_t r = i / num_cols;
-        float item_w = col_widths[c];
+        size_t cs = std::min(placements[i].c_start, num_cols - 1);
+        size_t ce = std::min(placements[i].c_end, num_cols);
+        float item_w = 0.0f;
+        for (size_t c = cs; c < ce; ++c) {
+            item_w += col_widths[c];
+            if (c + 1 < ce) item_w += col_gap;
+        }
+
         in_flow[i]->layout(item_w);
         float item_h = in_flow[i]->dimensions.margin_box().height;
-        row_heights[r] = std::max(row_heights[r], item_h);
+        size_t rs = std::min(placements[i].r_start, num_rows - 1);
+        size_t span = std::max(size_t(1), placements[i].r_end - rs);
+        float per_row_h = item_h / span;
+        for (size_t r = rs; r < std::min(placements[i].r_end, num_rows); ++r) {
+            row_heights[r] = std::max(row_heights[r], per_row_h);
+        }
     }
 
     for (size_t r = 0; r < num_rows && r < style.grid_template_rows.size(); ++r) {
@@ -522,12 +587,12 @@ void LayoutBox::layout_grid(float containing_width) {
     }
 
     for (size_t i = 0; i < in_flow.size(); ++i) {
-        size_t c = i % num_cols;
-        size_t r = i / num_cols;
+        size_t cs = std::min(placements[i].c_start, num_cols - 1);
+        size_t rs = std::min(placements[i].r_start, num_rows - 1);
 
         auto& child = in_flow[i];
-        float new_x = dimensions.content.x + col_x[c] + child->dimensions.margin.left;
-        float new_y = dimensions.content.y + row_y[r] + child->dimensions.margin.top;
+        float new_x = dimensions.content.x + col_x[cs] + child->dimensions.margin.left;
+        float new_y = dimensions.content.y + row_y[rs] + child->dimensions.margin.top;
 
         if (child->style.position == Position::Relative) {
             if (child->style.has_left) new_x += child->style.left;

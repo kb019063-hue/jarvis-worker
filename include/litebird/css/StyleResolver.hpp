@@ -5,11 +5,22 @@
 #include "litebird/dom/Node.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/css/StyleSheet.hpp"
+#include "litebird/render/ImageFilter.hpp"
 #include <memory>
 #include <string>
 #include <unordered_map>
 
 namespace litebird {
+
+enum class Containment : uint8_t {
+    None = 0,
+    Layout = 1 << 0,
+    Paint = 1 << 1,
+    Size = 1 << 2,
+    Style = 1 << 3,
+    Strict = Layout | Paint | Size,
+    Content = Layout | Paint | Style
+};
 
 enum class Display {
     Inline,
@@ -169,6 +180,30 @@ struct ComputedStyle {
 
     // CSS Custom Properties (Variables)
     std::unordered_map<std::string, std::string> custom_properties;
+
+    // Filters
+    std::vector<FilterFunction> filters;
+    std::vector<FilterFunction> backdrop_filters;
+
+    // Grid Template Areas
+    struct GridAreaRect {
+        int row_start{1};
+        int row_end{2};
+        int col_start{1};
+        int col_end{2};
+    };
+    std::unordered_map<std::string, GridAreaRect> grid_named_areas;
+    std::string grid_area_name;
+    int grid_row_start{0};
+    int grid_row_end{0};
+    int grid_column_start{0};
+    int grid_column_end{0};
+
+    // Containment
+    uint8_t containment{0};
+    bool contains_layout() const { return (containment & static_cast<uint8_t>(Containment::Layout)) != 0; }
+    bool contains_paint() const { return (containment & static_cast<uint8_t>(Containment::Paint)) != 0; }
+    bool contains_size() const { return (containment & static_cast<uint8_t>(Containment::Size)) != 0; }
 
     bool is_block() const { return display == Display::Block; }
     bool is_inline() const { return display == Display::Inline; }

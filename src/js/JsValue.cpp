@@ -120,7 +120,7 @@ double JsValue::to_number() const {
 }
 
 JsValue JsValue::call(const std::vector<JsValue>& args) const {
-    if (type == JsType::Function && s_function_caller) {
+    if (type == JsType::Function && !is_generator && s_function_caller) {
         return s_function_caller(*this, args, nullptr);
     }
     if (native_fn) {
@@ -130,13 +130,22 @@ JsValue JsValue::call(const std::vector<JsValue>& args) const {
 }
 
 JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsValue>& args) const {
-    if (type == JsType::Function && s_function_caller) {
+    if (type == JsType::Function && !is_generator && s_function_caller) {
         return s_function_caller(*this, args, &this_val);
     }
     if (native_fn) {
         return native_fn(args);
     }
     return JsValue::make_undefined();
+}
+
+bool JsValue::has_property(const std::string& name) const {
+    if (object_val) {
+        if (object_val->properties.find(name) != object_val->properties.end()) return true;
+        if (object_val->is_array && (name == "length" || name == "@@iterator" || name == "Symbol.iterator")) return true;
+    }
+    if (properties && properties->find(name) != properties->end()) return true;
+    return false;
 }
 
 JsValue JsValue::get_property(const std::string& name) const {
@@ -173,6 +182,26 @@ JsValue JsValue::get_property(const std::string& name) const {
                     auto sr = elem->attach_shadow(mode);
                     if (!sr) return JsValue::make_null();
                     return JsValue::make_dom_node(sr);
+                });
+            }
+            if (name == "getBoundingClientRect") {
+                auto elem = el;
+                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
+                    Rect r = elem->bounding_box();
+                    if (r.width <= 0.0f && r.height <= 0.0f) {
+                        r.width = 100.0f;
+                        r.height = 30.0f;
+                    }
+                    JsValue ro = JsValue::make_object();
+                    ro.set_property("x", JsValue::make_number(r.x));
+                    ro.set_property("y", JsValue::make_number(r.y));
+                    ro.set_property("width", JsValue::make_number(r.width));
+                    ro.set_property("height", JsValue::make_number(r.height));
+                    ro.set_property("top", JsValue::make_number(r.top()));
+                    ro.set_property("bottom", JsValue::make_number(r.bottom()));
+                    ro.set_property("left", JsValue::make_number(r.left()));
+                    ro.set_property("right", JsValue::make_number(r.right()));
+                    return ro;
                 });
             }
             if (name == "setAttribute") {
@@ -477,6 +506,30 @@ JsValue JsValue::get_property(const std::string& name) const {
             if (name == "length") {
                 return JsValue::make_number(object_val->array_elements.size());
             }
+            if (name == "@@iterator" || name == "Symbol.iterator") {
+                auto arr_obj = *this;
+                return JsValue::make_native_function([arr_obj](const std::vector<JsValue>&) {
+                    JsValue iter = JsValue::make_object();
+                    auto idx = std::make_shared<size_t>(0);
+                    iter.set_property("next", JsValue::make_native_function([arr_obj, idx](const std::vector<JsValue>&) {
+                        size_t len = static_cast<size_t>(arr_obj.get_property("length").to_number());
+                        JsValue res = JsValue::make_object();
+                        if (*idx < len) {
+                            res.set_property("value", arr_obj.get_property(std::to_string(*idx)));
+                            res.set_property("done", JsValue::make_boolean(false));
+                            (*idx)++;
+                        } else {
+                            res.set_property("value", JsValue::make_undefined());
+                            res.set_property("done", JsValue::make_boolean(true));
+                        }
+                        return res;
+                    }));
+                    auto self_iter = JsValue::make_native_function([iter](const std::vector<JsValue>&) { return iter; });
+                    iter.set_property("@@iterator", self_iter);
+                    iter.set_property("Symbol.iterator", self_iter);
+                    return iter;
+                });
+            }
             if (!name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) {
                 try {
                     size_t idx = std::stoul(name);
@@ -519,6 +572,11 @@ JsValue JsValue::get_property(const std::string& name) const {
             }
         }
 
+        auto it_getter = object_val->properties.find("__get_" + name + "__");
+        if (it_getter != object_val->properties.end() && it_getter->second.native_fn) {
+            return it_getter->second.native_fn({});
+        }
+
         // Own properties
         auto it = object_val->properties.find(name);
         if (it != object_val->properties.end()) return it->second;
@@ -544,6 +602,7 @@ JsValue JsValue::get_property(const std::string& name) const {
             return JsValue::make_string(canvas_ctx->stroke_style.to_hex());
         }
         if (name == "lineWidth") return JsValue::make_number(canvas_ctx->line_width);
+        if (name == "globalCompositeOperation") return JsValue::make_string(canvas_ctx->global_composite_operation);
     }
 
     if (name == "cookie") {
@@ -581,6 +640,11 @@ JsValue JsValue::get_property(const std::string& name) const {
                 return it_d->second.native_fn({});
             }
         }
+        auto it_prop_getter = properties->find("__get_" + name + "__");
+        if (it_prop_getter != properties->end() && it_prop_getter->second.native_fn) {
+            return it_prop_getter->second.native_fn({});
+        }
+
         auto it = properties->find(name);
         if (it != properties->end()) return it->second;
     }
@@ -605,6 +669,8 @@ void JsValue::set_property(const std::string& name, JsValue val) {
             }
         } else if (name == "lineWidth") {
             canvas_ctx->line_width = static_cast<float>(val.to_number());
+        } else if (name == "globalCompositeOperation") {
+            canvas_ctx->global_composite_operation = val.to_string();
         }
     }
 

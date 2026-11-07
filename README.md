@@ -87,8 +87,8 @@ Litebird implements the complete modern browser rendering pipeline:
 - Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`.
 - **CSS Box Sizing & Constraints:** Full support for `box-sizing: content-box | border-box`, plus `min-width`, `max-width`, `min-height`, and `max-height`.
 - **CSS Positioning & Stacking Contexts:** `position: static | relative | absolute | fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and hierarchical `z-index` stacking context sorting.
-- **CSS Grid Layout (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), cell auto-placement, item alignment, and grid gap spacing.
-- **CSS Multi-line Flexbox (`display: flex; flex-wrap: wrap`):** Multi-line flex container line breaking, cross-axis line alignment, and space distribution.
+- **CSS Grid Layout (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), `repeat()` counts, `minmax()` track constraints, `auto-fit` auto-repetition, cell auto-placement, item alignment, and grid gap spacing (`row-gap`, `column-gap`, `gap`).
+- **CSS Flexbox (`display: flex; flex-wrap: wrap`):** Single-line and multi-line flex container line breaking, cross-axis line alignment, space distribution, and flex item `gap` / `row-gap` / `column-gap` spacing without margin distortion.
 - **Inline Formatting Context (IFC 2.1):**
   - Line box construction (`LineBox`) and inline fragment generation (`InlineFragment`).
   - True continuous text flowing across mixed inline elements (`<b>`, `<strong>`, `<i>`, `<em>`, `<a>`, `<code>`, `<span>`).
@@ -130,6 +130,8 @@ Litebird implements the complete modern browser rendering pipeline:
   - `localStorage`: Key-value storage persisted across navigation.
   - `sessionStorage`: In-memory session key-value storage.
   - `document.cookie`: RFC-compliant cookie jar supporting `key=value`, `Path`, `Max-Age`, and `Expires`.
+- **Web Workers & Concurrent Execution:** Multi-threaded JavaScript workers (`new Worker(url)`), thread-isolated bytecode execution, deep-cloned JSON IPC message queues, `postMessage()`, `onmessage`, and thread lifecycle termination (`terminate()`).
+- **RFC 6455 WebSocket Client:** Standard full-duplex WebSocket networking (`new WebSocket(url)`), cryptographic handshake with zero-dependency SHA-1/Base64, frame masking/unmasking, background network polling thread, and `onopen`, `onmessage`, `send()`, and `close()`.
 - **Instruction Set & Bytecode Virtual Machine:** Compact 8-bit opcodes, constant pooling, local slot indexing, jump patching, and stack frame call dispatch.
 - **Mark-and-Sweep Garbage Collector (`Heap`):**
   - Tracing cycle collector detecting and reclaiming isolated circular reference graphs.

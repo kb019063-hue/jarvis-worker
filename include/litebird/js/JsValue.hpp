@@ -104,6 +104,7 @@ public:
 
     bool is_truthy() const;
     bool is_array() const;
+    bool is_function() const { return type == JsType::Function || type == JsType::NativeFunction; }
     std::string to_string() const;
     double to_number() const;
 

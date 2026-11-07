@@ -136,6 +136,20 @@ struct ComputedStyle {
     float grid_column_gap{0.0f};
     float grid_row_gap{0.0f};
 
+    // Modern Grid Track definition (minmax, auto-fit/auto-fill, repeat)
+    struct GridTrackDef {
+        float min_px{0.0f};
+        float max_px{0.0f};
+        float max_fr{0.0f}; // if > 0, fractional track
+        bool is_auto_fit{false};
+        bool is_auto_fill{false};
+    };
+
+    std::vector<GridTrackDef> grid_col_track_defs;
+    std::vector<GridTrackDef> grid_row_track_defs;
+    bool grid_auto_fit_columns{false};
+    GridTrackDef grid_auto_fit_def;
+
     // Transitions and Animations
     float opacity{1.0f};
     std::string animation_name;

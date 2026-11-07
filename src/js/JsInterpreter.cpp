@@ -7,6 +7,8 @@
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/URL.hpp"
 #include "litebird/net/Fetch.hpp"
+#include "litebird/net/WebSocket.hpp"
+#include "litebird/js/Worker.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -297,6 +299,12 @@ void JsInterpreter::init_builtins() {
     // URL & URLSearchParams built-ins
     m_global_env->define("URLSearchParams", URLSearchParamsObject::create_constructor());
     m_global_env->define("URL", URLObject::create_constructor());
+
+    // Worker built-in
+    m_global_env->define("Worker", WorkerObject::create_constructor());
+
+    // WebSocket built-in
+    m_global_env->define("WebSocket", WebSocketObject::create_constructor());
 
     // Map Constructor
     JsValue map_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {

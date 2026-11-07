@@ -1,4 +1,5 @@
 #include "litebird/layout/LayoutTree.hpp"
+#include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include <cctype>
@@ -122,11 +123,29 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
             box = LayoutBox::create_inline(element, style);
         }
 
-        // Process children
-        for (const auto& ch : element->children()) {
-            auto child_box = build_box(ch, resolver, &style);
-            if (child_box) {
-                box->append_child(child_box);
+        // Process children (supporting Shadow DOM and Slot projection)
+        const auto& children_to_process = (element->shadow_root()) ? element->shadow_root()->children() : element->children();
+        for (const auto& ch : children_to_process) {
+            if (ch->is_element() && ch->as_element()->tag_name() == "slot") {
+                auto slot_el = std::static_pointer_cast<Element>(ch);
+                auto assigned = ShadowRoot::assigned_nodes(slot_el);
+                if (!assigned.empty()) {
+                    for (const auto& a : assigned) {
+                        auto child_box = build_box(a, resolver, &style);
+                        if (child_box) box->append_child(child_box);
+                    }
+                } else {
+                    // Fallback slot content
+                    for (const auto& slot_ch : slot_el->children()) {
+                        auto child_box = build_box(slot_ch, resolver, &style);
+                        if (child_box) box->append_child(child_box);
+                    }
+                }
+            } else {
+                auto child_box = build_box(ch, resolver, &style);
+                if (child_box) {
+                    box->append_child(child_box);
+                }
             }
         }
 

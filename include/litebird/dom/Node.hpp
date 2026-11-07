@@ -19,7 +19,8 @@ enum class NodeType {
     Document,
     Element,
     Text,
-    Comment
+    Comment,
+    DocumentFragment
 };
 
 using EventListener = std::function<void(const std::shared_ptr<Event>&)>;
@@ -34,6 +35,7 @@ public:
     bool is_element() const { return m_type == NodeType::Element; }
     bool is_text() const { return m_type == NodeType::Text; }
     bool is_comment() const { return m_type == NodeType::Comment; }
+    bool is_document_fragment() const { return m_type == NodeType::DocumentFragment; }
 
     std::shared_ptr<Node> parent() const { return m_parent.lock(); }
     void set_parent(std::shared_ptr<Node> p) { m_parent = p; }
@@ -41,21 +43,16 @@ public:
     const std::vector<std::shared_ptr<Node>>& children() const { return m_children; }
     std::vector<std::shared_ptr<Node>>& children() { return m_children; }
 
-    void append_child(std::shared_ptr<Node> child) {
-        if (!child) return;
-        child->set_parent(shared_from_this());
-        m_children.push_back(child);
-        mark_needs_layout();
-    }
+    std::shared_ptr<Node> first_child() const { return m_children.empty() ? nullptr : m_children.front(); }
+    std::shared_ptr<Node> last_child() const { return m_children.empty() ? nullptr : m_children.back(); }
+    std::shared_ptr<Node> previous_sibling() const;
+    std::shared_ptr<Node> next_sibling() const;
 
-    void remove_child(std::shared_ptr<Node> child) {
-        auto it = std::find(m_children.begin(), m_children.end(), child);
-        if (it != m_children.end()) {
-            (*it)->m_parent.reset();
-            m_children.erase(it);
-            mark_needs_layout();
-        }
-    }
+    bool is_connected() const;
+
+    void append_child(std::shared_ptr<Node> child);
+    void remove_child(std::shared_ptr<Node> child);
+    void insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> ref_child);
 
     // Invalidation / dirty tracking
     bool needs_layout() const { return m_needs_layout; }

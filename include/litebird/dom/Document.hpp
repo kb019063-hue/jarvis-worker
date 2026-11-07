@@ -22,6 +22,10 @@ public:
     std::vector<std::shared_ptr<Element>> query_selector_all(const std::string& selector) const;
     std::shared_ptr<Element> query_selector(const std::string& selector) const;
 
+    std::shared_ptr<Element> create_element(const std::string& tag_name);
+    std::shared_ptr<Text> create_text_node(const std::string& text);
+    std::shared_ptr<Node> create_document_fragment();
+
     void dump(std::ostream& os, int indent = 0) const override;
 
 private:

@@ -14,6 +14,7 @@ namespace litebird {
 class HtmlParser {
 public:
     static std::shared_ptr<Document> parse(std::string_view html);
+    static std::vector<std::shared_ptr<Node>> parse_fragment(std::string_view html, std::vector<std::string>* out_stylesheets = nullptr);
 
     const std::vector<std::string>& stylesheets() const { return m_stylesheets; }
     const std::vector<std::string>& scripts() const { return m_scripts; }

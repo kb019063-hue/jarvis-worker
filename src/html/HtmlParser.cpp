@@ -109,4 +109,72 @@ std::shared_ptr<Document> HtmlParser::parse_internal() {
     return m_document;
 }
 
+std::vector<std::shared_ptr<Node>> HtmlParser::parse_fragment(std::string_view html, std::vector<std::string>* out_stylesheets) {
+    std::vector<std::shared_ptr<Node>> root_nodes;
+    HtmlTokenizer tokenizer(html);
+    std::vector<std::shared_ptr<Element>> stack;
+
+    auto is_void = [](const std::string& tag) {
+        return VOID_ELEMENTS.find(tag) != VOID_ELEMENTS.end();
+    };
+
+    while (tokenizer.has_more()) {
+        HtmlToken token = tokenizer.next_token();
+        if (token.type == HtmlTokenType::EndOfFile) break;
+
+        switch (token.type) {
+            case HtmlTokenType::Doctype:
+            case HtmlTokenType::Comment:
+                break;
+            case HtmlTokenType::Character: {
+                if (token.data.empty()) break;
+                if (!stack.empty() && stack.back()->tag_name() == "style") {
+                    if (out_stylesheets) out_stylesheets->push_back(token.data);
+                    stack.back()->append_child(std::make_shared<Text>(token.data));
+                } else if (!stack.empty() && stack.back()->tag_name() == "script") {
+                    stack.back()->append_child(std::make_shared<Text>(token.data));
+                } else {
+                    auto text_node = std::make_shared<Text>(token.data);
+                    if (!stack.empty()) {
+                        stack.back()->append_child(text_node);
+                    } else {
+                        root_nodes.push_back(text_node);
+                    }
+                }
+                break;
+            }
+            case HtmlTokenType::StartTag: {
+                auto elem = std::make_shared<Element>(token.tag_name);
+                for (const auto& [k, v] : token.attributes) {
+                    elem->set_attribute(k, v);
+                }
+                if (!stack.empty()) {
+                    stack.back()->append_child(elem);
+                } else {
+                    root_nodes.push_back(elem);
+                }
+                if (token.tag_name == "style" || token.tag_name == "script") {
+                    tokenizer.switch_to_raw_text(token.tag_name);
+                }
+                if (!token.self_closing && !is_void(token.tag_name)) {
+                    stack.push_back(elem);
+                }
+                break;
+            }
+            case HtmlTokenType::EndTag: {
+                for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i) {
+                    if (stack[i]->tag_name() == token.tag_name) {
+                        stack.resize(i);
+                        break;
+                    }
+                }
+                break;
+            }
+            case HtmlTokenType::EndOfFile:
+                break;
+        }
+    }
+    return root_nodes;
+}
+
 } // namespace litebird

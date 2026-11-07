@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/dom/Node.hpp"
+#include "litebird/js/JsValue.hpp"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -10,6 +11,7 @@
 namespace litebird {
 
 class CanvasRenderingContext2D;
+class ShadowRoot;
 
 class Element : public Node {
 public:
@@ -29,14 +31,27 @@ public:
         return it != m_attributes.end() ? it->second : "";
     }
 
-    void set_attribute(const std::string& name, std::string value) {
-        m_attributes[name] = std::move(value);
-        mark_needs_layout();
-    }
+    void set_attribute(const std::string& name, std::string value);
+    void remove_attribute(const std::string& name);
 
     const std::unordered_map<std::string, std::string>& attributes() const {
         return m_attributes;
     }
+
+    std::string inner_html() const;
+    void set_inner_html(const std::string& html);
+    std::string outer_html() const;
+
+    std::shared_ptr<Element> query_selector(const std::string& selector) const;
+    std::vector<std::shared_ptr<Element>> query_selector_all(const std::string& selector) const;
+
+    // Shadow DOM
+    std::shared_ptr<ShadowRoot> shadow_root() const { return m_shadow_root; }
+    std::shared_ptr<ShadowRoot> attach_shadow(const std::string& mode);
+
+    // Custom Elements
+    const JsValue& custom_element_instance() const { return m_custom_element_instance; }
+    void set_custom_element_instance(JsValue inst) { m_custom_element_instance = std::move(inst); }
 
     std::string id() const {
         return get_attribute("id");
@@ -139,6 +154,8 @@ private:
     std::string m_tag_name;
     std::unordered_map<std::string, std::string> m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
+    std::shared_ptr<ShadowRoot> m_shadow_root;
+    JsValue m_custom_element_instance;
     bool m_is_hovered{false};
     bool m_is_focused{false};
     bool m_is_active{false};

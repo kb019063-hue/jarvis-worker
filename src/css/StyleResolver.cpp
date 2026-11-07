@@ -1,5 +1,6 @@
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/css/CssParser.hpp"
+#include "litebird/dom/ShadowRoot.hpp"
 #include <sstream>
 #include <cctype>
 #include <cmath>
@@ -195,6 +196,16 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                     else if (arg[0] == '#') sub_sel.id = arg.substr(1);
                     else sub_sel.tag_name = arg;
                     if (matches_simple_selector(element, sub_sel)) return false;
+                }
+            } else if (name == "host") {
+                // Host pseudo-class matches if this element has a shadow root
+                if (!element->shadow_root()) return false;
+                if (!arg.empty()) {
+                    SimpleSelector sub_sel;
+                    if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
+                    else if (arg[0] == '#') sub_sel.id = arg.substr(1);
+                    else sub_sel.tag_name = arg;
+                    if (!matches_simple_selector(element, sub_sel)) return false;
                 }
             }
         }
@@ -1048,23 +1059,66 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         }
     }
 
-    // 2. Author Stylesheets
-    for (const auto& sheet : m_author_sheets) {
-        for (const auto& rule : sheet.rules) {
-            bool media_matches = true;
-            for (const auto& mq : rule.media_queries) {
-                if (!mq.matches(m_viewport_width, m_viewport_height)) {
-                    media_matches = false;
-                    break;
+    // 2. Author Stylesheets or Scoped Shadow Root Stylesheets
+    ShadowRoot* shadow_scope = nullptr;
+    auto curr_p = element->parent();
+    while (curr_p) {
+        if (curr_p->is_document_fragment()) {
+            shadow_scope = dynamic_cast<ShadowRoot*>(curr_p.get());
+            if (shadow_scope) break;
+        }
+        curr_p = curr_p->parent();
+    }
+
+    if (shadow_scope) {
+        // Scoped styling: Only stylesheets defined within this ShadowRoot match
+        for (const auto& sheet : shadow_scope->parsed_stylesheets()) {
+            for (const auto& rule : sheet.rules) {
+                for (const auto& sel : rule.selectors) {
+                    if (matches_selector(element, sel)) {
+                        auto spec = sel.specificity();
+                        for (const auto& decl : rule.declarations) {
+                            matched.push_back({spec, order++, &decl});
+                        }
+                    }
                 }
             }
-            if (!media_matches) continue;
+        }
+    } else {
+        // Light DOM: Author Stylesheets apply
+        for (const auto& sheet : m_author_sheets) {
+            for (const auto& rule : sheet.rules) {
+                bool media_matches = true;
+                for (const auto& mq : rule.media_queries) {
+                    if (!mq.matches(m_viewport_width, m_viewport_height)) {
+                        media_matches = false;
+                        break;
+                    }
+                }
+                if (!media_matches) continue;
 
-            for (const auto& sel : rule.selectors) {
-                if (matches_selector(element, sel)) {
-                    auto spec = sel.specificity();
-                    for (const auto& decl : rule.declarations) {
-                        matched.push_back({spec, order++, &decl});
+                for (const auto& sel : rule.selectors) {
+                    if (matches_selector(element, sel)) {
+                        auto spec = sel.specificity();
+                        for (const auto& decl : rule.declarations) {
+                            matched.push_back({spec, order++, &decl});
+                        }
+                    }
+                }
+            }
+        }
+
+        // Host element styling: If element has a shadow root, match :host rules from shadow stylesheets
+        if (element->shadow_root()) {
+            for (const auto& sheet : element->shadow_root()->parsed_stylesheets()) {
+                for (const auto& rule : sheet.rules) {
+                    for (const auto& sel : rule.selectors) {
+                        if (matches_selector(element, sel)) {
+                            auto spec = sel.specificity();
+                            for (const auto& decl : rule.declarations) {
+                                matched.push_back({spec, order++, &decl});
+                            }
+                        }
                     }
                 }
             }

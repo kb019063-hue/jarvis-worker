@@ -1,5 +1,10 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/dom/Document.hpp"
+#include "litebird/dom/Text.hpp"
+#include "litebird/dom/MutationObserver.hpp"
+#include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -65,6 +70,9 @@ JsValue JsInterpreter::eval_ast(std::string_view source) {
         return ret.value;
     } catch (const std::exception& ex) {
         std::cerr << "JS Runtime Error: " << ex.what() << std::endl;
+        return JsValue::make_undefined();
+    } catch (...) {
+        std::cerr << "JS Unknown Error in eval_ast!" << std::endl;
         return JsValue::make_undefined();
     }
 }
@@ -163,12 +171,125 @@ void JsInterpreter::init_builtins() {
             if (args.empty() || !m_document) return JsValue::make_null();
             auto el = m_document->get_element_by_id(args[0].to_string());
             if (el) {
-                return JsValue::make_dom_node(el);
+                return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
             }
             return JsValue::make_null();
         }));
+        doc_obj.set_property("querySelector", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+            if (args.empty() || !m_document) return JsValue::make_null();
+            auto el = m_document->query_selector(args[0].to_string());
+            if (el) {
+                return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
+            }
+            return JsValue::make_null();
+        }));
+        doc_obj.set_property("querySelectorAll", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+            JsValue arr = JsValue::make_array();
+            if (!args.empty() && m_document) {
+                auto list = m_document->query_selector_all(args[0].to_string());
+                for (const auto& item : list) {
+                    arr.array_elements().push_back(item->custom_element_instance().is_undefined() ? JsValue::make_dom_node(item) : item->custom_element_instance());
+                }
+            }
+            return arr;
+        }));
+        doc_obj.set_property("createElement", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_null();
+            std::string tag = args[0].to_string();
+            auto el = m_document ? m_document->create_element(tag) : std::make_shared<Element>(tag);
+            CustomElementRegistry::default_registry().upgrade_element(el);
+            return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
+        }));
+        doc_obj.set_property("createTextNode", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+            std::string txt = args.empty() ? "" : args[0].to_string();
+            auto node = m_document ? m_document->create_text_node(txt) : std::make_shared<Text>(txt);
+            return JsValue::make_dom_node(node);
+        }));
+        doc_obj.set_property("createDocumentFragment", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+            auto frag = m_document ? m_document->create_document_fragment() : std::make_shared<Node>(NodeType::DocumentFragment);
+            return JsValue::make_dom_node(frag);
+        }));
+        doc_obj.set_property("__get_body__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+            auto b = m_document ? m_document->body() : nullptr;
+            return b ? JsValue::make_dom_node(b) : JsValue::make_null();
+        }));
+        doc_obj.set_property("__get_head__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+            auto h = m_document ? m_document->head() : nullptr;
+            return h ? JsValue::make_dom_node(h) : JsValue::make_null();
+        }));
+        doc_obj.set_property("__get_documentElement__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
+            auto d = m_document ? m_document->document_element() : nullptr;
+            return d ? JsValue::make_dom_node(d) : JsValue::make_null();
+        }));
+        if (m_document->body()) doc_obj.set_property("body", JsValue::make_dom_node(m_document->body()));
+        if (m_document->head()) doc_obj.set_property("head", JsValue::make_dom_node(m_document->head()));
+        if (m_document->document_element()) doc_obj.set_property("documentElement", JsValue::make_dom_node(m_document->document_element()));
+
         m_global_env->define("document", doc_obj);
+        win_obj.set_property("document", doc_obj);
     }
+
+    // customElements registry
+    JsValue ce_obj = JsValue::make_object();
+    ce_obj.set_property("define", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
+        if (args.size() < 2) return JsValue::make_undefined();
+        std::string name = args[0].to_string();
+        JsValue constructor = args[1];
+        bool ok = CustomElementRegistry::default_registry().define(name, constructor);
+        if (ok && m_document) {
+            CustomElementRegistry::default_registry().upgrade_tree(m_document);
+        }
+        return JsValue::make_boolean(ok);
+    }));
+    ce_obj.set_property("get", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return JsValue::make_undefined();
+        return CustomElementRegistry::default_registry().get(args[0].to_string());
+    }));
+    ce_obj.set_property("whenDefined", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty()) return Promise::make_resolved(JsValue::make_undefined());
+        return CustomElementRegistry::default_registry().when_defined(args[0].to_string());
+    }));
+    ce_obj.set_property("upgrade", JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty() && args[0].dom_node) {
+            CustomElementRegistry::default_registry().upgrade_tree(args[0].dom_node);
+        }
+        return JsValue::make_undefined();
+    }));
+    m_global_env->define("customElements", ce_obj);
+    win_obj.set_property("customElements", ce_obj);
+
+    // HTMLElement constructor base
+    JsValue html_element_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {
+        return JsValue::make_undefined();
+    });
+    JsValue html_proto = JsValue::make_object();
+    html_element_ctor.set_property("prototype", html_proto);
+    m_global_env->define("HTMLElement", html_element_ctor);
+    win_obj.set_property("HTMLElement", html_element_ctor);
+
+    // MutationObserver
+    JsValue mo_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (args.empty() || !args[0].is_callable()) {
+            return JsValue::make_undefined();
+        }
+        auto obs = std::make_shared<MutationObserver>(args[0]);
+        return obs->to_js_value();
+    });
+    m_global_env->define("MutationObserver", mo_ctor);
+    win_obj.set_property("MutationObserver", mo_ctor);
+
+    // queueMicrotask(callback)
+    JsValue qm = JsValue::make_native_function([](const std::vector<JsValue>& args) {
+        if (!args.empty() && args[0].is_callable()) {
+            JsValue cb = args[0];
+            EventLoop::default_loop().post_microtask([cb]() {
+                cb.call({});
+            });
+        }
+        return JsValue::make_undefined();
+    });
+    m_global_env->define("queueMicrotask", qm);
+    win_obj.set_property("queueMicrotask", qm);
 
     // setTimeout(callback, delay)
     m_global_env->define("setTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
@@ -209,11 +330,16 @@ void JsInterpreter::init_builtins() {
     }));
 
     // Function caller for callbacks
-    JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args) {
+    JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val) {
         for (const auto& [k, v] : m_vm.globals()) {
-            m_global_env->define(k, v);
+            if (k != "document" && k != "window") {
+                m_global_env->define(k, v);
+            }
         }
         auto fn_env = std::make_shared<JsEnvironment>(fn.closure ? fn.closure : m_global_env);
+        if (this_val && this_val->type != JsType::Undefined) {
+            fn_env->define("this", *this_val);
+        }
         for (size_t i = 0; i < fn.params.size(); ++i) {
             JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
             fn_env->define(fn.params[i], arg);
@@ -229,6 +355,8 @@ void JsInterpreter::init_builtins() {
                 m_vm.set_global(k, v);
             }
             return ret.value;
+        } catch (...) {
+            return JsValue::make_undefined();
         }
     });
 
@@ -444,6 +572,10 @@ void JsInterpreter::init_builtins() {
         return set_inst;
     });
     m_global_env->define("Set", set_ctor);
+
+    for (const auto& [k, v] : m_global_env->values()) {
+        m_vm.set_global(k, v);
+    }
 }
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
@@ -1047,7 +1179,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
 
         if (callee_val.type == JsType::Function) {
             auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
-            if (this_val.type == JsType::Object) {
+            if (this_val.type == JsType::Object || this_val.type == JsType::DomNode) {
                 fn_env->define("this", this_val);
             }
             JsValue super_c = callee_val.get_property("__super_constructor__");

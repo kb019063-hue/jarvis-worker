@@ -836,10 +836,13 @@ TEST(box_sizing_and_constraints) {
     assert(max_box->dimensions.content.width == 250.0f);
     assert(max_box->dimensions.content.height == 150.0f);
 
-    // Centered: 800px containing width, 200px width -> (800 - 200) / 2 = 300px left and right margins
-    assert(center_box->dimensions.margin.left == 300.0f);
-    assert(center_box->dimensions.margin.right == 300.0f);
-    assert(center_box->dimensions.content.x == 300.0f);
+    // Centered: the document now parses through the spec tree builder, so the
+    // snippet is wrapped in the implied <html>/<body> elements and the body's
+    // 8px user-agent margin applies. Containing width is therefore 800 - 16 =
+    // 784px, and centering a 200px box yields (784 - 200) / 2 = 292px.
+    assert(center_box->dimensions.margin.left == 292.0f);
+    assert(center_box->dimensions.margin.right == 292.0f);
+    assert(center_box->dimensions.content.x == 292.0f);
 }
 
 TEST(javascript_prototype_chain_and_arrays) {
@@ -912,11 +915,15 @@ TEST(incremental_layout_and_invalidation) {
 
     assert(parent != nullptr && child1 != nullptr && child2 != nullptr);
 
-    // Initially, layout has executed and flags cleared
-    doc->clear_layout_flags();
-    parent->clear_layout_flags();
-    child1->clear_layout_flags();
-    child2->clear_layout_flags();
+    // Initially, layout has executed and flags cleared. The document now has
+    // the implied <html>/<body> wrapper, so clearing walks the whole tree.
+    std::function<void(const std::shared_ptr<Node>&)> clear_flags =
+        [&](const std::shared_ptr<Node>& node) {
+            if (!node) return;
+            node->clear_layout_flags();
+            for (const auto& child : node->children()) clear_flags(child);
+        };
+    clear_flags(doc);
     root->clear_layout_flags();
 
     assert(!child1->needs_layout());
@@ -3098,6 +3105,188 @@ TEST(css_grid_template_areas_and_containment) {
     assert(content_box->dimensions.content.y < footer_box->dimensions.content.y);
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 15: spec tree construction, cascade completeness, conformance
+// ---------------------------------------------------------------------------
+
+TEST(html5_tree_construction_implied_structure) {
+    using namespace litebird;
+
+    // The parser must synthesise <html>, <head> and <body> and auto-close <p>.
+    auto doc = HtmlParser::parse("<p>One<p>Two");
+    assert(doc->document_element() && doc->document_element()->tag_name() == "html");
+    assert(doc->head() != nullptr);
+    assert(doc->body() != nullptr);
+
+    auto paragraphs = doc->get_elements_by_tag_name("p");
+    assert(paragraphs.size() == 2);
+    assert(paragraphs[0]->text_content() == "One");
+    assert(paragraphs[1]->text_content() == "Two");
+    assert(paragraphs[0]->parent() == paragraphs[1]->parent());
+
+    // <li> closes an open <li>, and stays inside its list.
+    auto list_doc = HtmlParser::parse("<ul><li>a<li>b</ul>");
+    auto items = list_doc->get_elements_by_tag_name("li");
+    assert(items.size() == 2);
+    assert(items[0]->parent() == items[1]->parent());
+    assert(items[0]->parent()->as_element() != nullptr);
+    assert(items[0]->parent()->as_element()->tag_name() == "ul");
+
+    // A missing </div> must not swallow the following paragraph.
+    auto nested = HtmlParser::parse("<div><p>text<p>more</div><section>after</section>");
+    auto sections = nested->get_elements_by_tag_name("section");
+    assert(sections.size() == 1);
+    assert(sections[0]->parent() == nested->body());
+}
+
+TEST(html5_foster_parenting_and_adoption_agency) {
+    using namespace litebird;
+
+    // Content that is not table content is foster-parented before the table.
+    auto doc = HtmlParser::parse("<table><b>hi</table>");
+    auto tables = doc->get_elements_by_tag_name("table");
+    auto bold = doc->get_elements_by_tag_name("b");
+    assert(tables.size() == 1);
+    assert(bold.size() == 1);
+    assert(bold[0]->parent() == doc->body());
+    assert(bold[0]->text_content() == "hi");
+    // The <b> must not have ended up inside the table.
+    assert(bold[0]->parent() != tables[0]);
+
+    // Misnested formatting elements are repaired by the adoption agency.
+    auto repaired = HtmlParser::parse("<b><i>x</b>y</i>");
+    auto body = repaired->body();
+    assert(body != nullptr);
+    assert(body->children().size() == 2);
+    assert(body->children()[0]->is_element());
+    assert(static_cast<Element*>(body->children()[0].get())->tag_name() == "b");
+    assert(body->children()[1]->is_element());
+    assert(static_cast<Element*>(body->children()[1].get())->tag_name() == "i");
+    assert(body->children()[1]->text_content() == "y");
+}
+
+TEST(html5_comments_and_character_references) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse("<!doctype html><!--before--><div><!--inner--></div>");
+    assert(doc->has_doctype());
+    assert(doc->doctype().name == "html");
+    assert(doc->quirks_mode() == QuirksMode::NoQuirks);
+
+    // Comments are real DOM nodes, not discarded.
+    bool saw_before = false;
+    for (const auto& child : doc->children()) {
+        if (child->is_comment()) saw_before = true;
+    }
+    assert(saw_before);
+
+    auto divs = doc->get_elements_by_tag_name("div");
+    assert(divs.size() == 1);
+    assert(divs[0]->children().size() == 1);
+    assert(divs[0]->children()[0]->is_comment());
+
+    // Named, numeric and hex character references, including a multi-byte one.
+    auto text_doc = HtmlParser::parse("<p>&amp;&lt;&gt;&quot;&#65;&#x42;&notin;</p>");
+    auto paragraphs = text_doc->get_elements_by_tag_name("p");
+    assert(paragraphs.size() == 1);
+    const std::string expected = std::string("&<>\"AB") + "\xE2\x88\x89";  // U+2209
+    assert(paragraphs[0]->text_content() == expected);
+
+    // Missing doctype means quirks mode.
+    auto quirks = HtmlParser::parse("<p>x</p>");
+    assert(quirks->quirks_mode() == QuirksMode::Quirks);
+}
+
+TEST(html5_template_contents_and_fragments) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse("<template><p>Hi</p></template>");
+    auto templates = doc->get_elements_by_tag_name("template");
+    assert(templates.size() == 1);
+    assert(templates[0]->children().empty());
+    assert(templates[0]->template_contents() != nullptr);
+    assert(templates[0]->template_contents()->children().size() == 1);
+
+    // innerHTML-style fragment parsing honours the context element, so a <tr>
+    // is kept when the context is <tbody>.
+    auto fragment = HtmlParser::parse_fragment_with_context("<tr><td>cell</td></tr>", "tbody");
+    assert(fragment != nullptr);
+    assert(fragment->children().size() == 1);
+    assert(fragment->children()[0]->as_element() != nullptr);
+    assert(fragment->children()[0]->as_element()->tag_name() == "tr");
+
+    // ... and in a <div> context the table elements are dropped, leaving the
+    // text content behind (the in-body "ignore these start tags" rule).
+    auto div_fragment = HtmlParser::parse_fragment_with_context("<tr><td>cell</td></tr>", "div");
+    assert(div_fragment->children().size() == 1);
+    assert(div_fragment->children()[0]->is_text());
+    assert(div_fragment->children()[0]->text_content() == "cell");
+}
+
+TEST(css_shorthand_expansion_and_important) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<div id=\"box\" style=\"margin: 10px 20px; padding: 4px 8px 12px;\"></div>");
+    StyleResolver resolver;
+    auto box = doc->get_element_by_id("box");
+    assert(box != nullptr);
+    auto style = resolver.resolve_style(box, nullptr);
+    assert(style.margin.top == 10.0f);
+    assert(style.margin.right == 20.0f);
+    assert(style.margin.bottom == 10.0f);
+    assert(style.margin.left == 20.0f);
+    assert(style.padding.top == 4.0f);
+    assert(style.padding.right == 8.0f);
+    assert(style.padding.bottom == 12.0f);
+    assert(style.padding.left == 8.0f);
+
+    // border shorthand splits into width and colour.
+    auto border_doc = HtmlParser::parse(
+        "<div id=\"b\" style=\"border: 3px solid #00ff00\"></div>");
+    StyleResolver border_resolver;
+    auto bordered = border_resolver.resolve_style(border_doc->get_element_by_id("b"), nullptr);
+    assert(bordered.border_width.top == 3.0f);
+    assert(bordered.border_color.g == 255 && bordered.border_color.r == 0);
+
+    // !important outranks a more specific normal declaration.
+    StyleResolver important_resolver;
+    important_resolver.add_stylesheet(
+        CssParser::parse("#x { color: #00ff00 !important; } div#x { color: #ff0000; }"));
+    auto important_doc = HtmlParser::parse("<div id=\"x\"></div>");
+    auto important_style =
+        important_resolver.resolve_style(important_doc->get_element_by_id("x"), nullptr);
+    assert(important_style.color.r == 0 && important_style.color.g == 255);
+
+    // A normal inline declaration still loses to a stylesheet !important.
+    StyleResolver inline_resolver;
+    inline_resolver.add_stylesheet(CssParser::parse("#y { color: #0000ff !important; }"));
+    auto inline_doc = HtmlParser::parse("<div id=\"y\" style=\"color: #ff0000\"></div>");
+    auto inline_style = inline_resolver.resolve_style(inline_doc->get_element_by_id("y"), nullptr);
+    assert(inline_style.color.b == 255 && inline_style.color.r == 0);
+}
+
+TEST(css_relative_units) {
+    using namespace litebird;
+
+    StyleResolver resolver;
+    resolver.set_viewport(1000.0f, 400.0f);
+    auto doc = HtmlParser::parse(
+        "<div id=\"a\" style=\"font-size: 20px; width: 2em; height: 50vh; margin-top: 1rem;\"></div>");
+    auto style = resolver.resolve_style(doc->get_element_by_id("a"), nullptr);
+
+    assert(style.font_size == 20.0f);
+    assert(style.width == 40.0f);          // 2em against the element's own font size
+    assert(style.height == 200.0f);        // 50vh of a 400px viewport
+    assert(style.margin.top == 16.0f);     // 1rem against the 16px root size
+
+    // Percentages are still passed through for the layout stage to resolve.
+    auto pct_doc = HtmlParser::parse("<div id=\"p\" style=\"width: 50%\"></div>");
+    auto pct_style = resolver.resolve_style(pct_doc->get_element_by_id("p"), nullptr);
+    assert(pct_style.width == 50.0f);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -3153,7 +3342,13 @@ int main() {
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);
     RUN_TEST(css_grid_template_areas_and_containment);
+    RUN_TEST(html5_tree_construction_implied_structure);
+    RUN_TEST(html5_foster_parenting_and_adoption_agency);
+    RUN_TEST(html5_comments_and_character_references);
+    RUN_TEST(html5_template_contents_and_fragments);
+    RUN_TEST(css_shorthand_expansion_and_important);
+    RUN_TEST(css_relative_units);
 
-    std::cout << "\n\033[1;32mAll 52 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll 58 engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

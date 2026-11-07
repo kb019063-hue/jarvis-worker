@@ -1,8 +1,10 @@
 CXX ?= g++
-CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
+BUILD_DIR ?= build
 
 SRCS = src/dom/Node.cpp \
        src/dom/Document.cpp \
+       src/dom/Comment.cpp \
        src/dom/MutationObserver.cpp \
        src/dom/ShadowRoot.cpp \
        src/dom/CustomElementRegistry.cpp \
@@ -11,6 +13,10 @@ SRCS = src/dom/Node.cpp \
        src/dom/History.cpp \
        src/html/HtmlTokenizer.cpp \
        src/html/HtmlParser.cpp \
+       src/html/TreeDump.cpp \
+       src/html/EntityTable.cpp \
+       src/html/HtmlTreeBuilder.cpp \
+       src/html/HtmlTreeBuilderModes.cpp \
        src/css/CssParser.cpp \
        src/css/StyleResolver.cpp \
        src/layout/LayoutBox.cpp \
@@ -43,32 +49,33 @@ SRCS = src/dom/Node.cpp \
        src/net/AbortController.cpp \
        src/shell/BrowserShell.cpp
 
-OBJS = $(SRCS:src/%.cpp=build/%.o)
+OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
-TARGET = build/litebird
-TEST_TARGET = build/test_suite
+TARGET = $(BUILD_DIR)/litebird
+TEST_TARGET = $(BUILD_DIR)/test_suite
+CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 
-.PHONY: all clean test run
+.PHONY: all clean test run conformance fuzz asan help
 
 all: $(TARGET)
 
-build/%.o: src/%.cpp
+$(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(TARGET): $(OBJS) build/main.o
-	@mkdir -p build
+$(TARGET): $(OBJS) $(BUILD_DIR)/main.o
+	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 	@echo "\033[1;32mBuild complete: $(TARGET)\033[0m"
 
-build/main.o: src/main.cpp
-	@mkdir -p build
+$(BUILD_DIR)/main.o: src/main.cpp
+	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
--include $(OBJS:.o=.d) build/main.d
+-include $(OBJS:.o=.d) $(BUILD_DIR)/main.d
 
 $(TEST_TARGET): $(OBJS) tests/test_suite.cpp
-	@mkdir -p build
+	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
 test: $(TEST_TARGET)
@@ -77,5 +84,25 @@ test: $(TEST_TARGET)
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
 
+## Conformance scoreboard (html5lib / WPT tree-construction corpus).
+conformance: $(TARGET)
+	@$(CONFORMANCE)
+
+## Parser robustness: mutation fuzzing against a sanitizer build.
+fuzz:
+	@python3 tools/fuzz/fuzz_parser.py
+
+## Address + UB sanitizer build, then the test suite and a fuzz smoke run.
+## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
+## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
+asan:
+	$(MAKE) BUILD_DIR=build-asan \
+	        CXXFLAGS="-std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer" \
+	        BUILD_DIR=build-asan test
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
+
 clean:
-	rm -rf build
+	rm -rf build build-asan
+
+help:
+	@echo "Targets: all (default), test, run, conformance, fuzz, asan, clean"

@@ -1,6 +1,7 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
@@ -30,6 +31,9 @@ void print_help(const char* prog) {
     std::cout << "Usage: " << prog << " [options] <html-file>\n\n";
     std::cout << "Options:\n";
     std::cout << "  --dump-dom             Dump parsed DOM tree\n";
+    std::cout << "  --dump-dom-webplatform Dump DOM in WPT/html5lib tree-dump format\n";
+    std::cout << "  --fragment-context=C   Parse input as a fragment with context element C\n";
+    std::cout << "  --scripting=off        Disable the scripting flag while parsing\n";
     std::cout << "  --dump-css             Dump parsed CSS stylesheets & rules\n";
     std::cout << "  --dump-layout          Dump computed Layout Box tree\n";
     std::cout << "  --dump-paint           Dump display list paint commands\n";
@@ -89,6 +93,9 @@ int main(int argc, char* argv[]) {
     std::string js_code;
     bool repl_mode = false;
     bool shell_mode = false;
+    bool dump_dom_webplatform = false;
+    bool scripting = true;
+    std::string fragment_context;
     std::string input_file;
 
     for (int i = 1; i < argc; ++i) {
@@ -98,6 +105,12 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "--dump-dom") {
             dump_dom = true;
+        } else if (arg == "--dump-dom-webplatform") {
+            dump_dom_webplatform = true;
+        } else if (arg.rfind("--fragment-context=", 0) == 0) {
+            fragment_context = arg.substr(std::string("--fragment-context=").size());
+        } else if (arg == "--scripting=off") {
+            scripting = false;
         } else if (arg == "--dump-css") {
             dump_css = true;
         } else if (arg == "--dump-layout") {
@@ -174,10 +187,25 @@ int main(int argc, char* argv[]) {
     }
 
     std::string html_content = read_file(input_file);
-    if (html_content.empty()) return 1;
+    if (html_content.size() == 0 && input_file != "/dev/stdin") return 1;
 
     // 1. HTML Parsing
-    auto doc = litebird::HtmlParser::parse(html_content);
+    if (dump_dom_webplatform) {
+        if (!fragment_context.empty()) {
+            litebird::ElementNamespace ns = litebird::ElementNamespace::HTML;
+            std::string tag = fragment_context;
+            if (tag.rfind("svg ", 0) == 0) { ns = litebird::ElementNamespace::SVG; tag = tag.substr(4); }
+            else if (tag.rfind("math ", 0) == 0) { ns = litebird::ElementNamespace::MathML; tag = tag.substr(5); }
+            auto fragment = litebird::HtmlParser::parse_fragment_with_context(html_content, tag, ns, scripting);
+            std::cout << litebird::dump_tree_webplatform(*fragment);
+        } else {
+            auto document = litebird::HtmlParser::parse(html_content, scripting);
+            std::cout << litebird::dump_tree_webplatform(*document);
+        }
+        return 0;
+    }
+
+    auto doc = litebird::HtmlParser::parse(html_content, scripting);
 
     // 2. CSS Parsing & Style Resolution
     litebird::StyleResolver resolver;

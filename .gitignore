@@ -3,3 +3,6 @@ build/
 *.bmp
 *.ppm
 .DS_Store
+build-asan/
+build-*/
+conformance.json

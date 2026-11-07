@@ -68,6 +68,7 @@ struct Selector {
 struct Declaration {
     std::string property;
     std::string value;
+    bool important{false};
 };
 
 struct MediaQuery {

@@ -327,6 +327,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 12** | Multi-Threaded Web Workers (`postMessage`/`onmessage`), Modern CSS Grid & Flexbox Refinements (`repeat`, `minmax`, `gap`), and RFC 6455 WebSocket Client (`new WebSocket`) | ✅ Completed (43/43 tests passing) |
 | **Phase 13** | Modern DOM & Web Components: MutationObserver API (`new MutationObserver`, microtask batching, record generation), Autonomous Custom Elements (`customElements.define`, `whenDefined`, upgrade, lifecycles), and Shadow DOM (`attachShadow`, scoped CSS encapsulation, `<slot>` content projection) | ✅ Completed (46/46 tests passing) |
 | **Phase 14** | Modern Browser Capabilities & Advanced Engine Platform: Observers & Client Routing (`IntersectionObserver`, `ResizeObserver`, `History` SPA navigation API), CSS Visual Filters & Canvas Blending (`blur`, `brightness`, `contrast`, `sepia`, `drop-shadow`, `backdrop-filter`, `globalCompositeOperation`), JS Generators, Iterators & AbortController (`function*`, `yield`, `for...of`, `AbortController`, `fetch` cancellation), and CSS Grid Named Areas (`grid-template-areas`, `grid-area`) & Layout Containment (`contain: layout paint strict`) | ✅ Completed (52/52 tests passing) |
+| **Phase 15** | **Spec Fidelity & The Scoreboard:** complete WHATWG tree construction (23 insertion modes, adoption agency, foster parenting, foreign content, templates), spec-complete tokenizer with the full 2231-entry entity table, CSS shorthand expansion + `!important` cascade tiers + relative/viewport units, plus the conformance harness, sanitizer targets, fuzzing and CI. **1571/1790 (87.8%) on the html5lib tree-construction corpus; 58/58 test suites; 0 fuzz findings over 500 mutations.** | ✅ Completed |
 
 ---
 
@@ -597,6 +598,102 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
   - Layout Isolation: Elements with `contain: layout` or `contain: strict` act as independent layout boundaries. Internal mutations mark dirty bits only up to the containment root, preventing unnecessary layout passes across parent trees.
   - Paint Isolation: Precludes child elements from rendering outside containment clipping bounds.
 
+## Phase 15 Architecture: Spec Fidelity & The Scoreboard
 
+### 1. Why this phase existed
 
+Through Phase 14 the engine could *demonstrate* features but could not *match a
+browser*. The parser was a 180-line stack machine: no insertion modes, no
+implied tags, no foster parenting, no comments in the DOM, and a five-entity
+character reference table. Real pages do not survive that.
 
+Phase 15 therefore added two things: a parser that builds the *same DOM a
+browser builds*, and a way to prove it.
+
+### 2. The tokenizer (`src/html/HtmlTokenizer.cpp`)
+
+- All tag states: tag open, end tag open, tag name, before/after attribute
+  name, before/after attribute value (double-quoted, single-quoted, unquoted),
+  self-closing start tag.
+- All comment states, including `<!-->`, `<!--- -->` and the `--!>` terminator.
+- Doctype states with public/system identifiers, plus `force-quirks` handling.
+- Bogus comment handling for `<!...`, `<?...` and `</...` with no name.
+- Content models: `RCDATA` (title, textarea), `RAWTEXT` (style, xmp, iframe,
+  noembed, noframes), script data, and `PLAINTEXT`, switched by the tree
+  builder as it inserts those elements.
+- CDATA sections, gated on the tree builder reporting that the current node is
+  in a foreign namespace.
+- CRLF normalisation at input time, and NUL handling per state (literal in the
+  data state, U+FFFD in RCDATA/RAWTEXT, U+FFFD in foreign content).
+- Character references: numeric (with the C1/Windows-1252 remapping) and named,
+  with longest-match resolution over a generated 2231-entry table
+  (`tools/gen_entity_table.py` → `src/html/EntityTable.cpp`) and the
+  "no semicolon inside an attribute followed by `=` or alphanumeric" rule.
+
+### 3. The tree builder (`src/html/HtmlTreeBuilder*.cpp`)
+
+- **Insertion modes:** initial, before html, before head, in head, in head
+  noscript, after head, in body, text, in table, in table text, in caption,
+  in column group, in table body, in row, in cell, in select, in select in
+  table, in template, after body, in frameset, after frameset, after after
+  body, after after frameset.
+- **Scopes:** the default, list-item, button, table and select scope
+  predicates, driven by the spec's boundary-element lists (including the
+  MathML/SVG integration points).
+- **Active formatting elements:** markers, the Noah's Ark clause (three
+  identical entries), reconstruction, and the full adoption agency algorithm
+  (outer loop of 8, inner loop of 3, furthest block, common ancestor, bookmark).
+  The common ancestor is passed as an *override target* to the insertion
+  algorithm — omitting that turns foster parenting into a self-parented node.
+- **Foster parenting:** content that cannot live directly in a table is
+  relocated before the table (or into the table's parent), including inside
+  `<template>` contents.
+- **Foreign content:** the breakout tag list, `font` with `color`/`face`/`size`,
+  SVG tag-name case adjustment, `xlink`/`xml`/`xmlns` attribute namespacing,
+  and MathML's `definitionURL`.
+- **Templates:** contents are a separate `DocumentFragment` and template
+  insertion modes are stacked separately, per the spec.
+- **Fragment parsing** with a context element and the context-sensitive
+  "reset the insertion mode" substitution, which is what makes `innerHTML`
+  behave (and what makes a `<tr>` survive in a `<tbody>` context but not in a
+  `<div>` context).
+
+### 4. The scoreboard (`tools/conformance/run_tree_construction.py`)
+
+The runner parses each `.dat` case, feeds `#data` through
+`litebird --dump-dom-webplatform` (the exactly-specified tree-dump format), and
+diffs against the expected `#document`. It handles `#document-fragment`
+contexts, `#script-on`/`#script-off`, and treats a timeout as a failure rather
+than hanging the suite. `--json` output is consumed by CI, which enforces a
+floor so the score cannot silently regress.
+
+### 5. Robustness
+
+- `make asan` builds with AddressSanitizer + UndefinedBehaviorSanitizer, runs
+  the 58 suites, then fuzzes the parser.
+- `tools/fuzz/fuzz_parser.py` mutates the conformance corpus (byte flips,
+  token splicing, truncation, duplication, doubling) and feeds each mutant to
+  the sanitizer build. It found a real dangling-index bug in the adoption
+  agency during this phase; that is now fixed.
+- LeakSanitizer is deliberately disabled: the JS engine has pre-existing leaks
+  that deserve their own pass (see "Known gaps").
+
+---
+
+## Known gaps (the honest list)
+
+1. **Layout is behind parsing.** No `float`, no table layout (`display: table`),
+   no multicol, no bidi, no font shaping/HarfBuzz. The DOM is now trustworthy;
+   the box tree is not yet.
+2. **No JIT.** The JS engine is a bytecode stack VM. Expect 10-100x slower than
+   V8 on script-heavy pages.
+3. **Single process, no sandbox.** Chrome's original headline feature was
+   process-per-tab isolation. Untrusted input is parsed in-process.
+4. **Leaks.** The JS engine leaks in the ASan run; a leak audit is outstanding.
+5. **Percentages** are passed to layout rather than resolved in the cascade.
+6. **Script data escaped states** (`<!--` inside `<script>`) are not implemented;
+   those cases fail in `scriptdata01.dat`.
+7. **Conformance is not rendering.** 87.8% of the parser corpus is a DOM
+   guarantee, not a promise that real pages look right.
+
+---

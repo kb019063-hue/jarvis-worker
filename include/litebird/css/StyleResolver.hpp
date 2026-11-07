@@ -241,6 +241,12 @@ private:
     bool matches_simple_selector(const std::shared_ptr<Element>& element, const SimpleSelector& sel) const;
 
     void apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& val) const;
+    /// Applies a single longhand property (no shorthand expansion).
+    void apply_longhand(ComputedStyle& style, const std::string& prop, const std::string& val) const;
+    /// Expands CSS shorthands (margin, padding, border, background, font, ...)
+    /// into longhand declarations. Returns false when `prop` is not a shorthand.
+    bool expand_shorthand(const std::string& prop, const std::string& val,
+                          std::vector<std::pair<std::string, std::string>>& out) const;
     float parse_length(std::string_view val, float default_val = 0.0f) const;
     EdgeSizes parse_box_edges(std::string_view val) const;
 
@@ -248,6 +254,9 @@ private:
     std::vector<StyleSheet> m_author_sheets;
     float m_viewport_width{800.0f};
     float m_viewport_height{600.0f};
+    // Font size used to resolve em/ex/ch units for the element being resolved.
+    mutable float m_em_base{16.0f};
+    float m_root_font_size{16.0f};
 };
 
 } // namespace litebird

@@ -14,6 +14,13 @@ namespace litebird {
 class CanvasRenderingContext2D;
 class ShadowRoot;
 
+/// Namespace of an element, per the WHATWG DOM standard.
+enum class ElementNamespace {
+    HTML,
+    SVG,
+    MathML
+};
+
 class Element : public Node {
 public:
     explicit Element(std::string tag_name)
@@ -21,7 +28,23 @@ public:
         std::transform(m_tag_name.begin(), m_tag_name.end(), m_tag_name.begin(), ::tolower);
     }
 
+    /// Constructs an element in an explicit namespace. Foreign (SVG/MathML)
+    /// element names are case-adjusting, so they are stored verbatim.
+    Element(std::string tag_name, ElementNamespace ns)
+        : Node(NodeType::Element), m_tag_name(std::move(tag_name)), m_namespace(ns) {
+        if (ns == ElementNamespace::HTML) {
+            std::transform(m_tag_name.begin(), m_tag_name.end(), m_tag_name.begin(), ::tolower);
+        }
+    }
+
     const std::string& tag_name() const { return m_tag_name; }
+
+    ElementNamespace element_namespace() const { return m_namespace; }
+    bool is_foreign() const { return m_namespace != ElementNamespace::HTML; }
+
+    /// Template contents (a DocumentFragment), per the HTML template element rules.
+    const std::shared_ptr<Node>& template_contents() const { return m_template_contents; }
+    void set_template_contents(std::shared_ptr<Node> frag) { m_template_contents = std::move(frag); }
 
     const Rect& bounding_box() const { return m_bounding_box; }
     void set_bounding_box(const Rect& r) { m_bounding_box = r; }
@@ -156,6 +179,8 @@ public:
 
 private:
     std::string m_tag_name;
+    ElementNamespace m_namespace{ElementNamespace::HTML};
+    std::shared_ptr<Node> m_template_contents;
     std::unordered_map<std::string, std::string> m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;

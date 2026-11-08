@@ -9,26 +9,54 @@
 
 Phase 15 replaced the hand-rolled HTML parser with the WHATWG tree-construction
 algorithm and added a way to *measure* the engine instead of eyeballing it.
+Phase 17 then spent the scoreboard: it drove the number from 88.0% to 98.8% by
+fixing what the corpus actually disagreed with, and audited the harness itself
+(see "What the scoreboard measured wrong" below).
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1575 / 1790 (88.0%)** | html5lib/WPT derivation suite run by `make conformance` |
+| **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 63 suites, all passing | `make test` |
-| Parser robustness | 500 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
+| Engine unit tests | 69 suites, all passing | `make test` |
+| Parser robustness | 900 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # per-file pass rate + failing-case diffs
-make test            # 63 engine suites
+make test            # 69 engine suites
 make asan            # sanitizer build, tests, and a fuzz run
 ```
+
+Every remaining failure can be inspected with
+`python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
+1.2% is **22 cases**: the `selectedcontent` cloning behaviour of the 2025
+customizable-`<select>` work (6 cases), plus a handful of adoption-agency,
+`innerHTML` and character-reference edge cases. They are catalogued in
+`ARCHITECTURE.md` rather than papered over.
+
+### What the scoreboard measured wrong
+
+Phase 17 also fixed three harness bugs that were *mis-scoring the engine*, and
+they are worth stating because they change what the number means:
+
+1. **Case splitting.** The runner split `.dat` files on blank lines, but a case
+   legitimately contains blank lines (`<pre>` data does). Cases whose data
+   contained one were truncated and their expected trees came out empty — a
+   guaranteed fail. Cases now split where the corpus format says they do: at a
+   `#data` line that starts a case.
+2. **Lone CR.** Reading the corpus in text mode turned a lone `\r` into `\n`, so
+   a case asserting that a `&#x0D;` reference survives could never pass.
+3. **Trailing newline.** The expected tree kept a trailing blank line, which made
+   comparisons fail for cosmetic reasons.
+
+Fixing these moved the denominator from 1790 to 1792 cases and was worth ~55
+cases on its own. The gain is *measurement honesty*, not new engine code.
 
 The corpus is the same tree-construction material WebKit, Blink, Gecko and
 Ladybird use as their parser baseline, so the number is comparable across
 engines rather than self-referential. It is vendored under
 `tests/html5lib/tree-construction/` (BSD-licensed, see the LICENSE there).
 
-> **Honest scope:** 88.0% on parser conformance means the DOM this engine builds
+> **Honest scope:** 98.8% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
 > floats and tables now lay out (Phase 16), but there is no bidi, no
 > `rowspan`/`colspan`, no clipping for `overflow`, and the JS engine is a bytecode
@@ -90,10 +118,11 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Active formatting elements + the adoption agency algorithm:** misnested `<b><i></b></i>` repairs produce the same DOM a browser does.
 - **Foster parenting:** stray content inside `<table>` is relocated before the table instead of being dropped.
 - **Scopes:** default, list-item, button, table and select scoping rules drive every "is this tag in scope?" decision.
-- **Foreign content:** SVG and MathML namespaces, case adjustment (`<foreignobject>` → `foreignObject`), `xlink`/`xml` attribute namespacing, HTML/SVG/MathML integration points, and `<![CDATA[ ]]>` sections.
+- **Foreign content:** SVG and MathML namespaces, tag *and* attribute case adjustment (`<foreignobject>` → `foreignObject`, `viewbox` → `viewBox`), `xlink`/`xml` attribute namespacing, HTML/SVG/MathML integration points, `</p>`/`</br>` breakouts, and `<![CDATA[ ]]>` sections. Scope checks are namespace-aware, so an `<svg td>` never satisfies an HTML table-scope test.
 - **`<template>`:** contents live in a separate `DocumentFragment`, exactly as the spec requires.
 - **Comments and doctypes are real nodes** (`Comment`, `Document::doctype()`), including quirks/limited-quirks/no-quirks document modes.
-- **Spec-complete tokenizer:** all tag, attribute, comment, bogus-comment, doctype and CDATA states, RCDATA/RAWTEXT/script-data/plaintext content models, CRLF normalisation, and the complete 2231-entry named character reference table.
+- **Spec-complete tokenizer:** all tag, attribute, comment, bogus-comment, doctype and CDATA states, RCDATA/RAWTEXT/plaintext content models, CRLF normalisation, the complete 2231-entry named character reference table, and the full **script-data state machine** including the escaped and double-escaped runs (`<!--<script </script>-->` stays text, as it should).
+- **`eof-in-tag`, `eof-before-tag-name` and NUL handling** match the spec: a tag cut off by EOF is discarded, `</` at EOF is text, and a NUL in a comment becomes U+FFFD.
 - **Fragment parsing with a context element**, which is what makes `innerHTML` (and `<tbody>` vs `<div>` contexts) behave correctly.
 - Legacy helpers: `HtmlParser::parse()`, `HtmlParser::parse_fragment_with_context()`.
 

@@ -75,13 +75,19 @@ private:
     bool starts_with_ci(std::string_view text) const;
 
     std::string consume_char_ref(bool in_attribute);
-    std::string consume_numeric_char_ref();
-    void consume_tag(HtmlToken& token);
+    /// Decodes a numeric character reference. When `ok` comes back false the
+    /// reference had no digits and the returned string is the literal
+    /// continuation ("x" for a hex prefix) that must be emitted as text.
+    std::string consume_numeric_char_ref(bool& ok);
+    /// Returns false when EOF is reached inside the tag, in which case the
+    /// tag token is dropped (the spec emits only EOF).
+    bool consume_tag(HtmlToken& token);
     void consume_comment(HtmlToken& token);
     void consume_bogus_comment(HtmlToken& token, std::string_view prefix);
     void consume_doctype(HtmlToken& token);
     void consume_cdata(HtmlToken& token);
     bool scan_text_run(HtmlToken& token);
+    bool scan_script_data(HtmlToken& token);
     void skip_whitespace();
 
     std::string m_storage;      // holds the CRLF-normalised input

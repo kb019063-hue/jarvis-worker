@@ -419,6 +419,9 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
 
             if (name == "html") {
                 if (m_open_elements.empty()) return;
+                // Inside a template the tree is a separate fragment root, so a
+                // stray <html> must not mutate the document element.
+                if (element_index_in_stack("template") >= 0) return;
                 auto html = m_open_elements.front();
                 for (const auto& [key, value] : token.attributes) {
                     if (html->element_namespace() == ElementNamespace::HTML && !html->has_attribute(key)) {
@@ -434,6 +437,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 if (m_open_elements.size() < 2) return;
                 auto body = m_open_elements[1];
                 if (body->tag_name() != "body") return;
+                if (element_index_in_stack("template") >= 0) return;
                 m_frameset_ok = false;
                 for (const auto& [key, value] : token.attributes) {
                     if (!body->has_attribute(key)) body->set_attribute(key, value);
@@ -555,7 +559,10 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
-            if (is_formatting(name)) {
+            // <nobr> has its own rule below (it runs the adoption agency when
+            // another nobr is already in scope), so it must not be swallowed
+            // by the generic formatting-element branch.
+            if (is_formatting(name) && name != "nobr") {
                 reconstruct_formatting_elements();
                 auto element = insert_html_element(token);
                 push_formatting_element(element, token);
@@ -673,6 +680,15 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
+            // "in body" defers <noscript> to the "in head" rules when
+            // scripting is enabled, where it becomes raw text.
+            if (name == "noscript" && m_scripting) {
+                insert_html_element(token);
+                switch_to_text_mode(name, ContentModel::Rawtext);
+                m_frameset_ok = false;
+                return;
+            }
+
             if (name == "select") {
                 reconstruct_formatting_elements();
                 insert_html_element(token);
@@ -730,6 +746,15 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             const std::string& name = token.name;
 
             if (name == "template") { send_to_in_head(token); return; }
+
+            // <pre> and <listing> own their content: the end tag closes them
+            // even when a <p> is still open inside.
+            if (name == "pre" || name == "listing") {
+                if (!has_element_in_scope(name)) return;
+                generate_implied_end_tags();
+                pop_until_tag(name);
+                return;
+            }
 
             if (name == "body") {
                 if (!has_element_in_scope("body")) return;
@@ -1298,6 +1323,10 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
                 return;
             }
             if (name == "script" || name == "template") { send_to_in_head(token); return; }
+            // Unknown start tags are no longer swallowed: the modern select
+            // parsing rules keep them as ordinary elements (this is what the
+            // WPT tree-construction corpus expects for <select><div>).
+            send_to_in_body(token);
             return;
         }
         case HtmlTokenType::EndTag: {
@@ -1321,6 +1350,7 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
                 return;
             }
             if (name == "template") { send_to_in_head(token); return; }
+            send_to_in_body(token);
             return;
         }
         case HtmlTokenType::EndOfFile:
@@ -1600,6 +1630,20 @@ void HtmlTreeBuilder::process_foreign_content(const HtmlToken& token) {
             return;
         }
         case HtmlTokenType::EndTag: {
+            // "An end tag whose tag name is 'br' or 'p'": pop out of the
+            // foreign subtree, then reprocess with the HTML rules. Without
+            // this, </p> inside <svg> silently disappears instead of closing
+            // the SVG and starting a fresh paragraph.
+            if (token.name == "br" || token.name == "p") {
+                while (!m_open_elements.empty()) {
+                    auto element = current_node();
+                    if (element->element_namespace() == ElementNamespace::HTML) break;
+                    if (is_mathml_text_integration_point(*element) || is_html_integration_point(*element)) break;
+                    pop_current_node();
+                }
+                process_token_in_mode(m_mode, token);
+                return;
+            }
             auto node = current_node();
             if (node && node->tag_name() != token.name) {
                 // Parse error: fall through to the search loop below.

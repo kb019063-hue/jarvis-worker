@@ -84,7 +84,7 @@ std::string adjust_foreign_attribute_name(const std::string& name, ElementNamesp
         {"xlink:show", "xlink show"}, {"xlink:title", "xlink title"},
         {"xlink:type", "xlink type"}};
     static const std::unordered_map<std::string, const char*> xml = {
-        {"xml:lang", "xml lang"}, {"xml:space", "xml space"}, {"xml:base", "xml base"}};
+        {"xml:lang", "xml lang"}, {"xml:space", "xml space"}};
 
     if (name == "xmlns") return "xmlns xmlns";
     if (name.rfind("xmlns:", 0) == 0) return "xmlns " + name.substr(6);
@@ -93,6 +93,45 @@ std::string adjust_foreign_attribute_name(const std::string& name, ElementNamesp
     auto m = xml.find(name);
     if (m != xml.end()) return m->second;
     if (ns == ElementNamespace::MathML && name == "definitionurl") return "definitionURL";
+
+    // "Adjust SVG attributes": the tokenizer lowercases attribute names, but
+    // these SVG attributes are spelled with camel case in the DOM.
+    if (ns == ElementNamespace::SVG) {
+        static const std::unordered_map<std::string, const char*> svg_attributes = {
+            {"attributename", "attributeName"}, {"attributetype", "attributeType"},
+            {"basefrequency", "baseFrequency"}, {"baseprofile", "baseProfile"},
+            {"calcmode", "calcMode"}, {"clippathunits", "clipPathUnits"},
+            {"diffuseconstant", "diffuseConstant"}, {"edgemode", "edgeMode"},
+            {"filterunits", "filterUnits"}, {"glyphref", "glyphRef"},
+            {"gradienttransform", "gradientTransform"}, {"gradientunits", "gradientUnits"},
+            {"kernelmatrix", "kernelMatrix"}, {"kernelunitlength", "kernelUnitLength"},
+            {"keypoints", "keyPoints"}, {"keysplines", "keySplines"},
+            {"keytimes", "keyTimes"}, {"lengthadjust", "lengthAdjust"},
+            {"limitingconeangle", "limitingConeAngle"}, {"markerheight", "markerHeight"},
+            {"markerunits", "markerUnits"}, {"markerwidth", "markerWidth"},
+            {"maskcontentunits", "maskContentUnits"}, {"maskunits", "maskUnits"},
+            {"numoctaves", "numOctaves"}, {"pathlength", "pathLength"},
+            {"patterncontentunits", "patternContentUnits"},
+            {"patterntransform", "patternTransform"}, {"patternunits", "patternUnits"},
+            {"pointsatx", "pointsAtX"}, {"pointsaty", "pointsAtY"}, {"pointsatz", "pointsAtZ"},
+            {"preservealpha", "preserveAlpha"}, {"preserveaspectratio", "preserveAspectRatio"},
+            {"primitiveunits", "primitiveUnits"}, {"refx", "refX"}, {"refy", "refY"},
+            {"repeatcount", "repeatCount"}, {"repeatdur", "repeatDur"},
+            {"requiredextensions", "requiredExtensions"},
+            {"requiredfeatures", "requiredFeatures"},
+            {"specularconstant", "specularConstant"},
+            {"specularexponent", "specularExponent"}, {"spreadmethod", "spreadMethod"},
+            {"startoffset", "startOffset"}, {"stddeviation", "stdDeviation"},
+            {"stitchtiles", "stitchTiles"}, {"surfacescale", "surfaceScale"},
+            {"systemlanguage", "systemLanguage"}, {"tablevalues", "tableValues"},
+            {"targetx", "targetX"}, {"targety", "targetY"}, {"textlength", "textLength"},
+            {"viewbox", "viewBox"}, {"viewtarget", "viewTarget"},
+            {"xchannelselector", "xChannelSelector"},
+            {"ychannelselector", "yChannelSelector"}, {"zoomandpan", "zoomAndPan"},
+        };
+        auto svg = svg_attributes.find(name);
+        if (svg != svg_attributes.end()) return svg->second;
+    }
     return name;
 }
 
@@ -158,8 +197,13 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
 
     reset_insertion_mode();
 
-    // Context-sensitive tokenizer state.
-    const std::string& tag = m_context_element->tag_name();
+    // Context-sensitive tokenizer state. A foreign (SVG/MathML) context
+    // element never switches the tokenizer: an <svg title> context parses its
+    // children as markup, unlike an HTML <title>.
+    const std::string& tag =
+        (m_context_element->element_namespace() == ElementNamespace::HTML)
+            ? m_context_element->tag_name()
+            : std::string("\x01");
     if (tag == "title" || tag == "textarea") {
         m_tokenizer_pending = ContentModel::Rcdata;
     } else if (tag == "style" || tag == "xmp" || tag == "iframe" || tag == "noembed" || tag == "noframes") {
@@ -223,11 +267,20 @@ void HtmlTreeBuilder::pop_current_node() {
     if (!m_open_elements.empty()) m_open_elements.pop_back();
 }
 
+namespace {
+/// The tree-construction rules only ever match *HTML* elements; an SVG
+/// <tr> or a MathML <mi> must never satisfy a "has a td in table scope"
+/// test just because its local name matches.
+bool is_html_element(const std::shared_ptr<Element>& element) {
+    return element && element->element_namespace() == ElementNamespace::HTML;
+}
+} // namespace
+
 void HtmlTreeBuilder::pop_until_tag(const std::string& tag) {
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
         m_open_elements.pop_back();
-        if (element->tag_name() == tag) return;
+        if (is_html_element(element) && element->tag_name() == tag) return;
     }
 }
 
@@ -235,13 +288,15 @@ void HtmlTreeBuilder::pop_until_one_of(const std::vector<std::string>& tags) {
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
         m_open_elements.pop_back();
-        if (std::find(tags.begin(), tags.end(), element->tag_name()) != tags.end()) return;
+        if (is_html_element(element) &&
+            std::find(tags.begin(), tags.end(), element->tag_name()) != tags.end()) return;
     }
 }
 
 int HtmlTreeBuilder::element_index_in_stack(const std::string& tag) const {
     for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        if (m_open_elements[static_cast<std::size_t>(i)]->tag_name() == tag) return i;
+        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
+        if (is_html_element(element) && element->tag_name() == tag) return i;
     }
     return -1;
 }
@@ -256,9 +311,9 @@ bool HtmlTreeBuilder::has_element_in_scope_where(const std::vector<std::string>&
     for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
         const auto& element = m_open_elements[static_cast<std::size_t>(i)];
         const std::string& name = element->tag_name();
-        if (std::find(tags.begin(), tags.end(), name) != tags.end()) return true;
-
         const bool html = element->element_namespace() == ElementNamespace::HTML;
+        if (html && std::find(tags.begin(), tags.end(), name) != tags.end()) return true;
+
         if (html) {
             if (name == "applet" || name == "caption" || name == "html" || name == "table" ||
                 name == "td" || name == "th" || name == "marquee" || name == "object" ||
@@ -279,7 +334,7 @@ bool HtmlTreeBuilder::has_element_in_scope_where(const std::vector<std::string>&
 bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
     for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
         const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (element->tag_name() == tag) return true;
+        if (is_html_element(element) && element->tag_name() == tag) return true;
         if (element->element_namespace() == ElementNamespace::HTML &&
             (element->tag_name() == "html" || element->tag_name() == "table" ||
              element->tag_name() == "template")) {
@@ -292,7 +347,7 @@ bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
 bool HtmlTreeBuilder::has_element_in_select_scope(const std::string& tag) const {
     for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
         const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (element->tag_name() == tag) return true;
+        if (is_html_element(element) && element->tag_name() == tag) return true;
         if (!(element->tag_name() == "optgroup" || element->tag_name() == "option")) return false;
     }
     return false;
@@ -914,9 +969,22 @@ void HtmlTreeBuilder::process_token(const HtmlToken& token) {
     }
 
     if (token.type == HtmlTokenType::Character) {
-        process_characters(token.data);
+        // "If the next token is a U+000A LINE FEED character token, then
+        // ignore that token" -- the authoring convenience for <pre>,
+        // <listing> and <textarea>, whose first newline is dropped.
+        std::string data = token.data;
+        if (m_skip_next_newline) {
+            m_skip_next_newline = false;
+            if (!data.empty() && data.front() == '\n') {
+                data.erase(data.begin());
+            }
+        }
+        process_characters(data);
         return;
     }
+
+    // Any other token consumes the one-shot newline skip.
+    m_skip_next_newline = false;
 
     if (m_tokenizer) {
         m_tokenizer->set_allow_cdata(!m_open_elements.empty() &&
@@ -979,6 +1047,8 @@ void HtmlTreeBuilder::process_character(char c) {
             process_token_in_mode(m_mode, token);
             return;
         case Mode::InSelect:
+            // "A character token that is U+0000 NULL: parse error, ignore."
+            if (c == '\0') return;
             insert_character(c);
             return;
         case Mode::InSelectInTable:

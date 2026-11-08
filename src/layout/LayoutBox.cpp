@@ -5,11 +5,42 @@
 
 namespace litebird {
 
+void LayoutBox::resolve_percentages(float containing_width, float containing_height) {
+    // CSS 2.1: percentage widths, padding and margins resolve against the
+    // containing block's *width*; percentage heights need a definite
+    // containing height, and fall back to `auto` otherwise (which is what
+    // happens for the usual auto-height ancestor).
+    const float width_basis = std::max(0.0f, containing_width);
+    const float height_basis = (containing_height > 0.0f) ? containing_height : -1.0f;
+
+    auto apply = [](float& pixels, float percent, float basis) {
+        if (percent < 0.0f) return;
+        pixels = (basis >= 0.0f) ? basis * percent / 100.0f : -1.0f;
+    };
+    auto apply_edges = [&](EdgeSizes& pixels, const EdgeSizes& percent, float basis) {
+        apply(pixels.top, percent.top, basis);
+        apply(pixels.right, percent.right, basis);
+        apply(pixels.bottom, percent.bottom, basis);
+        apply(pixels.left, percent.left, basis);
+    };
+
+    apply(style.width, style.width_percent, width_basis);
+    apply(style.min_width, style.min_width_percent, width_basis);
+    apply(style.max_width, style.max_width_percent, width_basis);
+    apply(style.height, style.height_percent, height_basis);
+    apply(style.min_height, style.min_height_percent, height_basis);
+    apply(style.max_height, style.max_height_percent, height_basis);
+    apply_edges(style.margin, style.margin_percent, width_basis);
+    apply_edges(style.padding, style.padding_percent, width_basis);
+}
+
 void LayoutBox::layout(float containing_width, float containing_height) {
     (void)containing_height;
     if (!needs_layout && !child_needs_layout) {
         return;
     }
+
+    resolve_percentages(containing_width, containing_height);
 
     dimensions.margin = style.margin;
     dimensions.padding = style.padding;
@@ -122,6 +153,14 @@ void LayoutBox::layout_block(float containing_width) {
         dimensions.margin.right = remaining_h;
     }
 
+    // A definite height gives descendants a basis for percentage heights.
+    const float definite_height =
+        (style.height >= 0.0f)
+            ? ((style.box_sizing == BoxSizing::BorderBox)
+                   ? std::max(0.0f, style.height - v_padding_border)
+                   : style.height)
+            : -1.0f;
+
     // 2. Layout Children, placing floats and propagating the float context
     float y_cursor = 0.0f;
     float_bands.clear();
@@ -191,7 +230,7 @@ void LayoutBox::layout_block(float containing_width) {
             (!float_bands.empty() ? 0.0f : inherited_bands_offset_y) + y_cursor +
             child->style.margin.top + child->style.border_width.top + child->style.padding.top;
 
-        child->layout(dimensions.content.width);
+        child->layout(dimensions.content.width, definite_height);
 
         float new_x = dimensions.content.x +
                       child->dimensions.margin.left +

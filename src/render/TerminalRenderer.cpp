@@ -14,6 +14,19 @@ TerminalRenderer::TerminalRenderer(int cols, int rows, float cell_w, float cell_
     }
 }
 
+bool TerminalRenderer::inside_clip(int col, int row) const {
+    if (m_clip_stack.empty()) return true;
+    const float px = static_cast<float>(col) * m_cell_w + m_scroll_x;
+    const float py = static_cast<float>(row) * m_cell_h + m_scroll_y;
+    for (const auto& clip : m_clip_stack) {
+        if (px < clip.x || py < clip.y ||
+            px >= clip.x + clip.width || py >= clip.y + clip.height) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void TerminalRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
@@ -22,6 +35,10 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             m_transform_stack.push_back(curr.multiply(arg.matrix));
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
             if (!m_transform_stack.empty()) m_transform_stack.pop_back();
+        } else if constexpr (std::is_same_v<T, PushClipCommand>) {
+            m_clip_stack.push_back(current_transform().map_rect(arg.rect));
+        } else if constexpr (std::is_same_v<T, PopClipCommand>) {
+            if (!m_clip_stack.empty()) m_clip_stack.pop_back();
         } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {
             Rect tr = current_transform().map_rect(arg.rect);
             int start_col = std::clamp(static_cast<int>((tr.x + arg.x_offset - m_scroll_x) / m_cell_w), 0, m_cols - 1);

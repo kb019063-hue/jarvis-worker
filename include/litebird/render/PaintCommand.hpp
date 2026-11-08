@@ -56,7 +56,18 @@ struct PushTransformCommand {
 
 struct PopTransformCommand {};
 
-using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand>;
+/// Clips every following command to `rect` until the matching PopClipCommand.
+/// Emitted for `overflow: hidden|auto|scroll` (CSS 2.1 11.1.1) and for
+/// `contain: paint`; before Phase 18 `overflow` only established a block
+/// formatting context and content still painted outside the box.
+struct PushClipCommand {
+    Rect rect;
+    float border_radius{0.0f};
+};
+
+struct PopClipCommand {};
+
+using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
 
 class DisplayList {
 public:

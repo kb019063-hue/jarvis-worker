@@ -113,8 +113,22 @@ void BitmapRenderer::clear(Color color) {
     std::fill(m_pixels.begin(), m_pixels.end(), color);
 }
 
+bool BitmapRenderer::inside_clip(int x, int y) const {
+    if (m_clip_stack.empty()) return true;
+    const float px = static_cast<float>(x) + 0.5f;
+    const float py = static_cast<float>(y) + 0.5f;
+    for (const auto& clip : m_clip_stack) {
+        if (px < clip.x || py < clip.y ||
+            px >= clip.x + clip.width || py >= clip.y + clip.height) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void BitmapRenderer::set_pixel(int x, int y, Color color) {
     if (x < 0 || x >= m_width || y < 0 || y >= m_height) return;
+    if (!inside_clip(x, y)) return;
     if (color.a == 0) return;
 
     if (color.a == 255) {
@@ -181,6 +195,10 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             m_transform_stack.push_back(curr.multiply(arg.matrix));
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
             if (!m_transform_stack.empty()) m_transform_stack.pop_back();
+        } else if constexpr (std::is_same_v<T, PushClipCommand>) {
+            m_clip_stack.push_back(current_transform().map_rect(arg.rect));
+        } else if constexpr (std::is_same_v<T, PopClipCommand>) {
+            if (!m_clip_stack.empty()) m_clip_stack.pop_back();
         } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {
             Rect tr = current_transform().map_rect(arg.rect);
             float sx = tr.x + arg.x_offset;

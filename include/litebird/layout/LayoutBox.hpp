@@ -166,6 +166,11 @@ public:
     static void resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& root, float viewport_w, float viewport_h);
 
 private:
+    /// Turns percentage lengths into pixels against this box's containing
+    /// block. The percentage fields are kept, so a relayout at a different
+    /// size recomputes them instead of reusing a stale pixel value.
+    void resolve_percentages(float containing_width, float containing_height);
+
     void layout_block(float containing_width);
     void layout_table(float containing_width);
     void layout_table_row(float containing_width);

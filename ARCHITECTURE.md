@@ -330,6 +330,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 15** | **Spec Fidelity & The Scoreboard:** complete WHATWG tree construction (23 insertion modes, adoption agency, foster parenting, foreign content, templates), spec-complete tokenizer with the full 2231-entry entity table, CSS shorthand expansion + `!important` cascade tiers + relative/viewport units, plus the conformance harness, sanitizer targets, fuzzing and CI. **1571/1790 (87.8%) on the html5lib tree-construction corpus; 58/58 test suites; 0 fuzz findings over 500 mutations.** | ✅ Completed |
 | **Phase 16** | **Floats, Block Formatting Contexts & Table Layout:** `float: left/right` with shrink-to-fit sizing, per-line line-box shrinking around floats, `clear`, BFC establishment and float containment, plus `display: table/table-row/table-cell/table-row-group` with anonymous table structure, automatic column sizing and per-row height resolution; bitmap text advance aligned with the layout metric. **1575/1790 (88.0%) conformance; 63/63 test suites; 0 fuzz findings.** | ✅ Completed |
 | **Phase 17** | **Conformance push: the scoreboard pays off.** The full script-data state machine (escaped and double-escaped runs), `<pre>`/`<listing>`/`<textarea>` first-newline handling, `<nobr>` adoption agency, `<html>`/`<body>` inside templates, namespace-aware scope checks (an `<svg td>` is not an HTML `td`), SVG attribute case adjustment, foreign-content `</p>`/`</br>` breakouts, modern `<select>` content parsing, `eof-in-tag` discarding, and three harness-fidelity fixes. **1575/1790 (88.0%) → 1770/1792 (98.8%); 69/69 suites; 0 fuzz findings over 900 mutations.** | ✅ Completed |
+| **Phase 18** | **Layout fidelity: percentages and clipping.** Percentage `width`/`height`/`min`/`max` and percentage `margin`/`padding` now resolve against the containing block at layout time (before this, `width: 50%` silently became *fifty pixels*), percentage table cells resolve against the table width, and `overflow: hidden|auto|scroll` / `contain: paint` emit clip commands that both renderers honour. **98.8% conformance unchanged; 71/71 suites.** | ✅ Completed |
 
 ---
 
@@ -851,19 +852,101 @@ that is wrong against it: the honest number before and after is stated
 
 ---
 
+## Phase 18 Architecture: Percentages and Clipping
+
+Phase 17 was measurable because a corpus said what the DOM should be. Layout has
+no such oracle in this repository, so Phase 18 was chosen for a different
+reason: it fixes things that were *observably wrong* rather than merely
+incomplete, and both are verifiable with assertions that do not depend on taste.
+
+### 1. `width: 50%` was fifty pixels
+
+`StyleResolver::parse_length` ends with `return number;` for any unit it does
+not recognise -- including `%`. The comment there explained that percentages
+"are resolved by the layout stage instead", but nothing carried the percentage
+through: `width: 50%` stored `50.0f` in the pixel field and layout happily used
+fifty pixels. Every percentage length in every stylesheet was wrong, and one
+unit test (`css_relative_units`) *asserted the bug*.
+
+The fix keeps the two halves separate, because only layout knows the containing
+block:
+
+* `ComputedStyle` gains `width_percent`, `height_percent`,
+  `min_width_percent`, `max_width_percent`, `min_height_percent`,
+  `max_height_percent` and `margin_percent` / `padding_percent` edge sets.
+  A negative value means "not a percentage"; the pixel field stays `-1`
+  (auto) so every existing `>= 0` test keeps meaning "definite length".
+* `LayoutBox::resolve_percentages`, called from `LayoutBox::layout` before
+  dispatch, multiplies the percentages by the containing block. It *keeps* the
+  percentage fields, so a relayout at a different viewport recomputes instead of
+  reusing a stale pixel value.
+* Percentage widths, min/max widths, margins and padding resolve against the
+  containing block's **width**; percentage heights resolve against a definite
+  containing height and fall back to `auto` otherwise, which is what CSS does
+  for the usual auto-height ancestor. `layout_block` now hands its children a
+  definite height when it has one, so `height: 50%` inside a fixed-height box
+  works.
+* Table cells resolve their percentage widths against the table's own width,
+  after the table width is known (CSS 2.1 17.5.2), so `width: 25%` on a cell in
+  a 300px table is a 75px column.
+
+### 2. `overflow` now clips
+
+`overflow: hidden` already established a block formatting context (Phase 16),
+but content still painted outside the box, because the display list had no way
+to express a clip. It does now:
+
+* `PushClipCommand` / `PopClipCommand` join the display-list vocabulary, emitted
+  around a box's own background and its whole subtree for
+  `overflow: hidden|auto|scroll` and `contain: paint`, using the padding box
+  (CSS 2.1 11.1.1).
+* `BitmapRenderer` checks every pixel write against the active clip stack in
+  `set_pixel` -- which every drawing path (rect, border, glyph, image, shadow)
+  funnels through, so one check covers them all.
+* `TerminalRenderer` applies the same test per cell.
+
+### 3. How this is verified without a reftest corpus
+
+There is no pitch-comparable rendering corpus here, so the tests assert
+*geometric* facts and *pixel* facts rather than screenshots:
+
+* `percentage_lengths_resolve_against_containing_block` checks a 50% child of a
+  400px box is 200px, that `padding: 10px 5%` is 20px a side, that
+  `max-width: 25%` caps an auto box at 100px, that `height: 50%` inside a
+  200px-tall box is 100px, and that a 25% cell in a 300px table gets a 75px
+  column.
+* `overflow_hidden_clips_painting` builds the display list, asserts exactly one
+  clip push/pop pair, and then rasterises: a 300x200 red child inside a 100x50
+  `overflow: hidden` box leaves white pixels outside, while the same markup with
+  `overflow: visible` bleeds red across the page.
+
+### 4. What is still approximate
+
+Percentage `border-radius`, percentage `line-height` and percentage `font-size`
+are still not resolved (they are not box dimensions), percentage heights inside
+auto-height ancestors fall back to `auto`, and clip rects are rectangles -- no
+rounded-corner clipping, no `clip-path`. `overflow: auto`/`scroll` clip but do
+not create scrollbars or scrollable overflow.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
-   basic table layout landed in Phase 16, but there is no multicol, no bidi, no
-   font shaping/HarfBuzz, no `rowspan`/`colspan`, no `border-collapse`, and
-   `overflow` does not clip painting. The DOM is trustworthy; the box tree is
-   plausible.
+   basic table layout landed in Phase 16; Phase 18 added percentage lengths and
+   real `overflow` clipping. Still missing: multicol, bidi, font
+   shaping/HarfBuzz, `rowspan`/`colspan`, `border-collapse`, scrollable
+   `overflow: auto` (it clips but cannot be scrolled), and rounded-corner
+   clipping. The DOM is trustworthy; the box tree is plausible.
 2. **No JIT.** The JS engine is a bytecode stack VM. Expect 10-100x slower than
    V8 on script-heavy pages.
 3. **Single process, no sandbox.** Chrome's original headline feature was
    process-per-tab isolation. Untrusted input is parsed in-process.
 4. **Leaks.** The JS engine leaks in the ASan run; a leak audit is outstanding.
-5. **Percentages** are passed to layout rather than resolved in the cascade.
+5. **Percentage lengths are resolved in layout, not the cascade** (the cascade
+   has no containing block to resolve against) -- that is now correct for box
+   dimensions, margins and padding, but percentage `font-size`, `line-height`
+   and `border-radius` are still not resolved anywhere.
 6. **22 corpus cases still fail**, and they are known rather than mysterious.
    All of them are in 11 files, and the breakdown is:
    `webkit02.dat` 43/49 (six, all `<selectedcontent>` cloning from the 2025

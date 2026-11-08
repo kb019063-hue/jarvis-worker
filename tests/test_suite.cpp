@@ -34,6 +34,7 @@
 #include "litebird/net/AbortController.hpp"
 
 #include <iostream>
+#include <functional>
 #include <cassert>
 #include <string>
 #include <thread>
@@ -3287,10 +3288,14 @@ TEST(css_relative_units) {
     assert(style.height == 200.0f);        // 50vh of a 400px viewport
     assert(style.margin.top == 16.0f);     // 1rem against the 16px root size
 
-    // Percentages are still passed through for the layout stage to resolve.
+    // Percentages are *not* pixels: the cascade records the percentage and
+    // leaves the length auto, because only layout knows the containing block.
+    // (Before Phase 18 this asserted width == 50.0f, i.e. it encoded
+    // `width: 50%` becoming fifty pixels.)
     auto pct_doc = HtmlParser::parse("<div id=\"p\" style=\"width: 50%\"></div>");
     auto pct_style = resolver.resolve_style(pct_doc->get_element_by_id("p"), nullptr);
-    assert(pct_style.width == 50.0f);
+    assert(pct_style.width == -1.0f);
+    assert(pct_style.width_percent == 50.0f);
 }
 
 
@@ -3708,6 +3713,125 @@ TEST(template_and_scope_helpers_ignore_foreign_elements) {
     assert(contains(scoped, "<div>"));
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 18: percentage resolution and overflow clipping
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::shared_ptr<litebird::LayoutBox> build_doc(const std::string& html, float width = 800.0f) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    resolver.set_viewport(width, 600.0f);
+    return LayoutTree::build(doc, resolver, width, 600.0f);
+}
+
+bool has_command(const litebird::DisplayList& list,
+                 const std::function<bool(const litebird::PaintCommand&)>& predicate) {
+    for (const auto& cmd : list.commands()) {
+        if (predicate(cmd)) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(percentage_lengths_resolve_against_containing_block) {
+    using namespace litebird;
+
+    // width: 50% of a 400px containing block is 200px -- not 50px.
+    auto root = build_doc(
+        "<div style='width: 400px'>"
+        "  <div id='half' style='width: 50%; height: 20px'></div>"
+        "  <div id='padded' style='width: 100px; padding: 10px 5%; margin-left: 10%'></div>"
+        "  <div id='capped' style='max-width: 25%; height: 10px'></div>"
+        "</div>"
+        "<div style='width: 300px; height: 200px'>"
+        "  <div id='tall' style='width: 10px; height: 50%'></div>"
+        "</div>");
+    auto half = find_box_by_id(root, "half");
+    auto padded = find_box_by_id(root, "padded");
+    auto capped = find_box_by_id(root, "capped");
+    auto tall = find_box_by_id(root, "tall");
+    assert(half && padded && capped && tall);
+
+    assert(std::abs(half->dimensions.content.width - 200.0f) < 0.5f);
+
+    // Percentage padding and margins resolve against the containing block's
+    // *width* (400px), giving 20px each side and a 40px left margin.
+    assert(std::abs(padded->dimensions.padding.left - 20.0f) < 0.5f);
+    assert(std::abs(padded->dimensions.padding.right - 20.0f) < 0.5f);
+    assert(std::abs(padded->dimensions.margin.left - 40.0f) < 0.5f);
+
+    // max-width: 25% caps an otherwise auto-width box at 25% of 400 = 100px,
+    // and percentage heights resolve against a definite containing height.
+    assert(std::abs(capped->dimensions.content.width - 100.0f) < 0.5f);
+    assert(std::abs(tall->dimensions.content.height - 100.0f) < 0.5f);
+
+    // Table cells take percentage widths against the table's own width.
+    auto table_root = build_doc(
+        "<table style='width: 300px'><tr>"
+        "  <td id='quarter' style='width: 25%'>a</td><td>b</td><td>c</td><td>d</td>"
+        "</tr></table>");
+    auto quarter = find_box_by_id(table_root, "quarter");
+    assert(quarter);
+    assert(std::abs(quarter->dimensions.margin_box().width - 75.0f) < 1.0f);
+}
+
+TEST(overflow_hidden_clips_painting) {
+    using namespace litebird;
+
+    // A 300x200 child inside a 100x50 overflow:hidden box must be clipped to
+    // the 100x50 padding box; without clipping the red child paints over the
+    // whole area.
+    auto root = build_doc(
+        "<div style='width: 100px; height: 50px; overflow: hidden'>"
+        "  <div style='width: 300px; height: 200px; background: rgb(255, 0, 0)'></div>"
+        "</div>");
+    auto list = DisplayList::build(root);
+
+    int clips = 0;
+    int unclips = 0;
+    for (const auto& cmd : list.commands()) {
+        if (std::holds_alternative<PushClipCommand>(cmd)) ++clips;
+        if (std::holds_alternative<PopClipCommand>(cmd)) ++unclips;
+    }
+    assert(clips == 1);
+    assert(unclips == 1);
+
+    BitmapRenderer renderer(160, 120);
+    renderer.clear(Color::white());
+    renderer.render(list);
+
+    // Inside the clipping box: the red child is visible.
+    const Color inside = renderer.get_pixel(10, 10);
+    assert(inside.r > 200 && inside.g < 60 && inside.b < 60);
+
+    // Outside it: the child's paint was clipped away.
+    const Color outside_right = renderer.get_pixel(130, 10);
+    assert(outside_right.r > 240 && outside_right.g > 240 && outside_right.b > 240);
+    const Color outside_bottom = renderer.get_pixel(10, 90);
+    assert(outside_bottom.r > 240 && outside_bottom.g > 240 && outside_bottom.b > 240);
+
+    // overflow: visible emits no clip at all, so the same child leaks out.
+    auto bleeding_root = build_doc(
+        "<div style='width: 100px; height: 50px'>"
+        "  <div style='width: 300px; height: 200px; background: rgb(255, 0, 0)'></div>"
+        "</div>");
+    auto bleeding = DisplayList::build(bleeding_root);
+    assert(!has_command(bleeding, [](const PaintCommand& cmd) {
+        return std::holds_alternative<PushClipCommand>(cmd);
+    }));
+
+    BitmapRenderer bleeding_renderer(160, 120);
+    bleeding_renderer.clear(Color::white());
+    bleeding_renderer.render(bleeding);
+    const Color leaked = bleeding_renderer.get_pixel(130, 10);
+    assert(leaked.r > 200 && leaked.g < 60 && leaked.b < 60);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -3778,6 +3902,8 @@ int main() {
     RUN_TEST(select_content_parsing_and_foreign_end_tags);
     RUN_TEST(svg_attribute_adjustment_and_character_reference_edges);
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
+    RUN_TEST(percentage_lengths_resolve_against_containing_block);
+    RUN_TEST(overflow_hidden_clips_painting);
     RUN_TEST(float_shrinks_inline_line_boxes);
     RUN_TEST(float_left_and_right_can_stack_side_by_side);
 

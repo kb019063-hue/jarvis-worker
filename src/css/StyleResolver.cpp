@@ -1,4 +1,5 @@
 #include "litebird/css/StyleResolver.hpp"
+#include <unordered_set>
 #include "litebird/css/CssParser.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include <sstream>
@@ -9,6 +10,12 @@ namespace litebird {
 
 StyleSheet StyleResolver::default_user_agent_stylesheet() {
     const char* ua_css = R"(
+        table { display: table; border-collapse: separate; }
+        thead, tbody, tfoot { display: table-row-group; }
+        tr { display: table-row; }
+        td, th { display: table-cell; }
+        th { font-weight: 700; text-align: center; }
+
         html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li,
         section, article, header, footer, nav, main, pre, blockquote {
             display: block;
@@ -252,13 +259,40 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
         return parse_length(resolved, default_val);
     }
 
+    // Split the numeric part from its unit; the unit decides the scale factor.
+    std::size_t consumed = 0;
+    float number = 0.0f;
     try {
-        size_t idx = 0;
-        float num = std::stof(std::string(val), &idx);
-        return num;
+        number = std::stof(std::string(val), &consumed);
     } catch (...) {
         return default_val;
     }
+
+    std::string unit;
+    for (std::size_t i = consumed; i < val.size(); ++i) {
+        const char c = val[i];
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        if (c == '%') { unit = "%"; break; }
+        unit.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (unit.empty() || unit == "px") return number;
+    if (unit == "em") return number * m_em_base;
+    if (unit == "rem") return number * m_root_font_size;
+    if (unit == "ex" || unit == "ch") return number * m_em_base * 0.5f;
+    if (unit == "pt") return number * 96.0f / 72.0f;
+    if (unit == "pc") return number * 16.0f;
+    if (unit == "in") return number * 96.0f;
+    if (unit == "cm") return number * 96.0f / 2.54f;
+    if (unit == "mm") return number * 96.0f / 25.4f;
+    if (unit == "q") return number * 96.0f / 101.6f;
+    if (unit == "vw") return number * m_viewport_width / 100.0f;
+    if (unit == "vh") return number * m_viewport_height / 100.0f;
+    if (unit == "vmin") return number * std::min(m_viewport_width, m_viewport_height) / 100.0f;
+    if (unit == "vmax") return number * std::max(m_viewport_width, m_viewport_height) / 100.0f;
+    // Percentages need a containing block, which a length parser does not
+    // have; they are resolved by the layout stage instead.
+    return number;
 }
 
 EdgeSizes StyleResolver::parse_box_edges(std::string_view val) const {
@@ -569,7 +603,178 @@ static void parse_grid_template_areas(std::string_view val, std::unordered_map<s
     }
 }
 
+bool StyleResolver::expand_shorthand(const std::string& prop, const std::string& val,
+                                      std::vector<std::pair<std::string, std::string>>& out) const {
+    auto trim = [](std::string text) {
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.erase(text.begin());
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+        return text;
+    };
+    auto split_tokens = [&](const std::string& text) {
+        std::vector<std::string> tokens;
+        std::string current;
+        int depth = 0;
+        for (char c : text) {
+            if (c == '(') ++depth;
+            if (c == ')') --depth;
+            if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                if (!current.empty()) { tokens.push_back(current); current.clear(); }
+            } else {
+                current.push_back(c);
+            }
+        }
+        if (!current.empty()) tokens.push_back(current);
+        return tokens;
+    };
+    auto is_color_token = [](const std::string& token) {
+        if (token.empty()) return false;
+        if (token[0] == '#') return true;
+        if (token.rfind("rgb", 0) == 0 || token.rfind("hsl", 0) == 0) return true;
+        std::string lowered;
+        for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        static const std::unordered_set<std::string> named = {
+            "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
+            "gray", "grey", "silver", "maroon", "navy", "teal", "olive", "lime",
+            "aqua", "fuchsia", "transparent", "currentcolor", "pink", "brown",
+            "gold", "indigo", "violet", "cyan", "magenta", "beige", "ivory"};
+        return named.count(lowered) > 0;
+    };
+
+    // One-to-four value box shorthands: top, right, bottom, left.
+    if (prop == "margin" || prop == "padding" || prop == "border-width" || prop == "border-color") {
+        auto tokens = split_tokens(trim(val));
+        if (tokens.empty()) return true;
+        std::string top, right, bottom, left;
+        if (prop == "margin" || prop == "padding") {
+            top = prop + "-top"; right = prop + "-right";
+            bottom = prop + "-bottom"; left = prop + "-left";
+        } else if (prop == "border-width") {
+            top = "border-top-width"; right = "border-right-width";
+            bottom = "border-bottom-width"; left = "border-left-width";
+        } else {
+            top = "border-top-color"; right = "border-right-color";
+            bottom = "border-bottom-color"; left = "border-left-color";
+        }
+        switch (tokens.size()) {
+            case 1:
+                out.emplace_back(top, tokens[0]); out.emplace_back(right, tokens[0]);
+                out.emplace_back(bottom, tokens[0]); out.emplace_back(left, tokens[0]);
+                break;
+            case 2:
+                out.emplace_back(top, tokens[0]); out.emplace_back(right, tokens[1]);
+                out.emplace_back(bottom, tokens[0]); out.emplace_back(left, tokens[1]);
+                break;
+            case 3:
+                out.emplace_back(top, tokens[0]); out.emplace_back(right, tokens[1]);
+                out.emplace_back(bottom, tokens[2]); out.emplace_back(left, tokens[1]);
+                break;
+            default:
+                out.emplace_back(top, tokens[0]); out.emplace_back(right, tokens[1]);
+                out.emplace_back(bottom, tokens[2]); out.emplace_back(left, tokens[3]);
+                break;
+        }
+        return true;
+    }
+
+    // border-radius collapses to the single radius the renderer supports.
+    if (prop == "border-radius") {
+        auto tokens = split_tokens(trim(val));
+        if (!tokens.empty()) out.emplace_back("border-radius", tokens[0]);
+        return true;
+    }
+
+    // inset / scroll-* have no renderer support yet.
+    if (prop == "inset" || prop == "scroll-margin" || prop == "scroll-padding") {
+        return true;
+    }
+
+    // border / border-top / ... : width, style and colour in any order.
+    static const std::unordered_set<std::string> border_sides = {
+        "border", "border-top", "border-right", "border-bottom", "border-left"};
+    if (border_sides.count(prop)) {
+        auto tokens = split_tokens(trim(val));
+        for (const auto& raw_token : tokens) {
+            const std::string token = trim(raw_token);
+            if (token.empty()) continue;
+            std::string lowered;
+            for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (lowered == "none" || lowered == "hidden" || lowered == "solid" || lowered == "dashed" ||
+                lowered == "dotted" || lowered == "double" || lowered == "groove" ||
+                lowered == "ridge" || lowered == "inset" || lowered == "outset") {
+                continue;  // border styles are not rendered yet
+            }
+            if (is_color_token(token)) {
+                out.emplace_back(prop == "border" ? "border-color" : prop + "-color", token);
+            } else {
+                out.emplace_back(prop == "border" ? "border-width" : prop + "-width", token);
+            }
+        }
+        return true;
+    }
+
+    // background: only the colour component is honoured today.
+    if (prop == "background") {
+        for (const auto& token : split_tokens(trim(val))) {
+            if (token.rfind("url(", 0) == 0 || token == "no-repeat" || token == "repeat" ||
+                token.rfind("linear-gradient(", 0) == 0) {
+                continue;
+            }
+            if (is_color_token(token)) { out.emplace_back("background-color", token); break; }
+        }
+        return true;
+    }
+
+    // font: family defaults plus weight and size.
+    if (prop == "font") {
+        for (const auto& token : split_tokens(trim(val))) {
+            std::string lowered;
+            for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (lowered == "bold" || lowered == "bolder") out.emplace_back("font-weight", "700");
+            else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
+            else if (lowered == "italic" || lowered == "oblique") continue;
+            else if (lowered.find_first_of("0123456789") != std::string::npos &&
+                     (lowered.ends_with("px") || lowered.ends_with("em") || lowered.ends_with("rem") ||
+                      lowered.ends_with("pt") || lowered.ends_with("%"))) {
+                out.emplace_back("font-size", token);
+            }
+        }
+        return true;
+    }
+
+    if (prop == "flex-flow") {
+        for (const auto& token : split_tokens(trim(val))) {
+            const std::string lowered = [&] {
+                std::string out_token;
+                for (char c : token) out_token.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                return out_token;
+            }();
+            if (lowered == "wrap" || lowered == "nowrap" || lowered == "wrap-reverse") {
+                out.emplace_back("flex-wrap", lowered);
+            } else if (lowered == "row" || lowered == "column") {
+                out.emplace_back("flex-direction", lowered);
+            } else if (lowered == "row-reverse" || lowered == "column-reverse") {
+                out.emplace_back("flex-direction", lowered);
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
+    // CSS custom properties are not shorthands.
+    std::vector<std::pair<std::string, std::string>> longhands;
+    if (!prop.starts_with("--") && expand_shorthand(prop, raw_val, longhands)) {
+        for (const auto& [longhand, longhand_value] : longhands) {
+            apply_longhand(style, longhand, longhand_value);
+        }
+        return;
+    }
+    apply_longhand(style, prop, raw_val);
+}
+
+void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
     if (prop.starts_with("--")) {
         style.custom_properties[prop] = raw_val;
         return;
@@ -583,12 +788,35 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         val = resolve_calc_functions(val, m_viewport_width);
     }
 
+
     if (prop == "display") {
         if (val == "block") style.display = Display::Block;
         else if (val == "inline") style.display = Display::Inline;
         else if (val == "flex") style.display = Display::Flex;
         else if (val == "grid") style.display = Display::Grid;
         else if (val == "none") style.display = Display::None;
+        else if (val == "inline-block") style.display = Display::InlineBlock;
+        else if (val == "inline-flex") style.display = Display::Flex;
+        else if (val == "inline-grid") style.display = Display::Grid;
+        else if (val == "table") style.display = Display::Table;
+        else if (val == "table-row") style.display = Display::TableRow;
+        else if (val == "table-cell") style.display = Display::TableCell;
+        else if (val == "table-row-group" || val == "table-header-group" ||
+                 val == "table-footer-group") style.display = Display::TableRowGroup;
+    } else if (prop == "float") {
+        if (val == "left") style.float_type = FloatType::Left;
+        else if (val == "right") style.float_type = FloatType::Right;
+        else style.float_type = FloatType::None;
+    } else if (prop == "overflow" || prop == "overflow-x" || prop == "overflow-y") {
+        if (val == "hidden") style.overflow = Overflow::Hidden;
+        else if (val == "auto") style.overflow = Overflow::Auto;
+        else if (val == "scroll") style.overflow = Overflow::Scroll;
+        else style.overflow = Overflow::Visible;
+    } else if (prop == "clear") {
+        if (val == "left") style.clear_type = ClearType::Left;
+        else if (val == "right") style.clear_type = ClearType::Right;
+        else if (val == "both") style.clear_type = ClearType::Both;
+        else style.clear_type = ClearType::None;
     } else if (prop == "flex-direction") {
         if (val == "row") style.flex_direction = FlexDirection::Row;
         else if (val == "column") style.flex_direction = FlexDirection::Column;
@@ -776,7 +1004,18 @@ void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& p
         }
     } else if (prop == "border-width") {
         style.border_width = parse_box_edges(val);
+    } else if (prop == "border-top-width") {
+        style.border_width.top = parse_length(val, 0.0f);
+    } else if (prop == "border-right-width") {
+        style.border_width.right = parse_length(val, 0.0f);
+    } else if (prop == "border-bottom-width") {
+        style.border_width.bottom = parse_length(val, 0.0f);
+    } else if (prop == "border-left-width") {
+        style.border_width.left = parse_length(val, 0.0f);
     } else if (prop == "border-color") {
+        style.border_color = Color::parse(val);
+    } else if (prop == "border-top-color" || prop == "border-right-color" ||
+               prop == "border-bottom-color" || prop == "border-left-color") {
         style.border_color = Color::parse(val);
     } else if (prop == "font-size") {
         style.font_size = parse_length(val, 16.0f);
@@ -1237,6 +1476,8 @@ std::string StyleResolver::resolve_calc_functions(const std::string& value, floa
 
 ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style) const {
     ComputedStyle style;
+    // Relative (em/ex/ch) lengths resolve against the inherited font size.
+    m_em_base = parent_style ? parent_style->font_size : 16.0f;
 
     // Inherit properties from parent
     if (parent_style) {
@@ -1338,21 +1579,60 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         return a.spec < b.spec;
     });
 
+    // The cascade, in ascending priority: author normal, inline normal,
+    // author !important, inline !important. (CSS Cascade 4, "cascade sorting
+    // order".) Within each tier the declarations are already sorted by
+    // specificity and then source order.
+    auto apply_all = [&](const std::vector<const Declaration*>& declarations) {
+        for (const auto* declaration : declarations) {
+            apply_declaration(style, declaration->property, declaration->value);
+        }
+    };
+
+    std::vector<const Declaration*> normal_author;
+    std::vector<const Declaration*> important_author;
     for (const auto& m : matched) {
-        apply_declaration(style, m.decl->property, m.decl->value);
+        (m.decl->important ? important_author : normal_author).push_back(m.decl);
     }
 
-    // 3. Inline style attribute (highest priority: specificty 1000, 0, 0)
+    // 3. Inline style attribute (highest priority: specificity 1000, 0, 0)
+    std::vector<Declaration> inline_declarations;
     std::string inline_style = element->get_attribute("style");
     if (!inline_style.empty()) {
         std::string dummy_css = "* { " + inline_style + " }";
         auto sheet = CssParser::parse(dummy_css);
         for (const auto& r : sheet.rules) {
-            for (const auto& d : r.declarations) {
-                apply_declaration(style, d.property, d.value);
-            }
+            for (const auto& d : r.declarations) inline_declarations.push_back(d);
         }
     }
+    std::vector<const Declaration*> normal_inline;
+    std::vector<const Declaration*> important_inline;
+    for (const auto& d : inline_declarations) {
+        (d.important ? important_inline : normal_inline).push_back(&d);
+    }
+
+    std::vector<const Declaration*> cascade_order;
+    cascade_order.insert(cascade_order.end(), normal_author.begin(), normal_author.end());
+    cascade_order.insert(cascade_order.end(), normal_inline.begin(), normal_inline.end());
+    cascade_order.insert(cascade_order.end(), important_author.begin(), important_author.end());
+    cascade_order.insert(cascade_order.end(), important_inline.begin(), important_inline.end());
+
+    // Font size first: em/ex/ch lengths elsewhere on the element resolve
+    // against its own computed font size, while font-size itself resolves
+    // against the inherited one.
+    auto sets_font_size = [](const std::string& prop) {
+        return prop == "font-size" || prop == "font";
+    };
+    std::vector<const Declaration*> rest;
+    for (const auto* declaration : cascade_order) {
+        if (sets_font_size(declaration->property)) {
+            apply_declaration(style, declaration->property, declaration->value);
+        } else {
+            rest.push_back(declaration);
+        }
+    }
+    m_em_base = style.font_size;
+    apply_all(rest);
 
     if (style.has_transform && !style.transform_str.empty()) {
         style.transform_matrix = parse_transform_matrix(style.transform_str);

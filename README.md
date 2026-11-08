@@ -5,6 +5,37 @@
 
 ---
 
+## 📊 Conformance scoreboard
+
+Phase 15 replaced the hand-rolled HTML parser with the WHATWG tree-construction
+algorithm and added a way to *measure* the engine instead of eyeballing it.
+
+| Metric | Value | How it is measured |
+| :--- | :--- | :--- |
+| **DOM tree-construction conformance** | **1575 / 1790 (88.0%)** | html5lib/WPT derivation suite run by `make conformance` |
+| Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
+| Engine unit tests | 63 suites, all passing | `make test` |
+| Parser robustness | 500 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
+
+```bash
+make conformance     # per-file pass rate + failing-case diffs
+make test            # 63 engine suites
+make asan            # sanitizer build, tests, and a fuzz run
+```
+
+The corpus is the same tree-construction material WebKit, Blink, Gecko and
+Ladybird use as their parser baseline, so the number is comparable across
+engines rather than self-referential. It is vendored under
+`tests/html5lib/tree-construction/` (BSD-licensed, see the LICENSE there).
+
+> **Honest scope:** 88.0% on parser conformance means the DOM this engine builds
+> mostly matches a real browser's. It does **not** mean it renders real pages:
+> floats and tables now lay out (Phase 16), but there is no bidi, no
+> `rowspan`/`colspan`, no clipping for `overflow`, and the JS engine is a bytecode
+> interpreter without a JIT. See "Known gaps" in `ARCHITECTURE.md`.
+
+---
+
 ## 🌟 Features & Architecture
 
 Litebird implements the complete modern browser rendering pipeline:
@@ -53,14 +84,27 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Autonomous Custom Elements:** `customElements.define()`, `whenDefined()`, dynamic element upgrade, and lifecycle callbacks (`connectedCallback`, `disconnectedCallback`, `attributeChangedCallback`).
 - **Shadow DOM & Slot Content Projection:** `attachShadow({ mode: 'open' | 'closed' })`, `shadowRoot`, scoped CSS encapsulation with `:host` rules, and `<slot>` content projection (`assignedNodes()`, `assignedElements()`).
 
-### 2. HTML5 Parser (`include/litebird/html/`)
+### 2. HTML5 Parser: spec tree construction (`include/litebird/html/`)
+- **Full WHATWG tree-construction algorithm** (`HtmlTreeBuilder`): 23 insertion modes (`initial` through `after after frameset`), including `in table`, `in table body`, `in row`, `in cell`, `in caption`, `in column group`, `in select`, `in template` and `text`.
+- **Implied element synthesis:** `<html>`, `<head>`, `<body>`, `<tbody>` and `<colgroup>` are created when the markup omits them; `<p>`, `<li>`, `<dd>`/`<dt>`, `<option>` and heading elements auto-close per the spec's implied-end-tag rules.
+- **Active formatting elements + the adoption agency algorithm:** misnested `<b><i></b></i>` repairs produce the same DOM a browser does.
+- **Foster parenting:** stray content inside `<table>` is relocated before the table instead of being dropped.
+- **Scopes:** default, list-item, button, table and select scoping rules drive every "is this tag in scope?" decision.
+- **Foreign content:** SVG and MathML namespaces, case adjustment (`<foreignobject>` → `foreignObject`), `xlink`/`xml` attribute namespacing, HTML/SVG/MathML integration points, and `<![CDATA[ ]]>` sections.
+- **`<template>`:** contents live in a separate `DocumentFragment`, exactly as the spec requires.
+- **Comments and doctypes are real nodes** (`Comment`, `Document::doctype()`), including quirks/limited-quirks/no-quirks document modes.
+- **Spec-complete tokenizer:** all tag, attribute, comment, bogus-comment, doctype and CDATA states, RCDATA/RAWTEXT/script-data/plaintext content models, CRLF normalisation, and the complete 2231-entry named character reference table.
+- **Fragment parsing with a context element**, which is what makes `innerHTML` (and `<tbody>` vs `<div>` contexts) behave correctly.
+- Legacy helpers: `HtmlParser::parse()`, `HtmlParser::parse_fragment_with_context()`.
+
+### 3. HTML Parser helpers (`include/litebird/html/`)
 - Stateful streaming tokenizer (`HtmlTokenizer`).
 - Supports start tags, end tags, attributes (quoted/unquoted, boolean), comments, and DOCTYPEs.
 - Automatic handling of void elements (`<img />`, `<br>`, `<input>`, `<hr>`, `<meta>`, `<link>`).
 - Raw text mode for `<style>` and `<script>` tags.
 - Character entity decoding (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;`).
 
-### 3. CSS Engine, Cascade, Animations & Pseudo-Classes (`include/litebird/css/`)
+### 4. CSS Engine, Cascade, Animations & Pseudo-Classes (`include/litebird/css/`)
 - Selector parser supporting:
   - Universal (`*`)
   - Type / Tag selectors (`div`, `h1`, `p`)
@@ -81,13 +125,16 @@ Litebird implements the complete modern browser rendering pipeline:
   - Timing function calculation: `linear`, `ease`, `ease-in`, `ease-out`, `ease-in-out`.
   - Continuous property interpolation for `opacity`, `width`, `height`, `color`, and `background-color`.
 - **CSS Media Queries (`@media`):** Supports responsive breakpoints (`(max-width: ...)`, `(min-width: ...)`, `(max-height: ...)`, `(min-height: ...)`). Dynamically re-evaluates rule application against active viewport dimensions.
+- **Longhand Shorthands (Phase 15):** `margin`, `padding`, `border`, `border-width`, `border-color`, per-side borders, `background`, `font`, `border-radius` and `flex-flow` are expanded into longhands before cascading, so `margin: 10px 20px` and `border: 3px solid #0f0` behave as expected.
+- **`!important` and the full cascade order (Phase 15):** author normal → inline normal → author `!important` → inline `!important`, applied in `(importance, specificity, source order)` tiers.
+- **Relative and viewport units (Phase 15):** `em`/`ex`/`ch` resolve against the element's own computed font size, `rem` against the root size, and `vw`/`vh`/`vmin`/`vmax` against the viewport; `pt`, `pc`, `in`, `cm`, `mm` and `q` are converted to CSS pixels.
 - **Specificity Calculation:** Computes `(ID, Class, Tag)` triples for accurate cascade resolution.
 - **Built-in User-Agent Stylesheet:** Default styling for headings, paragraphs, lists, and layout blocks.
 - **Style Resolver:** Combines User-Agent styles, Author stylesheets, and inline `style="..."` attributes with property inheritance (`color`, `font-size`, `text-align`).
 
-### 4. Layout Engine: Block, Flexbox, Grid, Positioning & IFC (`include/litebird/layout/`)
+### 5. Layout Engine: Block, Flexbox, Grid, Positioning & IFC (`include/litebird/layout/`)
 - Standard Box Model: `content`, `padding`, `border`, `margin`.
-- Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`.
+- Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`, `TableNode`, `TableRowNode`, `TableCellNode`.
 - **CSS Box Sizing & Constraints:** Full support for `box-sizing: content-box | border-box`, plus `min-width`, `max-width`, `min-height`, and `max-height`.
 - **CSS Positioning & Stacking Contexts:** `position: static | relative | absolute | fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and hierarchical `z-index` stacking context sorting.
 - **CSS Grid Layout (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), `repeat()` counts, `minmax()` track constraints, `auto-fit` auto-repetition, cell auto-placement, item alignment, and grid gap spacing (`row-gap`, `column-gap`, `gap`).
@@ -97,9 +144,19 @@ Litebird implements the complete modern browser rendering pipeline:
   - True continuous text flowing across mixed inline elements (`<b>`, `<strong>`, `<i>`, `<em>`, `<a>`, `<code>`, `<span>`).
   - Inline element styling: custom colors, background pills, borders, padding, and text-decoration (`underline`).
   - Word wrapping across element boundaries with exact baseline alignment.
+- **Floats & Block Formatting Contexts (CSS 2.1 §9.5):**
+  - `float: left | right | none` with shrink-to-fit widths, floating out of the normal flow, and floats stacking side by side until a band is full.
+  - `clear: left | right | both` pushes a box below the relevant float bottoms.
+  - Line boxes shrink around floats per line (`LineBox::left_intrusion` / `right_intrusion`), so text wraps beside a float and reclaims the full width once it has passed.
+  - A block formatting context (`overflow != visible`, floats, flex/grid containers, table cells, inline-blocks, the root) grows to contain its floats instead of collapsing.
+- **CSS Table Layout (`display: table | table-row | table-cell | table-row-group`):**
+  - Anonymous table structure: rows and row groups are flattened into a row grid, and stray cells are collected into rows.
+  - Automatic column sizing: each column is at least as wide as its widest cell's min-content width or explicit width; an explicit table width distributes the surplus across the columns.
+  - Row heights are the maximum of the row's cell heights; cells carry their own padding, borders and backgrounds.
+  - UA stylesheet provides the default `table`/`tr`/`td` display values plus `<th>` centering and bold weight.
 - **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 
-### 5. Multi-Backend Rendering, SVG Vector Graphics, Canvas 2D & Image Decoding (`include/litebird/render/`)
+### 6. Multi-Backend Rendering, SVG Vector Graphics, Canvas 2D & Image Decoding (`include/litebird/render/`)
 - **Native SVG Vector Graphics Engine (`SvgRenderer`):**
   - Direct rasterization of `<svg>` DOM trees into `ImageNode` layout boxes.
   - Coordinate normalization via `viewBox` attribute scaling factors.
@@ -116,7 +173,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
-### 6. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web APIs (`include/litebird/js/`, `include/litebird/net/`)
+### 7. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web APIs (`include/litebird/js/`, `include/litebird/net/`)
 - **ES6 Classes & Prototype Inheritance:** Full syntactic support for `class`, `extends`, `super(...)`, `super.method()`, static methods, instance methods, and runtime `instanceof` prototype chain traversal.
 - **Async Functions & Await Syntax:** First-class `async function`, async arrow functions, and `await` operator, coordinated with the engine microtask EventLoop.
 - **Modern Fetch API & Network Stack:** Standard `fetch(url, options)`, `Response` object (`status`, `statusText`, `ok`, `headers`, `json()`, `text()`), and case-insensitive `Headers` object.
@@ -144,7 +201,7 @@ Litebird implements the complete modern browser rendering pipeline:
   - `fetch(url)` integrating native socket HTTP requests with JavaScript Promises.
   - `canvas.getContext("2d")` returning live 2D drawing contexts.
 
-### 7. Modern Browser Capabilities & Advanced Engine Platform (Phase 14) (`include/litebird/dom/`, `include/litebird/render/`, `include/litebird/net/`, `include/litebird/js/`)
+### 8. Modern Browser Capabilities & Advanced Engine Platform (Phase 14) (`include/litebird/dom/`, `include/litebird/render/`, `include/litebird/net/`, `include/litebird/js/`)
 - **IntersectionObserver API:** Viewport and root-relative intersection detection, threshold crossing calculations (`thresholds`, `rootMargin`), ratio computation, entry records, and EventLoop microtask delivery.
 - **ResizeObserver API:** Element content and border box size change observation (`contentRect`, `borderBoxSize`), target tracking, and reactive microtask dispatch.
 - **History API & Client-Side SPA Routing:** Session history stack management (`pushState`, `replaceState`, `back`, `forward`, `go`), navigation listeners, and standard `popstate` window event dispatch.
@@ -166,7 +223,7 @@ Litebird implements the complete modern browser rendering pipeline:
   - `grid-area`: Item placement into named template areas or explicit grid line coordinates (`row-start / col-start / row-end / col-end`).
   - CSS Containment (`contain: none | strict | content | layout | paint | size`): Layout isolation stopping dirty bit propagation at containment boundaries and size containment.
 
-### 8. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
+### 9. Interactive Browser Shell, EventLoop & Network (`include/litebird/shell/`, `include/litebird/net/`)
 - **Interactive TUI Browser Shell (`BrowserShell`):**
   - Terminal User Interface with keyboard-driven browsing: `[Tab]` / `[Shift+Tab]` cycles focus, `[Enter]` activates links and buttons, `[↑/↓/PgUp/PgDn]` scrolls viewport.
   - Navigation history (`back()`, `forward()`, `reload()`, `navigate_to()`).
@@ -194,7 +251,7 @@ Litebird implements the complete modern browser rendering pipeline:
 # Build the main litebird CLI
 make
 
-# Run the full 32-suite test suite
+# Run the full 58-suite test suite
 make test
 ```
 
@@ -248,7 +305,7 @@ make test
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Running Tests & Conformance
 
 ```bash
 make test

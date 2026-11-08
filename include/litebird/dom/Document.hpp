@@ -6,9 +6,31 @@
 
 namespace litebird {
 
+/// Document type information retained from the tokenizer.
+struct Doctype {
+    bool present{false};
+    std::string name;
+    std::string public_id;
+    std::string system_id;
+};
+
+/// Document mode, which changes a handful of parser and CSS behaviours.
+enum class QuirksMode {
+    NoQuirks,
+    Quirks,
+    LimitedQuirks
+};
+
 class Document : public Node {
 public:
     Document() : Node(NodeType::Document) {}
+
+    void set_doctype(Doctype d) { m_doctype = std::move(d); }
+    const Doctype& doctype() const { return m_doctype; }
+    bool has_doctype() const { return m_doctype.present; }
+
+    void set_quirks_mode(QuirksMode m) { m_quirks_mode = m; }
+    QuirksMode quirks_mode() const { return m_quirks_mode; }
 
     const std::string& title() const { return m_title; }
     void set_title(std::string t) { m_title = std::move(t); }
@@ -30,6 +52,8 @@ public:
 
 private:
     std::string m_title;
+    Doctype m_doctype;
+    QuirksMode m_quirks_mode{QuirksMode::NoQuirks};
 };
 
 } // namespace litebird

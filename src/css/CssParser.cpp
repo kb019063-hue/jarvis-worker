@@ -283,6 +283,23 @@ Declaration CssParser::parse_declaration() {
         decl.value.pop_back();
     }
 
+    // Strip a trailing "!important" and remember the declaration's importance.
+    auto strip_important = [](std::string& text) {
+        std::string lowered = text;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+        const std::string marker = "!important";
+        auto pos = lowered.rfind(marker);
+        if (pos == std::string::npos) return false;
+        // Only treat it as the flag when nothing but whitespace follows.
+        for (std::size_t i = pos + marker.size(); i < text.size(); ++i) {
+            if (!std::isspace(static_cast<unsigned char>(text[i]))) return false;
+        }
+        text.erase(pos);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+        return true;
+    };
+    if (strip_important(decl.value)) decl.important = true;
+
     if (peek() == ';') advance();
 
     return decl;

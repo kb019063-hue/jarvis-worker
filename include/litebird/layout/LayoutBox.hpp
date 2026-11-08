@@ -18,7 +18,20 @@ enum class BoxType {
     GridNode,
     ImageNode,
     AnonymousBlock,
-    TextNode
+    TextNode,
+    TableNode,
+    TableRowNode,
+    TableCellNode
+};
+
+/// A horizontal exclusion created by a float, in the coordinate space of the
+/// box that owns the float context. `left`/`right` are the intrusion depths
+/// from the content edges.
+struct FloatBand {
+    float top{0.0f};
+    float bottom{0.0f};
+    float left{0.0f};
+    float right{0.0f};
 };
 
 class LayoutBox;
@@ -35,6 +48,8 @@ struct InlineFragment {
 struct LineBox {
     Rect rect;                            // Overall line bounds (x, y, w, h)
     float baseline{0.0f};                 // Distance from top of line to font baseline
+    float left_intrusion{0.0f};           // Space taken by floats on this line
+    float right_intrusion{0.0f};
     std::vector<InlineFragment> fragments; // Inline fragments forming this line
 };
 
@@ -66,6 +81,18 @@ public:
         return std::make_shared<LayoutBox>(BoxType::GridNode, std::move(n), std::move(s));
     }
 
+    static std::shared_ptr<LayoutBox> create_table(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::TableNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_table_row(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::TableRowNode, std::move(n), std::move(s));
+    }
+
+    static std::shared_ptr<LayoutBox> create_table_cell(std::shared_ptr<Node> n, ComputedStyle s) {
+        return std::make_shared<LayoutBox>(BoxType::TableCellNode, std::move(n), std::move(s));
+    }
+
     static std::shared_ptr<LayoutBox> create_inline(std::shared_ptr<Node> n, ComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::InlineNode, std::move(n), std::move(s));
     }
@@ -93,6 +120,23 @@ public:
     }
 
     bool establishes_ifc() const;
+
+    /// True when this box establishes a block formatting context, which means
+    /// it contains its own floats (CSS 2.1 section 9.4.1).
+    bool establishes_bfc() const;
+
+    // --- float context -----------------------------------------------------
+    // Floats declared inside this box, in this box's content coordinates.
+    std::vector<FloatBand> float_bands;
+    // Bands inherited from the nearest ancestor that owns floats, plus this
+    // box's content origin relative to that ancestor.
+    const std::vector<FloatBand>* inherited_bands{nullptr};
+    float inherited_bands_offset_y{0.0f};
+
+    /// Horizontal intrusions at content-relative `y`.
+    static void band_at(const std::vector<FloatBand>& bands, float y, float& left, float& right);
+    /// Bottom edge of the floats that `clear` must move below, or -1.
+    static float clearance_y(const std::vector<FloatBand>& bands, ClearType clear);
     void layout(float containing_width, float containing_height = 0.0f);
     void dump(std::ostream& os, int indent = 0) const;
     void shift_position(float dx, float dy);
@@ -123,6 +167,13 @@ public:
 
 private:
     void layout_block(float containing_width);
+    void layout_table(float containing_width);
+    void layout_table_row(float containing_width);
+    void layout_table_cell(float containing_width);
+    /// Lays a floated child out with a shrink-to-fit width.
+    void layout_float(float containing_width);
+    /// Largest unbreakable inline content width, used as a table column floor.
+    static float min_content_width(const LayoutBox& box, float fallback);
     void layout_flex(float containing_width);
     void layout_grid(float containing_width);
     void layout_image(float containing_width);

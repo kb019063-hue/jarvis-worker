@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Engine test suites
+        run: make test
+      - name: Smoke-test the CLI
+        run: ./build/litebird examples/hello.html --dump-dom-webplatform
+
+  conformance:
+    name: DOM conformance (html5lib corpus)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Tree-construction scoreboard
+        run: make conformance
+      - name: Enforce the conformance floor
+        # The corpus is fixed, so the score is deterministic. Raise this floor
+        # as the parser improves; it exists to catch regressions.
+        run: python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
+          && python3 -c "
+import json, sys
+report = json.load(open('build/conformance.json'))
+print(f\"conformance: {report['passed']}/{report['total']} = {report['rate']:.1f}%\")
+sys.exit(0 if report['rate'] >= 80.0 else 1)
+"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          path: build/conformance.json
+
+  sanitizers:
+    name: Address/UB sanitizers + parser fuzzing
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Sanitizer build, tests and fuzz smoke run
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: make asan

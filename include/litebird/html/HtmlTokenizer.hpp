@@ -2,7 +2,7 @@
 
 #include <string>
 #include <string_view>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace litebird {
@@ -16,32 +16,40 @@ enum class HtmlTokenType {
     EndOfFile
 };
 
+/// A tokenizer output token. Unlike the pre-Phase-15 tokenizer this keeps
+/// attribute order (duplicates already dropped), separates doctype
+/// identifiers, and retains comments as first-class tokens.
 struct HtmlToken {
     HtmlTokenType type{HtmlTokenType::EndOfFile};
-    std::string tag_name;
-    std::unordered_map<std::string, std::string> attributes;
+    std::string name;                              // tag name or doctype name
+    std::vector<std::pair<std::string, std::string>> attributes;
+    std::string data;                              // character or comment data
+    std::string public_id;
+    std::string system_id;
     bool self_closing{false};
-    std::string data; // for Character, Comment, Doctype
+    bool force_quirks{false};
 
-    static HtmlToken make_character(char c) {
-        HtmlToken t;
-        t.type = HtmlTokenType::Character;
-        t.data = std::string(1, c);
-        return t;
+    bool is_start_tag(std::string_view tag) const {
+        return type == HtmlTokenType::StartTag && name == tag;
     }
 
-    static HtmlToken make_character_string(std::string str) {
-        HtmlToken t;
-        t.type = HtmlTokenType::Character;
-        t.data = std::move(str);
-        return t;
+    bool is_end_tag(std::string_view tag) const {
+        return type == HtmlTokenType::EndTag && name == tag;
     }
 
-    static HtmlToken make_eof() {
-        HtmlToken t;
-        t.type = HtmlTokenType::EndOfFile;
-        return t;
-    }
+    bool is_character() const { return type == HtmlTokenType::Character; }
+
+    static HtmlToken make_eof() { return HtmlToken{}; }
+};
+
+/// The tokenizer content model, which the tree builder switches as it
+/// inserts elements such as <title>, <style> and <script>.
+enum class ContentModel {
+    Data,
+    Rcdata,
+    Rawtext,
+    ScriptData,
+    Plaintext
 };
 
 class HtmlTokenizer {
@@ -51,22 +59,41 @@ public:
     HtmlToken next_token();
     bool has_more() const { return m_cursor < m_input.size(); }
 
-    void switch_to_raw_text(std::string tag_name);
+    /// Switches the content model (the spec's "tokenizer state" changes made
+    /// by the tree builder, e.g. after inserting <title> or <script>).
+    void set_content_model(ContentModel model, std::string tag_name);
+    void switch_to_raw_text(std::string tag_name) { set_content_model(ContentModel::Rawtext, std::move(tag_name)); }
+    ContentModel content_model() const { return m_content_model; }
+
+    /// CDATA sections are only recognised inside foreign (SVG/MathML) content.
+    void set_allow_cdata(bool allow) { m_allow_cdata = allow; }
 
 private:
-    char peek(size_t offset = 0) const;
-    char advance();
-    void consume_whitespace();
+    bool eof(std::size_t offset = 0) const { return m_cursor + offset >= m_input.size(); }
+    char peek(std::size_t offset = 0) const { return eof(offset) ? '\0' : m_input[m_cursor + offset]; }
+    void advance() { if (!eof()) ++m_cursor; }
+    bool starts_with_ci(std::string_view text) const;
 
-    HtmlToken consume_tag();
-    HtmlToken consume_comment();
-    HtmlToken consume_doctype();
-    HtmlToken consume_raw_text();
+    std::string consume_char_ref(bool in_attribute);
+    std::string consume_numeric_char_ref();
+    void consume_tag(HtmlToken& token);
+    void consume_comment(HtmlToken& token);
+    void consume_bogus_comment(HtmlToken& token, std::string_view prefix);
+    void consume_doctype(HtmlToken& token);
+    void consume_cdata(HtmlToken& token);
+    bool scan_text_run(HtmlToken& token);
+    void skip_whitespace();
 
+    std::string m_storage;      // holds the CRLF-normalised input
     std::string_view m_input;
-    size_t m_cursor{0};
-    bool m_raw_text_mode{false};
-    std::string m_raw_text_tag;
+    std::size_t m_cursor{0};
+    ContentModel m_content_model{ContentModel::Data};
+    std::string m_text_tag;     // tag name for RCDATA/RAWTEXT/ScriptData
+    bool m_allow_cdata{false};
+    bool m_emitted_eof{false};
 };
+
+/// Appends the UTF-8 encoding of `codepoint` to `out`.
+void append_utf8(std::string& out, char32_t codepoint);
 
 } // namespace litebird

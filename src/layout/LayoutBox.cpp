@@ -35,25 +35,46 @@ void LayoutBox::layout(float containing_width, float containing_height) {
         case BoxType::TextNode:
             layout_text(containing_width);
             break;
+        case BoxType::TableNode:
+            layout_table(containing_width);
+            break;
+        case BoxType::TableRowNode:
+            layout_table_row(containing_width);
+            break;
+        case BoxType::TableCellNode:
+            layout_table_cell(containing_width);
+            break;
     }
 
     clear_layout_flags();
 }
 
 bool LayoutBox::establishes_ifc() const {
-    if (box_type != BoxType::BlockNode && box_type != BoxType::AnonymousBlock) {
+    if (box_type != BoxType::BlockNode && box_type != BoxType::AnonymousBlock &&
+        box_type != BoxType::TableCellNode) {
         return false;
     }
+    if (style.is_table() || style.is_table_row()) return false;
     if (children.empty()) return false;
+    bool has_inline_content = false;
     for (const auto& child : children) {
+        // Out-of-flow children do not take part in inline flow, and floats are
+        // handled by the formatting context itself.
+        if (child->style.is_out_of_flow() || child->style.is_floated()) continue;
         if (child->box_type == BoxType::BlockNode ||
             child->box_type == BoxType::FlexNode ||
             child->box_type == BoxType::GridNode ||
-            child->box_type == BoxType::AnonymousBlock) {
+            child->box_type == BoxType::AnonymousBlock ||
+            child->box_type == BoxType::TableNode ||
+            child->box_type == BoxType::TableRowNode ||
+            child->box_type == BoxType::TableCellNode) {
             return false;
         }
+        has_inline_content = true;
     }
-    return true;
+    // A box holding nothing but out-of-flow or floated children has no inline
+    // content to format; it needs the block path so its floats can be placed.
+    return has_inline_content;
 }
 
 void LayoutBox::layout_block(float containing_width) {
@@ -101,12 +122,74 @@ void LayoutBox::layout_block(float containing_width) {
         dimensions.margin.right = remaining_h;
     }
 
-    // 2. Layout Children and compute content height
+    // 2. Layout Children, placing floats and propagating the float context
     float y_cursor = 0.0f;
+    float_bands.clear();
+
     for (auto& child : children) {
         if (child->style.is_out_of_flow()) {
             continue; // Handled in out-of-flow pass
         }
+
+        // --- floated children are taken out of the normal flow -------------
+        if (child->style.is_floated()) {
+            child->layout_float(dimensions.content.width);
+
+            const float margin_box_w = child->dimensions.margin_box().width;
+            const float margin_box_h = child->dimensions.margin_box().height;
+            const float inset_x = child->dimensions.margin.left + child->dimensions.border.left +
+                                  child->dimensions.padding.left;
+
+            // Slide down until the float fits horizontally next to the others.
+            float float_top = y_cursor;
+            float left_intrusion = 0.0f;
+            float right_intrusion = 0.0f;
+            for (int guard = 0; guard < 512; ++guard) {
+                band_at(float_bands, float_top, left_intrusion, right_intrusion);
+                const float room = dimensions.content.width - left_intrusion - right_intrusion;
+                if (room >= margin_box_w || float_top > 100000.0f) break;
+                float_top += std::max(1.0f, margin_box_h * 0.25f);
+                left_intrusion = right_intrusion = 0.0f;
+                band_at(float_bands, float_top, left_intrusion, right_intrusion);
+            }
+
+            float float_x;
+            if (child->style.float_type == FloatType::Left) {
+                float_x = dimensions.content.x + left_intrusion + inset_x;
+                float_bands.push_back(FloatBand{float_top, float_top + margin_box_h,
+                                                left_intrusion + margin_box_w, 0.0f});
+            } else {
+                float_x = dimensions.content.x + dimensions.content.width - right_intrusion -
+                          margin_box_w + inset_x;
+                float_bands.push_back(FloatBand{float_top, float_top + margin_box_h,
+                                                0.0f, right_intrusion + margin_box_w});
+            }
+
+            const float float_y = dimensions.content.y + float_top +
+                                  child->dimensions.margin.top + child->dimensions.border.top +
+                                  child->dimensions.padding.top;
+            child->shift_position(float_x - child->dimensions.content.x,
+                                  float_y - child->dimensions.content.y);
+            continue;  // floats never advance the flow cursor
+        }
+
+        // --- clearance ------------------------------------------------------
+        if (child->style.clear_type != ClearType::None) {
+            float clear_to = clearance_y(float_bands, child->style.clear_type);
+            if (float_bands.empty() && inherited_bands && inherited_bands->size() > 0) {
+                // Bands owned by an ancestor are measured from its content box.
+                (void)clear_to;
+            }
+            if (clear_to > y_cursor) y_cursor = clear_to;
+        }
+
+        // --- inline content wraps around this box's floats ------------------
+        const std::vector<FloatBand>* child_bands =
+            !float_bands.empty() ? &float_bands : inherited_bands;
+        child->inherited_bands = child_bands;
+        child->inherited_bands_offset_y =
+            (!float_bands.empty() ? 0.0f : inherited_bands_offset_y) + y_cursor +
+            child->style.margin.top + child->style.border_width.top + child->style.padding.top;
 
         child->layout(dimensions.content.width);
 
@@ -144,6 +227,13 @@ void LayoutBox::layout_block(float containing_width) {
         }
     } else {
         dimensions.content.height = y_cursor;
+    }
+
+    // A block formatting context contains its floats: grow to the lowest one.
+    if (!float_bands.empty() && establishes_bfc()) {
+        float floats_bottom = 0.0f;
+        for (const auto& band : float_bands) floats_bottom = std::max(floats_bottom, band.bottom);
+        dimensions.content.height = std::max(dimensions.content.height, floats_bottom);
     }
 
     if (style.min_height >= 0.0f) {
@@ -803,9 +893,60 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         return;
     }
 
-    // 3. Line Breaking
+    // 2b. Floats that share this formatting context are placed first, so the
+    //     line boxes can wrap around them.
+    float_bands.clear();
+    for (auto& child : children) {
+        if (!child->style.is_floated()) continue;
+
+        child->layout_float(dimensions.content.width);
+
+        const float margin_box_w = child->dimensions.margin_box().width;
+        const float margin_box_h = child->dimensions.margin_box().height;
+        const float inset_x = child->dimensions.margin.left + child->dimensions.border.left +
+                              child->dimensions.padding.left;
+
+        float left_intrusion = 0.0f;
+        float right_intrusion = 0.0f;
+        band_at(float_bands, 0.0f, left_intrusion, right_intrusion);
+
+        float float_x;
+        if (child->style.float_type == FloatType::Left) {
+            float_x = dimensions.content.x + left_intrusion + inset_x;
+            float_bands.push_back(FloatBand{0.0f, margin_box_h, left_intrusion + margin_box_w, 0.0f});
+        } else {
+            float_x = dimensions.content.x + dimensions.content.width - right_intrusion -
+                      margin_box_w + inset_x;
+            float_bands.push_back(FloatBand{0.0f, margin_box_h, 0.0f, right_intrusion + margin_box_w});
+        }
+
+        child->shift_position(float_x - child->dimensions.content.x,
+                              dimensions.content.y - child->dimensions.content.y +
+                                  child->dimensions.margin.top + child->dimensions.border.top +
+                                  child->dimensions.padding.top);
+    }
+
+    // 3. Line Breaking, wrapping around any floats in scope
+    const std::vector<FloatBand>* bands = !float_bands.empty() ? &float_bands : inherited_bands;
+    const float bands_offset = !float_bands.empty() ? 0.0f : inherited_bands_offset_y;
+    auto measure_band = [&](float y, float& left, float& right) -> float {
+        if (!bands) {
+            left = 0.0f;
+            right = 0.0f;
+            return available_width;
+        }
+        LayoutBox::band_at(*bands, bands_offset + y, left, right);
+        return std::max(1.0f, available_width - left - right);
+    };
+
     LineBox current_line;
     float current_x = 0.0f;
+    float line_top = 0.0f;              // running y used for band queries
+    float line_left = 0.0f;
+    float line_right = 0.0f;
+    float line_capacity = measure_band(line_top, line_left, line_right);
+
+    const float estimated_line_height = style.font_size * 1.25f;
 
     auto finish_line = [&](LineBox& line, float width) {
         while (!line.fragments.empty() && line.fragments.back().is_space) {
@@ -830,10 +971,12 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
             continue;
         }
 
-        if (!current_line.fragments.empty() && (current_x + item.width > available_width)) {
-            // Line break
+        if (!current_line.fragments.empty() && (current_x + item.width > line_capacity)) {
+            // Line break: the next line may have a different float shape.
             finish_line(current_line, current_x);
             current_x = 0.0f;
+            line_top += estimated_line_height;
+            line_capacity = measure_band(line_top, line_left, line_right);
 
             if (item.type == InlineItem::Type::Space) {
                 continue;
@@ -852,6 +995,8 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         frag.is_space = (item.type == InlineItem::Type::Space);
 
         current_line.fragments.push_back(frag);
+        current_line.left_intrusion = line_left;
+        current_line.right_intrusion = line_right;
         current_x += item.width;
     }
 
@@ -859,20 +1004,26 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         finish_line(current_line, current_x);
     }
 
-    // 4. Vertical Placement and text-align
+    // 4. Vertical Placement, text-align and float offsets
     float y_cursor = 0.0f;
     for (auto& line : line_boxes) {
-        float free_space = available_width - line.rect.width;
-        float x_offset = 0.0f;
+        float left = 0.0f;
+        float right = 0.0f;
+        const float capacity = measure_band(y_cursor, left, right);
+
+        float free_space = std::max(0.0f, capacity - line.rect.width);
+        float x_offset = left;
 
         if (style.text_align == "center") {
-            x_offset = std::max(0.0f, free_space / 2.0f);
+            x_offset = left + free_space / 2.0f;
         } else if (style.text_align == "right") {
-            x_offset = std::max(0.0f, free_space);
+            x_offset = left + free_space;
         }
 
-        line.rect.x = dimensions.content.x;
+        line.rect.x = dimensions.content.x + x_offset;
         line.rect.y = dimensions.content.y + y_cursor;
+        line.left_intrusion = left;
+        line.right_intrusion = right;
 
         for (auto& frag : line.fragments) {
             frag.rect.x = dimensions.content.x + x_offset + frag.rect.x;
@@ -1054,6 +1205,13 @@ void LayoutBox::dump(std::ostream& os, int indent) const {
         case BoxType::ImageNode: os << "ImageBox"; break;
         case BoxType::AnonymousBlock: os << "AnonymousBlock"; break;
         case BoxType::TextNode: os << "TextBox"; break;
+        case BoxType::TableNode: os << "TableBox"; break;
+        case BoxType::TableRowNode: os << "TableRowBox"; break;
+        case BoxType::TableCellNode: os << "TableCellBox"; break;
+    }
+
+    if (node && node->is_element() && !node->as_element()->id().empty()) {
+        os << " #" << node->as_element()->id();
     }
 
     os << " [x=" << dimensions.content.x
@@ -1062,7 +1220,10 @@ void LayoutBox::dump(std::ostream& os, int indent) const {
        << " h=" << dimensions.content.height << "]";
 
     if (!line_boxes.empty()) {
-        os << " IFC lines=" << line_boxes.size();
+        os << " IFC lines=" << line_boxes.size()
+           << " first_line=(" << line_boxes.front().rect.x << "," << line_boxes.front().rect.y
+           << " w=" << line_boxes.front().rect.width
+           << " intrude=" << line_boxes.front().left_intrusion << ")";
     } else if (!lines.empty()) {
         os << " lines=" << lines.size() << " text=\"" << lines[0] << (lines.size() > 1 ? "...\"" : "\"");
     } else if (!text.empty()) {

@@ -328,6 +328,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 13** | Modern DOM & Web Components: MutationObserver API (`new MutationObserver`, microtask batching, record generation), Autonomous Custom Elements (`customElements.define`, `whenDefined`, upgrade, lifecycles), and Shadow DOM (`attachShadow`, scoped CSS encapsulation, `<slot>` content projection) | ✅ Completed (46/46 tests passing) |
 | **Phase 14** | Modern Browser Capabilities & Advanced Engine Platform: Observers & Client Routing (`IntersectionObserver`, `ResizeObserver`, `History` SPA navigation API), CSS Visual Filters & Canvas Blending (`blur`, `brightness`, `contrast`, `sepia`, `drop-shadow`, `backdrop-filter`, `globalCompositeOperation`), JS Generators, Iterators & AbortController (`function*`, `yield`, `for...of`, `AbortController`, `fetch` cancellation), and CSS Grid Named Areas (`grid-template-areas`, `grid-area`) & Layout Containment (`contain: layout paint strict`) | ✅ Completed (52/52 tests passing) |
 | **Phase 15** | **Spec Fidelity & The Scoreboard:** complete WHATWG tree construction (23 insertion modes, adoption agency, foster parenting, foreign content, templates), spec-complete tokenizer with the full 2231-entry entity table, CSS shorthand expansion + `!important` cascade tiers + relative/viewport units, plus the conformance harness, sanitizer targets, fuzzing and CI. **1571/1790 (87.8%) on the html5lib tree-construction corpus; 58/58 test suites; 0 fuzz findings over 500 mutations.** | ✅ Completed |
+| **Phase 16** | **Floats, Block Formatting Contexts & Table Layout:** `float: left/right` with shrink-to-fit sizing, per-line line-box shrinking around floats, `clear`, BFC establishment and float containment, plus `display: table/table-row/table-cell/table-row-group` with anonymous table structure, automatic column sizing and per-row height resolution; bitmap text advance aligned with the layout metric. **1575/1790 (88.0%) conformance; 63/63 test suites; 0 fuzz findings.** | ✅ Completed |
 
 ---
 
@@ -669,8 +670,10 @@ floor so the score cannot silently regress.
 
 ### 5. Robustness
 
-- `make asan` builds with AddressSanitizer + UndefinedBehaviorSanitizer, runs
-  the 58 suites, then fuzzes the parser.
+- `make asan` builds the CLI and the tests with AddressSanitizer +
+  UndefinedBehaviorSanitizer, runs the full engine suite, then fuzzes the parser
+  (the sanitizer build has to produce `build-asan/litebird` first, or the fuzzer
+  has nothing to run).
 - `tools/fuzz/fuzz_parser.py` mutates the conformance corpus (byte flips,
   token splicing, truncation, duplication, doubling) and feeds each mutant to
   the sanitizer build. It found a real dangling-index bug in the adoption
@@ -680,11 +683,101 @@ floor so the score cannot silently regress.
 
 ---
 
+## Phase 16 Architecture: Floats, Block Formatting Contexts & Table Layout
+
+### 1. Why this phase existed
+
+Phase 15 made the DOM trustworthy but left the box tree unable to express two of
+the most common constructs on the web. Every second real page uses a float for
+an image or a table for tabular data; until Phase 16 the engine laid both out as
+ordinary blocks (floats overlapped their siblings, tables stacked their cells
+vertically). Phase 16 closes that gap without changing the parser.
+
+### 2. Float bands (`LayoutBox::float_bands`)
+
+A float is described by a *band* — a horizontal exclusion in the coordinate
+space of the box that owns it:
+
+```cpp
+struct FloatBand {
+    float top, bottom;   // vertical extent, relative to the owner's content box
+    float left, right;   // intrusion depth from the owner's left/right content edge
+};
+```
+
+`band_at(bands, y, left, right)` returns the union of every band covering `y`.
+That single predicate drives all three consumers:
+
+- **Float placement.** A floated child is laid out with a shrink-to-fit width
+  (`layout_float`), then slid down until the remaining band width can hold it.
+  Left floats pack from the left intrusion outward; right floats pack from the
+  right edge inward, so `float: left` and `float: right` can share a row.
+- **Line-box shrinking.** `layout_inline_formatting_context` queries the band at
+  each line's y, reduces that line's available width, and offsets the line's
+  fragments by the intrusion. Text therefore wraps beside a float and reclaims
+  the full width once the float's bottom edge is passed — per line, not per box.
+- **Clearance.** `clearance_y(bands, clear)` returns the lowest bottom edge the
+  `clear` value cares about; the flow cursor jumps down to it.
+
+A float never advances the vertical flow cursor, which is exactly what makes it
+out of flow.
+
+### 3. Float context propagation
+
+Bands live in the coordinate space of their owner, so a descendant cannot read
+them directly. Each block hands its children a `(pointer, y-offset)` pair —
+`inherited_bands` / `inherited_bands_offset_y` — pointing at the nearest ancestor
+that owns bands, with the child's content origin expressed in that ancestor's
+coordinates. The anonymous block that wraps a run of inline content therefore
+wraps its lines around a float that is a *sibling* of that content.
+
+`establishes_bfc()` mirrors CSS 2.1 §9.4.1: the root, floats, non-`visible`
+`overflow`, flex/grid containers, table cells and inline-blocks establish a new
+context, and their height grows to include their own floats. A box with only
+floated children is *not* treated as establishing an inline formatting context,
+so its floats still get placed by the block path.
+
+### 4. Table layout (`src/layout/FloatTableLayout.cpp`)
+
+Table boxes are real box types (`TableNode`, `TableRowNode`, `TableCellNode`), so
+the renderer paints cell backgrounds and borders with no special casing.
+
+1. **Anonymous structure.** Row groups (`<tbody>`, `<thead>`, `<tfoot>`) are
+   flattened into a row grid; cells that appear directly in a table are collected
+   into anonymous rows; a column count comes from the widest row.
+2. **Column sizing (auto layout).** Each column is at least as wide as the widest
+   cell's min-content width — the longest unbreakable word, so text can still
+   wrap — or the cell's explicit `width`. An explicit table width distributes the
+   surplus across the columns; without one the table shrink-wraps its content.
+3. **Row sizing.** Each cell is laid out at its column width, positioned on the
+   column origin, and the row height is the tallest cell's margin-box height.
+4. **Height.** The table is the sum of its rows, or an explicit `height`.
+
+### 5. A rendering bug worth fixing on the way
+
+The bitmap renderer advanced text by `8 * scale` pixels per glyph while the
+layout engine measures characters at `0.55 * font-size`. At 16px that is 16px of
+advance for 8.8px of layout width, so every line overran its box and glyphs
+collided. The renderer now uses the same advance the layout computed. This was a
+pre-existing bug, not a Phase 16 regression: it made float and table output
+impossible to verify by eye, which is why it was fixed here.
+
+### 6. What is still approximate
+
+Row/column sizing is a first-order approximation of CSS 2.1 §17.5.2 (no
+percentage columns, no `rowspan`/`colspan`, no `border-collapse`), floats do not
+interact with nested float contexts inside a float, and `overflow` establishes a
+block formatting context but does not clip painting.
+
+---
+
 ## Known gaps (the honest list)
 
-1. **Layout is behind parsing.** No `float`, no table layout (`display: table`),
-   no multicol, no bidi, no font shaping/HarfBuzz. The DOM is now trustworthy;
-   the box tree is not yet.
+1. **Layout is still behind parsing.** Floats, block formatting contexts and
+   basic table layout landed in Phase 16, but there is no multicol, no bidi, no
+   font shaping/HarfBuzz, no `rowspan`/`colspan`, no `border-collapse`, and
+   `overflow` does not clip painting. The DOM is trustworthy; the box tree is
+   plausible.
 2. **No JIT.** The JS engine is a bytecode stack VM. Expect 10-100x slower than
    V8 on script-heavy pages.
 3. **Single process, no sandbox.** Chrome's original headline feature was
@@ -693,7 +786,10 @@ floor so the score cannot silently regress.
 5. **Percentages** are passed to layout rather than resolved in the cascade.
 6. **Script data escaped states** (`<!--` inside `<script>`) are not implemented;
    those cases fail in `scriptdata01.dat`.
-7. **Conformance is not rendering.** 87.8% of the parser corpus is a DOM
+7. **Conformance is not rendering.** 88.0% of the parser corpus is a DOM
    guarantee, not a promise that real pages look right.
+8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
+   layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
+   is under-sized rather than blurry.
 
 ---

@@ -259,7 +259,11 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
             Point tp = current_transform().map_point(arg.position);
-            int scale = std::max(1, static_cast<int>(arg.font_size / 8.0f));
+
+            // Advance must match the metric the layout engine assumes, otherwise
+            // glyphs collide and line widths disagree with the box geometry.
+            const int advance = std::max(1, static_cast<int>(std::lround(arg.font_size * 0.55f)));
+            const int scale = std::max(1, advance / 8);
             int cur_x = static_cast<int>(tp.x);
             int cur_y = static_cast<int>(tp.y);
 
@@ -268,7 +272,7 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                 if (arg.font_weight >= 600) {
                     draw_char(cur_x + 1, cur_y, ch, arg.color, scale);
                 }
-                cur_x += 8 * scale;
+                cur_x += advance;
             }
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {

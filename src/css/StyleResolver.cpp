@@ -10,6 +10,12 @@ namespace litebird {
 
 StyleSheet StyleResolver::default_user_agent_stylesheet() {
     const char* ua_css = R"(
+        table { display: table; border-collapse: separate; }
+        thead, tbody, tfoot { display: table-row-group; }
+        tr { display: table-row; }
+        td, th { display: table-cell; }
+        th { font-weight: 700; text-align: center; }
+
         html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li,
         section, article, header, footer, nav, main, pre, blockquote {
             display: block;
@@ -789,6 +795,28 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val == "flex") style.display = Display::Flex;
         else if (val == "grid") style.display = Display::Grid;
         else if (val == "none") style.display = Display::None;
+        else if (val == "inline-block") style.display = Display::InlineBlock;
+        else if (val == "inline-flex") style.display = Display::Flex;
+        else if (val == "inline-grid") style.display = Display::Grid;
+        else if (val == "table") style.display = Display::Table;
+        else if (val == "table-row") style.display = Display::TableRow;
+        else if (val == "table-cell") style.display = Display::TableCell;
+        else if (val == "table-row-group" || val == "table-header-group" ||
+                 val == "table-footer-group") style.display = Display::TableRowGroup;
+    } else if (prop == "float") {
+        if (val == "left") style.float_type = FloatType::Left;
+        else if (val == "right") style.float_type = FloatType::Right;
+        else style.float_type = FloatType::None;
+    } else if (prop == "overflow" || prop == "overflow-x" || prop == "overflow-y") {
+        if (val == "hidden") style.overflow = Overflow::Hidden;
+        else if (val == "auto") style.overflow = Overflow::Auto;
+        else if (val == "scroll") style.overflow = Overflow::Scroll;
+        else style.overflow = Overflow::Visible;
+    } else if (prop == "clear") {
+        if (val == "left") style.clear_type = ClearType::Left;
+        else if (val == "right") style.clear_type = ClearType::Right;
+        else if (val == "both") style.clear_type = ClearType::Both;
+        else style.clear_type = ClearType::None;
     } else if (prop == "flex-direction") {
         if (val == "row") style.flex_direction = FlexDirection::Row;
         else if (val == "column") style.flex_direction = FlexDirection::Column;

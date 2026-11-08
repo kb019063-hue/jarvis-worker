@@ -2,6 +2,9 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
 BUILD_DIR ?= build
 
+ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
+             -fsanitize=address,undefined -fno-omit-frame-pointer
+
 SRCS = src/dom/Node.cpp \
        src/dom/Document.cpp \
        src/dom/Comment.cpp \
@@ -21,6 +24,7 @@ SRCS = src/dom/Node.cpp \
        src/css/StyleResolver.cpp \
        src/layout/LayoutBox.cpp \
        src/layout/LayoutTree.cpp \
+       src/layout/FloatTableLayout.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
        src/render/Canvas2D.cpp \
@@ -96,9 +100,8 @@ fuzz:
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan:
-	$(MAKE) BUILD_DIR=build-asan \
-	        CXXFLAGS="-std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer" \
-	        BUILD_DIR=build-asan test
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
 clean:

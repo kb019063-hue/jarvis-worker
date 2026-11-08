@@ -12,14 +12,14 @@ algorithm and added a way to *measure* the engine instead of eyeballing it.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1571 / 1790 (87.8%)** | html5lib/WPT derivation suite run by `make conformance` |
+| **DOM tree-construction conformance** | **1575 / 1790 (88.0%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 58 suites, all passing | `make test` |
+| Engine unit tests | 63 suites, all passing | `make test` |
 | Parser robustness | 500 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # per-file pass rate + failing-case diffs
-make test            # 58 engine suites
+make test            # 63 engine suites
 make asan            # sanitizer build, tests, and a fuzz run
 ```
 
@@ -28,9 +28,10 @@ Ladybird use as their parser baseline, so the number is comparable across
 engines rather than self-referential. It is vendored under
 `tests/html5lib/tree-construction/` (BSD-licensed, see the LICENSE there).
 
-> **Honest scope:** 87.8% on parser conformance means the DOM this engine builds
+> **Honest scope:** 88.0% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
-> floats, tables and bidi are still missing, and the JS engine is a bytecode
+> floats and tables now lay out (Phase 16), but there is no bidi, no
+> `rowspan`/`colspan`, no clipping for `overflow`, and the JS engine is a bytecode
 > interpreter without a JIT. See "Known gaps" in `ARCHITECTURE.md`.
 
 ---
@@ -133,7 +134,7 @@ Litebird implements the complete modern browser rendering pipeline:
 
 ### 5. Layout Engine: Block, Flexbox, Grid, Positioning & IFC (`include/litebird/layout/`)
 - Standard Box Model: `content`, `padding`, `border`, `margin`.
-- Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`.
+- Box types: `BlockNode`, `FlexNode`, `GridNode`, `InlineNode`, `AnonymousBlock`, `TextNode`, `ImageNode`, `TableNode`, `TableRowNode`, `TableCellNode`.
 - **CSS Box Sizing & Constraints:** Full support for `box-sizing: content-box | border-box`, plus `min-width`, `max-width`, `min-height`, and `max-height`.
 - **CSS Positioning & Stacking Contexts:** `position: static | relative | absolute | fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and hierarchical `z-index` stacking context sorting.
 - **CSS Grid Layout (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), `repeat()` counts, `minmax()` track constraints, `auto-fit` auto-repetition, cell auto-placement, item alignment, and grid gap spacing (`row-gap`, `column-gap`, `gap`).
@@ -143,6 +144,16 @@ Litebird implements the complete modern browser rendering pipeline:
   - True continuous text flowing across mixed inline elements (`<b>`, `<strong>`, `<i>`, `<em>`, `<a>`, `<code>`, `<span>`).
   - Inline element styling: custom colors, background pills, borders, padding, and text-decoration (`underline`).
   - Word wrapping across element boundaries with exact baseline alignment.
+- **Floats & Block Formatting Contexts (CSS 2.1 §9.5):**
+  - `float: left | right | none` with shrink-to-fit widths, floating out of the normal flow, and floats stacking side by side until a band is full.
+  - `clear: left | right | both` pushes a box below the relevant float bottoms.
+  - Line boxes shrink around floats per line (`LineBox::left_intrusion` / `right_intrusion`), so text wraps beside a float and reclaims the full width once it has passed.
+  - A block formatting context (`overflow != visible`, floats, flex/grid containers, table cells, inline-blocks, the root) grows to contain its floats instead of collapsing.
+- **CSS Table Layout (`display: table | table-row | table-cell | table-row-group`):**
+  - Anonymous table structure: rows and row groups are flattened into a row grid, and stray cells are collected into rows.
+  - Automatic column sizing: each column is at least as wide as its widest cell's min-content width or explicit width; an explicit table width distributes the surplus across the columns.
+  - Row heights are the maximum of the row's cell heights; cells carry their own padding, borders and backgrounds.
+  - UA stylesheet provides the default `table`/`tr`/`td` display values plus `<th>` centering and bold weight.
 - **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 
 ### 6. Multi-Backend Rendering, SVG Vector Graphics, Canvas 2D & Image Decoding (`include/litebird/render/`)

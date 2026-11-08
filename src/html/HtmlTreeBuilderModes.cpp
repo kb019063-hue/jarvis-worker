@@ -875,6 +875,7 @@ void HtmlTreeBuilder::process_in_table(const HtmlToken& token) {
                             current->tag_name() == "tr")) {
                 m_pending_table_text.clear();
                 m_pending_table_text.push_back(token.data[0]);
+                m_table_text_return_mode = m_mode;
                 m_mode = Mode::InTableText;
                 return;
             }
@@ -994,7 +995,7 @@ void HtmlTreeBuilder::process_in_table_text(const HtmlToken& token) {
 
     std::string pending;
     pending.swap(m_pending_table_text);
-    m_mode = Mode::InTable;
+    m_mode = m_table_text_return_mode;
 
     if (!pending.empty()) {
         if (is_ws_only(pending)) {

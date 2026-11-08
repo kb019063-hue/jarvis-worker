@@ -27,7 +27,35 @@ enum class Display {
     Block,
     Flex,
     Grid,
-    None
+    None,
+    InlineBlock,
+    Table,
+    TableRow,
+    TableCell,
+    TableRowGroup
+};
+
+/// CSS `overflow` values (only "does this establish a BFC" matters to layout).
+enum class Overflow {
+    Visible,
+    Hidden,
+    Auto,
+    Scroll
+};
+
+/// CSS `float` values.
+enum class FloatType {
+    None,
+    Left,
+    Right
+};
+
+/// CSS `clear` values.
+enum class ClearType {
+    None,
+    Left,
+    Right,
+    Both
 };
 
 enum class FlexDirection {
@@ -105,6 +133,11 @@ struct ComputedStyle {
     int font_weight{400};
     std::string text_align{"left"};
     std::string text_decoration{"none"}; // "none", "underline"
+
+    // Floats and clearance (CSS 2.1, sections 9.5 and 9.5.2)
+    FloatType float_type{FloatType::None};
+    ClearType clear_type{ClearType::None};
+    Overflow overflow{Overflow::Visible};
 
     // Positioning properties
     Position position{Position::Static};
@@ -206,6 +239,22 @@ struct ComputedStyle {
     bool contains_size() const { return (containment & static_cast<uint8_t>(Containment::Size)) != 0; }
 
     bool is_block() const { return display == Display::Block; }
+    bool is_inline_block() const { return display == Display::InlineBlock; }
+    bool is_table() const { return display == Display::Table; }
+    bool is_table_row() const { return display == Display::TableRow; }
+    bool is_table_cell() const { return display == Display::TableCell; }
+    bool is_table_row_group() const { return display == Display::TableRowGroup; }
+    bool is_table_internal() const {
+        return is_table_row() || is_table_cell() || is_table_row_group();
+    }
+    /// True for boxes that participate as block-level boxes in normal flow.
+    bool is_block_level() const {
+        return display == Display::Block || display == Display::Flex ||
+               display == Display::Grid || display == Display::Table ||
+               display == Display::TableRow || display == Display::TableCell ||
+               display == Display::TableRowGroup;
+    }
+    bool is_floated() const { return float_type != FloatType::None; }
     bool is_inline() const { return display == Display::Inline; }
     bool is_flex() const { return display == Display::Flex; }
     bool is_grid() const { return display == Display::Grid; }

@@ -30,6 +30,13 @@ static std::string collapse_whitespace(std::string_view s) {
     return res;
 }
 
+static bool is_block_level_box(const LayoutBox& box) {
+    return box.box_type == BoxType::BlockNode || box.box_type == BoxType::FlexNode ||
+           box.box_type == BoxType::GridNode || box.box_type == BoxType::AnonymousBlock ||
+           box.box_type == BoxType::TableNode || box.box_type == BoxType::TableRowNode ||
+           box.box_type == BoxType::TableCellNode;
+}
+
 static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, const ComputedStyle& parent_style) {
     if (!box) return;
     if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock) return;
@@ -39,7 +46,7 @@ static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, cons
     bool has_inline = false;
 
     for (const auto& ch : box->children) {
-        if (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::GridNode || ch->box_type == BoxType::AnonymousBlock) {
+        if (is_block_level_box(*ch)) {
             has_block = true;
         } else {
             has_inline = true;
@@ -52,7 +59,7 @@ static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, cons
     std::shared_ptr<LayoutBox> current_anon = nullptr;
 
     for (const auto& ch : box->children) {
-        bool is_block_level = (ch->box_type == BoxType::BlockNode || ch->box_type == BoxType::FlexNode || ch->box_type == BoxType::GridNode || ch->box_type == BoxType::AnonymousBlock);
+        bool is_block_level = is_block_level_box(*ch);
         if (is_block_level) {
             current_anon = nullptr;
             normalized.push_back(ch);
@@ -113,11 +120,17 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
         if (style.is_none()) return nullptr;
 
         std::shared_ptr<LayoutBox> box;
-        if (style.is_flex()) {
+        if (style.is_table()) {
+            box = LayoutBox::create_table(element, style);
+        } else if (style.is_table_row()) {
+            box = LayoutBox::create_table_row(element, style);
+        } else if (style.is_table_cell()) {
+            box = LayoutBox::create_table_cell(element, style);
+        } else if (style.is_flex()) {
             box = LayoutBox::create_flex(element, style);
         } else if (style.is_grid()) {
             box = LayoutBox::create_grid(element, style);
-        } else if (style.is_block()) {
+        } else if (style.is_block() || style.is_block_level() || style.is_inline_block()) {
             box = LayoutBox::create_block(element, style);
         } else {
             box = LayoutBox::create_inline(element, style);

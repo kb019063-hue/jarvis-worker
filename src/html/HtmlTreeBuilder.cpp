@@ -963,6 +963,7 @@ void HtmlTreeBuilder::process_character(char c) {
             insert_character(c);
             return;
         case Mode::InTable:
+            m_table_text_return_mode = m_mode;
             m_mode = Mode::InTableText;
             m_pending_table_text.clear();
             m_pending_table_text.push_back(c);

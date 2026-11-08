@@ -179,6 +179,11 @@ private:
     Mode m_original_mode{Mode::Initial};
     std::vector<Mode> m_template_modes;
     std::string m_pending_table_text;
+    // Mode to return to once pending table character tokens have been flushed.
+    // The spec says "in table", but restoring the real mode keeps consecutive
+    // rows in a single <tbody> (matching every browser) instead of spawning a
+    // new row group per row.
+    Mode m_table_text_return_mode{Mode::InTable};
     bool m_frameset_ok{true};
     bool m_foster_parenting{false};
     bool m_scripting{true};

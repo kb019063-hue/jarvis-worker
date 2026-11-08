@@ -103,7 +103,8 @@ void HtmlTokenizer::set_content_model(ContentModel model, std::string tag_name) 
     m_text_tag = ascii_lowercase(tag_name);
 }
 
-std::string HtmlTokenizer::consume_numeric_char_ref() {
+std::string HtmlTokenizer::consume_numeric_char_ref(bool& ok) {
+    ok = false;
     // The '&#' has already been consumed.
     bool hex = false;
     if (peek() == 'x' || peek() == 'X') {
@@ -125,8 +126,10 @@ std::string HtmlTokenizer::consume_numeric_char_ref() {
         advance();
     }
     if (!any_digits) {
-        return std::string();
+        // absence-of-digits: the consumed characters stay literal text.
+        return hex ? std::string("x") : std::string();
     }
+    ok = true;
     if (peek() == ';') advance();
     std::string out;
     append_utf8(out, numeric_reference_value(value));
@@ -138,8 +141,9 @@ std::string HtmlTokenizer::consume_char_ref(bool in_attribute) {
     if (eof()) return "&";
     if (peek() == '#') {
         advance();
-        std::string decoded = consume_numeric_char_ref();
-        if (decoded.empty()) return "&#";
+        bool ok = false;
+        std::string decoded = consume_numeric_char_ref(ok);
+        if (!ok) return "&#" + decoded;
         return decoded;
     }
 
@@ -160,7 +164,7 @@ std::string HtmlTokenizer::consume_char_ref(bool in_attribute) {
     return decoded;
 }
 
-void HtmlTokenizer::consume_tag(HtmlToken& token) {
+bool HtmlTokenizer::consume_tag(HtmlToken& token) {
     // '<' (and '/' for an end tag) already consumed.
     std::string name;
     while (!eof()) {
@@ -213,14 +217,14 @@ void HtmlTokenizer::consume_tag(HtmlToken& token) {
         const char c = peek();
         if (c == '>') {
             advance();
-            return;
+            return true;
         }
         if (c == '/') {
             advance();
             if (peek() == '>') {
                 advance();
                 token.self_closing = true;
-                return;
+                return true;
             }
             continue;  // unexpected-solidus-in-tag: reconsume in before-attribute-name
         }
@@ -241,7 +245,8 @@ void HtmlTokenizer::consume_tag(HtmlToken& token) {
             flush_attribute();
         }
     }
-    flush_attribute();
+    // EOF inside the tag: the token is discarded (eof-in-tag).
+    return false;
 }
 
 void HtmlTokenizer::consume_comment(HtmlToken& token) {
@@ -289,6 +294,12 @@ void HtmlTokenizer::consume_bogus_comment(HtmlToken& token, std::string_view pre
     token.type = HtmlTokenType::Comment;
     std::string data(prefix);
     while (!eof() && peek() != '>') {
+        if (peek() == '\0') {
+            // NUL in a comment is replaced by U+FFFD.
+            advance();
+            data += "\xEF\xBF\xBD";
+            continue;
+        }
         data.push_back(peek());
         advance();
     }
@@ -458,10 +469,245 @@ bool HtmlTokenizer::scan_text_run(HtmlToken& token) {
     return !token.data.empty();
 }
 
+
+// ---------------------------------------------------------------------------
+// Script data: the escaped and double-escaped states (WHATWG 13.2.5.20-24)
+//
+// A plain text-run scan is not enough here: `<script><!--<script </script -->`
+// must not end the script, because `</script` inside a double-escaped run only
+// leaves the double-escaped state. These states are what make `document.write`
+// style inline scripts with HTML comments in them parse the way browsers do.
+// ---------------------------------------------------------------------------
+bool HtmlTokenizer::scan_script_data(HtmlToken& token) {
+    enum class State {
+        Data, Lt, EndTagOpen, EndTagName,
+        EscapeStart, EscapeStartDash,
+        Escaped, EscapedDash, EscapedDashDash,
+        EscapedLt, EscapedEndTagOpen, EscapedEndTagName,
+        DoubleEscapeStart, DoubleEscaped, DoubleEscapedDash,
+        DoubleEscapedDashDash, DoubleEscapedLt, DoubleEscapeEnd
+    };
+
+    State state = State::Data;
+    std::string data;
+    std::string temp;            // tag name / "script" buffer
+    std::size_t tag_start = 0;   // cursor of the '<' opening a candidate end tag
+    bool ended = false;
+
+    auto is_alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    auto is_ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'; };
+    auto lower = [](char c) { return static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c); };
+    auto append = [&data](char c) { data.push_back(c); };
+    auto append_replacement = [&data]() { data += "\xEF\xBF\xBD"; };
+    auto is_script = [&temp]() { return !temp.empty(); };
+    auto tag_matches = [&]() {
+        if (temp.size() != m_text_tag.size()) return false;
+        for (std::size_t i = 0; i < temp.size(); ++i) {
+            if (lower(temp[i]) != m_text_tag[i]) return false;
+        }
+        const char term = (m_cursor < m_input.size()) ? m_input[m_cursor] : '\0';
+        return is_ws(term) || term == '/' || term == '>';
+    };
+
+    while (!eof()) {
+        const char c = peek();
+
+        switch (state) {
+            case State::Data:
+                if (c == '<') { tag_start = m_cursor; advance(); state = State::Lt; }
+                else if (c == '\0') { advance(); append_replacement(); }
+                else { append(c); advance(); }
+                break;
+
+            case State::Lt:
+                if (c == '/') { temp.clear(); advance(); state = State::EndTagOpen; }
+                else if (c == '!') { append('<'); append('!'); advance(); state = State::EscapeStart; }
+                else { append('<'); state = State::Data; }
+                break;
+
+            case State::EndTagOpen:
+                if (is_alpha(c)) { temp.clear(); state = State::EndTagName; }
+                else { append('<'); append('/'); state = State::Data; }
+                break;
+
+            case State::EndTagName:
+                if (is_alpha(c)) { temp.push_back(c); advance(); }
+                else if (tag_matches()) { ended = true; }
+                else {
+                    append('<'); append('/');
+                    for (char t : temp) append(t);
+                    temp.clear();
+                    state = State::Data;
+                }
+                break;
+
+            case State::EscapeStart:
+                if (c == '-') { append('-'); advance(); state = State::EscapeStartDash; }
+                else state = State::Data;
+                break;
+
+            case State::EscapeStartDash:
+                if (c == '-') { append('-'); advance(); state = State::EscapedDashDash; }
+                else state = State::Data;
+                break;
+
+            case State::Escaped:
+                if (c == '-') { append('-'); advance(); state = State::EscapedDash; }
+                else if (c == '<') { tag_start = m_cursor; advance(); state = State::EscapedLt; }
+                else if (c == '\0') { advance(); append_replacement(); }
+                else { append(c); advance(); }
+                break;
+
+            case State::EscapedDash:
+                if (c == '-') { append('-'); advance(); state = State::EscapedDashDash; }
+                else if (c == '<') { tag_start = m_cursor; advance(); state = State::EscapedLt; }
+                else if (c == '\0') { advance(); append_replacement(); state = State::Escaped; }
+                else { append(c); advance(); state = State::Escaped; }
+                break;
+
+            case State::EscapedDashDash:
+                if (c == '-') { append('-'); advance(); }
+                else if (c == '<') { tag_start = m_cursor; advance(); state = State::EscapedLt; }
+                else if (c == '>') { append('>'); advance(); state = State::Data; }
+                else if (c == '\0') { advance(); append_replacement(); state = State::Escaped; }
+                else { append(c); advance(); state = State::Escaped; }
+                break;
+
+            case State::EscapedLt:
+                if (is_alpha(c)) { append('<'); temp.clear(); state = State::DoubleEscapeStart; }
+                else if (c == '/') { temp.clear(); advance(); state = State::EscapedEndTagOpen; }
+                else { append('<'); state = State::Escaped; }
+                break;
+
+            case State::EscapedEndTagOpen:
+                if (is_alpha(c)) { temp.clear(); state = State::EscapedEndTagName; }
+                else { append('<'); append('/'); state = State::Escaped; }
+                break;
+
+            case State::EscapedEndTagName:
+                if (is_alpha(c)) { temp.push_back(c); advance(); }
+                else if (tag_matches()) { ended = true; }
+                else {
+                    append('<'); append('/');
+                    for (char t : temp) append(t);
+                    temp.clear();
+                    state = State::Escaped;
+                }
+                break;
+
+            case State::DoubleEscapeStart:
+                if (is_ws(c) || c == '/' || c == '>') {
+                    append(c);
+                    advance();
+                    state = is_script() && temp.size() == 6 ? State::DoubleEscaped : State::Escaped;
+                    // Compare case-insensitively against "script".
+                    if (state == State::DoubleEscaped) {
+                        for (std::size_t i = 0; i < temp.size(); ++i) {
+                            if (lower(temp[i]) != "script"[i]) { state = State::Escaped; break; }
+                        }
+                    }
+                } else if (is_alpha(c)) {
+                    append(c);
+                    temp.push_back(c);
+                    advance();
+                } else {
+                    state = State::Escaped;
+                }
+                break;
+
+            case State::DoubleEscaped:
+                if (c == '-') { append('-'); advance(); state = State::DoubleEscapedDash; }
+                else if (c == '<') { append('<'); advance(); state = State::DoubleEscapedLt; }
+                else if (c == '\0') { advance(); append_replacement(); }
+                else { append(c); advance(); }
+                break;
+
+            case State::DoubleEscapedDash:
+                if (c == '-') { append('-'); advance(); state = State::DoubleEscapedDashDash; }
+                else if (c == '<') { append('<'); advance(); state = State::DoubleEscapedLt; }
+                else if (c == '\0') { append_replacement(); advance(); state = State::DoubleEscaped; }
+                else { append(c); advance(); state = State::DoubleEscaped; }
+                break;
+
+            case State::DoubleEscapedDashDash:
+                if (c == '-') { append('-'); advance(); }
+                else if (c == '<') { append('<'); advance(); state = State::DoubleEscapedLt; }
+                else if (c == '>') { append('>'); advance(); state = State::Data; }
+                else if (c == '\0') { append_replacement(); advance(); state = State::DoubleEscaped; }
+                else { append(c); advance(); state = State::DoubleEscaped; }
+                break;
+
+            case State::DoubleEscapedLt:
+                if (c == '/') { append('/'); temp.clear(); advance(); state = State::DoubleEscapeEnd; }
+                else { state = State::DoubleEscaped; }
+                break;
+
+            case State::DoubleEscapeEnd:
+                if (is_ws(c) || c == '/' || c == '>') {
+                    append(c);
+                    advance();
+                    bool is_script_end = temp.size() == 6;
+                    if (is_script_end) {
+                        for (std::size_t i = 0; i < temp.size(); ++i) {
+                            if (lower(temp[i]) != "script"[i]) { is_script_end = false; break; }
+                        }
+                    }
+                    state = is_script_end ? State::Escaped : State::DoubleEscaped;
+                } else if (is_alpha(c)) {
+                    append(c);
+                    temp.push_back(c);
+                    advance();
+                } else {
+                    state = State::DoubleEscaped;
+                }
+                break;
+        }
+
+        if (ended) break;
+    }
+
+    if (!ended) {
+        // EOF with characters still buffered by a partially recognised
+        // construct: flush them as text (spec: "emit ... as character tokens").
+        switch (state) {
+            case State::Lt: append('<'); break;
+            case State::EndTagOpen: append('<'); append('/'); break;
+            case State::EndTagName:
+                append('<'); append('/');
+                for (char t : temp) append(t);
+                break;
+            case State::EscapedLt: append('<'); break;
+            case State::EscapedEndTagOpen: append('<'); append('/'); break;
+            case State::EscapedEndTagName:
+                append('<'); append('/');
+                for (char t : temp) append(t);
+                break;
+            case State::DoubleEscapeStart:
+            case State::DoubleEscapeEnd:
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (ended) {
+        // Hand the end tag back to the main tokenizer.
+        m_cursor = tag_start;
+        m_content_model = ContentModel::Data;
+        m_text_tag.clear();
+    }
+
+    token.type = HtmlTokenType::Character;
+    token.data = std::move(data);
+    return !token.data.empty();
+}
+
 HtmlToken HtmlTokenizer::next_token() {
     HtmlToken token;
 
-    if (m_content_model != ContentModel::Data) {
+    if (m_content_model == ContentModel::ScriptData) {
+        if (scan_script_data(token)) return token;
+    } else if (m_content_model != ContentModel::Data) {
         if (scan_text_run(token)) return token;
     }
 
@@ -503,9 +749,9 @@ HtmlToken HtmlTokenizer::next_token() {
             consume_cdata(token);
             return token;
         }
-        // Bogus comment: "<!" followed by anything else; the comment data
-        // starts with the "!" character.
-        advance();  // '<'
+        // Bogus comment: the "!" opened the markup declaration and is not part
+        // of the comment data (spec: reconsume the character after it).
+        m_cursor += 2;  // "<!"
         consume_bogus_comment(token, "");
         return token;
     }
@@ -521,12 +767,19 @@ HtmlToken HtmlTokenizer::next_token() {
         if (is_ascii_alpha(after)) {
             m_cursor += 2;
             token.type = HtmlTokenType::EndTag;
-            consume_tag(token);
+            if (!consume_tag(token)) return HtmlToken::make_eof();
             return token;
         }
         if (after == '>') {
             m_cursor += 3;  // "</>" is dropped entirely
             return next_token();
+        }
+        if (peek(2) == '\0' && m_cursor + 2 >= m_input.size()) {
+            // eof-before-tag-name: "</" is emitted as text.
+            m_cursor += 2;
+            token.type = HtmlTokenType::Character;
+            token.data = "</";
+            return token;
         }
         m_cursor += 2;  // "</" + anything else -> bogus comment
         consume_bogus_comment(token, "");
@@ -536,7 +789,7 @@ HtmlToken HtmlTokenizer::next_token() {
     if (is_ascii_alpha(next)) {
         m_cursor += 1;
         token.type = HtmlTokenType::StartTag;
-        consume_tag(token);
+        if (!consume_tag(token)) return HtmlToken::make_eof();
         return token;
     }
 

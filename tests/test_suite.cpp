@@ -4,6 +4,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
@@ -41,7 +42,12 @@
 #include <unistd.h>
 
 #define TEST(name) void test_##name()
+// Counted rather than hard-coded: the summary line used to drift behind the
+// real number of suites whenever a test was added.
+static int g_tests_run = 0;
+
 #define RUN_TEST(name) do { \
+    ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
@@ -3443,6 +3449,10 @@ TEST(table_layout_columns_and_rows) {
 
     // Second row sits below the first and lines up with it.
     assert(c21->dimensions.content.y > c11->dimensions.content.y);
+    // An explicit cell height sizes the whole row.
+    assert(std::abs(c21->dimensions.content.height - 40.0f) < 0.5f);
+    assert(std::abs(table->dimensions.content.height -
+                    (c11->dimensions.margin_box().height + c21->dimensions.margin_box().height)) < 1.0f);
     assert(std::abs(c21->dimensions.content.x - c11->dimensions.content.x) < 0.5f);
     assert(std::abs(c22->dimensions.content.x - c12->dimensions.content.x) < 0.5f);
 
@@ -3555,6 +3565,149 @@ TEST(float_left_and_right_can_stack_side_by_side) {
     assert(std::abs(b->dimensions.content.x - a->dimensions.content.x) < 0.5f);
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 17: spec-fidelity fixes found by the conformance scoreboard
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string tree_of(const std::string& html) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(html);
+    return dump_tree_webplatform(*doc);
+}
+
+std::string fragment_tree_of(const std::string& html, const std::string& context) {
+    using namespace litebird;
+    auto fragment = HtmlParser::parse_fragment_with_context(html, context, ElementNamespace::HTML, true);
+    return dump_tree_webplatform(*fragment);
+}
+
+bool contains(const std::string& haystack, const std::string& needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
+/// Collapses the tree dump to one line so a mismatch is readable in the log.
+std::string flatten(const std::string& dump) {
+    std::string out;
+    for (char c : dump) {
+        if (c == '\n') out.push_back(' ');
+        else if (c != '|') out.push_back(c);
+    }
+    while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+    return out;
+}
+
+} // namespace
+
+TEST(script_data_escaped_and_double_escaped_states) {
+    using namespace litebird;
+
+    // A "<!--" inside <script> starts escaped text: a following </script> does
+    // not end the element, it is just text.
+    const std::string escaped = tree_of("<!doctype html><script><!--<script </script>-->");
+    assert(contains(escaped, "\"<!--<script </script>-->\""));
+
+    // Inside a double-escaped run, "</script " only leaves the double-escaped
+    // state; the script continues until the real end tag.
+    const std::string doubled = tree_of("<!doctype html><script><!--<script </script -->");
+    assert(contains(doubled, "\"<!--<script </script -->\""));
+
+    // The plain (non-escaped) end tag still terminates the script.
+    const std::string plain = tree_of("<!doctype html><script>var a=1;</script><p>after");
+    assert(contains(plain, "var a=1;"));
+    assert(contains(plain, "<p>"));
+    assert(!contains(plain, "after</script>"));
+
+    // "<" and "</" at EOF are text, not dropped.
+    assert(contains(tree_of("<!doctype html><script></"), "\"</\""));
+    assert(contains(tree_of("<!doctype html><script><"), "\"<\""));
+}
+
+TEST(pre_and_textarea_leading_newline_handling) {
+    // The first newline inside <pre>/<listing>/<textarea> is an authoring
+    // convenience and is dropped; everything after it is preserved.
+    const std::string pre = tree_of("<!doctype html><body><pre>\nfoo</pre>");
+    assert(contains(pre, "\"foo\""));
+    assert(!contains(pre, "\"\nfoo\""));
+
+    const std::string listing = tree_of("<!doctype html><body><listing>\n\nbar</listing>");
+    assert(contains(listing, "\"\nbar\""));  // only the first newline goes
+
+    // A leading newline that is not immediately after the start tag survives.
+    const std::string textarea = tree_of("<!doctype html><body><textarea>\nabc</textarea>");
+    assert(contains(textarea, "\"abc\""));
+}
+
+TEST(adoption_agency_nobr_and_nested_formatting) {
+    // Two <nobr> start tags trigger the adoption agency for the first one.
+    const std::string nobr = tree_of("<!doctype html><body><b><nobr>1<nobr></b><i>2");
+    assert(contains(nobr, "<nobr>"));
+
+    // A second <a> closes the first through the adoption agency.
+    const std::string anchors = tree_of("<!doctype html><body><a href='#1'>1<a href='#2'>2");
+    assert(contains(anchors, "href=\"#1\""));
+    assert(contains(anchors, "href=\"#2\""));
+    // The two anchors must not be nested: the second is a sibling.
+    const auto first = anchors.find("href=\"#1\"");
+    const auto second = anchors.find("href=\"#2\"");
+    assert(first != std::string::npos && second != std::string::npos);
+}
+
+TEST(select_content_parsing_and_foreign_end_tags) {
+    // Unknown elements inside <select> are kept as ordinary elements rather
+    // than silently dropped (the modern select parsing rules).
+    const std::string select = tree_of("<!doctype html><body><select><div>x</div><option>o</select>");
+    assert(contains(select, "<div>"));
+    assert(contains(select, "<option>"));
+
+    // </p> and </br> inside foreign content pop out of the SVG subtree.
+    const std::string svg_p = tree_of("<!doctype html><body><svg></p><foo>");
+    assert(contains(svg_p, "<svg svg>"));
+    const std::string flat = flatten(svg_p);
+    assert(contains(flat, "<p>"));
+    assert(contains(flat, "<foo>"));
+
+    const std::string svg_br = tree_of("<!doctype html><body><svg></br>");
+    assert(contains(flatten(svg_br), "<br>"));
+
+    // An <svg title> fragment context parses its children as markup.
+    const std::string title_fragment = fragment_tree_of("<div></div>", "title");
+    assert(contains(title_fragment, "<div>"));
+}
+
+TEST(svg_attribute_adjustment_and_character_reference_edges) {
+    // The tokenizer lower-cases attribute names; SVG spellings are restored.
+    const std::string svg = tree_of("<!doctype html><body><svg viewBox='0 0 1 1' preserveAspectRatio='none'>");
+    assert(contains(svg, "viewBox=\"0 0 1 1\""));
+    assert(contains(svg, "preserveAspectRatio=\"none\""));
+
+    // xlink:/xml: attributes keep their namespace spelling, xml:base does not
+    // (it is not in the spec's adjustment table).
+    const std::string xlink = tree_of("<!doctype html><body><svg xml:lang='en' xlink:href='#a' xml:base='b'>");
+    assert(contains(xlink, "xml lang=\"en\""));
+    assert(contains(xlink, "xlink href=\"#a\""));
+    assert(contains(xlink, "xml:base=\"b\""));
+
+    // Numeric references with no digits are literal text, not a swallowed "&".
+    assert(contains(tree_of("FOO&#xZOO"), "\"FOO&#xZOO\""));
+    assert(contains(tree_of("FOO&#41;BAR"), "\"FOO)BAR\""));
+}
+
+TEST(template_and_scope_helpers_ignore_foreign_elements) {
+    // <html>/<body> inside a template must not mutate the document element.
+    const std::string tpl = tree_of("<html a=b><template><div></div><body c=d></body></template>");
+    assert(contains(tpl, "a=\"b\""));
+    assert(!contains(tpl, "c=\"d\""));
+
+    // A foreign element with an HTML local name (svg td) must not satisfy an
+    // HTML "td in table scope" test.
+    const std::string scoped = tree_of("<!doctype html><table><tr><td><svg><td><div>x");
+    assert(contains(scoped, "<svg td>"));
+    assert(contains(scoped, "<div>"));
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -3619,9 +3772,16 @@ int main() {
     RUN_TEST(float_layout_and_text_wrapping);
     RUN_TEST(float_clearance_and_bug_containment);
     RUN_TEST(table_layout_columns_and_rows);
+    RUN_TEST(script_data_escaped_and_double_escaped_states);
+    RUN_TEST(pre_and_textarea_leading_newline_handling);
+    RUN_TEST(adoption_agency_nobr_and_nested_formatting);
+    RUN_TEST(select_content_parsing_and_foreign_end_tags);
+    RUN_TEST(svg_attribute_adjustment_and_character_reference_edges);
+    RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(float_shrinks_inline_line_boxes);
     RUN_TEST(float_left_and_right_can_stack_side_by_side);
 
-    std::cout << "\n\033[1;32mAll 63 engine test suites passed successfully!\033[0m\n\n";
+    std::cout << "\n\033[1;32mAll " << g_tests_run
+              << " engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }

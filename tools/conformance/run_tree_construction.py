@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+import re
 from pathlib import Path
 
 DEFAULT_BINARY = "build/litebird"
@@ -54,29 +55,55 @@ class Result:
 
 
 def parse_dat(path: Path) -> list[Case]:
-    """Splits a .dat file into cases, per the corpus README."""
-    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    """Splits a .dat file into cases, per the corpus README.
+
+    A case *begins* at a line that is exactly `#data` at the start of the file
+    or immediately after a blank line ("tests are separated by two newlines").
+    Splitting on any blank line instead would corrupt every case whose data
+    itself contains one -- `tests3.dat` has `<pre>` cases with a blank line in
+    the data, and `<pre>`/`<textarea>` cases are exactly where whitespace
+    matters.
+    """
+    # newline="" keeps lone CR characters intact: some cases assert that a CR
+    # from a character reference survives while literal CRLF is normalised.
+    with open(path, "r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        text = handle.read()
     cases: list[Case] = []
 
-    for index, block in enumerate(text.split("\n\n")):
-        if "#data" not in block:
-            continue
+    marker_re = re.compile(r"(?m)(?:\A|\n\n)#data\n")
+    starts = [m.start() for m in marker_re.finditer(text)]
+    if text.startswith("#data\n"):
+        starts.insert(0, 0)
+    starts = sorted(set(starts))
+
+    markers = ("#data", "#errors", "#new-errors", "#document",
+               "#document-fragment", "#script-on", "#script-off")
+
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        block = text[start:end]
+        # Drop the blank separator line that terminated the block, and the
+        # single trailing newline the format always ends a file with.
+        if block.endswith("\n\n"):
+            block = block[:-1]
+        elif block.endswith("\n"):
+            block = block[:-1]
+
         lines = block.split("\n")
         sections: dict[str, list[str]] = {}
         current = None
         for line in lines:
-            if line in ("#data", "#errors", "#new-errors", "#document",
-                        "#document-fragment", "#script-on", "#script-off"):
+            if line in markers:
                 current = line
                 sections.setdefault(current, [])
                 continue
             if current is not None:
                 sections[current].append(line)
 
-        data_lines = sections.get("#data", [])
-        if not data_lines:
+        if "#data" not in sections:
             continue
-        data = "\n".join(data_lines)
+
+        data = "\n".join(sections["#data"])
         document_lines = sections.get("#document", [])
 
         context = None
@@ -99,9 +126,8 @@ def parse_dat(path: Path) -> list[Case]:
             fragment_context=context,
             scripting=scripting,
         ))
+
     return cases
-
-
 def run_case(binary: str, case: Case) -> Result:
     expected = case.document
     attempts = [case.scripting] if case.scripting is not None else [True, False]

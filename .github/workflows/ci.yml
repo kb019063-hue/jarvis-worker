@@ -39,7 +39,7 @@ jobs:
 import json, sys
 report = json.load(open('build/conformance.json'))
 print(f\"conformance: {report['passed']}/{report['total']} = {report['rate']:.1f}%\")
-sys.exit(0 if report['rate'] >= 80.0 else 1)
+sys.exit(0 if report['rate'] >= 98.0 else 1)
 "
       - uses: actions/upload-artifact@v4
         with:

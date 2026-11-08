@@ -331,6 +331,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 16** | **Floats, Block Formatting Contexts & Table Layout:** `float: left/right` with shrink-to-fit sizing, per-line line-box shrinking around floats, `clear`, BFC establishment and float containment, plus `display: table/table-row/table-cell/table-row-group` with anonymous table structure, automatic column sizing and per-row height resolution; bitmap text advance aligned with the layout metric. **1575/1790 (88.0%) conformance; 63/63 test suites; 0 fuzz findings.** | ✅ Completed |
 | **Phase 17** | **Conformance push: the scoreboard pays off.** The full script-data state machine (escaped and double-escaped runs), `<pre>`/`<listing>`/`<textarea>` first-newline handling, `<nobr>` adoption agency, `<html>`/`<body>` inside templates, namespace-aware scope checks (an `<svg td>` is not an HTML `td`), SVG attribute case adjustment, foreign-content `</p>`/`</br>` breakouts, modern `<select>` content parsing, `eof-in-tag` discarding, and three harness-fidelity fixes. **1575/1790 (88.0%) → 1770/1792 (98.8%); 69/69 suites; 0 fuzz findings over 900 mutations.** | ✅ Completed |
 | **Phase 18** | **Layout fidelity: percentages and clipping.** Percentage `width`/`height`/`min`/`max` and percentage `margin`/`padding` now resolve against the containing block at layout time (before this, `width: 50%` silently became *fifty pixels*), percentage table cells resolve against the table width, and `overflow: hidden|auto|scroll` / `contain: paint` emit clip commands that both renderers honour. **98.8% conformance unchanged; 71/71 suites.** | ✅ Completed |
+| **Phase 19** | **Table model, finished: spans and collapsed borders.** `colspan`/`rowspan` (including `rowspan="0"`) build an occupancy grid so spanning cells reserve the slots they cover; spanning cells distribute their width requirement across the columns they span and grow the last row they cover when they need more height. `border-collapse: collapse` shares borders between neighbours (half each) and suppresses spacing; `border-spacing: <h> <v>` spaces cells in the separate model. Also fixed two latent bugs found on the way: table cells and floats were laid out through a path that never copied margin/border/padding from the style, and percentage lengths inside cells resolved against the column instead of the table. **98.8% conformance unchanged; 73/73 suites.** | ✅ Completed |
 
 ---
 
@@ -930,14 +931,87 @@ not create scrollbars or scrollable overflow.
 
 ---
 
+## Phase 19 Architecture: The Table Model, Finished
+
+Phase 16 gave the engine a table algorithm that handled the common case and
+said so: no `rowspan`/`colspan`, no `border-collapse`. That is a real limit —
+most tables on the web use at least one of them — so Phase 19 finished the
+model rather than adding a new subsystem.
+
+### 1. An occupancy grid instead of a list of cells
+
+The old algorithm treated each row as a list of cells and every cell as one
+column wide. Spans need the opposite structure: the table's shape has to be
+decided *before* anything is sized, because a cell reserves slots that later
+cells must skip.
+
+`layout_table` now walks the rows in order and drops each cell into the first
+free slot of its row, marking a `rowspan x colspan` rectangle as occupied. The
+column count is the widest occupied row. `rowspan="0"` means "to the end of the
+row group" (per HTML), `colspan` is clamped to 1000, and a rowspan is clamped
+to the rows that actually exist — so malformed markup cannot allocate a grid of
+a million cells.
+
+### 2. Sizing with spans
+
+* **Columns**: a single-column cell demands at least its min-content width (or
+  its explicit width). A spanning cell instead *distributes* its requirement
+  over the columns it covers, so a `colspan="2"` cell does not force one
+  enormous column.
+* **Rows**: single-row cells set their row's height. Then, in a second pass,
+  every `rowspan` cell is checked against the rows it covers; if it needs more
+  room than they provide, the deficit is added to the last row it covers and the
+  cell's own box is grown to fill the whole spanned area. That is why a
+  `rowspan="2"` cell with a background looks like one tall box rather than two
+  short ones.
+
+### 3. The two border models
+
+`border-collapse: separate` (the default) gives each cell its own border and
+lays cells out with `border-spacing` — the space between cells *and* between the
+cells and the table edge.
+
+`border-collapse: collapse` shares borders: each cell paints **half** of the
+border it declares, so two neighbours produce one line of the declared width
+instead of doubling it (4px + 4px = 8px would be visibly wrong). The halving is
+implemented as `LayoutBox::border_scale`, applied in `layout()` when the used
+border is computed from the style — never by mutating the style, because a
+relayout that halved twice would erode the borders to nothing. Collapsed tables
+also suppress `border-spacing` entirely.
+
+### 4. Two latent bugs this surfaced
+
+While wiring the cells through the new code path:
+
+* Table cells (and floats) were laid out by calling `layout_table_cell()` /
+  `layout_block()` **directly**, and only `layout()` copies margin, padding and
+  border from the computed style onto the box. A cell with a border therefore
+  lost it, and a float with padding measured as if it had none. Both now go
+  through `layout()`.
+* A percentage width inside a cell resolved against the *column* width it
+  happened to receive (75px) instead of the table's width (300px), so
+  `width: 25%` produced an 18.75px cell. Cells now carry a
+  `width_basis_override` set to the table's content width.
+
+### 5. What is still approximate
+
+Collapsed borders are halved rather than resolved per edge by width/priority, so
+a 4px cell border against a 1px table border is not resolved by the CSS 2.1
+"widest wins" rule; `border-collapse` does not merge the table's own outer
+border with the edge cells' borders; `empty-cells`, `caption-side` and
+`table-layout: fixed` are not implemented; and a rowspan does not redistribute
+extra height across rows proportionally (it all lands on the last covered row).
+
+---
+
 ## Known gaps (the honest list)
 
-1. **Layout is still behind parsing.** Floats, block formatting contexts and
-   basic table layout landed in Phase 16; Phase 18 added percentage lengths and
-   real `overflow` clipping. Still missing: multicol, bidi, font
-   shaping/HarfBuzz, `rowspan`/`colspan`, `border-collapse`, scrollable
-   `overflow: auto` (it clips but cannot be scrolled), and rounded-corner
-   clipping. The DOM is trustworthy; the box tree is plausible.
+1. **Layout is still behind parsing.** Floats and block formatting contexts
+   (Phase 16), percentage lengths and `overflow` clipping (Phase 18), and tables
+   with spans and collapsed borders (Phase 19) are in. Still missing: multicol,
+   bidi, font shaping/HarfBuzz, `table-layout: fixed`, `empty-cells`,
+   scrollable `overflow: auto` (it clips but cannot be scrolled), and
+   rounded-corner clipping. The DOM is trustworthy; the box tree is plausible.
 2. **No JIT.** The JS engine is a bytecode stack VM. Expect 10-100x slower than
    V8 on script-heavy pages.
 3. **Single process, no sandbox.** Chrome's original headline feature was

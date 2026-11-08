@@ -34,6 +34,7 @@
 #include "litebird/net/AbortController.hpp"
 
 #include <iostream>
+#include <cstdio>
 #include <functional>
 #include <cassert>
 #include <string>
@@ -3832,6 +3833,143 @@ TEST(overflow_hidden_clips_painting) {
     assert(leaked.r > 200 && leaked.g < 60 && leaked.b < 60);
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 19: table spans, collapsed borders and border spacing
+// ---------------------------------------------------------------------------
+
+TEST(table_colspan_and_rowspan_geometry) {
+    using namespace litebird;
+
+    // colspan: the wide cell covers the columns of the cells below it.
+    auto span_root = build_doc(
+        "<table id='t' style='width: 300px'>"
+        "  <tr><td id='wide' colspan='2'>A</td><td id='third'>B</td></tr>"
+        "  <tr><td id='c1'>C</td><td id='c2'>D</td><td id='c3'>E</td></tr>"
+        "</table>");
+    auto table = find_box_by_id(span_root, "t");
+    auto wide = find_box_by_id(span_root, "wide");
+    auto third = find_box_by_id(span_root, "third");
+    auto c1 = find_box_by_id(span_root, "c1");
+    auto c2 = find_box_by_id(span_root, "c2");
+    auto c3 = find_box_by_id(span_root, "c3");
+    assert(table && wide && third && c1 && c2 && c3);
+
+    // The broad cell starts where the first column starts and is as wide as
+    // the two columns it covers.
+    assert(std::abs(wide->dimensions.content.x - c1->dimensions.content.x) < 0.5f);
+    const float two_columns = c1->dimensions.margin_box().width + c2->dimensions.margin_box().width;
+    assert(std::abs(wide->dimensions.margin_box().width - two_columns) < 1.0f);
+    // The third column is not pushed along by the colspan.
+    assert(std::abs(third->dimensions.content.x - c3->dimensions.content.x) < 0.5f);
+
+    // rowspan: the tall cell covers both rows, so its height is their sum and
+    // the following row still starts below the whole block.
+    auto row_root = build_doc(
+        "<table id='rt' style='width: 200px'>"
+        "  <tr><td id='tall' rowspan='2'>X</td><td id='y'>Y</td></tr>"
+        "  <tr><td id='z'>Z</td></tr>"
+        "  <tr><td id='w'>W</td><td id='v'>V</td></tr>"
+        "</table>");
+    auto rt = find_box_by_id(row_root, "rt");
+    auto tall = find_box_by_id(row_root, "tall");
+    auto y = find_box_by_id(row_root, "y");
+    auto z = find_box_by_id(row_root, "z");
+    auto w = find_box_by_id(row_root, "w");
+    assert(rt && tall && y && z && w);
+
+    const float two_rows = y->dimensions.margin_box().height + z->dimensions.margin_box().height;
+    assert(std::abs(tall->dimensions.margin_box().height - two_rows) < 1.0f);
+    assert(std::abs(z->dimensions.content.y - (y->dimensions.content.y + y->dimensions.margin_box().height)) < 0.5f);
+    // The third row is below the spanned cell, not beside it.
+    assert(w->dimensions.content.y >= tall->dimensions.content.y + tall->dimensions.margin_box().height - 0.5f);
+    assert(std::abs(w->dimensions.content.x - tall->dimensions.content.x) < 0.5f);
+
+    // rowspan="0" means "to the end of the row group".
+    auto zero_root = build_doc(
+        "<table id='zt' style='width: 200px'>"
+        "  <tr><td id='all' rowspan='0'>A</td><td>B</td></tr>"
+        "  <tr><td>C</td></tr>"
+        "  <tr><td>D</td></tr>"
+        "</table>");
+    auto all = find_box_by_id(zero_root, "all");
+    auto zt = find_box_by_id(zero_root, "zt");
+    assert(all && zt);
+    assert(std::abs(all->dimensions.margin_box().height - zt->dimensions.content.height) < 1.0f);
+
+    // A colspan larger than the grid is clamped rather than allocating columns.
+    auto clamp_root = build_doc(
+        "<table id='ct' style='width: 200px'>"
+        "  <tr><td id='huge' colspan='99'>A</td></tr>"
+        "  <tr><td id='plain'>B</td></tr>"
+        "</table>");
+    auto huge = find_box_by_id(clamp_root, "huge");
+    auto ct = find_box_by_id(clamp_root, "ct");
+    assert(huge && ct);
+    assert(std::abs(huge->dimensions.margin_box().width - ct->dimensions.content.width) < 1.0f);
+}
+
+TEST(table_border_collapse_and_spacing) {
+    using namespace litebird;
+
+    // Separate (default): every cell owns its full 4px border.
+    auto separate_root = build_doc(
+        "<table id='st' style='width: 200px'>"
+        "  <tr><td id='sa' style='border: 4px solid #000'>A</td>"
+        "      <td id='sb' style='border: 4px solid #000'>B</td></tr>"
+        "</table>");
+    auto sa = find_box_by_id(separate_root, "sa");
+    auto sb = find_box_by_id(separate_root, "sb");
+    assert(sa && sb);
+    assert(std::abs(sa->dimensions.border.left - 4.0f) < 0.01f);
+    assert(std::abs(sb->dimensions.border.left - 4.0f) < 0.01f);
+
+    // Collapsed: neighbours share the border, so each cell only paints half.
+    // The visual line between A and B is still 4px (2 + 2), not 8px.
+    auto collapsed_root = build_doc(
+        "<table id='ct' style='width: 200px; border-collapse: collapse'>"
+        "  <tr><td id='ca' style='border: 4px solid #000'>A</td>"
+        "      <td id='cb' style='border: 4px solid #000'>B</td></tr>"
+        "</table>");
+    auto ca = find_box_by_id(collapsed_root, "ca");
+    auto cb = find_box_by_id(collapsed_root, "cb");
+    auto ct = find_box_by_id(collapsed_root, "ct");
+    assert(ca && cb && ct);
+    assert(std::abs(ca->dimensions.border.left - 2.0f) < 0.01f);
+    assert(std::abs(cb->dimensions.border.left - 2.0f) < 0.01f);
+    // The shared edge is the sum of the two halves.
+    const float shared = ca->dimensions.border.right + cb->dimensions.border.left;
+    assert(std::abs(shared - 4.0f) < 0.01f);
+
+    // border-spacing pushes the cells in from the table edge and apart.
+    auto spaced_root = build_doc(
+        "<table id='pt' style='width: 220px; border-spacing: 10px 6px'>"
+        "  <tr><td id='p'>P</td><td id='q'>Q</td></tr>"
+        "  <tr><td id='r'>R</td><td id='s'>S</td></tr>"
+        "</table>");
+    auto pt = find_box_by_id(spaced_root, "pt");
+    auto p = find_box_by_id(spaced_root, "p");
+    auto q = find_box_by_id(spaced_root, "q");
+    auto r = find_box_by_id(spaced_root, "r");
+    assert(pt && p && q && r);
+
+    assert(std::abs(p->dimensions.content.x - (pt->dimensions.content.x + 10.0f)) < 0.5f);
+    assert(std::abs(q->dimensions.content.x -
+                     (p->dimensions.content.x + p->dimensions.margin_box().width + 10.0f)) < 0.5f);
+    assert(std::abs(r->dimensions.content.y -
+                     (p->dimensions.content.y + p->dimensions.margin_box().height + 6.0f)) < 0.5f);
+
+    // A collapsed table has no spacing at all.
+    auto collapsed_spaced_root = build_doc(
+        "<table id='cst' style='width: 220px; border-collapse: collapse; border-spacing: 10px'>"
+        "  <tr><td id='cp'>P</td><td id='cq'>Q</td></tr>"
+        "</table>");
+    auto cst = find_box_by_id(collapsed_spaced_root, "cst");
+    auto cp = find_box_by_id(collapsed_spaced_root, "cp");
+    assert(cst && cp);
+    assert(std::abs(cp->dimensions.content.x - cst->dimensions.content.x) < 0.5f);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -3904,6 +4042,8 @@ int main() {
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(percentage_lengths_resolve_against_containing_block);
     RUN_TEST(overflow_hidden_clips_painting);
+    RUN_TEST(table_colspan_and_rowspan_geometry);
+    RUN_TEST(table_border_collapse_and_spacing);
     RUN_TEST(float_shrinks_inline_line_boxes);
     RUN_TEST(float_left_and_right_can_stack_side_by_side);
 

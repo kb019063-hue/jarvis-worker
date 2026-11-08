@@ -13,18 +13,19 @@ Phase 17 then spent the scoreboard: it drove the number from 88.0% to 98.8% by
 fixing what the corpus actually disagreed with, and audited the harness itself
 (see "What the scoreboard measured wrong" below). Phase 18 moved back to
 *layout* -- percentage lengths and `overflow` clipping -- which the parser
-scoreboard cannot see at all.
+scoreboard cannot see at all. Phase 19 finished the table model: cell spans,
+collapsed borders and `border-spacing`.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 71 suites, all passing | `make test` |
+| Engine unit tests | 73 suites, all passing | `make test` |
 | Parser robustness | 900 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # per-file pass rate + failing-case diffs
-make test            # 71 engine suites
+make test            # 73 engine suites
 make asan            # sanitizer build, tests, and a fuzz run
 ```
 
@@ -60,10 +61,10 @@ engines rather than self-referential. It is vendored under
 
 > **Honest scope:** 98.8% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
-> floats and tables now lay out (Phase 16), percentages resolve (Phase 18) and
-> `overflow` clips (Phase 18), but there is no bidi, no `rowspan`/`colspan`, no
-> `border-collapse`, and the JS engine is a bytecode interpreter without a JIT.
-> See "Known gaps" in `ARCHITECTURE.md`.
+> floats, tables with spans and collapsed borders (Phase 16/19), percentages
+> (Phase 18) and `overflow` clipping (Phase 18) are in, but there is no bidi, no
+> font shaping, no scrollable overflow, and the JS engine is a bytecode
+> interpreter without a JIT. See "Known gaps" in `ARCHITECTURE.md`.
 
 ---
 
@@ -188,6 +189,8 @@ Litebird implements the complete modern browser rendering pipeline:
   - Automatic column sizing: each column is at least as wide as its widest cell's min-content width or explicit width; an explicit table width distributes the surplus across the columns.
   - Row heights are the maximum of the row's cell heights; cells carry their own padding, borders and backgrounds.
   - Percentage cell widths resolve against the table width (a `width: 25%` cell in a 300px table is a 75px column).
+  - `colspan` / `rowspan` (including `rowspan="0"`) build an occupancy grid, so a spanning cell reserves the slots it covers: its box covers the spanned columns and rows, and a spanning cell that needs more height grows the last row it covers.
+  - `border-collapse: collapse` shares borders between neighbours (each cell paints half, so a 4px border stays a 4px line instead of doubling to 8px) and drops cell spacing; `border-spacing: <h> <v>` spaces cells in the default separate model.
   - UA stylesheet provides the default `table`/`tr`/`td` display values plus `<th>` centering and bold weight.
 - **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 

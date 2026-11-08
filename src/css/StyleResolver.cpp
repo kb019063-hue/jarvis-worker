@@ -850,6 +850,16 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val == "auto") style.overflow = Overflow::Auto;
         else if (val == "scroll") style.overflow = Overflow::Scroll;
         else style.overflow = Overflow::Visible;
+    } else if (prop == "border-collapse") {
+        style.border_collapse = (val == "collapse") ? BorderCollapse::Collapse : BorderCollapse::Separate;
+    } else if (prop == "border-spacing") {
+        std::stringstream ss(val);
+        std::string first, second;
+        if (ss >> first) {
+            style.border_spacing_x = parse_length(first, 0.0f);
+            style.border_spacing_y = style.border_spacing_x;
+            if (ss >> second) style.border_spacing_y = parse_length(second, 0.0f);
+        }
     } else if (prop == "clear") {
         if (val == "left") style.clear_type = ClearType::Left;
         else if (val == "right") style.clear_type = ClearType::Right;

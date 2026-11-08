@@ -295,12 +295,50 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
     return number;
 }
 
-EdgeSizes StyleResolver::parse_box_edges(std::string_view val) const {
+/// True when the last non-space character is '%': the value is a percentage
+/// and must be resolved against a containing block at layout time.
+static bool is_percentage_value(std::string_view val) {
+    for (auto it = val.rbegin(); it != val.rend(); ++it) {
+        if (*it == ' ') continue;
+        return *it == '%';
+    }
+    return false;
+}
+
+EdgeSizes StyleResolver::parse_box_edges(std::string_view val, EdgeSizes* percent_out) const {
     std::vector<float> nums;
+    std::vector<bool> is_pct;
     std::stringstream ss{std::string(val)};
     std::string token;
     while (ss >> token) {
-        nums.push_back(parse_length(token, 0.0f));
+        const bool pct = is_percentage_value(token);
+        is_pct.push_back(pct);
+        // Percentages keep their raw number here; the pixel edge stays 0.
+        nums.push_back(pct ? 0.0f : parse_length(token, 0.0f));
+    }
+
+    auto to_edges = [](const std::vector<float>& v, const std::vector<bool>& p, float fallback) {
+        std::vector<float> out(4, fallback);
+        const std::size_t n = v.size();
+        if (n == 1) { out = {v[0], v[0], v[0], v[0]}; }
+        else if (n == 2) { out = {v[0], v[1], v[0], v[1]}; }
+        else if (n == 3) { out = {v[0], v[1], v[2], v[1]}; }
+        else if (n >= 4) { out = {v[0], v[1], v[2], v[3]}; }
+        (void)p;
+        return out;
+    };
+
+    if (percent_out) {
+        // Recover the raw percentage numbers for the edges that used one.
+        std::vector<float> raw;
+        std::stringstream raw_ss{std::string(val)};
+        while (raw_ss >> token) {
+            float number = 0.0f;
+            try { number = std::stof(token); } catch (...) { number = 0.0f; }
+            raw.push_back(is_percentage_value(token) ? number : -1.0f);
+        }
+        const auto edges = to_edges(raw, is_pct, -1.0f);
+        *percent_out = EdgeSizes(edges[0], edges[1], edges[2], edges[3]);
     }
 
     if (nums.size() == 1) {
@@ -891,18 +929,26 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         style.color = Color::parse(val);
     } else if (prop == "background-color" || prop == "background") {
         style.background_color = Color::parse(val);
-    } else if (prop == "width") {
-        style.width = parse_length(val, -1.0f);
-    } else if (prop == "height") {
-        style.height = parse_length(val, -1.0f);
-    } else if (prop == "min-width") {
-        style.min_width = parse_length(val, -1.0f);
-    } else if (prop == "max-width") {
-        style.max_width = parse_length(val, -1.0f);
-    } else if (prop == "min-height") {
-        style.min_height = parse_length(val, -1.0f);
-    } else if (prop == "max-height") {
-        style.max_height = parse_length(val, -1.0f);
+    } else if (prop == "width" || prop == "height" || prop == "min-width" ||
+               prop == "max-width" || prop == "min-height" || prop == "max-height") {
+        // A percentage is recorded as a percentage and left "auto" in pixels;
+        // layout resolves it against the containing block.
+        const bool pct = is_percentage_value(val);
+        const float length = parse_length(val, -1.0f);
+        float* pixels = &style.width;
+        float* percent = &style.width_percent;
+        if (prop == "height") { pixels = &style.height; percent = &style.height_percent; }
+        else if (prop == "min-width") { pixels = &style.min_width; percent = &style.min_width_percent; }
+        else if (prop == "max-width") { pixels = &style.max_width; percent = &style.max_width_percent; }
+        else if (prop == "min-height") { pixels = &style.min_height; percent = &style.min_height_percent; }
+        else if (prop == "max-height") { pixels = &style.max_height; percent = &style.max_height_percent; }
+        if (pct) {
+            *percent = length;
+            *pixels = -1.0f;
+        } else {
+            *pixels = length;
+            *percent = -1.0f;
+        }
     } else if (prop == "box-sizing") {
         if (val == "border-box") style.box_sizing = BoxSizing::BorderBox;
         else if (val == "content-box") style.box_sizing = BoxSizing::ContentBox;
@@ -933,7 +979,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         std::vector<std::string> tokens;
         std::string tok;
         while (mss >> tok) tokens.push_back(tok);
-        style.margin = parse_box_edges(val);
+        style.margin = parse_box_edges(val, &style.margin_percent);
         if (tokens.size() == 1 && tokens[0] == "auto") {
             style.margin_top_auto = style.margin_right_auto = style.margin_bottom_auto = style.margin_left_auto = true;
         } else if (tokens.size() == 2) {
@@ -945,28 +991,43 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             if (tokens[2] == "auto") style.margin_bottom_auto = true;
             if (tokens[3] == "auto") style.margin_left_auto = true;
         }
-    } else if (prop == "margin-top") {
-        if (val == "auto") style.margin_top_auto = true;
-        else style.margin.top = parse_length(val, 0.0f);
-    } else if (prop == "margin-right") {
-        if (val == "auto") style.margin_right_auto = true;
-        else style.margin.right = parse_length(val, 0.0f);
-    } else if (prop == "margin-bottom") {
-        if (val == "auto") style.margin_bottom_auto = true;
-        else style.margin.bottom = parse_length(val, 0.0f);
-    } else if (prop == "margin-left") {
-        if (val == "auto") style.margin_left_auto = true;
-        else style.margin.left = parse_length(val, 0.0f);
+    } else if (prop == "margin-top" || prop == "margin-right" ||
+               prop == "margin-bottom" || prop == "margin-left") {
+        bool* is_auto = nullptr;
+        float* pixels = nullptr;
+        float* percent = nullptr;
+        if (prop == "margin-top") { is_auto = &style.margin_top_auto; pixels = &style.margin.top; percent = &style.margin_percent.top; }
+        else if (prop == "margin-right") { is_auto = &style.margin_right_auto; pixels = &style.margin.right; percent = &style.margin_percent.right; }
+        else if (prop == "margin-bottom") { is_auto = &style.margin_bottom_auto; pixels = &style.margin.bottom; percent = &style.margin_percent.bottom; }
+        else { is_auto = &style.margin_left_auto; pixels = &style.margin.left; percent = &style.margin_percent.left; }
+
+        if (val == "auto") {
+            *is_auto = true;
+        } else if (is_percentage_value(val)) {
+            *percent = parse_length(val, 0.0f);   // resolved by layout
+            *pixels = 0.0f;
+        } else {
+            *pixels = parse_length(val, 0.0f);
+            *percent = -1.0f;
+        }
     } else if (prop == "padding") {
-        style.padding = parse_box_edges(val);
-    } else if (prop == "padding-top") {
-        style.padding.top = parse_length(val, 0.0f);
-    } else if (prop == "padding-right") {
-        style.padding.right = parse_length(val, 0.0f);
-    } else if (prop == "padding-bottom") {
-        style.padding.bottom = parse_length(val, 0.0f);
-    } else if (prop == "padding-left") {
-        style.padding.left = parse_length(val, 0.0f);
+        style.padding = parse_box_edges(val, &style.padding_percent);
+    } else if (prop == "padding-top" || prop == "padding-right" ||
+               prop == "padding-bottom" || prop == "padding-left") {
+        float* pixels = nullptr;
+        float* percent = nullptr;
+        if (prop == "padding-top") { pixels = &style.padding.top; percent = &style.padding_percent.top; }
+        else if (prop == "padding-right") { pixels = &style.padding.right; percent = &style.padding_percent.right; }
+        else if (prop == "padding-bottom") { pixels = &style.padding.bottom; percent = &style.padding_percent.bottom; }
+        else { pixels = &style.padding.left; percent = &style.padding_percent.left; }
+
+        if (is_percentage_value(val)) {
+            *percent = parse_length(val, 0.0f);   // resolved by layout
+            *pixels = 0.0f;
+        } else {
+            *pixels = parse_length(val, 0.0f);
+            *percent = -1.0f;
+        }
     } else if (prop == "border-radius") {
         style.border_radius = parse_length(val, 0.0f);
     } else if (prop == "box-shadow") {

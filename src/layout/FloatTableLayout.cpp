@@ -235,6 +235,26 @@ void LayoutBox::layout_table(float containing_width) {
         // Tables shrink-wrap their content; they do not fill the container.
     }
 
+    // 3b. Percentage cell widths resolve against the table's own width (CSS
+    //     2.1 17.5.2), so they are applied once that width is known.
+    {
+        const bool size_known = (style.width >= 0.0f);
+        float percent_total = total;
+        for (const auto& row : grid) {
+            for (std::size_t c = 0; c < row.size(); ++c) {
+                const auto& cell = row[c];
+                if (cell->style.width_percent < 0.0f) continue;
+                const float required = percent_total * cell->style.width_percent / 100.0f;
+                if (required > column_widths[c]) percent_total += required - column_widths[c];
+                column_widths[c] = std::max(column_widths[c], required);
+            }
+        }
+        if (!size_known) {
+            total = 0.0f;
+            for (float width : column_widths) total += width;
+        }
+    }
+
     dimensions.content.width = total;
 
     // 4. Place the rows and cells.

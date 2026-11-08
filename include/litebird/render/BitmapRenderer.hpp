@@ -21,6 +21,8 @@ public:
 private:
     void execute_command(const PaintCommand& cmd);
     void set_pixel(int x, int y, Color color);
+    /// True when the device pixel survives every active overflow clip.
+    bool inside_clip(int x, int y) const;
     void fill_rect(int rx, int ry, int rw, int rh, Color color);
     void draw_char(int x, int y, char c, Color color, int scale = 2);
 
@@ -32,6 +34,7 @@ private:
     int m_height;
     std::vector<Color> m_pixels;
     std::vector<TransformMatrix2D> m_transform_stack;
+    std::vector<Rect> m_clip_stack;
 };
 
 } // namespace litebird

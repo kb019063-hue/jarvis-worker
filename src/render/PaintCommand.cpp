@@ -19,6 +19,17 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         list.add(PushTransformCommand{box->style.transform_matrix});
     }
 
+    // Overflow clipping: a box that clips paints a clip command before its own
+    // background and pops it after its subtree.
+    const bool clips =
+        box->style.overflow != Overflow::Visible || box->style.contains_paint();
+    if (clips) {
+        PushClipCommand clip;
+        clip.rect = box->dimensions.padding_box();
+        clip.border_radius = box->style.border_radius;
+        list.add(clip);
+    }
+
     // 0. Box Shadow (rendered underneath background)
     if (box->style.box_shadow.has_shadow && !box->style.box_shadow.color.is_transparent()) {
         DrawShadowCommand shadow;
@@ -184,6 +195,10 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     // 3. Positive z-index elements paint on top (ordered by z-index ascending)
     for (const auto& child : pos_z_children) {
         build_recursive(child, list);
+    }
+
+    if (clips) {
+        list.add(PopClipCommand{});
     }
 
     if (has_t) {

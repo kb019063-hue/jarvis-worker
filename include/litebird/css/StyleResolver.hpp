@@ -125,6 +125,19 @@ struct ComputedStyle {
     float height{-1.0f}; // -1 indicates auto
     EdgeSizes margin{0.0f};
     EdgeSizes padding{0.0f};
+
+    // Percentages cannot be resolved in the cascade -- they need a containing
+    // block -- so they are stored here as the raw percentage (0-100) while the
+    // pixel field above stays -1 (auto). A value < 0 means "not a percentage".
+    // Phase 18: before this, `width: 50%` silently became 50 *pixels*.
+    float width_percent{-1.0f};
+    float height_percent{-1.0f};
+    float min_width_percent{-1.0f};
+    float max_width_percent{-1.0f};
+    float min_height_percent{-1.0f};
+    float max_height_percent{-1.0f};
+    EdgeSizes margin_percent{-1.0f};
+    EdgeSizes padding_percent{-1.0f};
     EdgeSizes border_width{0.0f};
     Color border_color{Color::black()};
     float border_radius{0.0f};
@@ -297,7 +310,7 @@ private:
     bool expand_shorthand(const std::string& prop, const std::string& val,
                           std::vector<std::pair<std::string, std::string>>& out) const;
     float parse_length(std::string_view val, float default_val = 0.0f) const;
-    EdgeSizes parse_box_edges(std::string_view val) const;
+    EdgeSizes parse_box_edges(std::string_view val, EdgeSizes* percent_out = nullptr) const;
 
     StyleSheet m_ua_sheet;
     std::vector<StyleSheet> m_author_sheets;

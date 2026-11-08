@@ -11,18 +11,20 @@ Phase 15 replaced the hand-rolled HTML parser with the WHATWG tree-construction
 algorithm and added a way to *measure* the engine instead of eyeballing it.
 Phase 17 then spent the scoreboard: it drove the number from 88.0% to 98.8% by
 fixing what the corpus actually disagreed with, and audited the harness itself
-(see "What the scoreboard measured wrong" below).
+(see "What the scoreboard measured wrong" below). Phase 18 moved back to
+*layout* -- percentage lengths and `overflow` clipping -- which the parser
+scoreboard cannot see at all.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 69 suites, all passing | `make test` |
+| Engine unit tests | 71 suites, all passing | `make test` |
 | Parser robustness | 900 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # per-file pass rate + failing-case diffs
-make test            # 69 engine suites
+make test            # 71 engine suites
 make asan            # sanitizer build, tests, and a fuzz run
 ```
 
@@ -58,9 +60,10 @@ engines rather than self-referential. It is vendored under
 
 > **Honest scope:** 98.8% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
-> floats and tables now lay out (Phase 16), but there is no bidi, no
-> `rowspan`/`colspan`, no clipping for `overflow`, and the JS engine is a bytecode
-> interpreter without a JIT. See "Known gaps" in `ARCHITECTURE.md`.
+> floats and tables now lay out (Phase 16), percentages resolve (Phase 18) and
+> `overflow` clips (Phase 18), but there is no bidi, no `rowspan`/`colspan`, no
+> `border-collapse`, and the JS engine is a bytecode interpreter without a JIT.
+> See "Known gaps" in `ARCHITECTURE.md`.
 
 ---
 
@@ -156,6 +159,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **CSS Media Queries (`@media`):** Supports responsive breakpoints (`(max-width: ...)`, `(min-width: ...)`, `(max-height: ...)`, `(min-height: ...)`). Dynamically re-evaluates rule application against active viewport dimensions.
 - **Longhand Shorthands (Phase 15):** `margin`, `padding`, `border`, `border-width`, `border-color`, per-side borders, `background`, `font`, `border-radius` and `flex-flow` are expanded into longhands before cascading, so `margin: 10px 20px` and `border: 3px solid #0f0` behave as expected.
 - **`!important` and the full cascade order (Phase 15):** author normal → inline normal → author `!important` → inline `!important`, applied in `(importance, specificity, source order)` tiers.
+- **Percentage lengths (Phase 18):** `width`, `height`, `min`/`max` dimensions, `margin` and `padding` percentages resolve against the containing block at layout time (`width: 50%` is half the parent, not fifty pixels), and percentage table cells resolve against the table width.
 - **Relative and viewport units (Phase 15):** `em`/`ex`/`ch` resolve against the element's own computed font size, `rem` against the root size, and `vw`/`vh`/`vmin`/`vmax` against the viewport; `pt`, `pc`, `in`, `cm`, `mm` and `q` are converted to CSS pixels.
 - **Specificity Calculation:** Computes `(ID, Class, Tag)` triples for accurate cascade resolution.
 - **Built-in User-Agent Stylesheet:** Default styling for headings, paragraphs, lists, and layout blocks.
@@ -178,10 +182,12 @@ Litebird implements the complete modern browser rendering pipeline:
   - `clear: left | right | both` pushes a box below the relevant float bottoms.
   - Line boxes shrink around floats per line (`LineBox::left_intrusion` / `right_intrusion`), so text wraps beside a float and reclaims the full width once it has passed.
   - A block formatting context (`overflow != visible`, floats, flex/grid containers, table cells, inline-blocks, the root) grows to contain its floats instead of collapsing.
+  - `overflow: hidden | auto | scroll` and `contain: paint` clip painting: the display list carries `PushClipCommand`/`PopClipCommand` and both renderers honour the clip stack.
 - **CSS Table Layout (`display: table | table-row | table-cell | table-row-group`):**
   - Anonymous table structure: rows and row groups are flattened into a row grid, and stray cells are collected into rows.
   - Automatic column sizing: each column is at least as wide as its widest cell's min-content width or explicit width; an explicit table width distributes the surplus across the columns.
   - Row heights are the maximum of the row's cell heights; cells carry their own padding, borders and backgrounds.
+  - Percentage cell widths resolve against the table width (a `width: 25%` cell in a 300px table is a 75px column).
   - UA stylesheet provides the default `table`/`tr`/`td` display values plus `<th>` centering and bold weight.
 - **Incremental Layout & Invalidation:** Granular `dirty` marking (`mark_dirty()`) and subtree-isolated relayout avoiding redundant full-document recalculations.
 

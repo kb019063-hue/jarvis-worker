@@ -41,6 +41,10 @@ private:
     float m_scroll_y{0.0f};
     std::vector<TerminalCell> m_grid;
     std::vector<TransformMatrix2D> m_transform_stack;
+    std::vector<Rect> m_clip_stack;
+
+    /// True when the terminal cell's top-left device point survives clipping.
+    bool inside_clip(int col, int row) const;
 };
 
 } // namespace litebird

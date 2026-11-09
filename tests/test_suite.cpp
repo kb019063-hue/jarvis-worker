@@ -3887,7 +3887,7 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     assert(root != nullptr);
 
     DisplayList::build(root);   // painting must survive it too
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] deep display done\n"
+    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] deep display done\n";
 
     // The limit must not truncate ordinary documents: a normal depth still
     // produces the full tree.

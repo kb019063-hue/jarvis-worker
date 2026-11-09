@@ -62,15 +62,15 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           set +e
-          ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build-asan \
-            CXXFLAGS="-std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer" all > /tmp/b.log 2>&1
+          CXXF="-std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer"
+          ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build-asan CXXFLAGS="$CXXF" all > /tmp/b.log 2>&1
           echo "BUILD_EXIT=$?"
-          tail -40 /tmp/b.log
-          ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build-asan \
-            CXXFLAGS="-std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer" test > /tmp/t.log 2>&1
+          g++ $CXXF tools/stack_probe.cpp -o /tmp/probe && ASAN_OPTIONS=detect_leaks=0 /tmp/probe | while IFS= read -r l; do echo "::error::PROBE $l"; done
+          echo "::error::ENV nproc=$(nproc) ulimit_s=$(ulimit -s) gxx=$(g++ -dumpversion)"
+          grep -E "^CXX|^CXXFLAGS" /dev/null
+          ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build-asan CXXFLAGS="$CXXF" test > /tmp/t.log 2>&1
           TE=$?
-          echo "TEST_EXIT=$TE"
           echo "::error::TEST_EXIT=$TE"
-          tail -60 /tmp/t.log
-          grep -iE "runtime error|ERROR: AddressSanitizer|SUMMARY|Assertion|FAILED" /tmp/t.log | head -20 | while IFS= read -r l; do echo "::error::DIAG $l"; done
+          tail -30 /tmp/t.log
+          grep -iE "runtime error|ERROR: AddressSanitizer|SUMMARY|Assertion|FAILED" /tmp/t.log | head -10 | while IFS= read -r l; do echo "::error::DIAG $l"; done
           exit $TE

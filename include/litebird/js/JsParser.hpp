@@ -143,13 +143,29 @@ public:
         : args(std::move(a)), method_name(std::move(m)), is_call(call) {}
 };
 
+/// `i++`, `i--`, `++i`, `--i` (ECMA-262 13.4 UpdateExpression).
+/// `prefix` decides which value the expression yields: the pre- or post-change one.
+class UpdateExpr : public Expr {
+public:
+    std::unique_ptr<Expr> target;
+    JsTokenType op;
+    bool prefix;
+
+    UpdateExpr(std::unique_ptr<Expr> t, JsTokenType o, bool pre)
+        : target(std::move(t)), op(o), prefix(pre) {}
+};
+
 class AssignExpr : public Expr {
 public:
     std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> value;
+    /// `Equal` for plain assignment, or PlusEqual/MinusEqual/StarEqual/
+    /// SlashEqual/PercentEqual for the compound forms.
+    JsTokenType op{JsTokenType::Equal};
 
-    AssignExpr(std::unique_ptr<Expr> t, std::unique_ptr<Expr> v)
-        : target(std::move(t)), value(std::move(v)) {}
+    AssignExpr(std::unique_ptr<Expr> t, std::unique_ptr<Expr> v,
+               JsTokenType o = JsTokenType::Equal)
+        : target(std::move(t)), value(std::move(v)), op(o) {}
 };
 
 // Statements
@@ -165,7 +181,6 @@ class VarDeclStmt : public Stmt {
 public:
     std::string name;
     std::unique_ptr<Expr> initializer;
-
     VarDeclStmt(std::string n, std::unique_ptr<Expr> init)
         : name(std::move(n)), initializer(std::move(init)) {}
 };
@@ -291,6 +306,7 @@ private:
 
     std::unique_ptr<Expr> parse_expression();
     std::unique_ptr<Expr> parse_assignment();
+    static bool is_assignable(const Expr* expr);
     std::unique_ptr<Expr> parse_logical_or();
     std::unique_ptr<Expr> parse_logical_and();
     std::unique_ptr<Expr> parse_equality();

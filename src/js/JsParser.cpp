@@ -298,11 +298,25 @@ std::unique_ptr<Expr> JsParser::parse_expression() {
 std::unique_ptr<Expr> JsParser::parse_assignment() {
     auto expr = parse_logical_or();
 
-    if (match(JsTokenType::Equal)) {
+    // Right-associative, so `a = b = c` nests as `a = (b = c)`.
+    if (match(JsTokenType::Equal) || match(JsTokenType::PlusEqual) ||
+        match(JsTokenType::MinusEqual) || match(JsTokenType::StarEqual) ||
+        match(JsTokenType::SlashEqual) || match(JsTokenType::PercentEqual)) {
+        JsTokenType op = previous().type;
         auto value = parse_assignment();
-        return std::make_unique<AssignExpr>(std::move(expr), std::move(value));
+        if (!is_assignable(expr.get())) {
+            throw std::runtime_error("Invalid assignment target: left-hand side is not a variable or property.");
+        }
+        return std::make_unique<AssignExpr>(std::move(expr), std::move(value), op);
     }
     return expr;
+}
+
+// Valid assignment targets are identifiers, `a.b` and `a[b]`.
+bool JsParser::is_assignable(const Expr* expr) {
+    return dynamic_cast<const IdentifierExpr*>(expr) != nullptr ||
+           dynamic_cast<const MemberExpr*>(expr) != nullptr ||
+           dynamic_cast<const IndexExpr*>(expr) != nullptr;
 }
 
 std::unique_ptr<Expr> JsParser::parse_logical_or() {
@@ -378,6 +392,16 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
         auto right = parse_unary();
         return std::make_unique<UnaryExpr>(op, std::move(right));
     }
+    // Prefix increment/decrement: `++i` yields the value *after* the change,
+    // so it is prefix=true. Postfix is handled in parse_call_or_member.
+    if (match(JsTokenType::PlusPlus) || match(JsTokenType::MinusMinus)) {
+        JsTokenType op = previous().type;
+        auto target = parse_unary();
+        if (!is_assignable(target.get())) {
+            throw std::runtime_error("Invalid increment/decrement target.");
+        }
+        return std::make_unique<UpdateExpr>(std::move(target), op, /*prefix=*/true);
+    }
     if (match(JsTokenType::New)) {
         auto callee = parse_primary();
         std::vector<std::unique_ptr<Expr>> args;
@@ -414,6 +438,13 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
             }
             consume(JsTokenType::CloseParen, "Expected ')' after call arguments.");
             expr = std::make_unique<CallExpr>(std::move(expr), std::move(args));
+        } else if (match(JsTokenType::PlusPlus) || match(JsTokenType::MinusMinus)) {
+            // Postfix: `i++` yields the value *before* the change (prefix=false).
+            JsTokenType op = previous().type;
+            if (!is_assignable(expr.get())) {
+                throw std::runtime_error("Invalid increment/decrement target.");
+            }
+            expr = std::make_unique<UpdateExpr>(std::move(expr), op, /*prefix=*/false);
         } else {
             break;
         }

@@ -467,6 +467,9 @@ JsValue VM::run() {
             case OpCode::OpPop:
                 pop();
                 break;
+            case OpCode::OpDup:
+                push(peek(0));
+                break;
 
             case OpCode::OpGetLocal: {
                 uint8_t slot = read_byte();

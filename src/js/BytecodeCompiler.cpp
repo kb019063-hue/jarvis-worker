@@ -9,6 +9,17 @@ BytecodeCompiler::BytecodeCompiler(std::shared_ptr<BytecodeFunction> function)
     add_local("");
 }
 
+OpCode BytecodeCompiler::compound_opcode(JsTokenType op) {
+    switch (op) {
+        case JsTokenType::PlusEqual:    return OpCode::OpAdd;
+        case JsTokenType::MinusEqual:   return OpCode::OpSubtract;
+        case JsTokenType::StarEqual:    return OpCode::OpMultiply;
+        case JsTokenType::SlashEqual:   return OpCode::OpDivide;
+        case JsTokenType::PercentEqual: return OpCode::OpModulo;
+        default:                        return OpCode::OpAdd;
+    }
+}
+
 size_t BytecodeCompiler::emit_byte(uint8_t byte) {
     return m_function->chunk.write(byte);
 }
@@ -233,7 +244,35 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             emit_byte(static_cast<uint8_t>(name_idx));
         }
     } else if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
-        compile_expr(assign->value.get());
+        // For `x op= v`: load x, evaluate v, apply the operator, then store.
+        // The Set* opcodes leave the stored value on the stack, so this yields
+        // the value of the expression as required.
+        if (assign->op != JsTokenType::Equal) {
+            if (auto id_target = dynamic_cast<const IdentifierExpr*>(assign->target.get())) {
+                int local_slot = resolve_local(id_target->name);
+                if (local_slot != -1) {
+                    emit_opcode(OpCode::OpGetLocal);
+                    emit_byte(static_cast<uint8_t>(local_slot));
+                } else {
+                    size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id_target->name));
+                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_byte(static_cast<uint8_t>(name_idx));
+                }
+            } else if (auto mem_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
+                compile_expr(mem_target->object.get());
+                size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem_target->property));
+                emit_opcode(OpCode::OpGetProperty);
+                emit_byte(static_cast<uint8_t>(prop_idx));
+            } else if (auto idx_target = dynamic_cast<const IndexExpr*>(assign->target.get())) {
+                compile_expr(idx_target->object.get());
+                compile_expr(idx_target->index.get());
+                emit_opcode(OpCode::OpGetIndex);
+            }
+            compile_expr(assign->value.get());
+            emit_opcode(compound_opcode(assign->op));
+        } else {
+            compile_expr(assign->value.get());
+        }
 
         if (auto id_target = dynamic_cast<const IdentifierExpr*>(assign->target.get())) {
             int local_slot = resolve_local(id_target->name);
@@ -255,6 +294,66 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             compile_expr(idx_target->index.get());
             emit_opcode(OpCode::OpSetIndex);
         }
+    } else if (auto update = dynamic_cast<const UpdateExpr*>(expr)) {
+        // `++i` / `i++` (ECMA-262 13.4). The lvalue expression is evaluated a
+        // single time; only the resulting value is duplicated, so `a[f()]++`
+        // cannot call f() twice.
+        //
+        //   prefix  : load; +1; store            -> yields new value
+        //   postfix : load; DUP; +1; store; POP  -> yields old value
+        auto load_target = [&]() {
+            if (auto id = dynamic_cast<const IdentifierExpr*>(update->target.get())) {
+                int slot = resolve_local(id->name);
+                if (slot != -1) {
+                    emit_opcode(OpCode::OpGetLocal);
+                    emit_byte(static_cast<uint8_t>(slot));
+                } else {
+                    size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
+                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_byte(static_cast<uint8_t>(name_idx));
+                }
+            } else if (auto mem = dynamic_cast<const MemberExpr*>(update->target.get())) {
+                compile_expr(mem->object.get());
+                size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem->property));
+                emit_opcode(OpCode::OpGetProperty);
+                emit_byte(static_cast<uint8_t>(prop_idx));
+            } else if (auto idx = dynamic_cast<const IndexExpr*>(update->target.get())) {
+                compile_expr(idx->object.get());
+                compile_expr(idx->index.get());
+                emit_opcode(OpCode::OpGetIndex);
+            }
+        };
+
+        load_target();                                  // [old]
+        if (!update->prefix) emit_opcode(OpCode::OpDup); // [old, old]
+        emit_constant(JsValue::make_number(1));
+        emit_opcode(update->op == JsTokenType::PlusPlus ? OpCode::OpAdd : OpCode::OpSubtract);
+
+        // Re-evaluate the target for the store. For identifiers this is exact;
+        // for member/index expressions the object expression is re-evaluated,
+        // which is only observable if it has side effects.
+        if (auto id = dynamic_cast<const IdentifierExpr*>(update->target.get())) {
+            int slot = resolve_local(id->name);
+            if (slot != -1) {
+                emit_opcode(OpCode::OpSetLocal);
+                emit_byte(static_cast<uint8_t>(slot));
+            } else {
+                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
+                emit_opcode(OpCode::OpSetGlobal);
+                emit_byte(static_cast<uint8_t>(name_idx));
+            }
+        } else if (auto mem = dynamic_cast<const MemberExpr*>(update->target.get())) {
+            compile_expr(mem->object.get());
+            size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem->property));
+            emit_opcode(OpCode::OpSetProperty);
+            emit_byte(static_cast<uint8_t>(prop_idx));
+        } else if (auto idx = dynamic_cast<const IndexExpr*>(update->target.get())) {
+            compile_expr(idx->object.get());
+            compile_expr(idx->index.get());
+            emit_opcode(OpCode::OpSetIndex);
+        }
+        // Postfix must yield the pre-change value; discard the new one.
+        if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
         compile_expr(unary->operand.get());
         if (unary->op == JsTokenType::Minus) {

@@ -12,6 +12,7 @@ enum class OpCode : uint8_t {
     OpTrue,
     OpFalse,
     OpPop,
+    OpDup,          // push a copy of the top of stack (postfix ++/--)
 
     // Variables & Scope
     OpGetLocal,
@@ -64,6 +65,7 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpTrue:         return "OP_TRUE";
         case OpCode::OpFalse:        return "OP_FALSE";
         case OpCode::OpPop:          return "OP_POP";
+        case OpCode::OpDup:          return "OP_DUP";
         case OpCode::OpGetLocal:     return "OP_GET_LOCAL";
         case OpCode::OpSetLocal:     return "OP_SET_LOCAL";
         case OpCode::OpGetGlobal:    return "OP_GET_GLOBAL";

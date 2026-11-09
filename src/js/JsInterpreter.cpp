@@ -1153,6 +1153,72 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
     return JsValue::make_undefined();
 }
 
+// Reads the current value behind an assignment target.
+JsValue JsInterpreter::read_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env) {
+    if (auto id = dynamic_cast<const IdentifierExpr*>(target)) {
+        return env->get(id->name);
+    }
+    if (auto member = dynamic_cast<const MemberExpr*>(target)) {
+        JsValue obj = eval_expr(member->object.get(), env);
+        return obj.get_property(member->property);
+    }
+    if (auto index = dynamic_cast<const IndexExpr*>(target)) {
+        JsValue obj = eval_expr(index->object.get(), env);
+        JsValue idx = eval_expr(index->index.get(), env);
+        std::string prop = (idx.type == JsType::Number)
+            ? std::to_string(static_cast<int64_t>(idx.number_val))
+            : idx.to_string();
+        return obj.get_property(prop);
+    }
+    return JsValue::make_undefined();
+}
+
+// Stores into an assignment target.
+void JsInterpreter::write_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env,
+                                 const JsValue& value) {
+    if (auto id = dynamic_cast<const IdentifierExpr*>(target)) {
+        env->assign(id->name, value);
+        return;
+    }
+    if (auto member = dynamic_cast<const MemberExpr*>(target)) {
+        JsValue obj = eval_expr(member->object.get(), env);
+        obj.set_property(member->property, value);
+        return;
+    }
+    if (auto index = dynamic_cast<const IndexExpr*>(target)) {
+        JsValue obj = eval_expr(index->object.get(), env);
+        JsValue idx = eval_expr(index->index.get(), env);
+        std::string prop = (idx.type == JsType::Number)
+            ? std::to_string(static_cast<int64_t>(idx.number_val))
+            : idx.to_string();
+        obj.set_property(prop, value);
+        return;
+    }
+}
+
+// Applies a compound-assignment operator to the value already read.
+JsValue JsInterpreter::apply_compound(JsTokenType op, const JsValue& left, const JsValue& right) {
+    switch (op) {
+        case JsTokenType::PlusEqual:
+            // `+=` concatenates when either operand is a string, exactly like `+`.
+            if (left.type == JsType::String || right.type == JsType::String ||
+                left.type == JsType::DomNode || right.type == JsType::DomNode) {
+                return JsValue::make_string(left.to_string() + right.to_string());
+            }
+            return JsValue::make_number(left.to_number() + right.to_number());
+        case JsTokenType::MinusEqual:
+            return JsValue::make_number(left.to_number() - right.to_number());
+        case JsTokenType::StarEqual:
+            return JsValue::make_number(left.to_number() * right.to_number());
+        case JsTokenType::SlashEqual:
+            return JsValue::make_number(left.to_number() / right.to_number());
+        case JsTokenType::PercentEqual:
+            return JsValue::make_number(std::fmod(left.to_number(), right.to_number()));
+        default:
+            return right;
+    }
+}
+
 JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment> env) {
     if (!expr) return JsValue::make_undefined();
 
@@ -1391,22 +1457,27 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
 
     if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
         JsValue right = eval_expr(assign->value.get(), env);
-        if (auto id_target = dynamic_cast<const IdentifierExpr*>(assign->target.get())) {
-            env->assign(id_target->name, right);
-            return right;
-        } else if (auto member_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
-            JsValue obj = eval_expr(member_target->object.get(), env);
-            obj.set_property(member_target->property, right);
-            return right;
-        } else if (auto index_target = dynamic_cast<const IndexExpr*>(assign->target.get())) {
-            JsValue obj = eval_expr(index_target->object.get(), env);
-            JsValue idx_val = eval_expr(index_target->index.get(), env);
-            std::string prop = (idx_val.type == JsType::Number) ?
-                std::to_string(static_cast<int64_t>(idx_val.number_val)) : idx_val.to_string();
-            obj.set_property(prop, right);
-            return right;
+
+        // Compound assignment reads the current value first, then applies the
+        // corresponding binary operator. `+=` must concatenate when either side
+        // is a string, which is why it shares the binary `+` semantics rather
+        // than doing arithmetic.
+        if (assign->op != JsTokenType::Equal) {
+            JsValue current = read_lvalue(assign->target.get(), env);
+            right = apply_compound(assign->op, current, right);
         }
+
+        write_lvalue(assign->target.get(), env, right);
         return right;
+    }
+
+    if (auto update = dynamic_cast<const UpdateExpr*>(expr)) {
+        // The lvalue is evaluated exactly once, so `a[i++]++` does what it says.
+        JsValue current = read_lvalue(update->target.get(), env);
+        double before = current.to_number();
+        double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
+        write_lvalue(update->target.get(), env, JsValue::make_number(after));
+        return JsValue::make_number(update->prefix ? after : before);
     }
 
     if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {

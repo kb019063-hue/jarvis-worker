@@ -3782,6 +3782,79 @@ TEST(percentage_lengths_resolve_against_containing_block) {
     assert(std::abs(quarter->dimensions.margin_box().width - 75.0f) < 1.0f);
 }
 
+TEST(compound_assignment_and_update_operators) {
+    using namespace litebird;
+
+    // `+=`, `-=`, `*=`, `/=`, `%=`, `++` and `--` had no token types at all
+    // before this -- the parser saw `s` `+` `=` and reported "Unexpected token
+    // in JS expression: =". They are covered here for BOTH execution paths,
+    // because the CLI exercises the bytecode VM while <script> tags and the
+    // test harness use the AST interpreter, and the two must not diverge.
+    const char* program = R"(
+        var a = 0;  a += 5;
+        var b = 10; b -= 3;
+        var c = 4;  c *= 3;
+        var d = 12; d /= 4;
+        var e = 13; e %= 5;
+        var s = "x"; s += "y";
+        var mixed = "n" + 1; mixed += 2;
+
+        var post = 1; var postResult = post++;
+        var pre  = 1; var preResult  = ++pre;
+        var postDec = 5; var postDecResult = postDec--;
+        var preDec  = 5; var preDecResult  = --preDec;
+
+        var obj = { n: 1 }; obj.n += 10; obj.n++;
+        var arr = [1]; arr[0] *= 7; arr[0]--;
+
+        var acc = 0;
+        for (var i = 0; i < 5; i++) { acc += i; }
+    )";
+
+    struct Expected { const char* name; const char* value; };
+    const Expected expected[] = {
+        {"a", "5"},   {"b", "7"},   {"c", "12"},  {"d", "3"},   {"e", "3"},
+        {"s", "xy"},
+        // `+=` must concatenate, and `"n"+1` is already the string "n1".
+        {"mixed", "n12"},
+        // Postfix yields the OLD value; prefix yields the NEW one.
+        {"post", "2"}, {"postResult", "1"},
+        {"pre", "2"},  {"preResult", "2"},
+        {"postDec", "4"}, {"postDecResult", "5"},
+        {"preDec", "4"},  {"preDecResult", "4"},
+        {"acc", "10"},   // 0+1+2+3+4
+    };
+
+    // Path 1: bytecode VM (what the CLI runs).
+    JsInterpreter vm;
+    vm.eval(program);
+    for (const auto& exp : expected) {
+        std::string got = vm.global_env()->get(exp.name).to_string();
+        if (got != exp.value) {
+            std::cerr << "bytecode VM: " << exp.name << " expected "
+                      << exp.value << " got " << got << "\n";
+        }
+        assert(got == exp.value);
+    }
+
+    // Path 2: AST interpreter. Same source, same answers.
+    JsInterpreter ast;
+    ast.eval_ast(program);
+    for (const auto& exp : expected) {
+        std::string got = ast.global_env()->get(exp.name).to_string();
+        if (got != exp.value) {
+            std::cerr << "AST interpreter: " << exp.name << " expected "
+                      << exp.value << " got " << got << "\n";
+        }
+        assert(got == exp.value);
+    }
+
+    // `obj.n` and `arr[0]` must really have been written through.
+    // 1 + 10 (compound) then ++ (update) => 12.
+    assert(ast.global_env()->get("obj").get_property("n").to_string() == "12");
+    assert(ast.global_env()->get("arr").get_property("0").to_string() == "6");
+}
+
 TEST(strict_equality_does_not_coerce) {
     using namespace litebird;
 
@@ -3982,6 +4055,7 @@ int main() {
     RUN_TEST(svg_attribute_adjustment_and_character_reference_edges);
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(percentage_lengths_resolve_against_containing_block);
+    RUN_TEST(compound_assignment_and_update_operators);
     RUN_TEST(strict_equality_does_not_coerce);
     RUN_TEST(image_decoder_rejects_hostile_dimensions);
     RUN_TEST(overflow_hidden_clips_painting);

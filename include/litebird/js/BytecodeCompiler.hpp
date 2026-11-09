@@ -31,6 +31,8 @@ private:
 
     size_t emit_byte(uint8_t byte);
     size_t emit_opcode(OpCode op);
+    /// Maps `+=`, `-=`, `*=`, `/=`, `%=` onto the matching arithmetic opcode.
+    static OpCode compound_opcode(JsTokenType op);
     size_t emit_constant(JsValue value);
     size_t emit_jump(OpCode op);
     void patch_jump(size_t offset);

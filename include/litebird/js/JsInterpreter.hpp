@@ -88,6 +88,14 @@ private:
     void init_builtins();
 
     JsValue eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment> env);
+
+    // Shared lvalue machinery for plain assignment, compound assignment and
+    // ++/--. Keeping one implementation means `obj.x += 1`, `obj.x++` and
+    // `obj.x = obj.x + 1` cannot drift apart.
+    JsValue read_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env);
+    void write_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env,
+                      const JsValue& value);
+    JsValue apply_compound(JsTokenType op, const JsValue& left, const JsValue& right);
     JsValue exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment> env);
 
     std::shared_ptr<JsEnvironment> m_global_env;

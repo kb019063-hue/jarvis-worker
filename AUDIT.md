@@ -18,10 +18,10 @@ The rest are documented with enough detail to act on.
 | 2 | `===` does not exist; strict equality silently behaves as `==` | **Critical** | ✅ Fixed |
 | 3 | `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--` are not tokenised | **Critical** | ✅ Fixed |
 | 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | ✅ Fixed |
-| 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | Open |
+| 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | ✅ Fixed |
 | 6 | Two incompatible object models in `JsValue` | **High** | Open |
 | 7 | `var` has block scope instead of function scope | **High** | Open (partial) |
-| 8 | No recursion guard in the JS engine | **High** | Open |
+| 8 | No recursion guard in the JS engine | **High** | ✅ Fixed |
 | 9 | `get_property()` allocates on every property read | **High (perf)** | Open |
 | 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | Open |
 | 11 | HTTP header injection + no response size cap | **Medium** | Open |
@@ -195,7 +195,12 @@ collection on one thread can free objects the other is using.
 
 ---
 
-## 5. Segfault on deeply nested input
+## 5. ✅ Segfault on deeply nested input
+
+> **Fixed.** The recursion was in `LayoutTree::build_box`, not the parser — see
+> below. Bounded at 512 levels and the per-frame cost was cut by moving the
+> 920-byte style off the stack. Depth 50,000 now renders.
+
 
 ```
 depth 1,000: ok
@@ -257,7 +262,12 @@ The finding stands; the fix needs more care than it looked like.
 
 ---
 
-## 8. No recursion guard in the JS engine
+## 8. ✅ No recursion guard in the JS engine
+
+> **Fixed.** Guard lives in `eval_expr` (guarding only call sites was not
+> enough — the recursion is per operator level). Runaway recursion now reports
+> `RangeError: Maximum call stack size exceeded`.
+
 
 There is no call-depth counter and no `RangeError` path. The VM has an explicit
 `m_stack` (so bytecode frames are heap-allocated and bounded), but the
@@ -403,7 +413,7 @@ Nested-depth parse (`--dump-dom`):
 1. **~~Assignment operators~~** (#3) — done; `typeof` / `switch` / `**` / `??`
    are the remaining grammar gaps.
 2. **~~GC roots~~** (#4) — done.
-3. **Depth guard** (#5) — 9 KB of input currently kills the process.
+3. **~~Depth guard~~** (#5) and **~~JS recursion guard~~** (#8) — done.
 4. **`JsValue` slimming** (#10) — unlocks memory *and* interpreter speed.
 5. **`var` scoping** (#7), then `typeof` / `switch` / `??`.
 6. **Cascade indexing** — make the now-flat curve actually stay flat.

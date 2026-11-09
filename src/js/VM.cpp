@@ -467,6 +467,9 @@ JsValue VM::run() {
             case OpCode::OpPop:
                 pop();
                 break;
+            case OpCode::OpDup:
+                push(peek(0));
+                break;
 
             case OpCode::OpGetLocal: {
                 uint8_t slot = read_byte();
@@ -599,6 +602,18 @@ JsValue VM::run() {
                 JsValue b = pop();
                 JsValue a = pop();
                 push(JsValue::make_boolean(a.to_string() != b.to_string()));
+                break;
+            }
+            case OpCode::OpStrictEqual: {
+                JsValue b = pop();
+                JsValue a = pop();
+                push(JsValue::make_boolean(strict_equals(a, b)));
+                break;
+            }
+            case OpCode::OpStrictNotEqual: {
+                JsValue b = pop();
+                JsValue a = pop();
+                push(JsValue::make_boolean(!strict_equals(a, b)));
                 break;
             }
             case OpCode::OpGreater: {

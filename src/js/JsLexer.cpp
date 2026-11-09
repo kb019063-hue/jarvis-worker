@@ -291,16 +291,40 @@ JsToken JsLexer::next_token() {
         case ':': t.type = JsTokenType::Colon; return t;
         case ',': t.type = JsTokenType::Comma; return t;
         case '.': t.type = JsTokenType::Dot; return t;
-        case '+': t.type = JsTokenType::Plus; return t;
-        case '-': t.type = JsTokenType::Minus; return t;
-        case '*': t.type = JsTokenType::Star; return t;
-        case '/': t.type = JsTokenType::Slash; return t;
-        case '%': t.type = JsTokenType::Percent; return t;
+        // Longest-match first: `+=` must win over `+`, `++` over `+`.
+        case '+':
+            if (match('=')) { t.type = JsTokenType::PlusEqual; t.text = "+="; return t; }
+            if (match('+')) { t.type = JsTokenType::PlusPlus;  t.text = "++"; return t; }
+            t.type = JsTokenType::Plus;
+            return t;
+        case '-':
+            if (match('=')) { t.type = JsTokenType::MinusEqual; t.text = "-="; return t; }
+            if (match('-')) { t.type = JsTokenType::MinusMinus; t.text = "--"; return t; }
+            t.type = JsTokenType::Minus;
+            return t;
+        case '*':
+            if (match('=')) { t.type = JsTokenType::StarEqual; t.text = "*="; return t; }
+            t.type = JsTokenType::Star;
+            return t;
+        case '/':
+            if (match('=')) { t.type = JsTokenType::SlashEqual; t.text = "/="; return t; }
+            t.type = JsTokenType::Slash;
+            return t;
+        case '%':
+            if (match('=')) { t.type = JsTokenType::PercentEqual; t.text = "%="; return t; }
+            t.type = JsTokenType::Percent;
+            return t;
         case '=':
             if (match('=')) {
-                t.type = JsTokenType::EqualEqual;
-                t.text = "==";
-                if (match('=')) t.text = "==="; // handle ===
+                if (match('=')) {
+                    // `===` is strict equality and MUST stay distinct from `==`:
+                    // collapsing them makes `1 === "1"` evaluate true.
+                    t.type = JsTokenType::StrictEqual;
+                    t.text = "===";
+                } else {
+                    t.type = JsTokenType::EqualEqual;
+                    t.text = "==";
+                }
             } else if (match('>')) {
                 t.type = JsTokenType::Arrow;
                 t.text = "=>";
@@ -310,9 +334,13 @@ JsToken JsLexer::next_token() {
             return t;
         case '!':
             if (match('=')) {
-                t.type = JsTokenType::NotEqual;
-                t.text = "!=";
-                if (match('=')) t.text = "!==";
+                if (match('=')) {
+                    t.type = JsTokenType::StrictNotEqual;
+                    t.text = "!==";
+                } else {
+                    t.type = JsTokenType::NotEqual;
+                    t.text = "!=";
+                }
             } else {
                 t.type = JsTokenType::Bang;
             }

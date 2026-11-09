@@ -48,8 +48,22 @@ enum class JsTokenType {
     Slash,
     Percent,
     Equal,
+
+    // Compound assignment and increment/decrement (ECMA-262 13.15, 13.4).
+    // Before these existed the parser saw `s` `+` `=` and reported
+    // "Unexpected token in JS expression: =", which made `+=` and `++`
+    // unusable -- and those two appear in essentially every real script.
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+    PlusPlus,
+    MinusMinus,
     EqualEqual,
+    StrictEqual,
     NotEqual,
+    StrictNotEqual,
     Less,
     LessEqual,
     Greater,

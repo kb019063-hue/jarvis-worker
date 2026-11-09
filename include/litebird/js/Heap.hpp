@@ -12,6 +12,7 @@ namespace litebird {
 
 class Heap;
 class JsValue;
+class Node;
 
 class HeapObject {
 public:
@@ -28,6 +29,11 @@ public:
     std::unordered_map<std::string, JsValue> properties;
     std::vector<JsValue> array_elements;
     bool is_array{false};
+
+    // Set when this JsObject is the script-visible identity of a DOM node.
+    // Holding a strong reference here means the wrapper keeps its node alive, which
+    // is what makes `document.body` stable across accesses and across collections.
+    std::shared_ptr<Node> dom_node;
 
     void trace(Heap& heap) override;
 };

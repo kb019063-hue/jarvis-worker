@@ -32,15 +32,17 @@ jobs:
       - name: Tree-construction scoreboard
         run: make conformance
       - name: Enforce the conformance floor
-        # The corpus is fixed, so the score is deterministic. Raise this floor
-        # as the parser improves; it exists to catch regressions.
-        run: python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
-          && python3 -c "
-import json, sys
-report = json.load(open('build/conformance.json'))
-print(f\"conformance: {report['passed']}/{report['total']} = {report['rate']:.1f}%\")
-sys.exit(0 if report['rate'] >= 98.0 else 1)
-"
+        # The corpus is fixed, so the score is deterministic. Raise this floor as
+        # the parser improves; it exists to catch regressions.
+        #
+        # NOTE: this used to be a bare multi-line `run:` value whose second line
+        # started at column 1, which is not valid YAML. The whole workflow file
+        # failed to parse, so every run reported "workflow file issue" and no job
+        # ever executed. Keep it as a block scalar.
+        run: |
+          set -euo pipefail
+          python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
+          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['rate'] >= 98.0 else 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: conformance-report

@@ -128,4 +128,12 @@ public:
     void set_property(const std::string& name, JsValue val);
 };
 
+/// ECMAScript `===` (Strict Equality Comparison, 7.2.16).
+///
+/// Unlike `==`, this never coerces: values of different types are simply not
+/// equal, and objects compare by identity. The old engine had no strict
+/// comparison at all -- the lexer folded `===` into `==`, so `1 === "1"`
+/// evaluated true and bugs like it were invisible.
+bool strict_equals(const JsValue& a, const JsValue& b);
+
 } // namespace litebird

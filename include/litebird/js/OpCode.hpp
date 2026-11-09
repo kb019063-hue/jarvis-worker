@@ -12,6 +12,7 @@ enum class OpCode : uint8_t {
     OpTrue,
     OpFalse,
     OpPop,
+    OpDup,          // push a copy of the top of stack (postfix ++/--)
 
     // Variables & Scope
     OpGetLocal,
@@ -37,6 +38,8 @@ enum class OpCode : uint8_t {
     // Logic & Comparison
     OpEqual,
     OpNotEqual,
+    OpStrictEqual,
+    OpStrictNotEqual,
     OpGreater,
     OpGreaterEqual,
     OpLess,
@@ -62,6 +65,7 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpTrue:         return "OP_TRUE";
         case OpCode::OpFalse:        return "OP_FALSE";
         case OpCode::OpPop:          return "OP_POP";
+        case OpCode::OpDup:          return "OP_DUP";
         case OpCode::OpGetLocal:     return "OP_GET_LOCAL";
         case OpCode::OpSetLocal:     return "OP_SET_LOCAL";
         case OpCode::OpGetGlobal:    return "OP_GET_GLOBAL";
@@ -79,6 +83,8 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpModulo:       return "OP_MODULO";
         case OpCode::OpEqual:        return "OP_EQUAL";
         case OpCode::OpNotEqual:     return "OP_NOT_EQUAL";
+        case OpCode::OpStrictEqual:  return "OP_STRICT_EQUAL";
+        case OpCode::OpStrictNotEqual: return "OP_STRICT_NOT_EQUAL";
         case OpCode::OpGreater:      return "OP_GREATER";
         case OpCode::OpGreaterEqual: return "OP_GREATER_EQUAL";
         case OpCode::OpLess:         return "OP_LESS";

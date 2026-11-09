@@ -174,6 +174,9 @@ JsValue JsInterpreter::eval_ast(std::string_view source) {
         return execute(program.get(), m_global_env);
     } catch (const ReturnException& ret) {
         return ret.value;
+    } catch (const JsStackOverflow& overflow) {
+        std::cerr << "JS Runtime Error: " << overflow.what() << std::endl;
+        return JsValue::make_undefined();
     } catch (const std::exception& ex) {
         std::cerr << "JS Runtime Error: " << ex.what() << std::endl;
         return JsValue::make_undefined();
@@ -531,6 +534,7 @@ void JsInterpreter::init_builtins() {
             fn_env->define(fn.params[i], arg);
         }
         try {
+            CallDepthGuard depth_guard(*this);
             JsValue res = execute(fn.body.get(), fn_env);
             for (const auto& [k, v] : m_global_env->values()) {
                 m_vm.set_global(k, v);
@@ -980,6 +984,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                 if (is_async) {
                     auto p_data = std::make_shared<PromiseData>();
                     try {
+                        CallDepthGuard depth_guard(*this);
                         JsValue res = execute(body_ptr.get(), fn_env);
                         Promise::resolve(p_data, res);
                     } catch (const ReturnException& ret) {
@@ -994,6 +999,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                 }
 
                 try {
+                    CallDepthGuard depth_guard(*this);
                     JsValue res = execute(body_ptr.get(), fn_env);
                     for (const auto& [k, v] : m_global_env->values()) {
                         m_vm.set_global(k, v);
@@ -1236,6 +1242,13 @@ JsValue JsInterpreter::apply_compound(JsTokenType op, const JsValue& left, const
 JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment> env) {
     if (!expr) return JsValue::make_undefined();
 
+    // Expression evaluation is itself recursive: `1 + (1 + (1 + ...))` and
+    // `return 1 + f(n - 1)` both nest `eval_expr` once per level. Guarding only
+    // the call sites left this unbounded -- a 2,000-deep recursive function
+    // still overflowed the stack. The guard is per-expression, so it also bounds
+    // pathological expression nesting inside a single statement.
+    CallDepthGuard depth_guard(*this);
+
     if (auto lit = dynamic_cast<const LiteralExpr*>(expr)) {
         return lit->value;
     }
@@ -1290,6 +1303,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 if (is_async) {
                     auto p_data = std::make_shared<PromiseData>();
                     try {
+                        CallDepthGuard depth_guard(*this);
                         JsValue res = execute(body_ptr.get(), fn_env);
                         Promise::resolve(p_data, res);
                     } catch (const ReturnException& ret) {
@@ -1304,6 +1318,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 }
 
                 try {
+                    CallDepthGuard depth_guard(*this);
                     JsValue res = execute(body_ptr.get(), fn_env);
                     for (const auto& [k, v] : m_global_env->values()) {
                         m_vm.set_global(k, v);

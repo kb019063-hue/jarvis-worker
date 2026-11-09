@@ -23,8 +23,17 @@ private:
     static std::shared_ptr<LayoutBox> build_box(
         const std::shared_ptr<Node>& node,
         const StyleResolver& resolver,
-        const ComputedStyle* parent_style
+        const ComputedStyle* parent_style,
+        int depth = 0
     );
+
+    /// Maximum box-tree depth. Every nested element costs a `build_box` stack
+    /// frame, and each frame keeps a 920-byte ComputedStyle alive across the
+    /// recursive call, so an ordinary 8 MB stack ran out at roughly 3,000 levels
+    /// of nesting. Real browsers cap DOM depth for exactly this reason (HTML's
+    /// stack of open elements is bounded at 512). Subtrees past the limit are
+    /// dropped rather than crashing the process.
+    static constexpr int kMaxBuildDepth = 512;
 };
 
 } // namespace litebird

@@ -69,6 +69,16 @@ public:
     explicit ReturnException(JsValue v) : value(std::move(v)) {}
 };
 
+/// Thrown when a script recurses deeper than the engine can represent on the
+/// native stack. Every JS call consumes C++ frames in the AST interpreter
+/// (`eval_expr` -> call -> `execute` -> `exec_stmt`), so without a limit an
+/// ordinary recursive function overflows the stack and the process dies with no
+/// error at all. Reported to script as a caught-able RangeError.
+class JsStackOverflow : public std::exception {
+public:
+    const char* what() const noexcept override { return "RangeError: Maximum call stack size exceeded"; }
+};
+
 class JsInterpreter {
 public:
     explicit JsInterpreter(std::shared_ptr<Document> doc = nullptr);
@@ -76,6 +86,10 @@ public:
 
     JsInterpreter(const JsInterpreter&) = delete;
     JsInterpreter& operator=(const JsInterpreter&) = delete;
+
+    /// Maximum JS call depth. A JS call here costs several native frames in the
+    /// AST interpreter, so this is deliberately far below the native limit.
+    static constexpr int kMaxCallDepth = 1000;
 
     JsValue eval(std::string_view source);
     JsValue eval_ast(std::string_view source);
@@ -91,6 +105,25 @@ public:
 
 private:
     void init_builtins();
+
+    /// RAII call-depth guard. Throws JsStackOverflow past kMaxCallDepth and
+    /// always restores the counter, including on the unwinding path.
+    class CallDepthGuard {
+    public:
+        explicit CallDepthGuard(JsInterpreter& interp) : m_interp(interp) {
+            if (++m_interp.m_call_depth > kMaxCallDepth) {
+                --m_interp.m_call_depth;
+                throw JsStackOverflow();
+            }
+        }
+        ~CallDepthGuard() { --m_interp.m_call_depth; }
+        CallDepthGuard(const CallDepthGuard&) = delete;
+        CallDepthGuard& operator=(const CallDepthGuard&) = delete;
+    private:
+        JsInterpreter& m_interp;
+    };
+
+    int m_call_depth{0};
 
     JsValue eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment> env);
 

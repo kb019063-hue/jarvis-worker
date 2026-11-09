@@ -27,6 +27,20 @@ namespace litebird {
 JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
     : m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)), m_history(std::make_shared<History>()), m_vm(m_document) {
     init_builtins();
+
+    // Everything a script can still name lives in an environment map, so this
+    // interpreter's environments must be roots. Without this registration a
+    // collection with an empty root list (the DevTools path) frees objects the
+    // interpreter is still holding, and the next property read is a UAF.
+    Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>& roots) {
+        if (m_global_env) m_global_env->collect_roots(roots);
+        if (m_current_env) m_current_env->collect_roots(roots);
+        for (auto& [k, v] : m_vm.globals()) roots.push_back(&v);
+    });
+}
+
+JsInterpreter::~JsInterpreter() {
+    Heap::default_heap().remove_root_provider(this);
 }
 
 static JsValue create_generator_instance(JsInterpreter* interp,

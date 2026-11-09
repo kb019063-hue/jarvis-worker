@@ -1,5 +1,6 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsValue.hpp"
+#include <algorithm>
 
 namespace litebird {
 
@@ -75,13 +76,45 @@ void Heap::unregister_root(JsValue* val) {
     }
 }
 
+void Heap::add_root_provider(const void* owner, RootProvider provider) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& entry : m_root_providers) {
+        if (entry.owner == owner) {
+            entry.provider = std::move(provider);
+            return;
+        }
+    }
+    m_root_providers.push_back({owner, std::move(provider)});
+}
+
+void Heap::remove_root_provider(const void* owner) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_root_providers.erase(
+        std::remove_if(m_root_providers.begin(), m_root_providers.end(),
+                       [owner](const RootProviderEntry& e) { return e.owner == owner; }),
+        m_root_providers.end());
+}
+
+// Called with m_mutex already held by collect_garbage, so this must not lock.
+void Heap::collect_roots(std::vector<JsValue*>& roots) const {
+    for (const auto& entry : m_root_providers) {
+        if (entry.provider) entry.provider(roots);
+    }
+}
+
 GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_stats.collections_count++;
     m_gray_stack.clear();
 
+    // Values held by registered owners (interpreter environments, pending
+    // microtasks, ...) are roots too. Without this, a collection that is handed
+    // an empty root list frees objects that scripts can still reach.
+    std::vector<JsValue*> all_roots = roots;
+    collect_roots(all_roots);
+
     // 1. Mark phase
-    for (const auto* root : roots) {
+    for (const auto* root : all_roots) {
         if (root) mark_value(*root);
     }
     for (const auto* root : m_registered_roots) {

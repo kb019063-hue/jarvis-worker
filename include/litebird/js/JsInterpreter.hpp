@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/js/JsValue.hpp"
+#include "litebird/js/Heap.hpp"
 #include "litebird/js/JsParser.hpp"
 #include "litebird/js/BytecodeCompiler.hpp"
 #include "litebird/js/VM.hpp"
@@ -71,6 +72,10 @@ public:
 class JsInterpreter {
 public:
     explicit JsInterpreter(std::shared_ptr<Document> doc = nullptr);
+    ~JsInterpreter();
+
+    JsInterpreter(const JsInterpreter&) = delete;
+    JsInterpreter& operator=(const JsInterpreter&) = delete;
 
     JsValue eval(std::string_view source);
     JsValue eval_ast(std::string_view source);

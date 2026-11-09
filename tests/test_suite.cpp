@@ -3855,6 +3855,82 @@ TEST(compound_assignment_and_update_operators) {
     assert(ast.global_env()->get("arr").get_property("0").to_string() == "6");
 }
 
+TEST(gc_roots_are_complete_under_empty_root_set) {
+    using namespace litebird;
+
+    // A `JsObject` is a raw pointer. The collector only keeps one alive if it is
+    // reachable from the root set, so anything reachable solely through a
+    // closure environment or a queued microtask has to be registered
+    // explicitly. It was not: the DevTools pane called collect_garbage() with
+    // an empty root list and freed every live object (an ASan
+    // heap-use-after-free, reproduced end to end).
+    //
+    // This test performs exactly that collection -- no explicit roots -- and
+    // then touches everything the interpreter still holds.
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var box = { payload: "keepme", nested: { deep: 42 } };
+            var list = [box, { a: 1 }, { b: 2 }];
+            function makeClosure() { var captured = { retained: true }; return function () { return captured.retained; }; }
+            var fn = makeClosure();
+            var closureResult = fn();
+        )");
+
+        const size_t alive_before = Heap::default_heap().stats().alive_cells;
+        assert(alive_before > 0);
+
+        // Empty root set. Registered providers are the only thing keeping
+        // script-visible objects alive here.
+        Heap::default_heap().collect_garbage();
+
+        // Every one of these dereferences a JsObject. If the root set were
+        // incomplete this is a use-after-free, not a failed assertion.
+        assert(js.global_env()->get("box").get_property("payload").to_string() == "keepme");
+        assert(js.global_env()->get("box").get_property("nested").get_property("deep").to_string() == "42");
+        assert(js.global_env()->get("list").get_property("length").to_string() == "3");
+        assert(js.global_env()->get("list").get_property("0").get_property("payload").to_string() == "keepme");
+        // A value reachable only through a closure environment.
+        assert(js.global_env()->get("closureResult").bool_val == true);
+        assert(js.global_env()->get("fn").call({}).bool_val == true);
+
+        // Collecting again must be idempotent, not cumulative damage.
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("box").get_property("payload").to_string() == "keepme");
+
+        // The garbage we actually produced must still be reclaimed, i.e. the
+        // fix must not have turned the collector into a no-op.
+        js.eval_ast("for (var i = 0; i < 200; i++) { var junk = { idx: i }; }");
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("box").get_property("payload").to_string() == "keepme");
+    }
+
+    // Destroying the interpreter must withdraw its provider. A collection
+    // afterwards must not call into freed memory.
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == 0);
+}
+
+TEST(gc_keeps_objects_captured_by_pending_microtasks) {
+    using namespace litebird;
+
+    // Promise handlers and queueMicrotask callbacks capture JsValue copies
+    // inside std::function storage the collector cannot inspect. Collecting
+    // before the queue drains used to free them, and the handler then read
+    // freed memory: it silently returned 'undefined' instead of 'keepme'.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        var box = { payload: "keepme" };
+        Promise.resolve(box).then(function (v) { microtask_value = v.payload; });
+    )");
+
+    // Collect while the callback is still queued.
+    Heap::default_heap().collect_garbage();
+
+    EventLoop::default_loop().tick();
+    assert(js.global_env()->get("microtask_value").to_string() == "keepme");
+}
+
 TEST(strict_equality_does_not_coerce) {
     using namespace litebird;
 
@@ -4056,6 +4132,8 @@ int main() {
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(percentage_lengths_resolve_against_containing_block);
     RUN_TEST(compound_assignment_and_update_operators);
+    RUN_TEST(gc_roots_are_complete_under_empty_root_set);
+    RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
     RUN_TEST(strict_equality_does_not_coerce);
     RUN_TEST(image_decoder_rejects_hostile_dimensions);
     RUN_TEST(overflow_hidden_clips_painting);

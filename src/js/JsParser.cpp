@@ -327,7 +327,8 @@ std::unique_ptr<Expr> JsParser::parse_logical_and() {
 
 std::unique_ptr<Expr> JsParser::parse_equality() {
     auto expr = parse_comparison();
-    while (match(JsTokenType::EqualEqual) || match(JsTokenType::NotEqual)) {
+    while (match(JsTokenType::EqualEqual) || match(JsTokenType::StrictEqual) ||
+           match(JsTokenType::NotEqual) || match(JsTokenType::StrictNotEqual)) {
         JsTokenType op = previous().type;
         auto right = parse_comparison();
         expr = std::make_unique<BinaryExpr>(std::move(expr), op, std::move(right));

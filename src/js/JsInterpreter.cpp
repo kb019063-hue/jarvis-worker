@@ -1460,6 +1460,10 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             }
             case JsTokenType::NotEqual:
                 return JsValue::make_boolean(left.to_string() != right.to_string());
+            case JsTokenType::StrictEqual:
+                return JsValue::make_boolean(strict_equals(left, right));
+            case JsTokenType::StrictNotEqual:
+                return JsValue::make_boolean(!strict_equals(left, right));
             case JsTokenType::Less:
                 return JsValue::make_boolean(left.to_number() < right.to_number());
             case JsTokenType::LessEqual:

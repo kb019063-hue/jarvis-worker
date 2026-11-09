@@ -37,6 +37,8 @@ enum class OpCode : uint8_t {
     // Logic & Comparison
     OpEqual,
     OpNotEqual,
+    OpStrictEqual,
+    OpStrictNotEqual,
     OpGreater,
     OpGreaterEqual,
     OpLess,
@@ -79,6 +81,8 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpModulo:       return "OP_MODULO";
         case OpCode::OpEqual:        return "OP_EQUAL";
         case OpCode::OpNotEqual:     return "OP_NOT_EQUAL";
+        case OpCode::OpStrictEqual:  return "OP_STRICT_EQUAL";
+        case OpCode::OpStrictNotEqual: return "OP_STRICT_NOT_EQUAL";
         case OpCode::OpGreater:      return "OP_GREATER";
         case OpCode::OpGreaterEqual: return "OP_GREATER_EQUAL";
         case OpCode::OpLess:         return "OP_LESS";

@@ -294,6 +294,8 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             case JsTokenType::Percent:      emit_opcode(OpCode::OpModulo); break;
             case JsTokenType::EqualEqual:   emit_opcode(OpCode::OpEqual); break;
             case JsTokenType::NotEqual:     emit_opcode(OpCode::OpNotEqual); break;
+            case JsTokenType::StrictEqual:  emit_opcode(OpCode::OpStrictEqual); break;
+            case JsTokenType::StrictNotEqual: emit_opcode(OpCode::OpStrictNotEqual); break;
             case JsTokenType::Greater:      emit_opcode(OpCode::OpGreater); break;
             case JsTokenType::GreaterEqual: emit_opcode(OpCode::OpGreaterEqual); break;
             case JsTokenType::Less:         emit_opcode(OpCode::OpLess); break;

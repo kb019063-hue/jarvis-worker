@@ -298,9 +298,15 @@ JsToken JsLexer::next_token() {
         case '%': t.type = JsTokenType::Percent; return t;
         case '=':
             if (match('=')) {
-                t.type = JsTokenType::EqualEqual;
-                t.text = "==";
-                if (match('=')) t.text = "==="; // handle ===
+                if (match('=')) {
+                    // `===` is strict equality and MUST stay distinct from `==`:
+                    // collapsing them makes `1 === "1"` evaluate true.
+                    t.type = JsTokenType::StrictEqual;
+                    t.text = "===";
+                } else {
+                    t.type = JsTokenType::EqualEqual;
+                    t.text = "==";
+                }
             } else if (match('>')) {
                 t.type = JsTokenType::Arrow;
                 t.text = "=>";
@@ -310,9 +316,13 @@ JsToken JsLexer::next_token() {
             return t;
         case '!':
             if (match('=')) {
-                t.type = JsTokenType::NotEqual;
-                t.text = "!=";
-                if (match('=')) t.text = "!==";
+                if (match('=')) {
+                    t.type = JsTokenType::StrictNotEqual;
+                    t.text = "!==";
+                } else {
+                    t.type = JsTokenType::NotEqual;
+                    t.text = "!=";
+                }
             } else {
                 t.type = JsTokenType::Bang;
             }

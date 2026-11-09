@@ -30,6 +30,38 @@ JsValue JsValue::make_object(JsObject* obj) {
     return v;
 }
 
+// ECMAScript Strict Equality Comparison (7.2.16).
+// No type coercion happens here, which is the entire point of `===`.
+bool strict_equals(const JsValue& a, const JsValue& b) {
+    // Different types are never strictly equal, with no coercion.
+    if (a.type != b.type) return false;
+
+    switch (a.type) {
+        case JsType::Undefined:
+        case JsType::Null:
+            return true;              // undefined === undefined, null === null
+        case JsType::Boolean:
+            return a.bool_val == b.bool_val;
+        case JsType::Number:
+            return a.number_val == b.number_val;   // NaN !== NaN, as required
+        case JsType::String:
+            return a.string_val == b.string_val;
+        case JsType::DomNode:
+            // A DOM wrapper is minted fresh on every property access, so its
+            // JsObject address is NOT a stable identity. The node behind it is.
+            // Comparing nodes is what makes `document.body === document.body`
+            // and `el.shadowRoot === sr` behave the way script expects.
+            return a.dom_node == b.dom_node;
+        case JsType::Object:
+        case JsType::Function:
+        case JsType::NativeFunction:
+            // Reference identity, never structural equality.
+            return a.object_val == b.object_val;
+        default:
+            return false;
+    }
+}
+
 bool JsValue::is_truthy() const {
     switch (type) {
         case JsType::Undefined:

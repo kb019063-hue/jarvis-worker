@@ -10,6 +10,8 @@
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include <cstdint>
+#include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Heap.hpp"
@@ -3780,6 +3782,83 @@ TEST(percentage_lengths_resolve_against_containing_block) {
     assert(std::abs(quarter->dimensions.margin_box().width - 75.0f) < 1.0f);
 }
 
+TEST(strict_equality_does_not_coerce) {
+    using namespace litebird;
+
+    // `===` used to be folded into `==` by the lexer, so `1 === "1"` was true.
+    // Strict equality must never coerce, compare null/undefined as distinct, and
+    // still compare DOM wrappers by node identity rather than wrapper address.
+    JsInterpreter js;
+
+    js.eval_ast(R"(
+        var n_eq = (1 === 1);
+        var n_string = (1 === "1");
+        var loose = (1 == "1");
+        var null_undef = (null === undefined);
+        var nulleq = (null == undefined);
+        var zero_false = (0 === false);
+        var not_strict = (1 !== "1");
+
+        var el = document.createElement("div");
+        var sr = el.attachShadow({ mode: "open" });
+        var same_shadow = (el.shadowRoot === sr);
+        var self_identity = (el === el);
+    )");
+
+    assert(js.global_env()->get("n_eq").bool_val == true);
+    assert(js.global_env()->get("n_string").bool_val == false);
+    // `==` keeps coercing -- the fix must not have made both operators strict.
+    assert(js.global_env()->get("loose").bool_val == true);
+    assert(js.global_env()->get("null_undef").bool_val == false);
+    assert(js.global_env()->get("zero_false").bool_val == false);
+    assert(js.global_env()->get("not_strict").bool_val == true);
+    assert(js.global_env()->get("same_shadow").bool_val == true);
+    assert(js.global_env()->get("self_identity").bool_val == true);
+}
+
+TEST(image_decoder_rejects_hostile_dimensions) {
+    using namespace litebird;
+
+    // A 154-byte BMP header claiming 65536 x 65536 pixels overflows the
+    // `width * height` product in `int`. Before the guard this either wrapped
+    // positive (buffer far smaller than the coordinates written through it) or
+    // wrapped negative (uncaught std::length_error -> std::terminate).
+    auto bmp_with_dims = [](int32_t w, int32_t h) {
+        std::vector<uint8_t> v(54, 0);
+        v[0] = 'B'; v[1] = 'M';
+        auto put32 = [&](size_t at, uint32_t val) {
+            v[at + 0] = static_cast<uint8_t>(val & 0xFF);
+            v[at + 1] = static_cast<uint8_t>((val >> 8) & 0xFF);
+            v[at + 2] = static_cast<uint8_t>((val >> 16) & 0xFF);
+            v[at + 3] = static_cast<uint8_t>((val >> 24) & 0xFF);
+        };
+        put32(10, 54);                                   // pixel data offset
+        put32(18, static_cast<uint32_t>(w));             // width
+        put32(22, static_cast<uint32_t>(h));             // height
+        v[28] = 24; v[29] = 0;                           // bpp = 24
+        put32(30, 0);                                    // BI_RGB
+        return v;
+    };
+
+    // Overflow wraps to 0 and to a negative value respectively.
+    assert(ImageDecoder::decode(bmp_with_dims(65536, 65536)) == nullptr);
+    assert(ImageDecoder::decode(bmp_with_dims(65536, 65535)) == nullptr);
+    // Wraps to a small positive count -- the out-of-bounds-write shape.
+    assert(ImageDecoder::decode(bmp_with_dims(65537, 65537)) == nullptr);
+    // INT32_MIN height: std::abs would overflow.
+    assert(ImageDecoder::decode(bmp_with_dims(4, INT32_MIN)) == nullptr);
+    // Absurd but non-overflowing dimensions must still be refused.
+    assert(ImageDecoder::decode(bmp_with_dims(100000, 100000)) == nullptr);
+
+    // A well-formed 2x2 24bpp BMP still decodes, so the guard is not over-broad.
+    auto good = bmp_with_dims(2, 2);
+    good.resize(54 + 16, 0x41);
+    auto img = ImageDecoder::decode(good);
+    assert(img != nullptr);
+    assert(img->width == 2 && img->height == 2);
+    assert(img->pixels.size() == 4);
+}
+
 TEST(overflow_hidden_clips_painting) {
     using namespace litebird;
 
@@ -3903,6 +3982,8 @@ int main() {
     RUN_TEST(svg_attribute_adjustment_and_character_reference_edges);
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(percentage_lengths_resolve_against_containing_block);
+    RUN_TEST(strict_equality_does_not_coerce);
+    RUN_TEST(image_decoder_rejects_hostile_dimensions);
     RUN_TEST(overflow_hidden_clips_painting);
     RUN_TEST(float_shrinks_inline_line_boxes);
     RUN_TEST(float_left_and_right_can_stack_side_by_side);

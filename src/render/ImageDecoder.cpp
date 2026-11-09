@@ -4,6 +4,8 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <climits>
 
 namespace litebird {
 
@@ -22,6 +24,25 @@ static int32_t read_i32_le(const uint8_t* p) {
     return static_cast<int32_t>(read_u32_le(p));
 }
 
+// Hard ceiling on decoded pixel count. A hostile header can claim 65535 x 65536
+// pixels in 154 bytes; without a cap the decoder either overflows `int` in
+// `width * height` (see below) or tries to allocate terabytes. 64 megapixels is
+// far beyond anything this engine can usefully paint, and keeps the product
+// provably inside both `int` and `size_t`.
+static constexpr int64_t kMaxDecodedPixels = 64ll * 1024 * 1024;
+
+// Returns false when a header-supplied width/height pair is unusable: non-positive,
+// or a pixel count that overflows `int` or exceeds kMaxDecodedPixels.
+// Callers MUST gate every `width * height` on this, because the multiplication is
+// performed in `int` and a wrapping result makes `pixels.resize()` allocate a
+// buffer that is far smaller than the coordinates `set_pixel` will later use.
+static bool validate_pixel_count(int64_t width, int64_t height) {
+    if (width <= 0 || height <= 0) return false;
+    // Divide rather than multiply so the check itself cannot overflow.
+    if (width > kMaxDecodedPixels / height) return false;
+    return width * height <= kMaxDecodedPixels;
+}
+
 std::shared_ptr<ImageData> ImageDecoder::decode_bmp(const uint8_t* data, size_t size) {
     if (!data || size < 54) return nullptr;
     if (data[0] != 'B' || data[1] != 'M') return nullptr;
@@ -37,25 +58,33 @@ std::shared_ptr<ImageData> ImageDecoder::decode_bmp(const uint8_t* data, size_t 
     }
 
     bool top_down = (h < 0);
-    int height = std::abs(h);
-    int width = w;
+    // NOT std::abs: abs(INT32_MIN) is UB and stays negative.
+    if (h == INT32_MIN) return nullptr;
+    int64_t height = top_down ? -static_cast<int64_t>(h) : static_cast<int64_t>(h);
+    int64_t width = w;
 
     if (offset >= size) return nullptr;
+    if (!validate_pixel_count(width, height)) return nullptr;
+    // The row stride must also fit in the `int` used below.
+    if (width * (bpp == 24 ? 3 : 4) + 4 > INT32_MAX) return nullptr;
 
     auto img = std::make_shared<ImageData>();
-    img->width = width;
-    img->height = height;
-    img->pixels.resize(width * height, 0xFF000000);
+    img->width = static_cast<int>(width);
+    img->height = static_cast<int>(height);
+    img->pixels.resize(static_cast<size_t>(width * height), 0xFF000000);
 
-    int row_stride = (bpp == 24) ? ((width * 3 + 3) & ~3) : (width * 4);
+    int row_stride = (bpp == 24) ? static_cast<int>((width * 3 + 3) & ~static_cast<int64_t>(3))
+                                 : static_cast<int>(width * 4);
 
-    for (int y = 0; y < height; ++y) {
-        int src_y = top_down ? y : (height - 1 - y);
-        size_t row_offset = offset + static_cast<size_t>(src_y) * row_stride;
-        if (row_offset + (bpp == 24 ? width * 3 : width * 4) > size) break;
+    for (int y = 0; y < static_cast<int>(height); ++y) {
+        int src_y = top_down ? y : (static_cast<int>(height) - 1 - y);
+        size_t row_offset = offset + static_cast<size_t>(src_y) * static_cast<size_t>(row_stride);
+        size_t row_bytes = (bpp == 24) ? static_cast<size_t>(width) * 3 : static_cast<size_t>(width) * 4;
+        // Overflow-safe: compare against `size`, not `row_offset + row_bytes`.
+        if (row_offset > size || row_bytes > size - row_offset) break;
 
         const uint8_t* row_ptr = data + row_offset;
-        for (int x = 0; x < width; ++x) {
+        for (int x = 0; x < static_cast<int>(width); ++x) {
             uint8_t b = row_ptr[0];
             uint8_t g = row_ptr[1];
             uint8_t r = row_ptr[2];
@@ -110,6 +139,9 @@ std::shared_ptr<ImageData> ImageDecoder::decode_ppm(const uint8_t* data, size_t 
     int maxval = read_int();
 
     if (width <= 0 || height <= 0 || maxval <= 0 || maxval > 255) return nullptr;
+    // Same `width * height` overflow hazard as decode_bmp: a 15-byte PPM header
+    // can claim 65536 x 65535 and turn `resize()` into a bad_alloc/length_error.
+    if (!validate_pixel_count(width, height)) return nullptr;
 
     if (is_p6 && cursor < size && std::isspace(data[cursor])) {
         cursor++; // skip single separator
@@ -118,7 +150,7 @@ std::shared_ptr<ImageData> ImageDecoder::decode_ppm(const uint8_t* data, size_t 
     auto img = std::make_shared<ImageData>();
     img->width = width;
     img->height = height;
-    img->pixels.resize(width * height, 0xFF000000);
+    img->pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height), 0xFF000000);
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {

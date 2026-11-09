@@ -98,8 +98,26 @@ public:
     }
 
     bool has_class(const std::string& class_name) const {
-        auto list = classes();
-        return std::find(list.begin(), list.end(), class_name) != list.end();
+        // Hot path: the cascade calls this once per class selector per element.
+        // The old version went through classes(), which built a std::stringstream,
+        // allocated a std::string per token and a vector to hold them -- roughly
+        // a microsecond for what is a substring scan. Tokenise in place instead.
+        auto it = m_attributes.find("class");
+        if (it == m_attributes.end()) return false;
+        const std::string& attr = it->second;
+        if (class_name.empty()) return false;
+
+        size_t pos = 0;
+        while (pos < attr.size()) {
+            while (pos < attr.size() && is_class_separator(attr[pos])) ++pos;
+            size_t start = pos;
+            while (pos < attr.size() && !is_class_separator(attr[pos])) ++pos;
+            if (pos > start && (pos - start) == class_name.size() &&
+                attr.compare(start, pos - start, class_name) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Form Controls
@@ -178,6 +196,13 @@ public:
     void dump(std::ostream& os, int indent = 0) const override;
 
 private:
+    /// HTML treats class as a space-separated token list; only ASCII whitespace
+    /// separates tokens (a non-breaking space is a legitimate class character).
+    static bool is_class_separator(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+
+public:
     std::string m_tag_name;
     ElementNamespace m_namespace{ElementNamespace::HTML};
     std::shared_ptr<Node> m_template_contents;

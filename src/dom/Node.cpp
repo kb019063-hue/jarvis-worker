@@ -236,11 +236,25 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
     return !event->default_prevented();
 }
 
+// Appends into one buffer instead of returning a fresh string per subtree.
+// The old form was O(n^2) in depth: every level copied all of its descendants'
+// text again, so reading textContent on a deeply nested document copied the
+// whole document once per level.
+static void append_text_content(const Node& node, std::string& out) {
+    if (node.type() == NodeType::Text) {
+        if (const auto* text = node.as_text()) {
+            out += text->text();
+        }
+        return;
+    }
+    for (const auto& ch : node.children()) {
+        if (ch) append_text_content(*ch, out);
+    }
+}
+
 std::string Node::text_content() const {
     std::string res;
-    for (const auto& ch : m_children) {
-        res += ch->text_content();
-    }
+    append_text_content(*this, res);
     return res;
 }
 

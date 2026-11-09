@@ -17,7 +17,7 @@ The rest are documented with enough detail to act on.
 | 1 | Image decoder: uncaught crash + OOB heap write from a 154-byte file | **Critical** | ✅ Fixed |
 | 2 | `===` does not exist; strict equality silently behaves as `==` | **Critical** | ✅ Fixed |
 | 3 | `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--` are not tokenised | **Critical** | ✅ Fixed |
-| 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | Open |
+| 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | ✅ Fixed |
 | 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | Open |
 | 6 | Two incompatible object models in `JsValue` | **High** | Open |
 | 7 | `var` has block scope instead of function scope | **High** | Open (partial) |
@@ -142,7 +142,13 @@ all fail to parse, and `"a".repeat(3)` returns `undefined` instead of `"aaa"`.
 
 ---
 
-## 4. GC roots are incomplete — latent use-after-free
+## 4. ✅ GC roots were incomplete — a live use-after-free
+
+> **Fixed in `f78d201`.** The heap now has a root-provider registry; the
+> interpreter and the event loop both contribute their live `JsValue`s. Verified
+> with 200 consecutive empty-root-set collections under ASan. The original
+> finding follows.
+
 
 `JsObject` lives in a mark-and-sweep heap holding **raw `JsObject*`**. A
 `JsValue` is a `shared_ptr`-managed value that can point at one. Nothing keeps
@@ -166,10 +172,19 @@ for (auto& [k, v] : m_globals) roots.push_back(&v);
 …is invisible to the collector and can be freed while live. `Heap::sweep()`
 deletes the cell outright; every surviving `JsObject*` then dangles.
 
-I could not make it fire from the CLI (nothing currently triggers an automatic
-collection — `collect_garbage()` is only reachable via the explicit `gc()`
-builtin), which is the only reason this has not shown up as a crash. It is a
-tripwire waiting for the first automatic GC trigger or long-lived page.
+**It does fire, and it is not latent.** I originally wrote here that nothing
+triggered a collection — that was wrong. `BrowserShell::render_terminal_frame`
+collects on **every DevTools render** with an empty root list:
+
+```cpp
+if (devtools) {
+    auto heap_stats = Heap::default_heap().collect_garbage();   // no roots
+```
+
+Against `examples/interactive.html` that prints `alive 23 -> 0` and ASan reports
+the next property read as a `heap-use-after-free` in `Heap::sweep()`. Values
+captured by pending promise handlers are hit the same way, and silently return
+`undefined` instead of their data.
 
 **Fix direction:** either make `JsValue` hold `shared_ptr<JsObject>` and drop
 the custom collector, or register roots properly at every boundary
@@ -387,7 +402,7 @@ Nested-depth parse (`--dump-dom`):
 
 1. **~~Assignment operators~~** (#3) — done; `typeof` / `switch` / `**` / `??`
    are the remaining grammar gaps.
-2. **GC roots** (#4) — the latent UAF is the thing that will bite hardest later.
+2. **~~GC roots~~** (#4) — done.
 3. **Depth guard** (#5) — 9 KB of input currently kills the process.
 4. **`JsValue` slimming** (#10) — unlocks memory *and* interpreter speed.
 5. **`var` scoping** (#7), then `typeof` / `switch` / `??`.

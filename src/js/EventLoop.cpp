@@ -1,9 +1,18 @@
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/Heap.hpp"
 
 namespace litebird {
 
 EventLoop& EventLoop::default_loop() {
     static EventLoop s_loop;
+    // Deliberately leaked: the event loop outlives every interpreter, and a
+    // static destructor would run after the heap it reports roots into.
+    static bool registered = [] {
+        Heap::default_heap().add_root_provider(
+            &s_loop, [](std::vector<JsValue*>& roots) { s_loop.collect_gc_roots(roots); });
+        return true;
+    }();
+    (void)registered;
     return s_loop;
 }
 
@@ -51,6 +60,34 @@ void EventLoop::post_task(std::function<void()> task) {
     if (task) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_task_queue.push_back(std::move(task));
+    }
+}
+
+void EventLoop::add_gc_root_provider(const void* owner, GcRootProvider provider) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& entry : m_gc_root_providers) {
+        if (entry.first == owner) {
+            entry.second = std::move(provider);
+            return;
+        }
+    }
+    m_gc_root_providers.emplace_back(owner, std::move(provider));
+}
+
+void EventLoop::remove_gc_root_provider(const void* owner) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_gc_root_providers.erase(
+        std::remove_if(m_gc_root_providers.begin(), m_gc_root_providers.end(),
+                       [owner](const auto& e) { return e.first == owner; }),
+        m_gc_root_providers.end());
+}
+
+// Called from within Heap::collect_garbage, which already holds the heap mutex;
+// this only takes the event-loop mutex.
+void EventLoop::collect_gc_roots(std::vector<JsValue*>& roots) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& entry : m_gc_root_providers) {
+        if (entry.second) entry.second(roots);
     }
 }
 

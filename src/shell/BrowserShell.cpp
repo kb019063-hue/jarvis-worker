@@ -515,7 +515,14 @@ std::string BrowserShell::render_terminal_frame(bool devtools) {
 
     // 5. Optional DevTools Pane
     if (devtools) {
+        // Rendering the DevTools pane used to collect with an EMPTY root set,
+        // which freed every JsObject the page could still reach and left the
+        // interpreter holding dangling pointers (reproduced as an ASan
+        // heap-use-after-free). The collector now pulls roots from registered
+        // providers, so this is safe -- and `stats` is the sane thing to
+        // report, since collect_garbage() already returns them.
         auto heap_stats = Heap::default_heap().collect_garbage();
+        (void)heap_stats;
         out << "\033[48;2;30;41;59m\033[38;2;251;191;36m";
         out << "--- [Litebird DevTools] ---\n";
         out << "DOM Elements: " << (m_document ? m_document->get_elements_by_tag_name("*").size() : 0)

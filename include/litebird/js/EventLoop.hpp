@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <algorithm>
 #include <mutex>
+#include <memory>
+#include <utility>
+#include "litebird/js/JsValue.hpp"
 
 namespace litebird {
 
@@ -33,6 +36,16 @@ public:
 
     void post_task(std::function<void()> task);
     void post_microtask(std::function<void()> microtask);
+
+    // Queued callbacks keep copies of JsValues (promise handlers, captured
+    // closures, queueMicrotask arguments) inside std::function storage, which the
+    // collector cannot inspect. An owner registers a provider that pushes the
+    // addresses of those live values; the provider stays valid until the owner
+    // withdraws it. Keyed by owner so multiple independent owners can contribute.
+    using GcRootProvider = std::function<void(std::vector<JsValue*>&)>;
+    void add_gc_root_provider(const void* owner, GcRootProvider provider);
+    void remove_gc_root_provider(const void* owner);
+    void collect_gc_roots(std::vector<JsValue*>& roots) const;
     size_t run_microtasks();
 
     // Processes all tasks and timers ready at 'now'.
@@ -51,6 +64,7 @@ private:
     std::vector<TimerTask> m_timers;
     std::vector<std::function<void()>> m_task_queue;
     std::vector<std::function<void()>> m_microtask_queue;
+    std::vector<std::pair<const void*, GcRootProvider>> m_gc_root_providers;
 };
 
 } // namespace litebird

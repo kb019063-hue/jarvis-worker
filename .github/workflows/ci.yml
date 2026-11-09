@@ -73,6 +73,7 @@ jobs:
           awk '/deeply_nested_markup_does_not_overflow_the_stack/{f=1} f&&/^\[bb\]/{print; n++} n>=8{exit}' /tmp/t.log | while IFS= read -r l; do echo "::error::BB $l"; done
           grep -n "deeply_nested" /tmp/t.log | head -2 | while IFS= read -r l; do echo "::error::WHERE $l"; done
           grep -iE "runtime error|ERROR: AddressSanitizer|SUMMARY|Assertion|FAILED|DEADLYSIGNAL" /tmp/t.log | head -8 | while IFS= read -r l; do echo "::error::DIAG $l"; done
+          grep -iE "Running test:|PASSED|FAILED|SUMMARY:|stack-overflow|Assertion|DEADLYSIGNAL" /tmp/t.log | tail -25 | while IFS= read -r l; do echo "::error::LAST $l"; done
           tail -60 /tmp/t.log | while IFS= read -r l; do echo "::error::TAIL $l"; done
           ASAN_OPTIONS=detect_leaks=0 make BUILD_DIR=build-asan fuzz > /tmp/f.log 2>&1
           echo "::error::FUZZ_EXIT=$?"

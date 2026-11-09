@@ -41,6 +41,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <pthread.h>
@@ -162,6 +164,15 @@ inline bool init_thread_stack_base() {
 #endif
 
     if (!state.active) init_from_rlimit(thread_stack_base_origin(), state);
+
+    // Opt-in diagnostics: stack limits vary between hosts, and a silent fallback
+    // to the fixed depth caps is exactly the kind of thing that is invisible
+    // until something overflows.
+    if (std::getenv("LITEBIRD_DEBUG_STACK")) {
+        std::fprintf(stderr, "[stack] active=%d top=%zx limit=%zu origin=%zx\n",
+                     static_cast<int>(state.active), static_cast<std::size_t>(state.top),
+                     state.limit, static_cast<std::size_t>(thread_stack_base_origin()));
+    }
 
     // If nothing could be established the walkers keep their fixed depth caps;
     // a guessed stack bound is worse than a coarse cap.

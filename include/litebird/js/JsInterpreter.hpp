@@ -6,6 +6,7 @@
 #include "litebird/js/BytecodeCompiler.hpp"
 #include "litebird/js/VM.hpp"
 #include "litebird/dom/Document.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -87,9 +88,12 @@ public:
     JsInterpreter(const JsInterpreter&) = delete;
     JsInterpreter& operator=(const JsInterpreter&) = delete;
 
-    /// Maximum JS call depth. A JS call here costs several native frames in the
-    /// AST interpreter, so this is deliberately far below the native limit.
-    static constexpr int kMaxCallDepth = 1000;
+    /// JS call-depth ceiling, used only where native stack bounds cannot be
+    /// queried (see StackLimit.hpp). A JS call costs several native frames in
+    /// the AST interpreter and the cost per frame swings ~12x between an -O2
+    /// and an AddressSanitizer build, so depth is bounded by the remaining
+    /// stack and this value is just a backstop.
+    static constexpr int kMaxCallDepth = 20000;
 
     JsValue eval(std::string_view source);
     JsValue eval_ast(std::string_view source);
@@ -106,12 +110,13 @@ public:
 private:
     void init_builtins();
 
-    /// RAII call-depth guard. Throws JsStackOverflow past kMaxCallDepth and
-    /// always restores the counter, including on the unwinding path.
+    /// RAII call-depth guard. Throws JsStackOverflow once the native stack is
+    /// within kStackReserveBytes of its budget, and always restores the counter,
+    /// including on the unwinding path.
     class CallDepthGuard {
     public:
         explicit CallDepthGuard(JsInterpreter& interp) : m_interp(interp) {
-            if (++m_interp.m_call_depth > kMaxCallDepth) {
+            if (++m_interp.m_call_depth > kMaxCallDepth || stack_is_exhausted()) {
                 --m_interp.m_call_depth;
                 throw JsStackOverflow();
             }

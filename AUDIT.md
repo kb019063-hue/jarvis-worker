@@ -29,6 +29,7 @@ The rest are documented with enough detail to act on.
 | 13 | Build uses `-O2` only (no LTO / `-march=native`) | Low | Open |
 | 14 | `has_class()` allocated a `stringstream` per call | **High (perf)** | ✅ Fixed |
 | 15 | `text_content()` was O(n²) in depth | **Medium (perf)** | ✅ Fixed |
+| 16 | Parsing is O(n²) in nesting depth (scope scans + ancestor walks) | **Medium (perf)** | Open |
 
 ---
 
@@ -198,8 +199,24 @@ collection on one thread can free objects the other is using.
 ## 5. ✅ Segfault on deeply nested input
 
 > **Fixed.** The recursion was in `LayoutTree::build_box`, not the parser — see
-> below. Bounded at 512 levels and the per-frame cost was cut by moving the
-> 920-byte style off the stack. Depth 50,000 now renders.
+> below. The per-frame cost was cut by moving the 920-byte style off the stack,
+> and the recursion is now bounded by the *remaining native stack* rather than a
+> fixed depth. Depth 50,000 parses and renders.
+>
+> A fixed depth constant was tried first, and the sanitizer CI job rejected it:
+> a `build_box` level costs ~2.8 KB in an `-O2` build but ~34 KB under
+> AddressSanitizer, so a nominal 512 levels exhausted an 8 MB stack at level 243
+> in the ASan job while leaving plenty of room in the normal one. No single
+> constant is correct for both. `include/litebird/common/StackLimit.hpp` instead
+> compares the current stack pointer against the thread's stack bounds and stops
+> when one more level would eat into a 1 MB reserve — the approach V8's
+> `StackGuard` and SpiderMonkey's `CheckRecursionLimit` take. It adapts to build
+> flags, platform and thread automatically.
+>
+> Consequence worth knowing: the *reachable* depth now depends on the build.
+> Normal builds get thousands of levels; an ASan build gets ~1,000 for layout and
+> ~130 for JS, because its frames are ~20-55x larger. That is a measurement of
+> the sanitizer, not a regression.
 
 
 ```
@@ -266,7 +283,20 @@ The finding stands; the fix needs more care than it looked like.
 
 > **Fixed.** Guard lives in `eval_expr` (guarding only call sites was not
 > enough — the recursion is per operator level). Runaway recursion now reports
-> `RangeError: Maximum call stack size exceeded`.
+> `RangeError: Maximum call stack size exceeded` and the interpreter survives.
+>
+> Like finding 5, the guard is a stack-headroom check rather than a fixed call
+> count, because one JS call costs ~1 KB of native stack in an `-O2` build but
+> ~55 KB under AddressSanitizer. Measured: the guard trips at depth 133 under
+> ASan and around 7,000 uninstrumented, both with the same 1 MB reserve intact.
+> A fixed counter tuned for one build is either too shallow or unsafe in the
+> other.
+>
+> One wrinkle found while testing: `JsInterpreter::eval()` runs the bytecode VM
+> first and falls through to the AST interpreter on *any* exception, so a
+> VM-level `RangeError` silently re-runs the whole script in the AST engine
+> before reporting. Harmless here (both bounded), but it is surprising behaviour
+> in a fallback path and is noted under finding 6.
 
 
 There is no call-depth counter and no `RangeError` path. The VM has an explicit
@@ -378,6 +408,41 @@ std::string Node::text_content() const {
 
 Every level copied all of its descendants' text again. Now appends into one
 buffer.
+
+---
+
+## 16. Parsing is O(n²) in nesting depth
+
+Found while testing finding 5. Deep documents are now *safe* but not *fast*:
+
+```
+depth  5,000:  1.5 s
+depth 10,000:  6.9 s
+depth 20,000: 28.6 s      (4x the depth -> 19x the time)
+depth 50,000: > 10 min
+```
+
+A `gprofng` profile at depth 10,000 attributes **69% inclusive** of the parse to
+`HtmlTreeBuilder::has_element_in_scope_where` and **31%** to
+`Node::is_connected`:
+
+- `has_element_in_scope_where` walks the whole open-elements stack from the top
+  down to the current node. For nested `<div>`s there is no `p`/`table`/`button`
+  scope boundary to stop the walk early, so each start tag scans the entire
+  stack. That is O(depth) per token, O(depth²) per document.
+- `Node::append_child` calls `is_connected()`, which walks the ancestor chain to
+  the root on **every insertion**.
+
+Neither is a crash, and neither was introduced by finding 5's fix (the guard
+short-circuits layout, not parsing). The fix for the first is to stop the scope
+scan at the nearest recorded boundary instead of rescanning to the top; the
+fix for the second is a cached "is in document" flag maintained on insertion
+and removal. Both are straightforward and measurable with the harness already
+in place.
+
+> **Note:** this is the reason `--dump-dom` on a 200,000-deep document still
+> times out. The recursion guard is doing its job; the parser never gets that
+> far.
 
 ---
 

@@ -6,6 +6,7 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutBox.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <memory>
 
 namespace litebird {
@@ -27,13 +28,14 @@ private:
         int depth = 0
     );
 
-    /// Maximum box-tree depth. Every nested element costs a `build_box` stack
-    /// frame, and each frame keeps a 920-byte ComputedStyle alive across the
-    /// recursive call, so an ordinary 8 MB stack ran out at roughly 3,000 levels
-    /// of nesting. Real browsers cap DOM depth for exactly this reason (HTML's
-    /// stack of open elements is bounded at 512). Subtrees past the limit are
-    /// dropped rather than crashing the process.
-    static constexpr int kMaxBuildDepth = 512;
+    /// Fixed depth ceiling, used only where the native stack bounds cannot be
+    /// queried (see StackLimit.hpp). On Linux and macOS the real limit is the
+    /// remaining stack: the native cost of one level varies about 12x between
+    /// an -O2 build (~2.8 KB) and an AddressSanitizer build (~34 KB), so a
+    /// constant that is safe under ASan truncates ordinary documents while one
+    /// that is generous there crashes ASan. Depth is therefore bounded by
+    /// `stack_is_exhausted()` and this value is just a backstop.
+    static constexpr int kMaxBuildDepth = 20000;
 };
 
 } // namespace litebird

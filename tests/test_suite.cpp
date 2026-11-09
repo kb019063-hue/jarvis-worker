@@ -3863,6 +3863,11 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     // 8 MB stack was exhausted at roughly 3,000 levels of nesting. The process
     // died mid-layout with no diagnostic; parsing and DOM dumping alone were
     // fine, which is what made it look like a parser bug.
+    //
+    // The limit is the remaining native stack, not a fixed depth, because the
+    // per-frame cost differs ~12x between an -O2 and an ASan build. This depth
+    // is deliberately far past what an 8 MB stack can hold uninstrumented, so
+    // the test exercises the guard rather than the payload.
     const int depth = 6000;
     std::string html;
     html.reserve(static_cast<size_t>(depth) * 11 + 8);
@@ -3892,23 +3897,29 @@ TEST(runaway_js_recursion_reports_range_error) {
     using namespace litebird;
 
     // Every JS call nests several native frames in the AST interpreter, with no
-    // depth limit: `f(2000)` overflowed the C++ stack and killed the process.
-    // It must now stop at a bounded depth and say so.
-    struct Case { const char* src; const char* expected; };
+    // depth limit, so `f(2000)` overflowed the C++ stack and killed the process.
+    // It must now stop before the stack dies and report a RangeError instead.
+    //
+    // The stopping depth is deliberately *not* asserted: it is set by how much
+    // native stack is left, and one JS level costs about 1 KB in an -O2 build
+    // but about 55 KB under AddressSanitizer, so the limit falls from thousands
+    // to ~130 between the two. Asserting a number would only encode which build
+    // the test happened to run in -- that is what broke the first version of
+    // this test. What must hold in every build is that a runaway recursion is
+    // reported and the interpreter survives it.
 
-    // Comfortably inside the limit: still works.
+    // A recursion shallow enough to fit in any build still evaluates correctly.
     {
         JsInterpreter js;
-        js.eval_ast("function f(n){ if (n === 0) { return 0; } return 1 + f(n - 1); } var r = f(200);");
-        assert(js.global_env()->get("r").to_string() == "200");
+        js.eval_ast("function f(n){ if (n === 0) { return 0; } return 1 + f(n - 1); } var r = f(50);");
+        assert(js.global_env()->get("r").to_string() == "50");
     }
 
-    // Far past the limit: reports rather than crashing.
+    // Far past the limit: reports rather than crashing. The result is undefined
+    // because the call never completed.
     {
         JsInterpreter js;
         js.eval_ast("function g(n){ if (n === 0) { return 0; } return 1 + g(n - 1); } var r = g(50000);");
-        // The result is undefined because the call never completed, but the
-        // process is alive and the interpreter is still usable afterwards.
         assert(js.global_env()->get("r").is_undefined());
     }
 
@@ -3917,6 +3928,17 @@ TEST(runaway_js_recursion_reports_range_error) {
         JsInterpreter js;
         js.eval_ast("function forever(){ return forever(); } var r = forever();");
         assert(js.global_env()->get("r").is_undefined());
+    }
+
+    // The guard must leave the interpreter usable: the counter has to be
+    // restored on the unwinding path, not just on the success path. If it
+    // leaked, this follow-up call would be refused even though the stack is
+    // empty again.
+    {
+        JsInterpreter js;
+        js.eval_ast("function g(n){ if (n === 0) { return 0; } return 1 + g(n - 1); } g(50000);");
+        js.eval_ast("function f(n){ if (n === 0) { return 0; } return 1 + f(n - 1); } var r = f(50);");
+        assert(js.global_env()->get("r").to_string() == "50");
     }
 }
 

@@ -92,8 +92,11 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
     if (!node) return nullptr;
 
     // Bound the recursion. Without this, deeply nested markup overflows the
-    // C++ stack and the process dies mid-layout (see kMaxBuildDepth).
+    // C++ stack and the process dies mid-layout. The stack probe adapts to the
+    // build (an ASan frame costs ~12x an -O2 one); kMaxBuildDepth is only a
+    // backstop for platforms that cannot report stack bounds.
     if (depth >= kMaxBuildDepth) return nullptr;
+    if (stack_is_exhausted()) return nullptr;
 
     if (node->is_comment()) return nullptr;
 

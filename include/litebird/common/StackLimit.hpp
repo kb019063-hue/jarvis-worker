@@ -20,12 +20,31 @@
 // left for another level? This is what real engines do (V8's `StackGuard`,
 // SpiderMonkey's `CheckRecursionLimit`). It adapts automatically to the build
 // flags, the platform, and whichever thread the code runs on.
+//
+// The first version of this file trusted `pthread_attr_getstack` outright and
+// broke on the CI runner, where the call reported a region that did not contain
+// the running frame (a 117 GB gap between the reported base and the live stack
+// pointer). Every layout then computed a "floor" above itself, concluded the
+// stack was exhausted, and the engine produced empty box trees -- a diagnostic
+// that kills the engine is worse than no diagnostic. Two defences are in place
+// now, and both matter:
+//
+//   1. The reported region is only accepted if it actually brackets the address
+//      of a local in the calling frame.
+//   2. If it does not, the bounds are derived from RLIMIT_STACK instead, so a
+//      host with an unusual stack setup degrades to a slightly wrong limit
+//      rather than to a dead engine.
+//
+// Note also that thread stack sizes vary a lot between environments -- 8 MB is
+// the common Linux default, but the CI runner uses 16 MB. Nothing here may
+// assume a particular size.
 
 #include <cstddef>
 #include <cstdint>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <pthread.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #define LITEBIRD_HAVE_STACK_PROBE 1
 #endif
@@ -56,8 +75,8 @@ namespace detail {
 /// Per-thread bounds of the native stack. `active` is false when the platform
 /// could not report them, in which case callers fall back to a fixed depth cap.
 struct ThreadStackBase {
-    std::uintptr_t base{0};   ///< lowest address in the stack mapping
-    std::size_t limit{0};     ///< size of the stack mapping in bytes
+    std::uintptr_t top{0};    ///< highest address the stack can grow to
+    std::size_t limit{0};     ///< size of the usable stack region in bytes
     bool active{false};
 };
 
@@ -77,9 +96,47 @@ inline std::uintptr_t current_stack_pointer() {
     return reinterpret_cast<std::uintptr_t>(&probe);
 }
 
+/// Stack address of the outermost frame seen on this thread. Initialised on
+/// first use, which is close enough to the thread's start for the fallback path.
+inline std::uintptr_t& thread_stack_base_origin() {
+    thread_local std::uintptr_t origin = 0;
+    if (origin == 0) origin = current_stack_pointer();
+    return origin;
+}
+
+
+/// Fallback for when the pthread query is missing or unusable: derive the top
+/// of the stack from the address of a local in the *outermost* frame we can
+/// see, and take the size from RLIMIT_STACK.
+///
+/// `origin` is the stack address the program started from (captured once, in
+/// `thread_stack_base()`), which is the best approximation of the stack top
+/// available without OS help.
+inline bool init_from_rlimit(std::uintptr_t origin, ThreadStackBase& state) {
+    std::size_t size = 8u * 1024u * 1024u;  // the usual default
+#if defined(RLIMIT_STACK)
+    struct rlimit rl {};
+    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+        rl.rlim_cur > 0 && rl.rlim_cur <= (1ull << 32)) {
+        size = static_cast<std::size_t>(rl.rlim_cur);
+    }
+#endif
+    if (origin == 0 || size < 64u * 1024u) return false;
+    // Align the top up to a page and keep the whole region below `origin`.
+    state.top = origin & ~static_cast<std::uintptr_t>(4095);
+    state.limit = size;
+    state.active = true;
+    return true;
+}
+
 inline bool init_thread_stack_base() {
     ThreadStackBase& state = thread_stack_base();
     if (state.active) return true;
+
+    // The address of a local in this frame: any real stack bound we are handed
+    // has to be consistent with it, which is how a bad pthread result gets
+    // caught instead of trusted.
+    const std::uintptr_t here = current_stack_pointer();
 
 #if defined(LITEBIRD_HAVE_STACK_PROBE)
     pthread_attr_t attr;
@@ -87,17 +144,27 @@ inline bool init_thread_stack_base() {
         void* stack_addr = nullptr;
         std::size_t stack_size = 0;
         if (pthread_attr_getstack(&attr, &stack_addr, &stack_size) == 0 &&
-            stack_addr && stack_size) {
-            state.base = reinterpret_cast<std::uintptr_t>(stack_addr);
-            state.limit = stack_size;
-            state.active = true;
+            stack_addr && stack_size >= 64u * 1024u) {
+            const auto low = reinterpret_cast<std::uintptr_t>(stack_addr);
+            const auto high = low + stack_size;
+            // Accept only a region that actually brackets this frame. On some
+            // hosts `pthread_attr_getstack` reports a stale or unrelated mapping,
+            // which would otherwise put the "floor" above the live stack and make
+            // the walkers refuse to do anything at all.
+            if (here >= low && here < high) {
+                state.top = high;
+                state.limit = stack_size;
+                state.active = true;
+            }
         }
         pthread_attr_destroy(&attr);
     }
 #endif
 
-    // If the query is refused we leave `active` false and the callers use their
-    // fixed depth cap. A guessed stack bound is worse than a coarse depth cap.
+    if (!state.active) init_from_rlimit(thread_stack_base_origin(), state);
+
+    // If nothing could be established the walkers keep their fixed depth caps;
+    // a guessed stack bound is worse than a coarse cap.
     return state.active;
 }
 
@@ -110,20 +177,19 @@ inline std::uintptr_t stack_floor() {
     const detail::ThreadStackBase& state = detail::thread_stack_base();
     if (state.limit == 0) return 0;
 
-    // Leave the reserve untouched at the bottom; cap how much of the rest the
-    // walkers may claim on very large thread stacks.
-    std::size_t offset = kStackReserveBytes;
+    // Leave kStackReserveBytes untouched at the bottom of the region; cap how
+    // much of the rest the walkers may claim on very large thread stacks.
+    std::size_t offset;
     if (state.limit <= kStackReserveBytes) {
-        // A thread with a stack smaller than the reserve (an exotic setup, but
-        // legal) would otherwise get a floor above its own top and refuse every
-        // level of recursion. Fall back to claiming half of what exists.
+        // A stack smaller than the reserve (exotic, but legal) would otherwise
+        // put the floor above its own top and refuse every level of recursion.
         offset = state.limit / 2;
     } else {
         const std::size_t available = state.limit - kStackReserveBytes;
         const std::size_t claimable = (available > kStackBudgetBytes) ? kStackBudgetBytes : available;
-        offset = state.limit - claimable;
+        offset = kStackReserveBytes + (available - claimable);
     }
-    return state.base + offset;
+    return state.top - (state.limit - offset);
 }
 
 /// True when the calling thread has run out of its recursion budget and the

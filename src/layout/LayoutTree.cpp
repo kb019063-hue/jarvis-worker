@@ -86,9 +86,14 @@ static void normalize_block_children(const std::shared_ptr<LayoutBox>& box, cons
 std::shared_ptr<LayoutBox> LayoutTree::build_box(
     const std::shared_ptr<Node>& node,
     const StyleResolver& resolver,
-    const ComputedStyle* parent_style
+    const ComputedStyle* parent_style,
+    int depth
 ) {
     if (!node) return nullptr;
+
+    // Bound the recursion. Without this, deeply nested markup overflows the
+    // C++ stack and the process dies mid-layout (see kMaxBuildDepth).
+    if (depth >= kMaxBuildDepth) return nullptr;
 
     if (node->is_comment()) return nullptr;
 
@@ -116,7 +121,12 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
             return nullptr;
         }
 
-        ComputedStyle style = resolver.resolve_style(element, parent_style);
+        // Held by pointer rather than by value: this object is only needed as
+        // `parent_style` for the recursive calls below, but as a local it stayed
+        // alive on the stack across every recursive descent, costing ~1 KB of
+        // frame per nesting level. The box owns its own copy, made once.
+        auto style_ptr = std::make_shared<ComputedStyle>(resolver.resolve_style(element, parent_style));
+        const ComputedStyle& style = *style_ptr;
         if (style.is_none()) return nullptr;
 
         std::shared_ptr<LayoutBox> box;
@@ -136,6 +146,9 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
             box = LayoutBox::create_inline(element, style);
         }
 
+        // NOTE: `style` is still referenced by the child recursion below. It is
+        // released as soon as the children are done, before the image/canvas/svg
+        // fixups that only touch box->style.
         // Process children (supporting Shadow DOM and Slot projection)
         const auto& children_to_process = (element->shadow_root()) ? element->shadow_root()->children() : element->children();
         for (const auto& ch : children_to_process) {
@@ -144,18 +157,18 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
                 auto assigned = ShadowRoot::assigned_nodes(slot_el);
                 if (!assigned.empty()) {
                     for (const auto& a : assigned) {
-                        auto child_box = build_box(a, resolver, &style);
+                        auto child_box = build_box(a, resolver, &style, depth + 1);
                         if (child_box) box->append_child(child_box);
                     }
                 } else {
                     // Fallback slot content
                     for (const auto& slot_ch : slot_el->children()) {
-                        auto child_box = build_box(slot_ch, resolver, &style);
+                        auto child_box = build_box(slot_ch, resolver, &style, depth + 1);
                         if (child_box) box->append_child(child_box);
                     }
                 }
             } else {
-                auto child_box = build_box(ch, resolver, &style);
+                auto child_box = build_box(ch, resolver, &style, depth + 1);
                 if (child_box) {
                     box->append_child(child_box);
                 }
@@ -247,11 +260,11 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
         auto doc = std::static_pointer_cast<Document>(node);
         auto body = doc->body();
         if (body) {
-            return build_box(body, resolver, nullptr);
+            return build_box(body, resolver, nullptr, depth + 1);
         }
         auto doc_el = doc->document_element();
         if (doc_el) {
-            return build_box(doc_el, resolver, nullptr);
+            return build_box(doc_el, resolver, nullptr, depth + 1);
         }
     }
 

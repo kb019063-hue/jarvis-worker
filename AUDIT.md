@@ -16,11 +16,11 @@ The rest are documented with enough detail to act on.
 |---|---|---|---|
 | 1 | Image decoder: uncaught crash + OOB heap write from a 154-byte file | **Critical** | ✅ Fixed |
 | 2 | `===` does not exist; strict equality silently behaves as `==` | **Critical** | ✅ Fixed |
-| 3 | `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--` are not tokenised | **Critical** | Open |
+| 3 | `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--` are not tokenised | **Critical** | ✅ Fixed |
 | 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | Open |
 | 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | Open |
 | 6 | Two incompatible object models in `JsValue` | **High** | Open |
-| 7 | `var` has block scope instead of function scope | **High** | Open |
+| 7 | `var` has block scope instead of function scope | **High** | Open (partial) |
 | 8 | No recursion guard in the JS engine | **High** | Open |
 | 9 | `get_property()` allocates on every property read | **High (perf)** | Open |
 | 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | Open |
@@ -111,7 +111,12 @@ Regression test: `strict_equality_does_not_coerce`.
 
 ---
 
-## 3. Assignment operators are missing from the grammar
+## 3. ✅ Assignment operators were missing from the grammar
+
+> **Fixed in `18be77f`.** All five compound forms plus `++`/`--` now work on both
+> the bytecode VM and the AST interpreter, with a regression test that asserts
+> the two paths agree. Details below are the original finding.
+
 
 ```js
 var s = 0; s += 1;   // JS Runtime Error: Unexpected token in JS expression: =
@@ -124,7 +129,7 @@ var s = 5; s *= 2;   // same
 `PlusPlus`, `MinusMinus`. The lexer has no branch that would produce them, so
 the parser sees `Plus` followed by `Equal` and fails.
 
-**This is the single biggest obstacle to running real scripts.** `+=` and `++`
+**This was the single biggest obstacle to running real scripts.** `+=` and `++`
 are in essentially every nontrivial script ever written; the engine's own
 example pages hand-unroll them (`seconds = seconds + 1`) to work around it.
 Fixing it means: 6 token types, a lexer branch each, a `parse_assignment()`
@@ -132,8 +137,8 @@ level in the parser, and an interpreter case that reads-modifies-writes the
 lvalue. Roughly a day's work, and it unlocks more real-world compatibility than
 any other single item on this list.
 
-Also missing from the probe: `typeof`, `switch`, `**`, and `??` all fail to
-parse. `"a".repeat(3)` returns `undefined` instead of `"aaa"`.
+Still missing from the probe (not fixed): `typeof`, `switch`, `**` and `??`
+all fail to parse, and `"a".repeat(3)` returns `undefined` instead of `"aaa"`.
 
 ---
 
@@ -226,6 +231,14 @@ if (true) { var z = 5; } console.log(z);                          // undefined, 
 
 `var` is function-scoped in JS. Scripts that declare a loop counter with `var`
 and read it afterwards — extremely common — get `undefined`.
+
+I attempted this fix and **reverted it**: hoisting to the nearest function scope
+also changed how an inner `var` shadows an outer one. `var g = 1; function
+h() { var g = 9; return g; }` regressed from `g = 1` to `g = 9`, i.e. the inner
+declaration leaked to the global scope. The cause is that the function body's
+block environment does not always sit directly under the function environment
+in the chain, which needs untangling before `var` hoisting can be made correct.
+The finding stands; the fix needs more care than it looked like.
 
 ---
 
@@ -372,7 +385,8 @@ Nested-depth parse (`--dump-dom`):
 
 ## Suggested order of work
 
-1. **Assignment operators** (#3) — biggest real-world compatibility gain.
+1. **~~Assignment operators~~** (#3) — done; `typeof` / `switch` / `**` / `??`
+   are the remaining grammar gaps.
 2. **GC roots** (#4) — the latent UAF is the thing that will bite hardest later.
 3. **Depth guard** (#5) — 9 KB of input currently kills the process.
 4. **`JsValue` slimming** (#10) — unlocks memory *and* interpreter speed.

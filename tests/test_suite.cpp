@@ -3855,6 +3855,93 @@ TEST(compound_assignment_and_update_operators) {
     assert(ast.global_env()->get("arr").get_property("0").to_string() == "6");
 }
 
+TEST(deeply_nested_markup_does_not_overflow_the_stack) {
+    using namespace litebird;
+
+    // `LayoutTree::build_box` recurses once per nesting level and kept a
+    // 920-byte ComputedStyle alive across each recursive call, so an ordinary
+    // 8 MB stack was exhausted at roughly 3,000 levels of nesting. The process
+    // died mid-layout with no diagnostic; parsing and DOM dumping alone were
+    // fine, which is what made it look like a parser bug.
+    //
+    // The limit is the remaining native stack, not a fixed depth, because the
+    // per-frame cost differs ~12x between an -O2 and an ASan build. This depth
+    // is deliberately far past what an 8 MB stack can hold uninstrumented, so
+    // the test exercises the guard rather than the payload.
+    const int depth = 6000;
+    std::string html;
+    html.reserve(static_cast<size_t>(depth) * 11 + 8);
+    for (int i = 0; i < depth; ++i) html += "<div>";
+    html += "x";
+    for (int i = 0; i < depth; ++i) html += "</div>";
+
+    auto doc = HtmlParser::parse(html);
+    assert(doc != nullptr);
+
+    // Building the box tree must terminate without a stack overflow.
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(root != nullptr);
+
+    DisplayList::build(root);   // painting must survive it too
+
+    // The limit must not truncate ordinary documents: a normal depth still
+    // produces the full tree.
+    auto shallow = HtmlParser::parse("<div><div><div><p>hi</p></div></div></div>");
+    auto shallow_root = LayoutTree::build(shallow, resolver, 800.0f, 600.0f);
+    assert(shallow_root != nullptr);
+    assert(!shallow_root->children.empty());
+}
+
+TEST(runaway_js_recursion_reports_range_error) {
+    using namespace litebird;
+
+    // Every JS call nests several native frames in the AST interpreter, with no
+    // depth limit, so `f(2000)` overflowed the C++ stack and killed the process.
+    // It must now stop before the stack dies and report a RangeError instead.
+    //
+    // The stopping depth is deliberately *not* asserted: it is set by how much
+    // native stack is left, and one JS level costs about 1 KB in an -O2 build
+    // but about 55 KB under AddressSanitizer, so the limit falls from thousands
+    // to ~130 between the two. Asserting a number would only encode which build
+    // the test happened to run in -- that is what broke the first version of
+    // this test. What must hold in every build is that a runaway recursion is
+    // reported and the interpreter survives it.
+
+    // A recursion shallow enough to fit in any build still evaluates correctly.
+    {
+        JsInterpreter js;
+        js.eval_ast("function f(n){ if (n === 0) { return 0; } return 1 + f(n - 1); } var r = f(50);");
+        assert(js.global_env()->get("r").to_string() == "50");
+    }
+
+    // Far past the limit: reports rather than crashing. The result is undefined
+    // because the call never completed.
+    {
+        JsInterpreter js;
+        js.eval_ast("function g(n){ if (n === 0) { return 0; } return 1 + g(n - 1); } var r = g(50000);");
+        assert(js.global_env()->get("r").is_undefined());
+    }
+
+    // Infinitely recursive function: must not hang or crash.
+    {
+        JsInterpreter js;
+        js.eval_ast("function forever(){ return forever(); } var r = forever();");
+        assert(js.global_env()->get("r").is_undefined());
+    }
+
+    // The guard must leave the interpreter usable: the counter has to be
+    // restored on the unwinding path, not just on the success path. If it
+    // leaked, this follow-up call would be refused even though the stack is
+    // empty again.
+    {
+        JsInterpreter js;
+        js.eval_ast("function g(n){ if (n === 0) { return 0; } return 1 + g(n - 1); } g(50000);");
+        js.eval_ast("function f(n){ if (n === 0) { return 0; } return 1 + f(n - 1); } var r = f(50);");
+        assert(js.global_env()->get("r").to_string() == "50");
+    }
+}
+
 TEST(gc_roots_are_complete_under_empty_root_set) {
     using namespace litebird;
 
@@ -4132,6 +4219,8 @@ int main() {
     RUN_TEST(template_and_scope_helpers_ignore_foreign_elements);
     RUN_TEST(percentage_lengths_resolve_against_containing_block);
     RUN_TEST(compound_assignment_and_update_operators);
+    RUN_TEST(deeply_nested_markup_does_not_overflow_the_stack);
+    RUN_TEST(runaway_js_recursion_reports_range_error);
     RUN_TEST(gc_roots_are_complete_under_empty_root_set);
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
     RUN_TEST(strict_equality_does_not_coerce);

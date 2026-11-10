@@ -125,7 +125,7 @@ Color CanvasGradient::sample_at(float px, float py) const {
 
 JsValue CanvasGradient::to_js_value(std::shared_ptr<CanvasGradient> self) {
     JsValue obj = JsValue::make_object();
-    obj.canvas_gradient = self;
+    obj.set_canvas_gradient_value(self);
     obj.set_property("addColorStop", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
         if (args.size() >= 2 && self) {
             float offset = static_cast<float>(args[0].to_number());
@@ -415,7 +415,7 @@ void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img,
 
 JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingContext2D> self) {
     JsValue ctx = JsValue::make_object();
-    ctx.canvas_ctx = self;
+    ctx.set_canvas_context(self);
 
     ctx.set_property("fillRect", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
         if (args.size() >= 4) {

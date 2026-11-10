@@ -116,11 +116,17 @@ std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* pro
 
 void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (!stmt) return;
+    if (dynamic_cast<const SwitchStmt*>(stmt) || dynamic_cast<const BreakStmt*>(stmt)) {
+        throw std::runtime_error("Switch/break compiled via AST interpreter");
+    }
 
     if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
         compile_expr(expr_stmt->expression.get());
         emit_opcode(OpCode::OpPop);
     } else if (auto var_decl = dynamic_cast<const VarDeclStmt*>(stmt)) {
+        if (var_decl->kind == JsDeclKind::Var) {
+            throw std::runtime_error("Function-scoped var compiled via AST interpreter");
+        }
         if (var_decl->initializer) {
             compile_expr(var_decl->initializer.get());
         } else {
@@ -196,9 +202,9 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // Create a function object holding the compiled bytecode function
         JsValue fn_obj;
         fn_obj.type = JsType::Function;
-        fn_obj.params = fn_decl->params;
-        fn_obj.body = fn_decl->body;
-        fn_obj.bytecode_fn = sub_fn;
+        fn_obj.set_function_params(fn_decl->params);
+        fn_obj.set_function_body(fn_decl->body);
+        fn_obj.set_function_bytecode(sub_fn);
         m_function->sub_functions.push_back(sub_fn);
         // Embed the compiled BytecodeFunction pointer into properties
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
@@ -355,6 +361,9 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         // Postfix must yield the pre-change value; discard the new one.
         if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
+        if (unary->op == JsTokenType::Typeof) {
+            throw std::runtime_error("typeof compiled via AST interpreter");
+        }
         compile_expr(unary->operand.get());
         if (unary->op == JsTokenType::Minus) {
             emit_opcode(OpCode::OpNegate);
@@ -362,6 +371,9 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             emit_opcode(OpCode::OpNot);
         }
     } else if (auto binary = dynamic_cast<const BinaryExpr*>(expr)) {
+        if (binary->op == JsTokenType::Power || binary->op == JsTokenType::Nullish) {
+            throw std::runtime_error("Exponentiation/nullish coalescing compiled via AST interpreter");
+        }
         // Short-circuit logic
         if (binary->op == JsTokenType::PipePipe) {
             compile_expr(binary->left.get());
@@ -456,9 +468,9 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
 
         JsValue fn_obj;
         fn_obj.type = JsType::Function;
-        fn_obj.params = fn_expr->params;
-        fn_obj.body = fn_expr->body;
-        fn_obj.bytecode_fn = sub_fn;
+        fn_obj.set_function_params(fn_expr->params);
+        fn_obj.set_function_body(fn_expr->body);
+        fn_obj.set_function_bytecode(sub_fn);
         m_function->sub_functions.push_back(sub_fn);
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         fn_obj.set_property("__fn_name__", JsValue::make_string(fn_expr->name));

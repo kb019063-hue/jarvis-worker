@@ -298,7 +298,23 @@ public:
     std::string resolve_calc_functions(const std::string& value, float reference_size = 0.0f) const;
 
 private:
+    struct IndexedSelector {
+        std::size_t sheet_index;
+        std::size_t rule_index;
+        std::size_t selector_index;
+        std::size_t source_order;
+    };
+    struct SelectorIndex {
+        std::unordered_map<std::string, std::vector<IndexedSelector>> by_id;
+        std::unordered_map<std::string, std::vector<IndexedSelector>> by_class;
+        std::unordered_map<std::string, std::vector<IndexedSelector>> by_tag;
+        std::vector<IndexedSelector> universal;
+    };
+
     static StyleSheet default_user_agent_stylesheet();
+    static void index_sheet(SelectorIndex& index, const StyleSheet& sheet,
+                            std::size_t sheet_index, std::size_t& source_order);
+    std::vector<IndexedSelector> indexed_candidates(const std::shared_ptr<Element>& element) const;
     bool matches_selector(const std::shared_ptr<Element>& element, const Selector& selector) const;
     bool matches_simple_selector(const std::shared_ptr<Element>& element, const SimpleSelector& sel) const;
 
@@ -314,6 +330,8 @@ private:
 
     StyleSheet m_ua_sheet;
     std::vector<StyleSheet> m_author_sheets;
+    SelectorIndex m_author_selector_index;
+    std::size_t m_next_author_selector_order{0};
     float m_viewport_width{800.0f};
     float m_viewport_height{600.0f};
     // Font size used to resolve em/ex/ch units for the element being resolved.

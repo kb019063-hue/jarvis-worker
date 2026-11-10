@@ -16,7 +16,10 @@ public:
 class BlockStmt;
 
 // Expressions
-class Expr : public AstNode {};
+class Expr : public AstNode {
+public:
+    bool explicitly_grouped{false};
+};
 
 class LiteralExpr : public Expr {
 public:
@@ -169,6 +172,8 @@ public:
 };
 
 // Statements
+enum class JsDeclKind { Var, Let, Const };
+
 class Stmt : public AstNode {};
 
 class ExprStmt : public Stmt {
@@ -181,26 +186,31 @@ class VarDeclStmt : public Stmt {
 public:
     std::string name;
     std::unique_ptr<Expr> initializer;
-    VarDeclStmt(std::string n, std::unique_ptr<Expr> init)
-        : name(std::move(n)), initializer(std::move(init)) {}
+    JsDeclKind kind{JsDeclKind::Let};
+    VarDeclStmt(std::string n, std::unique_ptr<Expr> init, JsDeclKind k = JsDeclKind::Let)
+        : name(std::move(n)), initializer(std::move(init)), kind(k) {}
 };
 
 class ArrayDestructuringDeclStmt : public Stmt {
 public:
     std::vector<std::string> names;
     std::unique_ptr<Expr> initializer;
+    JsDeclKind kind{JsDeclKind::Let};
 
-    ArrayDestructuringDeclStmt(std::vector<std::string> n, std::unique_ptr<Expr> init)
-        : names(std::move(n)), initializer(std::move(init)) {}
+    ArrayDestructuringDeclStmt(std::vector<std::string> n, std::unique_ptr<Expr> init,
+                               JsDeclKind k = JsDeclKind::Let)
+        : names(std::move(n)), initializer(std::move(init)), kind(k) {}
 };
 
 class ObjectDestructuringDeclStmt : public Stmt {
 public:
     std::vector<std::pair<std::string, std::string>> bindings; // property -> variable name
     std::unique_ptr<Expr> initializer;
+    JsDeclKind kind{JsDeclKind::Let};
 
-    ObjectDestructuringDeclStmt(std::vector<std::pair<std::string, std::string>> b, std::unique_ptr<Expr> init)
-        : bindings(std::move(b)), initializer(std::move(init)) {}
+    ObjectDestructuringDeclStmt(std::vector<std::pair<std::string, std::string>> b,
+                                std::unique_ptr<Expr> init, JsDeclKind k = JsDeclKind::Let)
+        : bindings(std::move(b)), initializer(std::move(init)), kind(k) {}
 };
 
 class BlockStmt : public Stmt {
@@ -236,13 +246,32 @@ public:
     explicit ReturnStmt(std::unique_ptr<Expr> v) : value(std::move(v)) {}
 };
 
+class BreakStmt : public Stmt {};
+
+struct SwitchCase {
+    std::unique_ptr<Expr> test; // null for default
+    std::vector<std::unique_ptr<Stmt>> statements;
+};
+
+class SwitchStmt : public Stmt {
+public:
+    std::unique_ptr<Expr> discriminant;
+    std::vector<SwitchCase> cases;
+    SwitchStmt(std::unique_ptr<Expr> expr, std::vector<SwitchCase> c)
+        : discriminant(std::move(expr)), cases(std::move(c)) {}
+};
+
 class ForOfStmt : public Stmt {
 public:
     std::string variable_name;
     std::unique_ptr<Expr> iterable;
     std::unique_ptr<Stmt> body;
-    ForOfStmt(std::string var, std::unique_ptr<Expr> iter, std::unique_ptr<Stmt> b)
-        : variable_name(std::move(var)), iterable(std::move(iter)), body(std::move(b)) {}
+    JsDeclKind kind{JsDeclKind::Let};
+    bool declares_variable{true};
+    ForOfStmt(std::string var, std::unique_ptr<Expr> iter, std::unique_ptr<Stmt> b,
+              JsDeclKind k = JsDeclKind::Let, bool declares = true)
+        : variable_name(std::move(var)), iterable(std::move(iter)), body(std::move(b)),
+          kind(k), declares_variable(declares) {}
 };
 
 class FunctionDeclStmt : public Stmt {
@@ -295,8 +324,10 @@ private:
     const JsToken& consume(JsTokenType type, const std::string& err_msg);
 
     std::unique_ptr<Stmt> parse_statement();
-    std::unique_ptr<Stmt> parse_var_declaration();
+    std::unique_ptr<Stmt> parse_var_declaration(JsDeclKind kind);
     std::unique_ptr<Stmt> parse_if_statement();
+    std::unique_ptr<Stmt> parse_switch_statement();
+    std::unique_ptr<Stmt> parse_break_statement();
     std::unique_ptr<Stmt> parse_while_statement();
     std::unique_ptr<Stmt> parse_for_statement();
     std::unique_ptr<Stmt> parse_return_statement();
@@ -308,12 +339,14 @@ private:
     std::unique_ptr<Expr> parse_assignment();
     static bool is_assignable(const Expr* expr);
     std::unique_ptr<Expr> parse_logical_or();
+    std::unique_ptr<Expr> parse_coalesce();
     std::unique_ptr<Expr> parse_logical_and();
     std::unique_ptr<Expr> parse_equality();
     std::unique_ptr<Expr> parse_comparison();
     std::unique_ptr<Expr> parse_term();
     std::unique_ptr<Expr> parse_factor();
     std::unique_ptr<Expr> parse_unary();
+    std::unique_ptr<Expr> parse_exponentiation();
     std::unique_ptr<Expr> parse_call_or_member();
     std::unique_ptr<Expr> parse_primary();
 

@@ -20,10 +20,10 @@ The rest are documented with enough detail to act on.
 | 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | ✅ Fixed |
 | 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | ✅ Fixed |
 | 6 | Two incompatible object models in `JsValue` | **High** | Open |
-| 7 | `var` has block scope instead of function scope | **High** | Open (partial) |
+| 7 | `var` has block scope instead of function scope | **High** | ✅ Fixed (Phase 19) |
 | 8 | No recursion guard in the JS engine | **High** | ✅ Fixed |
 | 9 | `get_property()` allocates on every property read | **High (perf)** | Open |
-| 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | Open |
+| 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | 🟡 Improved: 96-byte value; payloads tagged/out-of-line |
 | 11 | HTTP header injection + no response size cap | **Medium** | Open |
 | 12 | `ComputedStyle` is 920 bytes; `LayoutBox` is 1,200 | **Medium (perf)** | Open |
 | 13 | Build uses `-O2` only (no LTO / `-march=native`) | Low | Open |
@@ -138,8 +138,10 @@ level in the parser, and an interpreter case that reads-modifies-writes the
 lvalue. Roughly a day's work, and it unlocks more real-world compatibility than
 any other single item on this list.
 
-Still missing from the probe (not fixed): `typeof`, `switch`, `**` and `??`
-all fail to parse, and `"a".repeat(3)` returns `undefined` instead of `"aaa"`.
+Phase 19 adds `typeof`, `switch`, right-associative `**`, and short-circuit `??`
+to the parser and AST interpreter. These constructs use the interpreter fallback
+when bytecode compilation does not support them. `"a".repeat(3)` remains outside
+this phase and still returns `undefined`.
 
 ---
 
@@ -259,23 +261,16 @@ main source of the "known leaks" in `ARCHITECTURE.md`.
 
 ---
 
-## 7. `var` has block scope
+## 7. ✅ `var` has function scope (Phase 19)
 
-```js
-var i = 99; for (var i = 0; i < 3; i = i + 1) {} console.log(i);  // 99, should be 3
-if (true) { var z = 5; } console.log(z);                          // undefined, should be 5
-```
-
-`var` is function-scoped in JS. Scripts that declare a loop counter with `var`
-and read it afterwards — extremely common — get `undefined`.
-
-I attempted this fix and **reverted it**: hoisting to the nearest function scope
-also changed how an inner `var` shadows an outer one. `var g = 1; function
-h() { var g = 9; return g; }` regressed from `g = 1` to `g = 9`, i.e. the inner
-declaration leaked to the global scope. The cause is that the function body's
-block environment does not always sit directly under the function environment
-in the chain, which needs untangling before `var` hoisting can be made correct.
-The finding stands; the fix needs more care than it looked like.
+`var` declarations are hoisted to the nearest function or script scope,
+including declarations nested in blocks and `for`/`for...of` headers. The
+interpreter predeclares them as `undefined`; assignment during execution
+updates the function-scoped binding. `let` and `const` remain block-scoped.
+Regression coverage includes block escape, function isolation, use before
+initialization (`typeof`), and loop-header declarations. Script-level `var`
+bindings are synchronized with the VM global table for interoperability with
+the existing bytecode execution path.
 
 ---
 
@@ -324,27 +319,40 @@ access should not need string concatenation to discover that a getter exists.
 
 ---
 
-## 10. `JsValue` is 296 bytes
+## 10. 🟡 `JsValue` payload footprint improved
 
-Measured:
+The original inline representation measured 296 bytes. Phase 20 moves cold,
+type-specific state into a copy-on-write `std::variant` payload and exposes
+accessors instead of carrying function metadata, callbacks, DOM handles, and
+canvas/promise/generator handles in every value. On the current 64-bit GCC
+build:
 
+```text
+sizeof(JsValue): 296 bytes -> 96 bytes (67.6% smaller)
 ```
-sizeof(JsValue)    = 296
-sizeof(JsObject)   = 120    <- the actual object is smaller than a handle to it
-sizeof(Node)       = 136
-```
 
-296 bytes come from carrying *every* payload inline: `std::string`,
-`shared_ptr<JsObject>`, a `std::vector<std::string>`, three `shared_ptr<AstNode>`,
-`std::function`, and five more shared_ptrs for canvas/promise/generator/DOM.
-Only one is ever used. Every `push`, `pop`, `pop()`, and by-value return copies
-all of it.
+Primitive values and ordinary objects do not allocate the extra payload.
+Function/DOM/canvas/promise/generator values allocate it on demand; the variant
+stores only the active payload alternative. Copy-on-write setters preserve
+value-copy behavior when a payload-bearing `JsValue` is copied and then edited.
+The regression suite caps `sizeof(JsValue)` at 128 bytes and checks copy
+isolation.
 
-This is also why 20,000 `<div>`s peaks at **98 MB**:
-`ru_maxrss = 98,196 KB` for a 1 MB dump — roughly **5 KB per element**.
+A paired local measurement compared the clean `afad827` build with the current
+worktree, using the same 700,026-byte document containing 20,000
+`<div class="item">Hello world</div>` nodes. Peak RSS (one run per mode, Linux
+`wait4` `ru_maxrss`) changed from **28,452 to 24,888 KB** for
+`--dump-dom-webplatform` (-12.5%), and **162,296 to 158,336 KB** for
+`--render-terminal` (-2.4%); layout dominates the latter. A bytecode-path
+microbenchmark (`let sum = 0; for (let i = 0; i < 200000; i++) { sum += i; }`)
+ran five times per build: median wall time fell from **177.16 ms to 71.99 ms**
+(-59.4%). These are indicative local measurements, not CI performance
+thresholds; the RSS comparison used one run per mode.
 
-A tagged union (or `std::variant` with the union'd payloads out of line) would
-put this at 16–24 bytes and is the single largest memory win available.
+The common representation still includes a `std::string`, object pointer, and
+property-map pointer, so further tagged scalar/string compaction remains
+possible. The previous 98 MB figure used a different page/workload and should
+not be compared directly to these measurements.
 
 ---
 
@@ -451,22 +459,28 @@ detach, reattach, and shadow-host connectivity transitions.
 
 ---
 
-## Measured impact of the two perf fixes
+## Measured impact of cascade indexing and parser improvements
 
-Cascade, N rules × N elements (`--dump-layout`):
+Cascade benchmark (`--dump-layout`): for each N, generate N rules of the form
+`div.c{i} { color: #... }` and N matching `<div class="c{i}">x</div>` elements.
+Report median wall time from three process runs. This compares the clean
+`afad827` build with the current indexed worktree:
 
-| N | before | after | |
-|---|---|---|---|
-| 200 | 64.3 ms | 2.9 ms | 22× |
-| 400 | 180.9 ms | 2.9 ms | 62× |
-| 800 | 758.6 ms | 2.6 ms | 292× |
-| 1600 | 2144.4 ms | 2.4 ms | **894×** |
+| N rules and elements | afad827 | indexed | speedup |
+|---:|---:|---:|---:|
+| 200 | 6.18 ms | 5.28 ms | 1.2× |
+| 400 | 11.99 ms | 7.91 ms | 1.5× |
+| 800 | 30.49 ms | 14.46 ms | 2.1× |
+| 1600 | 88.25 ms | 30.35 ms | **2.9×** |
 
-Before, 8× the input cost 33× the time — textbook quadratic. Now it is flat.
-Note that this was **not** an algorithmic fix to the cascade: the resolver is
-still O(elements × rules) with no id/class/tag indexing, and will go quadratic
-again as soon as stylesheets get big. The win came from removing the constant
-factor. The next step is bucketing rules by rightmost simple selector.
+The index buckets author selectors by one necessary rightmost key (ID, one
+class token, tag, or a universal fallback), gathers only candidate selectors
+for each element, sorts candidates by source order, then confirms them with the
+full matcher. More than one possible index key is deliberately not recorded
+per selector, preventing duplicate matches. UA and shadow-root rules retain
+their existing scan paths; universal/attribute/pseudo-only rules also remain
+in the fallback bucket, so those workloads can still approach O(elements ×
+rules).
 
 Nested-depth parse (`--dump-dom`):
 
@@ -480,14 +494,16 @@ Nested-depth parse (`--dump-dom`):
 
 ## Suggested order of work
 
-1. **~~Assignment operators~~** (#3) — done; `typeof` / `switch` / `**` / `??`
-   are the remaining grammar gaps.
+1. **~~Assignment operators~~** (#3) and **~~JavaScript compatibility subset~~**
+   (#7, plus `typeof` / `switch` / `**` / `??`) — implemented in Phases 19.
 2. **~~GC roots~~** (#4) — done.
 3. **~~Depth guard~~** (#5) and **~~JS recursion guard~~** (#8) — done.
-4. **`JsValue` slimming** (#10) — unlocks memory *and* interpreter speed.
-5. **`var` scoping** (#7), then `typeof` / `switch` / `??`.
-6. **Cascade indexing** — make the now-flat curve actually stay flat.
-7. **Fuzzer coverage** — feed `--dump-layout` and `--render-bmp` too, and seed
+4. **~~Initial `JsValue` footprint/throughput measurements~~** (#10) — done;
+   further tagged scalar/string compaction should be driven by profiling.
+5. **~~Cascade indexing~~** — initial rightmost-selector buckets implemented in
+   Phase 21; shadow-root/UA indexing and universal-rule heavy workloads remain
+   possible follow-ups.
+6. **Fuzzer coverage** — feed `--dump-layout` and `--render-bmp` too, and seed
    it with malformed image headers, not just HTML.
 
 ## One meta-point

@@ -16,10 +16,22 @@ namespace litebird {
 class JsEnvironment : public std::enable_shared_from_this<JsEnvironment> {
 public:
     explicit JsEnvironment(std::shared_ptr<JsEnvironment> parent = nullptr)
-        : m_parent(std::move(parent)) {}
+        : m_parent(std::move(parent)), m_is_var_scope(!m_parent) {}
 
     void define(const std::string& name, JsValue value) {
         m_values[name] = std::move(value);
+    }
+
+    bool has_own(const std::string& name) const { return m_values.find(name) != m_values.end(); }
+    void mark_var_scope() { m_is_var_scope = true; }
+    std::shared_ptr<JsEnvironment> var_scope() {
+        auto scope = shared_from_this();
+        while (scope->m_parent && !scope->m_is_var_scope) scope = scope->m_parent;
+        return scope;
+    }
+    void hoist_var(const std::string& name) {
+        auto scope = var_scope();
+        if (!scope->has_own(name)) scope->define(name, JsValue::make_undefined());
     }
 
     bool assign(const std::string& name, JsValue value) {
@@ -61,6 +73,7 @@ public:
 
 private:
     std::shared_ptr<JsEnvironment> m_parent;
+    bool m_is_var_scope{false};
     std::unordered_map<std::string, JsValue> m_values;
 };
 
@@ -139,6 +152,7 @@ private:
     void write_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env,
                       const JsValue& value);
     JsValue apply_compound(JsTokenType op, const JsValue& left, const JsValue& right);
+    void hoist_var_declarations(const Stmt* stmt, const std::shared_ptr<JsEnvironment>& env);
     JsValue exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment> env);
 
     std::shared_ptr<JsEnvironment> m_global_env;

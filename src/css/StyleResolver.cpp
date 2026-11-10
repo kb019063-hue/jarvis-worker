@@ -63,8 +63,66 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
 
 StyleResolver::StyleResolver() : m_ua_sheet(default_user_agent_stylesheet()) {}
 
+void StyleResolver::index_sheet(SelectorIndex& index, const StyleSheet& sheet,
+                                std::size_t sheet_index, std::size_t& source_order) {
+    for (std::size_t ri = 0; ri < sheet.rules.size(); ++ri) {
+        const auto& rule = sheet.rules[ri];
+        for (std::size_t si = 0; si < rule.selectors.size(); ++si) {
+            const auto& selector = rule.selectors[si];
+            if (selector.parts.empty()) continue;
+            const auto& rightmost = selector.parts.back();
+            IndexedSelector entry{sheet_index, ri, si, source_order++};
+            if (!rightmost.id.empty()) {
+                index.by_id[rightmost.id].push_back(entry);
+            } else if (!rightmost.classes.empty()) {
+                // Index each selector by one necessary condition only. The
+                // full selector is still checked after candidate retrieval.
+                index.by_class[rightmost.classes.front()].push_back(entry);
+            } else if (!rightmost.tag_name.empty() && rightmost.tag_name != "*") {
+                index.by_tag[rightmost.tag_name].push_back(entry);
+            } else {
+                // Attribute- and pseudo-only selectors, universal selectors,
+                // and :host rules have no id/class/tag key to narrow by.
+                index.universal.push_back(entry);
+            }
+        }
+    }
+}
+
 void StyleResolver::add_stylesheet(const StyleSheet& sheet) {
     m_author_sheets.push_back(sheet);
+    index_sheet(m_author_selector_index, m_author_sheets.back(),
+                m_author_sheets.size() - 1, m_next_author_selector_order);
+}
+
+std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
+    const std::shared_ptr<Element>& element) const {
+    std::vector<IndexedSelector> candidates = m_author_selector_index.universal;
+    auto append = [&](const auto& map, const std::string& key) {
+        auto it = map.find(key);
+        if (it != map.end()) candidates.insert(candidates.end(), it->second.begin(), it->second.end());
+    };
+
+    const std::string id = element->id();
+    if (!id.empty()) append(m_author_selector_index.by_id, id);
+    append(m_author_selector_index.by_tag, element->tag_name());
+
+    const std::string class_attr = element->get_attribute("class");
+    const auto is_class_space = [](char c) {
+        return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f';
+    };
+    std::size_t pos = 0;
+    while (pos < class_attr.size()) {
+        while (pos < class_attr.size() && is_class_space(class_attr[pos])) ++pos;
+        const std::size_t start = pos;
+        while (pos < class_attr.size() && !is_class_space(class_attr[pos])) ++pos;
+        if (pos > start) append(m_author_selector_index.by_class, class_attr.substr(start, pos - start));
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const IndexedSelector& a, const IndexedSelector& b) {
+        return a.source_order < b.source_order;
+    });
+    return candidates;
 }
 
 static bool match_nth_formula(int idx, std::string formula) {
@@ -1594,25 +1652,25 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
             }
         }
     } else {
-        // Light DOM: Author Stylesheets apply
-        for (const auto& sheet : m_author_sheets) {
-            for (const auto& rule : sheet.rules) {
-                bool media_matches = true;
-                for (const auto& mq : rule.media_queries) {
-                    if (!mq.matches(m_viewport_width, m_viewport_height)) {
-                        media_matches = false;
-                        break;
-                    }
+        // Light DOM: retrieve possible author selectors by their rightmost
+        // simple selector, then run the full selector matcher on that smaller
+        // candidate set. Candidate sorting preserves stylesheet source order.
+        for (const auto& candidate : indexed_candidates(element)) {
+            const auto& rule = m_author_sheets[candidate.sheet_index].rules[candidate.rule_index];
+            bool media_matches = true;
+            for (const auto& mq : rule.media_queries) {
+                if (!mq.matches(m_viewport_width, m_viewport_height)) {
+                    media_matches = false;
+                    break;
                 }
-                if (!media_matches) continue;
+            }
+            if (!media_matches) continue;
 
-                for (const auto& sel : rule.selectors) {
-                    if (matches_selector(element, sel)) {
-                        auto spec = sel.specificity();
-                        for (const auto& decl : rule.declarations) {
-                            matched.push_back({spec, order++, &decl});
-                        }
-                    }
+            const auto& sel = rule.selectors[candidate.selector_index];
+            if (matches_selector(element, sel)) {
+                auto spec = sel.specificity();
+                for (const auto& decl : rule.declarations) {
+                    matched.push_back({spec, order++, &decl});
                 }
             }
         }

@@ -150,6 +150,34 @@ TEST(style_resolver_and_cascade) {
     assert(style.padding.left == 20.0f);
 }
 
+TEST(style_resolver_indexed_candidates_preserve_cascade) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(R"(
+        <div id="target" class="hot card" data-role="hero"></div>
+        <span class="card"></span>
+    )");
+    auto target = doc->get_element_by_id("target");
+    assert(target);
+
+    StyleResolver resolver;
+    resolver.add_stylesheet(CssParser::parse(R"(
+        * { color: #000000; }
+        div { color: #0000ff; }
+        .hot { color: #00ff00; }
+        div.card { background-color: #eeeeee; }
+        [data-role="hero"] { font-weight: 700; }
+        #target { color: #ff0000; }
+        div:hover { text-decoration: underline; }
+    )"));
+    resolver.add_stylesheet(CssParser::parse("#target { color: #123456; }"));
+
+    auto style = resolver.resolve_style(target);
+    assert(style.color == Color::parse("#123456")); // specificity and sheet order
+    assert(style.background_color == Color::parse("#eeeeee")); // indexed compound class
+    assert(style.font_weight == 700); // universal fallback bucket for attribute selector
+    assert(style.text_decoration == "none"); // candidate must still pass full matching
+}
+
 TEST(layout_box_tree) {
     using namespace litebird;
     std::string html = R"(
@@ -465,7 +493,7 @@ TEST(garbage_collector_and_cycles) {
     vm.set_global("x", JsValue::make_object());
     auto gc_fn = vm.get_global("gc");
     assert(gc_fn.type == JsType::NativeFunction);
-    auto gc_info = gc_fn.native_fn({});
+    auto gc_info = gc_fn.native_function()({});
     assert(gc_info.type == JsType::Object);
     assert(gc_info.get_property("total_cells").to_number() >= 1.0);
 }
@@ -522,7 +550,7 @@ TEST(dom_event_target_and_bubbling) {
     assert(add_listener_fn.type == JsType::NativeFunction);
 
     int js_event_fired = 0;
-    add_listener_fn.native_fn({
+    add_listener_fn.native_function()({
         JsValue::make_string("custom"),
         JsValue::make_native_function([&](const std::vector<JsValue>& args) {
             assert(!args.empty());
@@ -534,7 +562,7 @@ TEST(dom_event_target_and_bubbling) {
 
     auto dispatch_fn = js_btn.get_property("dispatchEvent");
     assert(dispatch_fn.type == JsType::NativeFunction);
-    dispatch_fn.native_fn({JsValue::make_string("custom")});
+    dispatch_fn.native_function()({JsValue::make_string("custom")});
     assert(js_event_fired == 1);
 }
 
@@ -4072,6 +4100,150 @@ TEST(gc_keeps_objects_captured_by_pending_microtasks) {
     assert(js.global_env()->get("microtask_value").to_string() == "keepme");
 }
 
+TEST(phase19_js_compatibility_basics) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    js.eval_ast(R"(
+        var globalBefore = 8;
+        { var fromBlock = 12; let blockOnly = 6; }
+        function localVarScope() {
+            var beforeInit = typeof later;
+            if (true) { var later = 5; var innerOnly = 9; }
+            return beforeInit + ":" + later;
+        }
+        var localResult = localVarScope();
+        var leakedLocal = typeof innerOnly;
+        var shadowed = 1;
+        function shadowVar() { var shadowed = 2; return shadowed; }
+        var shadowResult = shadowVar();
+        for (var loopVar = 0; loopVar < 2; loopVar++) { }
+        var loopResult = loopVar;
+        var forOfLast;
+        for (var item of [2, 3]) { forOfLast = item; }
+
+        var tUndefined = typeof missingName;
+        var tNull = typeof null;
+        var tNumber = typeof 1;
+        var tString = typeof "x";
+        var tBoolean = typeof false;
+        var tObject = typeof {};
+        var tArray = typeof [];
+        var tFunction = typeof (() => 1);
+
+        var powRightAssociative = 2 ** 3 ** 2;
+        var powUnaryRight = 2 ** -2;
+        var powPrecedence = 2 * 3 ** 2;
+
+        var fallback = null ?? "fallback";
+        var keepZero = 0 ?? 4;
+        var keepFalse = false ?? true;
+        var keepEmpty = "" ?? "fallback";
+        var nullishEffects = 0;
+        var shortCircuit = 1 ?? nullishEffects++;
+        var evaluateRight = null ?? nullishEffects++;
+
+        var switchFallthrough = "";
+        switch ("2") {
+            case 1: switchFallthrough = "wrong"; break;
+            case "2": switchFallthrough = "two";
+            default: switchFallthrough += " default";
+        }
+        var defaultPosition = "";
+        switch (9) {
+            case 1: defaultPosition = "one"; break;
+            default: defaultPosition = "default"; break;
+            case 9: defaultPosition = "nine"; break;
+        }
+        var breakCount = 0;
+        while (true) { breakCount++; break; }
+    )");
+
+    assert(js.global_env()->get("fromBlock").to_number() == 12);
+    assert(js.global_env()->get("blockOnly").is_undefined());
+    assert(js.global_env()->get("localResult").to_string() == "undefined:5");
+    assert(js.global_env()->get("leakedLocal").to_string() == "undefined");
+    assert(js.global_env()->get("shadowResult").to_number() == 2);
+    assert(js.global_env()->get("shadowed").to_number() == 1);
+    assert(js.global_env()->get("loopResult").to_number() == 2);
+    assert(js.global_env()->get("forOfLast").to_number() == 3);
+
+    assert(js.global_env()->get("tUndefined").to_string() == "undefined");
+    assert(js.global_env()->get("tNull").to_string() == "object");
+    assert(js.global_env()->get("tNumber").to_string() == "number");
+    assert(js.global_env()->get("tString").to_string() == "string");
+    assert(js.global_env()->get("tBoolean").to_string() == "boolean");
+    assert(js.global_env()->get("tObject").to_string() == "object");
+    assert(js.global_env()->get("tArray").to_string() == "object");
+    assert(js.global_env()->get("tFunction").to_string() == "function");
+
+    assert(js.global_env()->get("powRightAssociative").to_number() == 512);
+    assert(js.global_env()->get("powUnaryRight").to_number() == 0.25);
+    assert(js.global_env()->get("powPrecedence").to_number() == 18);
+    assert(js.global_env()->get("fallback").to_string() == "fallback");
+    assert(js.global_env()->get("keepZero").to_number() == 0);
+    assert(!js.global_env()->get("keepFalse").is_truthy());
+    assert(js.global_env()->get("keepEmpty").to_string().empty());
+    assert(js.global_env()->get("shortCircuit").to_number() == 1);
+    assert(js.global_env()->get("evaluateRight").to_number() == 0);
+    assert(js.global_env()->get("nullishEffects").to_number() == 1);
+    assert(js.global_env()->get("switchFallthrough").to_string() == "two default");
+    assert(js.global_env()->get("defaultPosition").to_string() == "nine");
+    assert(js.global_env()->get("breakCount").to_number() == 1);
+
+    // Features not implemented in the bytecode VM must transparently run via
+    // the AST interpreter, without running a partially compiled program first.
+    JsInterpreter fallback_eval;
+    fallback_eval.eval("var p = 2 ** 4; var n = null ?? 3;");
+    assert(fallback_eval.global_env()->get("p").to_number() == 16);
+    assert(fallback_eval.global_env()->get("n").to_number() == 3);
+    assert(fallback_eval.eval("typeof p").to_string() == "number");
+    fallback_eval.eval("function hoistedVar() { if (true) { var local = 5; } return local; } var hoistedResult = hoistedVar();");
+    assert(fallback_eval.global_env()->get("hoistedResult").to_number() == 5);
+    assert(fallback_eval.global_env()->get("local").is_undefined());
+
+    auto parses = [](const std::string& source) {
+        try {
+            JsLexer lexer(source);
+            JsParser parser(lexer.tokenize_all());
+            (void)parser.parse_program();
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
+    assert(!parses("var invalid = null ?? false || true;"));
+    assert(!parses("var invalid = null && false ?? true;"));
+    assert(parses("var valid = (null ?? false) || true;"));
+    assert(parses("var valid = null ?? (false || true);"));
+}
+
+TEST(js_value_payload_is_compact_and_copy_safe) {
+    using namespace litebird;
+
+    // Keep common VM stack/global values compact as type-specific data grows.
+    assert(sizeof(JsValue) <= 128);
+
+    auto original = JsValue::make_native_function([](const std::vector<JsValue>&) {
+        return JsValue::make_number(1);
+    });
+    JsValue copied = original;
+    original.set_native_function([](const std::vector<JsValue>&) {
+        return JsValue::make_number(2);
+    });
+    assert(copied.native_function()({}).to_number() == 1);
+    assert(original.native_function()({}).to_number() == 2);
+
+    JsValue fn;
+    fn.type = JsType::Function;
+    fn.set_function_params({"first"});
+    JsValue fn_copy = fn;
+    fn.set_function_params({"second"});
+    assert(fn_copy.function_params().size() == 1);
+    assert(fn_copy.function_params().front() == "first");
+    assert(fn.function_params().front() == "second");
+}
+
 TEST(strict_equality_does_not_coerce) {
     using namespace litebird;
 
@@ -4208,6 +4380,7 @@ int main() {
     RUN_TEST(html_parser);
     RUN_TEST(css_parser_and_specificity);
     RUN_TEST(style_resolver_and_cascade);
+    RUN_TEST(style_resolver_indexed_candidates_preserve_cascade);
     RUN_TEST(layout_box_tree);
     RUN_TEST(javascript_engine);
     RUN_TEST(bytecode_virtual_machine);
@@ -4278,6 +4451,8 @@ int main() {
     RUN_TEST(runaway_js_recursion_reports_range_error);
     RUN_TEST(gc_roots_are_complete_under_empty_root_set);
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
+    RUN_TEST(phase19_js_compatibility_basics);
+    RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);
     RUN_TEST(image_decoder_rejects_hostile_dimensions);
     RUN_TEST(overflow_hidden_clips_painting);

@@ -52,14 +52,23 @@ std::unique_ptr<BlockStmt> JsParser::parse_program() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_statement() {
-    if (match(JsTokenType::Var) || match(JsTokenType::Let) || match(JsTokenType::Const)) {
-        return parse_var_declaration();
+    if (check(JsTokenType::Var) || check(JsTokenType::Let) || check(JsTokenType::Const)) {
+        const JsTokenType token = advance().type;
+        const JsDeclKind kind = token == JsTokenType::Var ? JsDeclKind::Var
+                              : token == JsTokenType::Const ? JsDeclKind::Const : JsDeclKind::Let;
+        return parse_var_declaration(kind);
     }
     if (match(JsTokenType::If)) {
         return parse_if_statement();
     }
     if (match(JsTokenType::While)) {
         return parse_while_statement();
+    }
+    if (match(JsTokenType::Switch)) {
+        return parse_switch_statement();
+    }
+    if (match(JsTokenType::Break)) {
+        return parse_break_statement();
     }
     if (match(JsTokenType::For)) {
         return parse_for_statement();
@@ -89,7 +98,7 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
     return std::make_unique<ExprStmt>(std::move(expr));
 }
 
-std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
+std::unique_ptr<Stmt> JsParser::parse_var_declaration(JsDeclKind kind) {
     if (match(JsTokenType::OpenBracket)) {
         std::vector<std::string> names;
         if (!check(JsTokenType::CloseBracket)) {
@@ -102,7 +111,7 @@ std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
         consume(JsTokenType::Equal, "Expected '=' in destructuring declaration.");
         auto init = parse_expression();
         match(JsTokenType::Semicolon);
-        return std::make_unique<ArrayDestructuringDeclStmt>(std::move(names), std::move(init));
+        return std::make_unique<ArrayDestructuringDeclStmt>(std::move(names), std::move(init), kind);
     }
 
     if (match(JsTokenType::OpenBrace)) {
@@ -122,7 +131,7 @@ std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
         consume(JsTokenType::Equal, "Expected '=' in destructuring declaration.");
         auto init = parse_expression();
         match(JsTokenType::Semicolon);
-        return std::make_unique<ObjectDestructuringDeclStmt>(std::move(bindings), std::move(init));
+        return std::make_unique<ObjectDestructuringDeclStmt>(std::move(bindings), std::move(init), kind);
     }
 
     const auto& name_token = consume(JsTokenType::Identifier, "Expected variable name.");
@@ -132,7 +141,7 @@ std::unique_ptr<Stmt> JsParser::parse_var_declaration() {
         init = parse_expression();
     }
     match(JsTokenType::Semicolon);
-    return std::make_unique<VarDeclStmt>(name_token.text, std::move(init));
+    return std::make_unique<VarDeclStmt>(name_token.text, std::move(init), kind);
 }
 
 std::unique_ptr<FunctionDeclStmt> JsParser::parse_function_declaration() {
@@ -219,6 +228,42 @@ std::unique_ptr<Stmt> JsParser::parse_if_statement() {
     return std::make_unique<IfStmt>(std::move(condition), std::move(then_branch), std::move(else_branch));
 }
 
+std::unique_ptr<Stmt> JsParser::parse_switch_statement() {
+    consume(JsTokenType::OpenParen, "Expected '(' after switch.");
+    auto discriminant = parse_expression();
+    consume(JsTokenType::CloseParen, "Expected ')' after switch expression.");
+    consume(JsTokenType::OpenBrace, "Expected '{' before switch body.");
+
+    std::vector<SwitchCase> cases;
+    bool saw_default = false;
+    while (!check(JsTokenType::CloseBrace) && !is_at_end()) {
+        SwitchCase clause;
+        if (match(JsTokenType::Case)) {
+            clause.test = parse_expression();
+            consume(JsTokenType::Colon, "Expected ':' after case expression.");
+        } else if (match(JsTokenType::Default)) {
+            if (saw_default) throw std::runtime_error("Duplicate default clause in switch.");
+            saw_default = true;
+            consume(JsTokenType::Colon, "Expected ':' after default.");
+        } else {
+            throw std::runtime_error("Expected 'case' or 'default' in switch body.");
+        }
+
+        while (!check(JsTokenType::Case) && !check(JsTokenType::Default) &&
+               !check(JsTokenType::CloseBrace) && !is_at_end()) {
+            clause.statements.push_back(parse_statement());
+        }
+        cases.push_back(std::move(clause));
+    }
+    consume(JsTokenType::CloseBrace, "Expected '}' after switch body.");
+    return std::make_unique<SwitchStmt>(std::move(discriminant), std::move(cases));
+}
+
+std::unique_ptr<Stmt> JsParser::parse_break_statement() {
+    match(JsTokenType::Semicolon);
+    return std::make_unique<BreakStmt>();
+}
+
 std::unique_ptr<Stmt> JsParser::parse_while_statement() {
     consume(JsTokenType::OpenParen, "Expected '(' after while.");
     auto condition = parse_expression();
@@ -231,8 +276,12 @@ std::unique_ptr<Stmt> JsParser::parse_while_statement() {
 std::unique_ptr<Stmt> JsParser::parse_for_statement() {
     consume(JsTokenType::OpenParen, "Expected '(' after 'for'.");
     bool is_decl = false;
-    if (match(JsTokenType::Var) || match(JsTokenType::Let) || match(JsTokenType::Const)) {
+    JsDeclKind decl_kind = JsDeclKind::Let;
+    if (check(JsTokenType::Var) || check(JsTokenType::Let) || check(JsTokenType::Const)) {
+        const JsTokenType token = advance().type;
         is_decl = true;
+        decl_kind = token == JsTokenType::Var ? JsDeclKind::Var
+                  : token == JsTokenType::Const ? JsDeclKind::Const : JsDeclKind::Let;
     }
     std::string var_name = consume(JsTokenType::Identifier, "Expected variable name in for loop.").text;
 
@@ -240,7 +289,7 @@ std::unique_ptr<Stmt> JsParser::parse_for_statement() {
         auto iterable = parse_expression();
         consume(JsTokenType::CloseParen, "Expected ')' after for-of expression.");
         auto body = parse_statement();
-        return std::make_unique<ForOfStmt>(var_name, std::move(iterable), std::move(body));
+        return std::make_unique<ForOfStmt>(var_name, std::move(iterable), std::move(body), decl_kind, is_decl);
     }
 
     // Traditional for loop fallback: for (var_name = init; cond; update)
@@ -255,7 +304,7 @@ std::unique_ptr<Stmt> JsParser::parse_for_statement() {
 
     auto block = std::make_unique<BlockStmt>();
     if (is_decl) {
-        block->statements.push_back(std::make_unique<VarDeclStmt>(var_name, std::move(init_val)));
+        block->statements.push_back(std::make_unique<VarDeclStmt>(var_name, std::move(init_val), decl_kind));
     } else {
         auto target_id = std::make_unique<IdentifierExpr>(var_name);
         auto assign = std::make_unique<AssignExpr>(std::move(target_id), std::move(init_val));
@@ -319,11 +368,41 @@ bool JsParser::is_assignable(const Expr* expr) {
            dynamic_cast<const IndexExpr*>(expr) != nullptr;
 }
 
+namespace {
+bool root_is_unparenthesized_operator(const Expr* expr, JsTokenType op) {
+    if (!expr || expr->explicitly_grouped) return false;
+    auto binary = dynamic_cast<const BinaryExpr*>(expr);
+    return binary && binary->op == op;
+}
+}
+
 std::unique_ptr<Expr> JsParser::parse_logical_or() {
-    auto expr = parse_logical_and();
+    auto expr = parse_coalesce();
     while (match(JsTokenType::PipePipe)) {
+        if (root_is_unparenthesized_operator(expr.get(), JsTokenType::Nullish)) {
+            throw std::runtime_error("Cannot mix '??' with '||' without parentheses.");
+        }
+        JsTokenType op = previous().type;
+        auto right = parse_coalesce();
+        if (root_is_unparenthesized_operator(right.get(), JsTokenType::Nullish)) {
+            throw std::runtime_error("Cannot mix '??' with '||' without parentheses.");
+        }
+        expr = std::make_unique<BinaryExpr>(std::move(expr), op, std::move(right));
+    }
+    return expr;
+}
+
+std::unique_ptr<Expr> JsParser::parse_coalesce() {
+    auto expr = parse_logical_and();
+    while (match(JsTokenType::Nullish)) {
+        if (root_is_unparenthesized_operator(expr.get(), JsTokenType::AmpAmp)) {
+            throw std::runtime_error("Cannot mix '??' with '&&' without parentheses.");
+        }
         JsTokenType op = previous().type;
         auto right = parse_logical_and();
+        if (root_is_unparenthesized_operator(right.get(), JsTokenType::AmpAmp)) {
+            throw std::runtime_error("Cannot mix '??' with '&&' without parentheses.");
+        }
         expr = std::make_unique<BinaryExpr>(std::move(expr), op, std::move(right));
     }
     return expr;
@@ -383,6 +462,9 @@ std::unique_ptr<Expr> JsParser::parse_factor() {
 }
 
 std::unique_ptr<Expr> JsParser::parse_unary() {
+    if (match(JsTokenType::Typeof)) {
+        return std::make_unique<UnaryExpr>(JsTokenType::Typeof, parse_unary());
+    }
     if (match(JsTokenType::Await)) {
         auto operand = parse_unary();
         return std::make_unique<AwaitExpr>(std::move(operand));
@@ -415,7 +497,18 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
         }
         return std::make_unique<NewExpr>(std::move(callee), std::move(args));
     }
-    return parse_call_or_member();
+    return parse_exponentiation();
+}
+
+std::unique_ptr<Expr> JsParser::parse_exponentiation() {
+    auto expr = parse_call_or_member();
+    if (match(JsTokenType::Power)) {
+        // Exponentiation is right-associative and accepts a unary expression
+        // on the right (e.g. 2 ** -2).
+        auto right = parse_unary();
+        return std::make_unique<BinaryExpr>(std::move(expr), JsTokenType::Power, std::move(right));
+    }
+    return expr;
 }
 
 std::unique_ptr<Expr> JsParser::parse_call_or_member() {
@@ -685,6 +778,7 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             return std::make_unique<FunctionExpr>("", std::move(params), std::move(body), std::move(defs));
         }
 
+        first_expr->explicitly_grouped = true;
         return first_expr;
     }
 

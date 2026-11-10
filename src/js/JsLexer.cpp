@@ -122,6 +122,11 @@ JsToken JsLexer::scan_identifier() {
         {"false", JsTokenType::False},
         {"null", JsTokenType::Null},
         {"undefined", JsTokenType::Undefined},
+        {"typeof", JsTokenType::Typeof},
+        {"switch", JsTokenType::Switch},
+        {"case", JsTokenType::Case},
+        {"default", JsTokenType::Default},
+        {"break", JsTokenType::Break},
         {"class", JsTokenType::Class},
         {"extends", JsTokenType::Extends},
         {"super", JsTokenType::Super},
@@ -303,6 +308,7 @@ JsToken JsLexer::next_token() {
             t.type = JsTokenType::Minus;
             return t;
         case '*':
+            if (match('*')) { t.type = JsTokenType::Power; t.text = "**"; return t; }
             if (match('=')) { t.type = JsTokenType::StarEqual; t.text = "*="; return t; }
             t.type = JsTokenType::Star;
             return t;
@@ -372,6 +378,13 @@ JsToken JsLexer::next_token() {
             if (match('|')) {
                 t.type = JsTokenType::PipePipe;
                 t.text = "||";
+                return t;
+            }
+            break;
+        case '?':
+            if (match('?')) {
+                t.type = JsTokenType::Nullish;
+                t.text = "??";
                 return t;
             }
             break;

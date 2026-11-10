@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <unordered_set>
 
 namespace litebird {
@@ -343,7 +344,8 @@ void HtmlTreeBuilder::process_after_head(const HtmlToken& token) {
                 process_in_head(token);
                 for (auto it = m_open_elements.rbegin(); it != m_open_elements.rend(); ++it) {
                     if (*it == m_head_element) {
-                        m_open_elements.erase(std::next(it).base());
+                        const auto erase_it = std::next(it).base();
+                        erase_open_element(static_cast<std::size_t>(std::distance(m_open_elements.begin(), erase_it)));
                         break;
                     }
                 }
@@ -451,7 +453,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 if (!m_frameset_ok) return;
                 auto body = m_open_elements[1];
                 if (auto parent = body->parent()) parent->remove_child(body);
-                m_open_elements.resize(1);
+                resize_open_elements(1);
                 insert_html_element(token);
                 m_mode = Mode::InFrameset;
                 return;
@@ -548,7 +550,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                     if (index >= 0) m_formatting.erase(m_formatting.begin() + index);
                     for (std::size_t i = 0; i < m_open_elements.size(); ++i) {
                         if (m_open_elements[i] == entry->element) {
-                            m_open_elements.erase(m_open_elements.begin() + static_cast<long>(i));
+                            erase_open_element(i);
                             break;
                         }
                     }
@@ -798,7 +800,9 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                     if (!has_element_in_scope("form")) return;
                     generate_implied_end_tags();
                     auto it = std::find(m_open_elements.begin(), m_open_elements.end(), node);
-                    if (it != m_open_elements.end()) m_open_elements.erase(it);
+                    if (it != m_open_elements.end()) {
+                        erase_open_element(static_cast<std::size_t>(std::distance(m_open_elements.begin(), it)));
+                    }
                     return;
                 }
                 if (!has_element_in_scope("form")) return;
@@ -839,7 +843,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                         auto element = m_open_elements[static_cast<std::size_t>(i)];
                         if (element->tag_name() == name) {
                             generate_implied_end_tags(name);
-                            m_open_elements.resize(static_cast<std::size_t>(i));
+                            resize_open_elements(static_cast<std::size_t>(i));
                             return;
                         }
                         if (is_special(element->tag_name())) return;
@@ -877,7 +881,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 auto element = m_open_elements[static_cast<std::size_t>(i)];
                 if (element->tag_name() == name) {
                     generate_implied_end_tags(name);
-                    m_open_elements.resize(static_cast<std::size_t>(i));
+                    resize_open_elements(static_cast<std::size_t>(i));
                     return;
                 }
                 if (is_special(element->tag_name())) return;
@@ -1657,7 +1661,7 @@ void HtmlTreeBuilder::process_foreign_content(const HtmlToken& token) {
                 std::string lowered = element->tag_name();
                 std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
                 if (lowered == token.name) {
-                    m_open_elements.resize(static_cast<std::size_t>(i));
+                    resize_open_elements(static_cast<std::size_t>(i));
                     return;
                 }
             }

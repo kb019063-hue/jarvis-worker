@@ -32,22 +32,31 @@ std::shared_ptr<Node> Node::next_sibling() const {
     return nullptr;
 }
 
-bool Node::is_connected() const {
-    if (is_document()) return true;
-    auto curr = parent();
-    while (curr) {
-        if (curr->is_document()) return true;
-        if (curr->is_document_fragment()) {
-            if (auto sr = dynamic_cast<const ShadowRoot*>(curr.get())) {
-                auto host = sr->host();
-                if (!host) return false;
-                curr = host;
-                continue;
-            }
+void Node::set_parent(std::shared_ptr<Node> p) {
+    m_parent = p;
+    set_connected_state_subtree(p && p->is_connected());
+}
+
+void Node::set_connected_state_subtree(bool connected) {
+    // Use an explicit worklist. A detached subtree may already be deeply nested
+    // when attached to a document, and connectivity bookkeeping must not add
+    // another native-recursive walk to that operation.
+    std::vector<Node*> pending{this};
+    while (!pending.empty()) {
+        Node* node = pending.back();
+        pending.pop_back();
+        if (node->m_is_connected == connected) continue;
+        node->m_is_connected = connected;
+
+        for (const auto& child : node->m_children) pending.push_back(child.get());
+
+        // A shadow root is connected through its host, not through the ordinary
+        // parent chain. Include it when the host enters or leaves a document.
+        if (node->is_element()) {
+            auto element = static_cast<Element*>(node);
+            if (auto root = element->shadow_root()) pending.push_back(root.get());
         }
-        curr = curr->parent();
     }
-    return false;
 }
 
 static void trigger_connected_recursive(const std::shared_ptr<Node>& node) {

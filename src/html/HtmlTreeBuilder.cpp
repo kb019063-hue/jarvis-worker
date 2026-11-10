@@ -193,7 +193,7 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
 
     auto root = std::make_shared<Element>("html");
     m_document->append_child(root);
-    m_open_elements.push_back(root);
+    push_element(root);
 
     reset_insertion_mode();
 
@@ -259,18 +259,82 @@ std::shared_ptr<Element> HtmlTreeBuilder::adjusted_current_node() const {
     return current_node();
 }
 
+void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
+    if (!element) return;
+    const std::string& name = element->tag_name();
+    if (element->element_namespace() == ElementNamespace::HTML) {
+        m_open_html_tag_indices[name].push_back(index);
+        if (name == "applet" || name == "caption" || name == "html" || name == "table" ||
+            name == "td" || name == "th" || name == "marquee" || name == "object" ||
+            name == "template") {
+            m_scope_boundary_indices[0].push_back(index);
+        }
+        if (name == "ol" || name == "ul") m_scope_boundary_indices[1].push_back(index);
+        if (name == "button") m_scope_boundary_indices[2].push_back(index);
+    } else if (element->element_namespace() == ElementNamespace::MathML) {
+        if (is_mathml_text_integration_point_tag(name) || name == "annotation-xml") {
+            m_scope_boundary_indices[0].push_back(index);
+        }
+    } else if (element->element_namespace() == ElementNamespace::SVG) {
+        if (is_svg_html_integration_point_tag(name)) m_scope_boundary_indices[0].push_back(index);
+    }
+}
+
+void HtmlTreeBuilder::rebuild_open_element_indexes() {
+    m_open_html_tag_indices.clear();
+    for (auto& boundaries : m_scope_boundary_indices) boundaries.clear();
+    for (std::size_t i = 0; i < m_open_elements.size(); ++i) {
+        index_open_element(i, m_open_elements[i]);
+    }
+}
+
 void HtmlTreeBuilder::push_element(const std::shared_ptr<Element>& element) {
     m_open_elements.push_back(element);
+    index_open_element(m_open_elements.size() - 1, element);
 }
 
 void HtmlTreeBuilder::pop_current_node() {
-    if (!m_open_elements.empty()) m_open_elements.pop_back();
+    if (m_open_elements.empty()) return;
+    const std::size_t index = m_open_elements.size() - 1;
+    auto element = m_open_elements.back();
+    if (element && element->element_namespace() == ElementNamespace::HTML) {
+        auto it = m_open_html_tag_indices.find(element->tag_name());
+        if (it != m_open_html_tag_indices.end() && !it->second.empty() && it->second.back() == index) {
+            it->second.pop_back();
+            if (it->second.empty()) m_open_html_tag_indices.erase(it);
+        }
+    }
+    for (auto& boundaries : m_scope_boundary_indices) {
+        if (!boundaries.empty() && boundaries.back() == index) boundaries.pop_back();
+    }
+    m_open_elements.pop_back();
+}
+
+void HtmlTreeBuilder::resize_open_elements(std::size_t size) {
+    while (m_open_elements.size() > size) pop_current_node();
+}
+
+void HtmlTreeBuilder::erase_open_element(std::size_t index) {
+    if (index >= m_open_elements.size()) return;
+    m_open_elements.erase(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index));
+    rebuild_open_element_indexes();
+}
+
+void HtmlTreeBuilder::insert_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
+    index = std::min(index, m_open_elements.size());
+    m_open_elements.insert(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index), element);
+    rebuild_open_element_indexes();
+}
+
+void HtmlTreeBuilder::replace_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
+    if (index >= m_open_elements.size()) return;
+    m_open_elements[index] = element;
+    rebuild_open_element_indexes();
 }
 
 namespace {
-/// The tree-construction rules only ever match *HTML* elements; an SVG
-/// <tr> or a MathML <mi> must never satisfy a "has a td in table scope"
-/// test just because its local name matches.
+// Tree-construction stack queries are scoped to HTML elements, not foreign
+// elements that happen to share a local name.
 bool is_html_element(const std::shared_ptr<Element>& element) {
     return element && element->element_namespace() == ElementNamespace::HTML;
 }
@@ -279,7 +343,7 @@ bool is_html_element(const std::shared_ptr<Element>& element) {
 void HtmlTreeBuilder::pop_until_tag(const std::string& tag) {
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
-        m_open_elements.pop_back();
+        pop_current_node();
         if (is_html_element(element) && element->tag_name() == tag) return;
     }
 }
@@ -287,7 +351,7 @@ void HtmlTreeBuilder::pop_until_tag(const std::string& tag) {
 void HtmlTreeBuilder::pop_until_one_of(const std::vector<std::string>& tags) {
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
-        m_open_elements.pop_back();
+        pop_current_node();
         if (is_html_element(element) &&
             std::find(tags.begin(), tags.end(), element->tag_name()) != tags.end()) return;
     }
@@ -307,28 +371,33 @@ bool HtmlTreeBuilder::has_element_in_scope(const std::string& tag, Scope scope) 
 
 bool HtmlTreeBuilder::has_element_in_scope_where(const std::vector<std::string>& tags, Scope scope) const {
     if (scope == Scope::Select) return has_element_in_select_scope(tags.empty() ? "" : tags.front());
+    if (tags.empty()) return false;
 
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        const std::string& name = element->tag_name();
-        const bool html = element->element_namespace() == ElementNamespace::HTML;
-        if (html && std::find(tags.begin(), tags.end(), name) != tags.end()) return true;
-
-        if (html) {
-            if (name == "applet" || name == "caption" || name == "html" || name == "table" ||
-                name == "td" || name == "th" || name == "marquee" || name == "object" ||
-                name == "template") {
-                return false;
-            }
-            if (scope == Scope::ListItem && (name == "ol" || name == "ul")) return false;
-            if (scope == Scope::Button && name == "button") return false;
-        } else if (element->element_namespace() == ElementNamespace::MathML) {
-            if (is_mathml_text_integration_point_tag(name) || name == "annotation-xml") return false;
-        } else if (element->element_namespace() == ElementNamespace::SVG) {
-            if (is_svg_html_integration_point_tag(name)) return false;
+    std::ptrdiff_t match_index = -1;
+    for (const auto& tag : tags) {
+        auto it = m_open_html_tag_indices.find(tag);
+        if (it != m_open_html_tag_indices.end() && !it->second.empty()) {
+            match_index = std::max(match_index, static_cast<std::ptrdiff_t>(it->second.back()));
         }
     }
-    return false;
+    if (match_index < 0) return false;
+
+    std::ptrdiff_t boundary_index = -1;
+    const auto& default_boundaries = m_scope_boundary_indices[0];
+    if (!default_boundaries.empty()) {
+        boundary_index = static_cast<std::ptrdiff_t>(default_boundaries.back());
+    }
+    if (scope == Scope::ListItem && !m_scope_boundary_indices[1].empty()) {
+        boundary_index = std::max(boundary_index,
+            static_cast<std::ptrdiff_t>(m_scope_boundary_indices[1].back()));
+    } else if (scope == Scope::Button && !m_scope_boundary_indices[2].empty()) {
+        boundary_index = std::max(boundary_index,
+            static_cast<std::ptrdiff_t>(m_scope_boundary_indices[2].back()));
+    }
+
+    // The spec tests for a target before testing the boundary at each stack
+    // entry, so a target that is itself the boundary is in scope.
+    return match_index >= boundary_index;
 }
 
 bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
@@ -674,7 +743,7 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         }
 
         if (furthest_index < 0) {
-            m_open_elements.resize(static_cast<std::size_t>(formatting_stack_index));
+            resize_open_elements(static_cast<std::size_t>(formatting_stack_index));
             const int entry_index = formatting_entry_index(formatting_element);
             if (entry_index >= 0) m_formatting.erase(m_formatting.begin() + entry_index);
             return true;
@@ -701,7 +770,7 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
                 node_entry_index = -1;
             }
             if (node_entry_index < 0) {
-                m_open_elements.erase(m_open_elements.begin() + node_index);
+                erase_open_element(static_cast<std::size_t>(node_index));
                 continue;
             }
 
@@ -709,7 +778,7 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
             auto replacement = create_element_for_token(m_formatting[static_cast<std::size_t>(node_entry_index)].token,
                                                         ElementNamespace::HTML);
             m_formatting[static_cast<std::size_t>(node_entry_index)].element = replacement;
-            m_open_elements[static_cast<std::size_t>(node_index)] = replacement;
+            replace_open_element(static_cast<std::size_t>(node_index), replacement);
             node = replacement;
 
             if (last_node == furthest_block) bookmark = node_entry_index + 1;
@@ -745,9 +814,9 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         m_formatting.insert(m_formatting.begin() + bookmark, FormattingEntry{new_element, formatting_token, false});
 
         const int old_index = stack_index(formatting_element);
-        if (old_index >= 0) m_open_elements.erase(m_open_elements.begin() + old_index);
+        if (old_index >= 0) erase_open_element(static_cast<std::size_t>(old_index));
         const int furthest_now = stack_index(furthest_block);
-        m_open_elements.insert(m_open_elements.begin() + furthest_now + 1, new_element);
+        insert_open_element(static_cast<std::size_t>(furthest_now + 1), new_element);
     }
     return true;
 }

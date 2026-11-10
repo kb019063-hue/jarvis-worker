@@ -6,7 +6,11 @@
 namespace litebird {
 
 ShadowRoot::ShadowRoot(std::shared_ptr<Element> host, ShadowRootMode mode)
-    : Node(NodeType::DocumentFragment), m_host(std::move(host)), m_mode(mode) {}
+    : Node(NodeType::DocumentFragment), m_host(std::move(host)), m_mode(mode) {
+    if (auto h = m_host.lock()) {
+        set_connected_state_subtree(h->is_connected());
+    }
+}
 
 std::string ShadowRoot::inner_html() const {
     std::string res;

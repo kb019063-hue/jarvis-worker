@@ -24,6 +24,10 @@
 
 namespace litebird {
 
+namespace {
+struct BreakSignal {};
+}
+
 JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
     : m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)), m_history(std::make_shared<History>()), m_vm(m_document) {
     init_builtins();
@@ -97,8 +101,7 @@ static JsValue create_generator_instance(JsInterpreter* interp,
     });
 
     JsValue gen_obj = JsValue::make_object();
-    gen_obj.generator_data = gen_data;
-    gen_obj.is_generator = true;
+    gen_obj.set_generator_value(gen_data);
 
     gen_obj.set_property("next", JsValue::make_native_function([gen_data](const std::vector<JsValue>& nargs) {
         JsValue send_val = nargs.empty() ? JsValue::make_undefined() : nargs[0];
@@ -174,6 +177,9 @@ JsValue JsInterpreter::eval_ast(std::string_view source) {
         return execute(program.get(), m_global_env);
     } catch (const ReturnException& ret) {
         return ret.value;
+    } catch (const BreakSignal&) {
+        std::cerr << "JS Runtime Error: Illegal break statement" << std::endl;
+        return JsValue::make_undefined();
     } catch (const JsStackOverflow& overflow) {
         std::cerr << "JS Runtime Error: " << overflow.what() << std::endl;
         return JsValue::make_undefined();
@@ -436,8 +442,8 @@ void JsInterpreter::init_builtins() {
         return CustomElementRegistry::default_registry().when_defined(args[0].to_string());
     }));
     ce_obj.set_property("upgrade", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].dom_node) {
-            CustomElementRegistry::default_registry().upgrade_tree(args[0].dom_node);
+        if (!args.empty() && args[0].dom_node_value()) {
+            CustomElementRegistry::default_registry().upgrade_tree(args[0].dom_node_value());
         }
         return JsValue::make_undefined();
     }));
@@ -517,25 +523,25 @@ void JsInterpreter::init_builtins() {
 
     // Function caller for callbacks
     JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val) {
-        if (fn.is_generator && fn.native_fn) {
-            return fn.native_fn(args);
+        if (fn.function_is_generator() && fn.native_function()) {
+            return fn.native_function()(args);
         }
         for (const auto& [k, v] : m_vm.globals()) {
             if (k != "document" && k != "window") {
                 m_global_env->define(k, v);
             }
         }
-        auto fn_env = std::make_shared<JsEnvironment>(fn.closure ? fn.closure : m_global_env);
+        auto fn_env = std::make_shared<JsEnvironment>(fn.function_closure() ? fn.function_closure() : m_global_env);
         if (this_val && this_val->type != JsType::Undefined) {
             fn_env->define("this", *this_val);
         }
-        for (size_t i = 0; i < fn.params.size(); ++i) {
+        for (size_t i = 0; i < fn.function_params().size(); ++i) {
             JsValue arg = (i < args.size()) ? args[i] : JsValue::make_undefined();
-            fn_env->define(fn.params[i], arg);
+            fn_env->define(fn.function_params()[i], arg);
         }
         try {
             CallDepthGuard depth_guard(*this);
-            JsValue res = execute(fn.body.get(), fn_env);
+            JsValue res = execute(fn.function_body().get(), fn_env);
             for (const auto& [k, v] : m_global_env->values()) {
                 m_vm.set_global(k, v);
             }
@@ -801,8 +807,8 @@ void JsInterpreter::init_builtins() {
         IntersectionObserverInit opts;
         if (args.size() > 1 && args[1].is_object()) {
             JsValue root_val = args[1].get_property("root");
-            if (root_val.dom_node) {
-                opts.root = std::dynamic_pointer_cast<Element>(root_val.dom_node);
+            if (root_val.dom_node_value()) {
+                opts.root = std::dynamic_pointer_cast<Element>(root_val.dom_node_value());
             }
             JsValue rm_val = args[1].get_property("rootMargin");
             if (rm_val.type == JsType::String) {
@@ -838,11 +844,50 @@ void JsInterpreter::init_builtins() {
     }
 }
 
+void JsInterpreter::hoist_var_declarations(const Stmt* stmt,
+                                              const std::shared_ptr<JsEnvironment>& env) {
+    if (!stmt || !env) return;
+    if (auto var = dynamic_cast<const VarDeclStmt*>(stmt)) {
+        if (var->kind == JsDeclKind::Var) env->hoist_var(var->name);
+    } else if (auto arr = dynamic_cast<const ArrayDestructuringDeclStmt*>(stmt)) {
+        if (arr->kind == JsDeclKind::Var) {
+            for (const auto& name : arr->names) env->hoist_var(name);
+        }
+    } else if (auto obj = dynamic_cast<const ObjectDestructuringDeclStmt*>(stmt)) {
+        if (obj->kind == JsDeclKind::Var) {
+            for (const auto& [property, name] : obj->bindings) {
+                (void)property;
+                env->hoist_var(name);
+            }
+        }
+    } else if (auto block = dynamic_cast<const BlockStmt*>(stmt)) {
+        for (const auto& child : block->statements) hoist_var_declarations(child.get(), env);
+    } else if (auto if_stmt = dynamic_cast<const IfStmt*>(stmt)) {
+        hoist_var_declarations(if_stmt->then_branch.get(), env);
+        hoist_var_declarations(if_stmt->else_branch.get(), env);
+    } else if (auto while_stmt = dynamic_cast<const WhileStmt*>(stmt)) {
+        hoist_var_declarations(while_stmt->body.get(), env);
+    } else if (auto for_of = dynamic_cast<const ForOfStmt*>(stmt)) {
+        if (for_of->declares_variable && for_of->kind == JsDeclKind::Var) {
+            env->hoist_var(for_of->variable_name);
+        }
+        hoist_var_declarations(for_of->body.get(), env);
+    } else if (auto switch_stmt = dynamic_cast<const SwitchStmt*>(stmt)) {
+        for (const auto& clause : switch_stmt->cases) {
+            for (const auto& child : clause.statements) hoist_var_declarations(child.get(), env);
+        }
+    }
+    // Deliberately do not descend into function or class bodies: they own their
+    // own var scopes and are hoisted when that function is invoked.
+}
+
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
     if (!node) return JsValue::make_undefined();
     m_current_env = env;
 
     if (auto block = dynamic_cast<const BlockStmt*>(node)) {
+        env->mark_var_scope();
+        hoist_var_declarations(block, env);
         JsValue last_val = JsValue::make_undefined();
         for (const auto& stmt : block->statements) {
             last_val = exec_stmt(stmt.get(), env);
@@ -868,20 +913,39 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         return eval_expr(expr_stmt->expression.get(), env);
     } else if (auto var_decl = dynamic_cast<const VarDeclStmt*>(stmt)) {
         JsValue init_val = var_decl->initializer ? eval_expr(var_decl->initializer.get(), env) : JsValue::make_undefined();
-        env->define(var_decl->name, init_val);
+        if (var_decl->kind == JsDeclKind::Var) {
+            auto scope = env->var_scope();
+            if (var_decl->initializer) scope->define(var_decl->name, init_val);
+            else scope->hoist_var(var_decl->name);
+            if (scope == m_global_env) m_vm.set_global(var_decl->name, scope->get(var_decl->name));
+        } else {
+            env->define(var_decl->name, init_val);
+        }
         return init_val;
     } else if (auto arr_destruct = dynamic_cast<const ArrayDestructuringDeclStmt*>(stmt)) {
         JsValue init_val = arr_destruct->initializer ? eval_expr(arr_destruct->initializer.get(), env) : JsValue::make_undefined();
         for (size_t i = 0; i < arr_destruct->names.size(); ++i) {
             JsValue item = init_val.get_property(std::to_string(i));
-            env->define(arr_destruct->names[i], item);
+            if (arr_destruct->kind == JsDeclKind::Var) {
+                auto scope = env->var_scope();
+                scope->define(arr_destruct->names[i], item);
+                if (scope == m_global_env) m_vm.set_global(arr_destruct->names[i], item);
+            } else {
+                env->define(arr_destruct->names[i], item);
+            }
         }
         return init_val;
     } else if (auto obj_destruct = dynamic_cast<const ObjectDestructuringDeclStmt*>(stmt)) {
         JsValue init_val = obj_destruct->initializer ? eval_expr(obj_destruct->initializer.get(), env) : JsValue::make_undefined();
         for (const auto& [prop, var_name] : obj_destruct->bindings) {
             JsValue item = init_val.get_property(prop);
-            env->define(var_name, item);
+            if (obj_destruct->kind == JsDeclKind::Var) {
+                auto scope = env->var_scope();
+                scope->define(var_name, item);
+                if (scope == m_global_env) m_vm.set_global(var_name, item);
+            } else {
+                env->define(var_name, item);
+            }
         }
         return init_val;
     } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
@@ -901,7 +965,11 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
     } else if (auto while_stmt = dynamic_cast<const WhileStmt*>(stmt)) {
         JsValue last = JsValue::make_undefined();
         while (eval_expr(while_stmt->condition.get(), env).is_truthy()) {
-            last = exec_stmt(while_stmt->body.get(), env);
+            try {
+                last = exec_stmt(while_stmt->body.get(), env);
+            } catch (const BreakSignal&) {
+                break;
+            }
         }
         return last;
     } else if (auto for_of = dynamic_cast<const ForOfStmt*>(stmt)) {
@@ -912,7 +980,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
             for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
                 items.push_back(iterable.get_property(std::to_string(i)));
             }
-        } else if (iterable.is_generator || iterable.generator_data != nullptr || iterable.has_property("next")) {
+        } else if (iterable.function_is_generator() || iterable.generator_value() != nullptr || iterable.has_property("next")) {
             while (true) {
                 JsValue next_fn = iterable.get_property("next");
                 if (!next_fn.is_callable()) break;
@@ -941,20 +1009,66 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
 
         JsValue last = JsValue::make_undefined();
         for (const auto& item : items) {
-            auto loop_env = std::make_shared<JsEnvironment>(env);
-            loop_env->define(for_of->variable_name, item);
-            last = exec_stmt(for_of->body.get(), loop_env);
+            auto loop_env = env;
+            if (for_of->declares_variable && for_of->kind != JsDeclKind::Var) {
+                loop_env = std::make_shared<JsEnvironment>(env);
+                loop_env->define(for_of->variable_name, item);
+            } else if (for_of->declares_variable) {
+                auto scope = env->var_scope();
+                scope->define(for_of->variable_name, item);
+                if (scope == m_global_env) m_vm.set_global(for_of->variable_name, item);
+            } else {
+                env->assign(for_of->variable_name, item);
+            }
+            try {
+                last = exec_stmt(for_of->body.get(), loop_env);
+            } catch (const BreakSignal&) {
+                break;
+            }
         }
         return last;
+    } else if (auto switch_stmt = dynamic_cast<const SwitchStmt*>(stmt)) {
+        JsValue discriminant = eval_expr(switch_stmt->discriminant.get(), env);
+        std::ptrdiff_t selected = -1;
+        std::ptrdiff_t default_case = -1;
+        for (std::size_t i = 0; i < switch_stmt->cases.size(); ++i) {
+            const auto& clause = switch_stmt->cases[i];
+            if (!clause.test) {
+                default_case = static_cast<std::ptrdiff_t>(i);
+                continue;
+            }
+            JsValue test = eval_expr(clause.test.get(), env);
+            if (strict_equals(discriminant, test)) {
+                selected = static_cast<std::ptrdiff_t>(i);
+                break;
+            }
+        }
+        if (selected < 0) selected = default_case;
+        if (selected < 0) return JsValue::make_undefined();
+
+        auto switch_env = std::make_shared<JsEnvironment>(env);
+        JsValue last = JsValue::make_undefined();
+        try {
+            for (std::size_t i = static_cast<std::size_t>(selected); i < switch_stmt->cases.size(); ++i) {
+                for (const auto& child : switch_stmt->cases[i].statements) {
+                    last = exec_stmt(child.get(), switch_env);
+                }
+            }
+        } catch (const BreakSignal&) {
+            // The switch consumes the nearest break.
+        }
+        return last;
+    } else if (dynamic_cast<const BreakStmt*>(stmt)) {
+        throw BreakSignal{};
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
         JsValue fn_val;
         fn_val.type = JsType::Function;
-        fn_val.params = fn_decl->params;
-        for (const auto& d : fn_decl->default_values) fn_val.default_values.push_back(d);
-        fn_val.body = fn_decl->body;
-        fn_val.closure = env;
-        fn_val.is_async = fn_decl->is_async;
-        fn_val.is_generator = fn_decl->is_generator;
+        fn_val.set_function_params(fn_decl->params);
+        for (const auto& d : fn_decl->default_values) fn_val.add_function_default_value(d);
+        fn_val.set_function_body(fn_decl->body);
+        fn_val.set_function_closure(env);
+        fn_val.set_function_async(fn_decl->is_async);
+        fn_val.set_function_generator(fn_decl->is_generator);
 
         auto body_ptr = fn_decl->body;
         auto params = fn_decl->params;
@@ -964,11 +1078,11 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
         bool is_gen = fn_decl->is_generator;
 
         if (is_gen) {
-            fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+            fn_val.set_native_function([this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
                 return create_generator_instance(this, body_ptr, params, defs, closure, args);
-            };
+            });
         } else {
-            fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
+            fn_val.set_native_function([this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
                 for (const auto& [k, v] : m_vm.globals()) {
                     m_global_env->define(k, v);
                 }
@@ -1011,7 +1125,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                     }
                     return ret.value;
                 }
-            };
+            });
         }
 
         env->define(fn_decl->name, fn_val);
@@ -1043,19 +1157,19 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
 
         JsValue ctor_fn;
         ctor_fn.type = JsType::Function;
-        ctor_fn.closure = env;
-        ctor_fn.params = ctor_def ? ctor_def->params : std::vector<std::string>{};
+        ctor_fn.set_function_closure(env);
+        ctor_fn.set_function_params(ctor_def ? ctor_def->params : std::vector<std::string>{});
         if (ctor_def) {
-            for (const auto& d : ctor_def->default_values) ctor_fn.default_values.push_back(d);
+            for (const auto& d : ctor_def->default_values) ctor_fn.add_function_default_value(d);
         }
-        ctor_fn.body = ctor_def ? ctor_def->body : nullptr;
+        ctor_fn.set_function_body(ctor_def ? ctor_def->body : nullptr);
 
-        auto ctor_params = ctor_fn.params;
-        auto ctor_defs = ctor_fn.default_values;
-        auto ctor_body = ctor_fn.body;
+        auto ctor_params = ctor_fn.function_params();
+        auto ctor_defs = ctor_fn.function_default_values();
+        auto ctor_body = ctor_fn.function_body();
         auto closure = env;
 
-        ctor_fn.native_fn = [this, ctor_body, ctor_params, ctor_defs, closure, super_ctor](const std::vector<JsValue>& args) {
+        ctor_fn.set_native_function([this, ctor_body, ctor_params, ctor_defs, closure, super_ctor](const std::vector<JsValue>& args) {
             for (const auto& [k, v] : m_vm.globals()) {
                 m_global_env->define(k, v);
             }
@@ -1079,8 +1193,8 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                 } catch (const ReturnException& ret) {
                     return ret.value;
                 }
-            } else if (super_ctor.native_fn) {
-                super_ctor.native_fn(args);
+            } else if (super_ctor.native_function()) {
+                super_ctor.native_function()(args);
             }
 
             try {
@@ -1088,7 +1202,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
             } catch (...) {
                 return JsValue::make_undefined();
             }
-        };
+        });
 
         if (super_ctor.is_truthy()) {
             ctor_fn.set_property("__super_constructor__", super_ctor);
@@ -1106,18 +1220,18 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
 
             JsValue m_fn;
             m_fn.type = JsType::Function;
-            m_fn.closure = env;
-            m_fn.params = m.params;
-            for (const auto& d : m.default_values) m_fn.default_values.push_back(d);
-            m_fn.body = m.body;
-            m_fn.is_async = m.is_async;
-            m_fn.is_generator = m.is_generator;
+            m_fn.set_function_closure(env);
+            m_fn.set_function_params(m.params);
+            for (const auto& d : m.default_values) m_fn.add_function_default_value(d);
+            m_fn.set_function_body(m.body);
+            m_fn.set_function_async(m.is_async);
+            m_fn.set_function_generator(m.is_generator);
             if (m.is_generator) {
-                m_fn.native_fn = [this, m_body, m_params, m_defs, closure](const std::vector<JsValue>& args) {
+                m_fn.set_native_function([this, m_body, m_params, m_defs, closure](const std::vector<JsValue>& args) {
                     return create_generator_instance(this, m_body, m_params, m_defs, closure, args);
-                };
+                });
             } else {
-                m_fn.native_fn = [this, m_body, m_params, m_defs, closure, m_async](const std::vector<JsValue>& args) {
+                m_fn.set_native_function([this, m_body, m_params, m_defs, closure, m_async](const std::vector<JsValue>& args) {
                     for (const auto& [k, v] : m_vm.globals()) {
                         m_global_env->define(k, v);
                     }
@@ -1148,7 +1262,7 @@ JsValue JsInterpreter::exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment
                     } catch (const ReturnException& ret) {
                         return ret.value;
                     }
-                };
+                });
             }
 
             if (m.is_static) {
@@ -1268,12 +1382,12 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
     if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
         JsValue fn_val;
         fn_val.type = JsType::Function;
-        fn_val.params = fn_expr->params;
-        for (const auto& d : fn_expr->default_values) fn_val.default_values.push_back(d);
-        fn_val.body = fn_expr->body;
-        fn_val.closure = env;
-        fn_val.is_async = fn_expr->is_async;
-        fn_val.is_generator = fn_expr->is_generator;
+        fn_val.set_function_params(fn_expr->params);
+        for (const auto& d : fn_expr->default_values) fn_val.add_function_default_value(d);
+        fn_val.set_function_body(fn_expr->body);
+        fn_val.set_function_closure(env);
+        fn_val.set_function_async(fn_expr->is_async);
+        fn_val.set_function_generator(fn_expr->is_generator);
 
         auto body_ptr = fn_expr->body;
         auto params = fn_expr->params;
@@ -1283,11 +1397,11 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         bool is_gen = fn_expr->is_generator;
 
         if (is_gen) {
-            fn_val.native_fn = [this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
+            fn_val.set_native_function([this, body_ptr, params, defs, closure](const std::vector<JsValue>& args) {
                 return create_generator_instance(this, body_ptr, params, defs, closure, args);
-            };
+            });
         } else {
-            fn_val.native_fn = [this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
+            fn_val.set_native_function([this, body_ptr, params, defs, closure, is_async](const std::vector<JsValue>& args) {
                 for (const auto& [k, v] : m_vm.globals()) {
                     m_global_env->define(k, v);
                 }
@@ -1330,7 +1444,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                     }
                     return ret.value;
                 }
-            };
+            });
         }
 
         return fn_val;
@@ -1349,7 +1463,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 for (size_t i = 0; i < static_cast<size_t>(len); ++i) {
                     active_gen->yield_to_main(iterable.get_property(std::to_string(i)));
                 }
-            } else if (iterable.is_generator || iterable.generator_data != nullptr || iterable.has_property("next")) {
+            } else if (iterable.function_is_generator() || iterable.generator_value() != nullptr || iterable.has_property("next")) {
                 while (true) {
                     JsValue next_fn = iterable.get_property("next");
                     if (!next_fn.is_callable()) break;
@@ -1388,15 +1502,15 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
 
     if (auto await_expr = dynamic_cast<const AwaitExpr*>(expr)) {
         JsValue val = eval_expr(await_expr->expression.get(), env);
-        if (val.promise_data) {
-            while (val.promise_data->state == PromiseState::Pending) {
+        if (val.promise_value()) {
+            while (val.promise_value()->state == PromiseState::Pending) {
                 EventLoop::default_loop().tick();
             }
-            if (val.promise_data->state == PromiseState::Fulfilled) {
-                return val.promise_data->result;
+            if (val.promise_value()->state == PromiseState::Fulfilled) {
+                return val.promise_value()->result;
             }
-            if (val.promise_data->state == PromiseState::Rejected) {
-                throw std::runtime_error(val.promise_data->result.to_string());
+            if (val.promise_value()->state == PromiseState::Rejected) {
+                throw std::runtime_error(val.promise_value()->result.to_string());
             }
         }
         return val;
@@ -1430,25 +1544,25 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
 
         if (sup->method_name.empty()) {
             if (super_ctor.type == JsType::Function || super_ctor.type == JsType::NativeFunction) {
-                if (super_ctor.body) {
-                    auto s_env = std::make_shared<JsEnvironment>(super_ctor.closure ? super_ctor.closure : m_global_env);
+                if (super_ctor.function_body()) {
+                    auto s_env = std::make_shared<JsEnvironment>(super_ctor.function_closure() ? super_ctor.function_closure() : m_global_env);
                     s_env->define("this", this_val);
                     JsValue parent_super = super_ctor.get_property("__super_constructor__");
                     if (parent_super.is_truthy()) {
                         s_env->define("__super_constructor__", parent_super);
                     }
-                    for (size_t i = 0; i < super_ctor.params.size(); ++i) {
+                    for (size_t i = 0; i < super_ctor.function_params().size(); ++i) {
                         JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
-                        if (arg.type == JsType::Undefined && i < super_ctor.default_values.size() && super_ctor.default_values[i]) {
-                            arg = eval_expr(dynamic_cast<const Expr*>(super_ctor.default_values[i].get()), s_env);
+                        if (arg.type == JsType::Undefined && i < super_ctor.function_default_values().size() && super_ctor.function_default_values()[i]) {
+                            arg = eval_expr(dynamic_cast<const Expr*>(super_ctor.function_default_values()[i].get()), s_env);
                         }
-                        s_env->define(super_ctor.params[i], arg);
+                        s_env->define(super_ctor.function_params()[i], arg);
                     }
                     try {
-                        execute(super_ctor.body.get(), s_env);
+                        execute(super_ctor.function_body().get(), s_env);
                     } catch (...) {}
-                } else if (super_ctor.native_fn) {
-                    super_ctor.native_fn(arg_vals);
+                } else if (super_ctor.native_function()) {
+                    super_ctor.native_function()(arg_vals);
                 }
             }
             return this_val;
@@ -1457,25 +1571,25 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             JsValue method = super_proto.get_property(sup->method_name);
             if (sup->is_call) {
                 if (method.type == JsType::Function || method.type == JsType::NativeFunction) {
-                    auto fn_env = std::make_shared<JsEnvironment>(method.closure ? method.closure : m_global_env);
+                    auto fn_env = std::make_shared<JsEnvironment>(method.function_closure() ? method.function_closure() : m_global_env);
                     fn_env->define("this", this_val);
                     JsValue p_super = super_ctor.get_property("__super_constructor__");
                     if (p_super.is_truthy()) {
                         fn_env->define("__super_constructor__", p_super);
                     }
-                    for (size_t i = 0; i < method.params.size(); ++i) {
+                    for (size_t i = 0; i < method.function_params().size(); ++i) {
                         JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
-                        fn_env->define(method.params[i], arg);
+                        fn_env->define(method.function_params()[i], arg);
                     }
-                    if (method.body) {
+                    if (method.function_body()) {
                         try {
-                            return execute(method.body.get(), fn_env);
+                            return execute(method.function_body().get(), fn_env);
                         } catch (const ReturnException& ret) {
                             return ret.value;
                         }
                     }
-                    if (method.native_fn) {
-                        return method.native_fn(arg_vals);
+                    if (method.native_function()) {
+                        return method.native_function()(arg_vals);
                     }
                 }
                 return JsValue::make_undefined();
@@ -1515,6 +1629,18 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             return JsValue::make_number(-operand.to_number());
         } else if (unary->op == JsTokenType::Bang) {
             return JsValue::make_boolean(!operand.is_truthy());
+        } else if (unary->op == JsTokenType::Typeof) {
+            switch (operand.type) {
+                case JsType::Undefined: return JsValue::make_string("undefined");
+                case JsType::Null: return JsValue::make_string("object");
+                case JsType::Boolean: return JsValue::make_string("boolean");
+                case JsType::Number: return JsValue::make_string("number");
+                case JsType::String: return JsValue::make_string("string");
+                case JsType::Function:
+                case JsType::NativeFunction: return JsValue::make_string("function");
+                case JsType::Object:
+                case JsType::DomNode: return JsValue::make_string("object");
+            }
         }
         return operand;
     }
@@ -1529,6 +1655,11 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
         if (binary->op == JsTokenType::AmpAmp) {
             JsValue left = eval_expr(binary->left.get(), env);
             if (!left.is_truthy()) return left;
+            return eval_expr(binary->right.get(), env);
+        }
+        if (binary->op == JsTokenType::Nullish) {
+            JsValue left = eval_expr(binary->left.get(), env);
+            if (left.type != JsType::Null && left.type != JsType::Undefined) return left;
             return eval_expr(binary->right.get(), env);
         }
 
@@ -1546,6 +1677,8 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 return JsValue::make_number(left.to_number() - right.to_number());
             case JsTokenType::Star:
                 return JsValue::make_number(left.to_number() * right.to_number());
+            case JsTokenType::Power:
+                return JsValue::make_number(std::pow(left.to_number(), right.to_number()));
             case JsTokenType::Slash:
                 return JsValue::make_number(left.to_number() / right.to_number());
             case JsTokenType::Percent:
@@ -1625,16 +1758,16 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             this_val = eval_expr(mem->object.get(), env);
         }
 
-        if (callee_val.type == JsType::NativeFunction && callee_val.native_fn) {
-            return callee_val.native_fn(arg_vals);
+        if (callee_val.type == JsType::NativeFunction && callee_val.native_function()) {
+            return callee_val.native_function()(arg_vals);
         }
 
-        if (callee_val.is_generator && callee_val.native_fn) {
-            return callee_val.native_fn(arg_vals);
+        if (callee_val.function_is_generator() && callee_val.native_function()) {
+            return callee_val.native_function()(arg_vals);
         }
 
         if (callee_val.type == JsType::Function) {
-            auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
+            auto fn_env = std::make_shared<JsEnvironment>(callee_val.function_closure() ? callee_val.function_closure() : m_global_env);
             if (this_val.type == JsType::Object || this_val.type == JsType::DomNode) {
                 fn_env->define("this", this_val);
             }
@@ -1642,17 +1775,17 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             if (super_c.is_truthy()) {
                 fn_env->define("__super_constructor__", super_c);
             }
-            for (size_t i = 0; i < callee_val.params.size(); ++i) {
+            for (size_t i = 0; i < callee_val.function_params().size(); ++i) {
                 JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
-                if (arg.type == JsType::Undefined && i < callee_val.default_values.size() && callee_val.default_values[i]) {
-                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.default_values[i].get()), fn_env);
+                if (arg.type == JsType::Undefined && i < callee_val.function_default_values().size() && callee_val.function_default_values()[i]) {
+                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.function_default_values()[i].get()), fn_env);
                 }
-                fn_env->define(callee_val.params[i], arg);
+                fn_env->define(callee_val.function_params()[i], arg);
             }
-            if (callee_val.is_async) {
+            if (callee_val.function_is_async()) {
                 auto p_data = std::make_shared<PromiseData>();
                 try {
-                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    JsValue res = execute(callee_val.function_body().get(), fn_env);
                     Promise::resolve(p_data, res);
                 } catch (const ReturnException& ret) {
                     Promise::resolve(p_data, ret.value);
@@ -1665,9 +1798,9 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 return Promise::create_promise_instance(p_data);
             }
 
-            if (callee_val.body) {
+            if (callee_val.function_body()) {
                 try {
-                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    JsValue res = execute(callee_val.function_body().get(), fn_env);
                     for (const auto& [k, v] : m_global_env->values()) {
                         m_vm.set_global(k, v);
                     }
@@ -1679,8 +1812,8 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                     return ret.value;
                 }
             }
-            if (callee_val.native_fn) {
-                return callee_val.native_fn(arg_vals);
+            if (callee_val.native_function()) {
+                return callee_val.native_function()(arg_vals);
             }
             return JsValue::make_undefined();
         }
@@ -1693,8 +1826,8 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
             arg_vals.push_back(eval_expr(a.get(), env));
         }
 
-        if (callee_val.type == JsType::NativeFunction && callee_val.native_fn) {
-            return callee_val.native_fn(arg_vals);
+        if (callee_val.type == JsType::NativeFunction && callee_val.native_function()) {
+            return callee_val.native_function()(arg_vals);
         }
 
         if (callee_val.type == JsType::Function) {
@@ -1704,7 +1837,7 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 instance.object_val->prototype = proto.object_val;
             }
 
-            auto fn_env = std::make_shared<JsEnvironment>(callee_val.closure ? callee_val.closure : m_global_env);
+            auto fn_env = std::make_shared<JsEnvironment>(callee_val.function_closure() ? callee_val.function_closure() : m_global_env);
             fn_env->define("this", instance);
 
             JsValue super_c = callee_val.get_property("__super_constructor__");
@@ -1712,36 +1845,36 @@ JsValue JsInterpreter::eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment
                 fn_env->define("__super_constructor__", super_c);
             }
 
-            for (size_t i = 0; i < callee_val.params.size(); ++i) {
+            for (size_t i = 0; i < callee_val.function_params().size(); ++i) {
                 JsValue arg = (i < arg_vals.size() && arg_vals[i].type != JsType::Undefined) ? arg_vals[i] : JsValue::make_undefined();
-                if (arg.type == JsType::Undefined && i < callee_val.default_values.size() && callee_val.default_values[i]) {
-                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.default_values[i].get()), fn_env);
+                if (arg.type == JsType::Undefined && i < callee_val.function_default_values().size() && callee_val.function_default_values()[i]) {
+                    arg = eval_expr(dynamic_cast<const Expr*>(callee_val.function_default_values()[i].get()), fn_env);
                 }
-                fn_env->define(callee_val.params[i], arg);
+                fn_env->define(callee_val.function_params()[i], arg);
             }
 
-            if (callee_val.body) {
+            if (callee_val.function_body()) {
                 try {
-                    JsValue res = execute(callee_val.body.get(), fn_env);
+                    JsValue res = execute(callee_val.function_body().get(), fn_env);
                     if (res.type == JsType::Object && res.object_val != nullptr) return res;
                     return instance;
                 } catch (const ReturnException& ret) {
                     if (ret.value.type == JsType::Object && ret.value.object_val != nullptr) return ret.value;
                     return instance;
                 }
-            } else if (super_c.type == JsType::Function && super_c.body) {
-                auto s_env = std::make_shared<JsEnvironment>(super_c.closure ? super_c.closure : m_global_env);
+            } else if (super_c.type == JsType::Function && super_c.function_body()) {
+                auto s_env = std::make_shared<JsEnvironment>(super_c.function_closure() ? super_c.function_closure() : m_global_env);
                 s_env->define("this", instance);
-                for (size_t i = 0; i < super_c.params.size(); ++i) {
+                for (size_t i = 0; i < super_c.function_params().size(); ++i) {
                     JsValue arg = (i < arg_vals.size()) ? arg_vals[i] : JsValue::make_undefined();
-                    s_env->define(super_c.params[i], arg);
+                    s_env->define(super_c.function_params()[i], arg);
                 }
                 try {
-                    execute(super_c.body.get(), s_env);
+                    execute(super_c.function_body().get(), s_env);
                 } catch (...) {}
                 return instance;
-            } else if (callee_val.native_fn) {
-                JsValue res = callee_val.native_fn(arg_vals);
+            } else if (callee_val.native_function()) {
+                JsValue res = callee_val.native_function()(arg_vals);
                 if (res.type == JsType::Object && res.object_val != nullptr) return res;
                 return instance;
             }

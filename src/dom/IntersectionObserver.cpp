@@ -233,15 +233,15 @@ JsValue IntersectionObserver::to_js_value() {
     auto self = shared_from_this();
 
     obj.set_property("observe", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].dom_node && args[0].dom_node->is_element()) {
-            self->observe(std::static_pointer_cast<Element>(args[0].dom_node));
+        if (!args.empty() && args[0].dom_node_value() && args[0].dom_node_value()->is_element()) {
+            self->observe(std::static_pointer_cast<Element>(args[0].dom_node_value()));
         }
         return JsValue::make_undefined();
     }));
 
     obj.set_property("unobserve", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].dom_node && args[0].dom_node->is_element()) {
-            self->unobserve(std::static_pointer_cast<Element>(args[0].dom_node));
+        if (!args.empty() && args[0].dom_node_value() && args[0].dom_node_value()->is_element()) {
+            self->unobserve(std::static_pointer_cast<Element>(args[0].dom_node_value()));
         }
         return JsValue::make_undefined();
     }));

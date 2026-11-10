@@ -19,6 +19,104 @@ void JsValue::set_function_caller(FunctionCaller caller) {
     s_function_caller = std::move(caller);
 }
 
+JsValue::Extra& JsValue::mutable_extra() {
+    if (!m_extra) m_extra = std::make_shared<Extra>();
+    else if (!m_extra.unique()) m_extra = std::make_shared<Extra>(*m_extra);
+    return *m_extra;
+}
+
+JsValue::FunctionData& JsValue::mutable_function_data() {
+    auto& payload = mutable_extra().payload;
+    if (!std::holds_alternative<FunctionData>(payload)) payload = FunctionData{};
+    return std::get<FunctionData>(payload);
+}
+
+const std::vector<std::string>& JsValue::function_params() const {
+    static const std::vector<std::string> empty;
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->params;
+    return empty;
+}
+const std::vector<std::shared_ptr<AstNode>>& JsValue::function_default_values() const {
+    static const std::vector<std::shared_ptr<AstNode>> empty;
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->default_values;
+    return empty;
+}
+const std::shared_ptr<AstNode>& JsValue::function_body() const {
+    static const std::shared_ptr<AstNode> empty;
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->body;
+    return empty;
+}
+const std::shared_ptr<JsEnvironment>& JsValue::function_closure() const {
+    static const std::shared_ptr<JsEnvironment> empty;
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->closure;
+    return empty;
+}
+const std::shared_ptr<BytecodeFunction>& JsValue::function_bytecode() const {
+    static const std::shared_ptr<BytecodeFunction> empty;
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->bytecode_fn;
+    return empty;
+}
+bool JsValue::function_is_async() const {
+    if (extra()) if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->is_async;
+    return false;
+}
+bool JsValue::function_is_generator() const {
+    if (!extra()) return false;
+    if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->is_generator;
+    if (auto g = std::get_if<std::shared_ptr<GeneratorData>>(&extra()->payload)) return static_cast<bool>(*g);
+    return false;
+}
+const JsValue::NativeFn& JsValue::native_function() const {
+    static const NativeFn empty;
+    if (!extra()) return empty;
+    if (auto f = std::get_if<FunctionData>(&extra()->payload)) return f->native_fn;
+    if (auto f = std::get_if<NativeFn>(&extra()->payload)) return *f;
+    return empty;
+}
+const std::shared_ptr<Node>& JsValue::dom_node_value() const {
+    static const std::shared_ptr<Node> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<Node>>(&extra()->payload)) return *v;
+    return empty;
+}
+const std::shared_ptr<CanvasRenderingContext2D>& JsValue::canvas_context() const {
+    static const std::shared_ptr<CanvasRenderingContext2D> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasRenderingContext2D>>(&extra()->payload)) return *v;
+    return empty;
+}
+const std::shared_ptr<CanvasGradient>& JsValue::canvas_gradient_value() const {
+    static const std::shared_ptr<CanvasGradient> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasGradient>>(&extra()->payload)) return *v;
+    return empty;
+}
+const std::shared_ptr<PromiseData>& JsValue::promise_value() const {
+    static const std::shared_ptr<PromiseData> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
+    return empty;
+}
+const std::shared_ptr<GeneratorData>& JsValue::generator_value() const {
+    static const std::shared_ptr<GeneratorData> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<GeneratorData>>(&extra()->payload)) return *v;
+    return empty;
+}
+
+void JsValue::set_function_params(std::vector<std::string> v) { mutable_function_data().params = std::move(v); }
+void JsValue::add_function_default_value(std::shared_ptr<AstNode> v) { mutable_function_data().default_values.push_back(std::move(v)); }
+void JsValue::set_function_default_values(std::vector<std::shared_ptr<AstNode>> v) { mutable_function_data().default_values = std::move(v); }
+void JsValue::set_function_body(std::shared_ptr<AstNode> v) { mutable_function_data().body = std::move(v); }
+void JsValue::set_function_closure(std::shared_ptr<JsEnvironment> v) { mutable_function_data().closure = std::move(v); }
+void JsValue::set_function_bytecode(std::shared_ptr<BytecodeFunction> v) { mutable_function_data().bytecode_fn = std::move(v); }
+void JsValue::set_function_async(bool v) { mutable_function_data().is_async = v; }
+void JsValue::set_function_generator(bool v) { mutable_function_data().is_generator = v; }
+void JsValue::set_native_function(NativeFn v) {
+    if (type == JsType::Function) mutable_function_data().native_fn = std::move(v);
+    else mutable_extra().payload = std::move(v);
+}
+void JsValue::set_dom_node_value(std::shared_ptr<Node> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_canvas_gradient_value(std::shared_ptr<CanvasGradient> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_promise_value(std::shared_ptr<PromiseData> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_generator_value(std::shared_ptr<GeneratorData> v) { mutable_extra().payload = std::move(v); }
+
 JsValue JsValue::make_object(JsObject* obj) {
     JsValue v;
     v.type = JsType::Object;
@@ -51,7 +149,7 @@ bool strict_equals(const JsValue& a, const JsValue& b) {
             // JsObject address is NOT a stable identity. The node behind it is.
             // Comparing nodes is what makes `document.body === document.body`
             // and `el.shadowRoot === sr` behave the way script expects.
-            return a.dom_node == b.dom_node;
+            return a.dom_node_value() == b.dom_node_value();
         case JsType::Object:
         case JsType::Function:
         case JsType::NativeFunction:
@@ -100,6 +198,7 @@ const std::vector<JsValue>& JsValue::array_elements() const {
 }
 
 std::string JsValue::to_string() const {
+    const auto dom_node = dom_node_value();
     switch (type) {
         case JsType::Undefined: return "undefined";
         case JsType::Null: return "null";
@@ -152,21 +251,21 @@ double JsValue::to_number() const {
 }
 
 JsValue JsValue::call(const std::vector<JsValue>& args) const {
-    if (type == JsType::Function && !is_generator && s_function_caller) {
+    if (type == JsType::Function && !function_is_generator() && s_function_caller) {
         return s_function_caller(*this, args, nullptr);
     }
-    if (native_fn) {
-        return native_fn(args);
+    if (native_function()) {
+        return native_function()(args);
     }
     return JsValue::make_undefined();
 }
 
 JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsValue>& args) const {
-    if (type == JsType::Function && !is_generator && s_function_caller) {
+    if (type == JsType::Function && !function_is_generator() && s_function_caller) {
         return s_function_caller(*this, args, &this_val);
     }
-    if (native_fn) {
-        return native_fn(args);
+    if (native_function()) {
+        return native_function()(args);
     }
     return JsValue::make_undefined();
 }
@@ -181,6 +280,7 @@ bool JsValue::has_property(const std::string& name) const {
 }
 
 JsValue JsValue::get_property(const std::string& name) const {
+    const auto dom_node = dom_node_value();
     if (type == JsType::DomNode && dom_node) {
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
             if (name == "tagName") return JsValue::make_string(el->tag_name());
@@ -462,25 +562,25 @@ JsValue JsValue::get_property(const std::string& name) const {
         if (name == "appendChild") {
             auto node = dom_node;
             return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
-                node->append_child(args[0].dom_node);
+                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
+                node->append_child(args[0].dom_node_value());
                 return args[0];
             });
         }
         if (name == "removeChild") {
             auto node = dom_node;
             return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
-                node->remove_child(args[0].dom_node);
+                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
+                node->remove_child(args[0].dom_node_value());
                 return args[0];
             });
         }
         if (name == "insertBefore") {
             auto node = dom_node;
             return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node) return JsValue::make_null();
-                auto new_ch = args[0].dom_node;
-                auto ref_ch = (args.size() > 1) ? args[1].dom_node : nullptr;
+                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
+                auto new_ch = args[0].dom_node_value();
+                auto ref_ch = (args.size() > 1) ? args[1].dom_node_value() : nullptr;
                 node->insert_before(new_ch, ref_ch);
                 return args[0];
             });
@@ -575,38 +675,38 @@ JsValue JsValue::get_property(const std::string& name) const {
 
         if (name == "size") {
             auto it_size = object_val->properties.find("__get_size__");
-            if (it_size != object_val->properties.end() && it_size->second.native_fn) {
-                return it_size->second.native_fn({});
+            if (it_size != object_val->properties.end() && it_size->second.native_function()) {
+                return it_size->second.native_function()({});
             }
         }
         if (name == "readyState") {
             auto it_rs = object_val->properties.find("__get_readyState__");
-            if (it_rs != object_val->properties.end() && it_rs->second.native_fn) {
-                return it_rs->second.native_fn({});
+            if (it_rs != object_val->properties.end() && it_rs->second.native_function()) {
+                return it_rs->second.native_function()({});
             }
         }
         if (name == "body") {
             auto it_b = object_val->properties.find("__get_body__");
-            if (it_b != object_val->properties.end() && it_b->second.native_fn) {
-                return it_b->second.native_fn({});
+            if (it_b != object_val->properties.end() && it_b->second.native_function()) {
+                return it_b->second.native_function()({});
             }
         }
         if (name == "head") {
             auto it_h = object_val->properties.find("__get_head__");
-            if (it_h != object_val->properties.end() && it_h->second.native_fn) {
-                return it_h->second.native_fn({});
+            if (it_h != object_val->properties.end() && it_h->second.native_function()) {
+                return it_h->second.native_function()({});
             }
         }
         if (name == "documentElement") {
             auto it_d = object_val->properties.find("__get_documentElement__");
-            if (it_d != object_val->properties.end() && it_d->second.native_fn) {
-                return it_d->second.native_fn({});
+            if (it_d != object_val->properties.end() && it_d->second.native_function()) {
+                return it_d->second.native_function()({});
             }
         }
 
         auto it_getter = object_val->properties.find("__get_" + name + "__");
-        if (it_getter != object_val->properties.end() && it_getter->second.native_fn) {
-            return it_getter->second.native_fn({});
+        if (it_getter != object_val->properties.end() && it_getter->second.native_function()) {
+            return it_getter->second.native_function()({});
         }
 
         // Own properties
@@ -624,17 +724,17 @@ JsValue JsValue::get_property(const std::string& name) const {
         }
     }
 
-    if (canvas_ctx) {
+    if (canvas_context()) {
         if (name == "fillStyle") {
-            if (canvas_ctx->fill_gradient) return JsValue::make_string("[CanvasGradient]");
-            return JsValue::make_string(canvas_ctx->fill_style.to_hex());
+            if (canvas_context()->fill_gradient) return JsValue::make_string("[CanvasGradient]");
+            return JsValue::make_string(canvas_context()->fill_style.to_hex());
         }
         if (name == "strokeStyle") {
-            if (canvas_ctx->stroke_gradient) return JsValue::make_string("[CanvasGradient]");
-            return JsValue::make_string(canvas_ctx->stroke_style.to_hex());
+            if (canvas_context()->stroke_gradient) return JsValue::make_string("[CanvasGradient]");
+            return JsValue::make_string(canvas_context()->stroke_style.to_hex());
         }
-        if (name == "lineWidth") return JsValue::make_number(canvas_ctx->line_width);
-        if (name == "globalCompositeOperation") return JsValue::make_string(canvas_ctx->global_composite_operation);
+        if (name == "lineWidth") return JsValue::make_number(canvas_context()->line_width);
+        if (name == "globalCompositeOperation") return JsValue::make_string(canvas_context()->global_composite_operation);
     }
 
     if (name == "cookie") {
@@ -644,37 +744,37 @@ JsValue JsValue::get_property(const std::string& name) const {
     if (properties) {
         if (name == "size") {
             auto it_sz = properties->find("__get_size__");
-            if (it_sz != properties->end() && it_sz->second.native_fn) {
-                return it_sz->second.native_fn({});
+            if (it_sz != properties->end() && it_sz->second.native_function()) {
+                return it_sz->second.native_function()({});
             }
         }
         if (name == "readyState") {
             auto it_rs = properties->find("__get_readyState__");
-            if (it_rs != properties->end() && it_rs->second.native_fn) {
-                return it_rs->second.native_fn({});
+            if (it_rs != properties->end() && it_rs->second.native_function()) {
+                return it_rs->second.native_function()({});
             }
         }
         if (name == "body") {
             auto it_b = properties->find("__get_body__");
-            if (it_b != properties->end() && it_b->second.native_fn) {
-                return it_b->second.native_fn({});
+            if (it_b != properties->end() && it_b->second.native_function()) {
+                return it_b->second.native_function()({});
             }
         }
         if (name == "head") {
             auto it_h = properties->find("__get_head__");
-            if (it_h != properties->end() && it_h->second.native_fn) {
-                return it_h->second.native_fn({});
+            if (it_h != properties->end() && it_h->second.native_function()) {
+                return it_h->second.native_function()({});
             }
         }
         if (name == "documentElement") {
             auto it_d = properties->find("__get_documentElement__");
-            if (it_d != properties->end() && it_d->second.native_fn) {
-                return it_d->second.native_fn({});
+            if (it_d != properties->end() && it_d->second.native_function()) {
+                return it_d->second.native_function()({});
             }
         }
         auto it_prop_getter = properties->find("__get_" + name + "__");
-        if (it_prop_getter != properties->end() && it_prop_getter->second.native_fn) {
-            return it_prop_getter->second.native_fn({});
+        if (it_prop_getter != properties->end() && it_prop_getter->second.native_function()) {
+            return it_prop_getter->second.native_function()({});
         }
 
         auto it = properties->find(name);
@@ -684,25 +784,26 @@ JsValue JsValue::get_property(const std::string& name) const {
 }
 
 void JsValue::set_property(const std::string& name, JsValue val) {
-    if (canvas_ctx) {
+    const auto dom_node = dom_node_value();
+    if (canvas_context()) {
         if (name == "fillStyle") {
-            if (val.canvas_gradient) {
-                canvas_ctx->fill_gradient = val.canvas_gradient;
+            if (val.canvas_gradient_value()) {
+                canvas_context()->fill_gradient = val.canvas_gradient_value();
             } else {
-                canvas_ctx->fill_gradient = nullptr;
-                canvas_ctx->fill_style = Color::parse(val.to_string());
+                canvas_context()->fill_gradient = nullptr;
+                canvas_context()->fill_style = Color::parse(val.to_string());
             }
         } else if (name == "strokeStyle") {
-            if (val.canvas_gradient) {
-                canvas_ctx->stroke_gradient = val.canvas_gradient;
+            if (val.canvas_gradient_value()) {
+                canvas_context()->stroke_gradient = val.canvas_gradient_value();
             } else {
-                canvas_ctx->stroke_gradient = nullptr;
-                canvas_ctx->stroke_style = Color::parse(val.to_string());
+                canvas_context()->stroke_gradient = nullptr;
+                canvas_context()->stroke_style = Color::parse(val.to_string());
             }
         } else if (name == "lineWidth") {
-            canvas_ctx->line_width = static_cast<float>(val.to_number());
+            canvas_context()->line_width = static_cast<float>(val.to_number());
         } else if (name == "globalCompositeOperation") {
-            canvas_ctx->global_composite_operation = val.to_string();
+            canvas_context()->global_composite_operation = val.to_string();
         }
     }
 
@@ -867,7 +968,7 @@ JsValue JsValue::make_array(const std::vector<JsValue>& elements) {
 JsValue JsValue::make_dom_node(std::shared_ptr<Node> node) {
     JsValue v;
     v.type = JsType::DomNode;
-    v.dom_node = std::move(node);
+    v.set_dom_node_value(std::move(node));
     v.object_val = Heap::default_heap().allocate_object();
     return v;
 }

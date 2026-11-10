@@ -6,6 +6,7 @@
 #include <memory>
 #include <functional>
 #include <iostream>
+#include <variant>
 
 namespace litebird {
 
@@ -45,32 +46,58 @@ public:
     JsObject* object_val{nullptr};
     std::shared_ptr<std::unordered_map<std::string, JsValue>> properties;
 
-    // For Functions
-    std::vector<std::string> params;
-    std::vector<std::shared_ptr<AstNode>> default_values;
-    std::shared_ptr<AstNode> body;
-    std::shared_ptr<JsEnvironment> closure;
-    std::shared_ptr<BytecodeFunction> bytecode_fn;
-    bool is_async{false};
-    bool is_generator{false};
-
-    // For Native Functions
-    NativeFn native_fn;
-
-    // For DOM Nodes
-    std::shared_ptr<Node> dom_node;
-
-    // For HTML5 Canvas 2D Context & Gradients
-    std::shared_ptr<CanvasRenderingContext2D> canvas_ctx;
-    std::shared_ptr<CanvasGradient> canvas_gradient;
-
-    // For Promises
-    std::shared_ptr<struct PromiseData> promise_data;
-
-    // For Generators
-    std::shared_ptr<struct GeneratorData> generator_data;
+    // Cold, type-specific payload. Primitive values and ordinary objects don't
+    // carry function/DOM/canvas/promise/generator members inline.
+    struct FunctionData {
+        std::vector<std::string> params;
+        std::vector<std::shared_ptr<AstNode>> default_values;
+        std::shared_ptr<AstNode> body;
+        std::shared_ptr<JsEnvironment> closure;
+        std::shared_ptr<BytecodeFunction> bytecode_fn;
+        NativeFn native_fn;
+        bool is_async{false};
+        bool is_generator{false};
+    };
+    struct Extra {
+        using Payload = std::variant<std::monostate, FunctionData, NativeFn,
+                                     std::shared_ptr<Node>,
+                                     std::shared_ptr<CanvasRenderingContext2D>,
+                                     std::shared_ptr<CanvasGradient>,
+                                     std::shared_ptr<struct PromiseData>,
+                                     std::shared_ptr<struct GeneratorData>>;
+        Payload payload;
+    };
 
     JsValue() : type(JsType::Undefined) {}
+
+    const std::vector<std::string>& function_params() const;
+    const std::vector<std::shared_ptr<AstNode>>& function_default_values() const;
+    const std::shared_ptr<AstNode>& function_body() const;
+    const std::shared_ptr<JsEnvironment>& function_closure() const;
+    const std::shared_ptr<BytecodeFunction>& function_bytecode() const;
+    bool function_is_async() const;
+    bool function_is_generator() const;
+    const NativeFn& native_function() const;
+    const std::shared_ptr<Node>& dom_node_value() const;
+    const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;
+    const std::shared_ptr<CanvasGradient>& canvas_gradient_value() const;
+    const std::shared_ptr<struct PromiseData>& promise_value() const;
+    const std::shared_ptr<struct GeneratorData>& generator_value() const;
+
+    void set_function_params(std::vector<std::string> value);
+    void add_function_default_value(std::shared_ptr<AstNode> value);
+    void set_function_default_values(std::vector<std::shared_ptr<AstNode>> value);
+    void set_function_body(std::shared_ptr<AstNode> value);
+    void set_function_closure(std::shared_ptr<JsEnvironment> value);
+    void set_function_bytecode(std::shared_ptr<BytecodeFunction> value);
+    void set_function_async(bool value);
+    void set_function_generator(bool value);
+    void set_native_function(NativeFn value);
+    void set_dom_node_value(std::shared_ptr<Node> value);
+    void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> value);
+    void set_canvas_gradient_value(std::shared_ptr<CanvasGradient> value);
+    void set_promise_value(std::shared_ptr<struct PromiseData> value);
+    void set_generator_value(std::shared_ptr<struct GeneratorData> value);
 
     static JsValue make_undefined() { return JsValue(); }
     static JsValue make_null() {
@@ -101,7 +128,7 @@ public:
     static JsValue make_native_function(NativeFn fn) {
         JsValue v;
         v.type = JsType::NativeFunction;
-        v.native_fn = std::move(fn);
+        v.set_native_function(std::move(fn));
         return v;
     }
     static JsValue make_dom_node(std::shared_ptr<Node> node);
@@ -126,6 +153,12 @@ public:
 
     JsValue get_property(const std::string& name) const;
     void set_property(const std::string& name, JsValue val);
+
+private:
+    std::shared_ptr<Extra> m_extra;
+    Extra& mutable_extra();
+    FunctionData& mutable_function_data();
+    const Extra* extra() const { return m_extra.get(); }
 };
 
 /// ECMAScript `===` (Strict Equality Comparison, 7.2.16).

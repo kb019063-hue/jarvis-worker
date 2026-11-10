@@ -673,13 +673,13 @@ JsValue VM::run() {
                 uint8_t arg_count = read_byte();
                 JsValue callee = peek(arg_count);
 
-                if (callee.type == JsType::NativeFunction && callee.native_fn) {
+                if (callee.type == JsType::NativeFunction && callee.native_function()) {
                     std::vector<JsValue> args;
                     args.reserve(arg_count);
                     for (int i = arg_count - 1; i >= 0; --i) {
                         args.push_back(peek(i));
                     }
-                    JsValue result = callee.native_fn(args);
+                    JsValue result = callee.native_function()(args);
                     // Pop arguments and callee
                     for (size_t i = 0; i <= arg_count; ++i) pop();
                     push(std::move(result));

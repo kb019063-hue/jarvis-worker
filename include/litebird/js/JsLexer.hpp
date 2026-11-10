@@ -26,6 +26,11 @@ enum class JsTokenType {
     False,
     Null,
     Undefined,
+    Typeof,
+    Switch,
+    Case,
+    Default,
+    Break,
 
     // ES6 Classes & Async/Await
     Class,
@@ -45,6 +50,7 @@ enum class JsTokenType {
     Plus,
     Minus,
     Star,
+    Power,
     Slash,
     Percent,
     Equal,
@@ -70,6 +76,7 @@ enum class JsTokenType {
     GreaterEqual,
     AmpAmp,
     PipePipe,
+    Nullish,
     Bang,
     Arrow,
 

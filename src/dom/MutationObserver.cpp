@@ -143,7 +143,7 @@ JsValue MutationObserver::to_js_value() {
 
     obj.set_property("observe", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
         if (args.empty()) return JsValue::make_undefined();
-        std::shared_ptr<Node> target = args[0].dom_node;
+        std::shared_ptr<Node> target = args[0].dom_node_value();
         if (!target) return JsValue::make_undefined();
 
         MutationObserverInit init;

@@ -27,7 +27,8 @@ using EventListener = std::function<void(const std::shared_ptr<Event>&)>;
 
 class Node : public std::enable_shared_from_this<Node> {
 public:
-    explicit Node(NodeType type) : m_type(type) {}
+    explicit Node(NodeType type)
+        : m_type(type), m_is_connected(type == NodeType::Document) {}
     virtual ~Node() = default;
 
     NodeType type() const { return m_type; }
@@ -38,7 +39,7 @@ public:
     bool is_document_fragment() const { return m_type == NodeType::DocumentFragment; }
 
     std::shared_ptr<Node> parent() const { return m_parent.lock(); }
-    void set_parent(std::shared_ptr<Node> p) { m_parent = p; }
+    void set_parent(std::shared_ptr<Node> p);
 
     const std::vector<std::shared_ptr<Node>>& children() const { return m_children; }
     std::vector<std::shared_ptr<Node>>& children() { return m_children; }
@@ -48,7 +49,7 @@ public:
     std::shared_ptr<Node> previous_sibling() const;
     std::shared_ptr<Node> next_sibling() const;
 
-    bool is_connected() const;
+    bool is_connected() const { return m_is_connected; }
 
     void append_child(std::shared_ptr<Node> child);
     void remove_child(std::shared_ptr<Node> child);
@@ -88,7 +89,13 @@ public:
     const Document* as_document() const;
 
 protected:
+    // Connectivity is maintained as the tree is attached/detached. Keeping it
+    // cached makes append_child's connectedness check O(1) instead of walking
+    // every ancestor for every parser insertion.
+    void set_connected_state_subtree(bool connected);
+
     NodeType m_type;
+    bool m_is_connected{false};
     std::weak_ptr<Node> m_parent;
     std::vector<std::shared_ptr<Node>> m_children;
     std::unordered_map<std::string, std::vector<EventListenerEntry>> m_listeners;

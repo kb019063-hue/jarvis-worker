@@ -4,9 +4,12 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/html/HtmlTokenizer.hpp"
 
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace litebird {
@@ -107,6 +110,12 @@ private:
     std::shared_ptr<Element> adjusted_current_node() const;
     void push_element(const std::shared_ptr<Element>&);
     void pop_current_node();
+    void resize_open_elements(std::size_t size);
+    void erase_open_element(std::size_t index);
+    void insert_open_element(std::size_t index, const std::shared_ptr<Element>& element);
+    void replace_open_element(std::size_t index, const std::shared_ptr<Element>& element);
+    void index_open_element(std::size_t index, const std::shared_ptr<Element>& element);
+    void rebuild_open_element_indexes();
     void pop_until_tag(const std::string& tag);
     void pop_until_one_of(const std::vector<std::string>& tags);
     bool has_element_in_scope(const std::string& tag, Scope scope = Scope::Default) const;
@@ -172,6 +181,11 @@ private:
     std::shared_ptr<Document> m_document;
     HtmlTokenizer* m_tokenizer{nullptr};
     std::vector<std::shared_ptr<Element>> m_open_elements;
+    // Stack-indexed HTML tag positions and scope boundaries make scope queries
+    // independent of stack depth. Rebuilt only for rare middle edits to the
+    // tree-construction stack (e.g. adoption-agency repairs).
+    std::unordered_map<std::string, std::vector<std::size_t>> m_open_html_tag_indices;
+    std::array<std::vector<std::size_t>, 3> m_scope_boundary_indices;
     std::vector<FormattingEntry> m_formatting;
     std::shared_ptr<Element> m_head_element;
     std::shared_ptr<Element> m_form_element;

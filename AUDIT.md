@@ -29,7 +29,7 @@ The rest are documented with enough detail to act on.
 | 13 | Build uses `-O2` only (no LTO / `-march=native`) | Low | Open |
 | 14 | `has_class()` allocated a `stringstream` per call | **High (perf)** | ✅ Fixed |
 | 15 | `text_content()` was O(n²) in depth | **Medium (perf)** | ✅ Fixed |
-| 16 | Parsing is O(n²) in nesting depth (scope scans + ancestor walks) | **Medium (perf)** | Open |
+| 16 | Deep HTML parsing repeated scope scans and ancestor walks | **Medium (perf)** | ✅ Fixed |
 
 ---
 
@@ -411,38 +411,43 @@ buffer.
 
 ---
 
-## 16. Parsing is O(n²) in nesting depth
+## 16. ✅ Deep HTML parsing repeated scope scans and ancestor walks
 
-Found while testing finding 5. Deep documents are now *safe* but not *fast*:
+The tree builder had two depth-dependent costs:
 
-```
-depth  5,000:  1.5 s
-depth 10,000:  6.9 s
-depth 20,000: 28.6 s      (4x the depth -> 19x the time)
-depth 50,000: > 10 min
-```
+- Scope queries rescanned `m_open_elements` from the current node to a boundary.
+  Deep stacks often asked about tags absent from the stack, or about a target
+  below thousands of ordinary elements.
+- `Node::append_child` called `is_connected()`, which walked all ancestors for
+  every insertion.
 
-A `gprofng` profile at depth 10,000 attributes **69% inclusive** of the parse to
-`HtmlTreeBuilder::has_element_in_scope_where` and **31%** to
-`Node::is_connected`:
+The open-element stack now maintains HTML tag positions and scope-boundary
+positions incrementally on push/pop. Scope membership is decided from the
+nearest target and boundary indexes; the less common adoption-agency edits
+rebuild the indexes after changing the middle of the stack. `Node` also caches
+connectivity, updating it on parent changes and propagating through light DOM
+and shadow roots. Parser insertion therefore does not repeatedly walk the
+ancestor chain.
 
-- `has_element_in_scope_where` walks the whole open-elements stack from the top
-  down to the current node. For nested `<div>`s there is no `p`/`table`/`button`
-  scope boundary to stop the walk early, so each start tag scans the entire
-  stack. That is O(depth) per token, O(depth²) per document.
-- `Node::append_child` calls `is_connected()`, which walks the ancestor chain to
-  the root on **every insertion**.
+A local `-O2` parser-only harness (read input, call `HtmlParser::parse`, discard
+the document) now measures:
 
-Neither is a crash, and neither was introduced by finding 5's fix (the guard
-short-circuits layout, not parsing). The fix for the first is to stop the scope
-scan at the nearest recorded boundary instead of rescanning to the top; the
-fix for the second is a cached "is in document" flag maintained on insertion
-and removal. Both are straightforward and measurable with the harness already
-in place.
+| depth | time |
+|---:|---:|
+| 1,000 | 5 ms |
+| 2,000 | 6 ms |
+| 3,000 | 8 ms |
+| 5,000 | 12 ms |
+| 10,000 | 20 ms |
+| 20,000 | 38 ms |
 
-> **Note:** this is the reason `--dump-dom` on a 200,000-deep document still
-> times out. The recursion guard is doing its job; the parser never gets that
-> far.
+The old CLI measurements also serialized the resulting DOM. The web-platform
+tree dumper emits indentation proportional to depth for every node, so dumping
+a single deeply nested chain still produces O(depth²) output; those end-to-end
+numbers should not be confused with parser time.
+
+Conformance remains **1770/1792 (98.8%)**. The cache is tested across attach,
+detach, reattach, and shadow-host connectivity transitions.
 
 ---
 

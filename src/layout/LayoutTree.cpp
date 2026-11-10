@@ -97,10 +97,6 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
     // backstop for platforms that cannot report stack bounds.
     if (depth >= kMaxBuildDepth) return nullptr;
     if (stack_is_exhausted()) return nullptr;
-    if (std::getenv("LITEBIRD_DEBUG_STACK") && depth % 100 == 0) {
-        std::fprintf(stderr, "[bb] depth=%d headroom_kb=%ld\n", depth,
-                     (long)(detail::current_stack_pointer() - stack_floor()) / 1024);
-    }
 
     if (node->is_comment()) return nullptr;
 

@@ -11,7 +11,6 @@
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include <cstdint>
-#include <cstdlib>
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
@@ -3877,24 +3876,19 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     for (int i = 0; i < depth; ++i) html += "</div>";
 
     auto doc = HtmlParser::parse(html);
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] deep parse done\n";
     assert(doc != nullptr);
 
     // Building the box tree must terminate without a stack overflow.
     StyleResolver resolver;
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] deep layout done\n";
     assert(root != nullptr);
 
     DisplayList::build(root);   // painting must survive it too
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] deep display done\n";
 
     // The limit must not truncate ordinary documents: a normal depth still
     // produces the full tree.
     auto shallow = HtmlParser::parse("<div><div><div><p>hi</p></div></div></div>");
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] shallow parse done\n";
     auto shallow_root = LayoutTree::build(shallow, resolver, 800.0f, 600.0f);
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) std::cerr << "[phase] shallow layout done\n";
     assert(shallow_root != nullptr);
     assert(!shallow_root->children.empty());
 }

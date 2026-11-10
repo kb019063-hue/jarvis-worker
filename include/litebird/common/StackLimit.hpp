@@ -29,8 +29,8 @@
 // that kills the engine is worse than no diagnostic. Two defences are in place
 // now, and both matter:
 //
-//   1. The reported region is only accepted if it actually brackets the address
-//      of a local in the calling frame.
+//   1. The reported region is only accepted if it actually brackets the frame
+//      address of the calling code.
 //   2. If it does not, the bounds are derived from RLIMIT_STACK instead, so a
 //      host with an unusual stack setup degrades to a slightly wrong limit
 //      rather than to a dead engine.
@@ -41,8 +41,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <pthread.h>
@@ -87,15 +85,22 @@ inline ThreadStackBase& thread_stack_base() {
     return state;
 }
 
-/// Address of a local in the calling frame, i.e. the current stack pointer.
+/// Approximation of the live stack position in the calling frame.
 /// `noinline` stops the compiler folding the probe into a caller and thereby
-/// measuring some other frame.
+/// measuring some other frame. Use the frame address rather than the address
+/// of a local: AddressSanitizer can place locals in its fake stack (when
+/// use-after-return detection is enabled), which is not the native stack and
+/// makes stack-headroom calculations jump around or point hundreds of MB away.
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline))
 #endif
 inline std::uintptr_t current_stack_pointer() {
+#if defined(__GNUC__) || defined(__clang__)
+    return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+#else
     volatile char probe = 0;
     return reinterpret_cast<std::uintptr_t>(&probe);
+#endif
 }
 
 /// Stack address of the outermost frame seen on this thread. Initialised on
@@ -108,8 +113,8 @@ inline std::uintptr_t& thread_stack_base_origin() {
 
 
 /// Fallback for when the pthread query is missing or unusable: derive the top
-/// of the stack from the address of a local in the *outermost* frame we can
-/// see, and take the size from RLIMIT_STACK.
+/// of the stack from the frame address in the *outermost* frame we can see, and
+/// take the size from RLIMIT_STACK.
 ///
 /// `origin` is the stack address the program started from (captured once, in
 /// `thread_stack_base()`), which is the best approximation of the stack top
@@ -135,9 +140,8 @@ inline bool init_thread_stack_base() {
     ThreadStackBase& state = thread_stack_base();
     if (state.active) return true;
 
-    // The address of a local in this frame: any real stack bound we are handed
-    // has to be consistent with it, which is how a bad pthread result gets
-    // caught instead of trusted.
+    // The frame address: any real stack bound we are handed has to contain it,
+    // which is how a bad pthread result gets caught instead of trusted.
     const std::uintptr_t here = current_stack_pointer();
 
 #if defined(LITEBIRD_HAVE_STACK_PROBE)
@@ -165,14 +169,6 @@ inline bool init_thread_stack_base() {
 
     if (!state.active) init_from_rlimit(thread_stack_base_origin(), state);
 
-    // Opt-in diagnostics: stack limits vary between hosts, and a silent fallback
-    // to the fixed depth caps is exactly the kind of thing that is invisible
-    // until something overflows.
-    if (std::getenv("LITEBIRD_DEBUG_STACK")) {
-        std::fprintf(stderr, "[stack] active=%d top=%zx limit=%zu origin=%zx\n",
-                     static_cast<int>(state.active), static_cast<std::size_t>(state.top),
-                     state.limit, static_cast<std::size_t>(thread_stack_base_origin()));
-    }
 
     // If nothing could be established the walkers keep their fixed depth caps;
     // a guessed stack bound is worse than a coarse cap.

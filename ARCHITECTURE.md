@@ -208,7 +208,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 
 ### 4.9 Network, EventLoop & TUI Shell
 - **ResourceLoader (`include/litebird/net/ResourceLoader.hpp`):**
-  - Zero-dependency POSIX socket HTTP/1.1 client.
+  - Zero-dependency POSIX socket HTTP/1.1 client. Caller-controlled methods, request targets, and headers are validated against HTTP syntax/control-byte rules; request/response headers are capped at 64 KiB and the full response stream at 16 MiB.
   - Resolves relative URLs (`../`, `./`, `/`).
 - **EventLoop (`include/litebird/js/EventLoop.hpp`):**
   - High-resolution timer queue executing `setTimeout` and `setInterval` tasks.
@@ -334,6 +334,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 19** | **JavaScript compatibility:** function-scoped `var` with hoisting, `typeof`, `switch`/`case`/`default`/`break`, right-associative exponentiation (`**`), and short-circuit nullish coalescing (`??`); AST interpreter fallback for constructs not yet emitted by bytecode. **80/80 engine suites.** | ✅ Completed |
 | **Phase 20** | **Compact JavaScript values:** move cold function/DOM/canvas/promise/generator state behind a copy-on-write tagged payload and use typed accessors. `sizeof(JsValue)` reduced **296 → 96 bytes (67.6%)**; local 20,000-node render RSS fell **2.4%**, and a 200k-iteration bytecode-loop median improved **59.4%** (baseline/worktree comparison; details in `AUDIT.md`). **81/81 engine suites; ASan/UBSan and 400-mutation fuzz smoke passed.** | ✅ Completed |
 | **Phase 21** | **Indexed CSS cascade:** pre-index author selectors by a rightmost ID/class/tag key with a universal fallback; query candidate selectors per element, retain full selector matching and stable source order. Selective 1,600-rule/1,600-element benchmark improved **88.25 → 30.35 ms (2.9×)**. **82/82 engine suites.** | ✅ Completed |
+| **Phase 22** | **Pipeline fuzz coverage:** run HTML corpus mutations through layout and bitmap rendering, plus valid and malformed BMP/PPM headers through image loading and rendering. Fuzzing exposed and fixed signed overflow while parsing overlong PPM numeric fields. **82/82 engine suites; 400 parser mutations + 400 pipeline runs, 0 findings under ASan/UBSan.** | ✅ Completed |
 
 ---
 
@@ -675,14 +676,16 @@ floor so the score cannot silently regress.
 
 ### 5. Robustness
 
-- `make asan` builds the CLI and the tests with AddressSanitizer +
-  UndefinedBehaviorSanitizer, runs the full engine suite, then fuzzes the parser
-  (the sanitizer build has to produce `build-asan/litebird` first, or the fuzzer
-  has nothing to run).
+- `make asan` builds the CLI and tests with AddressSanitizer +
+  UndefinedBehaviorSanitizer, runs the full engine suite, then runs the HTML
+  parser and pipeline fuzzers against `build-asan/litebird`.
 - `tools/fuzz/fuzz_parser.py` mutates the conformance corpus (byte flips,
   token splicing, truncation, duplication, doubling) and feeds each mutant to
-  the sanitizer build. It found a real dangling-index bug in the adoption
-  agency during this phase; that is now fixed.
+  `--dump-dom-webplatform`.
+- `tools/fuzz/fuzz_pipeline.py` sends HTML corpus mutations through
+  `--dump-layout` and `--render-bmp`, then exercises BMP/PPM file decoding with
+  valid and hostile header seeds. It helped expose signed overflow in long PPM
+  decimal fields; that parser now rejects overflow without UB.
 - LeakSanitizer is deliberately disabled: the JS engine has pre-existing leaks
   that deserve their own pass (see "Known gaps").
 

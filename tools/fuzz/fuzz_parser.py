@@ -109,7 +109,10 @@ def main() -> int:
             Path(path).unlink(missing_ok=True)
 
         crashed = completed is None or completed.returncode < 0 or completed.returncode > 1
-        sanitizer_report = completed is not None and b"Sanitizer" in completed.stderr
+        sanitizer_report = completed is not None and any(
+            marker in completed.stderr for marker in
+            (b"AddressSanitizer", b"UndefinedBehaviorSanitizer", b"runtime error:",
+             b"SUMMARY: ", b"LeakSanitizer"))
         if crashed or sanitizer_report:
             findings += 1
             reason = "timeout" if completed is None else (

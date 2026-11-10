@@ -19,12 +19,12 @@ scoreboard cannot see at all.
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 71 suites, all passing | `make test` |
-| Parser robustness | 900 mutation-fuzz inputs, 0 findings | `make asan` (ASan + UBSan) |
+| Engine unit tests | 82 suites, all passing | `make test` |
+| Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # per-file pass rate + failing-case diffs
-make test            # 71 engine suites
+make test            # 82 engine suites
 make asan            # sanitizer build, tests, and a fuzz run
 ```
 
@@ -269,6 +269,7 @@ Litebird implements the complete modern browser rendering pipeline:
   - Timer-driven DOM mutations trigger reactive relayout and repaints.
 - **Resource Loader & Native HTTP Client (`ResourceLoader`):**
   - Native POSIX socket HTTP/1.1 client supporting GET requests and headers without external dependencies.
+  - Rejects unsafe HTTP methods, URL request targets, and caller header names/values; caps request/response headers at 64 KiB and total HTTP responses at 16 MiB.
   - Full relative URL path resolution.
 
 ---

@@ -41,6 +41,8 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -662,6 +664,64 @@ TEST(resource_loader_and_url_resolution) {
     auto missing_resp = ResourceLoader::load("examples/does_not_exist_xyz.html");
     assert(!missing_resp.success);
     assert(missing_resp.status_code == 404);
+
+    // Caller-controlled request-line/header components must be rejected before
+    // any network lookup or socket operation.
+    auto injected_method = ResourceLoader::load_http("http://127.0.0.1/", "GET\r\nX-Injected: yes");
+    assert(!injected_method.success);
+    assert(injected_method.error_message.find("method") != std::string::npos);
+    auto injected_header = ResourceLoader::load_http("http://127.0.0.1/", "GET", {{"X-Test", "ok\r\nX-Injected: yes"}});
+    assert(!injected_header.success);
+    assert(injected_header.error_message.find("header") != std::string::npos);
+    auto injected_target = ResourceLoader::load_http("http://127.0.0.1/path\r\nX-Injected: yes");
+    assert(!injected_target.success);
+
+    // A tiny loopback server lets us assert the response cap without external
+    // network dependencies.
+    auto fetch_from_local_server = [](const std::string& wire_response) {
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 1) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+        std::thread peer([server, &wire_response]() {
+            const int client = accept(server, nullptr, nullptr);
+            if (client >= 0) {
+                char request_buffer[2048];
+                (void)recv(client, request_buffer, sizeof(request_buffer), 0);
+                std::size_t offset = 0;
+                while (offset < wire_response.size()) {
+                    const auto count = send(client, wire_response.data() + offset,
+                                            wire_response.size() - offset, MSG_NOSIGNAL);
+                    if (count <= 0) break;
+                    offset += static_cast<std::size_t>(count);
+                }
+                close(client);
+            }
+            close(server);
+        });
+        auto response = ResourceLoader::load_http("http://127.0.0.1:" + std::to_string(port) + "/");
+        peer.join();
+        return response;
+    };
+
+    auto accepted_response = fetch_from_local_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    assert(accepted_response.success);
+    assert(accepted_response.body == "ok");
+    std::string oversized_response = "HTTP/1.1 200 OK\r\nContent-Length: " +
+        std::to_string(ResourceLoader::MaxHttpResponseBytes) + "\r\n\r\n";
+    oversized_response.append(ResourceLoader::MaxHttpResponseBytes, 'x');
+    auto rejected_response = fetch_from_local_server(oversized_response);
+    assert(!rejected_response.success);
+    assert(rejected_response.error_message.find("16 MiB") != std::string::npos);
 }
 
 TEST(browser_shell_navigation_and_hit_testing) {
@@ -4319,6 +4379,13 @@ TEST(image_decoder_rejects_hostile_dimensions) {
     assert(img != nullptr);
     assert(img->width == 2 && img->height == 2);
     assert(img->pixels.size() == 4);
+
+    // PPM dimensions and samples are decimal ints supplied by the file. A long
+    // digit run must be consumed and rejected without signed-overflow UB.
+    const std::string oversized_ppm_width = "P6\n999999999999999999999999999999 1\n255\n";
+    const std::string oversized_ppm_maxval = "P6\n1 1\n999999999999999999999999999999\n";
+    assert(ImageDecoder::decode(std::vector<uint8_t>(oversized_ppm_width.begin(), oversized_ppm_width.end())) == nullptr);
+    assert(ImageDecoder::decode(std::vector<uint8_t>(oversized_ppm_maxval.begin(), oversized_ppm_maxval.end())) == nullptr);
 }
 
 TEST(overflow_hidden_clips_painting) {

@@ -63,10 +63,12 @@ terminate called after throwing an instance of 'std::length_error'
 154 bytes of untrusted input, no `<script>` involved, and the process dies.
 There is no `try`/`catch` anywhere in `main.cpp`.
 
-**Why the fuzzer missed it.** `tools/fuzz/fuzz_parser.py` feeds every mutation
-to `--dump-dom-webplatform`, which never runs layout and therefore never calls
-`ImageDecoder`. 900 mutations of the *parser* says nothing about a *decoder*
-that parses a different, binary format with different invariants.
+**Why the original fuzzer missed it.** `tools/fuzz/fuzz_parser.py` fed every
+mutation to `--dump-dom-webplatform`, which returns before layout and never
+calls `ImageDecoder`. Phase 22 adds a pipeline fuzzer that runs corpus mutations
+through layout and bitmap rendering, and seeds image cases with malformed BMP
+and PPM headers. That pass also exposed unchecked decimal overflow in PPM
+`read_int`; the parser now consumes overlong fields safely and rejects them.
 
 **The fix.** Dimensions are validated before any multiplication, using division
 so the check cannot itself overflow, capped at 64 megapixels. Also fixed:
@@ -503,8 +505,9 @@ Nested-depth parse (`--dump-dom`):
 5. **~~Cascade indexing~~** — initial rightmost-selector buckets implemented in
    Phase 21; shadow-root/UA indexing and universal-rule heavy workloads remain
    possible follow-ups.
-6. **Fuzzer coverage** — feed `--dump-layout` and `--render-bmp` too, and seed
-   it with malformed image headers, not just HTML.
+6. **~~Fuzzer coverage~~** — Phase 22 now fuzzes parser, layout, bitmap render,
+   and malformed BMP/PPM headers through the actual image-loading path. The
+   existing work does not yet cover standalone CSS or arbitrary network input.
 
 ## One meta-point
 
@@ -515,3 +518,26 @@ above, because the scoreboard measures one stage of a five-stage pipeline and
 says nothing about memory safety, script semantics, or speed. A second
 scoreboard — even a tiny one: "no crash on N hostile images", "these 20 JS
 expressions produce these 20 results" — would catch every Critical finding here.
+
+
+## 17. ✅ HTTP request injection and unbounded response reads
+
+The POSIX HTTP client previously concatenated caller-supplied method/header
+strings and URL-derived request targets directly into a raw HTTP/1.1 request.
+CR/LF in those values could inject request lines or headers. It also accumulated
+the peer's response until disconnect without a size bound.
+
+`ResourceLoader::load_http()` now accepts only HTTP token methods/header names,
+rejects control bytes (including CR/LF) in header values and request targets,
+validates URL authority/port parsing, and manages framing headers (accepting a
+caller-supplied `Content-Length` only when it exactly matches the body). Complete
+request headers are capped at 64 KiB before DNS/network work.
+Incoming headers and the full response stream are capped at 64 KiB and 16 MiB
+respectively; malformed/incomplete response headers and invalid or oversized
+`Content-Length` values are rejected. Socket sends handle partial writes and
+interrupted system calls.
+
+Regression coverage exercises method, header-value, and request-target
+injection attempts, a successful local loopback response, and a response that
+exceeds the 16 MiB cap. Tests use a loopback socket only and do not require
+external networking.

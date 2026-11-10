@@ -2523,6 +2523,42 @@ TEST(mutation_observer_api) {
     assert(js.global_env()->get("recordsReceived").to_number() == count_before);
 }
 
+TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    auto host = std::make_shared<Element>("x-host");
+    auto shadow = host->attach_shadow("open");
+    auto shadow_child = std::make_shared<Element>("span");
+    shadow->append_child(shadow_child);
+    auto light_child = std::make_shared<Element>("div");
+    auto light_grandchild = std::make_shared<Element>("span");
+    light_child->append_child(light_grandchild);
+    host->append_child(light_child);
+
+    assert(!host->is_connected());
+    assert(!light_grandchild->is_connected());
+    assert(!shadow->is_connected());
+    assert(!shadow_child->is_connected());
+
+    doc->append_child(host);
+    assert(host->is_connected());
+    assert(light_grandchild->is_connected());
+    assert(shadow->is_connected());
+    assert(shadow_child->is_connected());
+
+    doc->remove_child(host);
+    assert(!host->is_connected());
+    assert(!light_grandchild->is_connected());
+    assert(!shadow->is_connected());
+    assert(!shadow_child->is_connected());
+
+    doc->append_child(host);
+    assert(host->is_connected());
+    assert(light_grandchild->is_connected());
+    assert(shadow_child->is_connected());
+}
+
 TEST(custom_elements_api) {
     using namespace litebird;
     CustomElementRegistry::default_registry().clear();
@@ -3878,6 +3914,24 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     auto doc = HtmlParser::parse(html);
     assert(doc != nullptr);
 
+    // Verify the whole nesting survived tree construction, without recursively
+    // walking the DOM from the test itself.
+    auto current = std::static_pointer_cast<Node>(doc->body());
+    int parsed_depth = 0;
+    while (current) {
+        std::shared_ptr<Node> nested;
+        for (const auto& child : current->children()) {
+            if (child->is_element() && child->as_element()->tag_name() == "div") {
+                nested = child;
+                break;
+            }
+        }
+        if (!nested) break;
+        ++parsed_depth;
+        current = std::move(nested);
+    }
+    assert(parsed_depth == depth);
+
     // Building the box tree must terminate without a stack overflow.
     StyleResolver resolver;
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
@@ -4194,6 +4248,7 @@ int main() {
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
     RUN_TEST(mutation_observer_api);
+    RUN_TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts);
     RUN_TEST(custom_elements_api);
     RUN_TEST(shadow_dom_and_slot_projection);
     RUN_TEST(intersection_and_resize_observers);

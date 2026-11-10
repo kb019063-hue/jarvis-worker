@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <memory>
@@ -18,6 +19,9 @@ struct ResourceResponse {
 
 class ResourceLoader {
 public:
+    static constexpr std::size_t MaxHttpResponseBytes = 16u * 1024u * 1024u;
+    static constexpr std::size_t MaxHttpHeaderBytes = 64u * 1024u;
+
     static std::string resolve_url(std::string_view base_url, std::string_view relative_url);
     static ResourceResponse load(
         const std::string& url,

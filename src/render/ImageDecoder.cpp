@@ -127,11 +127,17 @@ std::shared_ptr<ImageData> ImageDecoder::decode_ppm(const uint8_t* data, size_t 
         skip_ws_and_comments();
         if (cursor >= size || !std::isdigit(data[cursor])) return -1;
         int val = 0;
+        bool overflow = false;
         while (cursor < size && std::isdigit(data[cursor])) {
-            val = val * 10 + (data[cursor] - '0');
+            const int digit = data[cursor] - '0';
+            if (val > (INT_MAX - digit) / 10) {
+                overflow = true;
+            } else if (!overflow) {
+                val = val * 10 + digit;
+            }
             cursor++;
         }
-        return val;
+        return overflow ? -1 : val;
     };
 
     int width = read_int();

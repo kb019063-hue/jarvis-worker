@@ -1,10 +1,9 @@
 #include "litebird/net/ResourceLoader.hpp"
 #include <fstream>
 #include <sstream>
-#include <iostream>
-#include <cstring>
 #include <vector>
-#include <algorithm>
+#include <charconv>
+#include <cerrno>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -14,6 +13,59 @@
 #include <arpa/inet.h>
 
 namespace litebird {
+namespace {
+
+bool is_http_token(std::string_view value) {
+    if (value.empty()) return false;
+    for (unsigned char c : value) {
+        const bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        const bool digit = c >= '0' && c <= '9';
+        const bool punctuation = c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+            c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' ||
+            c == '_' || c == '`' || c == '|' || c == '~';
+        if (!alpha && !digit && !punctuation) return false;
+    }
+    return true;
+}
+
+bool is_safe_header_value(std::string_view value) {
+    for (unsigned char c : value) {
+        // HTAB and visible/obs-text bytes are allowed; all other controls,
+        // including CR/LF, can split or alter request headers.
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+    }
+    return true;
+}
+
+bool is_safe_request_target(std::string_view value) {
+    if (value.empty() || value.front() != '/') return false;
+    for (unsigned char c : value) {
+        // Request-target cannot contain whitespace or control bytes; in
+        // particular this prevents CRLF from introducing a second request.
+        if (c <= 0x20 || c == 0x7f) return false;
+    }
+    return true;
+}
+
+bool contains_authority_delimiter(std::string_view value) {
+    for (unsigned char c : value) {
+        if (c <= 0x20 || c == 0x7f || c == '/' || c == '?' || c == '#' || c == '@' || c == '\\') {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string ascii_lower(std::string_view value) {
+    std::string result(value);
+    for (char& c : result) {
+        const auto ch = static_cast<unsigned char>(c);
+        if (ch >= 'A' && ch <= 'Z') c = static_cast<char>(ch + ('a' - 'A'));
+    }
+    return result;
+}
+
+} // namespace
 
 std::string ResourceLoader::detect_mime_type(std::string_view path_or_url) {
     auto dot_pos = path_or_url.rfind('.');
@@ -211,22 +263,99 @@ ResourceResponse ResourceLoader::load_http(
         return resp;
     }
 
+    const std::string req_method = method.empty() ? "GET" : method;
+    if (!is_http_token(req_method)) {
+        resp.error_message = "Invalid HTTP method token";
+        return resp;
+    }
+    std::size_t user_header_bytes = 0;
+    bool has_content_length = false;
+    for (const auto& [name, value] : headers) {
+        if (!is_http_token(name) || !is_safe_header_value(value)) {
+            resp.error_message = "Invalid HTTP request header name or value";
+            return resp;
+        }
+        const std::string lower_name = ascii_lower(name);
+        if (lower_name == "host" || lower_name == "transfer-encoding" || lower_name == "connection") {
+            resp.error_message = "HTTP request header is managed by ResourceLoader: " + lower_name;
+            return resp;
+        }
+        if (lower_name == "content-length") {
+            std::size_t declared_size = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), declared_size);
+            if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+                declared_size != body.size()) {
+                resp.error_message = "HTTP Content-Length must match the request body size";
+                return resp;
+            }
+            has_content_length = true;
+        }
+        if (name.size() > MaxHttpHeaderBytes - 4 ||
+            value.size() > MaxHttpHeaderBytes - 4 - name.size() ||
+            user_header_bytes > MaxHttpHeaderBytes - 4 - name.size() - value.size()) {
+            resp.error_message = "HTTP request headers exceed 64 KiB limit";
+            return resp;
+        }
+        user_header_bytes += name.size() + value.size() + 4;
+    }
+
     std::string without_scheme = url.substr(7);
-    auto slash_pos = without_scheme.find('/');
-    std::string host_port = (slash_pos == std::string::npos) ? without_scheme : without_scheme.substr(0, slash_pos);
-    std::string path = (slash_pos == std::string::npos) ? "/" : without_scheme.substr(slash_pos);
+    const auto authority_end = without_scheme.find_first_of("/?#");
+    std::string host_port = (authority_end == std::string::npos)
+        ? without_scheme : without_scheme.substr(0, authority_end);
+    if (host_port.empty() || contains_authority_delimiter(host_port)) {
+        resp.error_message = "Invalid HTTP URL authority";
+        return resp;
+    }
+
+    std::string path = "/";
+    if (authority_end != std::string::npos) {
+        if (without_scheme[authority_end] == '/') path = without_scheme.substr(authority_end);
+        else if (without_scheme[authority_end] == '?') path = "/" + without_scheme.substr(authority_end);
+    }
+    if (const auto fragment = path.find('#'); fragment != std::string::npos) path.resize(fragment);
+    if (path.empty()) path = "/";
+    if (!is_safe_request_target(path)) {
+        resp.error_message = "Invalid HTTP request target";
+        return resp;
+    }
 
     std::string host = host_port;
     int port = 80;
-    auto colon_pos = host_port.find(':');
+    const auto colon_pos = host_port.find(':');
     if (colon_pos != std::string::npos) {
-        host = host_port.substr(0, colon_pos);
-        try {
-            port = std::stoi(host_port.substr(colon_pos + 1));
-        } catch (...) {
-            port = 80;
+        if (host_port.find(':', colon_pos + 1) != std::string::npos) {
+            resp.error_message = "IPv6 and malformed HTTP authorities are unsupported";
+            return resp;
         }
+        host = host_port.substr(0, colon_pos);
+        const std::string port_text = host_port.substr(colon_pos + 1);
+        unsigned parsed_port = 0;
+        const auto parsed = std::from_chars(port_text.data(), port_text.data() + port_text.size(), parsed_port);
+        if (host.empty() || port_text.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != port_text.data() + port_text.size() || parsed_port == 0 || parsed_port > 65535) {
+            resp.error_message = "Invalid HTTP port";
+            return resp;
+        }
+        port = static_cast<int>(parsed_port);
     }
+
+    // Build and cap the complete request headers before resolving or opening
+    // a connection. Caller-controlled pieces were validated above.
+    const std::string host_header = host + (port == 80 ? "" : ":" + std::to_string(port));
+    std::string request = req_method + " " + path + " HTTP/1.1\r\n" +
+                          "Host: " + host_header + "\r\n" +
+                          "User-Agent: Litebird/1.0 (Native Engine)\r\n" +
+                          "Accept: text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8\r\n";
+    for (const auto& [hk, hv] : headers) request += hk + ": " + hv + "\r\n";
+    if (!has_content_length && !body.empty()) request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    request += "Connection: close\r\n";
+    if (request.size() + 2 > MaxHttpHeaderBytes) {
+        resp.error_message = "HTTP request headers exceed 64 KiB limit";
+        return resp;
+    }
+    request += "\r\n";
+    if (!body.empty()) request += body;
 
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
@@ -261,38 +390,54 @@ ResourceResponse ResourceLoader::load_http(
     }
     freeaddrinfo(res);
 
-    // Build HTTP request
-    std::string req_method = method.empty() ? "GET" : method;
-    std::string request = req_method + " " + path + " HTTP/1.1\r\n" +
-                          "Host: " + host + "\r\n" +
-                          "User-Agent: Litebird/1.0 (Native Engine)\r\n" +
-                          "Accept: text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8\r\n";
-
-    for (const auto& [hk, hv] : headers) {
-        request += hk + ": " + hv + "\r\n";
+    std::size_t sent = 0;
+    while (sent < request.size()) {
+        const ssize_t count = send(sockfd, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            close(sockfd);
+            resp.error_message = "Failed to send HTTP request";
+            return resp;
+        }
+        sent += static_cast<std::size_t>(count);
     }
 
-    if (!body.empty() && headers.find("content-length") == headers.end()) {
-        request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    }
-
-    request += "Connection: close\r\n\r\n";
-    if (!body.empty()) {
-        request += body;
-    }
-
-    if (send(sockfd, request.c_str(), request.size(), 0) < 0) {
-        close(sockfd);
-        resp.error_message = "Failed to send HTTP request";
-        return resp;
-    }
-
-    // Read full response
+    // Bound the complete response (headers plus body) while receiving; never
+    // append an untrusted peer's stream without an allocation limit.
     std::string raw_response;
     char buffer[4096];
+    std::size_t header_end = std::string::npos;
     ssize_t bytes_read = 0;
-    while ((bytes_read = recv(sockfd, buffer, sizeof(buffer), 0)) > 0) {
-        raw_response.append(buffer, static_cast<size_t>(bytes_read));
+    while (true) {
+        bytes_read = recv(sockfd, buffer, sizeof(buffer), 0);
+        if (bytes_read == 0) break;
+        if (bytes_read < 0) {
+            if (errno == EINTR) continue;
+            close(sockfd);
+            resp.error_message = "Failed while reading HTTP response";
+            return resp;
+        }
+
+        const auto received = static_cast<std::size_t>(bytes_read);
+        if (received > MaxHttpResponseBytes - raw_response.size()) {
+            close(sockfd);
+            resp.error_message = "HTTP response exceeds 16 MiB size limit";
+            return resp;
+        }
+        raw_response.append(buffer, received);
+
+        header_end = raw_response.find("\r\n\r\n");
+        std::size_t received_header_size = 4;
+        if (header_end == std::string::npos) {
+            header_end = raw_response.find("\n\n");
+            received_header_size = 2;
+        }
+        if ((header_end == std::string::npos && raw_response.size() > MaxHttpHeaderBytes) ||
+            (header_end != std::string::npos && header_end + received_header_size > MaxHttpHeaderBytes)) {
+            close(sockfd);
+            resp.error_message = "HTTP response headers exceed 64 KiB size limit";
+            return resp;
+        }
     }
     close(sockfd);
 
@@ -302,14 +447,19 @@ ResourceResponse ResourceLoader::load_http(
     }
 
     // Parse HTTP response
-    auto header_end = raw_response.find("\r\n\r\n");
+    header_end = raw_response.find("\r\n\r\n");
+    std::size_t header_separator_size = 4;
     if (header_end == std::string::npos) {
         header_end = raw_response.find("\n\n");
+        header_separator_size = 2;
+    }
+    if (header_end == std::string::npos) {
+        resp.error_message = "Malformed HTTP response: missing header terminator";
+        return resp;
     }
 
-    std::string header_part = (header_end != std::string::npos) ? raw_response.substr(0, header_end) : raw_response;
-    std::string body_part = (header_end != std::string::npos) ?
-        raw_response.substr(header_end + (raw_response[header_end] == '\r' ? 4 : 2)) : "";
+    std::string header_part = raw_response.substr(0, header_end);
+    std::string body_part = raw_response.substr(header_end + header_separator_size);
 
     // Status line: HTTP/1.1 200 OK
     std::stringstream hss(header_part);
@@ -333,11 +483,27 @@ ResourceResponse ResourceLoader::load_http(
             while (!header_val.empty() && (header_val.front() == ' ' || header_val.front() == '\t')) {
                 header_val.erase(header_val.begin());
             }
-            std::transform(header_name.begin(), header_name.end(), header_name.begin(), ::tolower);
+            header_name = ascii_lower(header_name);
             resp.headers[header_name] = header_val;
             if (header_name == "content-type") {
                 resp.content_type = header_val;
             }
+        }
+    }
+
+    if (const auto content_length = resp.headers.find("content-length"); content_length != resp.headers.end()) {
+        std::string_view value = content_length->second;
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+        std::size_t declared_size = 0;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), declared_size);
+        if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+            resp.error_message = "Malformed HTTP Content-Length";
+            return resp;
+        }
+        if (declared_size > MaxHttpResponseBytes) {
+            resp.error_message = "HTTP response exceeds 16 MiB size limit";
+            return resp;
         }
     }
 

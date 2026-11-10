@@ -92,9 +92,10 @@ run: $(TARGET)
 conformance: $(TARGET)
 	@$(CONFORMANCE)
 
-## Parser robustness: mutation fuzzing against a sanitizer build.
+## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
+	@python3 tools/fuzz/fuzz_pipeline.py
 
 ## Address + UB sanitizer build, then the test suite and a fuzz smoke run.
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that

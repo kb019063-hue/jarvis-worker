@@ -358,8 +358,13 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     if (!node->is_arrow) {
         // Arrow functions bind none of these; lookups fall through to the
         // enclosing function's scope, which is exactly lexical `this`.
-        if (this_val.is_nullish() && !node->is_strict) env->define("this", m_global_object);
-        else env->define("this", this_val);
+        if (node->is_strict || this_val.is_object_like()) {
+            env->define("this", this_val);
+        } else if (this_val.is_nullish()) {
+            env->define("this", m_global_object);       // sloppy mode: no receiver means the global object
+        } else {
+            env->define("this", js_to_object(this_val)); // sloppy mode: a primitive receiver is wrapped
+        }
         if (node->uses_arguments) {
             JsValue arguments = JsValue::make_array(args);
             arguments.object_val->klass = ObjectClass::Arguments;

@@ -305,6 +305,10 @@ public:
         if (m_replacer.is_function()) {
             value = m_replacer.call_with_this(holder, {JsValue::make_string(key), value});
         }
+        // `new String("a")` and friends serialise as the value they wrap.
+        if (const JsValue* inner = js_wrapped_primitive(value); inner && inner->type != JsType::Symbol) {
+            value = *inner;
+        }
 
         switch (value.type) {
             case JsType::Null: out += "null"; return true;

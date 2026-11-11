@@ -68,8 +68,11 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
+JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
+# Cases that must pass in the sanitizer build. Same floor as the CI scoreboard job.
+JS_ASAN_FLOOR ?= 660
 
-.PHONY: all clean test run conformance fuzz asan help
+.PHONY: all clean test run conformance js-conformance fuzz asan help
 
 all: $(TARGET)
 
@@ -102,21 +105,29 @@ run: $(TARGET)
 conformance: $(TARGET)
 	@$(CONFORMANCE)
 
+## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
+js-conformance: $(TARGET)
+	@$(JS_CONFORMANCE)
+
 ## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
 	@python3 tools/fuzz/fuzz_pipeline.py
 
-## Address + UB sanitizer build, then the test suite and a fuzz smoke run.
+## Address + UB sanitizer build, then the test suite, the JavaScript corpus and
+## a fuzz smoke run. The corpus is run for what the sanitizers see while the
+## scripts execute, not for its score: a sanitizer report makes a case fail, and
+## --min-pass turns a batch of those into a failed build.
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
+	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
 clean:
 	rm -rf build build-asan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, fuzz, asan, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, fuzz, asan, clean"

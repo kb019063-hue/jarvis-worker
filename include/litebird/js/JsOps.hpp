@@ -133,6 +133,12 @@ enum class JsPrimitiveHint { Default, Number, String };
 JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint = JsPrimitiveHint::Default);
 /// ToNumber. Unlike JsValue::to_number(), undefined and unparsable strings are NaN.
 double js_to_number(const JsValue& value);
+/// The primitive held by a wrapper object (`new String("a")`, `Object(5)`), or
+/// null when `value` is not one.
+const JsValue* js_wrapped_primitive(const JsValue& value);
+/// ToObject: wraps a primitive in its wrapper object. Objects pass through;
+/// null and undefined throw a TypeError.
+JsValue js_to_object(const JsValue& value);
 /// ToIntegerOrInfinity: truncates, NaN becomes 0.
 double js_to_integer(double value);
 int32_t js_to_int32(double value);

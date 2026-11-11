@@ -197,6 +197,9 @@ std::string object_tag(const JsValue& value) {
             case ObjectClass::WeakSet: return "WeakSet";
             case ObjectClass::Promise: return "Promise";
             case ObjectClass::Generator: return "Generator";
+            case ObjectClass::String: return "String";
+            case ObjectClass::Number: return "Number";
+            case ObjectClass::Boolean: return "Boolean";
             default: break;
         }
         if (cell->is_array) return "Array";
@@ -280,7 +283,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     JsValue object_ctor = js_make_native("Object", 1, [](Args args) {
         const JsValue& value = js_arg(args, 0);
         if (value.is_nullish()) return JsValue::make_object();
-        return value;
+        return js_to_object(value);     // Object("a") is a String object
     });
     object_ctor.define_property("prototype", js_object_value(op), 0);
     js_define_hidden(op, "constructor", object_ctor);
@@ -503,14 +506,27 @@ void install_object_builtins(JsIntrinsics& realm) {
 
     // ---- Boolean ----------------------------------------------------------
     JsValue boolean_ctor = js_make_native("Boolean", 1, [](Args args) {
-        return JsValue::make_boolean(js_arg(args, 0).is_truthy());
+        JsValue flag = JsValue::make_boolean(js_arg(args, 0).is_truthy());
+        // `new Boolean(false)` is an object, and so truthy; `Boolean(0)` converts.
+        return JsValue::current_is_construct() ? js_to_object(flag) : flag;
     });
     boolean_ctor.define_property("prototype", js_object_value(realm.boolean_proto), 0);
     js_define_hidden(realm.boolean_proto, "constructor", boolean_ctor);
-    js_define_method(realm.boolean_proto, "toString", 0, [](Args) {
-        return JsValue::make_string(self().is_truthy() ? "true" : "false");
+    // The boolean `this` stands for: itself, or the one inside a Boolean object.
+    auto this_boolean = [](const char* method) {
+        const JsValue& me = JsValue::current_this();
+        if (me.type == JsType::Boolean) return me.bool_val;
+        if (const JsValue* inner = js_wrapped_primitive(me); inner && inner->type == JsType::Boolean) {
+            return inner->bool_val;
+        }
+        js_throw_type_error(std::string("Boolean.prototype.") + method + " requires that 'this' be a Boolean");
+    };
+    js_define_method(realm.boolean_proto, "toString", 0, [this_boolean](Args) {
+        return JsValue::make_string(this_boolean("toString") ? "true" : "false");
     });
-    js_define_method(realm.boolean_proto, "valueOf", 0, [](Args) { return self(); });
+    js_define_method(realm.boolean_proto, "valueOf", 0, [this_boolean](Args) {
+        return JsValue::make_boolean(this_boolean("valueOf"));
+    });
     realm.add_global("Boolean", boolean_ctor);
 
     // ---- Symbol -----------------------------------------------------------
@@ -537,13 +553,20 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (symbol.string_val.compare(0, 6, "@@for:") == 0) return JsValue::make_string(symbol.string_val.substr(6));
         return JsValue::make_undefined();
     });
-    js_define_method(realm.symbol_proto, "toString", 0, [](Args) {
-        return JsValue::make_string(self().to_string());
+    // The symbol `this` stands for: itself, or the one inside a Symbol object.
+    auto this_symbol = []() -> JsValue {
+        const JsValue& me = JsValue::current_this();
+        if (me.type == JsType::Symbol) return me;
+        if (const JsValue* inner = js_wrapped_primitive(me); inner && inner->type == JsType::Symbol) return *inner;
+        js_throw_type_error("Symbol.prototype method called on a value that is not a symbol");
+    };
+    js_define_method(realm.symbol_proto, "toString", 0, [this_symbol](Args) {
+        return JsValue::make_string(this_symbol().to_string());
     });
-    js_define_method(realm.symbol_proto, "valueOf", 0, [](Args) { return self(); });
-    js_define_getter(realm.symbol_proto, "description", [](Args) {
-        JsValue symbol = self();
-        if (symbol.type != JsType::Symbol || !symbol.properties) return JsValue::make_undefined();
+    js_define_method(realm.symbol_proto, "valueOf", 0, [this_symbol](Args) { return this_symbol(); });
+    js_define_getter(realm.symbol_proto, "description", [this_symbol](Args) {
+        JsValue symbol = this_symbol();
+        if (!symbol.properties) return JsValue::make_undefined();
         return (*symbol.properties)["description"];
     });
     realm.add_global("Symbol", symbol_ctor);

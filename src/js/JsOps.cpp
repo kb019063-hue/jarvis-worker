@@ -394,9 +394,66 @@ double js_string_to_number(const std::string& text) {
 // Conversions
 // ---------------------------------------------------------------------------
 
+const JsValue* js_wrapped_primitive(const JsValue& value) {
+    if (value.type != JsType::Object || !value.object_val) return nullptr;
+    switch (value.object_val->klass) {
+        case ObjectClass::String:
+        case ObjectClass::Number:
+        case ObjectClass::Boolean:
+        case ObjectClass::Symbol:
+            return static_cast<const JsValue*>(value.object_val->internal.get());
+        default:
+            return nullptr;
+    }
+}
+
+JsValue js_to_object(const JsValue& value) {
+    if (value.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
+    if (value.is_object_like()) return value;
+
+    auto& realm = JsIntrinsics::get();
+    JsObject* cell = Heap::default_heap().allocate_object();
+    switch (value.type) {
+        case JsType::String:
+            cell->prototype = realm.string_proto;
+            cell->klass = ObjectClass::String;
+            // `length` is an own property of a String object, fixed at creation.
+            {
+                auto& length = cell->properties.entry("length");
+                length.second = JsValue::make_number(static_cast<double>(js_string_length(value.string_val)));
+                length.flags = 0;
+            }
+            break;
+        case JsType::Number:
+            cell->prototype = realm.number_proto;
+            cell->klass = ObjectClass::Number;
+            break;
+        case JsType::Boolean:
+            cell->prototype = realm.boolean_proto;
+            cell->klass = ObjectClass::Boolean;
+            break;
+        default:
+            cell->prototype = realm.symbol_proto;
+            cell->klass = ObjectClass::Symbol;
+            break;
+    }
+    cell->internal = std::make_shared<JsValue>(value);
+    return JsValue::make_object(cell);
+}
+
 JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint) {
     if (!value.is_object_like()) return value;
     if (value.type == JsType::DomNode) return JsValue::make_string(value.to_string());
+
+    // An object can take over its own conversion with Symbol.toPrimitive.
+    JsValue exotic = value.get_property("@@toPrimitive");
+    if (exotic.is_function()) {
+        const char* hint_name = hint == JsPrimitiveHint::String ? "string"
+                              : hint == JsPrimitiveHint::Number ? "number" : "default";
+        JsValue result = exotic.call_with_this(value, {JsValue::make_string(hint_name)});
+        if (result.is_object_like()) js_throw_type_error("Cannot convert object to primitive value");
+        return result;
+    }
 
     bool string_first = hint == JsPrimitiveHint::String;
     if (hint == JsPrimitiveHint::Default && value.object_val && value.object_val->klass == ObjectClass::Date) {

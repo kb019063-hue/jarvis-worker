@@ -17,12 +17,15 @@ namespace {
 
 using Args = const std::vector<JsValue>&;
 
-JsValue self() { return JsValue::current_this(); }
-
 std::string this_string(const char* method) {
-    JsValue me = self();
+    const JsValue& me = JsValue::current_this();
+    if (me.type == JsType::String) return me.string_val;
     if (me.is_nullish()) {
         js_throw_type_error(std::string("String.prototype.") + method + " called on null or undefined");
+    }
+    // A String object, as in `new String("a").toUpperCase()`.
+    if (const JsValue* inner = js_wrapped_primitive(me); inner && inner->type == JsType::String) {
+        return inner->string_val;
     }
     return js_to_string(me);
 }
@@ -411,10 +414,18 @@ void install_string_builtins(JsIntrinsics& realm) {
 
     // ---- Constructor ------------------------------------------------------
     JsValue string_ctor = js_make_native("String", 1, [](Args args) {
-        if (args.empty()) return JsValue::make_string("");
-        // String(symbol) is allowed and gives the description form.
-        if (args[0].type == JsType::Symbol) return JsValue::make_string(args[0].to_string());
-        return JsValue::make_string(js_to_string(args[0]));
+        const bool construct = JsValue::current_is_construct();
+        JsValue text;
+        if (args.empty()) {
+            text = JsValue::make_string("");
+        } else if (args[0].type == JsType::Symbol && !construct) {
+            // String(symbol) is allowed and gives the description form.
+            text = JsValue::make_string(args[0].to_string());
+        } else {
+            text = JsValue::make_string(js_to_string(args[0]));
+        }
+        // `new String("a")` is an object that wraps the string.
+        return construct ? js_to_object(text) : text;
     });
     string_ctor.define_property("prototype", js_object_value(sp), 0);
     js_define_hidden(sp, "constructor", string_ctor);

@@ -48,6 +48,39 @@ jobs:
           name: conformance-report
           path: build/conformance.json
 
+  js-conformance:
+    name: JavaScript conformance (Node-verified corpus)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          # The expectations in tests/js-conformance were recorded with Node 22.
+          node-version: "22"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Check the corpus against Node.js
+        # Every expected output must be what a real engine prints. If this step
+        # fails, an expectation is wrong; it says nothing about Litebird.
+        run: python3 tools/conformance/run_js_conformance.py --reference "node -e" --quiet
+      - name: JavaScript scoreboard
+        run: make js-conformance
+      - name: Enforce the JavaScript floor
+        # The corpus is fixed and timers run on a virtual clock, so the score is
+        # deterministic. Raise the floor as the engine improves; it exists to
+        # catch regressions.
+        run: |
+          set -euo pipefail
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 660
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-conformance-report
+          path: build/js-conformance.json
+
   sanitizers:
     name: Address/UB sanitizers + parser fuzzing
     runs-on: ubuntu-latest

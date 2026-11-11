@@ -18,11 +18,13 @@ const double kNaN = std::numeric_limits<double>::quiet_NaN();
 const double kInfinity = std::numeric_limits<double>::infinity();
 
 double this_number(const char* method) {
-    JsValue me = JsValue::current_this();
-    if (me.type != JsType::Number) {
-        js_throw_type_error(std::string("Number.prototype.") + method + " requires that 'this' be a Number");
+    const JsValue& me = JsValue::current_this();
+    if (me.type == JsType::Number) return me.number_val;
+    // A Number object, as in `new Number(5).toFixed(1)`.
+    if (const JsValue* inner = js_wrapped_primitive(me); inner && inner->type == JsType::Number) {
+        return inner->number_val;
     }
-    return me.number_val;
+    js_throw_type_error(std::string("Number.prototype.") + method + " requires that 'this' be a Number");
 }
 
 bool is_space_byte(unsigned char c) {
@@ -247,7 +249,9 @@ void install_number_builtins(JsIntrinsics& realm) {
 
     // ---- Number -----------------------------------------------------------
     JsValue number_ctor = js_make_native("Number", 1, [](Args args) {
-        return JsValue::make_number(args.empty() ? 0.0 : js_to_number(args[0]));
+        JsValue number = JsValue::make_number(args.empty() ? 0.0 : js_to_number(args[0]));
+        // `new Number(5)` is an object that wraps the number; `Number(5)` converts.
+        return JsValue::current_is_construct() ? js_to_object(number) : number;
     });
     number_ctor.define_property("prototype", js_object_value(np), 0);
     js_define_hidden(np, "constructor", number_ctor);
@@ -350,7 +354,14 @@ void install_number_builtins(JsIntrinsics& realm) {
     def("trunc", math_unary("trunc", [](double x) { return std::trunc(x); }));
     def("sign", math_unary("sign", [](double x) { return std::isnan(x) ? kNaN : x > 0 ? 1.0 : x < 0 ? -1.0 : x; }));
     def("sqrt", math_unary("sqrt", [](double x) { return std::sqrt(x); }));
-    def("cbrt", math_unary("cbrt", [](double x) { return std::cbrt(x); }));
+    def("cbrt", math_unary("cbrt", [](double x) {
+        double root = std::cbrt(x);
+        if (!std::isfinite(root) || root == 0.0) return root;
+        // The C library's cbrt is allowed to be an ulp off, and is: it gives
+        // 3.0000000000000004 for 27. One Newton step lands on the nearest
+        // double, which is the exact root whenever there is one.
+        return root - (root * root * root - x) / (3.0 * root * root);
+    }));
     def("exp", math_unary("exp", [](double x) { return std::exp(x); }));
     def("expm1", math_unary("expm1", [](double x) { return std::expm1(x); }));
     def("log", math_unary("log", [](double x) { return std::log(x); }));

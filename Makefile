@@ -70,7 +70,7 @@ TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 # Cases that must pass in the sanitizer build. Same floor as the CI scoreboard job.
-JS_ASAN_FLOOR ?= 660
+JS_ASAN_FLOOR ?= 692
 
 .PHONY: all clean test run conformance js-conformance fuzz asan help
 

@@ -18,15 +18,41 @@ scoreboard cannot see at all.
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
+| **JavaScript corpus** | **698 / 703 (99.3%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 82 suites, all passing | `make test` |
+| Engine unit tests | 83 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
-make conformance     # per-file pass rate + failing-case diffs
-make test            # 82 engine suites
-make asan            # sanitizer build, tests, and a fuzz run
+make conformance     # HTML: per-file pass rate + failing-case diffs
+make js-conformance  # JavaScript: per-file pass rate
+make test            # 83 engine suites
+make asan            # sanitizer build, tests, the JavaScript corpus and a fuzz run
 ```
+
+### The JavaScript scoreboard
+
+`tests/js-conformance/` holds 703 small scripts. Each one records what Node.js
+prints for it, and a case passes when `litebird --run-js` prints the same and
+exits 0. CI re-runs the whole corpus under Node first, so an expectation
+cannot be edited to match what Litebird does.
+
+Read the number for what it is:
+
+- **It is not test262.** The corpus was written alongside the engine. It
+  covers the language and library features ordinary scripts use (syntax,
+  closures, classes, destructuring, generators, promises and async functions,
+  strings, arrays, regular expressions, dates, JSON), not every clause of the
+  specification. A run of the official suite would score far lower.
+- **The five failures are whole features that do not exist**: BigInt (2
+  cases), `Proxy`, typed arrays, and holes in arrays.
+- **It measures the language, not the DOM.** The bindings a page script calls
+  (`document`, elements, events) are a much thinner layer; see "Known gaps" in
+  `ARCHITECTURE.md`.
+
+Before the engine was rebuilt (Phase 23) the same corpus scored 126 of the
+671 cases that existed then, and 25 of the 90 cases in the fixed "everyday"
+probe (`everyday-es5.dat` and `everyday-es2015.dat`), which now passes 90/90.
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
@@ -62,7 +88,8 @@ engines rather than self-referential. It is vendored under
 > mostly matches a real browser's. It does **not** mean it renders real pages:
 > floats and tables now lay out (Phase 16), percentages resolve (Phase 18) and
 > `overflow` clips (Phase 18), but there is no bidi, no `rowspan`/`colspan`, no
-> `border-collapse`, and the JS engine is a bytecode interpreter without a JIT.
+> `border-collapse`, external stylesheets and scripts are not loaded, and the
+> JS engine is a tree-walking interpreter without a JIT.
 > See "Known gaps" in `ARCHITECTURE.md`.
 
 ---
@@ -208,33 +235,56 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
-### 7. Modern JavaScript Engine, Bytecode VM, ES6 Collections & Web APIs (`include/litebird/js/`, `include/litebird/net/`)
-- **ES6 Classes & Prototype Inheritance:** Full syntactic support for `class`, `extends`, `super(...)`, `super.method()`, static methods, instance methods, and runtime `instanceof` prototype chain traversal.
-- **Async Functions & Await Syntax:** First-class `async function`, async arrow functions, and `await` operator, coordinated with the engine microtask EventLoop.
-- **Modern Fetch API & Network Stack:** Standard `fetch(url, options)`, `Response` object (`status`, `statusText`, `ok`, `headers`, `json()`, `text()`), and case-insensitive `Headers` object.
-- **URL & URLSearchParams Standards:** Complete WHATWG URL decomposition (`href`, `origin`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`) and `URLSearchParams` query manipulation with live bidirectional synchronization.
-- **ES6 Collections & Syntactic Extensions:**
-  - **`Map` & `Set` Collections:** Standard ES6 collections with `.set()`, `.get()`, `.add()`, `.has()`, `.delete()`, `.clear()`, and dynamic `.size` property getters.
-  - **Destructuring Declarations:** Array destructuring (`const [a, b] = [1, 2]`) and object destructuring (`const { name, role } = user`).
-  - **Default Function Parameters:** Default argument evaluation for function declarations and arrow functions (`(x = 1, y = 2) => x + y`).
-  - **Arrow Functions:** `(x, y) => x + y` and block bodies `(val) => { ... }` with lexical scope binding.
-  - **Template Literals:** Multi-part interpolation `` `Value: ${val}, count: ${count + 1}` `` with expression evaluation.
-  - **Prototype Chain & Built-ins:** `Object.create()`, `prototype` inheritance, and `Array.prototype` methods (`map`, `filter`, `reduce`, `push`, `pop`, `join`).
-- **Asynchronous Promises & JSON:** ECMAScript Promises (`new Promise()`, `.then()`, `.catch()`, `Promise.resolve()`, `Promise.reject()`), microtask execution queue, and `JSON.parse()` / `JSON.stringify()`.
-- **Web Storage & Cookie Jar:**
-  - `localStorage`: Key-value storage persisted across navigation.
-  - `sessionStorage`: In-memory session key-value storage.
-  - `document.cookie`: RFC-compliant cookie jar supporting `key=value`, `Path`, `Max-Age`, and `Expires`.
-- **Web Workers & Concurrent Execution:** Multi-threaded JavaScript workers (`new Worker(url)`), thread-isolated bytecode execution, deep-cloned JSON IPC message queues, `postMessage()`, `onmessage`, and thread lifecycle termination (`terminate()`).
-- **RFC 6455 WebSocket Client:** Standard full-duplex WebSocket networking (`new WebSocket(url)`), cryptographic handshake with zero-dependency SHA-1/Base64, frame masking/unmasking, background network polling thread, and `onopen`, `onmessage`, `send()`, and `close()`.
-- **Instruction Set & Bytecode Virtual Machine:** Compact 8-bit opcodes, constant pooling, local slot indexing, jump patching, and stack frame call dispatch.
-- **Mark-and-Sweep Garbage Collector (`Heap`):**
-  - Tracing cycle collector detecting and reclaiming isolated circular reference graphs.
-  - Memory diagnostics via `gc()` (`total_cells`, `alive_cells`, `collected_cells`, `bytes_allocated`).
-- **DOM & Web API Bindings:**
-  - `window`, `document`, `console.log/warn/error`, `Math.*`
-  - `fetch(url)` integrating native socket HTTP requests with JavaScript Promises.
-  - `canvas.getContext("2d")` returning live 2D drawing contexts.
+### 7. JavaScript Engine & Web APIs (`include/litebird/js/`, `include/litebird/net/`)
+
+The engine was rebuilt in Phase 23. It is a tree-walking interpreter: a lexer
+and a recursive-descent parser produce an AST, and the evaluator runs it
+directly. A script with a syntax error does not run at all, and no script runs
+twice.
+
+- **Language:** `var`/`let`/`const` with hoisting and the temporal dead zone,
+  strict mode, closures, all operators including `?.`, `??` and the logical
+  assignments, destructuring, spread and rest, default parameters, template
+  literals and tagged templates, labelled statements, `switch`, `try`/`catch`/
+  `finally`, getters and setters, computed keys, symbols, iterators,
+  `for`...`of` and `for`...`in`, generators, classes (fields, private names,
+  statics, accessors, `super`, subclassing built-ins), regular-expression
+  literals.
+- **Promises and async functions:** promises follow the specification's
+  ordering (reactions are FIFO microtasks, thenables are adopted), with `all`,
+  `allSettled`, `any`, `race` and `withResolvers`. `await` suspends the
+  function and returns to its caller; `for await` and async generators work.
+  A rejection nothing handles is reported as `Uncaught (in promise)`.
+- **Standard library:** `Object`, `Function`, `Array`, `String`, `Number`,
+  `Boolean`, `Symbol`, `Math`, `JSON`, `Date`, `RegExp` (a backtracking matcher
+  with lookaround, named groups and the `g`, `i`, `m`, `s`, `u`, `y` flags),
+  `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, the `Error` family,
+  `structuredClone`, `globalThis`, `eval` and `Function`. Methods live on
+  shared prototypes; each interpreter has its own set (a realm).
+- **Event loop:** tasks, microtasks and timers, with a microtask checkpoint
+  whenever the script stack empties. `setTimeout`/`setInterval` (with extra
+  arguments), `queueMicrotask`, `requestAnimationFrame`, `performance.now()`.
+  The loop's clock can skip ahead, so `--run-js` and one-shot page rendering
+  never sleep waiting for a timer.
+- **Garbage collector:** mark and sweep, including cycles through closures.
+  Every value holds a counted handle to its object, and the collector treats
+  an object with more handles than it can find inside the heap as held by
+  native code. Nothing has to be registered as a root. `gc()` runs a
+  collection and returns its statistics.
+- **Page lifecycle:** `document.readyState`, `DOMContentLoaded` and `load`
+  fire once the document's scripts have run.
+- **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
+  `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
+  `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
+  interpreter and event loop; messages are copied as JSON), and DOM bindings:
+  `document.getElementById`/`querySelector(All)`/`createElement`, element
+  properties and methods, `addEventListener`/`removeEventListener` with capture
+  and bubbling, `canvas.getContext("2d")`.
+- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`,
+  modules (`import`/`export`), `with`, holes in arrays, `Intl`. See "Known
+  gaps" in `ARCHITECTURE.md` for the limits of what is there.
+- **Bytecode VM:** an earlier experiment, kept for `--dump-bytecode`. It
+  covers a small subset of the language and scripts do not run on it.
 
 ### 8. Modern Browser Capabilities & Advanced Engine Platform (Phase 14) (`include/litebird/dom/`, `include/litebird/render/`, `include/litebird/net/`, `include/litebird/js/`)
 - **IntersectionObserver API:** Viewport and root-relative intersection detection, threshold crossing calculations (`thresholds`, `rootMargin`), ratio computation, entry records, and EventLoop microtask delivery.
@@ -287,7 +337,7 @@ Litebird implements the complete modern browser rendering pipeline:
 # Build the main litebird CLI
 make
 
-# Run the full 58-suite test suite
+# Run the 83 engine test suites
 make test
 ```
 
@@ -336,7 +386,8 @@ make test
 | `--dump-bytecode` | Disassemble JavaScript code into VM bytecode |
 | `--render-terminal` | Render page to ANSI Truecolor terminal (default) |
 | `--render-bmp <file>` | Render page to an uncompressed 24-bit BMP image |
-| `--run-js "<code>"` | Evaluate a JavaScript snippet directly |
+| `--run-js "<code>"` | Run a script, then its timers and promise callbacks. Exits 1 if anything was left uncaught |
+| `--virtual-time-budget=<ms>` | How much timer time a page gets to settle before it is rendered (default 16, one frame) |
 | `--repl` | Launch the interactive JavaScript & DOM REPL |
 
 ---
@@ -347,57 +398,17 @@ make test
 make test
 ```
 
-Output:
+Output (83 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
-Running test: css_parser_and_specificity... PASSED
-Running test: style_resolver_and_cascade... PASSED
-Running test: layout_box_tree... PASSED
-Running test: javascript_engine... PASSED
-Running test: bytecode_virtual_machine... PASSED
-Running test: flexbox_layout... PASSED
-Running test: text_wrapping... PASSED
-Running test: anti_aliased_rasterizer_and_shadows... PASSED
-Running test: inline_formatting_context... PASSED
-Running test: garbage_collector_and_cycles... PASSED
-Running test: dom_event_target_and_bubbling... PASSED
-Running test: event_loop_and_timers... PASSED
-Running test: resource_loader_and_url_resolution... PASSED
-Running test: browser_shell_navigation_and_hit_testing... PASSED
-Running test: css_positioning_and_stacking_contexts... PASSED
-Running test: box_sizing_and_constraints... PASSED
-Running test: javascript_prototype_chain_and_arrays... PASSED
-Running test: incremental_layout_and_invalidation... PASSED
-Running test: js_async_promises_and_json... PASSED
-Running test: css_flex_wrapping_and_grid_layout... PASSED
-Running test: dom_3phase_events_and_form_controls... PASSED
-Running test: image_decoding_and_rendering... PASSED
-Running test: js_template_literals_and_arrow_functions... PASSED
-Running test: web_storage_and_cookies... PASSED
-Running test: html5_canvas_2d_context... PASSED
-Running test: css_media_queries... PASSED
-Running test: css_pseudo_classes... PASSED
-Running test: svg_vector_rendering... PASSED
-Running test: es6_map_set_and_destructuring... PASSED
-Running test: css_variables_and_cascade... PASSED
-Running test: css_calc_expressions... PASSED
-Running test: fetch_api_and_headers... PASSED
-Running test: url_and_url_search_params... PASSED
-Running test: web_workers_and_concurrent_execution... PASSED
-Running test: css_flexbox_and_grid_modern_refinements... PASSED
-Running test: websocket_rfc6455_client_and_handshake... PASSED
-Running test: mutation_observer_api... PASSED
-Running test: custom_elements_api... PASSED
-Running test: shadow_dom_and_slot_projection... PASSED
-Running test: intersection_and_resize_observers... PASSED
-Running test: history_api_and_client_routing... PASSED
-Running test: css_filters_and_canvas_blending... PASSED
-Running test: js_generators_iterators_and_for_of... PASSED
-Running test: abort_controller_and_fetch_cancellation... PASSED
-Running test: css_grid_template_areas_and_containment... PASSED
+...
+All 83 engine test suites passed successfully!
+```
 
-All 52 engine test suites passed successfully!
+```bash
+make js-conformance                                                     # the JavaScript scoreboard
+python3 tools/conformance/run_js_conformance.py --show 10 --filter async   # failing cases, with diffs
 ```

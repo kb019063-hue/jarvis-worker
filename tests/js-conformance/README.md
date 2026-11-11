@@ -29,6 +29,7 @@ The runner sets `TZ=UTC` for both engines so date cases are stable.
 | `strings.dat`, `numbers-math.dat`, `json.dat`, `regexp.dat`, `date.dat` | Built-in libraries |
 | `errors.dat`, `collections-iterators.dat`, `async.dat`, `misc.dat` | Exceptions, Map/Set/generators, promises and timers |
 | `programs.dat` | 20-40 line programs that combine features the way real scripts do |
+| `gc-safety.dat` | Scripts that run a collection in the middle of everything: inside callbacks, half-built expressions, loops, suspended generators and async functions. The result must not change |
 
 ## Format
 
@@ -56,3 +57,8 @@ the expected output and exits 0.
    run `--reference "node -e"` to confirm.
 6. Add cases for what JavaScript does, including things Litebird cannot do
    yet. A corpus that only contains passing cases measures nothing.
+7. A case that needs `gc()` must still run under Node, which has none. Start
+   it the way `gc-safety.dat` does: `var gc = globalThis.gc || function(){ return {}; };`.
+   Node then checks the logic, and Litebird checks that collecting does not
+   change the answer. `make asan` runs the corpus under the sanitizers, where
+   a freed object that is still in use is an error rather than a wrong value.

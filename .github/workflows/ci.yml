@@ -75,7 +75,7 @@ jobs:
         # catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 660
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 692
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report

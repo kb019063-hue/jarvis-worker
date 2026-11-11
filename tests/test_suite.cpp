@@ -4169,6 +4169,80 @@ TEST(gc_keeps_objects_captured_by_pending_microtasks) {
     assert(js.global_env()->get("microtask_value").to_string() == "keepme");
 }
 
+TEST(gc_keeps_state_reachable_only_from_listeners_and_frames) {
+    using namespace litebird;
+
+    // Two shapes of "the only reference is somewhere the collector used to
+    // not look". Both were heap-use-after-free under AddressSanitizer while
+    // roots were registered by hand at each boundary; the collector now works
+    // out its own roots from handle counts, so neither needs registering.
+
+    // 1. A DOM listener. The closure, and the `state` object it captures, are
+    //    referenced from nothing but the listener table of a DOM node -- C++
+    //    storage the heap cannot walk. Collect, churn the heap so freed cells
+    //    would be reused, then click.
+    {
+        auto doc = std::make_shared<Document>();
+        auto button = std::make_shared<Element>("button");
+        button->set_attribute("id", "b");
+        auto out = std::make_shared<Element>("div");
+        out->set_attribute("id", "out");
+        out->append_child(std::make_shared<Text>("initial"));
+        doc->append_child(button);
+        doc->append_child(out);
+
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var handler;
+            (function () {
+                var state = { count: 0, tag: { name: "live" } };
+                var listener = function () {
+                    state.count++;
+                    document.getElementById("out").textContent = state.tag.name + ":" + state.count;
+                };
+                document.getElementById("b").addEventListener("click", listener);
+                handler = { remove: function () { document.getElementById("b").removeEventListener("click", listener); } };
+            })();
+            var junk = [];
+            gc();
+            for (var i = 0; i < 3000; i++) junk.push({ k: i, s: "x" + i });
+            document.getElementById("b").click();
+        )");
+        assert(out->text_content() == "live:1");
+
+        // The same again with the collection and the click coming from the
+        // host side, the way the shell's heap view and a real mouse click do.
+        Heap::default_heap().collect_garbage();
+        js.eval_ast("junk = []; for (var j = 0; j < 3000; j++) junk.push({ k: j });");
+        button->click();
+        assert(out->text_content() == "live:2");
+
+        // removeEventListener must find the listener after collections too:
+        // identity is the function object, and that object must not have moved
+        // or been replaced.
+        js.eval_ast("handler.remove(); gc();");
+        button->click();
+        assert(out->text_content() == "live:2");
+    }
+
+    // 2. A binding that lives only in a `for (let ...)` head while the body
+    //    collects. The per-iteration copy of the scope is held by the
+    //    evaluator's C++ frame and by nothing else.
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var seen = "";
+            for (let o = { a: { b: 1 } }, i = 0; i < 3; i++) {
+                gc();
+                var filler = [];
+                for (var k = 0; k < 500; k++) filler.push({ k: k });
+                seen += o.a.b;
+            }
+        )");
+        assert(js.global_env()->get("seen").to_string() == "111");
+    }
+}
+
 TEST(phase19_js_compatibility_basics) {
     using namespace litebird;
 
@@ -4535,6 +4609,7 @@ int main() {
     RUN_TEST(runaway_js_recursion_reports_range_error);
     RUN_TEST(gc_roots_are_complete_under_empty_root_set);
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
+    RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

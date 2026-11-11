@@ -19,7 +19,7 @@ The rest are documented with enough detail to act on.
 | 3 | `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--` are not tokenised | **Critical** | ✅ Fixed |
 | 4 | GC roots are incomplete and never registered → latent use-after-free | **Critical** | ✅ Fixed |
 | 5 | Segfault on deeply nested input (depth ≈ 3,000) | **High** | ✅ Fixed |
-| 6 | Two incompatible object models in `JsValue` | **High** | Open |
+| 6 | Two incompatible object models in `JsValue` | **High** | 🟡 Mostly resolved (Phase 23): every object is a heap cell |
 | 7 | `var` has block scope instead of function scope | **High** | ✅ Fixed (Phase 19) |
 | 8 | No recursion guard in the JS engine | **High** | ✅ Fixed |
 | 9 | `get_property()` allocates on every property read | **High (perf)** | Open |
@@ -30,6 +30,10 @@ The rest are documented with enough detail to act on.
 | 14 | `has_class()` allocated a `stringstream` per call | **High (perf)** | ✅ Fixed |
 | 15 | `text_content()` was O(n²) in depth | **Medium (perf)** | ✅ Fixed |
 | 16 | Deep HTML parsing repeated scope scans and ancestor walks | **Medium (perf)** | ✅ Fixed |
+| 17 | HTTP request injection and unbounded response reads | **High** | ✅ Fixed |
+| 18 | A script was cut off at the first character the lexer did not know, and could run twice | **Critical** | ✅ Fixed (Phase 23) |
+| 19 | `gc()` freed objects held only by native code or the native stack | **Critical** | ✅ Fixed (Phase 23) |
+| 20 | A collection on one thread examined and freed a worker's objects | **High** | 🟡 Collections are per agent; the cell list is still shared |
 
 ---
 
@@ -153,6 +157,10 @@ this phase and still returns `undefined`.
 > interpreter and the event loop both contribute their live `JsValue`s. Verified
 > with 200 consecutive empty-root-set collections under ASan. The original
 > finding follows.
+>
+> **Superseded in Phase 23.** Registering roots at every boundary turned out
+> not to be completable; finding 19 is what was still missed. The collector
+> now derives its roots from reference counts and nothing is registered.
 
 
 `JsObject` lives in a mark-and-sweep heap holding **raw `JsObject*`**. A
@@ -240,7 +248,13 @@ text past the limit, which is what the HTML spec already tells you to do.
 
 ---
 
-## 6. Two incompatible object models in one struct
+## 6. 🟡 Two incompatible object models in one struct
+
+> **Mostly resolved in Phase 23.** Every object, array and wrapper is a heap
+> cell now, and a script function keeps its own properties in one. The
+> `properties` map survives on `JsValue` for symbols (their description) and for
+> native functions' own properties, which live in the function's shared payload.
+> The read sites that had to check both are gone. The original finding follows.
 
 `JsValue` carries both a GC pointer and a `shared_ptr` to a property map:
 
@@ -541,3 +555,72 @@ Regression coverage exercises method, header-value, and request-target
 injection attempts, a successful local loopback response, and a response that
 exceeds the 16 MiB cap. Tests use a loopback socket only and do not require
 external networking.
+
+## 18. ✅ A script was cut off at the first unknown character, and could run twice
+
+Found in Phase 23 by running the engine against an outside corpus
+(`tests/js-conformance/`, expected output recorded from Node.js). The engine
+passed its own unit tests and 25 of 90 everyday scripts.
+
+- The lexer's default case turned any character it did not recognise into the
+  end-of-file token. `?`, `&`, `|`, `^` and `~` were among them, so a script
+  using a ternary or a bitwise operator stopped there, without an error, and
+  everything after it never ran.
+- `eval()` ran the bytecode VM and, on any exception, ran the whole source
+  again in the tree-walker. `console.log("side effect"); undefinedFunction()`
+  printed twice. Any script that touched the DOM or the network before failing
+  did so twice.
+
+Both are gone with the rewrite: the lexer reports what it cannot tokenise as a
+`SyntaxError`, a script that does not parse does not run, and there is one
+execution path.
+
+## 19. ✅ `gc()` freed objects that were still in use
+
+Finding 4 was fixed by registering roots. After Phase 23 every object is a
+heap cell, which made every unregistered holder a use-after-free the next time
+script called `gc()`:
+
+```js
+function inner() { gc(); }
+function outer() { var o = {a: [1, 2, 3]}; inner(); return o.a.length; }   // o freed inside inner()
+
+for (let o = {a: 1}, i = 0; i < 2; i++) { gc(); o.a; }                     // the loop's scope was not a root
+
+button.addEventListener("click", function () { state.count++; });        // `state` lives in a std::function
+gc(); button.click();
+```
+
+AddressSanitizer reported each as `heap-use-after-free`. The same shape exists
+wherever native code keeps a value: observers, timers, promise reactions, a
+half-evaluated argument list, the stack of a suspended generator.
+
+**Fix.** The collector no longer depends on registration. Each `JsValue` holds
+a counted handle to its cell; a collection counts the references it can find
+inside the heap and treats anything with more references than that as held by
+native code, hence a root (`Heap::collect_garbage`, described in
+`ARCHITECTURE.md`, Phase 23).
+
+**Tests.** `tests/js-conformance/gc-safety.dat` has 32 cases that collect in
+the middle of something (the first two above among them) and must still print
+Node's answer. The listener case needs a DOM, so it is a unit test,
+`gc_keeps_state_reachable_only_from_listeners_and_frames`. `make asan` runs
+both under the sanitizers, and the corpus runner now fails the run on any
+sanitizer report in a case's stderr, whatever the pass count: UBSan prints its
+report and carries on, so a case could otherwise print the right answer after
+undefined behaviour and count as a pass.
+
+## 20. 🟡 A collection on one thread reached into a worker's objects
+
+A worker runs its own interpreter on its own thread but allocates from the
+process-wide heap. A collection started by the page marked through, and could
+free, cells the worker thread was using at that moment.
+
+Cells and scopes are now tagged with the agent (page or worker) that created
+them. A collection examines and frees only its own agent's; other agents'
+cells are kept and never looked into. Workers also have their own event loop,
+so their timers and promise callbacks no longer run on the page's thread.
+
+Still open: all agents share one cell list behind one mutex, so a collection
+blocks other agents' allocations while it marks.
+

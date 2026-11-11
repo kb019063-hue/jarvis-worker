@@ -19,6 +19,11 @@ Options:
     --quiet            Only print the summary lines
     --json PATH        Write a machine-readable summary to PATH
     --min-pass N       Exit 1 if fewer than N cases pass (the CI floor)
+
+Whatever the floor says, the run fails if any case crashes the engine or
+prints an AddressSanitizer / UBSan / ThreadSanitizer report: those are
+memory-safety bugs, and a case that prints the right answer after UBSan
+complained is counted as a failure.
     --reference CMD    Run the corpus under a reference engine instead, e.g.
                        --reference "node -e". Exits 1 on any mismatch. This is
                        how the expectations themselves are kept honest.
@@ -37,6 +42,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -65,6 +71,17 @@ class Result:
     returncode: int = 0
     stderr: str = ""
     timed_out: bool = False
+    sanitizer: bool = False
+
+
+# What AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer print.
+# UBSan in particular reports and then carries on, so a case can print the
+# right answer and exit 0 while the engine did something undefined. A pass
+# count alone would never show that; the runner has to read stderr.
+SANITIZER_REPORT = re.compile(
+    r"ERROR: (Address|Leak|Thread|Memory|UndefinedBehavior)Sanitizer"
+    r"|WARNING: ThreadSanitizer"
+    r"|: runtime error: ")
 
 
 def parse_dat(path: Path) -> list[Case]:
@@ -113,8 +130,9 @@ def run_case(command: list[str], case: Case, timeout: float) -> Result:
         return Result(case, "", False, returncode=-1, stderr="timeout", timed_out=True)
     actual = completed.stdout.decode("utf-8", "replace").rstrip("\n")
     stderr = completed.stderr.decode("utf-8", "replace").strip()
-    passed = completed.returncode == 0 and actual == case.expect
-    return Result(case, actual, passed, completed.returncode, stderr)
+    sanitizer = bool(SANITIZER_REPORT.search(stderr))
+    passed = completed.returncode == 0 and actual == case.expect and not sanitizer
+    return Result(case, actual, passed, completed.returncode, stderr, sanitizer=sanitizer)
 
 
 def failure_block(result: Result) -> str:
@@ -125,7 +143,10 @@ def failure_block(result: Result) -> str:
     out.append(f"    actual:   {result.actual!r}")
     if result.returncode != 0:
         out.append(f"    exit:     {result.returncode}")
-    if result.stderr:
+    if result.sanitizer:
+        report = next(line for line in result.stderr.splitlines() if SANITIZER_REPORT.search(line))
+        out.append(f"    sanitizer: {report[:240]}")
+    elif result.stderr:
         out.append(f"    stderr:   {result.stderr.splitlines()[-1][:200]}")
     return "\n".join(out)
 
@@ -188,6 +209,7 @@ def main() -> int:
     headline_passed = sum(1 for r in headline if r.passed)
     crashes = sum(1 for r in results if r.returncode < 0 and not r.timed_out)
     timeouts = sum(1 for r in results if r.timed_out)
+    sanitizer_hits = [r for r in results if r.sanitizer]
 
     if not args.quiet:
         print(f"Per-file results for {label} (passed/total):")
@@ -209,6 +231,12 @@ def main() -> int:
               f"({100.0 * headline_passed / len(headline):.1f}%)")
     print(f"JS conformance, full corpus: {passed}/{total} ({rate:.1f}%)  "
           f"[{len(files)} files, {crashes} crashes, {timeouts} timeouts]")
+    if sanitizer_hits:
+        # Printed even with --quiet: this is never noise.
+        print(f"\nSanitizer reports in {len(sanitizer_hits)} case(s):")
+        for result in sanitizer_hits[:20]:
+            print(failure_block(result))
+            print()
 
     if args.json:
         Path(args.json).write_text(json.dumps({
@@ -218,12 +246,21 @@ def main() -> int:
             "headline": {"passed": headline_passed, "total": len(headline)},
             "crashes": crashes,
             "timeouts": timeouts,
+            "sanitizer_reports": [f"{r.case.source}: {r.case.name}" for r in sanitizer_hits],
             "per_file": {name: {"passed": v[0], "total": v[1]} for name, v in per_file.items()},
             "failures": [f"{r.case.source}: {r.case.name}" for r in results if not r.passed],
         }, indent=2))
 
     if args.reference:
         return 0 if passed == total else 1
+    # A crash or a sanitizer report is a memory-safety bug in the engine, not
+    # a missing feature, so the floor's slack does not apply to it.
+    if sanitizer_hits:
+        print(f"error: {len(sanitizer_hits)} case(s) produced a sanitizer report", file=sys.stderr)
+        return 1
+    if crashes:
+        print(f"error: {crashes} case(s) crashed the engine", file=sys.stderr)
+        return 1
     if args.min_pass is not None and passed < args.min_pass:
         print(f"error: {passed} cases pass, below the floor of {args.min_pass}", file=sys.stderr)
         return 1

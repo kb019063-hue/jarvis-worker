@@ -3,6 +3,7 @@
 #include "litebird/js/Json.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include <fstream>
 #include <sstream>
@@ -40,6 +41,7 @@ WorkerObject::~WorkerObject() {
 void WorkerObject::start() {
     m_running = true;
     m_terminated = false;
+    m_owner_loop = &EventLoop::default_loop();
     std::string script_source = load_worker_script(m_script_url);
 
     m_thread = std::thread([this, script = std::move(script_source)]() {
@@ -78,8 +80,42 @@ void WorkerObject::add_event_listener(const std::string& event, JsValue listener
 }
 
 void WorkerObject::worker_thread_main(std::string script_source) {
+    // A worker is an agent of its own: its timers and promise reactions run on
+    // this thread, in this loop, never in the page's. Declared before the
+    // interpreter so that it outlives it.
+    EventLoop worker_loop;
+    EventLoop::set_current(&worker_loop);
+    EventLoop* owner_loop = m_owner_loop;
+
     JsInterpreter worker_js(nullptr);
     auto env = worker_js.global_env();
+
+    // An error nothing in the worker caught goes to the page's worker.onerror.
+    auto report_error = [this, owner_loop](std::string message) {
+        owner_loop->post_task([weak_self = weak_from_this(), err = std::move(message)]() {
+            auto worker = weak_self.lock();
+            if (!worker || worker->m_terminated) return;
+            if (worker->m_onerror.is_function()) {
+                JsValue err_event = JsValue::make_object(Heap::default_heap().allocate_object());
+                err_event.set_property("message", JsValue::make_string(err));
+                err_event.set_property("type", JsValue::make_string("error"));
+                js_call_guarded(worker->m_onerror, JsValue::make_undefined(), {err_event});
+            } else {
+                std::cerr << "Uncaught (in worker) " << err << std::endl;
+            }
+        });
+    };
+    // Runs worker script and returns false, after reporting, if it threw.
+    auto run_script = [&report_error](const std::function<void()>& body) {
+        JsValue thrown;
+        bool ok = false;
+        {
+            JsScriptScope script_scope;     // promise reactions run when the script is done
+            ok = js_capture_throw(body, thrown);
+        }
+        if (!ok) report_error(js_describe_thrown(thrown));
+        return ok;
+    };
 
     std::vector<JsValue> worker_message_listeners;
 
@@ -97,7 +133,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
             json_str = args[0].to_string();
         }
 
-        EventLoop::default_loop().post_task([weak_self = weak_from_this(), json = std::move(json_str)]() {
+        m_owner_loop->post_task([weak_self = weak_from_this(), json = std::move(json_str)]() {
             auto worker = weak_self.lock();
             if (!worker || worker->m_terminated) return;
 
@@ -158,79 +194,64 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     env->define("addEventListener", add_el_fn);
     self_obj.set_property("addEventListener", add_el_fn);
 
-    // Initial evaluation of worker script
-    try {
-        worker_js.eval(script_source);
-    } catch (const std::exception& ex) {
-        std::string err_msg = ex.what();
-        EventLoop::default_loop().post_task([weak_self = weak_from_this(), err = std::move(err_msg)]() {
-            auto worker = weak_self.lock();
-            if (!worker || worker->m_terminated) return;
-            if (worker->m_onerror.is_function()) {
-                JsValue err_event = JsValue::make_object(Heap::default_heap().allocate_object());
-                err_event.set_property("message", JsValue::make_string(err));
-                worker->m_onerror.call({err_event});
-            }
-        });
+    // Initial evaluation of the worker script. A worker whose script fails to
+    // load or throws at the top level never starts.
+    if (!run_script([&] { worker_js.run(script_source); })) {
         m_running = false;
         return;
     }
+    worker_loop.tick();
 
-    // Worker message pump loop
+    // Message pump: wait for a message from the page or for the worker's next
+    // timer, whichever comes first.
     while (m_running && !m_terminated) {
         std::string incoming_json;
+        bool have_message = false;
         {
             std::unique_lock<std::mutex> lock(m_queue_mutex);
-            m_cv.wait(lock, [this]() {
-                return !m_incoming_messages.empty() || !m_running || m_terminated;
-            });
-
+            auto woken = [this]() { return !m_incoming_messages.empty() || !m_running || m_terminated; };
+            const auto next_timer = worker_loop.time_until_next();
+            if (!next_timer) {
+                m_cv.wait(lock, woken);
+            } else if (next_timer->count() > 0) {
+                m_cv.wait_for(lock, *next_timer, woken);
+            }
             if (!m_running || m_terminated) break;
-            incoming_json = std::move(m_incoming_messages.front());
-            m_incoming_messages.pop();
+            if (!m_incoming_messages.empty()) {
+                incoming_json = std::move(m_incoming_messages.front());
+                m_incoming_messages.pop();
+                have_message = true;
+            }
         }
 
-        JsValue data;
-        try {
-            data = Json::parse(incoming_json);
-        } catch (...) {
-            data = JsValue::make_string(incoming_json);
-        }
-
-        JsValue event = JsValue::make_object(Heap::default_heap().allocate_object());
-        event.set_property("data", data);
-        event.set_property("type", JsValue::make_string("message"));
-
-        // Check self.onmessage or global onmessage
-        JsValue onmsg = env->get("onmessage");
-        if (!onmsg.is_function()) {
-            onmsg = self_obj.get_property("onmessage");
-        }
-
-        if (onmsg.is_function()) {
+        if (have_message) {
+            JsValue data;
             try {
-                onmsg.call({event});
-            } catch (const std::exception& ex) {
-                std::string err_str = ex.what();
-                EventLoop::default_loop().post_task([weak_self = weak_from_this(), err = std::move(err_str)]() {
-                    auto worker = weak_self.lock();
-                    if (!worker || worker->m_terminated) return;
-                    if (worker->m_onerror.is_function()) {
-                        JsValue err_event = JsValue::make_object(Heap::default_heap().allocate_object());
-                        err_event.set_property("message", JsValue::make_string(err));
-                        worker->m_onerror.call({err_event});
-                    }
-                });
+                data = Json::parse(incoming_json);
+            } catch (...) {
+                data = JsValue::make_string(incoming_json);
+            }
+
+            JsValue event = JsValue::make_object(Heap::default_heap().allocate_object());
+            event.set_property("data", data);
+            event.set_property("type", JsValue::make_string("message"));
+
+            // Check self.onmessage or global onmessage
+            JsValue onmsg = env->get("onmessage");
+            if (!onmsg.is_function()) {
+                onmsg = self_obj.get_property("onmessage");
+            }
+            if (onmsg.is_function()) {
+                run_script([&] { onmsg.call({event}); });
+            }
+            // A listener may add or remove listeners; iterate over a copy.
+            const auto listeners = worker_message_listeners;
+            for (const auto& listener : listeners) {
+                if (listener.is_function()) run_script([&] { listener.call({event}); });
             }
         }
 
-        for (auto& listener : worker_message_listeners) {
-            if (listener.is_function()) {
-                try {
-                    listener.call({event});
-                } catch (...) {}
-            }
-        }
+        worker_loop.tick();
     }
 }
 

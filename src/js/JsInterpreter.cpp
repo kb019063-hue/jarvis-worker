@@ -43,8 +43,21 @@ void* environment_trace(Heap& heap, void* env) {
 
 } // namespace
 
+namespace {
+std::unique_ptr<JsIntrinsics> create_realm() {
+    auto realm = std::make_unique<JsIntrinsics>();
+    realm->install();
+    // Objects created from here on, including the ones the members below
+    // create while they are constructed, belong to this interpreter's realm.
+    JsIntrinsics::set_current(realm.get());
+    return realm;
+}
+}
+
 JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
-    : m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)), m_history(std::make_shared<History>()), m_vm(m_document) {
+    : m_realm(create_realm()), m_alive(std::make_shared<std::atomic<bool>>(true)),
+      m_global_env(std::make_shared<JsEnvironment>()), m_document(std::move(doc)),
+      m_history(std::make_shared<History>()), m_vm(m_document) {
     Heap::EnvironmentTracer tracer;
     tracer.enter = &environment_enter;
     tracer.trace = &environment_trace;
@@ -57,18 +70,36 @@ JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
     // collection with an empty root list (the DevTools path) frees objects the
     // interpreter is still holding, and the next property read is a UAF.
     Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>& roots) {
+        // Scopes with code running in them are reported separately (see
+        // "Active scopes" in JsEval.cpp); the global scope is always live.
         if (m_global_env) m_global_env->collect_roots(roots);
-        if (m_current_env) m_current_env->collect_roots(roots);
         roots.push_back(&m_global_object);
         for (auto& [k, v] : m_vm.globals()) roots.push_back(&v);
+
+        // A generator or async function parked mid-body keeps its local
+        // variables on a thread stack the collector cannot scan; its scope is
+        // reachable from here instead.
+        for (auto& weak : m_generators) {
+            auto frame = weak.lock();
+            if (!frame || frame->is_done || !frame->frame_env) continue;
+            Heap::default_heap().mark_environment(frame->frame_env.get());
+        }
     });
 }
 
 JsInterpreter::~JsInterpreter() {
-    // Suspended generators hold frames that point back into this interpreter.
-    // Unwind them now, while it still exists: their `finally` blocks run.
+    // Callbacks that outlive this interpreter (timers and promise reactions in
+    // the process-wide event loop, DOM listeners) must not run script any more.
+    m_alive->store(false);
+
+    // Suspended generators and async functions hold frames that point back
+    // into this interpreter. Unwind them now, while it still exists. Their
+    // `finally` blocks do not run: no script may run from a destructor.
     for (auto& weak : m_generators) {
-        if (auto generator = weak.lock()) generator->terminate();
+        if (auto frame = weak.lock()) {
+            frame->cancelled = true;
+            frame->terminate(false);
+        }
     }
     m_generators.clear();
     Heap::default_heap().remove_root_provider(this);
@@ -113,12 +144,16 @@ JsValue JsInterpreter::eval_bytecode(std::string_view source) {
 
 JsValue JsInterpreter::eval_ast(std::string_view source) {
     m_last_eval_failed = false;
+    // When this scope ends the script has finished and the JavaScript stack is
+    // empty, so promise callbacks it queued run before control returns to the
+    // host. That is what a browser does after every <script>.
+    JsScriptScope script_scope;
     try {
         return run(source);
     } catch (const JsSyntaxError& error) {
         // A script with a syntax error does not run at all, not even the part
         // before the error.
-        js_report_uncaught(js_make_error(JsErrorKind::SyntaxError, error.what()));
+        js_report_uncaught(error);
     } catch (const JsThrow& thrown) {
         js_report_uncaught(thrown.value);
     } catch (const GeneratorAbortException&) {
@@ -130,19 +165,31 @@ JsValue JsInterpreter::eval_ast(std::string_view source) {
     return JsValue::make_undefined();
 }
 
+namespace {
+
+/// setTimeout's delay argument: anything that is not a positive finite number
+/// means "as soon as possible".
+int timer_delay_from(const JsValue& value) {
+    const double ms = value.is_undefined() ? 0.0 : js_to_number(value);
+    if (!(ms > 0)) return 0;                        // also catches NaN
+    if (ms > 2147483647.0) return 2147483647;
+    return static_cast<int>(ms);
+}
+
+uint32_t timer_id_from(const JsValue& value) {
+    const double id = js_to_number(value);
+    if (!(id >= 1) || id > 4294967295.0) return 0;  // 0 is never a live timer
+    return static_cast<uint32_t>(id);
+}
+
+} // namespace
+
 void JsInterpreter::init_builtins() {
     // gc function
     m_global_env->define("gc", JsValue::make_native_function([this](const std::vector<JsValue>&) {
-        std::vector<JsValue*> roots;
-        if (m_current_env) {
-            m_current_env->collect_roots(roots);
-        } else if (m_global_env) {
-            m_global_env->collect_roots(roots);
-        }
-        for (auto& [k, v] : m_vm.globals()) {
-            roots.push_back(&v);
-        }
-        auto stats = Heap::default_heap().collect_garbage(roots);
+        // Everything this interpreter can reach is reported by its root
+        // provider, including the scopes of every function on the call stack.
+        auto stats = Heap::default_heap().collect_garbage();
         JsValue res = JsValue::make_object();
         res.set_property("total_cells", JsValue::make_number(stats.total_cells));
         res.set_property("alive_cells", JsValue::make_number(stats.alive_cells));
@@ -276,16 +323,38 @@ void JsInterpreter::init_builtins() {
     m_global_env->define("history", history_obj);
     win_obj.set_property("history", history_obj);
 
-    JsValue raf = JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) return JsValue::make_number(0);
-        JsValue callback = args[0];
-        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
-            callback.call({JsValue::make_number(16.0)});
-        }, 16);
+    // requestAnimationFrame(callback): there is no compositor to synchronise
+    // with, so a frame is a 16 ms timer. The callback receives the time since
+    // this interpreter started, like performance.now().
+    const auto time_origin = EventLoop::default_loop().now();
+    auto elapsed_ms = [time_origin]() {
+        const auto elapsed = EventLoop::default_loop().now() - time_origin;
+        return std::chrono::duration<double, std::milli>(elapsed).count();
+    };
+    JsValue raf = js_make_native("requestAnimationFrame", 1, [elapsed_ms](const std::vector<JsValue>& args) {
+        const JsValue callback = js_arg(args, 0);
+        if (!callback.is_function()) js_throw_type_error("requestAnimationFrame: the callback is not a function");
+        uint32_t id = EventLoop::default_loop().set_timeout([callback, elapsed_ms]() {
+            callback.call({JsValue::make_number(elapsed_ms())});
+        }, 16, {js_roots({callback})});
         return JsValue::make_number(id);
     });
     m_global_env->define("requestAnimationFrame", raf);
     win_obj.set_property("requestAnimationFrame", raf);
+    JsValue caf = js_make_native("cancelAnimationFrame", 1, [](const std::vector<JsValue>& args) {
+        if (!args.empty()) EventLoop::default_loop().clear_timer(timer_id_from(args[0]));
+        return JsValue::make_undefined();
+    });
+    m_global_env->define("cancelAnimationFrame", caf);
+    win_obj.set_property("cancelAnimationFrame", caf);
+
+    // performance.now(): milliseconds since this interpreter started.
+    JsValue performance = JsValue::make_object();
+    js_define_method(performance, "now", 0, [elapsed_ms](const std::vector<JsValue>&) {
+        return JsValue::make_number(elapsed_ms());
+    });
+    performance.set_property("timeOrigin", JsValue::make_number(js_current_time_ms()));
+    m_global_env->define("performance", performance);
 
     m_global_env->define("window", win_obj);
 
@@ -406,55 +475,45 @@ void JsInterpreter::init_builtins() {
     win_obj.set_property("MutationObserver", mo_ctor);
 
     // queueMicrotask(callback)
-    JsValue qm = JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].is_callable()) {
-            JsValue cb = args[0];
-            EventLoop::default_loop().post_microtask([cb]() {
-                cb.call({});
-            });
-        }
+    JsValue qm = js_make_native("queueMicrotask", 1, [](const std::vector<JsValue>& args) {
+        const JsValue callback = js_arg(args, 0);
+        if (!callback.is_function()) js_throw_type_error("queueMicrotask: the callback is not a function");
+        EventLoop::default_loop().post_microtask([callback]() { callback.call({}); }, {js_roots({callback})});
         return JsValue::make_undefined();
     });
     m_global_env->define("queueMicrotask", qm);
     win_obj.set_property("queueMicrotask", qm);
 
-    // setTimeout(callback, delay)
-    m_global_env->define("setTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) return JsValue::make_number(0);
-        JsValue callback = args[0];
-        int delay = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
-        uint32_t id = EventLoop::default_loop().set_timeout([callback]() {
-            callback.call({});
-        }, delay);
-        return JsValue::make_number(id);
-    }));
-
-    // setInterval(callback, interval)
-    m_global_env->define("setInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) return JsValue::make_number(0);
-        JsValue callback = args[0];
-        int interval = (args.size() > 1) ? static_cast<int>(args[1].to_number()) : 0;
-        uint32_t id = EventLoop::default_loop().set_interval([callback]() {
-            callback.call({});
-        }, interval);
-        return JsValue::make_number(id);
-    }));
-
-    // clearTimeout(id)
-    m_global_env->define("clearTimeout", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty()) {
-            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
-        }
+    // setTimeout(callback, delay, ...args) and setInterval(callback, delay, ...args).
+    // The callback and its arguments sit in a std::function while they wait,
+    // where the collector cannot see them, so they are handed over as roots.
+    auto make_timer = [](const char* name, bool repeating) {
+        return js_make_native(name, 2, [repeating](const std::vector<JsValue>& args) {
+            const JsValue callback = js_arg(args, 0);
+            // Browsers also accept a string of code here. That form is an
+            // eval() in disguise and is not supported.
+            if (!callback.is_function()) return JsValue::make_number(0);
+            std::vector<JsValue> extra;
+            if (args.size() > 2) extra.assign(args.begin() + 2, args.end());
+            auto roots = std::make_shared<std::vector<JsValue>>(extra);
+            roots->push_back(callback);
+            auto fire = [callback, extra]() { callback.call(extra); };
+            const int delay = timer_delay_from(js_arg(args, 1));
+            auto& loop = EventLoop::default_loop();
+            const uint32_t id = repeating ? loop.set_interval(fire, delay, {roots})
+                                          : loop.set_timeout(fire, delay, {roots});
+            return JsValue::make_number(id);
+        });
+    };
+    JsValue clear_timer = js_make_native("clearTimeout", 1, [](const std::vector<JsValue>& args) {
+        if (!args.empty()) EventLoop::default_loop().clear_timer(timer_id_from(args[0]));
         return JsValue::make_undefined();
-    }));
-
-    // clearInterval(id)
-    m_global_env->define("clearInterval", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty()) {
-            EventLoop::default_loop().clear_timer(static_cast<uint32_t>(args[0].to_number()));
-        }
-        return JsValue::make_undefined();
-    }));
+    });
+    m_global_env->define("setTimeout", make_timer("setTimeout", false));
+    m_global_env->define("setInterval", make_timer("setInterval", true));
+    // One id space, as in browsers: either function clears either kind.
+    m_global_env->define("clearTimeout", clear_timer);
+    m_global_env->define("clearInterval", clear_timer);
 
     // Function values produced by the bytecode compiler have no native entry
     // point; this runs their body on the tree-walker.
@@ -547,7 +606,7 @@ void JsInterpreter::init_builtins() {
 void JsInterpreter::init_language_builtins() {
     // The language's own library (Object, Array, String, Math, JSON, ...) is
     // shared by every interpreter in the process.
-    for (const auto& [name, value] : JsIntrinsics::get().globals) {
+    for (const auto& [name, value] : m_realm->globals) {
         m_global_env->define(name, value);
     }
 
@@ -579,7 +638,8 @@ void JsInterpreter::init_language_builtins() {
             js_throw_error(JsErrorKind::SyntaxError, error.what());
         }
     });
-    function_ctor.define_property("prototype", js_object_value(JsIntrinsics::get().function_proto), 0);
+    function_ctor.define_property("prototype", js_object_value(m_realm->function_proto), 0);
+    js_define_hidden(m_realm->function_proto, "constructor", function_ctor);
     m_global_env->define("Function", function_ctor);
 
     // The global object. `window`, `self` and `globalThis` are the same object,

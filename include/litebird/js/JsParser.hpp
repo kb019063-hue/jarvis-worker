@@ -256,6 +256,7 @@ public:
     bool is_derived_constructor{false};
     bool is_strict{false};
     bool uses_arguments{false};
+    bool uses_await{false};              // the body itself contains `await` or `for await`
     bool uses_super{false};              // `super.x` or `super(...)` appears in the body
     bool uses_new_target{false};
     bool simple_params{true};            // identifiers only: no defaults, rest or patterns

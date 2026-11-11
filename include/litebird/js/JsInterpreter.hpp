@@ -8,6 +8,7 @@
 #include "litebird/js/VM.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include <atomic>
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -132,6 +133,18 @@ public:
     /// from walking a scope shared by many closures more than once.
     uint64_t gc_epoch{0};
 
+    /// Whether code running directly in this scope is strict: 1 strict,
+    /// 0 sloppy, -1 inherit from the enclosing scope. Set on function, class
+    /// and program scopes.
+    int8_t strict_mode{-1};
+
+    bool is_strict() const {
+        for (const JsEnvironment* env = this; env; env = env->m_parent.get()) {
+            if (env->strict_mode >= 0) return env->strict_mode == 1;
+        }
+        return false;
+    }
+
 private:
     static constexpr size_t kIndexThreshold = 16;
 
@@ -239,19 +252,26 @@ private:
     /// RAII call-depth guard. Throws JsStackOverflow once the native stack is
     /// within kStackReserveBytes of its budget, and always restores the counter,
     /// including on the unwinding path.
+    ///
+    /// The depth is counted per thread, because that is what a native stack is:
+    /// a generator or async function parked on its own thread must not use up
+    /// the budget of the thread that keeps running.
     class CallDepthGuard {
     public:
-        explicit CallDepthGuard(JsInterpreter& interp) : m_interp(interp) {
-            if (++m_interp.m_call_depth > kMaxCallDepth || stack_is_exhausted()) {
-                --m_interp.m_call_depth;
+        explicit CallDepthGuard(JsInterpreter&) {
+            if (++depth() > kMaxCallDepth || stack_is_exhausted()) {
+                --depth();
                 throw JsStackOverflow();
             }
         }
-        ~CallDepthGuard() { --m_interp.m_call_depth; }
+        ~CallDepthGuard() { --depth(); }
         CallDepthGuard(const CallDepthGuard&) = delete;
         CallDepthGuard& operator=(const CallDepthGuard&) = delete;
     private:
-        JsInterpreter& m_interp;
+        static int& depth() {
+            static thread_local int t_depth = 0;
+            return t_depth;
+        }
     };
 
     // --- Programs and functions -------------------------------------------
@@ -264,6 +284,8 @@ private:
     JsValue run_function_body(const FunctionNode& node, const EnvPtr& env);
     JsValue run_async_body(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);
     JsValue make_generator(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);
+    std::shared_ptr<struct GeneratorData> spawn_frame(const std::shared_ptr<const FunctionNode>& node,
+                                                      const EnvPtr& env, bool is_coroutine);
     void bind_parameters(const FunctionNode& node, const EnvPtr& env, const std::vector<JsValue>& args);
     void hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env);
     JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env);
@@ -315,16 +337,21 @@ private:
     void bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode);
     JsValue super_base(const EnvPtr& env);
 
-    int m_call_depth{0};
-    bool m_strict{false};
     bool m_last_eval_failed{false};
     bool m_chain_short_circuit{false};
+
+    /// This interpreter's built-ins. Declared first: everything below creates
+    /// objects that need its prototypes.
+    std::unique_ptr<JsIntrinsics> m_realm;
+    /// Cleared by the destructor. Every function value holds a copy, so a
+    /// callback that outlives the interpreter (a timer still queued in the
+    /// process-wide event loop) becomes a no-op instead of a dangling call.
+    std::shared_ptr<std::atomic<bool>> m_alive;
 
     std::shared_ptr<JsEnvironment> m_global_env;
     JsValue m_global_object;
     std::shared_ptr<Document> m_document;
     std::shared_ptr<class History> m_history;
-    std::shared_ptr<JsEnvironment> m_current_env;
     std::vector<std::weak_ptr<struct GeneratorData>> m_generators;
     VM m_vm;
 };

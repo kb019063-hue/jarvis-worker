@@ -1,7 +1,7 @@
 #pragma once
 
-// Installers for the built-in library. Each one populates the prototypes in
-// JsIntrinsics and registers its global bindings; they run once per process.
+// Installers for the built-in library. Each one populates the prototypes of a
+// realm and registers its global bindings; they run once per realm.
 
 #include "litebird/js/JsOps.hpp"
 
@@ -16,6 +16,11 @@ void install_collection_builtins(JsIntrinsics& realm);  // Map, Set, WeakMap, We
 void install_regexp_builtins(JsIntrinsics& realm);      // RegExp
 void install_date_builtins(JsIntrinsics& realm);        // Date
 void install_json_builtins(JsIntrinsics& realm);        // JSON
+void install_promise_builtins(JsIntrinsics& realm);     // Promise
+
+/// Milliseconds since the Unix epoch on the clock scripts see: wall-clock time
+/// plus whatever the current event loop has skipped (EventLoop::clock_skew).
+double js_current_time_ms();
 
 /// Creates an iterator object whose next() calls `step`. `step` fills `value`
 /// and returns true, or returns false when the sequence is exhausted. `roots`

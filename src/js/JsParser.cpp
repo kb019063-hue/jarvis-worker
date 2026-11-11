@@ -436,6 +436,7 @@ std::unique_ptr<Stmt> JsParser::parse_do_while_statement() {
 
 std::unique_ptr<Stmt> JsParser::parse_for_statement() {
     bool is_await = match(JsTokenType::Await);
+    if (is_await && !m_functions.empty() && m_functions.back().fn) m_functions.back().fn->uses_await = true;
     consume(JsTokenType::OpenParen, "Expected '(' after 'for'.");
 
     const int closures_before = m_closure_count;
@@ -1206,6 +1207,9 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
         }
         case JsTokenType::Await: {
             advance();
+            // Unlike `arguments`, await belongs to the innermost function,
+            // arrow or not.
+            if (!m_functions.empty() && m_functions.back().fn) m_functions.back().fn->uses_await = true;
             auto operand = parse_unary();
             return std::make_unique<AwaitExpr>(std::move(operand));
         }

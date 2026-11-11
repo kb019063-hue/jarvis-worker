@@ -174,16 +174,15 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         } else {
+            // Nobody is watching the clock while a one-shot script runs, so the
+            // loop does not sleep until a timer is due: it jumps its clock
+            // there. The script sees the time pass (Date.now() follows the
+            // loop's clock) and timers still fire in due order. The budget
+            // bounds a script that reschedules itself forever.
+            auto& loop = litebird::EventLoop::default_loop();
+            loop.set_time_skipping(true);
             interp.eval(js_code);
-            auto start_wait = std::chrono::steady_clock::now();
-            while (litebird::EventLoop::default_loop().has_pending_tasks()) {
-                if (litebird::EventLoop::default_loop().tick() == 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-                if (std::chrono::steady_clock::now() - start_wait > std::chrono::milliseconds(2000)) {
-                    break;
-                }
-            }
+            loop.run_until_idle(std::chrono::seconds(60));
             // A script that ended with an uncaught exception or a syntax error
             // is a failure; say so through the exit status.
             if (litebird::js_uncaught_error_count() > 0) return 1;

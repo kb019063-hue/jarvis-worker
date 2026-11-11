@@ -1,7 +1,10 @@
 #include "litebird/js/JsOps.hpp"
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Generator.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/JsLexer.hpp"
+#include "litebird/js/Promise.hpp"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -119,6 +122,7 @@ void js_throw_range_error(const std::string& message) {
 
 JsValue js_value_from_exception(const std::exception& ex) {
     if (auto thrown = dynamic_cast<const JsThrow*>(&ex)) return thrown->value;
+    if (dynamic_cast<const JsSyntaxError*>(&ex)) return js_make_error(JsErrorKind::SyntaxError, ex.what());
     std::string text = ex.what();
     // Engine-internal errors arrive as "RangeError: ..." style strings.
     static const std::pair<const char*, JsErrorKind> prefixes[] = {
@@ -144,8 +148,33 @@ void js_report_uncaught(const std::exception& ex) {
         js_report_uncaught(thrown->value);
         return;
     }
+    if (dynamic_cast<const JsSyntaxError*>(&ex)) {
+        g_uncaught_errors.fetch_add(1);
+        std::cerr << "Uncaught SyntaxError: " << ex.what() << std::endl;
+        return;
+    }
     g_uncaught_errors.fetch_add(1);
     std::cerr << "Uncaught " << ex.what() << std::endl;
+}
+
+void js_report_unhandled_rejection(const JsValue& reason) {
+    g_uncaught_errors.fetch_add(1);
+    std::cerr << "Uncaught (in promise) " << js_describe_thrown(reason) << std::endl;
+}
+
+JsScriptScope::JsScriptScope() : m_loop(EventLoop::default_loop()) {
+    // Counted per agent, not per thread: a suspended function's thread
+    // continues the JavaScript stack of whichever thread resumed it.
+    m_loop.enter_script();
+}
+
+JsScriptScope::~JsScriptScope() {
+    if (m_loop.leave_script() != 0) return;
+    // The JavaScript stack is empty: microtask checkpoint. Not while an
+    // exception is unwinding through here, which only happens when the engine
+    // is discarding a frame.
+    if (std::uncaught_exceptions() > 0) return;
+    m_loop.run_microtasks();
 }
 
 int js_uncaught_error_count() {
@@ -819,10 +848,21 @@ JsValue js_object_value(JsObject* object) {
 // Intrinsics
 // ---------------------------------------------------------------------------
 
+namespace {
+thread_local JsIntrinsics* t_current_realm = nullptr;
+
+JsIntrinsics& default_realm() {
+    // Leaked on purpose: values created in it may be destroyed by static
+    // destructors that run in an unknown order.
+    static JsIntrinsics* realm = new JsIntrinsics();
+    return *realm;
+}
+}
+
 JsIntrinsics::JsIntrinsics() {
-    // Only allocation happens here. Built-in methods are installed lazily by
-    // ensure_installed(), because installing them creates objects, and creating
-    // an object needs these prototypes to exist already.
+    // Only allocation happens here. Built-in methods are added by install(),
+    // because installing them creates objects, and creating an object needs
+    // these prototypes to exist already.
     auto& heap = Heap::default_heap();
     auto make = [&](JsObject* parent) {
         JsObject* obj = heap.allocate_object();
@@ -845,15 +885,28 @@ JsIntrinsics::JsIntrinsics() {
     set_proto = make(object_proto);
     weakmap_proto = make(object_proto);
     weakset_proto = make(object_proto);
+    promise_proto = make(object_proto);
     error_protos[static_cast<int>(JsErrorKind::Error)] = make(object_proto);
     for (int i = 1; i < 7; ++i) error_protos[i] = make(error_protos[0]);
 
     for (JsObject* cell : {object_proto, function_proto, array_proto, string_proto, number_proto,
                            boolean_proto, symbol_proto, iterator_proto, regexp_proto, date_proto,
-                           map_proto, set_proto, weakmap_proto, weakset_proto}) {
+                           map_proto, set_proto, weakmap_proto, weakset_proto, promise_proto}) {
         m_roots.push_back(JsValue::make_object(cell));
     }
     for (JsObject* cell : error_protos) m_roots.push_back(JsValue::make_object(cell));
+
+    // The collector frees anything it cannot reach, and nothing else points at
+    // these: they are roots for as long as the realm exists.
+    heap.add_root_provider(this, [this](std::vector<JsValue*>& roots) {
+        for (auto& value : m_roots) roots.push_back(&value);
+        for (auto& entry : globals) roots.push_back(&entry.second);
+    });
+}
+
+JsIntrinsics::~JsIntrinsics() {
+    Heap::default_heap().remove_root_provider(this);
+    if (t_current_realm == this) t_current_realm = nullptr;
 }
 
 void JsIntrinsics::add_global(const std::string& name, JsValue value) {
@@ -873,12 +926,15 @@ const JsValue* JsIntrinsics::find_global(const std::string& name) const {
     return nullptr;
 }
 
-void JsIntrinsics::ensure_installed() {
+void JsIntrinsics::install() {
     std::lock_guard<std::recursive_mutex> lock(m_install_mutex);
-    // A re-entrant call from an installer sees m_installing and returns: the
-    // prototypes it needs were allocated by the constructor.
     if (m_ready.load() || m_installing) return;
     m_installing = true;
+
+    // Objects the installers create (Math, JSON, every function) must get this
+    // realm's prototypes, so it is the current realm while they run.
+    JsIntrinsics* previous = t_current_realm;
+    t_current_realm = this;
 
     install_object_builtins(*this);
     install_error_builtins(*this);
@@ -889,21 +945,21 @@ void JsIntrinsics::ensure_installed() {
     install_regexp_builtins(*this);
     install_date_builtins(*this);
     install_json_builtins(*this);
+    install_promise_builtins(*this);
 
-    // The collector frees anything it cannot reach, and nothing else points at
-    // these: register them as permanent roots.
-    Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>& roots) {
-        for (auto& value : m_roots) roots.push_back(&value);
-        for (auto& entry : globals) roots.push_back(&entry.second);
-    });
-
+    t_current_realm = previous;
     m_ready.store(true);
 }
 
+void JsIntrinsics::set_current(JsIntrinsics* realm) {
+    t_current_realm = realm;
+}
+
 JsIntrinsics& JsIntrinsics::get() {
-    static JsIntrinsics instance;
-    if (!instance.m_ready.load(std::memory_order_acquire)) instance.ensure_installed();
-    return instance;
+    if (t_current_realm) return *t_current_realm;
+    JsIntrinsics& realm = default_realm();
+    if (!realm.m_ready.load(std::memory_order_acquire)) realm.install();
+    return realm;
 }
 
 } // namespace litebird

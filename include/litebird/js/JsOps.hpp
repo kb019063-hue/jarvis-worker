@@ -20,6 +20,7 @@
 namespace litebird {
 
 class JsObject;
+class EventLoop;
 
 // ---------------------------------------------------------------------------
 // Exceptions
@@ -60,15 +61,34 @@ void js_report_uncaught(const JsValue& value);
 void js_report_uncaught(const std::exception& ex);
 int js_uncaught_error_count();
 
+/// Reports a promise that was rejected with nothing listening.
+void js_report_unhandled_rejection(const JsValue& reason);
+
 /// True for exceptions the engine uses to unwind its own machinery (tearing
 /// down a suspended generator). Host code must let these pass.
 bool js_is_internal_unwind(const std::exception& ex);
+
+/// Marks a stretch of host code that has called into script. When the
+/// outermost one ends the JavaScript stack is empty again, which is the point
+/// where HTML drains the microtask queue ("clean up after running script").
+/// Without it, promise callbacks queued by an event listener would wait for
+/// the next timer.
+class JsScriptScope {
+public:
+    JsScriptScope();
+    ~JsScriptScope();
+    JsScriptScope(const JsScriptScope&) = delete;
+    JsScriptScope& operator=(const JsScriptScope&) = delete;
+private:
+    EventLoop& m_loop;
+};
 
 /// Runs `body` at a boundary where the host calls into script with nothing
 /// above it to catch: an event listener, a timer, a lifecycle callback. An
 /// exception is reported as uncaught instead of escaping into host code.
 template <typename Body>
 void js_run_guarded(Body&& body) {
+    JsScriptScope scope;
     try {
         body();
     } catch (const std::exception& ex) {
@@ -79,6 +99,23 @@ void js_run_guarded(Body&& body) {
 
 /// Calls a script callback from host code; see js_run_guarded.
 JsValue js_call_guarded(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args);
+
+/// Runs `body` and turns a JavaScript throw, or an exception from native code,
+/// into a value. Returns true when `body` completed normally. Engine-internal
+/// unwinds pass through untouched.
+template <typename Body>
+bool js_capture_throw(Body&& body, JsValue& thrown) {
+    try {
+        body();
+        return true;
+    } catch (const JsThrow& error) {
+        thrown = error.value;
+    } catch (const std::exception& ex) {
+        if (js_is_internal_unwind(ex)) throw;
+        thrown = js_value_from_exception(ex);
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Conversions
@@ -170,8 +207,13 @@ bool js_symbol_from_key(const std::string& key, JsValue& out);
 // Intrinsics
 // ---------------------------------------------------------------------------
 
-/// The built-in prototypes and constructors. One set per process: they hold no
-/// per-page state, so every interpreter binds the same objects.
+/// A realm: one complete set of built-in prototypes and constructors.
+///
+/// Every interpreter owns a realm, so a page that patches Array.prototype does
+/// not change it for the next page, and a worker thread never shares mutable
+/// built-ins with the page that started it. Code with no interpreter at hand
+/// (host bindings, unit tests) asks for the realm that is current on its
+/// thread, or falls back to a process-wide default.
 struct JsIntrinsics {
     JsObject* object_proto{nullptr};
     JsObject* function_proto{nullptr};
@@ -187,20 +229,30 @@ struct JsIntrinsics {
     JsObject* set_proto{nullptr};
     JsObject* weakmap_proto{nullptr};
     JsObject* weakset_proto{nullptr};
+    JsObject* promise_proto{nullptr};
     JsObject* error_protos[7]{};          // indexed by JsErrorKind
 
-    /// Name/value pairs every interpreter defines in its global scope.
+    /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;
+
+    /// Allocates the prototype objects. The library itself is added by install().
+    JsIntrinsics();
+    ~JsIntrinsics();
+    JsIntrinsics(const JsIntrinsics&) = delete;
+    JsIntrinsics& operator=(const JsIntrinsics&) = delete;
 
     void add_global(const std::string& name, JsValue value);
     const JsValue* find_global(const std::string& name) const;
 
+    /// Installs the built-in library. Safe to call more than once.
+    void install();
+
+    /// The realm objects created on this thread belong to right now.
     static JsIntrinsics& get();
+    /// Selects the realm for this thread; nullptr selects the default realm.
+    static void set_current(JsIntrinsics* realm);
 
 private:
-    JsIntrinsics();
-    void ensure_installed();
-
     std::atomic<bool> m_ready{false};
     bool m_installing{false};
     std::recursive_mutex m_install_mutex;

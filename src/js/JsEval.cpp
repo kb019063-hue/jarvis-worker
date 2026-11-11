@@ -11,10 +11,13 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Generator.hpp"
+#include "litebird/js/Heap.hpp"
 #include "litebird/js/Promise.hpp"
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 
@@ -41,13 +44,70 @@ struct FlagScope {
     ~FlagScope() { flag = saved; }
 };
 
-struct EnvScope {
-    std::shared_ptr<JsEnvironment>& slot;
-    std::shared_ptr<JsEnvironment> saved;
-    EnvScope(std::shared_ptr<JsEnvironment>& s, const std::shared_ptr<JsEnvironment>& value) : slot(s), saved(s) {
-        slot = value;
+// ---------------------------------------------------------------------------
+// Active scopes
+// ---------------------------------------------------------------------------
+//
+// The collector cannot scan native stacks, so every scope that has code running
+// in it is listed here: the scopes of all the callers of the function that is
+// executing, not just its own lexical chain. There is one list per thread,
+// because a suspended generator or async function keeps its scopes on the
+// stack of its own thread while other code runs.
+
+struct ScopeStack {
+    std::vector<JsEnvironment*> scopes;
+    ScopeStack();
+    ~ScopeStack();
+};
+
+struct ScopeStackRegistry {
+    std::mutex mutex;
+    std::vector<ScopeStack*> stacks;
+
+    ScopeStackRegistry() {
+        Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>&) {
+            // Runs inside a collection. Script threads take turns, so every
+            // other thread's list is at rest while this one reads it.
+            std::lock_guard<std::mutex> lock(mutex);
+            for (ScopeStack* stack : stacks) {
+                for (JsEnvironment* scope : stack->scopes) Heap::default_heap().mark_environment(scope);
+            }
+        });
     }
-    ~EnvScope() { slot = std::move(saved); }
+};
+
+ScopeStackRegistry& scope_registry() {
+    static ScopeStackRegistry* registry = new ScopeStackRegistry();     // never destroyed: threads may outlive main()
+    return *registry;
+}
+
+ScopeStack::ScopeStack() {
+    auto& registry = scope_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    registry.stacks.push_back(this);
+}
+
+ScopeStack::~ScopeStack() {
+    auto& registry = scope_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    registry.stacks.erase(std::remove(registry.stacks.begin(), registry.stacks.end(), this), registry.stacks.end());
+}
+
+ScopeStack& active_scopes() {
+    static thread_local ScopeStack stack;
+    return stack;
+}
+
+/// Lists `env` as active for the lifetime of this object. The caller keeps the
+/// scope alive; this only makes it visible to the collector.
+struct EnvScope {
+    ScopeStack& stack;
+    explicit EnvScope(const std::shared_ptr<JsEnvironment>& env) : stack(active_scopes()) {
+        stack.scopes.push_back(env.get());
+    }
+    ~EnvScope() { stack.scopes.pop_back(); }
+    EnvScope(const EnvScope&) = delete;
+    EnvScope& operator=(const EnvScope&) = delete;
 };
 
 JsTokenType binary_operator_for(JsTokenType assign_op) {
@@ -186,8 +246,17 @@ JsValue JsInterpreter::run(std::string_view source) {
 
 JsValue JsInterpreter::run_program(const Program& program) {
     CallDepthGuard depth_guard(*this);
-    FlagScope strict_scope(m_strict, program.is_strict);
-    EnvScope env_scope(m_current_env, m_global_env);
+    JsIntrinsics::set_current(m_realm.get());
+    EnvScope env_scope(m_global_env);
+
+    // The global scope is shared by every script; its strictness is that of
+    // the script running right now.
+    struct StrictScope {
+        JsEnvironment& env;
+        int8_t saved;
+        StrictScope(JsEnvironment& e, bool strict) : env(e), saved(e.strict_mode) { env.strict_mode = strict ? 1 : 0; }
+        ~StrictScope() { env.strict_mode = saved; }
+    } strict_scope(*m_global_env, program.is_strict);
 
     // `var` and function declarations exist before the first statement runs.
     for (const auto& name : program.var_names) {
@@ -234,11 +303,14 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     // context instead.
     std::shared_ptr<const FunctionNode> shared_node = node;
     EnvPtr closure = env;
-    fd.native_fn = [this, shared_node, closure](const std::vector<JsValue>& args) {
+    fd.native_fn = [this, alive = m_alive, shared_node, closure](const std::vector<JsValue>& args) {
         JsValue this_val;
         JsValue callee;
         bool is_construct = false;
         JsValue::take_call_context(this_val, is_construct, &callee);
+        // The interpreter that created this function is gone: a timer or a
+        // listener outlived it. There is nothing left to run the body with.
+        if (!alive->load()) return JsValue::make_undefined();
         return invoke_function(shared_node, closure, callee, this_val, is_construct, args);
     };
     return fn;
@@ -275,12 +347,14 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
                                        const JsValue& callee, const JsValue& this_val, bool is_construct,
                                        const std::vector<JsValue>& args) {
     CallDepthGuard depth_guard(*this);
+    JsIntrinsics::set_current(m_realm.get());
 
     if (node->is_class_constructor && !is_construct) {
         js_throw_type_error("Class constructor " + node->name + " cannot be invoked without 'new'");
     }
 
     auto env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+    env->strict_mode = node->is_strict ? 1 : 0;
     if (!node->is_arrow) {
         // Arrow functions bind none of these; lookups fall through to the
         // enclosing function's scope, which is exactly lexical `this`.
@@ -300,17 +374,25 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
         }
     }
 
-    bind_parameters(*node, env, args);
-    for (const auto& name : node->var_names) {
-        if (!env->has_own(name)) env->define(name, JsValue::make_undefined());
-    }
-    hoist_functions(node->body->functions, env);
+    EnvScope env_scope(env);
 
-    FlagScope strict_scope(m_strict, node->is_strict);
-    EnvScope env_scope(m_current_env, env);
+    // Everything an async function does wrong, including a throwing parameter
+    // default, comes back as a rejected promise rather than a thrown error.
+    auto prepare = [&] {
+        bind_parameters(*node, env, args);
+        for (const auto& name : node->var_names) {
+            if (!env->has_own(name)) env->define(name, JsValue::make_undefined());
+        }
+        hoist_functions(node->body->functions, env);
+    };
+    if (node->is_async && !node->is_generator) {
+        JsValue thrown;
+        if (!js_capture_throw(prepare, thrown)) return Promise::make_rejected(thrown);
+        return run_async_body(node, env);
+    }
+    prepare();
 
     if (node->is_generator) return make_generator(node, env);
-    if (node->is_async) return run_async_body(node, env);
 
     // A base class runs its field initialisers before the constructor body; a
     // derived class runs them when super() returns.
@@ -327,119 +409,193 @@ JsValue JsInterpreter::run_function_body(const FunctionNode& node, const EnvPtr&
     return JsValue::make_undefined();
 }
 
-JsValue JsInterpreter::run_async_body(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env) {
-    auto promise = std::make_shared<PromiseData>();
-    try {
-        JsValue result = run_function_body(*node, env);
-        Promise::resolve(promise, result);
-    } catch (const GeneratorAbortException&) {
-        throw;
-    } catch (const JsThrow& thrown) {
-        Promise::reject(promise, thrown.value);
-    } catch (const std::exception& ex) {
-        Promise::reject(promise, js_value_from_exception(ex));
+// Starts a thread that will run `node`'s body as a suspendable frame. The
+// thread parks immediately and runs only while someone is inside resume().
+std::shared_ptr<GeneratorData> JsInterpreter::spawn_frame(const std::shared_ptr<const FunctionNode>& node,
+                                                          const EnvPtr& env, bool is_coroutine) {
+    auto frame = std::make_shared<GeneratorData>();
+    frame->is_coroutine = is_coroutine;
+    frame->frame_env = env;
+
+    // Forget frames that no longer exist before remembering another one.
+    if (m_generators.size() >= 64 && (m_generators.size() & (m_generators.size() - 1)) == 0) {
+        m_generators.erase(std::remove_if(m_generators.begin(), m_generators.end(),
+                                          [](const std::weak_ptr<GeneratorData>& weak) { return weak.expired(); }),
+                           m_generators.end());
     }
-    return Promise::create_promise_instance(promise);
-}
+    m_generators.push_back(frame);
 
-JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env) {
-    auto gen = std::make_shared<GeneratorData>();
-    GeneratorData* raw = gen.get();
-    m_generators.push_back(gen);
-
-    // The body runs on its own thread, parked until the first next(). The
-    // thread holds a raw pointer: GeneratorData joins it in its destructor, so
-    // the data always outlives the thread, and a shared_ptr here would keep an
-    // unfinished generator alive forever.
-    gen->worker = std::thread([this, raw, node, env]() {
+    // The thread holds a raw pointer: GeneratorData joins the thread in its
+    // destructor, so it always outlives the thread, and a shared_ptr here
+    // would keep a frame that is never resumed alive forever.
+    GeneratorData* raw = frame.get();
+    JsIntrinsics* realm = m_realm.get();
+    EventLoop* loop = &EventLoop::default_loop();
+    auto body = [this, raw, realm, loop, node = node, env = env]() mutable {
+        // The frame is part of the agent that created it.
         GeneratorContext::set_active(raw);
-        {
-            std::unique_lock<std::mutex> lock(raw->mtx);
-            raw->cv_gen.wait(lock, [&] { return raw->started || raw->should_terminate; });
-            if (raw->should_terminate) {
-                GeneratorContext::set_active(nullptr);
-                return;
-            }
-        }
+        JsIntrinsics::set_current(realm);
+        EventLoop::set_current(loop);
 
         JsValue result;
         JsValue error;
         bool failed = false;
-        try {
-            result = run_function_body(*node, env);
-        } catch (const GeneratorAbortException&) {
-            GeneratorContext::set_active(nullptr);
-            return;
-        } catch (const JsThrow& thrown) {
-            failed = true;
-            error = thrown.value;
-        } catch (const std::exception& ex) {
-            failed = true;
-            error = js_value_from_exception(ex);
+        if (raw->wait_for_start()) {
+            try {
+                EnvScope env_scope(env);
+                result = run_function_body(*node, env);
+            } catch (const GeneratorAbortException&) {
+                // Discarded while suspended: nobody is waiting for a result.
+            } catch (const JsThrow& thrown) {
+                failed = true;
+                error = thrown.value;
+            } catch (const std::exception& ex) {
+                failed = true;
+                error = js_value_from_exception(ex);
+            }
         }
-
-        {
-            std::unique_lock<std::mutex> lock(raw->mtx);
-            raw->yielded_value = failed ? JsValue::make_undefined() : result;
-            raw->has_error = failed;
-            raw->error = error;
-            raw->is_done = true;
-            raw->finished = true;
-            raw->cv_main.notify_one();
-        }
+        // Let go of the scope before handing control back: after finish() this
+        // thread must not touch anything another thread can see.
+        node.reset();
+        env.reset();
         GeneratorContext::set_active(nullptr);
-    });
+        raw->finish(std::move(result), failed, std::move(error));
+    };
+
+    try {
+        frame->worker = std::thread(std::move(body));
+    } catch (const std::system_error&) {
+        // The system will not give us another thread. Each suspended function
+        // holds one, so this is the engine's limit on how many can be pending.
+        frame->finished = true;
+        frame->is_done = true;
+        js_throw_error(JsErrorKind::RangeError, "Too many suspended functions: out of threads");
+    }
+    return frame;
+}
+
+namespace {
+
+// Runs an async function's frame until its next `await` (or its end), then
+// arranges for itself to be called again when the awaited promise settles.
+void drive_coroutine(const std::shared_ptr<GeneratorData>& frame, const std::shared_ptr<PromiseData>& promise,
+                     const JsValue& sent, bool is_throw) {
+    if (frame->cancelled) return;       // the interpreter is gone
+    if (is_throw) frame->inject_throw(sent);
+    frame->resume(is_throw ? JsValue::make_undefined() : sent);
+    if (frame->cancelled) return;
+
+    if (frame->is_done) {
+        frame->reap();      // the body has ended; its thread exits now
+        JsValue error;
+        if (frame->take_error(error)) Promise::reject(promise, error);
+        else Promise::resolve(promise, frame->yielded_value);
+        return;
+    }
+
+    // Parked at `await value`. Whatever it settles to is sent back in, from a
+    // microtask: the code after an await never runs synchronously.
+    Promise::subscribe(Promise::to_promise(frame->yielded_value),
+        [frame, promise](bool rejected, const JsValue& value) {
+            drive_coroutine(frame, promise, value, rejected);
+        });
+}
+
+} // namespace
+
+JsValue JsInterpreter::run_async_body(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env) {
+    auto promise = std::make_shared<PromiseData>();
+
+    if (!node->uses_await) {
+        // No await in the body: it runs straight through on this stack.
+        JsValue result;
+        JsValue thrown;
+        if (js_capture_throw([&] { result = run_function_body(*node, env); }, thrown)) {
+            Promise::resolve(promise, result);
+        } else {
+            Promise::reject(promise, thrown);
+        }
+        return Promise::create_promise_instance(promise);
+    }
+
+    // The body may suspend, so it needs a stack of its own. Its first segment
+    // still runs synchronously, as the language requires: the caller gets the
+    // promise back only once the body has reached its first await.
+    auto frame = spawn_frame(node, env, /*is_coroutine=*/true);
+    drive_coroutine(frame, promise, JsValue::make_undefined(), false);
+    return Promise::create_promise_instance(promise);
+}
+
+JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env) {
+    auto gen = spawn_frame(node, env, /*is_coroutine=*/false);
 
     JsValue object = JsValue::make_object();
     object.object_val->klass = ObjectClass::Generator;
     object.set_generator_value(gen);
 
-    // Resumes the body and surfaces an exception that escaped it.
-    auto resume = [gen](const JsValue& sent) -> JsValue {
-        JsValue step = gen->step(sent);
-        if (gen->has_error) {
-            gen->has_error = false;
-            JsValue error = gen->error;
-            gen->error = JsValue::make_undefined();
-            js_throw(error);
+    auto result_object = [](const JsValue& value, bool done) {
+        JsValue result = JsValue::make_object();
+        result.set_property("value", value);
+        result.set_property("done", JsValue::make_boolean(done));
+        return result;
+    };
+
+    // Runs the body to its next yield and reports what happened.
+    auto advance = [gen, result_object](const JsValue& sent) -> JsValue {
+        if (gen->is_done) return result_object(JsValue::make_undefined(), true);
+        if (!gen->resume(sent)) js_throw_type_error("Generator is already running");
+        JsValue error;
+        if (gen->take_error(error)) js_throw(error);        // the body threw: it surfaces in the caller of next()
+        if (gen->is_done) {
+            // The return value is reported once; later calls see undefined.
+            JsValue returned = gen->yielded_value;
+            gen->yielded_value = JsValue::make_undefined();
+            gen->reap();
+            return result_object(returned, true);
         }
-        return step;
+        return result_object(gen->yielded_value, false);
     };
 
     const bool is_async = node->is_async;
-    auto wrap = [is_async](JsValue step) {
-        // An async generator's methods return promises.
-        return is_async ? Promise::make_resolved(std::move(step)) : step;
+    // An async generator's methods return promises, and a failure is a
+    // rejection rather than a thrown error.
+    auto deliver = [is_async](const std::function<JsValue()>& body) -> JsValue {
+        if (!is_async) return body();
+        JsValue result;
+        JsValue thrown;
+        if (js_capture_throw([&] { result = body(); }, thrown)) return Promise::make_resolved(result);
+        return Promise::make_rejected(thrown);
     };
 
-    js_define_method(object, "next", 1, [resume, wrap](const std::vector<JsValue>& args) {
-        return wrap(resume(js_arg(args, 0)));
+    js_define_method(object, "next", 1, [advance, deliver](const std::vector<JsValue>& args) {
+        const JsValue sent = js_arg(args, 0);
+        return deliver([&] { return advance(sent); });
     });
 
-    js_define_method(object, "return", 1, [gen, wrap](const std::vector<JsValue>& args) {
-        // Unwinds the suspended body, which runs its `finally` blocks.
-        gen->terminate();
-        gen->is_done = true;
-        JsValue result = JsValue::make_object();
-        result.set_property("value", js_arg(args, 0));
-        result.set_property("done", JsValue::make_boolean(true));
-        return wrap(result);
+    js_define_method(object, "return", 1, [gen, result_object, deliver](const std::vector<JsValue>& args) {
+        const JsValue value = js_arg(args, 0);
+        return deliver([&] {
+            if (gen->is_running()) js_throw_type_error("Generator is already running");
+            // Unwinds the suspended body, running its `finally` blocks.
+            gen->terminate(/*run_finalizers=*/true);
+            return result_object(value, true);
+        });
     });
 
-    js_define_method(object, "throw", 1, [gen, resume, wrap](const std::vector<JsValue>& args) -> JsValue {
-        if (!gen->started || gen->is_done) {
-            gen->terminate();
-            gen->is_done = true;
-            js_throw(js_arg(args, 0));
-        }
-        {
+    js_define_method(object, "throw", 1, [gen, advance, deliver](const std::vector<JsValue>& args) {
+        const JsValue error = js_arg(args, 0);
+        return deliver([&]() -> JsValue {
+            if (gen->is_running()) js_throw_type_error("Generator is already running");
+            if (!gen->started || gen->is_done) {
+                // Nothing is suspended to receive it: the generator just ends.
+                gen->terminate(false);
+                js_throw(error);
+            }
             // Raised inside the body at the suspended `yield`, where the
             // generator's own try/catch can handle it.
-            std::unique_lock<std::mutex> lock(gen->mtx);
-            gen->has_pending_throw = true;
-            gen->pending_throw = js_arg(args, 0);
-        }
-        return wrap(resume(JsValue::make_undefined()));
+            gen->inject_throw(error);
+            return advance(JsValue::make_undefined());
+        });
     });
 
     JsObject* cell = object.object_val;
@@ -491,6 +647,7 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     // The class name is visible inside the class body even if the outer
     // binding is later reassigned.
     auto class_env = std::make_shared<JsEnvironment>(env);
+    class_env->strict_mode = 1;     // class bodies are always strict code
 
     JsValue proto = JsValue::make_object();
     if (has_parent) {
@@ -701,7 +858,7 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
             return;
         }
     }
-    if (m_strict) js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
+    if (env->is_strict()) js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
     m_global_env->define(name, value);      // sloppy mode: implicit global
 }
 
@@ -888,7 +1045,7 @@ JsInterpreter::Flow JsInterpreter::exec_block(const BlockStmt* block, const EnvP
     // A block only needs a scope of its own when it declares something.
     if (!block->has_lexical) return exec_list(block->statements, env, frame);
     auto scope = std::make_shared<JsEnvironment>(env);
-    EnvScope env_scope(m_current_env, scope);
+    EnvScope env_scope(scope);
     hoist_functions(block->functions, scope);
     return exec_list(block->statements, scope, frame);
 }
@@ -1177,9 +1334,11 @@ JsInterpreter::Flow JsInterpreter::exec_try(const TryStmt* stmt, const EnvPtr& e
 
     try {
         flow = exec_block(stmt->block.get(), env, frame);
-    } catch (const GeneratorAbortException&) {
-        // The generator is being torn down: `finally` runs, `catch` does not.
-        if (stmt->finalizer) {
+    } catch (const GeneratorAbortException& abort) {
+        // The frame is being closed while suspended in this block. `catch`
+        // never sees that. `finally` runs when script asked for the close
+        // (iterator.return()), not when the engine is discarding the frame.
+        if (stmt->finalizer && abort.run_finalizers) {
             Frame scratch;
             exec_block(stmt->finalizer.get(), env, scratch);
         }
@@ -1628,7 +1787,7 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
 
 JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
     auto* generator = GeneratorContext::get_active();
-    if (!generator) {
+    if (!generator || generator->is_coroutine) {
         js_throw_error(JsErrorKind::SyntaxError, "yield is only valid in generator functions");
     }
 
@@ -1636,12 +1795,8 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
     // generator object surfaces here, inside the body's own try/catch.
     auto suspend = [&](const JsValue& value) -> JsValue {
         JsValue sent = generator->yield_to_main(value);
-        if (generator->has_pending_throw) {
-            generator->has_pending_throw = false;
-            JsValue error = generator->pending_throw;
-            generator->pending_throw = JsValue::make_undefined();
-            js_throw(error);
-        }
+        JsValue error;
+        if (generator->take_pending_throw(error)) js_throw(error);
         return sent;
     };
 
@@ -1659,18 +1814,28 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
 }
 
 JsValue JsInterpreter::eval_await(const JsValue& value) {
-    auto promise = value.promise_value();
-    if (!promise) return value;
+    // Inside an async function: park this frame. drive_coroutine() resumes it,
+    // from a microtask, with whatever the awaited value settles to.
+    if (auto* frame = GeneratorContext::get_active(); frame && frame->is_coroutine) {
+        JsValue settled = frame->yield_to_main(value);
+        JsValue error;
+        if (frame->take_pending_throw(error)) js_throw(error);
+        return settled;
+    }
 
-    // Blocking await: run the event loop until the promise settles.
+    // Anywhere else (the top level of a script, an async generator body) there
+    // is no frame to park, so the wait is a blocking one: run the event loop
+    // here until the promise settles.
+    auto promise = Promise::to_promise(value);
+    promise->handled = true;
     auto& loop = EventLoop::default_loop();
     while (promise->state == PromiseState::Pending) {
-        if (loop.tick() == 0) {
+        if (loop.spin_once() == 0) {
             if (!loop.has_pending_tasks()) {
                 // Nothing left that could ever settle it.
-                js_throw_type_error("await on a promise that can never settle");
+                js_throw_type_error("await: the promise can never settle, nothing is pending");
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            loop.wait_for_work(false);
         }
     }
     if (promise->state == PromiseState::Rejected) js_throw(promise->result);
@@ -1888,7 +2053,7 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
 
 JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironment> env) {
     if (!node) return JsValue::make_undefined();
-    EnvScope env_scope(m_current_env, env);
+    EnvScope env_scope(env);
 
     switch (node->kind) {
         case NodeKind::FunctionNode:

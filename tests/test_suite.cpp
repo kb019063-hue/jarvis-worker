@@ -1083,13 +1083,14 @@ TEST(js_async_promises_and_json) {
     int step2 = 0;
 
     JsValue p = Promise::make_resolved(JsValue::make_number(10));
-    JsValue p_chained = p.get_property("then").call({
+    // `then` lives on Promise.prototype, so the receiver has to be supplied.
+    JsValue p_chained = p.get_property("then").call_with_this(p, {
         JsValue::make_native_function([&step1](const std::vector<JsValue>& args) {
             step1 = static_cast<int>(args[0].to_number()) * 2; // 20
             return JsValue::make_number(step1);
         })
     });
-    p_chained.get_property("then").call({
+    p_chained.get_property("then").call_with_this(p_chained, {
         JsValue::make_native_function([&step2](const std::vector<JsValue>& args) {
             step2 = static_cast<int>(args[0].to_number()) + 5; // 25
             return JsValue::make_number(step2);
@@ -1128,7 +1129,7 @@ TEST(js_async_promises_and_json) {
     JsValue all_fn = p_ctor.get_property("all");
     JsValue all_res = all_fn.call({JsValue::make_array({p_all_1, p_all_2})});
     bool all_passed = false;
-    all_res.get_property("then").call({
+    all_res.get_property("then").call_with_this(all_res, {
         JsValue::make_native_function([&all_passed](const std::vector<JsValue>& args) {
             if (args[0].is_array() && args[0].object_val->array_elements.size() == 2) {
                 if (args[0].object_val->array_elements[0].to_string() == "alpha" &&

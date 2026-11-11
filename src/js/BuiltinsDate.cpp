@@ -5,6 +5,7 @@
 // C library is only asked for the local time-zone offset.
 
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include <cctype>
 #include <chrono>
@@ -118,9 +119,21 @@ double from_local(double local) {
 }
 
 double now_ms() {
-    using namespace std::chrono;
-    return static_cast<double>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+    return js_current_time_ms();
 }
+
+} // namespace
+
+double js_current_time_ms() {
+    using namespace std::chrono;
+    // Wall-clock time, moved forward by however far the event loop has skipped
+    // ahead: a script that sets a 100 ms timer and then reads the clock must
+    // see 100 ms gone, whether or not the host really waited.
+    const auto wall = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
+    return static_cast<double>((wall + EventLoop::default_loop().clock_skew()).count());
+}
+
+namespace {
 
 // ---- Parsing ---------------------------------------------------------------
 

@@ -69,8 +69,10 @@ TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
-# Cases that must pass in the sanitizer build. Same floor as the CI scoreboard job.
-JS_ASAN_FLOOR ?= 692
+# Cases that must pass in the sanitizer build. One below the CI scoreboard
+# floor: a sanitizer build's stack frames are too large for one deep-recursion
+# case that the normal build passes.
+JS_ASAN_FLOOR ?= 789
 
 .PHONY: all clean test run conformance js-conformance fuzz asan help
 

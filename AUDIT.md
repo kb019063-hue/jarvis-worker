@@ -624,3 +624,171 @@ so their timers and promise callbacks no longer run on the page's thread.
 Still open: all agents share one cell list behind one mutex, so a collection
 blocks other agents' allocations while it marks.
 
+
+## 21. ✅ Deeply nested input killed the process
+
+Found by generating stress pages rather than by reading code: one script per
+page, each nesting one construct 200,000 deep, followed by a second script that
+reports whether it ran. 28 of 46 pages ended in `SIGSEGV`. A page could take the
+browser down with one long line such as `((((...1...))))`.
+
+The engine recurses over what a script gives it, and only function calls were
+guarded (finding 6). Four separate recursions were not:
+
+- **The parser.** Every nested expression, statement, pattern or function body
+  is a level of recursive descent.
+- **The evaluator**, on nested statements and patterns, and on long operator
+  chains: `a+b+c+...` parses into a tree as deep as the chain is long.
+- **Library code**: `join` calling `toString` calling `join`, `flat`,
+  `structuredClone`, `JSON.stringify` and the JSON parser.
+- **Destructors.** Freeing a syntax tree, a chain of closures (each scope owns
+  its parent), or a chain of promises ran one destructor inside another, once
+  per link. This one needs no deep syntax at all: a loop that builds a linked
+  list of scopes is enough, and it crashes when the list is dropped.
+
+Fixes:
+
+- `js_check_stack()` measures the native stack that is left
+  (`common/StackLimit.hpp`) and throws a `RangeError` the script can catch. It
+  is called at the recursive entry points of the parser, the evaluator and the
+  library functions above. Depth counters were not used: how much stack one
+  level costs differs by a factor of 50 between an optimised and a sanitizer
+  build.
+- Operator chains of 8 or more are evaluated in a loop
+  (`eval_binary_chain`), so a long `a+b+c+...` is not an error.
+- Destruction is iterative. `common/ReleaseQueue.hpp` collects what a destructor
+  would otherwise destroy recursively and drains it in a loop; syntax tree nodes
+  are deleted through it (`ast_delete`), scopes release their parent chain in a
+  loop, and so do promises and function payloads.
+
+After the fix no stress page crashes, in the normal build or under
+AddressSanitizer. Deep syntax reports `Uncaught RangeError: Maximum call stack
+size exceeded` and the next script on the page runs, which is what V8 does.
+
+**Tests:** `tests/js-conformance/deep-nesting.dat` (63 cases, expectations from
+Node) and the unit test `deep_nesting_never_exhausts_the_native_stack`.
+
+Generators and async functions recurse without using the stack: a frame that
+resumes another frame waits for it on its own thread. `function* g() { yield*
+g(); }` took threads until the system refused one, 15,724 on the test machine,
+and under AddressSanitizer ran out of memory first. Frames may now nest 2,000
+deep; beyond that the script gets the same `RangeError`.
+
+**Still open.** Two stress pages do not crash but are killed for time or
+memory: 100,000 chained `bind` calls (the name `bound bound ...` grows
+quadratically; 20,000 take 2 s and 1.3 GB) and a string built from two million
+`+` terms (finding 25). And the DOM is not covered by any of this: see finding
+24.
+
+## 22. ✅ A template literal dropped substitutions that were literals
+
+`` `${200000}` `` evaluated to an empty string, and `` `a${1}b` `` to `ab`. The
+parser stores a template as a list of parts, text and substitutions alternating,
+and the evaluator told the two apart by node type: a string literal node was
+taken to be text. A substitution that was itself a literal (`${1}`, `${'x'}`,
+`${null}`) was therefore treated as text, and number literals were skipped.
+
+Parts are now told apart by position. Found by a differential run: 67,545
+generated expressions evaluated by this engine and by Node, results compared.
+The 671-case corpus had not caught it because every template in it substituted
+a variable.
+
+## 23. ✅ What the differential run found
+
+The same run (finding 22) left 1.2% of expressions disagreeing with Node. The
+causes that real pages meet were fixed, each with corpus cases:
+
+- **`undefined` was a keyword.** `function (window, undefined) { ... }`, the
+  opening line of jQuery-era libraries, was a syntax error. It is now an
+  ordinary identifier bound to a read-only global, as are `NaN` and `Infinity`:
+  assigning to them does nothing in sloppy code and throws in strict code.
+- **Every function printed as `function f() { [native code] }`.** Libraries
+  test for built-ins with `/native code/.test(fn)`, so every user function
+  passed as a built-in. Functions and classes now keep their extent in the
+  source and print it.
+- **Lookups stopped 10,000 objects up a prototype chain** and answered "not
+  found". The limit existed because nothing stopped a script from making a
+  chain circular. `Object.setPrototypeOf`, `Reflect.setPrototypeOf` and
+  `__proto__` now refuse to close a loop, and the limit is gone.
+- `new String('abc')[1]` was `undefined`, and `Object.keys` of a String object
+  was empty.
+- `-2 ** 2` was accepted; it is a syntax error.
+- `escape` and `unescape` were missing.
+- `Math.hypot(1e300, 3)` overflowed to `Infinity`; `parseInt` of a long digit
+  string was off in the last digits.
+- `Date.prototype.toString` named the zone `(UTC)` where browsers print
+  `(Coordinated Universal Time)`.
+
+Left as they are, and listed in ARCHITECTURE.md: arrays are dense, last-digit
+differences in `Math.atan2`, `cbrt` and `pow`, and date strings such as
+`new Date('1')`.
+
+## 24. 🟡 `node.appendChild(node)` ended the process; very deep trees still do
+
+```js
+var d = document.createElement('div');
+d.appendChild(d);
+```
+
+The DOM accepted this. The node became its own child and its own parent, and
+the next thing to walk the tree (`textContent`, serialisation, layout, the
+destructor) recursed until the stack was gone. Appending a node to one of its
+own descendants did the same in two steps. The DOM standard forbids both.
+
+`Node::append_child` and `Node::insert_before` are the only two places a tree
+grows, and both now refuse an insertion that would make a node its own
+ancestor, counting a shadow tree as part of its host. The script bindings throw
+`HierarchyRequestError` (code 3), as a browser does. The check costs nothing
+for a node with no children, which is every node the HTML parser appends.
+Test: `dom_insertion_cannot_make_a_node_its_own_ancestor`.
+
+**Still open: depth.** The DOM and the code that walks it are recursive
+throughout (more than 20 functions: `textContent`, `innerHTML`, selectors,
+`getElementsByTagName`, the dumps, the destructors). Only the layout tree
+builder checks the stack. Measured with nested `<div>` elements and no script
+at all:
+
+| Nesting | Normal build | Sanitizer build |
+| :--- | :--- | :--- |
+| 20,000 | renders | renders |
+| 100,000 | renders | stack overflow in `find_by_tag_recursive` |
+| 300,000 (a 3.3 MB file) | `SIGSEGV` | not run |
+
+A tree built by script fails sooner: 200,000 levels made with `appendChild` in
+a loop, or 100,000 nested tags assigned to `innerHTML`, are a `SIGSEGV` in the
+normal build. The fuzzers mutate small seed pages and never nest this deep,
+which is why 400 runs of each report nothing. Two ways to close it: limit nesting where the tree grows, as
+Blink and WebKit do in their parsers (512 levels), or make the destructor
+iterative and give each walker the stack check the JavaScript engine now has.
+The existing test `deeply_nested_markup_does_not_overflow_the_stack` requires
+6,000 parsed levels to survive, so a limit would have to sit above that.
+
+## 25. 🟡 Strings are copied on every read
+
+Not a crash, but the largest remaining defect in the JavaScript engine, found
+by timing 40 ordinary scripts against Node. A string lives inside the value
+that holds it. Reading a string variable copies the string; `length` and
+indexing scan it to find out whether it is ASCII. Every one of those is
+proportional to the length of the string, so a loop over a long string is
+quadratic:
+
+| Script | Litebird | Node |
+| :--- | :--- | :--- |
+| `s.charCodeAt(i)` for each of 200,000 characters | 76 s | 35 ms |
+| `s[i]` for each of 200,000 characters | 55 s | 33 ms |
+| `s += x`, 100,000 times | 18 s | 58 ms |
+| `delete` of 50,000 keys from one object | over 120 s | 91 ms |
+| `shift()` until a 50,000-element array is empty | 5.3 s | 0.2 s |
+
+The last two are the same shape in other containers: the property map rebuilds
+its index on every `delete`, and arrays are plain vectors.
+
+Short strings and small objects, which is nearly everything a page handles,
+are unaffected. A script that decodes, hashes or builds a large string one
+character at a time will appear to hang. One of this audit's own corpus cases
+did: it built a 900 KB script with `+=` and took 8 s, until it was rewritten
+to use `join`.
+
+The fix is a shared, immutable string that caches its length and whether it
+is ASCII, with `+=` appending in place when nothing else refers to the string.
+`string_val` is read in 54 places, so the change is contained. Not done.

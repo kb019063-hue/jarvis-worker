@@ -18,21 +18,21 @@ scoreboard cannot see at all.
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
-| **JavaScript corpus** | **698 / 703 (99.3%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **796 / 801 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 83 suites, all passing | `make test` |
+| Engine unit tests | 85 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
-make test            # 83 engine suites
+make test            # 85 engine suites
 make asan            # sanitizer build, tests, the JavaScript corpus and a fuzz run
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 703 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 801 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -50,9 +50,16 @@ Read the number for what it is:
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
 
-Before the engine was rebuilt (Phase 23) the same corpus scored 126 of the
-671 cases that existed then, and 25 of the 90 cases in the fixed "everyday"
-probe (`everyday-es5.dat` and `everyday-es2015.dat`), which now passes 90/90.
+The engine as it was before Phase 23 passes 140 of these 801 cases, and 25 of
+the 90 cases in the fixed "everyday" probe (`everyday-es5.dat` and
+`everyday-es2015.dat`), which now passes 90/90.
+
+Two other checks sit behind the number. A differential run evaluates 67,545
+generated expressions in Litebird and in Node and compares the results: 99
+(0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`. And
+63 of the corpus cases (`deep-nesting.dat`) hand the engine input nested
+200,000 deep, which used to end the process and must now end in an error the
+script can catch.
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
@@ -337,7 +344,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 83 engine test suites
+# Run the 85 engine test suites
 make test
 ```
 
@@ -398,14 +405,14 @@ make test
 make test
 ```
 
-Output (83 suites; the first and last lines shown):
+Output (85 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 83 engine test suites passed successfully!
+All 85 engine test suites passed successfully!
 ```
 
 ```bash

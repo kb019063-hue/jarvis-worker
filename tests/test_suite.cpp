@@ -4361,6 +4361,84 @@ TEST(deep_nesting_never_exhausts_the_native_stack) {
     }
 }
 
+TEST(dom_insertion_cannot_make_a_node_its_own_ancestor) {
+    using namespace litebird;
+
+    // `d.appendChild(d)` used to succeed: the node became its own child and
+    // its own parent. Every walk over the tree assumes there are no loops, so
+    // the next textContent, serialisation, layout pass or destructor recursed
+    // until the stack was gone. Three lines of script ended the process.
+
+    // The DOM itself refuses, whoever calls it.
+    {
+        auto a = std::make_shared<Element>("div");
+        auto b = std::make_shared<Element>("span");
+        auto c = std::make_shared<Element>("b");
+        a->append_child(b);
+        b->append_child(c);
+
+        a->append_child(a);                     // into itself
+        assert(a->children().size() == 1 && a->parent() == nullptr);
+        c->append_child(a);                     // into its grandchild
+        assert(c->children().empty() && a->parent() == nullptr);
+        b->insert_before(a, c);                 // the same through insertBefore
+        assert(b->children().size() == 1 && a->parent() == nullptr);
+        b->insert_before(b, c);
+        assert(b->children().size() == 1 && b->parent() == a);
+
+        // Moves that create no loop still work: a leaf, and a subtree moved
+        // to a sibling.
+        auto d = std::make_shared<Element>("i");
+        a->append_child(d);
+        d->append_child(b);                     // b (with c inside) moves under d
+        assert(a->children().size() == 1 && d->children().size() == 1 && b->parent() == d);
+        assert(a->text_content().empty());      // and the tree can be walked
+    }
+
+    // A host contains its shadow tree.
+    {
+        auto host = std::make_shared<Element>("div");
+        auto root = host->attach_shadow("open");
+        auto inner = std::make_shared<Element>("span");
+        root->append_child(inner);
+        inner->append_child(host);
+        assert(inner->children().empty());
+        root->append_child(host);
+        assert(root->children().size() == 1);
+    }
+
+    // Script is told, with the error a browser gives, and keeps running.
+    {
+        auto doc = std::make_shared<Document>();
+        auto host = std::make_shared<Element>("div");
+        host->set_attribute("id", "host");
+        doc->append_child(host);
+
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var names = [];
+            function attempt(fn) { try { fn(); names.push('ok'); } catch (e) { names.push(e.name + ':' + e.code); } }
+            var host = document.getElementById('host');
+            var a = document.createElement('div'), b = document.createElement('span');
+            attempt(function () { a.appendChild(a); });
+            attempt(function () { a.appendChild(b); });
+            attempt(function () { b.appendChild(a); });
+            attempt(function () { b.insertBefore(a, null); });
+            attempt(function () { host.appendChild(a); });
+            attempt(function () { b.appendChild(host); });
+            attempt(function () { a.insertBefore(document.createElement('i'), b); });
+            var result = names.join(' ');
+            var shape = host.children.length + '/' + a.children.length + '/' + b.children.length;
+            var text = typeof host.textContent + ' ' + host.innerHTML;
+        )");
+        assert(js.global_env()->get("result").to_string() ==
+               "HierarchyRequestError:3 ok HierarchyRequestError:3 HierarchyRequestError:3 ok "
+               "HierarchyRequestError:3 ok");
+        assert(js.global_env()->get("shape").to_string() == "1/2/0");
+        assert(js.global_env()->get("text").to_string() == "string <div><i></i><span></span></div>");
+    }
+}
+
 TEST(phase19_js_compatibility_basics) {
     using namespace litebird;
 
@@ -4729,6 +4807,7 @@ int main() {
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
     RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
     RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
+    RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

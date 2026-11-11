@@ -853,6 +853,29 @@ JsValue js_event_target_method(const std::shared_ptr<Node>& target, const std::s
     return JsValue::make_undefined();
 }
 
+// The DOM's pre-insertion check: a node may not be inserted into itself or
+// into anything it contains (its descendants, and what is in its shadow tree).
+// Throws what a browser throws; Node::append_child refuses the same cases on
+// its own, so this only decides what the script is told.
+static void require_insertable(const std::shared_ptr<Node>& parent, const std::shared_ptr<Node>& child,
+                               const char* method) {
+    for (std::shared_ptr<Node> at = parent; at;) {
+        if (at == child) {
+            JsValue error = js_make_error(JsErrorKind::Error,
+                std::string("Failed to execute '") + method +
+                "' on 'Node': The new child element contains the parent.");
+            error.set_property("name", JsValue::make_string("HierarchyRequestError"));
+            error.set_property("code", JsValue::make_number(3));
+            js_throw(std::move(error));
+        }
+        std::shared_ptr<Node> up = at->parent();
+        if (!up) {
+            if (auto shadow = std::dynamic_pointer_cast<ShadowRoot>(at)) up = shadow->host();
+        }
+        at = std::move(up);
+    }
+}
+
 JsValue JsValue::get_property(const std::string& name) const {
     // Primitives have no properties of their own; they borrow the methods of
     // their wrapper prototype (String.prototype and friends).
@@ -1124,6 +1147,7 @@ JsValue JsValue::get_property(const std::string& name) const {
             auto node = dom_node;
             return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
                 if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
+                require_insertable(node, args[0].dom_node_value(), "appendChild");
                 node->append_child(args[0].dom_node_value());
                 return args[0];
             });
@@ -1142,6 +1166,7 @@ JsValue JsValue::get_property(const std::string& name) const {
                 if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
                 auto new_ch = args[0].dom_node_value();
                 auto ref_ch = (args.size() > 1) ? args[1].dom_node_value() : nullptr;
+                require_insertable(node, new_ch, "insertBefore");
                 node->insert_before(new_ch, ref_ch);
                 return args[0];
             });

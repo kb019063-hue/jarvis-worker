@@ -3,6 +3,7 @@
 #include "litebird/js/JsValue.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsParser.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/js/BytecodeCompiler.hpp"
 #include "litebird/js/VM.hpp"
 #include "litebird/dom/Document.hpp"
@@ -13,16 +14,76 @@
 
 namespace litebird {
 
+/// One lexical scope: a function activation, a block, or the global scope.
+///
+/// Bindings live in a small vector because most scopes hold a handful of
+/// names; the global scope, which holds a hundred or more, gets an index.
 class JsEnvironment : public std::enable_shared_from_this<JsEnvironment> {
 public:
+    struct Binding {
+        std::string name;
+        JsValue value;
+        bool is_const{false};
+    };
+
+    enum class AssignResult { Ok, NotFound, Const };
+
     explicit JsEnvironment(std::shared_ptr<JsEnvironment> parent = nullptr)
         : m_parent(std::move(parent)), m_is_var_scope(!m_parent) {}
 
+    /// Declares `name` in this scope, replacing an existing declaration.
     void define(const std::string& name, JsValue value) {
-        m_values[name] = std::move(value);
+        Binding* existing = find_own(name);
+        if (existing) {
+            existing->value = std::move(value);
+            existing->is_const = false;
+            return;
+        }
+        add(name, std::move(value), false);
     }
 
-    bool has_own(const std::string& name) const { return m_values.find(name) != m_values.end(); }
+    void define_const(const std::string& name, JsValue value) {
+        Binding* existing = find_own(name);
+        if (existing) {
+            existing->value = std::move(value);
+            existing->is_const = true;
+            return;
+        }
+        add(name, std::move(value), true);
+    }
+
+    Binding* find_own(const std::string& name) {
+        if (m_bindings.size() > kIndexThreshold) {
+            auto it = m_index.find(name);
+            return it == m_index.end() ? nullptr : &m_bindings[it->second];
+        }
+        for (auto& b : m_bindings) {
+            if (b.name == name) return &b;
+        }
+        return nullptr;
+    }
+
+    bool has_own(const std::string& name) const {
+        return const_cast<JsEnvironment*>(this)->find_own(name) != nullptr;
+    }
+
+    /// Finds `name` in this scope or an enclosing one.
+    Binding* lookup(const std::string& name) {
+        for (JsEnvironment* env = this; env; env = env->m_parent.get()) {
+            if (Binding* b = env->find_own(name)) return b;
+        }
+        return nullptr;
+    }
+
+    /// Assigns to an existing binding without ever creating one.
+    AssignResult try_assign(const std::string& name, const JsValue& value) {
+        Binding* b = lookup(name);
+        if (!b) return AssignResult::NotFound;
+        if (b->is_const) return AssignResult::Const;
+        b->value = value;
+        return AssignResult::Ok;
+    }
+
     void mark_var_scope() { m_is_var_scope = true; }
     std::shared_ptr<JsEnvironment> var_scope() {
         auto scope = shared_from_this();
@@ -34,49 +95,63 @@ public:
         if (!scope->has_own(name)) scope->define(name, JsValue::make_undefined());
     }
 
+    /// Legacy assignment: creates the binding in the outermost scope when the
+    /// name is not declared anywhere (sloppy-mode implicit global).
     bool assign(const std::string& name, JsValue value) {
-        auto it = m_values.find(name);
-        if (it != m_values.end()) {
-            it->second = std::move(value);
+        if (Binding* b = lookup(name)) {
+            b->value = std::move(value);
             return true;
         }
-        if (m_parent) {
-            return m_parent->assign(name, std::move(value));
-        }
-        // Implicit global definition if not found
-        m_values[name] = std::move(value);
+        JsEnvironment* root = this;
+        while (root->m_parent) root = root->m_parent.get();
+        root->define(name, std::move(value));
         return true;
     }
 
+    /// Legacy read: undefined when the name is not declared.
     JsValue get(const std::string& name) const {
-        auto it = m_values.find(name);
-        if (it != m_values.end()) {
-            return it->second;
-        }
-        if (m_parent) {
-            return m_parent->get(name);
-        }
+        if (const Binding* b = const_cast<JsEnvironment*>(this)->lookup(name)) return b->value;
         return JsValue::make_undefined();
     }
 
     std::shared_ptr<JsEnvironment> parent() const { return m_parent; }
-    const std::unordered_map<std::string, JsValue>& values() const { return m_values; }
+    JsEnvironment* parent_raw() const { return m_parent.get(); }
+    std::vector<Binding>& bindings() { return m_bindings; }
+    const std::vector<Binding>& bindings() const { return m_bindings; }
 
     void collect_roots(std::vector<JsValue*>& roots) {
-        for (auto& [k, v] : m_values) {
-            roots.push_back(&v);
+        for (auto& b : m_bindings) {
+            roots.push_back(&b.value);
         }
         if (m_parent) {
             m_parent->collect_roots(roots);
         }
     }
 
+    /// The collection in which this scope was last traced; stops the collector
+    /// from walking a scope shared by many closures more than once.
+    uint64_t gc_epoch{0};
+
 private:
+    static constexpr size_t kIndexThreshold = 16;
+
+    void add(const std::string& name, JsValue value, bool is_const) {
+        m_bindings.push_back(Binding{name, std::move(value), is_const});
+        if (m_bindings.size() == kIndexThreshold + 1) {
+            for (size_t i = 0; i < m_bindings.size(); ++i) m_index[m_bindings[i].name] = static_cast<uint32_t>(i);
+        } else if (m_bindings.size() > kIndexThreshold + 1) {
+            m_index[name] = static_cast<uint32_t>(m_bindings.size() - 1);
+        }
+    }
+
     std::shared_ptr<JsEnvironment> m_parent;
     bool m_is_var_scope{false};
-    std::unordered_map<std::string, JsValue> m_values;
+    std::vector<Binding> m_bindings;
+    std::unordered_map<std::string, uint32_t> m_index;
 };
 
+/// Kept for source compatibility. The interpreter no longer throws this:
+/// `return` is a completion value, not a C++ exception.
 class ReturnException {
 public:
     JsValue value;
@@ -84,10 +159,9 @@ public:
 };
 
 /// Thrown when a script recurses deeper than the engine can represent on the
-/// native stack. Every JS call consumes C++ frames in the AST interpreter
-/// (`eval_expr` -> call -> `execute` -> `exec_stmt`), so without a limit an
-/// ordinary recursive function overflows the stack and the process dies with no
-/// error at all. Reported to script as a caught-able RangeError.
+/// native stack. Every JS call consumes C++ frames in the AST interpreter, so
+/// without a limit an ordinary recursive function overflows the stack and the
+/// process dies with no error at all. Scripts see it as a RangeError.
 class JsStackOverflow : public std::exception {
 public:
     const char* what() const noexcept override { return "RangeError: Maximum call stack size exceeded"; }
@@ -108,20 +182,59 @@ public:
     /// stack and this value is just a backstop.
     static constexpr int kMaxCallDepth = 20000;
 
+    /// Runs a script. A syntax error or an uncaught exception is reported on
+    /// stderr as "Uncaught ..." and the result is undefined; see
+    /// last_eval_failed(). The script never runs twice and never runs
+    /// partially past a syntax error.
     JsValue eval(std::string_view source);
+    /// Same as eval(). Kept because callers and tests use both names.
     JsValue eval_ast(std::string_view source);
+    /// Experimental: compiles to bytecode and runs it on the VM. Throws if the
+    /// compiler does not support a construct. Not used by eval().
+    JsValue eval_bytecode(std::string_view source);
     std::shared_ptr<BytecodeFunction> compile_to_bytecode(std::string_view source);
+
+    /// Runs a script and lets exceptions propagate to the caller as JsThrow.
+    JsValue run(std::string_view source);
 
     JsValue execute(const AstNode* node, std::shared_ptr<JsEnvironment> env);
 
     std::shared_ptr<JsEnvironment> global_env() const { return m_global_env; }
+    const JsValue& global_object() const { return m_global_object; }
     VM& vm() { return m_vm; }
     void set_document(std::shared_ptr<Document> doc);
 
     std::shared_ptr<class History> history() const { return m_history; }
 
+    /// True when the most recent eval()/eval_ast() ended with a syntax error or
+    /// an uncaught exception.
+    bool last_eval_failed() const { return m_last_eval_failed; }
+
 private:
+    using EnvPtr = std::shared_ptr<JsEnvironment>;
+
+    /// How a statement finished.
+    enum class Flow : uint8_t { Normal, Break, Continue, Return };
+
+    /// Per-activation state for statements: one per function call or script.
+    struct Frame {
+        JsValue return_value;
+        const std::string* label{nullptr};   // target of a labelled break/continue in flight
+        JsValue completion;                  // value of the last expression statement
+        bool track_completion{false};
+    };
+
+    /// An evaluated assignment target: a variable or `base[key]`.
+    struct Reference {
+        bool is_property{false};
+        std::string name;
+        JsValue base;
+    };
+
+    enum class BindMode { Var, Let, Const, Assign };
+
     void init_builtins();
+    void init_language_builtins();
 
     /// RAII call-depth guard. Throws JsStackOverflow once the native stack is
     /// within kStackReserveBytes of its budget, and always restores the counter,
@@ -141,24 +254,78 @@ private:
         JsInterpreter& m_interp;
     };
 
+    // --- Programs and functions -------------------------------------------
+    JsValue run_program(const Program& program);
+    JsValue make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
+                          const std::string& name_hint = std::string());
+    JsValue invoke_function(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& closure,
+                            const JsValue& callee, const JsValue& this_val, bool is_construct,
+                            const std::vector<JsValue>& args);
+    JsValue run_function_body(const FunctionNode& node, const EnvPtr& env);
+    JsValue run_async_body(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);
+    JsValue make_generator(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);
+    void bind_parameters(const FunctionNode& node, const EnvPtr& env, const std::vector<JsValue>& args);
+    void hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env);
+    JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env);
+    void initialize_fields(const JsValue& ctor, const JsValue& instance);
+    JsValue call_legacy_function(const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val);
+
+    // --- Statements ---------------------------------------------------------
+    Flow exec(const Stmt* stmt, const EnvPtr& env, Frame& frame);
+    Flow exec_list(const std::vector<std::unique_ptr<Stmt>>& list, const EnvPtr& env, Frame& frame);
+    Flow exec_block(const BlockStmt* block, const EnvPtr& env, Frame& frame);
+    Flow exec_labeled(const Stmt* stmt, const EnvPtr& env, Frame& frame,
+                      std::vector<const std::string*>& labels);
+    Flow exec_for(const ForStmt* stmt, const EnvPtr& env, Frame& frame,
+                  const std::vector<const std::string*>& labels);
+    Flow exec_for_each(const ForEachStmt* stmt, const EnvPtr& env, Frame& frame,
+                       const std::vector<const std::string*>& labels);
+    Flow exec_while(const WhileStmt* stmt, const EnvPtr& env, Frame& frame,
+                    const std::vector<const std::string*>& labels);
+    Flow exec_do_while(const DoWhileStmt* stmt, const EnvPtr& env, Frame& frame,
+                       const std::vector<const std::string*>& labels);
+    Flow exec_try(const TryStmt* stmt, const EnvPtr& env, Frame& frame);
+    Flow exec_switch(const SwitchStmt* stmt, const EnvPtr& env, Frame& frame);
+    void exec_var_decl(const VarDeclStmt* stmt, const EnvPtr& env);
+
+    // --- Expressions --------------------------------------------------------
+    JsValue evaluate(const Expr* expr, const EnvPtr& env);
+    JsValue evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint);
+    JsValue eval_binary(const BinaryExpr* expr, const EnvPtr& env);
+    JsValue apply_binary(JsTokenType op, const JsValue& left, const JsValue& right);
+    JsValue eval_unary(const UnaryExpr* expr, const EnvPtr& env);
+    JsValue eval_assign(const AssignExpr* expr, const EnvPtr& env);
+    JsValue eval_call(const CallExpr* expr, const EnvPtr& env);
+    JsValue eval_new(const NewExpr* expr, const EnvPtr& env);
+    JsValue eval_object_literal(const ObjectLiteralExpr* expr, const EnvPtr& env);
+    JsValue eval_super_call(const SuperCallExpr* expr, const EnvPtr& env);
+    JsValue eval_yield(const YieldExpr* expr, const EnvPtr& env);
+    JsValue eval_await(const JsValue& value);
+    JsValue eval_tagged_template(const TaggedTemplateExpr* expr, const EnvPtr& env);
+    std::vector<JsValue> eval_arguments(const std::vector<std::unique_ptr<Expr>>& args, const EnvPtr& env);
+
+    // --- Variables and properties -------------------------------------------
+    JsValue lookup_identifier(const std::string& name, const EnvPtr& env);
+    void assign_identifier(const std::string& name, const JsValue& value, const EnvPtr& env);
+    JsValue get_member(const JsValue& base, const std::string& key);
+    void set_member(const JsValue& base, const std::string& key, const JsValue& value);
+    Reference resolve_reference(const Expr* target, const EnvPtr& env);
+    JsValue read_reference(const Reference& ref, const EnvPtr& env);
+    void write_reference(const Reference& ref, const JsValue& value, const EnvPtr& env);
+    void bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode);
+    JsValue super_base(const EnvPtr& env);
+
     int m_call_depth{0};
-
-    JsValue eval_expr(const Expr* expr, std::shared_ptr<JsEnvironment> env);
-
-    // Shared lvalue machinery for plain assignment, compound assignment and
-    // ++/--. Keeping one implementation means `obj.x += 1`, `obj.x++` and
-    // `obj.x = obj.x + 1` cannot drift apart.
-    JsValue read_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env);
-    void write_lvalue(const Expr* target, const std::shared_ptr<JsEnvironment>& env,
-                      const JsValue& value);
-    JsValue apply_compound(JsTokenType op, const JsValue& left, const JsValue& right);
-    void hoist_var_declarations(const Stmt* stmt, const std::shared_ptr<JsEnvironment>& env);
-    JsValue exec_stmt(const Stmt* stmt, std::shared_ptr<JsEnvironment> env);
+    bool m_strict{false};
+    bool m_last_eval_failed{false};
+    bool m_chain_short_circuit{false};
 
     std::shared_ptr<JsEnvironment> m_global_env;
+    JsValue m_global_object;
     std::shared_ptr<Document> m_document;
     std::shared_ptr<class History> m_history;
     std::shared_ptr<JsEnvironment> m_current_env;
+    std::vector<std::weak_ptr<struct GeneratorData>> m_generators;
     VM m_vm;
 };
 

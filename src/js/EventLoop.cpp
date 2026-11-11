@@ -1,4 +1,5 @@
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/js/Heap.hpp"
 
 namespace litebird {
@@ -110,7 +111,8 @@ size_t EventLoop::run_microtasks() {
         }
         for (auto& task : microtasks) {
             if (task) {
-                task();
+                // A callback that throws must not take the loop down with it.
+                js_run_guarded(task);
                 count++;
             }
         }
@@ -135,8 +137,10 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
     }
     for (auto& task : tasks) {
         if (task) {
-            task();
+            js_run_guarded(task);
             executed_count++;
+            // Microtask checkpoint after every task, as HTML specifies.
+            executed_count += run_microtasks();
         }
     }
     // Microtask checkpoint after task
@@ -158,6 +162,12 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
         }
     }
 
+    // Timers fire in the order they come due, not the order they were set:
+    // setTimeout(a, 20); setTimeout(b, 5) runs b first even when both are late.
+    std::stable_sort(due_timers.begin(), due_timers.end(), [](const TimerTask& a, const TimerTask& b) {
+        return a.trigger_time < b.trigger_time;
+    });
+
     // Execute due timers
     for (const auto& dt : due_timers) {
         bool still_active = true;
@@ -173,7 +183,7 @@ size_t EventLoop::tick(std::chrono::steady_clock::time_point now) {
             }
         }
         if (still_active && dt.callback) {
-            dt.callback();
+            js_run_guarded(dt.callback);
             executed_count++;
             executed_count += run_microtasks();
         }

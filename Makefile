@@ -40,6 +40,16 @@ SRCS = src/dom/Node.cpp \
        src/js/Heap.cpp \
        src/js/VM.cpp \
        src/js/JsInterpreter.cpp \
+       src/js/JsEval.cpp \
+       src/js/JsOps.cpp \
+       src/js/BuiltinsObject.cpp \
+       src/js/BuiltinsArray.cpp \
+       src/js/BuiltinsString.cpp \
+       src/js/BuiltinsNumber.cpp \
+       src/js/BuiltinsCollections.cpp \
+       src/js/BuiltinsJson.cpp \
+       src/js/BuiltinsRegExp.cpp \
+       src/js/BuiltinsDate.cpp \
        src/js/Json.cpp \
        src/js/Promise.cpp \
        src/js/Storage.cpp \

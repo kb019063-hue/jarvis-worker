@@ -165,18 +165,28 @@ int main(int argc, char* argv[]) {
         doc->set_title("Standalone JS Execution");
         litebird::JsInterpreter interp(doc);
         if (dump_bytecode) {
-            auto fn = interp.compile_to_bytecode(js_code);
-            fn->chunk.disassemble(std::cout, "CLI Script");
+            try {
+                auto fn = interp.compile_to_bytecode(js_code);
+                fn->chunk.disassemble(std::cout, "CLI Script");
+            } catch (const std::exception& ex) {
+                // The bytecode compiler covers a subset of the language.
+                std::cerr << "Cannot compile to bytecode: " << ex.what() << "\n";
+                return 1;
+            }
         } else {
             interp.eval(js_code);
             auto start_wait = std::chrono::steady_clock::now();
             while (litebird::EventLoop::default_loop().has_pending_tasks()) {
-                litebird::EventLoop::default_loop().tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (litebird::EventLoop::default_loop().tick() == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
                 if (std::chrono::steady_clock::now() - start_wait > std::chrono::milliseconds(2000)) {
                     break;
                 }
             }
+            // A script that ended with an uncaught exception or a syntax error
+            // is a failure; say so through the exit status.
+            if (litebird::js_uncaught_error_count() > 0) return 1;
         }
         return 0;
     }
@@ -223,8 +233,12 @@ int main(int argc, char* argv[]) {
         if (!script.empty()) {
             if (dump_bytecode) {
                 std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-                auto fn = js_engine.compile_to_bytecode(script);
-                fn->chunk.disassemble(std::cout, "Inline <script>");
+                try {
+                    auto fn = js_engine.compile_to_bytecode(script);
+                    fn->chunk.disassemble(std::cout, "Inline <script>");
+                } catch (const std::exception& ex) {
+                    std::cout << "(not compiled: " << ex.what() << ")";
+                }
                 std::cout << "\n";
             }
             js_engine.eval_ast(script);

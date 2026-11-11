@@ -123,26 +123,53 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
         compile_expr(expr_stmt->expression.get());
         emit_opcode(OpCode::OpPop);
+    } else if (dynamic_cast<const EmptyStmt*>(stmt)) {
+        // nothing to emit
     } else if (auto var_decl = dynamic_cast<const VarDeclStmt*>(stmt)) {
         if (var_decl->kind == JsDeclKind::Var) {
-            throw std::runtime_error("Function-scoped var compiled via AST interpreter");
+            throw std::runtime_error("Function-scoped var is not supported by the bytecode compiler");
         }
-        if (var_decl->initializer) {
-            compile_expr(var_decl->initializer.get());
+        const std::string* name = var_decl->simple_name();
+        if (!name) {
+            throw std::runtime_error("Destructuring and multiple declarators are not supported by the bytecode compiler");
+        }
+        if (var_decl->decls[0].init) {
+            compile_expr(var_decl->decls[0].init.get());
         } else {
             emit_opcode(OpCode::OpUndefined);
         }
 
         if (m_scope_depth > 0) {
-            add_local(var_decl->name);
+            add_local(*name);
         } else {
-            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(var_decl->name));
+            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(*name));
             emit_opcode(OpCode::OpSetGlobal);
             emit_byte(static_cast<uint8_t>(name_idx));
             emit_opcode(OpCode::OpPop);
         }
-    } else if (dynamic_cast<const ArrayDestructuringDeclStmt*>(stmt) || dynamic_cast<const ObjectDestructuringDeclStmt*>(stmt) || dynamic_cast<const ClassDeclStmt*>(stmt)) {
-        throw std::runtime_error("Falling back to AST interpreter");
+    } else if (auto for_stmt = dynamic_cast<const ForStmt*>(stmt)) {
+        if (!for_stmt->per_iteration_names.empty()) {
+            throw std::runtime_error("Per-iteration loop bindings are not supported by the bytecode compiler");
+        }
+        // for (init; test; update) body  ==>  { init; while (test) { body; update; } }
+        begin_scope();
+        if (for_stmt->init) compile_stmt(for_stmt->init.get());
+        size_t loop_start = m_function->chunk.code.size();
+        if (for_stmt->test) compile_expr(for_stmt->test.get());
+        else emit_opcode(OpCode::OpTrue);
+        size_t exit_jump = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);
+        begin_scope();
+        compile_stmt(for_stmt->body.get());
+        if (for_stmt->update) {
+            compile_expr(for_stmt->update.get());
+            emit_opcode(OpCode::OpPop);
+        }
+        end_scope();
+        emit_loop(loop_start);
+        patch_jump(exit_jump);
+        emit_opcode(OpCode::OpPop);
+        end_scope();
     } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
         begin_scope();
         for (const auto& s : block_stmt->statements) {
@@ -183,46 +210,59 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_opcode(OpCode::OpUndefined);
         }
         emit_opcode(OpCode::OpReturn);
-    } else if (dynamic_cast<const ForOfStmt*>(stmt)) {
-        throw std::runtime_error("ForOf compiled via AST interpreter");
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
-        if (fn_decl->is_generator) {
-            throw std::runtime_error("Generator compiled via AST interpreter");
-        }
-        auto sub_fn = std::make_shared<BytecodeFunction>(fn_decl->name, static_cast<int>(fn_decl->params.size()));
+        const FunctionNode& node = *fn_decl->fn;
+        require_simple_function(node);
+        const std::vector<std::string> params = node.simple_param_names();
+        auto sub_fn = std::make_shared<BytecodeFunction>(node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
 
         // Parameters are local variables in the function scope
-        for (const auto& p : fn_decl->params) {
+        for (const auto& p : params) {
             sub_compiler.add_local(p);
         }
 
-        sub_compiler.compile(fn_decl->body.get());
+        sub_compiler.compile(node.body.get());
 
         // Create a function object holding the compiled bytecode function
         JsValue fn_obj;
         fn_obj.type = JsType::Function;
-        fn_obj.set_function_params(fn_decl->params);
-        fn_obj.set_function_body(fn_decl->body);
+        fn_obj.set_function_params(params);
+        fn_obj.set_function_body(node.body);
         fn_obj.set_function_bytecode(sub_fn);
         m_function->sub_functions.push_back(sub_fn);
         // Embed the compiled BytecodeFunction pointer into properties
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         // Keep a strong reference in properties so it isn't freed
-        fn_obj.set_property("__fn_name__", JsValue::make_string(fn_decl->name));
+        fn_obj.set_property("__fn_name__", JsValue::make_string(node.name));
 
         size_t const_idx = m_function->chunk.add_constant(fn_obj);
         emit_opcode(OpCode::OpConstant);
         emit_byte(static_cast<uint8_t>(const_idx));
 
         if (m_scope_depth > 0) {
-            add_local(fn_decl->name);
+            add_local(node.name);
         } else {
-            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(fn_decl->name));
+            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(node.name));
             emit_opcode(OpCode::OpSetGlobal);
             emit_byte(static_cast<uint8_t>(name_idx));
             emit_opcode(OpCode::OpPop);
         }
+    } else {
+        // A statement this compiler does not understand must never be dropped
+        // silently: the program would run with a hole in it.
+        throw std::runtime_error("Statement is not supported by the bytecode compiler");
+    }
+}
+
+// The VM has no closures, default values, `this` or `arguments`; refuse anything
+// that would need them rather than compile it wrongly.
+void BytecodeCompiler::require_simple_function(const FunctionNode& node) {
+    if (node.is_generator || node.is_async) {
+        throw std::runtime_error("Generators and async functions are not supported by the bytecode compiler");
+    }
+    if (!node.simple_params || node.uses_arguments || node.uses_super || node.uses_new_target) {
+        throw std::runtime_error("This function form is not supported by the bytecode compiler");
     }
 }
 
@@ -250,6 +290,20 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             emit_byte(static_cast<uint8_t>(name_idx));
         }
     } else if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
+        if (assign->pattern) {
+            throw std::runtime_error("Destructuring assignment is not supported by the bytecode compiler");
+        }
+        switch (assign->op) {
+            case JsTokenType::Equal:
+            case JsTokenType::PlusEqual:
+            case JsTokenType::MinusEqual:
+            case JsTokenType::StarEqual:
+            case JsTokenType::SlashEqual:
+            case JsTokenType::PercentEqual:
+                break;
+            default:
+                throw std::runtime_error("This assignment operator is not supported by the bytecode compiler");
+        }
         // For `x op= v`: load x, evaluate v, apply the operator, then store.
         // The Set* opcodes leave the stored value on the stack, so this yields
         // the value of the expression as required.
@@ -361,8 +415,8 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         // Postfix must yield the pre-change value; discard the new one.
         if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
-        if (unary->op == JsTokenType::Typeof) {
-            throw std::runtime_error("typeof compiled via AST interpreter");
+        if (unary->op != JsTokenType::Minus && unary->op != JsTokenType::Bang) {
+            throw std::runtime_error("This unary operator is not supported by the bytecode compiler");
         }
         compile_expr(unary->operand.get());
         if (unary->op == JsTokenType::Minus) {
@@ -411,9 +465,11 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             case JsTokenType::GreaterEqual: emit_opcode(OpCode::OpGreaterEqual); break;
             case JsTokenType::Less:         emit_opcode(OpCode::OpLess); break;
             case JsTokenType::LessEqual:    emit_opcode(OpCode::OpLessEqual); break;
-            default: break;
+            default:
+                throw std::runtime_error("This binary operator is not supported by the bytecode compiler");
         }
     } else if (auto member = dynamic_cast<const MemberExpr*>(expr)) {
+        if (member->optional) throw std::runtime_error("Optional chaining is not supported by the bytecode compiler");
         compile_expr(member->object.get());
         size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(member->property));
         emit_opcode(OpCode::OpGetProperty);
@@ -424,22 +480,32 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         emit_opcode(OpCode::OpGetIndex);
     } else if (auto arr = dynamic_cast<const ArrayLiteralExpr*>(expr)) {
         for (const auto& elem : arr->elements) {
+            if (!elem || elem->kind == NodeKind::Spread) {
+                throw std::runtime_error("Array holes and spread are not supported by the bytecode compiler");
+            }
             compile_expr(elem.get());
         }
         emit_opcode(OpCode::OpNewArray);
         emit_byte(static_cast<uint8_t>(arr->elements.size()));
     } else if (auto obj_lit = dynamic_cast<const ObjectLiteralExpr*>(expr)) {
-        for (const auto& [k, v] : obj_lit->entries) {
-            size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(k));
+        if (!obj_lit->is_simple()) {
+            throw std::runtime_error("This object literal form is not supported by the bytecode compiler");
+        }
+        for (const auto& prop : obj_lit->properties) {
+            size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(prop.key));
             emit_opcode(OpCode::OpConstant);
             emit_byte(static_cast<uint8_t>(key_idx));
-            compile_expr(v.get());
+            compile_expr(prop.value.get());
         }
         emit_opcode(OpCode::OpNewObject);
-        emit_byte(static_cast<uint8_t>(obj_lit->entries.size()));
+        emit_byte(static_cast<uint8_t>(obj_lit->properties.size()));
     } else if (auto call = dynamic_cast<const CallExpr*>(expr)) {
+        if (call->optional) throw std::runtime_error("Optional calls are not supported by the bytecode compiler");
         compile_expr(call->callee.get());
         for (const auto& arg : call->args) {
+            if (arg->kind == NodeKind::Spread) {
+                throw std::runtime_error("Spread arguments are not supported by the bytecode compiler");
+            }
             compile_expr(arg.get());
         }
         emit_opcode(OpCode::OpCall);
@@ -454,26 +520,26 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
-        if (fn_expr->is_generator) {
-            throw std::runtime_error("Generator compiled via AST interpreter");
-        }
-        auto sub_fn = std::make_shared<BytecodeFunction>(fn_expr->name.empty() ? "__anon__" : fn_expr->name, static_cast<int>(fn_expr->params.size()));
+        const FunctionNode& node = *fn_expr->fn;
+        require_simple_function(node);
+        const std::vector<std::string> params = node.simple_param_names();
+        auto sub_fn = std::make_shared<BytecodeFunction>(node.name.empty() ? "__anon__" : node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
 
-        for (const auto& p : fn_expr->params) {
+        for (const auto& p : params) {
             sub_compiler.add_local(p);
         }
 
-        sub_compiler.compile(fn_expr->body.get());
+        sub_compiler.compile(node.body.get());
 
         JsValue fn_obj;
         fn_obj.type = JsType::Function;
-        fn_obj.set_function_params(fn_expr->params);
-        fn_obj.set_function_body(fn_expr->body);
+        fn_obj.set_function_params(params);
+        fn_obj.set_function_body(node.body);
         fn_obj.set_function_bytecode(sub_fn);
         m_function->sub_functions.push_back(sub_fn);
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
-        fn_obj.set_property("__fn_name__", JsValue::make_string(fn_expr->name));
+        fn_obj.set_property("__fn_name__", JsValue::make_string(node.name));
 
         size_t const_idx = m_function->chunk.add_constant(fn_obj);
         emit_opcode(OpCode::OpConstant);

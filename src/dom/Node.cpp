@@ -1,4 +1,5 @@
 #include "litebird/dom/Node.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
@@ -204,7 +205,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
             auto copy = it->second;
             for (const auto& entry : copy) {
                 if (entry.use_capture) {
-                    entry.listener(event);
+                    js_run_guarded([&] { entry.listener(event); });
                     if (event->propagation_stopped()) return !event->default_prevented();
                 }
             }
@@ -218,7 +219,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
     if (it != m_listeners.end()) {
         auto copy = it->second;
         for (const auto& entry : copy) {
-            entry.listener(event);
+            js_run_guarded([&] { entry.listener(event); });
             if (event->propagation_stopped()) return !event->default_prevented();
         }
     }
@@ -234,7 +235,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
                 auto p_copy = p_it->second;
                 for (const auto& entry : p_copy) {
                     if (!entry.use_capture) {
-                        entry.listener(event);
+                        js_run_guarded([&] { entry.listener(event); });
                         if (event->propagation_stopped()) return !event->default_prevented();
                     }
                 }

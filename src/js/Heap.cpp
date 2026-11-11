@@ -4,16 +4,26 @@
 
 namespace litebird {
 
+namespace {
+Heap::EnvironmentTracer g_environment_tracer;
+}
+
 void JsObject::trace(Heap& heap) {
     if (prototype) {
         heap.mark_object(prototype);
     }
-    for (auto& [k, v] : properties) {
-        heap.mark_value(v);
+    for (auto& entry : properties) {
+        heap.mark_value(entry.second);
+        if (entry.setter) heap.mark_value(*entry.setter);
     }
     for (auto& elem : array_elements) {
         heap.mark_value(elem);
     }
+    if (trace_extra) trace_extra(heap);
+}
+
+void Heap::set_environment_tracer(EnvironmentTracer tracer) {
+    g_environment_tracer = tracer;
 }
 
 Heap::Heap() = default;
@@ -51,6 +61,27 @@ void Heap::mark_value(const JsValue& val) {
     if (val.object_val) {
         mark_object(val.object_val);
     }
+    if (val.type == JsType::Function) {
+        // A function keeps its own-property cell and the scopes it closed over.
+        if (const auto* fd = val.function_data()) {
+            if (fd->cell) mark_object(fd->cell);
+            if (fd->closure) mark_environment(fd->closure.get());
+        }
+    }
+    // Native functions keep their properties in a shared table, not a cell.
+    if (const PropertyMap* map = val.loose_properties()) mark_property_map(map);
+}
+
+void Heap::mark_property_map(const PropertyMap* map) {
+    if (!map || map->empty()) return;
+    if (std::find(m_visited_maps.begin(), m_visited_maps.end(), map) != m_visited_maps.end()) return;
+    m_visited_maps.push_back(map);
+    m_gray_maps.push_back(map);
+}
+
+void Heap::mark_environment(void* env) {
+    if (!env || !g_environment_tracer.enter) return;
+    if (g_environment_tracer.enter(env, m_stats.collections_count)) m_gray_environments.push_back(env);
 }
 
 void Heap::mark_object(HeapObject* obj) {
@@ -106,6 +137,9 @@ GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_stats.collections_count++;
     m_gray_stack.clear();
+    m_gray_environments.clear();
+    m_gray_maps.clear();
+    m_visited_maps.clear();
 
     // Values held by registered owners (interpreter environments, pending
     // microtasks, ...) are roots too. Without this, a collection that is handed
@@ -121,11 +155,28 @@ GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
         if (root) mark_value(*root);
     }
 
-    // Process gray worklist
-    while (!m_gray_stack.empty()) {
-        HeapObject* obj = m_gray_stack.back();
-        m_gray_stack.pop_back();
-        obj->trace(*this);
+    // Process the gray worklists until nothing new is discovered.
+    while (!m_gray_stack.empty() || !m_gray_environments.empty() || !m_gray_maps.empty()) {
+        if (!m_gray_stack.empty()) {
+            HeapObject* obj = m_gray_stack.back();
+            m_gray_stack.pop_back();
+            obj->trace(*this);
+        } else if (!m_gray_environments.empty()) {
+            void* env = m_gray_environments.back();
+            m_gray_environments.pop_back();
+            // Walk outwards; a scope already seen in this collection ends the walk.
+            while (env) {
+                void* parent = g_environment_tracer.trace(*this, env);
+                env = (parent && g_environment_tracer.enter(parent, m_stats.collections_count)) ? parent : nullptr;
+            }
+        } else {
+            const PropertyMap* map = m_gray_maps.back();
+            m_gray_maps.pop_back();
+            for (const auto& entry : *map) {
+                mark_value(entry.second);
+                if (entry.setter) mark_value(*entry.setter);
+            }
+        }
     }
 
     // 2. Sweep phase

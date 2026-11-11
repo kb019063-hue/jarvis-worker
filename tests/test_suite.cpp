@@ -4096,6 +4096,13 @@ TEST(gc_roots_are_complete_under_empty_root_set) {
     //
     // This test performs exactly that collection -- no explicit roots -- and
     // then touches everything the interpreter still holds.
+
+    // The built-in prototypes (Object.prototype, Array.prototype, ...) are
+    // heap objects shared by every interpreter and kept for the life of the
+    // process, so an "empty" heap holds exactly those.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
     {
         JsInterpreter js;
         js.eval_ast(R"(
@@ -4135,9 +4142,10 @@ TEST(gc_roots_are_complete_under_empty_root_set) {
     }
 
     // Destroying the interpreter must withdraw its provider. A collection
-    // afterwards must not call into freed memory.
+    // afterwards must not call into freed memory, and must reclaim everything
+    // the script created.
     Heap::default_heap().collect_garbage();
-    assert(Heap::default_heap().stats().alive_cells == 0);
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
 }
 
 TEST(gc_keeps_objects_captured_by_pending_microtasks) {
@@ -4310,7 +4318,13 @@ TEST(strict_equality_does_not_coerce) {
     // `===` used to be folded into `==` by the lexer, so `1 === "1"` was true.
     // Strict equality must never coerce, compare null/undefined as distinct, and
     // still compare DOM wrappers by node identity rather than wrapper address.
-    JsInterpreter js;
+    //
+    // The interpreter needs a document here. It used to be constructed without
+    // one: `document` was undefined, every DOM line below silently evaluated to
+    // undefined, and `undefined === undefined` made the identity assertions
+    // pass without a single DOM node being involved.
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
 
     js.eval_ast(R"(
         var n_eq = (1 === 1);
@@ -4334,6 +4348,8 @@ TEST(strict_equality_does_not_coerce) {
     assert(js.global_env()->get("null_undef").bool_val == false);
     assert(js.global_env()->get("zero_false").bool_val == false);
     assert(js.global_env()->get("not_strict").bool_val == true);
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("el").type == JsType::DomNode);
     assert(js.global_env()->get("same_shadow").bool_val == true);
     assert(js.global_env()->get("self_identity").bool_val == true);
 }

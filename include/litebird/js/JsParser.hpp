@@ -8,31 +8,82 @@
 
 namespace litebird {
 
+/// Every AST node carries a tag so the interpreter can dispatch with a switch
+/// instead of a chain of dynamic_casts.
+enum class NodeKind : uint8_t {
+    // Expressions
+    Literal, Identifier, TemplateLiteral, TaggedTemplate, ArrayLiteral, ObjectLiteral,
+    Function, Class, Regex, Unary, Update, Binary, Assign, Conditional, Call, New,
+    Member, Index, Sequence, Spread, Yield, Await, SuperCall, SuperMember,
+    OptionalChain, NewTarget,
+    // Statements
+    ExprStmt, VarDecl, Block, If, While, DoWhile, For, ForEach, Return, Break,
+    Continue, Throw, Try, Switch, FunctionDecl, ClassDecl, Labeled, Empty,
+    // Shared sub-trees
+    FunctionNode, ClassNode
+};
+
 class AstNode {
 public:
     virtual ~AstNode() = default;
+    NodeKind kind;
+    int line{0};
+protected:
+    explicit AstNode(NodeKind k) : kind(k) {}
 };
 
 class BlockStmt;
+class FunctionDeclStmt;
+class Expr;
 
+// ---------------------------------------------------------------------------
+// Binding and assignment patterns: `x`, `[a, , b = 1, ...rest]`, `{a, b: c}`.
+// ---------------------------------------------------------------------------
+
+struct Pattern;
+
+struct PatternElement {
+    std::unique_ptr<Pattern> target;        // null for an array hole
+    std::unique_ptr<Expr> default_value;
+    bool rest{false};
+    std::string key;                        // object patterns: property name
+    std::unique_ptr<Expr> computed_key;     // object patterns: `[expr]: target`
+};
+
+struct Pattern {
+    enum class Kind : uint8_t { Identifier, Array, Object, Target };
+    Kind kind{Kind::Identifier};
+    std::string name;                       // Identifier
+    std::vector<PatternElement> elements;   // Array / Object
+    std::unique_ptr<Expr> target;           // Target: `a.b` or `a[i]` in an assignment pattern
+
+    void collect_names(std::vector<std::string>& out) const;
+};
+
+// ---------------------------------------------------------------------------
 // Expressions
+// ---------------------------------------------------------------------------
+
 class Expr : public AstNode {
 public:
     bool explicitly_grouped{false};
+protected:
+    explicit Expr(NodeKind k) : AstNode(k) {}
 };
 
 class LiteralExpr : public Expr {
 public:
     JsValue value;
-    explicit LiteralExpr(JsValue val) : value(std::move(val)) {}
+    explicit LiteralExpr(JsValue val) : Expr(NodeKind::Literal), value(std::move(val)) {}
 };
 
 class IdentifierExpr : public Expr {
 public:
     std::string name;
-    explicit IdentifierExpr(std::string n) : name(std::move(n)) {}
+    explicit IdentifierExpr(std::string n) : Expr(NodeKind::Identifier), name(std::move(n)) {}
 };
 
+/// Arithmetic, comparison, bitwise and the short-circuiting logical operators.
 class BinaryExpr : public Expr {
 public:
     std::unique_ptr<Expr> left;
@@ -40,7 +91,7 @@ public:
     std::unique_ptr<Expr> right;
 
     BinaryExpr(std::unique_ptr<Expr> l, JsTokenType o, std::unique_ptr<Expr> r)
-        : left(std::move(l)), op(o), right(std::move(r)) {}
+        : Expr(NodeKind::Binary), left(std::move(l)), op(o), right(std::move(r)) {}
 };
 
 class UnaryExpr : public Expr {
@@ -49,16 +100,42 @@ public:
     std::unique_ptr<Expr> operand;
 
     UnaryExpr(JsTokenType o, std::unique_ptr<Expr> expr)
-        : op(o), operand(std::move(expr)) {}
+        : Expr(NodeKind::Unary), op(o), operand(std::move(expr)) {}
+};
+
+class ConditionalExpr : public Expr {
+public:
+    std::unique_ptr<Expr> test;
+    std::unique_ptr<Expr> consequent;
+    std::unique_ptr<Expr> alternate;
+
+    ConditionalExpr(std::unique_ptr<Expr> t, std::unique_ptr<Expr> c, std::unique_ptr<Expr> a)
+        : Expr(NodeKind::Conditional), test(std::move(t)), consequent(std::move(c)), alternate(std::move(a)) {}
+};
+
+/// `a, b, c`: evaluates every operand and yields the last.
+class SequenceExpr : public Expr {
+public:
+    std::vector<std::unique_ptr<Expr>> expressions;
+    explicit SequenceExpr(std::vector<std::unique_ptr<Expr>> e)
+        : Expr(NodeKind::Sequence), expressions(std::move(e)) {}
+};
+
+/// `...x` inside an array literal or an argument list.
+class SpreadExpr : public Expr {
+public:
+    std::unique_ptr<Expr> argument;
+    explicit SpreadExpr(std::unique_ptr<Expr> a) : Expr(NodeKind::Spread), argument(std::move(a)) {}
 };
 
 class CallExpr : public Expr {
 public:
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> args;
+    bool optional{false};   // `f?.()`
 
     CallExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
-        : callee(std::move(c)), args(std::move(a)) {}
+        : Expr(NodeKind::Call), callee(std::move(c)), args(std::move(a)) {}
 };
 
 class NewExpr : public Expr {
@@ -67,59 +144,158 @@ public:
     std::vector<std::unique_ptr<Expr>> args;
 
     NewExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
-        : callee(std::move(c)), args(std::move(a)) {}
+        : Expr(NodeKind::New), callee(std::move(c)), args(std::move(a)) {}
 };
 
 class MemberExpr : public Expr {
 public:
     std::unique_ptr<Expr> object;
     std::string property;
+    bool optional{false};   // `a?.b`
 
     MemberExpr(std::unique_ptr<Expr> obj, std::string prop)
-        : object(std::move(obj)), property(std::move(prop)) {}
+        : Expr(NodeKind::Member), object(std::move(obj)), property(std::move(prop)) {}
 };
 
 class IndexExpr : public Expr {
 public:
     std::unique_ptr<Expr> object;
     std::unique_ptr<Expr> index;
+    bool optional{false};   // `a?.[i]`
 
     IndexExpr(std::unique_ptr<Expr> obj, std::unique_ptr<Expr> idx)
-        : object(std::move(obj)), index(std::move(idx)) {}
+        : Expr(NodeKind::Index), object(std::move(obj)), index(std::move(idx)) {}
+};
+
+/// Marks where an optional chain ends: a short-circuit anywhere inside makes
+/// the whole wrapped expression evaluate to undefined.
+class OptionalChainExpr : public Expr {
+public:
+    std::unique_ptr<Expr> expression;
+    explicit OptionalChainExpr(std::unique_ptr<Expr> e)
+        : Expr(NodeKind::OptionalChain), expression(std::move(e)) {}
+};
+
+struct ObjectProperty {
+    enum class Kind : uint8_t { Init, Getter, Setter, Spread };
+    Kind kind{Kind::Init};
+    std::string key;
+    std::unique_ptr<Expr> computed_key;
+    std::unique_ptr<Expr> value;
+    bool shorthand{false};
+    bool is_method{false};
 };
 
 class ObjectLiteralExpr : public Expr {
 public:
-    std::vector<std::pair<std::string, std::unique_ptr<Expr>>> entries;
-    explicit ObjectLiteralExpr(std::vector<std::pair<std::string, std::unique_ptr<Expr>>> e)
-        : entries(std::move(e)) {}
+    std::vector<ObjectProperty> properties;
+    explicit ObjectLiteralExpr(std::vector<ObjectProperty> p)
+        : Expr(NodeKind::ObjectLiteral), properties(std::move(p)) {}
+
+    /// True when every property is a plain `key: value` pair.
+    bool is_simple() const {
+        for (const auto& p : properties) {
+            if (p.kind != ObjectProperty::Kind::Init || p.computed_key || p.is_method) return false;
+        }
+        return true;
+    }
 };
 
 class ArrayLiteralExpr : public Expr {
 public:
-    std::vector<std::unique_ptr<Expr>> elements;
+    std::vector<std::unique_ptr<Expr>> elements;   // null entries are holes
     explicit ArrayLiteralExpr(std::vector<std::unique_ptr<Expr>> elems)
-        : elements(std::move(elems)) {}
+        : Expr(NodeKind::ArrayLiteral), elements(std::move(elems)) {}
 };
 
 class TemplateLiteralExpr : public Expr {
 public:
     std::vector<std::unique_ptr<Expr>> parts;
     explicit TemplateLiteralExpr(std::vector<std::unique_ptr<Expr>> p)
-        : parts(std::move(p)) {}
+        : Expr(NodeKind::TemplateLiteral), parts(std::move(p)) {}
+};
+
+class TaggedTemplateExpr : public Expr {
+public:
+    std::unique_ptr<Expr> tag;
+    std::vector<std::string> cooked;
+    std::vector<std::string> raw;
+    std::vector<std::unique_ptr<Expr>> expressions;
+    TaggedTemplateExpr() : Expr(NodeKind::TaggedTemplate) {}
+};
+
+class RegexLiteralExpr : public Expr {
+public:
+    std::string pattern;
+    std::string flags;
+    RegexLiteralExpr(std::string p, std::string f)
+        : Expr(NodeKind::Regex), pattern(std::move(p)), flags(std::move(f)) {}
+};
+
+struct FunctionParam {
+    std::unique_ptr<Pattern> target;
+    std::shared_ptr<Expr> default_value;
+    bool rest{false};
+};
+
+/// A function's parameters and body. Shared between the AST and every function
+/// value created from it, because closures outlive the script that defined
+/// them.
+class FunctionNode : public AstNode {
+public:
+    FunctionNode() : AstNode(NodeKind::FunctionNode) {}
+
+    std::string name;
+    std::vector<FunctionParam> params;
+    std::shared_ptr<BlockStmt> body;
+    bool is_arrow{false};
+    bool is_async{false};
+    bool is_generator{false};
+    bool is_method{false};               // methods, getters and setters cannot be constructed
+    bool is_class_constructor{false};
+    bool is_derived_constructor{false};
+    bool is_strict{false};
+    bool uses_arguments{false};
+    bool uses_super{false};              // `super.x` or `super(...)` appears in the body
+    bool uses_new_target{false};
+    bool simple_params{true};            // identifiers only: no defaults, rest or patterns
+    int length{0};                       // parameters before the first default or rest
+    std::vector<std::string> var_names;  // `var` bindings hoisted to this function
+
+    /// Parameter names when `simple_params` is true.
+    std::vector<std::string> simple_param_names() const;
 };
 
 class FunctionExpr : public Expr {
 public:
-    std::string name;
-    std::vector<std::string> params;
-    std::vector<std::shared_ptr<Expr>> default_values;
-    std::shared_ptr<BlockStmt> body;
-    bool is_async{false};
-    bool is_generator{false};
+    std::shared_ptr<FunctionNode> fn;
+    explicit FunctionExpr(std::shared_ptr<FunctionNode> f)
+        : Expr(NodeKind::Function), fn(std::move(f)) {}
+};
 
-    FunctionExpr(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false, bool gen_flag = false)
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag), is_generator(gen_flag) {}
+struct ClassMember {
+    enum class Kind : uint8_t { Method, Getter, Setter, Field, StaticBlock };
+    Kind kind{Kind::Method};
+    bool is_static{false};
+    std::string key;
+    std::shared_ptr<Expr> computed_key;
+    std::shared_ptr<FunctionNode> fn;    // Method, Getter, Setter, StaticBlock
+    std::shared_ptr<Expr> value;         // Field initialiser, may be null
+};
+
+class ClassNode : public AstNode {
+public:
+    ClassNode() : AstNode(NodeKind::ClassNode) {}
+    std::string name;
+    std::shared_ptr<Expr> super_class;
+    std::shared_ptr<FunctionNode> constructor;
+    std::vector<ClassMember> members;
+};
+
+class ClassExpr : public Expr {
+public:
+    std::shared_ptr<ClassNode> cls;
+    explicit ClassExpr(std::shared_ptr<ClassNode> c) : Expr(NodeKind::Class), cls(std::move(c)) {}
 };
 
 class YieldExpr : public Expr {
@@ -127,23 +303,36 @@ public:
     std::unique_ptr<Expr> argument;
     bool delegate{false}; // yield*
     explicit YieldExpr(std::unique_ptr<Expr> arg, bool del = false)
-        : argument(std::move(arg)), delegate(del) {}
+        : Expr(NodeKind::Yield), argument(std::move(arg)), delegate(del) {}
 };
 
 class AwaitExpr : public Expr {
 public:
     std::unique_ptr<Expr> expression;
-    explicit AwaitExpr(std::unique_ptr<Expr> expr) : expression(std::move(expr)) {}
+    explicit AwaitExpr(std::unique_ptr<Expr> expr)
+        : Expr(NodeKind::Await), expression(std::move(expr)) {}
 };
 
-class SuperExpr : public Expr {
+/// `super(args)` inside a derived class constructor.
+class SuperCallExpr : public Expr {
 public:
     std::vector<std::unique_ptr<Expr>> args;
-    std::string method_name;
-    bool is_call{false};
+    explicit SuperCallExpr(std::vector<std::unique_ptr<Expr>> a)
+        : Expr(NodeKind::SuperCall), args(std::move(a)) {}
+};
 
-    SuperExpr(std::vector<std::unique_ptr<Expr>> a, std::string m = "", bool call = false)
-        : args(std::move(a)), method_name(std::move(m)), is_call(call) {}
+/// `super.name` or `super[expr]`.
+class SuperMemberExpr : public Expr {
+public:
+    std::string property;
+    std::unique_ptr<Expr> computed;
+    SuperMemberExpr(std::string p, std::unique_ptr<Expr> c)
+        : Expr(NodeKind::SuperMember), property(std::move(p)), computed(std::move(c)) {}
+};
+
+class NewTargetExpr : public Expr {
+public:
+    NewTargetExpr() : Expr(NodeKind::NewTarget) {}
 };
 
 /// `i++`, `i--`, `++i`, `--i` (ECMA-262 13.4 UpdateExpression).
@@ -155,70 +344,80 @@ public:
     bool prefix;
 
     UpdateExpr(std::unique_ptr<Expr> t, JsTokenType o, bool pre)
-        : target(std::move(t)), op(o), prefix(pre) {}
+        : Expr(NodeKind::Update), target(std::move(t)), op(o), prefix(pre) {}
 };
 
 class AssignExpr : public Expr {
 public:
-    std::unique_ptr<Expr> target;
+    std::unique_ptr<Expr> target;        // identifier, `a.b` or `a[b]`; null when `pattern` is set
+    std::unique_ptr<Pattern> pattern;    // destructuring assignment: `[a, b] = ...`, `({x} = ...)`
     std::unique_ptr<Expr> value;
-    /// `Equal` for plain assignment, or PlusEqual/MinusEqual/StarEqual/
-    /// SlashEqual/PercentEqual for the compound forms.
+    /// `Equal` for plain assignment, or one of the compound operators.
     JsTokenType op{JsTokenType::Equal};
 
     AssignExpr(std::unique_ptr<Expr> t, std::unique_ptr<Expr> v,
                JsTokenType o = JsTokenType::Equal)
-        : target(std::move(t)), value(std::move(v)), op(o) {}
+        : Expr(NodeKind::Assign), target(std::move(t)), value(std::move(v)), op(o) {}
 };
 
+// ---------------------------------------------------------------------------
 // Statements
+// ---------------------------------------------------------------------------
+
 enum class JsDeclKind { Var, Let, Const };
 
-class Stmt : public AstNode {};
+class Stmt : public AstNode {
+protected:
+    explicit Stmt(NodeKind k) : AstNode(k) {}
+};
 
 class ExprStmt : public Stmt {
 public:
     std::unique_ptr<Expr> expression;
-    explicit ExprStmt(std::unique_ptr<Expr> expr) : expression(std::move(expr)) {}
+    explicit ExprStmt(std::unique_ptr<Expr> expr)
+        : Stmt(NodeKind::ExprStmt), expression(std::move(expr)) {}
 };
 
+struct VarDeclarator {
+    std::unique_ptr<Pattern> target;
+    std::unique_ptr<Expr> init;
+};
+
+/// `var`/`let`/`const` with one or more declarators, each a name or a pattern.
 class VarDeclStmt : public Stmt {
 public:
-    std::string name;
-    std::unique_ptr<Expr> initializer;
     JsDeclKind kind{JsDeclKind::Let};
-    VarDeclStmt(std::string n, std::unique_ptr<Expr> init, JsDeclKind k = JsDeclKind::Let)
-        : name(std::move(n)), initializer(std::move(init)), kind(k) {}
-};
+    std::vector<VarDeclarator> decls;
+    explicit VarDeclStmt(JsDeclKind k) : Stmt(NodeKind::VarDecl), kind(k) {}
 
-class ArrayDestructuringDeclStmt : public Stmt {
-public:
-    std::vector<std::string> names;
-    std::unique_ptr<Expr> initializer;
-    JsDeclKind kind{JsDeclKind::Let};
-
-    ArrayDestructuringDeclStmt(std::vector<std::string> n, std::unique_ptr<Expr> init,
-                               JsDeclKind k = JsDeclKind::Let)
-        : names(std::move(n)), initializer(std::move(init)), kind(k) {}
-};
-
-class ObjectDestructuringDeclStmt : public Stmt {
-public:
-    std::vector<std::pair<std::string, std::string>> bindings; // property -> variable name
-    std::unique_ptr<Expr> initializer;
-    JsDeclKind kind{JsDeclKind::Let};
-
-    ObjectDestructuringDeclStmt(std::vector<std::pair<std::string, std::string>> b,
-                                std::unique_ptr<Expr> init, JsDeclKind k = JsDeclKind::Let)
-        : bindings(std::move(b)), initializer(std::move(init)), kind(k) {}
+    /// The name when this is a single `let x = ...` style declaration.
+    const std::string* simple_name() const {
+        if (decls.size() == 1 && decls[0].target && decls[0].target->kind == Pattern::Kind::Identifier) {
+            return &decls[0].target->name;
+        }
+        return nullptr;
+    }
 };
 
 class BlockStmt : public Stmt {
 public:
     std::vector<std::unique_ptr<Stmt>> statements;
-    BlockStmt() = default;
+    /// Function declarations directly inside this block, hoisted on entry.
+    std::vector<const FunctionDeclStmt*> functions;
+    /// True when the block declares let/const/class/function bindings and so
+    /// needs an environment of its own.
+    bool has_lexical{false};
+
+    BlockStmt() : Stmt(NodeKind::Block) {}
     explicit BlockStmt(std::vector<std::unique_ptr<Stmt>> stmts)
-        : statements(std::move(stmts)) {}
+        : Stmt(NodeKind::Block), statements(std::move(stmts)) {}
+};
+
+/// A whole script: the top-level statements plus what must be hoisted.
+class Program : public BlockStmt {
+public:
+    std::vector<std::string> var_names;
+    bool is_strict{false};
 };
 
 class IfStmt : public Stmt {
@@ -228,7 +427,7 @@ public:
     std::unique_ptr<Stmt> else_branch;
 
     IfStmt(std::unique_ptr<Expr> cond, std::unique_ptr<Stmt> th, std::unique_ptr<Stmt> el = nullptr)
-        : condition(std::move(cond)), then_branch(std::move(th)), else_branch(std::move(el)) {}
+        : Stmt(NodeKind::If), condition(std::move(cond)), then_branch(std::move(th)), else_branch(std::move(el)) {}
 };
 
 class WhileStmt : public Stmt {
@@ -237,16 +436,94 @@ public:
     std::unique_ptr<Stmt> body;
 
     WhileStmt(std::unique_ptr<Expr> cond, std::unique_ptr<Stmt> b)
-        : condition(std::move(cond)), body(std::move(b)) {}
+        : Stmt(NodeKind::While), condition(std::move(cond)), body(std::move(b)) {}
+};
+
+class DoWhileStmt : public Stmt {
+public:
+    std::unique_ptr<Stmt> body;
+    std::unique_ptr<Expr> condition;
+
+    DoWhileStmt(std::unique_ptr<Stmt> b, std::unique_ptr<Expr> cond)
+        : Stmt(NodeKind::DoWhile), body(std::move(b)), condition(std::move(cond)) {}
+};
+
+/// `for (init; test; update) body`.
+class ForStmt : public Stmt {
+public:
+    std::unique_ptr<Stmt> init;      // VarDeclStmt, ExprStmt or null
+    std::unique_ptr<Expr> test;
+    std::unique_ptr<Expr> update;
+    std::unique_ptr<Stmt> body;
+    /// `let` loop variables captured by a closure need a fresh binding per
+    /// iteration; this lists them. Empty when no closure can observe it.
+    std::vector<std::string> per_iteration_names;
+    bool has_lexical_init{false};
+
+    ForStmt() : Stmt(NodeKind::For) {}
+};
+
+/// `for (target in object)` and `for (target of iterable)`.
+class ForEachStmt : public Stmt {
+public:
+    bool is_of{false};
+    bool is_await{false};
+    bool declares{false};                 // `for (let x of ...)` vs `for (x of ...)`
+    JsDeclKind decl_kind{JsDeclKind::Let};
+    std::unique_ptr<Pattern> target;
+    std::unique_ptr<Expr> iterable;
+    std::unique_ptr<Stmt> body;
+
+    ForEachStmt() : Stmt(NodeKind::ForEach) {}
 };
 
 class ReturnStmt : public Stmt {
 public:
     std::unique_ptr<Expr> value;
-    explicit ReturnStmt(std::unique_ptr<Expr> v) : value(std::move(v)) {}
+    explicit ReturnStmt(std::unique_ptr<Expr> v) : Stmt(NodeKind::Return), value(std::move(v)) {}
 };
 
-class BreakStmt : public Stmt {};
+class BreakStmt : public Stmt {
+public:
+    std::string label;
+    explicit BreakStmt(std::string l = "") : Stmt(NodeKind::Break), label(std::move(l)) {}
+};
+
+class ContinueStmt : public Stmt {
+public:
+    std::string label;
+    explicit ContinueStmt(std::string l = "") : Stmt(NodeKind::Continue), label(std::move(l)) {}
+};
+
+class ThrowStmt : public Stmt {
+public:
+    std::unique_ptr<Expr> argument;
+    explicit ThrowStmt(std::unique_ptr<Expr> a) : Stmt(NodeKind::Throw), argument(std::move(a)) {}
+};
+
+class TryStmt : public Stmt {
+public:
+    std::unique_ptr<BlockStmt> block;
+    bool has_handler{false};
+    std::unique_ptr<Pattern> param;          // may be null: `catch { ... }`
+    std::unique_ptr<BlockStmt> handler;
+    std::unique_ptr<BlockStmt> finalizer;
+
+    TryStmt() : Stmt(NodeKind::Try) {}
+};
+
+class LabeledStmt : public Stmt {
+public:
+    std::string label;
+    std::unique_ptr<Stmt> body;
+    LabeledStmt(std::string l, std::unique_ptr<Stmt> b)
+        : Stmt(NodeKind::Labeled), label(std::move(l)), body(std::move(b)) {}
+};
+
+class EmptyStmt : public Stmt {
+public:
+    EmptyStmt() : Stmt(NodeKind::Empty) {}
+};
 
 struct SwitchCase {
     std::unique_ptr<Expr> test; // null for default
@@ -257,101 +534,118 @@ class SwitchStmt : public Stmt {
 public:
     std::unique_ptr<Expr> discriminant;
     std::vector<SwitchCase> cases;
+    std::vector<const FunctionDeclStmt*> functions;
     SwitchStmt(std::unique_ptr<Expr> expr, std::vector<SwitchCase> c)
-        : discriminant(std::move(expr)), cases(std::move(c)) {}
-};
-
-class ForOfStmt : public Stmt {
-public:
-    std::string variable_name;
-    std::unique_ptr<Expr> iterable;
-    std::unique_ptr<Stmt> body;
-    JsDeclKind kind{JsDeclKind::Let};
-    bool declares_variable{true};
-    ForOfStmt(std::string var, std::unique_ptr<Expr> iter, std::unique_ptr<Stmt> b,
-              JsDeclKind k = JsDeclKind::Let, bool declares = true)
-        : variable_name(std::move(var)), iterable(std::move(iter)), body(std::move(b)),
-          kind(k), declares_variable(declares) {}
+        : Stmt(NodeKind::Switch), discriminant(std::move(expr)), cases(std::move(c)) {}
 };
 
 class FunctionDeclStmt : public Stmt {
 public:
-    std::string name;
-    std::vector<std::string> params;
-    std::vector<std::shared_ptr<Expr>> default_values;
-    std::shared_ptr<BlockStmt> body;
-    bool is_async{false};
-    bool is_generator{false};
-
-    FunctionDeclStmt(std::string n, std::vector<std::string> p, std::shared_ptr<BlockStmt> b, std::vector<std::shared_ptr<Expr>> defs = {}, bool async_flag = false, bool gen_flag = false)
-        : name(std::move(n)), params(std::move(p)), default_values(std::move(defs)), body(std::move(b)), is_async(async_flag), is_generator(gen_flag) {}
-};
-
-struct MethodDefinition {
-    std::string name;
-    bool is_static{false};
-    bool is_constructor{false};
-    bool is_async{false};
-    bool is_generator{false};
-    std::vector<std::string> params;
-    std::vector<std::shared_ptr<Expr>> default_values;
-    std::shared_ptr<BlockStmt> body;
+    std::shared_ptr<FunctionNode> fn;
+    explicit FunctionDeclStmt(std::shared_ptr<FunctionNode> f)
+        : Stmt(NodeKind::FunctionDecl), fn(std::move(f)) {}
 };
 
 class ClassDeclStmt : public Stmt {
 public:
-    std::string name;
-    std::string super_class; // empty if no extends
-    std::vector<MethodDefinition> methods;
-
-    ClassDeclStmt(std::string n, std::string sup, std::vector<MethodDefinition> m)
-        : name(std::move(n)), super_class(std::move(sup)), methods(std::move(m)) {}
+    std::shared_ptr<ClassNode> cls;
+    explicit ClassDeclStmt(std::shared_ptr<ClassNode> c)
+        : Stmt(NodeKind::ClassDecl), cls(std::move(c)) {}
 };
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
 
 class JsParser {
 public:
     explicit JsParser(std::vector<JsToken> tokens);
 
-    std::unique_ptr<BlockStmt> parse_program();
+    /// Parses a whole script. Throws JsSyntaxError on malformed input.
+    std::unique_ptr<Program> parse_program();
 
 private:
-    const JsToken& peek() const;
+    struct FunctionContext {
+        FunctionNode* fn{nullptr};          // null for the program
+        std::vector<std::string>* var_names{nullptr};
+        bool is_arrow{false};
+        bool is_async{false};
+        bool is_generator{false};
+        bool strict{false};
+    };
+
+    const JsToken& peek(size_t offset = 0) const;
     const JsToken& previous() const;
     bool is_at_end() const;
     const JsToken& advance();
     bool check(JsTokenType type) const;
+    bool check_identifier(const char* text) const;
     bool match(JsTokenType type);
+    bool match_identifier(const char* text);
     const JsToken& consume(JsTokenType type, const std::string& err_msg);
+    [[noreturn]] void fail(const std::string& message) const;
+    [[noreturn]] void fail_unexpected() const;
+    void consume_semicolon();
+    std::string consume_binding_identifier(const char* what);
+    bool is_property_name_token() const;
 
+    // Statements
     std::unique_ptr<Stmt> parse_statement();
-    std::unique_ptr<Stmt> parse_var_declaration(JsDeclKind kind);
+    std::unique_ptr<Stmt> parse_declaration_or_statement();
+    std::unique_ptr<VarDeclStmt> parse_var_declaration(JsDeclKind kind, bool no_in);
     std::unique_ptr<Stmt> parse_if_statement();
     std::unique_ptr<Stmt> parse_switch_statement();
-    std::unique_ptr<Stmt> parse_break_statement();
     std::unique_ptr<Stmt> parse_while_statement();
+    std::unique_ptr<Stmt> parse_do_while_statement();
     std::unique_ptr<Stmt> parse_for_statement();
+    std::unique_ptr<Stmt> parse_try_statement();
     std::unique_ptr<Stmt> parse_return_statement();
-    std::unique_ptr<FunctionDeclStmt> parse_function_declaration();
-    std::unique_ptr<ClassDeclStmt> parse_class_declaration();
     std::unique_ptr<BlockStmt> parse_block();
+    void parse_statement_list(BlockStmt& block, bool until_close_brace);
 
+    // Functions and classes
+    std::shared_ptr<FunctionNode> parse_function(bool is_async, bool is_declaration);
+    void parse_params_and_body(FunctionNode& fn);
+    void parse_params(FunctionNode& fn);
+    void parse_function_body(FunctionNode& fn);
+    void finish_params(FunctionNode& fn);
+    std::shared_ptr<FunctionNode> parse_method(bool is_async, bool is_generator);
+    std::shared_ptr<FunctionNode> parse_arrow_function(bool is_async);
+    std::shared_ptr<ClassNode> parse_class(bool is_declaration);
+    void detect_use_strict(FunctionNode* fn, const BlockStmt& body);
+
+    // Patterns
+    std::unique_ptr<Pattern> parse_binding_pattern();
+    std::unique_ptr<Pattern> expr_to_pattern(std::unique_ptr<Expr> expr);
+    void declare_var_names(const Pattern& pattern);
+
+    // Expressions
     std::unique_ptr<Expr> parse_expression();
     std::unique_ptr<Expr> parse_assignment();
-    static bool is_assignable(const Expr* expr);
-    std::unique_ptr<Expr> parse_logical_or();
-    std::unique_ptr<Expr> parse_coalesce();
-    std::unique_ptr<Expr> parse_logical_and();
-    std::unique_ptr<Expr> parse_equality();
-    std::unique_ptr<Expr> parse_comparison();
-    std::unique_ptr<Expr> parse_term();
-    std::unique_ptr<Expr> parse_factor();
+    std::unique_ptr<Expr> parse_conditional();
+    std::unique_ptr<Expr> parse_binary(int min_precedence);
     std::unique_ptr<Expr> parse_unary();
-    std::unique_ptr<Expr> parse_exponentiation();
+    std::unique_ptr<Expr> parse_postfix();
     std::unique_ptr<Expr> parse_call_or_member();
+    std::unique_ptr<Expr> parse_new();
     std::unique_ptr<Expr> parse_primary();
+    std::unique_ptr<Expr> parse_array_literal();
+    std::unique_ptr<Expr> parse_object_literal();
+    std::unique_ptr<Expr> parse_template(std::unique_ptr<Expr> tag);
+    std::vector<std::unique_ptr<Expr>> parse_arguments();
+    std::string parse_property_name(std::unique_ptr<Expr>& computed);
+    bool is_arrow_ahead() const;
+    FunctionNode* nearest_non_arrow_function();
+    static bool is_assignable(const Expr* expr);
+    static int binary_precedence(JsTokenType type);
 
     std::vector<JsToken> m_tokens;
+    std::vector<int> m_match;        // index of the matching bracket for each opener, or -1
     size_t m_current{0};
+    bool m_no_in{false};
+    int m_closure_count{0};
+    std::vector<FunctionContext> m_functions;
+    std::vector<BlockStmt*> m_blocks;
 };
 
 } // namespace litebird

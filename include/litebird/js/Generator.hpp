@@ -30,6 +30,14 @@ struct GeneratorData {
     JsValue yielded_value{JsValue::make_undefined()};
     bool is_done{false};
 
+    // An exception that escaped the generator body, to be rethrown in the
+    // caller of next(); and one injected by throw(), to be raised at the
+    // suspended `yield`.
+    bool has_error{false};
+    JsValue error{JsValue::make_undefined()};
+    bool has_pending_throw{false};
+    JsValue pending_throw{JsValue::make_undefined()};
+
     std::thread worker;
 
     ~GeneratorData() {

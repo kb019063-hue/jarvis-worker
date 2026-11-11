@@ -1,4 +1,5 @@
 #include "litebird/net/AbortController.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/js/EventLoop.hpp"
 
 namespace litebird {
@@ -24,7 +25,7 @@ void AbortSignal::signal_abort(JsValue reason) {
     ev_obj.set_property("cancelable", JsValue::make_boolean(false));
 
     if (m_onabort.is_callable()) {
-        m_onabort.call({ev_obj});
+        js_call_guarded(m_onabort, JsValue(), {ev_obj});
     }
 
     auto ev = std::make_shared<Event>("abort", false, false);
@@ -91,7 +92,7 @@ JsValue AbortSignal::to_js_value() {
             self->add_event_listener(type, [listener](const std::shared_ptr<Event>& ev) {
                 JsValue eo = JsValue::make_object();
                 eo.set_property("type", JsValue::make_string(ev->type()));
-                listener.call({eo});
+                js_call_guarded(listener, JsValue(), {eo});
             });
         }
         return JsValue::make_undefined();

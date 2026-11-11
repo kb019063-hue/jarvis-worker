@@ -1,0 +1,197 @@
+#name Math basics
+#code
+console.log(Math.max(1, 5, 3), Math.min(1, 5, 3), Math.abs(-4), Math.sign(-3), Math.sqrt(49), Math.pow(2, 8))
+#expect
+5 1 4 -1 7 256
+
+#name Math rounding
+#code
+console.log(Math.floor(2.7), Math.ceil(2.1), Math.round(2.5), Math.round(-2.5), Math.round(2.4), Math.trunc(-2.7))
+#expect
+2 3 3 -2 2 -2
+
+#name Math max/min edge cases
+#code
+console.log(Math.max(), Math.min(), Math.max(1, NaN), Math.max(1, "3"))
+#expect
+-Infinity Infinity NaN 3
+
+#name Math constants
+#code
+console.log(Math.PI.toFixed(5), Math.E.toFixed(5), Math.SQRT2.toFixed(4), Math.LN2.toFixed(4))
+#expect
+3.14159 2.71828 1.4142 0.6931
+
+#name Math logs and exp
+#code
+console.log(Math.log(Math.E), Math.log10(1000), Math.log2(8), Math.exp(0), Math.cbrt(27), Math.hypot(3, 4))
+#expect
+1 3 3 1 3 5
+
+#name Math trig
+#code
+console.log(Math.sin(0), Math.cos(0), Math.atan2(1, 1).toFixed(4), Math.tan(0))
+#expect
+0 1 0.7854 0
+
+#name Math.random range
+#code
+var ok = true; for (var i = 0; i < 100; i++) { var r = Math.random(); if (!(r >= 0 && r < 1)) ok = false; } console.log(ok)
+#expect
+true
+
+#name random integer in range
+#code
+var ok = true; for (var i = 0; i < 100; i++) { var r = Math.floor(Math.random() * 6) + 1; if (r < 1 || r > 6 || r % 1 !== 0) ok = false; } console.log(ok)
+#expect
+true
+
+#name Number static checks
+#code
+console.log(Number.isInteger(5.0), Number.isInteger(5.5), Number.isFinite(1 / 0), Number.isNaN(NaN), Number.isNaN("x"), isNaN("x"))
+#expect
+true false false true false true
+
+#name Number constants
+#code
+console.log(Number.MAX_SAFE_INTEGER, Number.EPSILON > 0, Number.MAX_VALUE > 1e308, Number.MIN_SAFE_INTEGER, Number.POSITIVE_INFINITY)
+#expect
+9007199254740991 true true -9007199254740991 Infinity
+
+#name Number.parseFloat and parseInt
+#code
+console.log(Number.parseFloat("1.5x"), Number.parseInt("12", 8), Number.parseInt === parseInt)
+#expect
+1.5 10 true
+
+#name toFixed rounding and padding
+#code
+console.log((1.005).toFixed(2), (2.5).toFixed(0), (0).toFixed(2), (-1.5).toFixed(1), (1e21).toFixed(2))
+#expect
+1.00 3 0.00 -1.5 1e+21
+
+#name toPrecision and toExponential
+#code
+console.log((123.456).toPrecision(4), (0.00012).toPrecision(2), (12345).toExponential(2))
+#expect
+123.5 0.00012 1.23e+4
+
+#name toString with radix
+#code
+console.log((255).toString(16), (255).toString(2), (-255).toString(36), (0.5).toString(2))
+#expect
+ff 11111111 -73 0.1
+
+#name number conversions
+#code
+console.log(Number(true), Number(null), Number(undefined), Number([]), Number([5]), Number("  "), Number({}))
+#expect
+1 0 NaN 0 5 0 NaN
+
+#name integer precision limits
+#code
+console.log(9007199254740992 === 9007199254740993, 0.1 * 3, 9007199254740991 + 2)
+#expect
+true 0.30000000000000004 9007199254740992
+
+#name rounding to two decimals
+#code
+console.log(Math.round(1.2345 * 100) / 100, Math.round(-0.4), (0.1 + 0.2).toFixed(2))
+#expect
+1.23 -0 0.30
+
+#name integer division and remainder
+#code
+console.log(Math.floor(7 / 2), 7 % 2, Math.trunc(-7 / 2), -7 % 2, 5.5 % 2)
+#expect
+3 1 -3 -1 1.5
+
+#name NaN propagation
+#code
+console.log(NaN + 1, Math.sqrt(-1), parseInt("x") * 2, 0 / 0, typeof NaN)
+#expect
+NaN NaN NaN NaN number
+
+#name number is a primitive with methods
+#code
+var n = 3.14159; console.log(n.toFixed(2), typeof n, n.constructor === Number, (5).valueOf())
+#expect
+3.14 number true 5
+
+#name isFinite and isNaN coercion
+#code
+console.log(isFinite("12"), isFinite("x"), isNaN(undefined), isNaN(null), Number.isFinite("12"))
+#expect
+true false true false false
+
+#name clamp helper
+#code
+function clamp(v, lo, hi){ return Math.min(hi, Math.max(lo, v)); } console.log(clamp(5, 0, 3), clamp(-1, 0, 3), clamp(2, 0, 3))
+#expect
+3 0 2
+
+#name sum and average
+#code
+var a = [2, 4, 9]; var s = a.reduce(function(x, y){ return x + y; }, 0); console.log(s, s / a.length)
+#expect
+15 5
+
+#name hex and bit manipulation
+#code
+console.log((0xff & 0x0f).toString(16), 1 << 10, (5).toString(2).padStart(8, "0"), parseInt("ff", 16))
+#expect
+f 1024 00000101 255
+
+#name exponent and scientific output
+#code
+console.log(2 ** 53, 1e100, 2 ** -1, 1.5e-10, 123e-20)
+#expect
+9007199254740992 1e+100 0.5 1.5e-10 1.23e-18
+
+#name number formatting of fractions
+#code
+console.log(1.1 + 2.2, 0.5 + 0.25, 3 * 1.1, 1 / 7, 4.35 * 100)
+#expect
+3.3000000000000003 0.75 3.3000000000000003 0.14285714285714285 434.99999999999994
+
+#name Math.fround and clz32 and imul
+#code
+console.log(Math.fround(5.5), Math.clz32(1), Math.imul(3, 4))
+#expect
+5.5 31 12
+
+#name unary minus and plus on strings
+#code
+console.log(-"5", +"", +"abc", -null, +[], +{})
+#expect
+-5 0 NaN -0 0 NaN
+
+#name number comparison chain
+#code
+console.log(1 < 2 < 3, 3 > 2 > 1, 1 == 1.0, 0.1 + 0.2 > 0.3)
+#expect
+true false true true
+
+#name Number() vs parseInt
+#code
+console.log(Number("12px"), parseInt("12px"), Number("1,000"), parseInt("1,000"), Number("0b11"))
+#expect
+NaN 12 NaN 1 3
+
+#name toLocaleString-free thousands separator
+#code
+function sep(n){ return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); } console.log(sep(1234567), sep(999), sep(1000))
+#expect
+1,234,567 999 1,000
+
+#name big number string formatting
+#code
+console.log(123456789 * 1000, 2 ** 31, -(2 ** 31), 4294967296 * 4294967296)
+#expect
+123456789000 2147483648 -2147483648 18446744073709552000
+
+#name BigInt basics
+#code
+console.log(typeof 10n, (2n ** 64n).toString(), 7n / 2n === 3n, BigInt(5) + 1n === 6n)
+#expect
+bigint 18446744073709551616 true true

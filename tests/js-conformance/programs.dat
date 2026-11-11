@@ -1,0 +1,487 @@
+#name fizzbuzz
+#code
+var out = [];
+for (var i = 1; i <= 15; i++) {
+  out.push(i % 15 === 0 ? "FizzBuzz" : i % 3 === 0 ? "Fizz" : i % 5 === 0 ? "Buzz" : String(i));
+}
+console.log(out.join(" "));
+#expect
+1 2 Fizz 4 Buzz Fizz 7 8 Fizz Buzz 11 Fizz 13 14 FizzBuzz
+
+#name word frequency
+#code
+var text = "the quick brown fox jumps over the lazy dog the fox";
+var freq = {};
+text.split(/\s+/).forEach(function (w) { freq[w] = (freq[w] || 0) + 1; });
+var top = Object.keys(freq).sort(function (a, b) { return freq[b] - freq[a] || (a < b ? -1 : 1); }).slice(0, 3);
+console.log(top.map(function (w) { return w + "=" + freq[w]; }).join(", "));
+#expect
+the=3, fox=2, brown=1
+
+#name sieve of eratosthenes
+#code
+function primes(n) {
+  var sieve = [], out = [];
+  for (var i = 2; i <= n; i++) {
+    if (!sieve[i]) {
+      out.push(i);
+      for (var j = i * i; j <= n; j += i) sieve[j] = true;
+    }
+  }
+  return out;
+}
+console.log(primes(50).join(" "));
+#expect
+2 3 5 7 11 13 17 19 23 29 31 37 41 43 47
+
+#name binary search
+#code
+function bsearch(a, x) {
+  var lo = 0, hi = a.length - 1;
+  while (lo <= hi) {
+    var mid = (lo + hi) >> 1;
+    if (a[mid] === x) return mid;
+    if (a[mid] < x) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+var a = [1, 3, 5, 7, 9, 11];
+console.log(bsearch(a, 7), bsearch(a, 1), bsearch(a, 11), bsearch(a, 4));
+#expect
+3 0 5 -1
+
+#name palindromes and anagrams
+#code
+function isPal(s) {
+  var c = s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return c === c.split("").reverse().join("");
+}
+function isAnagram(a, b) {
+  var n = function (s) { return s.toLowerCase().split("").sort().join(""); };
+  return n(a) === n(b);
+}
+console.log(isPal("A man, a plan, a canal: Panama"), isPal("hello"), isAnagram("Listen", "Silent"), isAnagram("a", "b"));
+#expect
+true false true false
+
+#name matrix multiply and transpose
+#code
+function mul(a, b) {
+  return a.map(function (row) {
+    return b[0].map(function (_, j) {
+      return row.reduce(function (s, v, k) { return s + v * b[k][j]; }, 0);
+    });
+  });
+}
+function t(m) { return m[0].map(function (_, i) { return m.map(function (r) { return r[i]; }); }); }
+var p = mul([[1, 2], [3, 4]], [[5, 6], [7, 8]]);
+console.log(p.map(function (r) { return r.join(","); }).join(";"), t([[1, 2, 3], [4, 5, 6]]).join("|"));
+#expect
+19,22;43,50 1,4|2,5|3,6
+
+#name memoized fibonacci with Map
+#code
+const memo = new Map();
+function fib(n) {
+  if (n < 2) return n;
+  if (memo.has(n)) return memo.get(n);
+  const v = fib(n - 1) + fib(n - 2);
+  memo.set(n, v);
+  return v;
+}
+console.log(fib(50), memo.size);
+#expect
+12586269025 49
+
+#name event emitter
+#code
+class Emitter {
+  constructor() { this.handlers = {}; }
+  on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); return this; }
+  off(evt, fn) { this.handlers[evt] = (this.handlers[evt] || []).filter(function (h) { return h !== fn; }); return this; }
+  emit(evt, ...args) { (this.handlers[evt] || []).slice().forEach(function (h) { h(...args); }); return this; }
+}
+const log = [];
+const e = new Emitter();
+const once = (x) => log.push("once" + x);
+e.on("a", (x, y) => log.push("a" + x + y)).on("a", once);
+e.emit("a", 1, 2).off("a", once).emit("a", 3, 4).emit("none");
+console.log(log.join(" "));
+#expect
+a12 once1 a34
+
+#name stack and queue classes
+#code
+class Stack { constructor() { this.items = []; } push(x) { this.items.push(x); } pop() { return this.items.pop(); } get size() { return this.items.length; } }
+class Queue { constructor() { this.items = []; } enqueue(x) { this.items.push(x); } dequeue() { return this.items.shift(); } get size() { return this.items.length; } }
+function balanced(s) {
+  const st = new Stack(), pairs = { ")": "(", "]": "[", "}": "{" };
+  for (const ch of s) {
+    if ("([{".includes(ch)) st.push(ch);
+    else if (ch in pairs && st.pop() !== pairs[ch]) return false;
+  }
+  return st.size === 0;
+}
+const q = new Queue(); q.enqueue(1); q.enqueue(2); q.dequeue();
+console.log(balanced("{[()]}"), balanced("([)]"), balanced("(("), q.size, q.dequeue());
+#expect
+true false false 1 2
+
+#name linked list
+#code
+function List() { this.head = null; this.length = 0; }
+List.prototype.add = function (v) {
+  var node = { value: v, next: null };
+  if (!this.head) this.head = node;
+  else { var c = this.head; while (c.next) c = c.next; c.next = node; }
+  this.length++;
+  return this;
+};
+List.prototype.reverse = function () {
+  var prev = null, cur = this.head;
+  while (cur) { var n = cur.next; cur.next = prev; prev = cur; cur = n; }
+  this.head = prev;
+  return this;
+};
+List.prototype.toArray = function () { var out = []; for (var c = this.head; c; c = c.next) out.push(c.value); return out; };
+var l = new List().add(1).add(2).add(3);
+console.log(l.toArray().join(), l.reverse().toArray().join(), l.length);
+#expect
+1,2,3 3,2,1 3
+
+#name tokenizer and calculator
+#code
+function tokenize(src) {
+  var out = [], m, re = /\s*(\d+\.?\d*|[-+*\/()])/g;
+  while ((m = re.exec(src)) !== null) out.push(m[1]);
+  return out;
+}
+function calc(src) {
+  var t = tokenize(src), i = 0;
+  function atom() { if (t[i] === "(") { i++; var v = expr(); i++; return v; } return parseFloat(t[i++]); }
+  function term() { var v = atom(); while (t[i] === "*" || t[i] === "/") { var op = t[i++]; var r = atom(); v = op === "*" ? v * r : v / r; } return v; }
+  function expr() { var v = term(); while (t[i] === "+" || t[i] === "-") { var op = t[i++]; var r = term(); v = op === "+" ? v + r : v - r; } return v; }
+  return expr();
+}
+console.log(calc("1 + 2 * 3"), calc("(1 + 2) * 3"), calc("10 / 4 - 1"), tokenize("2*(3+4)").length);
+#expect
+7 9 1.5 7
+
+#name deep clone and deep equal
+#code
+function clone(v) {
+  if (Array.isArray(v)) return v.map(clone);
+  if (v && typeof v === "object") { var o = {}; for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k)) o[k] = clone(v[k]); return o; }
+  return v;
+}
+function equal(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length && ka.every(function (k) { return equal(a[k], b[k]); });
+}
+var src = { a: 1, b: [1, 2, { c: [3] }], d: { e: null } };
+var cp = clone(src);
+cp.b[2].c.push(4);
+console.log(equal(src, clone(src)), equal(src, cp), src.b[2].c.length, cp.b[2].c.length);
+#expect
+true false 1 2
+
+#name group by and aggregate
+#code
+const orders = [
+  { id: 1, cust: "ann", total: 30 }, { id: 2, cust: "bob", total: 15 },
+  { id: 3, cust: "ann", total: 20 }, { id: 4, cust: "cy", total: 5 }, { id: 5, cust: "bob", total: 40 },
+];
+const by = orders.reduce((acc, o) => { (acc[o.cust] ||= []).push(o); return acc; }, {});
+const report = Object.entries(by)
+  .map(([cust, os]) => ({ cust, n: os.length, sum: os.reduce((s, o) => s + o.total, 0) }))
+  .sort((a, b) => b.sum - a.sum);
+console.log(report.map(({ cust, n, sum }) => `${cust}:${n}:${sum}`).join(" "));
+#expect
+bob:2:55 ann:2:50 cy:1:5
+
+#name string template rendering
+#code
+function render(tpl, data) {
+  return tpl.replace(/\{\{\s*([\w.]+)\s*\}\}/g, function (_, path) {
+    var v = path.split(".").reduce(function (o, k) { return o == null ? o : o[k]; }, data);
+    return v == null ? "" : String(v);
+  });
+}
+console.log(render("Hello {{ user.name }}! You have {{count}} new {{ kind }}{{missing}}.", { user: { name: "Ada" }, count: 3, kind: "messages" }));
+#expect
+Hello Ada! You have 3 new messages.
+
+#name state machine
+#code
+var machine = {
+  state: "idle",
+  transitions: { idle: { start: "running" }, running: { pause: "paused", stop: "idle" }, paused: { resume: "running", stop: "idle" } },
+  send: function (evt) {
+    var next = (this.transitions[this.state] || {})[evt];
+    if (!next) throw new Error("bad transition " + this.state + " -> " + evt);
+    this.state = next;
+    return this;
+  }
+};
+var trace = [machine.state];
+["start", "pause", "resume", "stop"].forEach(function (e) { trace.push(machine.send(e).state); });
+try { machine.send("pause"); } catch (err) { trace.push("error"); }
+console.log(trace.join(">"));
+#expect
+idle>running>paused>running>idle>error
+
+#name towers of hanoi and permutations
+#code
+function hanoi(n, a, b, c, moves) { if (n === 0) return moves; hanoi(n - 1, a, c, b, moves); moves.push(a + c); return hanoi(n - 1, b, a, c, moves); }
+function perms(s) {
+  if (s.length <= 1) return [s];
+  var out = [];
+  for (var i = 0; i < s.length; i++) perms(s.slice(0, i) + s.slice(i + 1)).forEach(function (p) { out.push(s[i] + p); });
+  return out;
+}
+console.log(hanoi(3, "A", "B", "C", []).length, hanoi(2, "A", "B", "C", []).join(" "), perms("abc").join(","));
+#expect
+7 AB AC BC abc,acb,bac,bca,cab,cba
+
+#name debounce with timers
+#code
+function debounce(fn, ms) {
+  var t = null;
+  return function () {
+    var args = arguments, self = this;
+    clearTimeout(t);
+    t = setTimeout(function () { fn.apply(self, args); }, ms);
+  };
+}
+var calls = [];
+var save = debounce(function (v) { calls.push(v); }, 10);
+save("a"); save("b"); save("c");
+setTimeout(function () { save("d"); }, 30);
+setTimeout(function () { console.log(calls.join(",")); }, 70);
+#expect
+c,d
+
+#name sequential async tasks with retry
+#code
+var attempts = 0;
+function flaky() {
+  return new Promise(function (resolve, reject) {
+    setTimeout(function () { attempts++; attempts < 3 ? reject(new Error("fail " + attempts)) : resolve("ok after " + attempts); }, 1);
+  });
+}
+async function retry(fn, n) {
+  var last;
+  for (var i = 0; i < n; i++) {
+    try { return await fn(); } catch (e) { last = e; }
+  }
+  throw last;
+}
+retry(flaky, 5).then(function (v) { console.log(v); return retry(function () { return Promise.reject(new Error("always")); }, 2); })
+  .catch(function (e) { console.log("gave up:", e.message); });
+#expect
+ok after 3
+gave up: always
+
+#name roman numerals and base conversion
+#code
+function toRoman(n) {
+  var map = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
+  var out = "";
+  map.forEach(function (p) { while (n >= p[0]) { out += p[1]; n -= p[0]; } });
+  return out;
+}
+function fromRoman(s) {
+  var v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }, t = 0;
+  for (var i = 0; i < s.length; i++) { var a = v[s[i]], b = v[s[i + 1]] || 0; t += a < b ? -a : a; }
+  return t;
+}
+console.log(toRoman(1994), fromRoman("MCMXCIV"), toRoman(2024), (2024).toString(2), parseInt("11111101000", 2));
+#expect
+MCMXCIV 1994 MMXXIV 11111101000 2024
+
+#name sorting records by multiple keys
+#code
+var people = [
+  { name: "Cy", age: 30, city: "Accra" }, { name: "Al", age: 25, city: "Lagos" },
+  { name: "Bo", age: 30, city: "Accra" }, { name: "Di", age: 25, city: "Accra" },
+];
+people.sort(function (a, b) {
+  return a.city.localeCompare(b.city) || b.age - a.age || a.name.localeCompare(b.name);
+});
+console.log(people.map(function (p) { return p.name; }).join(""), people.filter(function (p) { return p.age > 26; }).length);
+#expect
+BoCyDiAl 2
+
+#name simple LRU cache
+#code
+class LRU {
+  constructor(cap) { this.cap = cap; this.map = new Map(); }
+  get(k) { if (!this.map.has(k)) return undefined; const v = this.map.get(k); this.map.delete(k); this.map.set(k, v); return v; }
+  set(k, v) { if (this.map.has(k)) this.map.delete(k); else if (this.map.size >= this.cap) this.map.delete(this.map.keys().next().value); this.map.set(k, v); }
+  keys() { return [...this.map.keys()].join(""); }
+}
+const c = new LRU(2);
+c.set("a", 1); c.set("b", 2); c.get("a"); c.set("c", 3);
+console.log(c.keys(), c.get("b"), c.get("a"), c.get("c"));
+#expect
+ac undefined 1 3
+
+#name date range and formatting
+#code
+function pad(n) { return String(n).padStart(2, "0"); }
+function ymd(d) { return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()); }
+function range(start, days) {
+  var out = [];
+  for (var i = 0; i < days; i++) out.push(ymd(new Date(start.getTime() + i * 86400000)));
+  return out;
+}
+var r = range(new Date(Date.UTC(2024, 1, 27)), 4);
+console.log(r.join(" "), new Date(Date.UTC(2024, 1, 29)).getUTCDay());
+#expect
+2024-02-27 2024-02-28 2024-02-29 2024-03-01 4
+
+#name csv parsing and totals
+#code
+var csv = "name,qty,price\nwidget,2,3.50\ngadget,1,10\n\"big, thing\",3,1.25";
+function parseLine(line) {
+  var out = [], cur = "", q = false;
+  for (var i = 0; i < line.length; i++) {
+    var ch = line[i];
+    if (ch === '"') q = !q;
+    else if (ch === "," && !q) { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+var rows = csv.split("\n").map(parseLine);
+var head = rows.shift();
+var recs = rows.map(function (r) { var o = {}; head.forEach(function (h, i) { o[h] = r[i]; }); return o; });
+var total = recs.reduce(function (s, r) { return s + Number(r.qty) * parseFloat(r.price); }, 0);
+console.log(recs.length, recs[2].name, total.toFixed(2));
+#expect
+3 big, thing 20.75
+
+#name observer with getters and setters
+#code
+function observable(target, onChange) {
+  var store = {};
+  Object.keys(target).forEach(function (k) {
+    store[k] = target[k];
+    Object.defineProperty(target, k, {
+      get: function () { return store[k]; },
+      set: function (v) { var old = store[k]; store[k] = v; onChange(k, old, v); },
+      enumerable: true
+    });
+  });
+  return target;
+}
+var changes = [];
+var s = observable({ count: 0, label: "x" }, function (k, a, b) { changes.push(k + ":" + a + ">" + b); });
+s.count++; s.count += 2; s.label = "y";
+console.log(changes.join(" "), JSON.stringify(s));
+#expect
+count:0>1 count:1>3 label:x>y {"count":3,"label":"y"}
+
+#name promise pool with ordering
+#code
+function task(id, ms) { return function () { return new Promise(function (res) { setTimeout(function () { res(id); }, ms); }); }; }
+async function pool(tasks, limit) {
+  const results = [], running = new Set();
+  for (const [i, t] of tasks.entries()) {
+    const p = t().then((v) => { results[i] = v; running.delete(p); });
+    running.add(p);
+    if (running.size >= limit) await Promise.race(running);
+  }
+  await Promise.all(running);
+  return results;
+}
+pool([task("a", 20), task("b", 5), task("c", 10), task("d", 1)], 2).then((r) => console.log(r.join("")));
+#expect
+abcd
+
+#name text wrapping and justification
+#code
+function wrap(text, width) {
+  var lines = [], cur = "";
+  text.split(" ").forEach(function (w) {
+    if ((cur + " " + w).trim().length > width) { lines.push(cur); cur = w; }
+    else cur = (cur + " " + w).trim();
+  });
+  if (cur) lines.push(cur);
+  return lines;
+}
+var lines = wrap("the quick brown fox jumps over the lazy dog", 12);
+console.log(lines.length, lines.map(function (l) { return l.padEnd(12, ".") ; }).join("|"));
+#expect
+4 the quick...|brown fox...|jumps over..|the lazy dog
+
+#name json transform pipeline
+#code
+var input = '{"users":[{"id":1,"name":"Ann","tags":["a","b"],"active":true},{"id":2,"name":"Bob","tags":[],"active":false},{"id":3,"name":"Cy","tags":["b"],"active":true}]}';
+var data = JSON.parse(input);
+var out = {
+  activeNames: data.users.filter(function (u) { return u.active; }).map(function (u) { return u.name.toUpperCase(); }),
+  tagCounts: data.users.reduce(function (m, u) { u.tags.forEach(function (t) { m[t] = (m[t] || 0) + 1; }); return m; }, {}),
+  byId: Object.fromEntries(data.users.map(function (u) { return [u.id, u.name]; }))
+};
+console.log(JSON.stringify(out));
+#expect
+{"activeNames":["ANN","CY"],"tagCounts":{"a":1,"b":2},"byId":{"1":"Ann","2":"Bob","3":"Cy"}}
+
+#name binary tree insert and traversal
+#code
+class Node { constructor(v) { this.v = v; this.l = null; this.r = null; } }
+class Tree {
+  constructor() { this.root = null; }
+  insert(v) {
+    const n = new Node(v);
+    if (!this.root) { this.root = n; return this; }
+    let c = this.root;
+    for (;;) {
+      if (v < c.v) { if (!c.l) { c.l = n; break; } c = c.l; }
+      else { if (!c.r) { c.r = n; break; } c = c.r; }
+    }
+    return this;
+  }
+  *inorder(n = this.root) { if (n) { yield* this.inorder(n.l); yield n.v; yield* this.inorder(n.r); } }
+  height(n = this.root) { return n ? 1 + Math.max(this.height(n.l), this.height(n.r)) : 0; }
+}
+const t = new Tree();
+[5, 3, 8, 1, 4, 9, 7].forEach((v) => t.insert(v));
+console.log([...t.inorder()].join(" "), t.height());
+#expect
+1 3 4 5 7 8 9 3
+
+#name caesar cipher and run-length encoding
+#code
+function caesar(s, k) {
+  return s.replace(/[a-z]/gi, function (c) {
+    var base = c <= "Z" ? 65 : 97;
+    return String.fromCharCode((c.charCodeAt(0) - base + k + 26) % 26 + base);
+  });
+}
+function rle(s) { return s.replace(/(.)\1*/g, function (m, c) { return c + m.length; }); }
+function unrle(s) { return s.replace(/(.)(\d+)/g, function (_, c, n) { return c.repeat(+n); }); }
+console.log(caesar("Hello, World!", 3), caesar(caesar("Hello", 3), -3), rle("aaabccdddd"), unrle(rle("aaabccdddd")));
+#expect
+Khoor, Zruog! Hello a3b1c2d4 aaabccdddd
+
+#name shopping cart with classes and reduce
+#code
+class Item { constructor(name, price, qty = 1) { Object.assign(this, { name, price, qty }); } get total() { return this.price * this.qty; } }
+class Cart {
+  #items = [];
+  add(item) { const ex = this.#items.find((i) => i.name === item.name); if (ex) ex.qty += item.qty; else this.#items.push(item); return this; }
+  remove(name) { this.#items = this.#items.filter((i) => i.name !== name); return this; }
+  get subtotal() { return this.#items.reduce((s, i) => s + i.total, 0); }
+  total(taxRate = 0.1) { return Math.round(this.subtotal * (1 + taxRate) * 100) / 100; }
+  summary() { return this.#items.map(({ name, qty }) => `${qty}x${name}`).join(","); }
+}
+const cart = new Cart().add(new Item("pen", 1.5, 4)).add(new Item("book", 12)).add(new Item("pen", 1.5)).add(new Item("cup", 5)).remove("cup");
+console.log(cart.summary(), cart.subtotal, cart.total(), cart.total(0));
+#expect
+5xpen,1xbook 19.5 21.45 19.5

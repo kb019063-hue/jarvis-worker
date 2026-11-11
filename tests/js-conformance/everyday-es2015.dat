@@ -1,0 +1,239 @@
+#name array destructuring
+#code
+let [a,b]=[1,2]; console.log(a+b)
+#expect
+3
+
+#name object destructuring
+#code
+const {x,y}={x:1,y:2}; console.log(x+y)
+#expect
+3
+
+#name array spread
+#code
+console.log([...[1,2],3].length)
+#expect
+3
+
+#name arrow function default parameter
+#code
+const f=(a,b=2)=>a+b; console.log(f(1))
+#expect
+3
+
+#name rest parameters
+#code
+function f(...r){ return r.length; } console.log(f(1,2,3))
+#expect
+3
+
+#name class getter
+#code
+class A{ constructor(){ this.x=1; } get y(){ return this.x+1; } } console.log(new A().y)
+#expect
+2
+
+#name class inheritance and super method
+#code
+class A{ f(){ return 1; } } class B extends A{ f(){ return super.f()+1; } } console.log(new B().f())
+#expect
+2
+
+#name template literal
+#code
+console.log(`a${1+1}b`)
+#expect
+a2b
+
+#name object spread
+#code
+const o={a:1}; const p={...o,b:2}; console.log(Object.keys(p).length)
+#expect
+2
+
+#name array includes
+#code
+console.log([1,2,3].includes(2))
+#expect
+true
+
+#name string startsWith
+#code
+console.log("abc".startsWith("ab"))
+#expect
+true
+
+#name Map from entries
+#code
+const m=new Map([[1,"a"]]); console.log(m.get(1))
+#expect
+a
+
+#name array find
+#code
+console.log([1,2,3].find(x=>x>1))
+#expect
+2
+
+#name for-of
+#code
+let s=0; for (const v of [1,2,3]) s+=v; console.log(s)
+#expect
+6
+
+#name Object.entries
+#code
+console.log(Object.entries({a:1}).length)
+#expect
+1
+
+#name optional chaining
+#code
+const o={a:{b:1}}; console.log(o?.a?.b)
+#expect
+1
+
+#name nullish coalescing
+#code
+console.log(null ?? "d")
+#expect
+d
+
+#name generator spread
+#code
+function* g(){ yield 1; yield 2; } console.log([...g()].length)
+#expect
+2
+
+#name Promise.resolve then
+#code
+Promise.resolve(1).then(v=>console.log(v))
+#expect
+1
+
+#name async function await
+#code
+async function f(){ return await 5; } f().then(v=>console.log(v))
+#expect
+5
+
+#name Array.from with map function
+#code
+console.log(Array.from({length:3},(_, i)=>i).join(""))
+#expect
+012
+
+#name typeof symbol
+#code
+const s=Symbol("x"); console.log(typeof s)
+#expect
+symbol
+
+#name string repeat
+#code
+console.log("a".repeat(3))
+#expect
+aaa
+
+#name object rest destructuring
+#code
+const {a, ...rest} = {a:1,b:2,c:3}; console.log(Object.keys(rest).length)
+#expect
+2
+
+#name Number.isInteger
+#code
+console.log(Number.isInteger(5))
+#expect
+true
+
+#name sort with comparator
+#code
+console.log([3,1,2].sort((a,b)=>b-a)[0])
+#expect
+3
+
+#name method shorthand and computed key
+#code
+const o={ f(){ return 1; }, ["k"+1]: 2 }; console.log(o.f()+o.k1)
+#expect
+3
+
+#name let block scope
+#code
+let x=1; { let x=2; } console.log(x)
+#expect
+1
+
+#name Set size
+#code
+console.log(new Set([1,1,2]).size)
+#expect
+2
+
+#name setTimeout
+#code
+setTimeout(()=>console.log("t"),0)
+#expect
+t
+
+#name array some and every
+#code
+console.log([1,2,3].some(x=>x>2), [1,2,3].every(x=>x>0))
+#expect
+true true
+
+#name string spread and reverse
+#code
+console.log([..."abc"].reverse().join(""))
+#expect
+cba
+
+#name Object.assign
+#code
+console.log(Object.assign({}, {a:1}, {b:2}).b)
+#expect
+2
+
+#name shorthand properties and multiple declarators
+#code
+const a=1, b=2; const o={a,b}; console.log(o.a+o.b)
+#expect
+3
+
+#name exponent operator
+#code
+console.log(2 ** 10)
+#expect
+1024
+
+#name array flat
+#code
+console.log([1,[2,[3]]].flat(2).length)
+#expect
+3
+
+#name method chaining with arrow
+#code
+console.log("a-b".split("-").map(s=>s.toUpperCase()).join("_"))
+#expect
+A_B
+
+#name static method
+#code
+class C{ static make(){ return new C(); } v(){ return 9; } } console.log(C.make().v())
+#expect
+9
+
+#name async try/catch of rejected promise
+#code
+const fn = async () => { try { await Promise.reject(new Error("e")); } catch (err) { return err.message; } }; fn().then(m=>console.log(m))
+#expect
+e
+
+#name typeof globalThis
+#code
+console.log(typeof globalThis)
+#expect
+object

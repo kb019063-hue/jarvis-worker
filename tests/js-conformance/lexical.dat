@@ -1,0 +1,164 @@
+#name hex literal
+#code
+console.log(0xff)
+#expect
+255
+
+#name octal and binary literals
+#code
+console.log(0o17, 0b101)
+#expect
+15 5
+
+#name exponent literal
+#code
+console.log(1e3, 2.5e-2)
+#expect
+1000 0.025
+
+#name leading-dot number
+#code
+console.log(.5 + .25)
+#expect
+0.75
+
+#name numeric separators
+#code
+console.log(1_000_000)
+#expect
+1000000
+
+#name trailing-dot number
+#code
+console.log(5. + 1)
+#expect
+6
+
+#name string escapes
+#code
+console.log("a\tb\\c\"d".length)
+#expect
+7
+
+#name unicode escape
+#code
+console.log("\u0041\x42\u{43}")
+#expect
+ABC
+
+#name newline escape in output
+#code
+console.log("line1\nline2")
+#expect
+line1
+line2
+
+#name single quotes
+#code
+console.log('it\'s')
+#expect
+it's
+
+#name line and block comments
+#code
+var a = 1; // c1
+/* c2
+ c2 */ var b = 2;
+console.log(a + b)
+#expect
+3
+
+#name asi: statements on separate lines
+#code
+var a = 1
+var b = 2
+console.log(a + b)
+#expect
+3
+
+#name asi: return followed by newline
+#code
+function f(){ return
+ 1 }
+console.log(f())
+#expect
+undefined
+
+#name division after parenthesis
+#code
+var a = 8, b = 2; console.log((a) / b / 2)
+#expect
+2
+
+#name regex literal after operator
+#code
+var r = /b/.test("abc"); console.log(r)
+#expect
+true
+
+#name keywords as property names
+#code
+var o = { if: 1, class: 2, default: 3, new: 4 }; console.log(o.if + o.class + o.default + o.new)
+#expect
+10
+
+#name trailing commas
+#code
+var a = [1,2,3,]; var o = {x:1,}; function f(p,){ return p; } console.log(a.length, o.x, f(7,))
+#expect
+3 1 7
+
+#name multi-line template literal
+#code
+console.log(`a
+b`.length)
+#expect
+3
+
+#name template literal nesting
+#code
+var n = 2; console.log(`x${`y${n}`}z`)
+#expect
+xy2z
+
+#name empty statements
+#code
+;;; var x = 1;; console.log(x)
+#expect
+1
+
+#name unicode string content
+#code
+console.log("café 日本")
+#expect
+café 日本
+
+#name dollar and underscore identifiers
+#code
+var $a = 1, _b = 2, c$_ = 3; console.log($a + _b + c$_)
+#expect
+6
+
+#name long string concatenation across lines
+#code
+var s = "a" +
+  "b" +
+  "c";
+console.log(s)
+#expect
+abc
+
+#name chained calls across lines
+#code
+var r = [3,1,2]
+  .map(function(x){ return x * 2; })
+  .join("-");
+console.log(r)
+#expect
+6-2-4
+
+#name object literal at statement start in parens
+#code
+console.log(({a: 1}).a)
+#expect
+1

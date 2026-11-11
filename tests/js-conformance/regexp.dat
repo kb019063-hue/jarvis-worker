@@ -1,0 +1,191 @@
+#name test and exec basics
+#code
+var re = /(\d+)-(\d+)/; var m = re.exec("tel 555-1234 x"); console.log(re.test("1-2"), m[0], m[1], m[2], m.index)
+#expect
+true 555-1234 555 1234 4
+
+#name exec returns null when no match
+#code
+console.log(/x/.exec("abc"), /x/.test("abc"))
+#expect
+null false
+
+#name case-insensitive flag
+#code
+console.log(/hello/i.test("HeLLo"), "ABC".replace(/b/i, "x"))
+#expect
+true AxC
+
+#name global flag with lastIndex loop
+#code
+var re = /a(\d)/g; var out = []; var m; while ((m = re.exec("a1 a2 a3")) !== null) out.push(m[1] + "@" + m.index); console.log(out.join())
+#expect
+1@0,2@3,3@6
+
+#name multiline flag anchors
+#code
+var s = "one\ntwo"; console.log(s.match(/^t\w+$/m)[0], /^two$/.test(s), s.match(/^\w+$/gm).length)
+#expect
+two false 2
+
+#name dotAll flag
+#code
+console.log(/a.b/.test("a\nb"), /a.b/s.test("a\nb"))
+#expect
+false true
+
+#name character classes
+#code
+console.log("a1 b_2!".replace(/\w/g, "w").replace(/\s/g, "s"), /^\d{3}$/.test("123"), /[^a-c]/.test("abc"), /[a-c]+/.exec("xxbcaz")[0])
+#expect
+wwswww! true false bca
+
+#name quantifiers greedy and lazy
+#code
+console.log("<a><b>".match(/<.+>/)[0], "<a><b>".match(/<.+?>/)[0], "aaa".match(/a{2}/)[0], "ab".match(/ab?c*/)[0])
+#expect
+<a><b> <a> aa ab
+
+#name alternation and groups
+#code
+console.log(/^(cat|dog)s?$/.test("dogs"), "gray grey".match(/gr(a|e)y/g).join(), /(?:ab)+/.exec("ababx")[0])
+#expect
+true gray,grey abab
+
+#name word boundary
+#code
+console.log("cat concat cat".replace(/\bcat\b/g, "X"), /\Bcat/.test("concat"))
+#expect
+X concat X true
+
+#name backreference
+#code
+console.log(/(\w)\1/.test("hello"), /(\w)\1/.exec("hello")[0], /^(a+)b\1$/.test("aabaa"))
+#expect
+true ll true
+
+#name named groups
+#code
+var m = /(?<y>\d{4})-(?<m>\d{2})/.exec("2024-05"); console.log(m.groups.y, m.groups.m, "2024-05".replace(/(?<y>\d+)-(?<m>\d+)/, "$<m>/$<y>"))
+#expect
+2024 05 05/2024
+
+#name lookahead and lookbehind
+#code
+console.log("a1b2".replace(/\d(?=b)/, "#"), /q(?!u)/.test("qa"), "$5 and 6".match(/(?<=\$)\d/)[0], "$5 6".match(/(?<!\$)\b\d/)[0])
+#expect
+a#b2 true 5 6
+
+#name replace special patterns
+#code
+console.log("abc".replace(/b/, "[$&]"), "abc".replace(/b/, "$`|$'"), "a.b".replace(".", "$$"))
+#expect
+a[b]c aa|cc a$b
+
+#name replace with function arguments
+#code
+console.log("3 + 4".replace(/(\d) \+ (\d)/, function(m, a, b, off){ return (+a + +b) + "@" + off; }))
+#expect
+7@0
+
+#name split with regex and limit
+#code
+console.log("a1b2c3".split(/\d/).join("|"), "a, b;c".split(/[,;]\s*/).join("|"), "abc".split(/b/, 1).length)
+#expect
+a|b|c| a|b|c 1
+
+#name matchAll
+#code
+var out = []; for (var m of "a1b22".matchAll(/[a-z](\d+)/g)) out.push(m[1] + ":" + m.index); console.log(out.join())
+#expect
+1:0,22:2
+
+#name RegExp constructor and flags
+#code
+var re = new RegExp("a+", "gi"); console.log(re.source, re.flags, re.global, re.ignoreCase, re.multiline, "AaA".match(re)[0], String(re))
+#expect
+a+ gi true true false AaA /a+/gi
+
+#name RegExp constructor with escaping
+#code
+var re = new RegExp("\\d+\\.\\d+"); console.log(re.test("3.14"), re.test("3x14"))
+#expect
+true false
+
+#name escaping user input
+#code
+function esc(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); } console.log(new RegExp("^" + esc("a.b*c") + "$").test("a.b*c"), new RegExp(esc("a.b")).test("axb"))
+#expect
+true false
+
+#name sticky flag
+#code
+var re = /foo/y; re.lastIndex = 3; console.log(re.test("barfoo"), re.lastIndex, re.test("barfoo"))
+#expect
+true 6 false
+
+#name lastIndex resets after failed global test
+#code
+var re = /a/g; console.log(re.test("ba"), re.lastIndex, re.test("ba"), re.lastIndex)
+#expect
+true 2 false 0
+
+#name unicode flag and code points
+#code
+console.log(/^.$/.test("😀"), /^.$/u.test("😀"), /\u{1F600}/u.test("😀"), "é".match(/\w/), /[à-ÿ]/.test("é"))
+#expect
+false true true null true
+
+#name validation patterns
+#code
+var email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; var hex = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i; console.log(email.test("a@b.co"), email.test("a@b"), hex.exec("#FFaa00").slice(1).map(function(h){ return parseInt(h, 16); }).join())
+#expect
+true false 255,170,0
+
+#name trim implementation with regex
+#code
+console.log("[" + "  x y  ".replace(/^\s+|\s+$/g, "") + "]")
+#expect
+[x y]
+
+#name camelCase to kebab-case
+#code
+console.log("backgroundColorTop".replace(/[A-Z]/g, function(c){ return "-" + c.toLowerCase(); }), "a-b-c".replace(/-(\w)/g, function(m, c){ return c.toUpperCase(); }))
+#expect
+background-color-top aBC
+
+#name simple template substitution
+#code
+var data = {name: "Ada", n: 3}; console.log("Hi {{name}}, {{n}} new, {{x}}".replace(/\{\{(\w+)\}\}/g, function(m, k){ return k in data ? data[k] : "?"; }))
+#expect
+Hi Ada, 3 new, ?
+
+#name query string parsing
+#code
+var q = {}; "a=1&b=two&c=".split("&").forEach(function(p){ var kv = p.split("="); q[kv[0]] = kv[1]; }); var m = /[?&]id=(\d+)/.exec("/p?x=1&id=42"); console.log(q.a, q.b, q.c === "", m[1])
+#expect
+1 two true 42
+
+#name regex literal with slash in class and escaped slash
+#code
+console.log("a/b".split(/[/]/).length, "a/b".replace(/\//g, "-"))
+#expect
+2 a-b
+
+#name search and string match with regex string
+#code
+console.log("abc".search("c"), "a.c".match(".").index, "x1".match(/\d/).input)
+#expect
+2 0 x1
+
+#name greedy backtracking
+#code
+console.log(/^(a+)+b$/.test("aaaab"), "aaa".replace(/a*?/g, "-"), /(a|ab)(c|bcd)(d*)/.exec("abcd").slice(1).join("|"))
+#expect
+true -a-a-a- a|bcd|
+
+#name toString and source of special patterns
+#code
+console.log(/a\/b/.source, new RegExp("/").source, /[\]]/.test("]"))
+#expect
+a\/b \/ true

@@ -1,0 +1,182 @@
+#name globalThis holds globals
+#code
+var gv = 5; console.log(typeof globalThis, globalThis.gv, typeof globalThis.Math, globalThis === globalThis.globalThis)
+#expect
+object 5 object true
+
+#name global function types
+#code
+console.log(typeof parseInt, typeof isNaN, typeof setTimeout, typeof console.log, typeof JSON.parse, typeof Math.max, typeof Object, typeof Array)
+#expect
+function function function function function function function function
+
+#name undefined NaN Infinity globals
+#code
+console.log(undefined === void 0, typeof NaN, Infinity > 1e308, typeof undefined)
+#expect
+true number true undefined
+
+#name eval of simple expression
+#code
+console.log(eval("1 + 2"), typeof eval)
+#expect
+3 function
+
+#name Function constructor
+#code
+var f = new Function("a", "b", "return a * b"); console.log(f(6, 7))
+#expect
+42
+
+#name labelled block
+#code
+blk: { console.log("in"); break blk; console.log("skipped"); } console.log("out")
+#expect
+in
+out
+
+#name debugger statement is a no-op
+#code
+var x = 1; debugger; console.log(x)
+#expect
+1
+
+#name getter and setter via defineProperty
+#code
+var o = { _v: 1 }; Object.defineProperty(o, "v", { get: function(){ return this._v; }, set: function(x){ this._v = x * 2; }, enumerable: true }); o.v = 5; console.log(o.v, Object.keys(o).join())
+#expect
+10 _v,v
+
+#name structuredClone
+#code
+var a = {d: [1, {e: 2}]}; var b = structuredClone(a); b.d[1].e = 9; console.log(a.d[1].e, b.d[1].e)
+#expect
+2 9
+
+#name array destructuring in function return
+#code
+function mm(a){ return [Math.min.apply(null, a), Math.max.apply(null, a)]; } var [lo, hi] = mm([4, 1, 8]); console.log(lo, hi)
+#expect
+1 8
+
+#name object destructuring in loop over entries
+#code
+var t = 0; for (var {qty, price} of [{qty: 2, price: 5}, {qty: 1, price: 3}]) t += qty * price; console.log(t)
+#expect
+13
+
+#name default and named-style arguments
+#code
+function box({w = 1, h = 1, label = "b"} = {}){ return label + w * h; } console.log(box(), box({w: 3, h: 2}), box({label: "x"}))
+#expect
+b1 b6 x1
+
+#name closures in loops with setTimeout
+#code
+for (let i = 0; i < 3; i++) setTimeout(function(){ console.log(i); }, i)
+#expect
+0
+1
+2
+
+#name immediately resolved IIFE module pattern
+#code
+var mod = (function(){ var priv = 0; function inc(){ return ++priv; } return { inc: inc, get value(){ return priv; } }; })(); mod.inc(); mod.inc(); console.log(mod.value, typeof mod.priv)
+#expect
+2 undefined
+
+#name memoization with closure
+#code
+function memo(fn){ var c = {}; return function(n){ return n in c ? c[n] : (c[n] = fn(n)); }; } var calls = 0; var sq = memo(function(n){ calls++; return n * n; }); sq(4); sq(4); sq(5); console.log(sq(4), calls)
+#expect
+16 2
+
+#name currying
+#code
+function curry(f){ return function c(){ var a = Array.prototype.slice.call(arguments); return a.length >= f.length ? f.apply(null, a) : function(){ return c.apply(null, a.concat(Array.prototype.slice.call(arguments))); }; }; } var add3 = curry(function(a, b, c){ return a + b + c; }); console.log(add3(1)(2)(3), add3(1, 2)(3), add3(1)(2, 3))
+#expect
+6 6 6
+
+#name compose and pipe
+#code
+var compose = function(){ var fs = arguments; return function(x){ for (var i = fs.length - 1; i >= 0; i--) x = fs[i](x); return x; }; }; var inc = function(x){ return x + 1; }, dbl = function(x){ return x * 2; }; console.log(compose(inc, dbl)(5), compose(dbl, inc)(5))
+#expect
+11 12
+
+#name getter-based lazy value
+#code
+var o = { get lazy(){ var v = Math.sqrt(16); Object.defineProperty(this, "lazy", { value: v }); return v; } }; console.log(o.lazy, o.lazy)
+#expect
+4 4
+
+#name console methods exist
+#code
+console.log(typeof console.error, typeof console.warn, typeof console.info, typeof console.table, typeof console.assert)
+#expect
+function function function function function
+
+#name number and string wrappers
+#code
+console.log(typeof Number("5"), typeof Boolean(0), Boolean("false"), new Number(5) + 1, typeof new Boolean(false), new Boolean(false) ? "truthy" : "falsy")
+#expect
+number boolean true 6 object truthy
+
+#name with-free dynamic property access
+#code
+var cfg = {a: {b: {c: 9}}}; function get(o, path){ return path.split(".").reduce(function(x, k){ return x == null ? undefined : x[k]; }, o); } console.log(get(cfg, "a.b.c"), get(cfg, "a.x.c"))
+#expect
+9 undefined
+
+#name array-like DOM-style collection loop
+#code
+var list = {0: "a", 1: "b", length: 2}; var out = ""; for (var i = 0; i < list.length; i++) out += list[i]; console.log(out, Array.prototype.map.call(list, function(x){ return x.toUpperCase(); }).join(""))
+#expect
+ab AB
+
+#name strict mode disallows undeclared assignment
+#code
+"use strict"; try { undeclaredVar = 1; console.log("no"); } catch (e) { console.log(e.name); }
+#expect
+ReferenceError
+
+#name sloppy mode implicit global
+#code
+function f(){ implicitGlobal = 3; } f(); console.log(implicitGlobal)
+#expect
+3
+
+#name typeof for wrappers and special objects
+#code
+console.log(typeof new Date(), typeof /x/, typeof new Map(), typeof Promise.resolve(), typeof null, typeof Math)
+#expect
+object object object object object object
+
+#name Object.prototype.toString tags
+#code
+var t = Object.prototype.toString; console.log([t.call(1), t.call("s"), t.call(true), t.call(undefined), t.call(function(){}), t.call(new Date()), t.call(/x/)].join(""))
+#expect
+[object Number][object String][object Boolean][object Undefined][object Function][object Date][object RegExp]
+
+#name getter in class used with JSON
+#code
+class P { constructor(){ this.a = 1; } get b(){ return 2; } toJSON(){ return { a: this.a, b: this.b }; } } console.log(JSON.stringify(new P()))
+#expect
+{"a":1,"b":2}
+
+#name Intl-free number padding and joining
+#code
+console.log([1, 2, 3].map(function(n){ return ("00" + n).slice(-3); }).join(":"))
+#expect
+001:002:003
+
+#name arguments and callee-free recursion via name
+#code
+var r = (function walk(n, acc){ return n === 0 ? acc : walk(n - 1, acc.concat(n)); })(4, []); console.log(r.join(""))
+#expect
+4321
+
+#name short-circuit default idioms
+#code
+function f(o){ o = o || {}; var n = o.n !== undefined ? o.n : 10; var s = o.s || "d"; return n + s; } console.log(f(), f({n: 0, s: ""}), f({n: 5, s: "x"}))
+#expect
+10d 0d 5x

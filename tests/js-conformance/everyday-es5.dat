@@ -1,0 +1,299 @@
+#name array length
+#code
+var a=[1,2,3]; console.log(a.length)
+#expect
+3
+
+#name string toUpperCase
+#code
+console.log("abc".toUpperCase())
+#expect
+ABC
+
+#name string split
+#code
+console.log("a,b,c".split(",").length)
+#expect
+3
+
+#name array sort and join
+#code
+console.log([3,1,2].sort().join(""))
+#expect
+123
+
+#name typeof null
+#code
+console.log(typeof null)
+#expect
+object
+
+#name parseInt with trailing text
+#code
+console.log(parseInt("42px"))
+#expect
+42
+
+#name for-in over object
+#code
+var o={a:1,b:2}; var s=0; for (var k in o) { s += o[k]; } console.log(s)
+#expect
+3
+
+#name array indexOf
+#code
+console.log([1,2,3].indexOf(2))
+#expect
+1
+
+#name string slice
+#code
+console.log("hello".slice(1,3))
+#expect
+el
+
+#name string indexOf
+#code
+console.log("hello".indexOf("l"))
+#expect
+2
+
+#name arguments.length
+#code
+function f(){ return arguments.length; } console.log(f(1,2,3))
+#expect
+3
+
+#name try/catch with Error message
+#code
+try { throw new Error("x"); } catch (e) { console.log(e.message); }
+#expect
+x
+
+#name while with break
+#code
+var i=0; while(true){ i++; if(i>4) break; } console.log(i)
+#expect
+5
+
+#name do-while
+#code
+var i=0; do { i++; } while (i<3); console.log(i)
+#expect
+3
+
+#name ternary operator
+#code
+console.log(1 < 2 ? "y" : "n")
+#expect
+y
+
+#name Math.max
+#code
+console.log(Math.max(1,5,3))
+#expect
+5
+
+#name numeric string multiplication
+#code
+console.log("5" * "2")
+#expect
+10
+
+#name floating point strict equality
+#code
+console.log(0.1+0.2 === 0.3)
+#expect
+false
+
+#name array slice
+#code
+console.log([1,2,3].slice(1).length)
+#expect
+2
+
+#name delete and in
+#code
+var o={}; o["x"]=1; delete o.x; console.log("x" in o)
+#expect
+false
+
+#name Object.keys
+#code
+console.log(Object.keys({a:1,b:2}).length)
+#expect
+2
+
+#name Date getTime
+#code
+console.log(new Date(0).getTime())
+#expect
+0
+
+#name regex test
+#code
+console.log(/a+b/.test("caab"))
+#expect
+true
+
+#name regex global replace
+#code
+console.log("a-b-c".replace(/-/g, "+"))
+#expect
+a+b+c
+
+#name constructor function and prototype method
+#code
+function A(){ this.x=1; } A.prototype.get=function(){ return this.x; }; console.log(new A().get())
+#expect
+1
+
+#name Function.prototype.call
+#code
+var f=function(){ return this.v; }; console.log(f.call({v:7}))
+#expect
+7
+
+#name array map with function expression
+#code
+console.log([1,2,3].map(function(x){return x*2;}).join(","))
+#expect
+2,4,6
+
+#name isNaN
+#code
+console.log(isNaN(NaN))
+#expect
+true
+
+#name number toString radix
+#code
+console.log((255).toString(16))
+#expect
+ff
+
+#name String() conversion
+#code
+console.log(String(123).length)
+#expect
+3
+
+#name labelled continue
+#code
+outer: for (var i=0;i<3;i++){ for (var j=0;j<3;j++){ if (j==1) continue outer; } } console.log(i)
+#expect
+3
+
+#name strict inequality across types
+#code
+console.log(1 !== "1")
+#expect
+true
+
+#name shift-assign and bitwise or
+#code
+var x = 5; x <<= 1; console.log(x | 1)
+#expect
+11
+
+#name void operator
+#code
+console.log(void 0 === undefined)
+#expect
+true
+
+#name nested array toString
+#code
+console.log([1,[2,3]].toString())
+#expect
+1,2,3
+
+#name JSON.stringify key order
+#code
+console.log(JSON.stringify({a:[1,2],b:"x"}))
+#expect
+{"a":[1,2],"b":"x"}
+
+#name recursive function with ternary
+#code
+function fib(n){ return n<2?n:fib(n-1)+fib(n-2); } console.log(fib(20))
+#expect
+6765
+
+#name closure counter
+#code
+var c=(function(){ var n=0; return function(){ return ++n; }; })(); c(); console.log(c())
+#expect
+2
+
+#name charAt and charCodeAt
+#code
+console.log("abc".charAt(1), "abc".charCodeAt(0))
+#expect
+b 97
+
+#name Array.isArray
+#code
+console.log(Array.isArray([]))
+#expect
+true
+
+#name custom toString in concatenation
+#code
+var o = {toString: function(){ return "z"; }}; console.log("" + o)
+#expect
+z
+
+#name parseFloat and Number
+#code
+console.log(parseFloat("3.5") + Number("1.5"))
+#expect
+5
+
+#name Math.floor and Math.round
+#code
+console.log(Math.floor(-0.5), Math.round(2.5))
+#expect
+-1 3
+
+#name typeof table
+#code
+console.log(typeof function(){}, typeof {}, typeof [], typeof "s", typeof 1, typeof true, typeof undefined)
+#expect
+function object object string number boolean undefined
+
+#name string trim
+#code
+console.log("  x ".trim().length)
+#expect
+1
+
+#name array reduce
+#code
+console.log([1,2,3].reduce(function(a,b){return a+b;},0))
+#expect
+6
+
+#name array filter
+#code
+console.log([1,2,3,4].filter(function(x){return x%2===0;}).length)
+#expect
+2
+
+#name array splice
+#code
+var a=[1,2,3]; a.splice(1,1); console.log(a.join(""))
+#expect
+13
+
+#name array concat
+#code
+console.log([1,2].concat([3]).length)
+#expect
+3
+
+#name switch fallthrough
+#code
+var s=""; switch(2){ case 1: s+="a"; case 2: s+="b"; case 3: s+="c"; break; default: s+="d"; } console.log(s)
+#expect
+bc

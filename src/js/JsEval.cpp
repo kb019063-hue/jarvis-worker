@@ -132,7 +132,7 @@ JsTokenType binary_operator_for(JsTokenType assign_op) {
 /// what `super.x` needs.
 JsValue get_with_receiver(JsObject* start, const std::string& key, const JsValue& receiver) {
     int guard = 0;
-    for (JsObject* obj = start; obj && guard < 10000; obj = obj->prototype, ++guard) {
+    for (JsObject* obj = start; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         auto it = obj->properties.find(key);
         if (it == obj->properties.end()) continue;
         if (it->flags & PropertyMap::Accessor) {
@@ -237,9 +237,11 @@ std::shared_ptr<JsEnvironment> copy_scope(const std::shared_ptr<JsEnvironment>& 
 // ---------------------------------------------------------------------------
 
 JsValue JsInterpreter::run(std::string_view source) {
-    JsLexer lexer(source);
+    // Functions keep a reference to the text they were parsed from.
+    auto text = std::make_shared<const std::string>(source);
+    JsLexer lexer(*text);
     auto tokens = lexer.tokenize_all();
-    JsParser parser(std::move(tokens));
+    JsParser parser(std::move(tokens), text);
     auto program = parser.parse_program();
     return run_program(*program);
 }
@@ -840,7 +842,7 @@ JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& 
     // makes `x` resolvable.
     if (JsObject* global = m_global_object.object_val) {
         int guard = 0;
-        for (JsObject* obj = global; obj && guard < 10000; obj = obj->prototype, ++guard) {
+        for (JsObject* obj = global; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
             auto it = obj->properties.find(name);
             if (it == obj->properties.end()) continue;
             if (it->flags & PropertyMap::Accessor) {
@@ -859,6 +861,12 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
             return;
         case JsEnvironment::AssignResult::Const:
             js_throw_type_error("Assignment to constant variable.");
+        case JsEnvironment::AssignResult::ReadOnly:
+            // `undefined = 1`: ignored in sloppy code, an error in strict code.
+            if (env->is_strict()) {
+                js_throw_type_error("Cannot assign to read only property '" + name + "' of object '#<Object>'");
+            }
+            return;
         case JsEnvironment::AssignResult::NotFound:
             break;
     }
@@ -945,6 +953,7 @@ void JsInterpreter::write_reference(const Reference& ref, const JsValue& value, 
 }
 
 void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode) {
+    js_check_stack();       // patterns nest: [[[[x]]]] = v
     switch (pattern.kind) {
         case Pattern::Kind::Identifier:
             switch (mode) {
@@ -957,6 +966,7 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 case BindMode::Var: {
                     // The binding was hoisted to the function scope on entry.
                     if (auto* binding = env->lookup(pattern.name)) {
+                        if (binding->is_readonly) return;      // `var undefined = 1` at the top level
                         binding->value = value;
                         binding->is_const = false;
                     } else {
@@ -1082,6 +1092,9 @@ void JsInterpreter::exec_var_decl(const VarDeclStmt* stmt, const EnvPtr& env) {
 }
 
 JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Frame& frame) {
+    // Statements nest too (`if (a) if (b) ...`, an `else if` ladder, blocks in
+    // blocks), with no expression in between for evaluate()'s guard to catch.
+    js_check_stack();
     switch (stmt->kind) {
         case NodeKind::ExprStmt: {
             JsValue value = evaluate(static_cast<const ExprStmt*>(stmt)->expression.get(), env);
@@ -1286,7 +1299,7 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
         for (auto& key : subject.own_keys(false)) keys.push_back(std::move(key));
         int guard = 0;
         for (JsObject* proto = subject.type == JsType::String ? nullptr : subject.prototype_object();
-             proto && guard < 10000; proto = proto->prototype, ++guard) {
+             proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
             JsValue holder = JsValue::make_object(proto);
             std::vector<std::string> all = holder.own_keys(true);
             for (auto& key : holder.own_keys(false)) {
@@ -1526,25 +1539,48 @@ JsValue JsInterpreter::apply_binary(JsTokenType op, const JsValue& left, const J
     return JsValue::make_undefined();
 }
 
+JsValue JsInterpreter::eval_binary_chain(const BinaryExpr* expr, const EnvPtr& env) {
+    // `a + b + c + ...` is ((a + b) + c) + ...: a chain of nodes linked through
+    // `left`. Collect the chain, evaluate its innermost operand, then apply
+    // the operators on the way back out. The order of evaluation is the same
+    // as recursing; the native stack used does not grow with the chain.
+    std::vector<const BinaryExpr*> chain;
+    chain.reserve(expr->left_chain + 1);
+    const BinaryExpr* node = expr;
+    while (true) {
+        chain.push_back(node);
+        if (node->left->kind != NodeKind::Binary) break;
+        node = static_cast<const BinaryExpr*>(node->left.get());
+    }
+    JsValue acc = evaluate(chain.back()->left.get(), env);
+    for (size_t i = chain.size(); i-- > 0;) {
+        acc = combine_binary(chain[i], std::move(acc), env);
+    }
+    return acc;
+}
+
 JsValue JsInterpreter::eval_binary(const BinaryExpr* expr, const EnvPtr& env) {
+    // Short chains recurse (no allocation); long ones are walked in a loop.
+    if (expr->left_chain >= 8) return eval_binary_chain(expr, env);
+    return combine_binary(expr, evaluate(expr->left.get(), env), env);
+}
+
+/// Finishes one binary operator whose left operand is already evaluated.
+JsValue JsInterpreter::combine_binary(const BinaryExpr* expr, JsValue left, const EnvPtr& env) {
     // Short-circuit operators evaluate their right side only when needed and
     // yield an operand, not a boolean.
     if (expr->op == JsTokenType::PipePipe) {
-        JsValue left = evaluate(expr->left.get(), env);
         if (left.is_truthy()) return left;
         return evaluate(expr->right.get(), env);
     }
     if (expr->op == JsTokenType::AmpAmp) {
-        JsValue left = evaluate(expr->left.get(), env);
         if (!left.is_truthy()) return left;
         return evaluate(expr->right.get(), env);
     }
     if (expr->op == JsTokenType::Nullish) {
-        JsValue left = evaluate(expr->left.get(), env);
         if (!left.is_nullish()) return left;
         return evaluate(expr->right.get(), env);
     }
-    JsValue left = evaluate(expr->left.get(), env);
     JsValue right = evaluate(expr->right.get(), env);
     if (left.type == JsType::Number && right.type == JsType::Number) {
         // The hot path for loops and arithmetic.
@@ -1888,8 +1924,11 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::Literal:
             return static_cast<const LiteralExpr*>(expr)->value;
 
-        case NodeKind::Identifier:
-            return lookup_identifier(static_cast<const IdentifierExpr*>(expr)->name, env);
+        case NodeKind::Identifier: {
+            auto* id = static_cast<const IdentifierExpr*>(expr);
+            if (id->is_undefined && !JsEnvironment::undefined_shadowed()) return JsValue::make_undefined();
+            return lookup_identifier(id->name, env);
+        }
 
         case NodeKind::Binary:
             return eval_binary(static_cast<const BinaryExpr*>(expr), env);
@@ -1990,12 +2029,17 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         }
 
         case NodeKind::TemplateLiteral: {
+            // parts alternates text, substitution, text, ..., text. Position is
+            // what tells them apart: a substitution can itself be a literal
+            // (`${200000}`, `${true}`), and that has to be converted, not
+            // read as if it were a piece of the template's own text.
+            const auto& parts = static_cast<const TemplateLiteralExpr*>(expr)->parts;
             std::string result;
-            for (const auto& part : static_cast<const TemplateLiteralExpr*>(expr)->parts) {
-                if (part->kind == NodeKind::Literal) {
-                    result += static_cast<const LiteralExpr*>(part.get())->value.string_val;
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (i % 2 == 0) {
+                    result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val;
                 } else {
-                    result += js_to_string(evaluate(part.get(), env));
+                    result += js_to_string(evaluate(parts[i].get(), env));
                 }
             }
             return JsValue::make_string(std::move(result));

@@ -165,3 +165,15 @@ true boolean
 class C { static #n = 1; static v; static { C.v = C.#n + 1; } } console.log(C.v)
 #expect
 2
+
+#name class toString returns the class text
+#code
+class A { constructor(x) { this.x = x; } static make() { return new A(1); } get v() { return 1; } async *ag() {} m(a) { return a; } }
+console.log(A.toString()); console.log(A.make.toString()); console.log(A.prototype.m.toString()); console.log(Object.getOwnPropertyDescriptor(A.prototype, 'v').get.toString()); console.log(A.prototype.ag.toString()); console.log((class {}).toString(), (class B extends A {}).toString())
+#expect
+class A { constructor(x) { this.x = x; } static make() { return new A(1); } get v() { return 1; } async *ag() {} m(a) { return a; } }
+make() { return new A(1); }
+m(a) { return a; }
+get v() { return 1; }
+async *ag() {}
+class {} class B extends A {}

@@ -195,3 +195,21 @@ console.log(123456789 * 1000, 2 ** 31, -(2 ** 31), 4294967296 * 4294967296)
 console.log(typeof 10n, (2n ** 64n).toString(), 7n / 2n === 3n, BigInt(5) + 1n === 6n)
 #expect
 bigint 18446744073709551616 true true
+
+#name Math.hypot does not overflow or underflow
+#code
+console.log(Math.hypot(1e300, 3), Math.hypot(1e-200, 1e-200), Math.hypot(3, 4), Math.hypot(), Math.hypot(NaN, Infinity), Math.hypot(-5), Math.hypot(3, 4, 12), Math.hypot(1e200, 1e200, 1e200), Math.hypot(0, -0), Math.hypot('3', '4'))
+#expect
+1e+300 1.414213562373095e-200 5 0 Infinity 5 13 1.7320508075688773e+200 0 5
+
+#name parseInt of long digit strings
+#code
+console.log(parseInt(123456789012345680000), parseInt('123456789012345678901234567890'), parseInt('9007199254740993'), parseInt('-98765432109876543210'), parseInt('00000000000000000000123'), parseInt('1234567890123456789.99'))
+#expect
+123456789012345680000 1.2345678901234568e+29 9007199254740992 -98765432109876540000 123 1234567890123456800
+
+#name parseInt of long strings in other radixes
+#code
+console.log(parseInt('0x1fffffffffffff'), parseInt('777777777777', 8), parseInt('zzzzzzzz', 36), parseInt('11111111111111111111111111111111', 2), parseInt('0x'), parseInt('-0xff'))
+#expect
+9007199254740991 68719476735 2821109907455 4294967295 NaN -255

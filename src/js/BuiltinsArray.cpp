@@ -131,6 +131,7 @@ void sort_values(std::vector<JsValue>& items, const JsValue& comparator) {
 }
 
 void flatten_into(std::vector<JsValue>& out, const JsValue& array, double depth) {
+    js_check_stack();       // [[[[...]]]].flat(Infinity) recurses once per level
     for (size_t i = 0; i < elements_of(array).size(); ++i) {
         JsValue item = elements_of(array)[i];
         if (depth >= 1 && item.is_array()) flatten_into(out, item, depth - 1);

@@ -8,7 +8,52 @@ namespace litebird {
 // AST helpers
 // ---------------------------------------------------------------------------
 
+namespace {
+
+struct PendingNode {
+    enum class Kind : uint8_t { Expr, Stmt, Pattern };
+    Kind kind;
+    void* node;
+};
+
+/// Nodes whose deletion was requested while another node on this thread was
+/// being deleted. Points into the stack of the outermost ast_delete().
+thread_local std::vector<PendingNode>* t_pending_nodes = nullptr;
+
+void delete_now(const PendingNode& pending) {
+    switch (pending.kind) {
+        case PendingNode::Kind::Expr: delete static_cast<Expr*>(pending.node); break;
+        case PendingNode::Kind::Stmt: delete static_cast<Stmt*>(pending.node); break;
+        case PendingNode::Kind::Pattern: delete static_cast<Pattern*>(pending.node); break;
+    }
+}
+
+void delete_iteratively(PendingNode first) noexcept {
+    if (!first.node) return;
+    if (t_pending_nodes) {
+        // Inside another node's destructor: do not go deeper, queue it.
+        t_pending_nodes->push_back(first);
+        return;
+    }
+    std::vector<PendingNode> pending;
+    t_pending_nodes = &pending;
+    delete_now(first);                      // its children land in `pending`
+    while (!pending.empty()) {
+        PendingNode next = pending.back();
+        pending.pop_back();
+        delete_now(next);
+    }
+    t_pending_nodes = nullptr;
+}
+
+} // namespace
+
+void ast_delete(Expr* node) noexcept { delete_iteratively({PendingNode::Kind::Expr, node}); }
+void ast_delete(Stmt* node) noexcept { delete_iteratively({PendingNode::Kind::Stmt, node}); }
+void ast_delete(Pattern* node) noexcept { delete_iteratively({PendingNode::Kind::Pattern, node}); }
+
 void Pattern::collect_names(std::vector<std::string>& out) const {
+    js_check_stack();
     switch (kind) {
         case Kind::Identifier:
             out.push_back(name);
@@ -24,6 +69,26 @@ void Pattern::collect_names(std::vector<std::string>& out) const {
     }
 }
 
+std::string js_function_source_text(const AstNode* node) {
+    if (!node) return std::string();
+    const std::string* source = nullptr;
+    uint32_t start = 0;
+    uint32_t end = 0;
+    if (node->kind == NodeKind::FunctionNode) {
+        auto* fn = static_cast<const FunctionNode*>(node);
+        source = fn->source.get();
+        start = fn->source_start;
+        end = fn->source_end;
+    } else if (node->kind == NodeKind::ClassNode) {
+        auto* cls = static_cast<const ClassNode*>(node);
+        source = cls->source.get();
+        start = cls->source_start;
+        end = cls->source_end;
+    }
+    if (!source || start >= end || end > source->size()) return std::string();
+    return source->substr(start, end - start);
+}
+
 std::vector<std::string> FunctionNode::simple_param_names() const {
     std::vector<std::string> names;
     names.reserve(params.size());
@@ -37,7 +102,8 @@ std::vector<std::string> FunctionNode::simple_param_names() const {
 // Token plumbing
 // ---------------------------------------------------------------------------
 
-JsParser::JsParser(std::vector<JsToken> tokens) : m_tokens(std::move(tokens)) {
+JsParser::JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source)
+    : m_tokens(std::move(tokens)), m_source(std::move(source)) {
     if (m_tokens.empty() || m_tokens.back().type != JsTokenType::Eof) {
         JsToken eof;
         eof.type = JsTokenType::Eof;
@@ -209,7 +275,12 @@ void JsParser::parse_statement_list(BlockStmt& block, bool until_close_brace) {
     }
 }
 
+// The parser descends once per level of nesting in the source. Each function
+// that can reach itself again checks how much native stack is left first, so
+// that `((((...` or ten thousand nested blocks end in a RangeError the way
+// they do in other engines, not in a dead process.
 std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
+    js_check_stack();
     const int line = peek().line;
     std::unique_ptr<Stmt> result;
     switch (peek().type) {
@@ -273,6 +344,7 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_statement() {
+    js_check_stack();
     switch (peek().type) {
         case JsTokenType::OpenBrace:
             advance();
@@ -623,6 +695,8 @@ void JsParser::parse_params_and_body(FunctionNode& fn) {
 std::shared_ptr<FunctionNode> JsParser::parse_function(bool is_async, bool is_declaration) {
     auto fn = std::make_shared<FunctionNode>();
     fn->line = previous().line;
+    // Called with `function` consumed, and `async` before it if there was one.
+    const size_t first_token = m_current - (is_async && m_current >= 2 ? 2 : 1);
     fn->is_async = is_async;
     fn->is_generator = match(JsTokenType::Star);
     if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) || check(JsTokenType::Await) ||
@@ -632,6 +706,7 @@ std::shared_ptr<FunctionNode> JsParser::parse_function(bool is_async, bool is_de
         fail("Function statements require a function name");
     }
     parse_params_and_body(*fn);
+    set_source(*fn, first_token);
     return fn;
 }
 
@@ -648,6 +723,7 @@ std::shared_ptr<FunctionNode> JsParser::parse_method(bool is_async, bool is_gene
 std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     auto fn = std::make_shared<FunctionNode>();
     fn->line = peek().line;
+    const size_t first_token = m_current - (is_async && m_current >= 1 ? 1 : 0);
     fn->is_arrow = true;
     fn->is_async = is_async;
 
@@ -683,6 +759,7 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     }
     m_functions.pop_back();
     m_closure_count++;
+    set_source(*fn, first_token);
     return fn;
 }
 
@@ -710,6 +787,7 @@ std::string JsParser::parse_property_name(std::unique_ptr<Expr>& computed) {
 std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
     auto cls = std::make_shared<ClassNode>();
     cls->line = previous().line;
+    const size_t class_token = m_current - 1;       // called with `class` consumed
     if (check(JsTokenType::Identifier)) {
         cls->name = advance().text;
     } else if (is_declaration) {
@@ -761,6 +839,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
 
         bool is_async = false;
         bool is_generator = false;
+        const size_t member_token = m_current;       // after `static`, as engines print it
         if (check_identifier("async") && can_follow_modifier() && !peek(1).newline_before) {
             advance();
             is_async = true;
@@ -776,6 +855,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
 
         if (check(JsTokenType::OpenParen)) {
             auto fn = parse_method(is_async, is_generator);
+            set_source(*fn, member_token);
             fn->name = member.key;
             if (member.kind == ClassMember::Kind::Method && !member.is_static &&
                 !member.computed_key && member.key == "constructor") {
@@ -810,6 +890,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
         cls->members.push_back(std::move(member));
     }
     consume(JsTokenType::CloseBrace, "Expected '}' after class body.");
+    set_source(*cls, class_token);
     m_functions[enclosing].strict = enclosing_strict;
 
     if (!cls->constructor) {
@@ -844,6 +925,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
+    js_check_stack();
     auto pattern = std::make_unique<Pattern>();
     FlagScope scope(m_no_in, false);
     if (match(JsTokenType::OpenBracket)) {
@@ -903,6 +985,7 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
 // Destructuring assignment is parsed as an array/object literal first and
 // reinterpreted as a pattern once the `=` is seen (the "cover grammar").
 std::unique_ptr<Pattern> JsParser::expr_to_pattern(std::unique_ptr<Expr> expr) {
+    js_check_stack();
     auto pattern = std::make_unique<Pattern>();
     switch (expr->kind) {
         case NodeKind::Identifier:
@@ -1014,6 +1097,7 @@ bool JsParser::is_assignable(const Expr* expr) {
 }
 
 std::unique_ptr<Expr> JsParser::parse_assignment() {
+    js_check_stack();
     const int line = peek().line;
 
     // Arrow functions.
@@ -1162,6 +1246,13 @@ std::unique_ptr<Expr> JsParser::parse_binary(int min_precedence) {
         int precedence = binary_precedence(type);
         if (precedence == 0 || precedence < min_precedence) break;
         if (type == JsTokenType::In && m_no_in) break;
+        // `-2 ** 2` could mean (-2) ** 2 or -(2 ** 2), so the grammar allows
+        // neither: a unary operator may not sit directly left of `**`.
+        if (type == JsTokenType::Power && !left->explicitly_grouped &&
+            (left->kind == NodeKind::Unary || left->kind == NodeKind::Await)) {
+            fail("Unary operator used immediately before exponentiation expression. "
+                 "Parenthesis must be used to disambiguate operator precedence");
+        }
         advance();
         // `**` is right-associative; everything else is left-associative.
         auto right = parse_binary(type == JsTokenType::Power ? precedence : precedence + 1);
@@ -1185,6 +1276,7 @@ std::unique_ptr<Expr> JsParser::parse_binary(int min_precedence) {
 }
 
 std::unique_ptr<Expr> JsParser::parse_unary() {
+    js_check_stack();
     switch (peek().type) {
         case JsTokenType::Bang:
         case JsTokenType::Minus:
@@ -1248,6 +1340,7 @@ std::vector<std::unique_ptr<Expr>> JsParser::parse_arguments() {
 
 // Called at a `new` token.
 std::unique_ptr<Expr> JsParser::parse_new() {
+    js_check_stack();
     advance();
     if (match(JsTokenType::Dot)) {
         if (!match_identifier("target")) fail_unexpected();
@@ -1415,6 +1508,7 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
 
         bool is_async = false;
         bool is_generator = false;
+        const size_t property_token = m_current;
         if (check_identifier("async") && can_follow_modifier() && !peek(1).newline_before) {
             advance();
             is_async = true;
@@ -1431,10 +1525,12 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
 
         if (prop.kind != ObjectProperty::Kind::Init) {
             auto fn = parse_method(false, false);
+            set_source(*fn, property_token);
             fn->name = prop.key;
             prop.value = std::make_unique<FunctionExpr>(std::move(fn));
         } else if (check(JsTokenType::OpenParen) || is_async || is_generator) {
             auto fn = parse_method(is_async, is_generator);
+            set_source(*fn, property_token);
             fn->name = prop.key;
             prop.is_method = true;
             prop.value = std::make_unique<FunctionExpr>(std::move(fn));
@@ -1462,6 +1558,7 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
 }
 
 std::unique_ptr<Expr> JsParser::parse_primary() {
+    js_check_stack();
     const JsToken& token = peek();
     const int line = token.line;
     std::unique_ptr<Expr> result;

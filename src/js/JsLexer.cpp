@@ -39,7 +39,6 @@ const std::unordered_map<std::string, JsTokenType>& keyword_table() {
         {"true", JsTokenType::True},
         {"false", JsTokenType::False},
         {"null", JsTokenType::Null},
-        {"undefined", JsTokenType::Undefined},
         {"typeof", JsTokenType::Typeof},
         {"instanceof", JsTokenType::InstanceOf},
         {"switch", JsTokenType::Switch},
@@ -464,8 +463,16 @@ JsToken JsLexer::scan_template(bool is_start) {
 }
 
 JsToken JsLexer::next_token() {
+    JsToken t = scan_token();
+    t.start = static_cast<uint32_t>(m_token_start);
+    t.end = static_cast<uint32_t>(m_cursor);
+    return t;
+}
+
+JsToken JsLexer::scan_token() {
     m_newline_before = false;
     skip_whitespace_and_comments();
+    m_token_start = m_cursor;
 
     JsToken t;
     t.line = m_line;

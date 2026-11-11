@@ -69,6 +69,7 @@ JsValue parse_int(Args args) {
 
     double value = 0.0;
     bool any = false;
+    const size_t first_digit = i;
     for (; i < s.size(); ++i) {
         char c = s[i];
         int digit = (c >= '0' && c <= '9') ? c - '0'
@@ -79,6 +80,13 @@ JsValue parse_int(Args args) {
         any = true;
     }
     if (!any) return JsValue::make_number(kNaN);
+    // Accumulating digit by digit rounds at every step once the value passes
+    // 2^53. For decimal input, convert the run of digits in one correctly
+    // rounded step instead: parseInt("123456789012345680000") must give the
+    // same number as the literal.
+    if (radix == 10 && i - first_digit > 15) {
+        value = js_string_to_number(s.substr(first_digit, i - first_digit));
+    }
     return JsValue::make_number(negative ? -value : value);
 }
 
@@ -399,15 +407,28 @@ void install_number_builtins(JsIntrinsics& realm) {
         return JsValue::make_number(static_cast<int32_t>(a * b));
     }));
     def("hypot", js_make_native("hypot", 2, [](Args args) {
-        double sum = 0.0;
+        // Every argument is converted first (that can run script), then the
+        // values are scaled by the largest so that squaring neither overflows
+        // (1e300) nor vanishes (1e-200).
+        std::vector<double> values;
+        values.reserve(args.size());
+        for (const auto& arg : args) values.push_back(std::fabs(js_to_number(arg)));
         bool has_nan = false;
-        for (const auto& arg : args) {
-            double v = js_to_number(arg);
+        double largest = 0.0;
+        for (double v : values) {
             if (std::isinf(v)) return JsValue::make_number(kInfinity);
             if (std::isnan(v)) has_nan = true;
-            sum += v * v;
+            else if (v > largest) largest = v;
         }
-        return JsValue::make_number(has_nan ? kNaN : std::sqrt(sum));
+        if (has_nan) return JsValue::make_number(kNaN);
+        if (largest == 0.0) return JsValue::make_number(0.0);
+        if (values.size() == 2) return JsValue::make_number(std::hypot(values[0], values[1]));
+        double sum = 0.0;
+        for (double v : values) {
+            double scaled = v / largest;
+            sum += scaled * scaled;
+        }
+        return JsValue::make_number(largest * std::sqrt(sum));
     }));
     def("max", js_make_native("max", 2, [](Args args) {
         double best = -kInfinity;

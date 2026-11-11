@@ -22,6 +22,7 @@
 #include "litebird/net/AbortController.hpp"
 #include "litebird/js/JsBuiltins.hpp"
 #include <cmath>
+#include <limits>
 #include <iostream>
 
 namespace litebird {
@@ -696,6 +697,10 @@ void JsInterpreter::init_language_builtins() {
     for (const auto& [name, value] : m_realm->globals) {
         m_global_env->define(name, value);
     }
+    // The three value properties of the global object are not writable.
+    m_global_env->define_readonly("undefined", JsValue::make_undefined());
+    m_global_env->define_readonly("NaN", JsValue::make_number(std::numeric_limits<double>::quiet_NaN()));
+    m_global_env->define_readonly("Infinity", JsValue::make_number(std::numeric_limits<double>::infinity()));
 
     // eval(source): runs in the global scope and propagates exceptions.
     m_global_env->define("eval", js_make_native("eval", 1, [this](const std::vector<JsValue>& args) {
@@ -761,7 +766,7 @@ void JsInterpreter::init_language_builtins() {
                 auto scope = global_scope.lock();
                 if (!scope) return false;
                 if (auto* binding = scope->find_own(name)) {
-                    if (!binding->is_const) binding->value = value;
+                    if (!binding->is_const && !binding->is_readonly) binding->value = value;
                     return true;
                 }
                 return false;

@@ -29,6 +29,7 @@ The runner sets `TZ=UTC` for both engines so date cases are stable.
 | `strings.dat`, `numbers-math.dat`, `json.dat`, `regexp.dat`, `date.dat` | Built-in libraries |
 | `errors.dat`, `collections-iterators.dat`, `async.dat`, `misc.dat` | Exceptions, Map/Set/generators, promises and timers |
 | `programs.dat` | 20-40 line programs that combine features the way real scripts do |
+| `deep-nesting.dat` | Input nested or chained far deeper than the native stack: 200,000 nested parentheses, blocks or functions, a million-node linked list, a 100,000-link promise chain. Too deep must be a `RangeError` the script can catch, never the end of the process. Engines differ on where "too deep" begins, so these cases accept either a result or a `RangeError` and print which invariant held |
 | `gc-safety.dat` | Scripts that run a collection in the middle of everything: inside callbacks, half-built expressions, loops, suspended generators and async functions. The result must not change |
 
 ## Format
@@ -62,3 +63,8 @@ the expected output and exits 0.
    Node then checks the logic, and Litebird checks that collecting does not
    change the answer. `make asan` runs the corpus under the sanitizers, where
    a freed object that is still in use is an error rather than a wrong value.
+8. Where the limit is an engine's own (how deep a recursion may go, how much
+   nesting the parser takes), do not expect one outcome. Accept the outcomes
+   that are correct and print whether one of them happened, as
+   `deep-nesting.dat` does: `console.log(outcome === 'ran' || outcome === 'RangeError')`.
+   What such a case then checks is that the engine survived and kept working.

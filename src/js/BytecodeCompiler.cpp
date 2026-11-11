@@ -116,6 +116,7 @@ std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* pro
 
 void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (!stmt) return;
+    js_check_stack();
     if (dynamic_cast<const SwitchStmt*>(stmt) || dynamic_cast<const BreakStmt*>(stmt)) {
         throw std::runtime_error("Switch/break compiled via AST interpreter");
     }
@@ -271,6 +272,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         emit_opcode(OpCode::OpUndefined);
         return;
     }
+    js_check_stack();
 
     if (auto lit = dynamic_cast<const LiteralExpr*>(expr)) {
         switch (lit->value.type) {

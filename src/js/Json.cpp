@@ -41,6 +41,7 @@ private:
     }
 
     JsValue parse_value() {
+        js_check_stack();
         skip_whitespace();
         char c = peek();
         if (c == '"') return parse_string();
@@ -233,6 +234,9 @@ static std::string escape_string(const std::string& s) {
 }
 
 std::string Json::stringify(const JsValue& value) {
+    // No cycle detection here: a structure that contains itself ends in this
+    // check, as a RangeError, instead of running off the end of the stack.
+    js_check_stack();
     switch (value.type) {
         case JsType::Undefined:
         case JsType::Null:

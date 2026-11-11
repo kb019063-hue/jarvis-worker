@@ -42,7 +42,7 @@ const char* error_kind_name(JsErrorKind kind) {
 /// Reads a data property along the prototype chain without running getters.
 bool raw_lookup(const JsValue& value, const std::string& name, JsValue& out) {
     int guard = 0;
-    for (JsObject* obj = value.object_val; obj && guard < 10000; obj = obj->prototype, ++guard) {
+    for (JsObject* obj = value.object_val; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) return false;
@@ -619,7 +619,7 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor) {
     JsValue proto = constructor.get_property("prototype");
     if (!proto.object_val) return false;
     int guard = 0;
-    for (JsObject* obj = value.prototype_object(); obj && guard < 10000; obj = obj->prototype, ++guard) {
+    for (JsObject* obj = value.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj == proto.object_val) return true;
     }
     return false;

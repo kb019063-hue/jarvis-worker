@@ -35,12 +35,54 @@ protected:
 class BlockStmt;
 class FunctionDeclStmt;
 class Expr;
+class Stmt;
+struct Pattern;
+
+/// Deletes a node of the syntax tree without destroying its children from
+/// inside its own destructor. `a + b + c + ...` parses into a tree as deep as
+/// the expression is long, and the parser builds that chain in a loop, so its
+/// depth is not limited by the parser's own stack check; deleting it the
+/// ordinary way would recurse once per operator. See common/ReleaseQueue.hpp
+/// for the idea; the queue here holds raw nodes.
+void ast_delete(Expr* node) noexcept;
+void ast_delete(Stmt* node) noexcept;
+void ast_delete(Pattern* node) noexcept;
+
+} // namespace litebird
+
+// Every owning pointer to an expression, statement or pattern in the tree is a
+// std::unique_ptr of one of these three types, or leads to one within a node
+// or two, so routing their deleters through ast_delete() bounds the depth of
+// destruction for the whole tree without touching the node classes. A
+// unique_ptr to a derived node (what std::make_unique returns) converts as
+// before; that is what the converting constructors are for.
+namespace std {
+template <>
+struct default_delete<litebird::Expr> {
+    constexpr default_delete() noexcept = default;
+    template <typename U, typename = enable_if_t<is_convertible_v<U*, litebird::Expr*>>>
+    default_delete(const default_delete<U>&) noexcept {}
+    void operator()(litebird::Expr* node) const noexcept { litebird::ast_delete(node); }
+};
+template <>
+struct default_delete<litebird::Stmt> {
+    constexpr default_delete() noexcept = default;
+    template <typename U, typename = enable_if_t<is_convertible_v<U*, litebird::Stmt*>>>
+    default_delete(const default_delete<U>&) noexcept {}
+    void operator()(litebird::Stmt* node) const noexcept { litebird::ast_delete(node); }
+};
+template <>
+struct default_delete<litebird::Pattern> {
+    constexpr default_delete() noexcept = default;
+    void operator()(litebird::Pattern* node) const noexcept { litebird::ast_delete(node); }
+};
+} // namespace std
+
+namespace litebird {
 
 // ---------------------------------------------------------------------------
 // Binding and assignment patterns: `x`, `[a, , b = 1, ...rest]`, `{a, b: c}`.
 // ---------------------------------------------------------------------------
-
-struct Pattern;
 
 struct PatternElement {
     std::unique_ptr<Pattern> target;        // null for an array hole
@@ -80,7 +122,13 @@ public:
 class IdentifierExpr : public Expr {
 public:
     std::string name;
-    explicit IdentifierExpr(std::string n) : Expr(NodeKind::Identifier), name(std::move(n)) {}
+    /// The name is `undefined`. That is an ordinary identifier, not a keyword:
+    /// `function (window, undefined) {...}` declares a parameter with that
+    /// name. The evaluator may still answer without a scope lookup as long as
+    /// no scope has ever declared it (see JsEnvironment::undefined_shadowed).
+    bool is_undefined{false};
+    explicit IdentifierExpr(std::string n)
+        : Expr(NodeKind::Identifier), name(std::move(n)), is_undefined(name == "undefined") {}
 };
 
 /// Arithmetic, comparison, bitwise and the short-circuiting logical operators.
@@ -89,9 +137,18 @@ public:
     std::unique_ptr<Expr> left;
     JsTokenType op;
     std::unique_ptr<Expr> right;
+    /// How many binary operators are nested directly through `left`:
+    /// 0 for `a + b`, 2 for `a + b + c + d`. A long concatenation is a deep
+    /// tree in this direction only, and the evaluator walks such a chain in a
+    /// loop instead of recursing down it.
+    uint32_t left_chain{0};
 
     BinaryExpr(std::unique_ptr<Expr> l, JsTokenType o, std::unique_ptr<Expr> r)
-        : Expr(NodeKind::Binary), left(std::move(l)), op(o), right(std::move(r)) {}
+        : Expr(NodeKind::Binary), left(std::move(l)), op(o), right(std::move(r)) {
+        if (left && left->kind == NodeKind::Binary) {
+            left_chain = static_cast<const BinaryExpr*>(left.get())->left_chain + 1;
+        }
+    }
 };
 
 class UnaryExpr : public Expr {
@@ -210,6 +267,10 @@ public:
 
 class TemplateLiteralExpr : public Expr {
 public:
+    /// Text and substitutions, strictly alternating and starting and ending
+    /// with text: `a${x}b` is ["a", x, "b"] and `${x}` is ["", x, ""]. The
+    /// text entries are string LiteralExprs. A substitution may be a literal
+    /// too, so only the position says which is which.
     std::vector<std::unique_ptr<Expr>> parts;
     explicit TemplateLiteralExpr(std::vector<std::unique_ptr<Expr>> p)
         : Expr(NodeKind::TemplateLiteral), parts(std::move(p)) {}
@@ -263,6 +324,13 @@ public:
     int length{0};                       // parameters before the first default or rest
     std::vector<std::string> var_names;  // `var` bindings hoisted to this function
 
+    /// The script this function was parsed from and the function's extent in
+    /// it, for Function.prototype.toString. The text is shared by every
+    /// function of the script and lives as long as any of them does.
+    std::shared_ptr<const std::string> source;
+    uint32_t source_start{0};
+    uint32_t source_end{0};
+
     /// Parameter names when `simple_params` is true.
     std::vector<std::string> simple_param_names() const;
 };
@@ -291,6 +359,11 @@ public:
     std::shared_ptr<Expr> super_class;
     std::shared_ptr<FunctionNode> constructor;
     std::vector<ClassMember> members;
+
+    /// The class's own source text; see FunctionNode::source.
+    std::shared_ptr<const std::string> source;
+    uint32_t source_start{0};
+    uint32_t source_end{0};
 };
 
 class ClassExpr : public Expr {
@@ -560,7 +633,9 @@ public:
 
 class JsParser {
 public:
-    explicit JsParser(std::vector<JsToken> tokens);
+    /// `source` is the text the tokens came from. When given, functions and
+    /// classes record their extent in it (Function.prototype.toString).
+    explicit JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source = nullptr);
 
     /// Parses a whole script. Throws JsSyntaxError on malformed input.
     std::unique_ptr<Program> parse_program();
@@ -611,6 +686,13 @@ private:
     void parse_function_body(FunctionNode& fn);
     void finish_params(FunctionNode& fn);
     std::shared_ptr<FunctionNode> parse_method(bool is_async, bool is_generator);
+    /// Records [token `first_token`, the token just consumed] as the source of `node`.
+    template <typename Node> void set_source(Node& node, size_t first_token) const {
+        if (!m_source || m_current == 0 || first_token >= m_current) return;
+        node.source = m_source;
+        node.source_start = m_tokens[first_token].start;
+        node.source_end = m_tokens[m_current - 1].end;
+    }
     std::shared_ptr<FunctionNode> parse_arrow_function(bool is_async);
     std::shared_ptr<ClassNode> parse_class(bool is_declaration);
     void detect_use_strict(FunctionNode* fn, const BlockStmt& body);
@@ -641,6 +723,7 @@ private:
     static int binary_precedence(JsTokenType type);
 
     std::vector<JsToken> m_tokens;
+    std::shared_ptr<const std::string> m_source;
     std::vector<int> m_match;        // index of the matching bracket for each opener, or -1
     size_t m_current{0};
     bool m_no_in{false};

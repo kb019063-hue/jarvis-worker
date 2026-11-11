@@ -327,3 +327,27 @@ true
 console.log("1a2b3".split(/[ab]/).join(), "1a2".split(/(a)/).length)
 #expect
 1,2,3 3
+
+#name escape and unescape
+#code
+console.log(escape('a b+c/@*_-.'), escape('\u00e4\u20ac\ud83d\ude00'), escape(''), unescape('%u20AC%E4%20%zz%u12') === '\u20ac\u00e4 %zz%u12', unescape(escape('\u00fc \u00df \u6f22\u5b57')) === '\u00fc \u00df \u6f22\u5b57', escape(1.5), unescape('%41%u0042c'))
+#expect
+a%20b+c/@*_-. %E4%u20AC%uD83D%uDE00  true true 1.5 ABc
+
+#name String object exposes characters as properties
+#code
+var s = new String('abc'); console.log(s[1], s.length, Object.keys(s).join(), '1' in s, s.hasOwnProperty(2), s.hasOwnProperty(3), Object.getOwnPropertyNames(s).join(), s[5], typeof s)
+#expect
+b 3 0,1,2 true true false 0,1,2,length undefined object
+
+#name String object in for-in, entries and spread
+#code
+var s = new String('hi'), keys = []; for (var k in s) keys.push(k); s.extra = 1; console.log(keys.join(), JSON.stringify(Object.entries(new String('ab'))), JSON.stringify(Object.assign({}, new String('xy'))), JSON.stringify({ ...'ab' }), Object.keys(s).join(), Array.prototype.map.call(s, function (c) { return c.toUpperCase(); }).join(''))
+#expect
+0,1 [["0","a"],["1","b"]] {"0":"x","1":"y"} {"0":"a","1":"b"} 0,1,extra HI
+
+#name String object characters are read only
+#code
+var s = new String('abc'); s[0] = 'z'; s[7] = 'q'; s.length = 1; console.log(s[0], s[7], s.length, String(s), Object.keys(s).join(), delete s[0], s[0])
+#expect
+a q 3 abc 0,1,2,7 false a

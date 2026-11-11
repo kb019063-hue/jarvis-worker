@@ -8,6 +8,8 @@
 #include "litebird/dom/Event.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/common/ReleaseQueue.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -16,6 +18,31 @@
 namespace litebird {
 
 static thread_local JsValue::FunctionCaller s_function_caller = nullptr;
+
+namespace {
+/// What a dying function payload hands to the release queue: everything in it
+/// that can own another function.
+struct ExtraContents {
+    std::shared_ptr<PropertyMap> props;
+    JsValue::Extra::Payload payload;
+};
+}
+
+// A closure owns the scope it was created in, the scope owns its bindings, and
+// a binding can be another closure. `f = wrap(f)` in a loop therefore builds a
+// chain as long as the loop ran, and letting each payload destroy the next in
+// place would use native stack in proportion to it.
+JsValue::Extra::~Extra() {
+    if (payload.index() == 0 && !props) return;     // owns nothing
+    using Queue = ReleaseQueue<ExtraContents>;
+    if (Queue::busy()) {
+        Queue::defer(ExtraContents{std::move(props), std::move(payload)});
+        return;
+    }
+    Queue::Drain drain;
+    props.reset();
+    payload.emplace<std::monostate>();
+}
 
 void JsValue::set_function_caller(FunctionCaller caller) {
     s_function_caller = std::move(caller);
@@ -249,7 +276,7 @@ JsValue read_entry(const PropertyMap::Entry& entry, const JsValue& receiver) {
 /// Looks `name` up on `start` and then along its prototype chain.
 bool lookup_chain(JsObject* start, const std::string& name, const JsValue& receiver, JsValue& out) {
     int guard = 0;
-    for (JsObject* obj = start; obj && guard < 10000; obj = obj->prototype, ++guard) {
+    for (JsObject* obj = start; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             out = read_entry(*it, receiver);
@@ -313,6 +340,11 @@ JsValue JsValue::call(const std::vector<JsValue>& args) const {
 }
 
 JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsValue>& args) const {
+    // Every call goes through here or construct(), including the ones built-in
+    // functions make to each other: [[[...]]].toString() is join calling
+    // toString calling join, with no script function in between for the
+    // evaluator's own guard to see.
+    if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
     if (fn) {
         CallContextScope scope(this_val, false, this);
@@ -327,6 +359,7 @@ JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsVal
 
 JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this_val) const {
     static const JsValue undefined_this;
+    if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
     if (fn) {
         CallContextScope scope(this_val ? *this_val : undefined_this, true, this);
@@ -488,11 +521,19 @@ std::string JsValue::to_string() const {
         case JsType::Function:
         case JsType::NativeFunction: {
             std::string name;
-            if (const FunctionData* fd = function_data()) name = fd->name;
+            if (const FunctionData* fd = function_data()) {
+                // A script function prints as its own source text. Code that
+                // tests for built-ins with /native code/ depends on that.
+                std::string text = js_function_source_text(fd->class_node ? fd->class_node.get() : fd->node.get());
+                if (!text.empty()) return text;
+                name = fd->name;
+            }
             else if (const PropertyMap* map = loose_properties()) {
                 auto it = map->find("name");
                 if (it != map->end()) name = it->second.string_val;
             }
+            // Bound functions print without a name, as V8 prints them.
+            if (name.compare(0, 6, "bound ") == 0) name.clear();
             return "function " + name + "() { [native code] }";
         }
         case JsType::DomNode: {
@@ -545,6 +586,25 @@ JsObject* JsValue::prototype_object() const {
     return nullptr;
 }
 
+bool js_set_prototype(JsObject* cell, JsObject* proto) {
+    if (!cell) return true;
+    for (JsObject* p = proto; p; p = p->prototype) {
+        if (p == cell) return false;
+    }
+    cell->prototype = proto;
+    return true;
+}
+
+// True when `name` is the index of a character of the string that a String
+// object wraps. Those properties exist without being stored, and are read-only.
+static bool is_wrapped_string_index(const JsObject* cell, const std::string& name) {
+    if (cell->klass != ObjectClass::String || name.empty() || name[0] < '0' || name[0] > '9') return false;
+    const auto* wrapped = static_cast<const JsValue*>(cell->internal.get());
+    size_t index = 0;
+    return wrapped && wrapped->type == JsType::String && parse_array_index(name, index) &&
+           index < js_string_length(wrapped->string_val);
+}
+
 bool JsValue::has_own_property(const std::string& name) const {
     size_t index = 0;
     if (type == JsType::String) {
@@ -556,6 +616,7 @@ bool JsValue::has_own_property(const std::string& name) const {
             if (name == "length") return true;
             if (parse_array_index(name, index)) return index < cell->array_elements.size();
         }
+        if (is_wrapped_string_index(cell, name)) return true;
         if (cell->properties.find(name) != cell->properties.end()) return true;
     }
     if (const PropertyMap* map = loose_properties()) {
@@ -578,7 +639,7 @@ bool JsValue::has_property(const std::string& name) const {
         default: proto = prototype_object(); break;
     }
     int guard = 0;
-    for (JsObject* obj = proto; obj && guard < 10000; obj = obj->prototype, ++guard) {
+    for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
     }
     if (object_val && object_val->lookup_fallback) {
@@ -593,6 +654,7 @@ bool JsValue::delete_property(const std::string& name) {
         if (cell->frozen || cell->sealed) {
             return !has_own_property(name);
         }
+        if (is_wrapped_string_index(cell, name)) return false;
         size_t index = 0;
         if (cell->is_array && parse_array_index(name, index)) {
             // Arrays are dense here: deleting an element leaves undefined behind.
@@ -629,6 +691,14 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     if (cell && cell->is_array) {
         for (size_t i = 0; i < cell->array_elements.size(); ++i) keys.push_back(std::to_string(i));
         if (include_non_enumerable) keys.emplace_back("length");
+    }
+    if (cell && cell->klass == ObjectClass::String) {
+        // The characters come first; `length` is in the property map already.
+        const auto* wrapped = static_cast<const JsValue*>(cell->internal.get());
+        if (wrapped && wrapped->type == JsType::String) {
+            size_t length = js_string_length(wrapped->string_val);
+            for (size_t i = 0; i < length; ++i) keys.push_back(std::to_string(i));
+        }
     }
 
     const PropertyMap* map = cell ? &cell->properties : loose_properties();
@@ -1142,6 +1212,11 @@ JsValue JsValue::get_property(const std::string& name) const {
             }
         }
 
+        // A String object exposes the characters of the string it wraps.
+        if (is_wrapped_string_index(obj, name)) {
+            return static_cast<const JsValue*>(obj->internal.get())->get_property(name);
+        }
+
         // Legacy host getters: a native stored under "__get_<name>__" is run on
         // every read of <name>. Only objects that have one pay for the lookup.
         if (obj->has_legacy_getters) {
@@ -1306,12 +1381,13 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         if (name == "__proto__") {
             if (obj->frozen) return;
             if (val.object_val && val.is_object_like()) {
-                obj->prototype = val.object_val;
+                if (!js_set_prototype(obj, val.object_val)) js_throw_error(JsErrorKind::TypeError, "Cyclic __proto__ value");
             } else if (val.type == JsType::Null) {
                 obj->prototype = nullptr;
             }
             return;
         }
+        if (is_wrapped_string_index(obj, name)) return;      // the characters are read-only
 
         if (obj->is_array) {
             if (name == "length") {
@@ -1353,7 +1429,7 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         // A setter inherited from a prototype (a class `set x(v)`) runs instead
         // of creating an own property.
         int guard = 0;
-        for (JsObject* proto = obj->prototype; proto && guard < 10000; proto = proto->prototype, ++guard) {
+        for (JsObject* proto = obj->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
             if (!proto->has_accessors) continue;
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;

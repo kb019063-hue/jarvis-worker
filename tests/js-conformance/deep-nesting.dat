@@ -1,0 +1,492 @@
+#name eval of 200000 nested parentheses
+#code
+var depth = 200000, src = '('.repeat(depth) + '1' + ')'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested array literals
+#code
+var depth = 200000, src = '['.repeat(depth) + '1' + ']'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested blocks
+#code
+var depth = 200000, src = '{'.repeat(depth) + ';' + '}'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested object literals
+#code
+var depth = 200000, src = '({a:'.repeat(depth) + '1' + '})'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested unary minus
+#code
+var depth = 200000, src = '- '.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested logical not
+#code
+var depth = 200000, src = '!'.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested typeof
+#code
+var depth = 200000, src = 'typeof '.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested ternaries
+#code
+var depth = 200000, src = '1?'.repeat(depth) + '1' + ':0'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested arrow functions
+#code
+var depth = 200000, src = '()=>'.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested function expressions
+#code
+var depth = 200000, src = '(function(){return '.repeat(depth) + '1' + '})'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested template substitutions
+#code
+var depth = 200000, src = '`${'.repeat(depth) + '1' + '}`'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested array destructuring
+#code
+var depth = 200000, src = 'var ['.repeat(depth) + 'x' + ']=[]'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+false still running 2,4,6
+
+#name eval of 200000 nested calls
+#code
+var depth = 200000, src = 'f('.repeat(depth) + '1' + ')'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested if statements
+#code
+var depth = 200000, src = 'if(1)'.repeat(depth) + ';' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested assignments to members
+#code
+var depth = 200000, src = 'o.a='.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested new expressions
+#code
+var depth = 200000, src = 'new '.repeat(depth) + 'F' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested spread in arrays
+#code
+var depth = 200000, src = '[...'.repeat(depth) + '[]' + ']'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested exponent chain
+#code
+var depth = 200000, src = '2**'.repeat(depth) + '1' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name eval of 200000 nested void
+#code
+var depth = 200000, src = 'void '.repeat(depth) + '0' + ''.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running', [1, 2, 3].map(function (x) { return x * 2; }).join())
+#expect
+true still running 2,4,6
+
+#name new Function with a deeply nested body
+#code
+var src = 'return ' + '('.repeat(200000) + '1' + ')'.repeat(200000);
+var outcome;
+try { outcome = new Function(src)(); } catch (e) { outcome = e.name; }
+console.log(outcome === 1 || outcome === 'RangeError', typeof new Function('return 7'), new Function('return 7')())
+#expect
+true function 7
+
+#name deep syntax is catchable twice in a row
+#code
+var src = '['.repeat(150000) + ']'.repeat(150000), seen = [];
+for (var i = 0; i < 3; i++) { try { eval(src); seen.push('ran'); } catch (e) { seen.push(e.name === 'RangeError' ? 'caught' : e.name); } }
+console.log(seen[0] === seen[1] && seen[1] === seen[2], seen[0] === 'ran' || seen[0] === 'caught', eval('1 + 2'))
+#expect
+true true 3
+
+#name moderately nested parentheses evaluate
+#code
+var n = 200; console.log(eval('('.repeat(n) + '41 + 1' + ')'.repeat(n)))
+#expect
+42
+
+#name moderately nested arrays evaluate
+#code
+var n = 200, v = eval('['.repeat(n) + '7' + ']'.repeat(n)), d = 0;
+while (Array.isArray(v)) { v = v[0]; d++; }
+console.log(d, v)
+#expect
+200 7
+
+#name moderately nested functions evaluate
+#code
+var n = 150, v = eval('(function(){return '.repeat(n) + '5' + '})'.repeat(n)), d = 0;
+while (typeof v === 'function') { v = v(); d++; }
+console.log(d, v)
+#expect
+150 5
+
+#name moderately nested blocks and ifs evaluate
+#code
+var n = 200, hit = 0; eval('if(1){'.repeat(n) + 'hit = 1;' + '}'.repeat(n)); console.log(hit)
+#expect
+1
+
+#name moderately nested object literals evaluate
+#code
+var n = 150, v = eval('(' + '{a:'.repeat(n) + '3' + '}'.repeat(n) + ')'), d = 0;
+while (typeof v === 'object') { v = v.a; d++; }
+console.log(d, v)
+#expect
+150 3
+
+#name moderately nested template literals evaluate
+#code
+var n = 100; console.log(eval('`${'.repeat(n) + '"x"' + '}`'.repeat(n)))
+#expect
+x
+
+#name moderately nested destructuring binds
+#code
+var n = 100; eval('var ' + '['.repeat(n) + 'deepName' + ']'.repeat(n) + ' = ' + '['.repeat(n) + '9' + ']'.repeat(n)); console.log(deepName)
+#expect
+9
+
+#name sum of 100000 terms
+#code
+console.log(eval(new Array(100000).fill('1').join('+')))
+#expect
+100000
+
+#name string concatenation of 50000 terms
+#code
+console.log(eval(new Array(50000).fill('"ab"').join('+')).length)
+#expect
+100000
+
+#name comma chain of 100000 expressions
+#code
+console.log(eval(new Array(100000).fill('1').join(',') + ',42'))
+#expect
+42
+
+#name logical chain of 100000 operands
+#code
+console.log(eval(new Array(100000).fill('0').join('||') + '||"last"'), eval(new Array(100000).fill('1').join('&&') + '&&"end"'))
+#expect
+last end
+
+#name mixed precedence chain of 60000 terms
+#code
+var parts = []; for (var i = 0; i < 20000; i++) parts.push('2*3', '1', '4-4');
+console.log(eval(parts.join('+')))
+#expect
+140000
+
+#name 100000 statements in one script
+#code
+var counter = 0; eval(new Array(100000).fill('counter++;').join('')); console.log(counter)
+#expect
+100000
+
+#name array literal with 100000 elements
+#code
+var a = eval('[' + new Array(100000).fill('1').join(',') + ']'); console.log(a.length, a[99999])
+#expect
+100000 1
+
+#name else-if ladder of 400 branches
+#code
+var src = 'var r; '; for (var i = 0; i < 400; i++) src += (i ? 'else ' : '') + 'if (k === ' + i + ') r = ' + i + ';';
+var k = 399; eval(src); console.log(r)
+#expect
+399
+
+#name eval of 100000 nested labelled blocks
+#code
+var parts = [], depth = 100000; for (var i = 0; i < depth; i++) parts.push('l' + i + ':{'); var src = parts.join('') + '}'.repeat(depth);
+var outcome;
+try { eval(src); outcome = 'ran'; } catch (e) { outcome = e instanceof RangeError ? 'RangeError' : e.name; }
+console.log(outcome === 'ran' || outcome === 'RangeError', 'still running')
+#expect
+true still running
+
+#name unbounded recursion is a RangeError and the engine recovers
+#code
+function down(n) { return down(n + 1) + 1; }
+var names = [];
+for (var i = 0; i < 3; i++) { try { down(0); } catch (e) { names.push(e instanceof RangeError); } }
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+console.log(names.join(), fib(15))
+#expect
+true,true,true 610
+
+#name mutual recursion through getters
+#code
+var o = { get a() { return this.b; }, get b() { return this.a; } };
+try { o.a; console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion through toString
+#code
+var o = { toString: function () { return '' + this; } };
+try { String(o); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion through a sort comparator
+#code
+function cmp(a, b) { return [a, b].sort(cmp)[0]; }
+try { [3, 1, 2].sort(cmp); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion through a constructor
+#code
+function Node() { this.child = new Node(); }
+try { new Node(); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion through array callbacks
+#code
+function walk(x) { return [x].map(walk); }
+try { walk(1); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion through a class constructor and super
+#code
+class A { constructor() { this.next = new B(); } } class B extends A { constructor() { super(); } }
+try { new A(); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name recursion inside try finally still unwinds
+#code
+var finals = 0;
+function f() { try { return f(); } finally { finals++; } }
+try { f(); } catch (e) { console.log(e instanceof RangeError, finals > 100); }
+#expect
+true true
+
+#name stack overflow inside a promise callback rejects the promise
+#code
+function down() { return down(); }
+Promise.resolve().then(down).catch(function (e) { console.log('rejected', e instanceof RangeError); });
+#expect
+rejected true
+
+#name stack overflow inside a generator
+#code
+function* g() { yield* g(); }
+try { g().next(); console.log('no error'); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name linked list of a million nodes is built and dropped
+#code
+var head = null; for (var i = 0; i < 1000000; i++) head = { next: head, i: i };
+var n = 0; for (var p = head; p; p = p.next) n++;
+head = null; p = null;
+console.log(n, 'dropped')
+#expect
+1000000 dropped
+
+#name closure chain of 200000 scopes is dropped
+#code
+function wrap(inner) { return function () { return inner; }; }
+var f = function () { return 0; }; for (var i = 0; i < 200000; i++) f = wrap(f);
+var depth = 0; for (var g = f; depth < 5; depth++) g = g();
+f = null; g = null;
+console.log(depth, 'dropped')
+#expect
+5 dropped
+
+#name promise chain of 100000 links settles
+#code
+var p = Promise.resolve(0); for (var i = 0; i < 100000; i++) p = p.then(function (v) { return v + 1; });
+p.then(function (v) { console.log(v); });
+#expect
+100000
+
+#name pending promise chain of 100000 links is dropped
+#code
+var p = new Promise(function () {}); for (var i = 0; i < 100000; i++) p = p.then(function (v) { return v; });
+p = null; console.log('dropped')
+#expect
+dropped
+
+#name prototype chain of 100000 objects
+#code
+var o = { base: 'found' }; for (var i = 0; i < 100000; i++) o = Object.create(o);
+console.log(o.base, o.missing, 'base' in o, o.hasOwnProperty('base'))
+#expect
+found undefined true false
+
+#name error cause chain of 100000 errors
+#code
+var e = new Error('root'); for (var i = 0; i < 100000; i++) e = new Error('level', { cause: e });
+var n = 0; for (var c = e; c; c = c.cause) n++;
+e = null; c = null; console.log(n)
+#expect
+100001
+
+#name nested arrays 100000 deep are built at run time and dropped
+#code
+var a = []; for (var i = 0; i < 100000; i++) a = [a];
+var d = 0; for (var p = a; p.length; p = p[0]) d++;
+a = null; p = null; console.log(d)
+#expect
+100000
+
+#name joining deeply nested arrays
+#code
+var a = ['x']; for (var i = 0; i < 100000; i++) a = [a];
+var out; try { out = String(a); } catch (e) { out = e.name; }
+console.log(out === 'x' || out === 'RangeError')
+#expect
+true
+
+#name flattening deeply nested arrays
+#code
+var a = ['x']; for (var i = 0; i < 100000; i++) a = [a];
+var out; try { out = a.flat(Infinity).join(); } catch (e) { out = e.name; }
+console.log(out === 'x' || out === 'RangeError')
+#expect
+true
+
+#name JSON.stringify of deeply nested arrays
+#code
+var a = []; for (var i = 0; i < 100000; i++) a = [a];
+var out; try { out = JSON.stringify(a).length; } catch (e) { out = e.name; }
+console.log(out === 200002 || out === 'RangeError')
+#expect
+true
+
+#name JSON.parse of deeply nested text
+#code
+var text = '['.repeat(100000) + ']'.repeat(100000), out;
+try { out = typeof JSON.parse(text); } catch (e) { out = e.name; }
+console.log(out === 'object' || out === 'RangeError', JSON.parse('[[1]]')[0][0])
+#expect
+true 1
+
+#name structuredClone of deeply nested objects
+#code
+var o = {}; for (var i = 0; i < 100000; i++) o = { o: o };
+var out; try { out = typeof structuredClone(o); } catch (e) { out = e.name; }
+console.log(out === 'object' || out === 'RangeError')
+#expect
+true
+
+#name map nested 50000 deep is dropped
+#code
+var m = new Map(); for (var i = 0; i < 50000; i++) { var outer = new Map(); outer.set('inner', m); m = outer; }
+var d = 0; for (var p = m; p; p = p.get('inner')) d++;
+m = null; p = null; outer = null; console.log(d)
+#expect
+50001
+
+#name array cycle joins to an empty string
+#code
+var a = [1, 2]; a.push(a); var b = [a, 3]; console.log(String(a), '|', b.join('-'))
+#expect
+1,2, | 1,2,-3
+
+#name instanceof against a 50000 long prototype chain
+#code
+function F() {} var o = new F(); for (var i = 0; i < 50000; i++) o = Object.create(o);
+console.log(o instanceof F, o instanceof Array, Object.getPrototypeOf(o) !== null)
+#expect
+true false true
+
+#name regular expression with deep groups is an error or a match
+#code
+var out; try { out = new RegExp('('.repeat(20000) + 'a' + ')'.repeat(20000)).test('a'); } catch (e) { out = e.name; }
+console.log(out === true || out === 'SyntaxError' || out === 'RangeError', /((a))/.test('a'))
+#expect
+true true

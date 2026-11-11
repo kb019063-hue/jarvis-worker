@@ -4243,6 +4243,124 @@ TEST(gc_keeps_state_reachable_only_from_listeners_and_frames) {
     }
 }
 
+TEST(deep_nesting_never_exhausts_the_native_stack) {
+    using namespace litebird;
+
+    // The engine recurses over what a script gives it: the parser over nested
+    // syntax, the evaluator over nested statements, and C++ destructors over
+    // chains of scopes, promises and syntax tree nodes. Each of those used to
+    // overflow the native stack on a deep enough input, which killed the
+    // process: a page could take the browser down with one long line.
+    //
+    // What must hold: too-deep input is a RangeError the script can catch, a
+    // later script still runs, and long chains are released without recursion.
+    // Depths are not asserted, for the reason given in the test above.
+
+    // Syntax nested far beyond any stack: parentheses, arrays, blocks, unary
+    // operators, functions. Every one ends in a caught RangeError.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var kinds = [['(', '1', ')'], ['[', '1', ']'], ['{', ';', '}'], ['!', '1', ''],"
+            "             ['(function(){return ', '1', '})'], ['`${', '1', '}`'], ['1?', '1', ':0']];"
+            "var caught = 0;"
+            "for (var i = 0; i < kinds.length; i++) {"
+            "  var src = kinds[i][0].repeat(300000) + kinds[i][1] + kinds[i][2].repeat(300000);"
+            "  try { eval(src); } catch (e) { if (e instanceof RangeError) caught++; }"
+            "}"
+            "var after = [1, 2, 3].map(function (x) { return x * 2; }).join();");
+        assert(js.global_env()->get("caught").to_string() == "7");
+        assert(js.global_env()->get("after").to_string() == "2,4,6");
+    }
+
+    // A script that is itself too deep is reported, and the interpreter is
+    // still usable for the next script on the page.
+    {
+        JsInterpreter js;
+        js.eval_ast(std::string(300000, '(') + "1" + std::string(300000, ')'));
+        js.eval_ast("var next = 6 * 7;");
+        assert(js.global_env()->get("next").to_string() == "42");
+    }
+
+    // Long chains of operators are not nesting. They are evaluated in a loop
+    // and must give the right answer, not an error.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var sum = eval(new Array(200000).fill('1').join('+'));"
+            "var text = eval(new Array(50000).fill('\"ab\"').join('+')).length;"
+            "var last = eval(new Array(100000).fill('0').join('||') + '||7');");
+        assert(js.global_env()->get("sum").to_string() == "200000");
+        assert(js.global_env()->get("text").to_string() == "100000");
+        assert(js.global_env()->get("last").to_string() == "7");
+    }
+
+    // Chains that are released link by link: a linked list, nested closures
+    // (each holding its parent scope), a settled promise chain and a pending
+    // one. Dropping the head must not recurse once per link.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var head = null; for (var i = 0; i < 500000; i++) head = { next: head };"
+            "function wrap(inner) { return function () { return inner; }; }"
+            "var f = function () { return 0; }; for (var i = 0; i < 200000; i++) f = wrap(f);"
+            "var settled = Promise.resolve(0);"
+            "for (var i = 0; i < 100000; i++) settled = settled.then(function (v) { return v + 1; });"
+            "var total = -1; settled.then(function (v) { total = v; });"
+            "var pending = new Promise(function () {});"
+            "for (var i = 0; i < 100000; i++) pending = pending.then(function (v) { return v; });");
+        EventLoop::default_loop().run_microtasks();
+        assert(js.global_env()->get("total").to_string() == "100000");
+        js.eval_ast("head = null; f = null; settled = null; pending = null; var done = 'released';");
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("done").to_string() == "released");
+    }
+    // ...and the same when the whole interpreter goes away while holding them.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var head = null; for (var i = 0; i < 300000; i++) head = { next: head };"
+            "function wrap(inner) { return function () { return inner; }; }"
+            "var f = function () { return 0; }; for (var i = 0; i < 100000; i++) f = wrap(f);"
+            "var pending = new Promise(function () {});"
+            "for (var i = 0; i < 50000; i++) pending = pending.then(function (v) { return v; });");
+    }
+
+    // Deep data handed to recursive library code: an error or an answer.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var a = ['x']; for (var i = 0; i < 200000; i++) a = [a];"
+            "var results = [];"
+            "function attempt(fn) { try { fn(); results.push('ok'); } catch (e) { results.push(e instanceof RangeError ? 'range' : 'other'); } }"
+            "attempt(function () { String(a); });"
+            "attempt(function () { a.flat(Infinity); });"
+            "attempt(function () { JSON.stringify(a); });"
+            "attempt(function () { JSON.parse('['.repeat(200000) + ']'.repeat(200000)); });"
+            "attempt(function () { structuredClone(a); });"
+            "var bad = results.indexOf('other'); var count = results.length; a = null;");
+        assert(js.global_env()->get("bad").to_string() == "-1");
+        assert(js.global_env()->get("count").to_string() == "5");
+    }
+
+    // A prototype chain longer than the old lookup limit of 10,000 still finds
+    // what is at its far end, and a circular chain cannot be built.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var o = { far: 'found' }; for (var i = 0; i < 50000; i++) o = Object.create(o);"
+            "var far = o.far; var has = 'far' in o; var isObj = o instanceof Object;"
+            "var a = {}, b = Object.create(a), cyc = 'none';"
+            "try { Object.setPrototypeOf(a, b); } catch (e) { cyc = e.name; }"
+            "var cyc2 = 'none'; try { a.__proto__ = b; } catch (e) { cyc2 = e.name; }");
+        assert(js.global_env()->get("far").to_string() == "found");
+        assert(js.global_env()->get("has").to_string() == "true");
+        assert(js.global_env()->get("isObj").to_string() == "true");
+        assert(js.global_env()->get("cyc").to_string() == "TypeError");
+        assert(js.global_env()->get("cyc2").to_string() == "TypeError");
+    }
+}
+
 TEST(phase19_js_compatibility_basics) {
     using namespace litebird;
 
@@ -4610,6 +4728,7 @@ int main() {
     RUN_TEST(gc_roots_are_complete_under_empty_root_set);
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
     RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
+    RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdexcept>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -133,6 +134,8 @@ struct JsToken {
     std::string flags;           // regex flags
     double number_value{0.0};
     int line{1};
+    uint32_t start{0};           // byte offsets of the token in the source: [start, end)
+    uint32_t end{0};
     bool newline_before{false};  // a line terminator separates this token from the previous one
     bool is_keyword{false};      // reserved word; still valid as a property name after '.'
 };
@@ -163,6 +166,7 @@ private:
     void skip_whitespace_and_comments();
     bool regex_allowed() const;
 
+    JsToken scan_token();
     JsToken scan_number();
     JsToken scan_string(char quote);
     JsToken scan_identifier();
@@ -181,6 +185,7 @@ private:
     bool m_has_prev{false};
     JsTokenType m_prev_type{JsTokenType::Eof};
     bool m_prev_is_keyword{false};
+    size_t m_token_start{0};
     std::vector<int> m_template_brace_stack;
 };
 

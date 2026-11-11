@@ -209,6 +209,7 @@ std::string object_tag(const JsValue& value) {
 }
 
 JsValue structured_clone(const JsValue& value, std::unordered_map<const void*, JsValue>& seen) {
+    js_check_stack();
     if (!value.is_object_like()) return value;
     if (value.is_function() || value.type == JsType::DomNode) {
         js_throw_error(JsErrorKind::Error, "DataCloneError: value could not be cloned");
@@ -259,7 +260,7 @@ void install_object_builtins(JsIntrinsics& realm) {
         const JsValue& candidate = js_arg(args, 0);
         if (!candidate.is_object_like() || !me.object_val) return JsValue::make_boolean(false);
         int guard = 0;
-        for (JsObject* obj = candidate.prototype_object(); obj && guard < 10000; obj = obj->prototype, ++guard) {
+        for (JsObject* obj = candidate.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
             if (obj == me.object_val) return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
@@ -392,7 +393,8 @@ void install_object_builtins(JsIntrinsics& realm) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
         if (JsObject* cell = object.property_cell(object.is_function())) {
-            cell->prototype = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+            JsObject* target = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+            if (!js_set_prototype(cell, target)) js_throw_type_error("Cyclic __proto__ value");
         }
         return object;
     });
@@ -591,6 +593,18 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(reflect, "deleteProperty", 2, [](Args args) {
         JsValue target = require_object(js_arg(args, 0), "Reflect.deleteProperty");
         return JsValue::make_boolean(target.delete_property(js_to_property_key(js_arg(args, 1))));
+    });
+    js_define_method(reflect, "setPrototypeOf", 2, [](Args args) {
+        JsValue object = require_object(js_arg(args, 0), "Reflect.setPrototypeOf");
+        const JsValue& proto = js_arg(args, 1);
+        if (!proto.is_object_like() && proto.type != JsType::Null) {
+            js_throw_type_error("Object prototype may only be an Object or null");
+        }
+        JsObject* cell = object.property_cell(object.is_function());
+        if (!cell || cell->frozen) return JsValue::make_boolean(false);
+        JsObject* target = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+        // Unlike Object.setPrototypeOf, a refused change is reported, not thrown.
+        return JsValue::make_boolean(js_set_prototype(cell, target));
     });
     js_define_method(reflect, "getPrototypeOf", 1, [](Args args) {
         JsObject* proto = require_object(js_arg(args, 0), "Reflect.getPrototypeOf").prototype_object();

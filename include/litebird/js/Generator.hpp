@@ -23,6 +23,19 @@ public:
     bool run_finalizers;
 };
 
+/// How deep in a chain of frames the code on this thread is running: 0 on an
+/// agent's own thread, and one more than its resumer's inside a frame.
+///
+/// A frame that resumes another frame blocks until that one suspends, so
+/// frames resumed from inside one another stack up exactly like nested calls,
+/// except that each level holds a thread instead of a stack frame. A recursion
+/// through them (`function* g() { yield* g(); }`, or an async function that
+/// awaits itself) therefore has to be stopped the way a runaway recursion is.
+/// Left alone it ends when the system refuses another thread, which is a
+/// different number on every machine and can be more than its memory holds.
+inline thread_local int t_frame_nesting = 0;
+inline constexpr int kMaxFrameNesting = 2000;
+
 /// A suspendable function activation: a generator, or an async function that
 /// is parked at an `await`.
 ///
@@ -52,6 +65,9 @@ struct GeneratorData {
     JsValue send_value{JsValue::make_undefined()};
     JsValue yielded_value{JsValue::make_undefined()};
     bool is_done{false};
+
+    /// t_frame_nesting for the frame's thread, set by whoever resumes it.
+    int nesting{0};
 
     // An exception that escaped the body, to be rethrown to whoever resumed
     // it; and one injected from outside, to be raised at the suspended
@@ -116,6 +132,7 @@ struct GeneratorData {
             throw GeneratorAbortException(abort_runs_finalizers);
         }
         running = true;
+        t_frame_nesting = nesting;
         return send_value;
     }
 
@@ -126,6 +143,7 @@ struct GeneratorData {
         cv_gen.wait(lock, [this] { return started || should_terminate; });
         if (should_terminate) return false;
         running = true;
+        t_frame_nesting = nesting;
         return true;
     }
 
@@ -148,6 +166,10 @@ struct GeneratorData {
         std::unique_lock<std::mutex> lock(mtx);
         if (running) return false;
         if (is_done || finished || should_terminate) return true;
+        // Scripts see this as "Maximum call stack size exceeded". Nothing has
+        // been changed yet, so the frame can still be resumed from higher up.
+        if (t_frame_nesting >= kMaxFrameNesting) throw JsStackOverflow();
+        nesting = t_frame_nesting + 1;
         send_value = std::move(send_arg);
         if (!started) {
             started = true;

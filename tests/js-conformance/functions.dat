@@ -249,3 +249,70 @@ function mk(){ return { get v(){ return 8; } }; } console.log(mk().v)
 function f(){} console.log(typeof f.toString(), typeof String(f))
 #expect
 string string
+
+#name function toString returns the source text
+#code
+function f(a, b) { return a + b; }
+console.log(f.toString()); console.log(String(function () {})); console.log((x => x * 2).toString()); console.log((async (a, b) => { await a; }).toString()); console.log('' + f === f.toString())
+#expect
+function f(a, b) { return a + b; }
+function () {}
+x => x * 2
+async (a, b) => { await a; }
+true
+
+#name async and generator function toString
+#code
+console.log((async function af() {}).toString()); console.log((function* gen() { yield 1; }).toString()); console.log((async function* () {}).toString())
+#expect
+async function af() {}
+function* gen() { yield 1; }
+async function* () {}
+
+#name method toString returns the method text
+#code
+var ob = { m() { return 1; }, get g() { return 2; }, async am() {}, *gm() {}, ['c' + 1]() {}, f: function () { return 3; }, a: () => 4 };
+console.log(ob.m.toString()); console.log(Object.getOwnPropertyDescriptor(ob, 'g').get.toString()); console.log(ob.am.toString()); console.log(ob.gm.toString()); console.log(ob.c1.toString()); console.log(ob.f.toString()); console.log(ob.a.toString())
+#expect
+m() { return 1; }
+get g() { return 2; }
+async am() {}
+*gm() {}
+['c' + 1]() {}
+function () { return 3; }
+() => 4
+
+#name function toString keeps comments and spacing
+#code
+var f = function  ( a ,b )  { /* body */ return a  +  b ; // tail
+};
+console.log(f.toString()); console.log(f.toString().length)
+#expect
+function  ( a ,b )  { /* body */ return a  +  b ; // tail
+}
+59
+
+#name native function toString says native code
+#code
+function mine() {} console.log(Math.max.toString(), /native code/.test(Array.prototype.push.toString()), /native code/.test(mine.toString()), Function.prototype.toString.call(Object), mine.bind(null).toString())
+#expect
+function max() { [native code] } true false function Object() { [native code] } function () { [native code] }
+
+#name new Function toString
+#code
+console.log(new Function('a', 'b', 'return a+b').toString()); console.log(Function('return 1').toString())
+#expect
+function anonymous(a,b
+) {
+return a+b
+}
+function anonymous(
+) {
+return 1
+}
+
+#name feature detection with native code test
+#code
+function isNative(fn) { return typeof fn === 'function' && /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(fn)); } function user() {} console.log(isNative(Object.keys), isNative(Promise), isNative(user), isNative(function () {}), isNative(class {}), isNative(user.bind(null)), isNative(JSON.stringify))
+#expect
+true true false false false true true

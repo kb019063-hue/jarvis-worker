@@ -30,6 +30,11 @@ struct PromiseHandler {
 };
 
 struct PromiseData {
+    PromiseData() = default;
+    /// then() links a promise to the one it returned, so a long pending chain
+    /// is a linked list; it is released in a loop (common/ReleaseQueue.hpp).
+    ~PromiseData();
+
     PromiseState state{PromiseState::Pending};
     JsValue result;
     std::vector<PromiseHandler> handlers;

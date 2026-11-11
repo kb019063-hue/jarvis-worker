@@ -261,3 +261,21 @@ var o = Object.seal({a: 1}); o.a = 2; o.b = 3; delete o.a; console.log(o.a, o.b,
 function eq(a, b){ if (a === b) return true; if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false; var ka = Object.keys(a), kb = Object.keys(b); if (ka.length !== kb.length) return false; return ka.every(function(k){ return eq(a[k], b[k]); }); } console.log(eq({a:[1,{b:2}]}, {a:[1,{b:2}]}), eq({a:1}, {a:2}))
 #expect
 true false
+
+#name a circular prototype chain is refused
+#code
+var a = {}, b = Object.create(a), c = Object.create(b), names = []; try { Object.setPrototypeOf(a, c); names.push('set'); } catch (e) { names.push(e.name); } try { a.__proto__ = b; names.push('set'); } catch (e) { names.push(e.name); } try { a.__proto__ = a; names.push('set'); } catch (e) { names.push(e.name); } console.log(names.join(), Object.getPrototypeOf(a) === Object.prototype, Reflect.setPrototypeOf(a, c), Reflect.setPrototypeOf(c, null), Reflect.setPrototypeOf(a, c), Object.getPrototypeOf(a) === c)
+#expect
+TypeError,TypeError,TypeError true false true true true
+
+#name setting a prototype that makes no cycle works
+#code
+var base = { hi: function () { return 'hi ' + this.n; } }, o = { n: 1 }; Object.setPrototypeOf(o, base); var p = { n: 2 }; p.__proto__ = base; var q = { n: 3 }; console.log(o.hi(), p.hi(), Reflect.setPrototypeOf(q, o), q.hi(), Object.setPrototypeOf(q, null) === q, typeof q.hi, Reflect.setPrototypeOf(Object.freeze({}), base))
+#expect
+hi 1 hi 2 true hi 3 true undefined false
+
+#name property found far up a long prototype chain
+#code
+var o = { deep: 'value', method: function () { return this.own; } }; for (var i = 0; i < 20000; i++) o = Object.create(o); o.own = 'mine'; var seen = 0; for (var k in o) seen++; console.log(o.deep, o.method(), 'deep' in o, o.hasOwnProperty('deep'), seen, typeof o.toString, o instanceof Object)
+#expect
+value mine true false 3 function true

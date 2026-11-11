@@ -104,8 +104,13 @@ double local_offset_ms(double t) {
 std::string local_zone_name(double t) {
     std::time_t seconds = static_cast<std::time_t>(std::floor(t / 1000.0));
     std::tm local{};
-    if (!localtime_r(&seconds, &local) || !local.tm_zone) return "UTC";
-    return local.tm_zone;
+    if (!localtime_r(&seconds, &local) || !local.tm_zone) return "Coordinated Universal Time";
+    // The C library only has the abbreviation. Browsers print the long name;
+    // without a zone-name table that can be matched for these two only.
+    const std::string zone = local.tm_zone;
+    if (zone == "UTC") return "Coordinated Universal Time";
+    if (zone == "GMT") return "Greenwich Mean Time";
+    return zone;
 }
 
 double to_local(double t) { return t + local_offset_ms(t); }

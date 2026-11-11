@@ -675,6 +675,58 @@ void install_string_builtins(JsIntrinsics& realm) {
     realm.add_global("decodeURI", js_make_native("decodeURI", 1, [](Args args) {
         return JsValue::make_string(uri_decode(js_to_string(js_arg(args, 0)), true));
     }));
+
+    // escape() and unescape(): legacy, but still called by old pages (cookie
+    // helpers mostly). They work on UTF-16 code units, not on UTF-8 bytes.
+    realm.add_global("escape", js_make_native("escape", 1, [](Args args) {
+        static const char* const kHex = "0123456789ABCDEF";
+        std::string out;
+        for (char16_t unit : js_utf8_to_utf16(js_to_string(js_arg(args, 0)))) {
+            const bool plain = unit < 128 && (std::isalnum(static_cast<unsigned char>(unit)) ||
+                                              std::strchr("@*_+-./", static_cast<char>(unit)));
+            if (plain && unit != 0) {
+                out += static_cast<char>(unit);
+            } else if (unit < 256) {
+                out += '%';
+                out += kHex[unit >> 4];
+                out += kHex[unit & 15];
+            } else {
+                out += "%u";
+                for (int shift = 12; shift >= 0; shift -= 4) out += kHex[(unit >> shift) & 15];
+            }
+        }
+        return JsValue::make_string(std::move(out));
+    }));
+    realm.add_global("unescape", js_make_native("unescape", 1, [](Args args) {
+        const std::u16string in = js_utf8_to_utf16(js_to_string(js_arg(args, 0)));
+        auto hex = [&in](size_t at, size_t count, unsigned& value) {
+            if (at + count > in.size()) return false;
+            value = 0;
+            for (size_t i = 0; i < count; ++i) {
+                char16_t c = in[at + i];
+                unsigned digit = (c >= '0' && c <= '9') ? c - '0'
+                               : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                               : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 99;
+                if (digit == 99) return false;
+                value = value * 16 + digit;
+            }
+            return true;
+        };
+        std::u16string out;
+        for (size_t i = 0; i < in.size(); ++i) {
+            unsigned value = 0;
+            if (in[i] == '%' && i + 1 < in.size() && in[i + 1] == 'u' && hex(i + 2, 4, value)) {
+                out += static_cast<char16_t>(value);
+                i += 5;
+            } else if (in[i] == '%' && hex(i + 1, 2, value)) {
+                out += static_cast<char16_t>(value);
+                i += 2;
+            } else {
+                out += in[i];
+            }
+        }
+        return JsValue::make_string(js_utf16_to_utf8(out));
+    }));
 }
 
 } // namespace litebird

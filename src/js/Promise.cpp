@@ -8,10 +8,26 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/common/ReleaseQueue.hpp"
 #include <algorithm>
 #include <mutex>
 
 namespace litebird {
+
+// `p = p.then(f)` in a loop, on a promise that has not settled yet, links each
+// promise to the next through its reaction (PromiseHandler::next_promise, or
+// a native reaction that captured the promise it will settle). Releasing the
+// first one must not release the rest from inside its own destructor.
+PromiseData::~PromiseData() {
+    if (handlers.empty()) return;
+    using Queue = ReleaseQueue<std::vector<PromiseHandler>>;
+    if (Queue::busy()) {
+        Queue::defer(std::move(handlers));
+        return;
+    }
+    Queue::Drain drain;
+    handlers.clear();
+}
 
 namespace {
 

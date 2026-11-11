@@ -267,3 +267,15 @@ b undefined true
 console.log(!!"", !!"0", !!0, !!NaN, !![], !!{}, !!null)
 #expect
 false true false false true true false
+
+#name unary operand of exponent is a syntax error
+#code
+var names = []; ['-2 ** 2', '+2 ** 2', '!2 ** 2', '~2 ** 2', 'typeof 2 ** 2', 'void 2 ** 2', 'delete x ** 2', '-x ** -y'].forEach(function (src) { try { eval('var x = 1, y = 2; ' + src); names.push('ok'); } catch (e) { names.push(e.name); } }); console.log(names.join())
+#expect
+SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+#name exponent with grouped or postfix operands
+#code
+var x = 2; console.log((-2) ** 2, 2 ** -2, -(2 ** 2), 2 ** 3 ** 2, (+2) ** 2, x++ ** 2, ++x ** 2, x-- ** 2, x, 2 ** -x, (-x) ** 2)
+#expect
+4 0.25 -4 512 4 4 16 16 3 0.125 9

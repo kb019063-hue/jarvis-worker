@@ -9,8 +9,27 @@
 #include <variant>
 #include <tuple>
 #include <cstdint>
+#include <exception>
+#include "litebird/common/StackLimit.hpp"
 
 namespace litebird {
+
+/// Thrown when the engine is about to run out of native stack. Parsing,
+/// evaluating and several built-ins recurse once per level of nesting in the
+/// script or in its data, so without a limit a deeply nested expression, an
+/// ordinary runaway recursion or `String([[[[...]]]])` overflows the stack and
+/// the process dies with no error at all. Scripts see it as a RangeError.
+class JsStackOverflow : public std::exception {
+public:
+    const char* what() const noexcept override { return "RangeError: Maximum call stack size exceeded"; }
+};
+
+/// For engine code that recurses over something a script controls: call this
+/// once per level. It measures the stack that is really left on this thread
+/// (see StackLimit.hpp) instead of counting levels.
+inline void js_check_stack() {
+    if (stack_is_exhausted()) throw JsStackOverflow();
+}
 
 class Node;
 class Element;
@@ -160,6 +179,13 @@ public:
         mutable CellRef cell;
     };
     struct Extra {
+        Extra() = default;
+        Extra(const Extra&) = default;
+        Extra& operator=(const Extra&) = default;
+        /// Releases the payload without one destructor running inside the
+        /// next along a chain of closures; see common/ReleaseQueue.hpp.
+        ~Extra();
+
         /// Own properties of a function value that has no heap cell (native
         /// functions). Lives here, not in the value, so every copy of the
         /// function sees a property set through any other copy.
@@ -397,6 +423,22 @@ private:
     std::vector<Entry> m_entries;
     std::unordered_map<std::string, uint32_t> m_index;   // populated above kIndexThreshold
 };
+
+/// Upper bound on a walk up a prototype chain. Chains cannot be circular (see
+/// js_set_prototype), so this is never reached by a correct engine; it only
+/// keeps a bug from becoming an endless loop. It is far beyond what fits in
+/// memory, so it does not cut real chains short the way the old limit of
+/// 10,000 did (lookups past it silently answered "not found").
+inline constexpr int kMaxPrototypeChain = 1 << 30;
+
+/// Sets the prototype of `cell`. Returns false, changing nothing, when that
+/// would make the prototype chain circular. Every walk up a chain relies on
+/// this: chains are finite because nothing else lets script close a loop.
+bool js_set_prototype(JsObject* cell, JsObject* proto);
+
+/// The source text of a script function or class (a FunctionNode or ClassNode),
+/// or an empty string when the node has none. Defined in JsParser.cpp.
+std::string js_function_source_text(const AstNode* node);
 
 /// ECMAScript `===` (Strict Equality Comparison, 7.2.16).
 ///

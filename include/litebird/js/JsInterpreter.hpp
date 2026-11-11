@@ -25,15 +25,33 @@ public:
         std::string name;
         JsValue value;
         bool is_const{false};
+        /// A non-writable property of the global object (`undefined`, `NaN`,
+        /// `Infinity`): assigning to it does nothing in sloppy code and throws
+        /// in strict code, and it cannot be redeclared.
+        bool is_readonly{false};
     };
 
-    enum class AssignResult { Ok, NotFound, Const };
+    enum class AssignResult { Ok, NotFound, Const, ReadOnly };
+
+    /// True once any scope other than a global one has declared a binding
+    /// named `undefined`. Until then every use of that name means the global,
+    /// whose value cannot change, so the evaluator skips the lookup.
+    static bool undefined_shadowed() { return s_undefined_shadowed.load(std::memory_order_relaxed); }
 
     explicit JsEnvironment(std::shared_ptr<JsEnvironment> parent = nullptr)
         : m_parent(std::move(parent)), m_is_var_scope(!m_parent), m_agent(Heap::current_agent()) {
         register_scope();
     }
-    ~JsEnvironment() { unregister_scope(); }
+    ~JsEnvironment() {
+        unregister_scope();
+        // A scope owns its parent. Let go of a run of parents that only this
+        // chain keeps alive in a loop, not by one destructor calling the next.
+        std::shared_ptr<JsEnvironment> parent = std::move(m_parent);
+        while (parent && parent.use_count() == 1) {
+            std::shared_ptr<JsEnvironment> next = std::move(parent->m_parent);
+            parent = std::move(next);       // the old parent dies here, already detached
+        }
+    }
     JsEnvironment(const JsEnvironment&) = delete;
     JsEnvironment& operator=(const JsEnvironment&) = delete;
 
@@ -62,6 +80,7 @@ public:
     void define(const std::string& name, JsValue value) {
         Binding* existing = find_own(name);
         if (existing) {
+            if (existing->is_readonly) return;
             existing->value = std::move(value);
             existing->is_const = false;
             return;
@@ -72,11 +91,18 @@ public:
     void define_const(const std::string& name, JsValue value) {
         Binding* existing = find_own(name);
         if (existing) {
+            if (existing->is_readonly) return;
             existing->value = std::move(value);
             existing->is_const = true;
             return;
         }
         add(name, std::move(value), true);
+    }
+
+    /// Declares a non-writable global such as `undefined`.
+    void define_readonly(const std::string& name, JsValue value) {
+        define(name, std::move(value));
+        if (Binding* b = find_own(name)) b->is_readonly = true;
     }
 
     Binding* find_own(const std::string& name) {
@@ -107,6 +133,7 @@ public:
         Binding* b = lookup(name);
         if (!b) return AssignResult::NotFound;
         if (b->is_const) return AssignResult::Const;
+        if (b->is_readonly) return AssignResult::ReadOnly;
         b->value = value;
         return AssignResult::Ok;
     }
@@ -126,7 +153,7 @@ public:
     /// name is not declared anywhere (sloppy-mode implicit global).
     bool assign(const std::string& name, JsValue value) {
         if (Binding* b = lookup(name)) {
-            b->value = std::move(value);
+            if (!b->is_readonly) b->value = std::move(value);
             return true;
         }
         JsEnvironment* root = this;
@@ -175,7 +202,10 @@ private:
     static constexpr size_t kIndexThreshold = 16;
 
     void add(const std::string& name, JsValue value, bool is_const) {
-        m_bindings.push_back(Binding{name, std::move(value), is_const});
+        if (m_parent && name.size() == 9 && name == "undefined") {
+            s_undefined_shadowed.store(true, std::memory_order_relaxed);
+        }
+        m_bindings.push_back(Binding{name, std::move(value), is_const, false});
         if (m_bindings.size() == kIndexThreshold + 1) {
             for (size_t i = 0; i < m_bindings.size(); ++i) m_index[m_bindings[i].name] = static_cast<uint32_t>(i);
         } else if (m_bindings.size() > kIndexThreshold + 1) {
@@ -207,6 +237,7 @@ private:
     static inline std::atomic_flag s_registry_lock = ATOMIC_FLAG_INIT;
     static inline JsEnvironment* s_registry_head = nullptr;
     static inline size_t s_registry_size = 0;
+    static inline std::atomic<bool> s_undefined_shadowed{false};
 
     std::shared_ptr<JsEnvironment> m_parent;
     bool m_is_var_scope{false};
@@ -223,15 +254,6 @@ class ReturnException {
 public:
     JsValue value;
     explicit ReturnException(JsValue v) : value(std::move(v)) {}
-};
-
-/// Thrown when a script recurses deeper than the engine can represent on the
-/// native stack. Every JS call consumes C++ frames in the AST interpreter, so
-/// without a limit an ordinary recursive function overflows the stack and the
-/// process dies with no error at all. Scripts see it as a RangeError.
-class JsStackOverflow : public std::exception {
-public:
-    const char* what() const noexcept override { return "RangeError: Maximum call stack size exceeded"; }
 };
 
 class JsInterpreter {
@@ -375,6 +397,8 @@ private:
     JsValue evaluate(const Expr* expr, const EnvPtr& env);
     JsValue evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint);
     JsValue eval_binary(const BinaryExpr* expr, const EnvPtr& env);
+    JsValue eval_binary_chain(const BinaryExpr* expr, const EnvPtr& env);
+    JsValue combine_binary(const BinaryExpr* expr, JsValue left, const EnvPtr& env);
     JsValue apply_binary(JsTokenType op, const JsValue& left, const JsValue& right);
     JsValue eval_unary(const UnaryExpr* expr, const EnvPtr& env);
     JsValue eval_assign(const AssignExpr* expr, const EnvPtr& env);

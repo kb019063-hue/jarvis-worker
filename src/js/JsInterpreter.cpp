@@ -1,5 +1,6 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/dom/Event.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/MutationObserver.hpp"
@@ -41,6 +42,14 @@ void* environment_trace(Heap& heap, void* env) {
     return scope->parent_raw();
 }
 
+bool environment_reached(void* env, uint64_t epoch) {
+    return static_cast<JsEnvironment*>(env)->gc_epoch == epoch;
+}
+
+void environment_clear(void* env) {
+    static_cast<JsEnvironment*>(env)->clear_bindings();
+}
+
 } // namespace
 
 namespace {
@@ -61,6 +70,9 @@ JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
     Heap::EnvironmentTracer tracer;
     tracer.enter = &environment_enter;
     tracer.trace = &environment_trace;
+    tracer.snapshot = &JsEnvironment::snapshot;
+    tracer.reached = &environment_reached;
+    tracer.clear = &environment_clear;
     Heap::set_environment_tracer(tracer);
 
     init_builtins();
@@ -103,6 +115,49 @@ JsInterpreter::~JsInterpreter() {
     }
     m_generators.clear();
     Heap::default_heap().remove_root_provider(this);
+}
+
+// Calls the window's listeners for `type`, then its `on<type>` handler.
+void JsInterpreter::fire_window_event(const std::string& type) {
+    JsValue event = JsValue::make_object();
+    event.set_property("type", JsValue::make_string(type));
+    event.set_property("target", m_global_object);
+    event.set_property("currentTarget", m_global_object);
+    event.set_property("bubbles", JsValue::make_boolean(false));
+    event.set_property("cancelable", JsValue::make_boolean(false));
+
+    if (m_window_listeners) {
+        auto found = m_window_listeners->find(type);
+        if (found != m_window_listeners->end()) {
+            const auto listeners = found->second;       // a listener may change the table
+            for (const auto& listener : listeners) js_call_guarded(listener, m_global_object, {event});
+        }
+    }
+    JsValue handler = m_global_object.get_property("on" + type);
+    if (handler.is_function()) js_call_guarded(handler, m_global_object, {event});
+}
+
+void JsInterpreter::notify_document_loaded() {
+    if (m_load_notified) return;
+    m_load_notified = true;
+    JsIntrinsics::set_current(m_realm.get());
+
+    JsValue document = m_global_env->get("document");
+    auto set_ready_state = [&](const char* state) {
+        if (document.is_object()) document.set_property("readyState", JsValue::make_string(state));
+    };
+
+    // The parser is done and every script has run: DOMContentLoaded, at the
+    // document, bubbling to the window.
+    set_ready_state("interactive");
+    if (m_document) m_document->dispatch_event(std::make_shared<Event>("DOMContentLoaded", true, false));
+    fire_window_event("DOMContentLoaded");
+
+    // Nothing is fetched asynchronously while a page loads here (there are no
+    // external stylesheets, scripts or images still arriving), so the page is
+    // complete as soon as it is interactive.
+    set_ready_state("complete");
+    fire_window_event("load");
 }
 
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {
@@ -246,10 +301,30 @@ void JsInterpreter::init_builtins() {
     win_obj.set_property("localStorage", local_store);
     win_obj.set_property("sessionStorage", session_store);
 
-    auto window_listeners = std::make_shared<std::unordered_map<std::string, std::vector<JsValue>>>();
+    // The window is an event target that is not a DOM node, so it keeps its
+    // own listener table.
+    m_window_listeners = std::make_shared<WindowListeners>();
+    auto window_listeners = m_window_listeners;
     JsValue win_add_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
-        if (args.size() >= 2) {
-            (*window_listeners)[args[0].to_string()].push_back(args[1]);
+        if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
+        auto& listeners = (*window_listeners)[args[0].to_string()];
+        // The same callback registered twice is one listener.
+        for (const auto& existing : listeners) {
+            if (existing.identity() == args[1].identity()) return JsValue::make_undefined();
+        }
+        listeners.push_back(args[1]);
+        return JsValue::make_undefined();
+    });
+    JsValue win_remove_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+        if (args.size() < 2) return JsValue::make_undefined();
+        auto found = window_listeners->find(args[0].to_string());
+        if (found == window_listeners->end()) return JsValue::make_undefined();
+        auto& listeners = found->second;
+        for (auto it = listeners.begin(); it != listeners.end(); ++it) {
+            if (it->identity() == args[1].identity()) {
+                listeners.erase(it);
+                break;
+            }
         }
         return JsValue::make_undefined();
     });
@@ -258,13 +333,16 @@ void JsInterpreter::init_builtins() {
         std::string type = args[0].is_object() ? args[0].get_property("type").to_string() : args[0].to_string();
         auto it = window_listeners->find(type);
         if (it != window_listeners->end()) {
-            for (const auto& cb : it->second) {
+            // A listener may add or remove listeners; iterate over a copy.
+            const auto listeners = it->second;
+            for (const auto& cb : listeners) {
                 js_call_guarded(cb, JsValue(), args);
             }
         }
         return JsValue::make_boolean(true);
     });
     win_obj.set_property("addEventListener", win_add_el);
+    win_obj.set_property("removeEventListener", win_remove_el);
     win_obj.set_property("dispatchEvent", win_dispatch);
 
     if (!m_history) {
@@ -420,6 +498,15 @@ void JsInterpreter::init_builtins() {
         if (m_document->body()) doc_obj.set_property("body", JsValue::make_dom_node(m_document->body()));
         if (m_document->head()) doc_obj.set_property("head", JsValue::make_dom_node(m_document->head()));
         if (m_document->document_element()) doc_obj.set_property("documentElement", JsValue::make_dom_node(m_document->document_element()));
+
+        // The document is an event target. Listeners go on the Document node,
+        // which is the root of the tree, so events that bubble up from any
+        // element reach them.
+        for (const char* method : {"addEventListener", "removeEventListener", "dispatchEvent"}) {
+            doc_obj.set_property(method, js_event_target_method(m_document, method));
+        }
+        // "loading" while scripts run; notify_document_loaded() moves it on.
+        doc_obj.set_property("readyState", JsValue::make_string("loading"));
 
         m_global_env->define("document", doc_obj);
         win_obj.set_property("document", doc_obj);
@@ -654,11 +741,15 @@ void JsInterpreter::init_language_builtins() {
     m_global_env->define("globalThis", m_global_object);
     m_global_env->define("self", m_global_object);
 
-    JsEnvironment* global_scope = m_global_env.get();
+    // The global object does not own the global scope: it looks it up each
+    // time, and finds nothing once the interpreter and its scope are gone.
+    std::weak_ptr<JsEnvironment> global_scope = m_global_env;
     m_global_object.object_val->lookup_fallback =
         std::make_shared<std::function<bool(const std::string&, JsValue&)>>(
             [global_scope](const std::string& name, JsValue& out) {
-                if (auto* binding = global_scope->find_own(name)) {
+                auto scope = global_scope.lock();
+                if (!scope) return false;
+                if (auto* binding = scope->find_own(name)) {
                     out = binding->value;
                     return true;
                 }
@@ -667,7 +758,9 @@ void JsInterpreter::init_language_builtins() {
     m_global_object.object_val->assign_hook =
         std::make_shared<std::function<bool(const std::string&, const JsValue&)>>(
             [global_scope](const std::string& name, const JsValue& value) {
-                if (auto* binding = global_scope->find_own(name)) {
+                auto scope = global_scope.lock();
+                if (!scope) return false;
+                if (auto* binding = scope->find_own(name)) {
                     if (!binding->is_const) binding->value = value;
                     return true;
                 }

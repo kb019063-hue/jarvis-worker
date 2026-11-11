@@ -155,6 +155,7 @@ JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<J
         // `step` holds these inside a std::function, where the collector cannot see them.
         auto kept = std::make_shared<std::vector<JsValue>>(std::move(roots));
         cell->trace_extra = [kept](Heap& heap) {
+            if (!heap.first_visit(kept.get())) return;
             for (const auto& value : *kept) heap.mark_value(value);
         };
     }

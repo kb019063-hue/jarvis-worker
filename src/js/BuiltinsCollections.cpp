@@ -163,6 +163,8 @@ JsValue make_collection(ObjectClass klass, JsObject* proto) {
     std::weak_ptr<CollectionData> weak = data;
     cell->trace_extra = [weak](Heap& heap) {
         if (auto d = weak.lock()) {
+            // After `class X extends Map` two cells share these entries.
+            if (!heap.first_visit(d.get())) return;
             for (const auto& entry : d->entries) {
                 heap.mark_value(entry.key);
                 heap.mark_value(entry.value);

@@ -30,7 +30,33 @@ public:
     enum class AssignResult { Ok, NotFound, Const };
 
     explicit JsEnvironment(std::shared_ptr<JsEnvironment> parent = nullptr)
-        : m_parent(std::move(parent)), m_is_var_scope(!m_parent) {}
+        : m_parent(std::move(parent)), m_is_var_scope(!m_parent), m_agent(Heap::current_agent()) {
+        register_scope();
+    }
+    ~JsEnvironment() { unregister_scope(); }
+    JsEnvironment(const JsEnvironment&) = delete;
+    JsEnvironment& operator=(const JsEnvironment&) = delete;
+
+    /// Every scope of `agent` that exists right now, each kept alive by the
+    /// returned pointer. The collector starts from this list: a scope can be
+    /// garbage (a closure and its scope referring to each other) without any
+    /// object pointing at it.
+    static void snapshot(uint32_t agent, std::vector<std::shared_ptr<void>>& out) {
+        RegistryLock lock;
+        out.reserve(out.size() + s_registry_size);
+        for (JsEnvironment* scope = s_registry_head; scope; scope = scope->m_registry_next) {
+            if (scope->m_agent != agent) continue;
+            // A scope whose last owner has just let go is skipped.
+            if (auto owner = scope->weak_from_this().lock()) out.push_back(std::move(owner));
+        }
+    }
+
+    /// Drops every binding. Used by the collector on scopes nothing can reach.
+    void clear_bindings() {
+        std::vector<Binding> dropped = std::move(m_bindings);
+        m_bindings.clear();
+        m_index.clear();
+    }
 
     /// Declares `name` in this scope, replacing an existing declaration.
     void define(const std::string& name, JsValue value) {
@@ -157,8 +183,36 @@ private:
         }
     }
 
+    // All live scopes, as an intrusive list. Scopes are created and destroyed
+    // on every call, so the lock is a spin lock: it is held for a few
+    // instructions and only ever contended by a worker thread.
+    struct RegistryLock {
+        RegistryLock() { while (s_registry_lock.test_and_set(std::memory_order_acquire)) {} }
+        ~RegistryLock() { s_registry_lock.clear(std::memory_order_release); }
+    };
+    void register_scope() {
+        RegistryLock lock;
+        m_registry_next = s_registry_head;
+        if (s_registry_head) s_registry_head->m_registry_prev = this;
+        s_registry_head = this;
+        ++s_registry_size;
+    }
+    void unregister_scope() {
+        RegistryLock lock;
+        if (m_registry_prev) m_registry_prev->m_registry_next = m_registry_next;
+        else s_registry_head = m_registry_next;
+        if (m_registry_next) m_registry_next->m_registry_prev = m_registry_prev;
+        --s_registry_size;
+    }
+    static inline std::atomic_flag s_registry_lock = ATOMIC_FLAG_INIT;
+    static inline JsEnvironment* s_registry_head = nullptr;
+    static inline size_t s_registry_size = 0;
+
     std::shared_ptr<JsEnvironment> m_parent;
     bool m_is_var_scope{false};
+    uint32_t m_agent{0};
+    JsEnvironment* m_registry_prev{nullptr};
+    JsEnvironment* m_registry_next{nullptr};
     std::vector<Binding> m_bindings;
     std::unordered_map<std::string, uint32_t> m_index;
 };
@@ -222,6 +276,13 @@ public:
     /// True when the most recent eval()/eval_ast() ended with a syntax error or
     /// an uncaught exception.
     bool last_eval_failed() const { return m_last_eval_failed; }
+
+    /// Tells the page it has finished loading. The host calls this once, after
+    /// the document's scripts have run: document.readyState becomes
+    /// "interactive" and DOMContentLoaded fires (at the document, then the
+    /// window), then readyState becomes "complete" and `load` fires at the
+    /// window. Later calls do nothing.
+    void notify_document_loaded();
 
 private:
     using EnvPtr = std::shared_ptr<JsEnvironment>;
@@ -337,8 +398,13 @@ private:
     void bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode);
     JsValue super_base(const EnvPtr& env);
 
+    void fire_window_event(const std::string& type);
+
     bool m_last_eval_failed{false};
     bool m_chain_short_circuit{false};
+    bool m_load_notified{false};
+    using WindowListeners = std::unordered_map<std::string, std::vector<JsValue>>;
+    std::shared_ptr<WindowListeners> m_window_listeners;
 
     /// This interpreter's built-ins. Declared first: everything below creates
     /// objects that need its prototypes.

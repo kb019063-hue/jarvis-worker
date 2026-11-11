@@ -164,8 +164,30 @@ void Node::remove_child(std::shared_ptr<Node> child) {
     }
 }
 
-void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture) {
-    m_listeners[type].push_back({std::move(listener), use_capture});
+void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture,
+                              const void* key) {
+    auto& entries = m_listeners[type];
+    if (key) {
+        // The same callback registered twice for the same phase is one listener.
+        for (const auto& entry : entries) {
+            if (entry.key == key && entry.use_capture == use_capture) return;
+        }
+    }
+    entries.push_back({std::move(listener), use_capture, key});
+}
+
+void Node::remove_event_listener(const std::string& type, const void* key, bool use_capture) {
+    if (!key) return;
+    auto it = m_listeners.find(type);
+    if (it == m_listeners.end()) return;
+    auto& entries = it->second;
+    for (auto entry = entries.begin(); entry != entries.end(); ++entry) {
+        if (entry->key == key && entry->use_capture == use_capture) {
+            entries.erase(entry);
+            break;
+        }
+    }
+    if (entries.empty()) m_listeners.erase(it);
 }
 
 void Node::mark_needs_layout() {

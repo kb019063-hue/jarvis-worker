@@ -83,6 +83,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     // A worker is an agent of its own: its timers and promise reactions run on
     // this thread, in this loop, never in the page's. Declared before the
     // interpreter so that it outlives it.
+    Heap::enter_new_agent();
     EventLoop worker_loop;
     EventLoop::set_current(&worker_loop);
     EventLoop* owner_loop = m_owner_loop;

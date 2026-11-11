@@ -99,13 +99,19 @@ void Storage::load_from_disk() {
 JsValue Storage::to_js_value() {
     JsValue obj = JsValue::make_object();
 
-    obj.set_property("setItem", JsValue::make_native_function([this, obj](const std::vector<JsValue>& args) mutable {
+    // The methods update the object they are called on (`this`) rather than
+    // capturing `obj`: an object whose own methods hold a copy of it can never
+    // be collected.
+    obj.set_property("setItem", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
         if (args.size() >= 2) {
             std::string k = args[0].to_string();
             std::string v = args[1].to_string();
             set_item(k, v);
-            obj.set_property("length", JsValue::make_number(static_cast<double>(length())));
-            obj.set_property(k, JsValue::make_string(v));
+            JsValue self = JsValue::current_this();
+            if (self.is_object()) {
+                self.set_property("length", JsValue::make_number(static_cast<double>(length())));
+                self.set_property(k, JsValue::make_string(v));
+            }
         }
         return JsValue::make_undefined();
     }));
@@ -119,19 +125,23 @@ JsValue Storage::to_js_value() {
         return JsValue::make_null();
     }));
 
-    obj.set_property("removeItem", JsValue::make_native_function([this, obj](const std::vector<JsValue>& args) mutable {
+    obj.set_property("removeItem", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
         if (!args.empty()) {
             std::string k = args[0].to_string();
             remove_item(k);
-            obj.set_property("length", JsValue::make_number(static_cast<double>(length())));
-            obj.set_property(k, JsValue::make_undefined());
+            JsValue self = JsValue::current_this();
+            if (self.is_object()) {
+                self.set_property("length", JsValue::make_number(static_cast<double>(length())));
+                self.set_property(k, JsValue::make_undefined());
+            }
         }
         return JsValue::make_undefined();
     }));
 
-    obj.set_property("clear", JsValue::make_native_function([this, obj](const std::vector<JsValue>&) mutable {
+    obj.set_property("clear", JsValue::make_native_function([this](const std::vector<JsValue>&) {
         clear();
-        obj.set_property("length", JsValue::make_number(0));
+        JsValue self = JsValue::current_this();
+        if (self.is_object()) self.set_property("length", JsValue::make_number(0));
         return JsValue::make_undefined();
     }));
 

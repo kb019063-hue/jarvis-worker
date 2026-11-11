@@ -686,6 +686,103 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
     entry.flags = static_cast<uint8_t>((flags | PropertyMap::Accessor) & ~PropertyMap::Writable);
 }
 
+// The EventTarget methods, for any node: elements, text nodes and the document.
+JsValue js_event_target_method(const std::shared_ptr<Node>& target, const std::string& name) {
+    if (!target) return JsValue::make_undefined();
+    if (name == "addEventListener") {
+        auto node = target;
+        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+            if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
+            std::string ev_type = args[0].to_string();
+            JsValue cb = args[1];
+            // The third argument is `useCapture` or an options object.
+            bool use_capture = false;
+            bool once = false;
+            if (args.size() > 2) {
+                if (args[2].is_object()) {
+                    use_capture = args[2].get_property("capture").is_truthy();
+                    once = args[2].get_property("once").is_truthy();
+                } else {
+                    use_capture = args[2].is_truthy();
+                }
+            }
+            const void* key = cb.identity();
+            std::weak_ptr<Node> weak_node = node;
+            node->add_event_listener(ev_type, [cb, weak_node, ev_type, key, use_capture, once](const std::shared_ptr<Event>& ev) mutable {
+                if (once) {
+                    if (auto target = weak_node.lock()) target->remove_event_listener(ev_type, key, use_capture);
+                }
+                JsValue ev_obj = JsValue::make_object();
+                ev_obj.set_property("type", JsValue::make_string(ev->type()));
+                ev_obj.set_property("eventPhase", JsValue::make_number(static_cast<int>(ev->event_phase())));
+                ev_obj.set_property("bubbles", JsValue::make_boolean(ev->bubbles()));
+                ev_obj.set_property("cancelable", JsValue::make_boolean(ev->cancelable()));
+                ev_obj.set_property("defaultPrevented", JsValue::make_boolean(ev->default_prevented()));
+                ev_obj.set_property("data", JsValue::make_string(ev->data));
+                ev_obj.set_property("key", JsValue::make_string(ev->key));
+
+                if (ev->target()) ev_obj.set_property("target", JsValue::make_dom_node(ev->target()));
+                if (ev->current_target()) ev_obj.set_property("currentTarget", JsValue::make_dom_node(ev->current_target()));
+
+                auto ev_ptr = ev;
+                ev_obj.set_property("stopPropagation", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
+                    ev_ptr->stop_propagation();
+                    return JsValue::make_undefined();
+                }));
+                ev_obj.set_property("preventDefault", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
+                    ev_ptr->prevent_default();
+                    return JsValue::make_undefined();
+                }));
+
+                // A listener runs with `this` set to the node it was added to.
+                JsValue receiver;
+                if (auto current = ev->current_target()) {
+                    auto element = std::dynamic_pointer_cast<Element>(current);
+                    receiver = (element && !element->custom_element_instance().is_undefined())
+                                   ? element->custom_element_instance() : JsValue::make_dom_node(current);
+                }
+                cb.call_with_this(receiver, {ev_obj});
+            }, use_capture, key);
+            return JsValue::make_undefined();
+        });
+    }
+    if (name == "removeEventListener") {
+        auto node = target;
+        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+            if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
+            bool use_capture = false;
+            if (args.size() > 2) {
+                use_capture = args[2].is_object() ? args[2].get_property("capture").is_truthy() : args[2].is_truthy();
+            }
+            node->remove_event_listener(args[0].to_string(), args[1].identity(), use_capture);
+            return JsValue::make_undefined();
+        });
+    }
+    if (name == "dispatchEvent") {
+        auto node = target;
+        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
+            // Takes an event object ({type, bubbles, cancelable}) or, as a
+            // shorthand, just the type.
+            std::string ev_type = "custom";
+            bool bubbles = true;
+            bool cancelable = true;
+            if (!args.empty() && args[0].is_object()) {
+                ev_type = args[0].get_property("type").to_string();
+                JsValue b = args[0].get_property("bubbles");
+                JsValue c = args[0].get_property("cancelable");
+                if (!b.is_undefined()) bubbles = b.is_truthy();
+                if (!c.is_undefined()) cancelable = c.is_truthy();
+            } else if (!args.empty()) {
+                ev_type = args[0].to_string();
+            }
+            auto ev = std::make_shared<Event>(ev_type, bubbles, cancelable);
+            bool ok = node->dispatch_event(ev);
+            return JsValue::make_boolean(ok);
+        });
+    }
+    return JsValue::make_undefined();
+}
+
 JsValue JsValue::get_property(const std::string& name) const {
     // Primitives have no properties of their own; they borrow the methods of
     // their wrapper prototype (String.prototype and friends).
@@ -717,6 +814,9 @@ JsValue JsValue::get_property(const std::string& name) const {
 
     const auto dom_node = dom_node_value();
     if (type == JsType::DomNode && dom_node) {
+        if (name == "addEventListener" || name == "removeEventListener" || name == "dispatchEvent") {
+            return js_event_target_method(dom_node, name);
+        }
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
             if (name == "tagName") return JsValue::make_string(el->tag_name());
             if (name == "id") return JsValue::make_string(el->id());
@@ -871,50 +971,6 @@ JsValue JsValue::get_property(const std::string& name) const {
                         elem->click();
                     }
                     return JsValue::make_undefined();
-                });
-            }
-            if (name == "addEventListener") {
-                auto node = dom_node;
-                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                    if (args.size() < 2) return JsValue::make_undefined();
-                    std::string ev_type = args[0].to_string();
-                    JsValue cb = args[1];
-                    bool use_capture = (args.size() > 2) ? args[2].is_truthy() : false;
-                    node->add_event_listener(ev_type, [cb](const std::shared_ptr<Event>& ev) mutable {
-                        JsValue ev_obj = JsValue::make_object();
-                        ev_obj.set_property("type", JsValue::make_string(ev->type()));
-                        ev_obj.set_property("eventPhase", JsValue::make_number(static_cast<int>(ev->event_phase())));
-                        ev_obj.set_property("bubbles", JsValue::make_boolean(ev->bubbles()));
-                        ev_obj.set_property("cancelable", JsValue::make_boolean(ev->cancelable()));
-                        ev_obj.set_property("defaultPrevented", JsValue::make_boolean(ev->default_prevented()));
-                        ev_obj.set_property("data", JsValue::make_string(ev->data));
-                        ev_obj.set_property("key", JsValue::make_string(ev->key));
-
-                        if (ev->target()) ev_obj.set_property("target", JsValue::make_dom_node(ev->target()));
-                        if (ev->current_target()) ev_obj.set_property("currentTarget", JsValue::make_dom_node(ev->current_target()));
-
-                        auto ev_ptr = ev;
-                        ev_obj.set_property("stopPropagation", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
-                            ev_ptr->stop_propagation();
-                            return JsValue::make_undefined();
-                        }));
-                        ev_obj.set_property("preventDefault", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
-                            ev_ptr->prevent_default();
-                            return JsValue::make_undefined();
-                        }));
-
-                        cb.call({ev_obj});
-                    }, use_capture);
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "dispatchEvent") {
-                auto node = dom_node;
-                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                    std::string ev_type = args.empty() ? "custom" : args[0].to_string();
-                    auto ev = std::make_shared<Event>(ev_type, true, true);
-                    bool ok = node->dispatch_event(ev);
-                    return JsValue::make_boolean(ok);
                 });
             }
             if (name == "getContext") {

@@ -82,6 +82,7 @@ bool BrowserShell::back() {
             m_js_engine->eval_ast(script);
         }
     }
+    m_js_engine->notify_document_loaded();
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -118,6 +119,7 @@ bool BrowserShell::forward() {
             m_js_engine->eval_ast(script);
         }
     }
+    m_js_engine->notify_document_loaded();
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -149,6 +151,7 @@ bool BrowserShell::reload() {
             m_js_engine->eval_ast(script);
         }
     }
+    m_js_engine->notify_document_loaded();
 
     rebuild_layout();
     m_status_message = "Reloaded " + m_current_url;
@@ -195,6 +198,7 @@ bool BrowserShell::navigate_to(const std::string& url) {
             m_js_engine->eval_ast(script);
         }
     }
+    m_js_engine->notify_document_loaded();
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;

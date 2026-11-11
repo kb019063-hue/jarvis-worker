@@ -302,7 +302,10 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     // that would be a reference cycle. The callee arrives through the call
     // context instead.
     std::shared_ptr<const FunctionNode> shared_node = node;
-    EnvPtr closure = env;
+    // The scope is owned once, by `fd.closure` above. This callable lives in
+    // the same payload, so a plain pointer is enough, and a second owner here
+    // would hide from the collector how many closures really share a scope.
+    JsEnvironment* closure = env.get();
     fd.native_fn = [this, alive = m_alive, shared_node, closure](const std::vector<JsValue>& args) {
         JsValue this_val;
         JsValue callee;
@@ -311,7 +314,8 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
         // The interpreter that created this function is gone: a timer or a
         // listener outlived it. There is nothing left to run the body with.
         if (!alive->load()) return JsValue::make_undefined();
-        return invoke_function(shared_node, closure, callee, this_val, is_construct, args);
+        return invoke_function(shared_node, closure ? closure->shared_from_this() : nullptr, callee, this_val,
+                               is_construct, args);
     };
     return fn;
 }
@@ -436,11 +440,13 @@ std::shared_ptr<GeneratorData> JsInterpreter::spawn_frame(const std::shared_ptr<
     GeneratorData* raw = frame.get();
     JsIntrinsics* realm = m_realm.get();
     EventLoop* loop = &EventLoop::default_loop();
-    auto body = [this, raw, realm, loop, node = node, env = env]() mutable {
+    const uint32_t agent = Heap::current_agent();
+    auto body = [this, raw, realm, loop, agent, node = node, env = env]() mutable {
         // The frame is part of the agent that created it.
         GeneratorContext::set_active(raw);
         JsIntrinsics::set_current(realm);
         EventLoop::set_current(loop);
+        Heap::join_agent(agent);
 
         JsValue result;
         JsValue error;

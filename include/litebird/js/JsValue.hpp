@@ -33,6 +33,87 @@ class JsEnvironment;
 class AstNode;
 class JsObject;
 class PropertyMap;
+class Heap;
+
+/// Base of every garbage-collected cell.
+class HeapObject {
+public:
+    bool is_marked{false};
+    /// How many handles (see CellRef) point at this cell right now.
+    uint32_t handle_count{0};
+    /// Collector scratch: how many of those handles it found inside the heap.
+    uint32_t gc_seen{0};
+    /// The agent (page or worker) that created the cell; see Heap::current_agent.
+    uint32_t agent{0};
+    HeapObject* next_cell{nullptr};
+
+    virtual ~HeapObject() = default;
+    /// Reports every value this cell holds to the collector.
+    virtual void trace(Heap& heap) = 0;
+    /// Drops everything this cell holds. Called on garbage before it is freed.
+    virtual void release_contents() = 0;
+};
+
+/// A counted reference to a heap cell.
+///
+/// The collector cannot look inside C++ locals, std::function captures or the
+/// containers native code keeps values in. It does not have to: every JsValue
+/// that points at a cell holds one of these, so each cell knows how many
+/// references exist in total. During a collection the collector counts the
+/// references it can see, the ones stored inside other cells. A cell with more
+/// references than that is being held by something outside the heap, and is
+/// treated as a root. Native code therefore never registers what it holds; a
+/// JsValue that exists keeps its object alive.
+///
+/// It behaves like a `JsObject*`: it converts to one, compares like one and
+/// can be assigned from one.
+class CellRef {
+public:
+    CellRef() = default;
+    CellRef(JsObject* cell) : m_cell(header(cell)) { retain(); }
+    CellRef(const CellRef& other) : m_cell(other.m_cell) { retain(); }
+    CellRef(CellRef&& other) noexcept : m_cell(other.m_cell) { other.m_cell = nullptr; }
+    ~CellRef() { release(); }
+
+    CellRef& operator=(const CellRef& other) {
+        if (m_cell != other.m_cell) {
+            release();
+            m_cell = other.m_cell;
+            retain();
+        }
+        return *this;
+    }
+    CellRef& operator=(CellRef&& other) noexcept {
+        if (this != &other) {
+            release();
+            m_cell = other.m_cell;
+            other.m_cell = nullptr;
+        }
+        return *this;
+    }
+    CellRef& operator=(JsObject* cell) {
+        HeapObject* target = header(cell);
+        if (m_cell != target) {
+            release();
+            m_cell = target;
+            retain();
+        }
+        return *this;
+    }
+
+    // JsObject is only declared here. HeapObject is its first and only base,
+    // so the two share an address; Heap.cpp checks that this holds.
+    operator JsObject*() const { return reinterpret_cast<JsObject*>(m_cell); }
+    JsObject* operator->() const { return reinterpret_cast<JsObject*>(m_cell); }
+    JsObject* get() const { return reinterpret_cast<JsObject*>(m_cell); }
+
+private:
+    static HeapObject* header(JsObject* cell) { return reinterpret_cast<HeapObject*>(cell); }
+    void retain() const { if (m_cell) ++m_cell->handle_count; }
+    void release() const { if (m_cell) --m_cell->handle_count; }
+
+    HeapObject* m_cell{nullptr};
+};
 struct BytecodeFunction;
 class CanvasRenderingContext2D;
 class CanvasGradient;
@@ -46,8 +127,8 @@ public:
     bool bool_val{false};
     std::string string_val;
 
-    // For Garbage-Collected Objects
-    JsObject* object_val{nullptr};
+    // The heap cell this value refers to, if any. A counted handle: see CellRef.
+    CellRef object_val;
     std::shared_ptr<PropertyMap> properties;
 
     // Cold, type-specific payload. Primitive values and ordinary objects don't
@@ -76,7 +157,7 @@ public:
         /// Heap cell holding the function's own properties (`prototype`,
         /// statics, expandos). Created on first need: most closures never have
         /// a property set on them, and a cell is only reclaimed by the collector.
-        mutable JsObject* cell{nullptr};
+        mutable CellRef cell;
     };
     struct Extra {
         /// Own properties of a function value that has no heap cell (native
@@ -237,6 +318,17 @@ public:
     /// The property table of a value that has no cell: native functions and
     /// the few legacy values that carry `properties` directly.
     PropertyMap* loose_properties(bool create = false) const;
+
+    // --- For the collector ------------------------------------------------------
+    //
+    // Copies of a function, promise or DOM value share one payload. The
+    // collector compares how many copies exist with how many it can find.
+    const void* payload_identity() const { return m_extra.get(); }
+    long payload_owners() const { return m_extra.use_count(); }
+    /// The payload's own property table when this payload is its only owner.
+    const PropertyMap* payload_properties() const {
+        return (m_extra && m_extra->props && m_extra->props.use_count() == 1) ? m_extra->props.get() : nullptr;
+    }
 
 private:
     std::shared_ptr<Extra> m_extra;

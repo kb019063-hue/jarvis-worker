@@ -287,6 +287,13 @@ JsValue Promise::create_promise_instance(std::shared_ptr<PromiseData> data) {
     // The promise's state lives outside the cell; whoever can reach the
     // promise can reach its result and its reactions.
     cell->trace_extra = [data](Heap& heap) {
+        // This capture and the promise value's payload are the two owners a
+        // promise has when only script refers to it. Any more and native code
+        // (a resolver handed to a timer, a suspended async function) can settle
+        // it after the object is gone, so its reactions must not be counted as
+        // belonging to this cell: they stay roots.
+        if (heap.counting() && data.use_count() > 2) return;
+        if (!heap.first_visit(data.get())) return;
         heap.mark_value(data->result);
         for (const auto& handler : data->handlers) {
             heap.mark_value(handler.on_fulfilled);

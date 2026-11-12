@@ -196,6 +196,10 @@ JsValue js_bind_this(const JsValue& fn, const JsValue& receiver);
 // units and reads one in constant time. These helpers are for text that is
 // not in a string value yet: they read all of it on every call.
 bool js_is_ascii(std::string_view s);
+/// Text on its way out of the engine as bytes: the console, an error report.
+/// Half of a surrogate pair standing alone is not a character and has no
+/// UTF-8 encoding; it goes out as U+FFFD, as it does from every engine.
+std::string js_output_text(std::string text);
 std::u16string js_utf8_to_utf16(std::string_view s);
 std::string js_utf16_to_utf8(std::u16string_view s);
 /// The number of UTF-16 code units in UTF-8 text.

@@ -18,7 +18,7 @@ scoreboard cannot see at all.
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
-| **JavaScript corpus** | **838 / 843 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 88 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
@@ -34,7 +34,7 @@ make bench           # string-heavy scripts timed against Node; fails if one is 
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 843 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 845 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.

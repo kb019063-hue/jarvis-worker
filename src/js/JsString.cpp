@@ -527,6 +527,28 @@ int JsString::compare(std::string_view a, std::string_view b) noexcept {
     return a_is_pair ? pair_order : -pair_order;
 }
 
+size_t JsString::find_lone_half(std::string_view utf8, size_t from) noexcept {
+    // Two halves that meet are stored as one four-byte character, so a
+    // three-byte sequence in the surrogate range (0xED, then 0xA0 or more) is
+    // always a half on its own. 0xED is never a continuation byte.
+    for (size_t at = utf8.find('\xED', from); at != std::string_view::npos; at = utf8.find('\xED', at + 1)) {
+        if (at + 1 < utf8.size() && static_cast<unsigned char>(utf8[at + 1]) >= 0xA0) return at;
+    }
+    return std::string_view::npos;
+}
+
+JsString JsString::to_well_formed() const {
+    if (is_ascii()) return *this;
+    const std::string_view text = view();
+    size_t at = find_lone_half(text);
+    if (at == std::string_view::npos) return *this;
+    std::string fixed(text);
+    for (; at != std::string_view::npos; at = find_lone_half(text, at + 3)) {
+        fixed.replace(at, 3, "\xEF\xBF\xBD");        // U+FFFD: three bytes and one code unit, like the half
+    }
+    return from_checked(fixed, m_units);
+}
+
 JsString::Stats JsString::stats() noexcept { return t_stats; }
 
 // ---------------------------------------------------------------------------

@@ -845,8 +845,9 @@ bytes, down from 96; strings that are copies of one another are one block
 string share it (a 5 MB string with 1,000 slices of 2 MB each: 15 MB, was
 1.9 GB). A slice can keep at most four times its own size alive.
 
-**What else it changed.** Storing the text one way made four things right
-that were wrong:
+**What else it changed.** Six things that were wrong are right. The first
+three follow from storing text one way; the rest were found by the same
+tests.
 
 - Two halves of a surrogate pair that meet are the character they spell:
   `"\uD83D" + "\uDE00" === "😀"` was false, as were the same halves brought
@@ -859,6 +860,11 @@ that were wrong:
   2^29 − 24 bytes of UTF-8, which for ASCII is V8's limit exactly and for
   other text is reached sooner than V8's.
 - `String.prototype.isWellFormed` and `toWellFormed` exist.
+- Text that leaves the engine is UTF-8. `console.log("\uD83D")` wrote the
+  three bytes of a lone half, which no reader accepts; it writes U+FFFD, as
+  Node does.
+- `decodeURIComponent` accepts only UTF-8. `"%ED%A0%BD"` (a surrogate) and
+  `"%C0%80"` (an overlong form) decoded to something; both are a `URIError`.
 
 A run of 8,814 string expressions (32 subjects, among them lone halves and
 astral characters, through every `String.prototype` method and 20 regular

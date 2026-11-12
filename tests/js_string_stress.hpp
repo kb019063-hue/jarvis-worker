@@ -77,6 +77,23 @@ inline void js_string_model_test() {
         for (size_t i = 0; i < model.size(); ++i) {
             if (text.unit_at(i) != model[i]) return false;
         }
+        // A half of a surrogate pair that stands alone, and what the text is
+        // once each of those is U+FFFD.
+        std::u16string repaired = model;
+        bool well_formed = true;
+        for (size_t i = 0; i < repaired.size(); ++i) {
+            const char16_t unit = repaired[i];
+            if (unit >= 0xD800 && unit <= 0xDBFF && i + 1 < repaired.size() && repaired[i + 1] >= 0xDC00 && repaired[i + 1] <= 0xDFFF) {
+                ++i;
+            } else if (unit >= 0xD800 && unit <= 0xDFFF) {
+                repaired[i] = 0xFFFD;
+                well_formed = false;
+            }
+        }
+        if (text.is_well_formed() != well_formed) return false;
+        const JsString fixed = text.to_well_formed();
+        if (fixed.view() != js_string_test_encode(repaired) || fixed.length() != repaired.size() || !fixed.is_well_formed()) return false;
+        if (well_formed && !(fixed == text)) return false;
         Utf16View view(text);
         return view.size() == model.size() && view.copy() == model;
     };

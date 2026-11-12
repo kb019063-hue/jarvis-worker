@@ -336,7 +336,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 21** | **Indexed CSS cascade:** pre-index author selectors by a rightmost ID/class/tag key with a universal fallback; query candidate selectors per element, retain full selector matching and stable source order. Selective 1,600-rule/1,600-element benchmark improved **88.25 → 30.35 ms (2.9×)**. **82/82 engine suites.** | ✅ Completed |
 | **Phase 22** | **Pipeline fuzz coverage:** run HTML corpus mutations through layout and bitmap rendering, plus valid and malformed BMP/PPM headers through image loading and rendering. Fuzzing exposed and fixed signed overflow while parsing overlong PPM numeric fields. **82/82 engine suites; 400 parser mutations + 400 pipeline runs, 0 findings under ASan/UBSan.** | ✅ Completed |
 | **Phase 23** | **The JavaScript engine, rebuilt against an outside scoreboard:** an 801-case corpus with expected output recorded from Node.js (`make js-conformance`, enforced in CI); new lexer, parser, evaluator and standard library on shared prototypes; promises with the specification's ordering and `await` that suspends; an event loop with a microtask checkpoint and a virtual clock; a collector that derives its roots from reference counts and collects closure cycles; `DOMContentLoaded`/`load` and `removeEventListener`; deep JavaScript ends in a `RangeError`, not a crash. | ✅ Completed (corpus 140 → 796 of 801 cases; 85/85 unit suites) |
-| **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 838 of 843 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`) |
+| **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`) |
 
 ---
 
@@ -1362,8 +1362,8 @@ begin between the halves of a surrogate pair; both the search loop and the
 
 | Check | Result |
 | :--- | :--- |
-| JavaScript corpus (`make js-conformance`) | 838 / 843; the five failures are the Phase 23 ones (BigInt, `Proxy`, typed arrays, array holes). 42 cases are new: `long-strings.dat` (34), lookbehind and unicode cases in `regexp.dat` (6), surrogate halves and `isWellFormed` in `strings.dat` (2). Phase 23's engine passes 810 of the 843 |
-| The corpus re-run under Node 22 | 843 / 843 |
+| JavaScript corpus (`make js-conformance`) | 840 / 845; the five failures are the Phase 23 ones (BigInt, `Proxy`, typed arrays, array holes). 44 cases are new: `long-strings.dat` (34), lookbehind and unicode cases in `regexp.dat` (6), surrogate halves, `isWellFormed`, console output and `decodeURIComponent` in `strings.dat` (4). Phase 23's engine passes 810 of the 845 |
+| The corpus re-run under Node 22 | 845 / 845 |
 | Unit tests (`make test`) | 88 / 88. Three are new: a random-edit model test, a thread test, and one that asserts on counted work through the interpreter |
 | `make tsan`: the two stress tests alone, under ThreadSanitizer, and under ASan + UBSan with leak checking | no report, nothing leaked |
 | Planted bugs: 40 in `JsString`, one at a time | 39 caught by the stress tests; the other changes no result and no counted work |
@@ -1439,7 +1439,7 @@ repository; what they found is, as corpus cases and as assertions in
 8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
    layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
    is under-sized rather than blurry.
-9. **The DOM a script sees is thin.** The language passes 838 of 843 corpus
+9. **The DOM a script sees is thin.** The language passes 840 of 845 corpus
    cases; the bindings were not rebuilt and have no scoreboard. Present:
    `getElementById`, `querySelector(All)`, `createElement`, `appendChild`,
    attributes, `innerHTML`, `textContent`, `children`, `parentNode`, events,

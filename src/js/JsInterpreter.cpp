@@ -259,20 +259,20 @@ void JsInterpreter::init_builtins() {
     JsValue console_obj = JsValue::make_object();
     console_obj.set_property("log", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         for (size_t i = 0; i < args.size(); ++i) {
-            std::cout << args[i].inspect() << (i + 1 < args.size() ? " " : "");
+            std::cout << js_output_text(args[i].inspect()) << (i + 1 < args.size() ? " " : "");
         }
         std::cout << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("warn", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cout << "\033[33m[WARN] ";
-        for (const auto& a : args) std::cout << a.inspect() << " ";
+        for (const auto& a : args) std::cout << js_output_text(a.inspect()) << " ";
         std::cout << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("error", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cerr << "\033[31m[ERROR] ";
-        for (const auto& a : args) std::cerr << a.inspect() << " ";
+        for (const auto& a : args) std::cerr << js_output_text(a.inspect()) << " ";
         std::cerr << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));
@@ -285,7 +285,7 @@ void JsInterpreter::init_builtins() {
     console_obj.set_property("assert", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         if (args.empty() || !args[0].is_truthy()) {
             std::cerr << "Assertion failed";
-            for (size_t i = 1; i < args.size(); ++i) std::cerr << (i == 1 ? ": " : " ") << args[i].inspect();
+            for (size_t i = 1; i < args.size(); ++i) std::cerr << (i == 1 ? ": " : " ") << js_output_text(args[i].inspect());
             std::cerr << std::endl;
         }
         return JsValue::make_undefined();

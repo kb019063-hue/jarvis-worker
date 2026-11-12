@@ -140,7 +140,7 @@ JsValue js_value_from_exception(const std::exception& ex) {
 
 void js_report_uncaught(const JsValue& value) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << js_describe_thrown(value) << std::endl;
+    std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
 }
 
 void js_report_uncaught(const std::exception& ex) {
@@ -159,7 +159,7 @@ void js_report_uncaught(const std::exception& ex) {
 
 void js_report_unhandled_rejection(const JsValue& reason) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught (in promise) " << js_describe_thrown(reason) << std::endl;
+    std::cerr << "Uncaught (in promise) " << js_output_text(js_describe_thrown(reason)) << std::endl;
 }
 
 JsScriptScope::JsScriptScope() : m_loop(EventLoop::default_loop()) {
@@ -509,6 +509,13 @@ std::string js_to_string(const JsValue& value) {
         case JsType::Symbol: js_throw_type_error("Cannot convert a Symbol value to a string");
         default: return js_to_string(js_to_primitive(value, JsPrimitiveHint::String));
     }
+}
+
+std::string js_output_text(std::string text) {
+    for (size_t at = JsString::find_lone_half(text); at != std::string::npos; at = JsString::find_lone_half(text, at + 3)) {
+        text.replace(at, 3, "\xEF\xBF\xBD");
+    }
+    return text;
 }
 
 JsString js_to_js_string(const JsValue& value) {

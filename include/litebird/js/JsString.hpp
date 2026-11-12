@@ -164,6 +164,15 @@ public:
     friend bool operator==(const JsString& a, std::string_view b) noexcept { return a.view() == b; }
     friend bool operator!=(const JsString& a, std::string_view b) noexcept { return a.view() != b; }
 
+    /// True when no half of a surrogate pair stands alone in the text, which is
+    /// when the bytes are UTF-8 that anything outside the engine will accept.
+    bool is_well_formed() const noexcept { return is_ascii() || find_lone_half(view()) == std::string_view::npos; }
+    /// The text with every lone half replaced by U+FFFD.
+    JsString to_well_formed() const;
+    /// Where the next lone half is encoded in `utf8`, at or after `from`, or
+    /// npos. `utf8` must be text taken from a JsString.
+    static size_t find_lone_half(std::string_view utf8, size_t from = 0) noexcept;
+
     /// True when both handles read from the same block, which means no text
     /// was copied to get from one to the other.
     bool shares_text_with(const JsString& other) const noexcept {

@@ -86,20 +86,20 @@ void VM::init_builtins() {
     JsValue console_obj = JsValue::make_object();
     console_obj.set_property("log", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         for (size_t i = 0; i < args.size(); ++i) {
-            std::cout << args[i].to_string() << (i + 1 < args.size() ? " " : "");
+            std::cout << js_output_text(args[i].to_string()) << (i + 1 < args.size() ? " " : "");
         }
         std::cout << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("warn", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cout << "\033[33m[WARN] ";
-        for (const auto& a : args) std::cout << a.to_string() << " ";
+        for (const auto& a : args) std::cout << js_output_text(a.to_string()) << " ";
         std::cout << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("error", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cerr << "\033[31m[ERROR] ";
-        for (const auto& a : args) std::cerr << a.to_string() << " ";
+        for (const auto& a : args) std::cerr << js_output_text(a.to_string()) << " ";
         std::cerr << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));

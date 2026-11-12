@@ -75,7 +75,7 @@ jobs:
         # catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 832
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 834
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a

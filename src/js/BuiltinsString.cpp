@@ -37,14 +37,6 @@ JsString this_string(const char* method) {
 /// `this`, addressed by UTF-16 code unit.
 Utf16View this_units(const char* method) { return Utf16View(this_string(method)); }
 
-/// Where the next lone surrogate half is encoded at or after `from`, or npos.
-size_t find_lone_surrogate(std::string_view text, size_t from) {
-    for (size_t at = text.find('\xED', from); at != std::string_view::npos; at = text.find('\xED', at + 1)) {
-        if (at + 1 < text.size() && static_cast<unsigned char>(text[at + 1]) >= 0xA0) return at;
-    }
-    return std::string_view::npos;
-}
-
 /// ToString(args[index]), addressed by UTF-16 code unit.
 Utf16View arg_units(Args args, size_t index) { return Utf16View(js_to_js_string(js_arg(args, index))); }
 
@@ -319,6 +311,14 @@ std::string uri_decode(const std::string& input, bool keep_reserved) {
             bytes += static_cast<char>(next);
             at += 3;
         }
+        // Shortest form, not a surrogate, not above U+10FFFF: anything else is
+        // not UTF-8, however well the bytes are shaped.
+        uint32_t cp = static_cast<uint32_t>(first) & (extra == 1 ? 0x1Fu : extra == 2 ? 0x0Fu : 0x07u);
+        for (size_t k = 1; k < bytes.size(); ++k) cp = (cp << 6) | (static_cast<unsigned char>(bytes[k]) & 0x3Fu);
+        static const uint32_t smallest[] = {0, 0x80, 0x800, 0x10000};
+        if (cp < smallest[extra] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            js_throw_error(JsErrorKind::URIError, "URI malformed");
+        }
         out += bytes;
         i = at;
     }
@@ -576,25 +576,11 @@ void install_string_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(s);
     });
     js_define_method(sp, "normalize", 0, [](Args) { return JsValue::make_string(this_string("normalize")); });
-    // A string is well formed when no half of a surrogate pair stands alone.
-    // Halves that meet are stored as one four-byte character, so in the bytes
-    // a lone half is exactly a three-byte sequence in the surrogate range:
-    // 0xED followed by 0xA0 or more.
     js_define_method(sp, "isWellFormed", 0, [](Args) {
-        const JsString s = this_string("isWellFormed");
-        return JsValue::make_boolean(s.is_ascii() || find_lone_surrogate(s.view(), 0) == std::string_view::npos);
+        return JsValue::make_boolean(this_string("isWellFormed").is_well_formed());
     });
     js_define_method(sp, "toWellFormed", 0, [](Args) {
-        const JsString s = this_string("toWellFormed");
-        if (s.is_ascii()) return JsValue::make_string(s);
-        const std::string_view text = s.view();
-        size_t at = find_lone_surrogate(text, 0);
-        if (at == std::string_view::npos) return JsValue::make_string(s);
-        std::string out(text);
-        for (; at != std::string_view::npos; at = find_lone_surrogate(text, at + 3)) {
-            out.replace(at, 3, "\xEF\xBF\xBD");     // U+FFFD, also three bytes
-        }
-        return JsValue::make_string(out);
+        return JsValue::make_string(this_string("toWellFormed").to_well_formed());
     });
     js_define_method(sp, "localeCompare", 1, [](Args args) {
         const JsString a = this_string("localeCompare");

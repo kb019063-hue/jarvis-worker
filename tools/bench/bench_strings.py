@@ -107,6 +107,10 @@ CASES = [
      "var s='hello world '.repeat(20000);console.log(s.replace(/o/g,'0').length,s.split(' ').length)"),
     ("regex: test() on a long string, 20k times",
      "var s='x'.repeat(200000)+'end',t=0;for(var i=0;i<20000;i++)if(/^x/.test(s))t++;console.log(t)"),
+    ("regex: lookbehind, 20k matches",
+     "var s='ab,cd;'.repeat(20000),re=/(?<=,)\\w+/g,n=0;while(re.exec(s))n++;console.log(n)"),
+    ("regex: negative lookbehind, no match in 120k",
+     "var s='ab,cd;'.repeat(20000),re=/(?<!,)c/g,n=0;while(re.exec(s))n++;console.log(n)"),
 
     # --- short strings: these must not get slower -------------------------------
     ("short: 'k' + i, 200k",

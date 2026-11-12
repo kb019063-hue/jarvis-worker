@@ -351,3 +351,85 @@ var s = new String('hi'), keys = []; for (var k in s) keys.push(k); s.extra = 1;
 var s = new String('abc'); s[0] = 'z'; s[7] = 'q'; s.length = 1; console.log(s[0], s[7], s.length, String(s), Object.keys(s).join(), delete s[0], s[0])
 #expect
 a q 3 abc 0,1,2,7 false a
+
+#name every way two halves of a pair can meet
+#code
+var hi = "\uD83D", lo = "\uDE00", face = "\uD83D\uDE00", out = [];
+function chk(label, got, want) { var ok = got === want && [...got].length === [...want].length && got.length === want.length; var o = {}; o[got] = 1; ok = ok && o[want] === 1 && new Set([got, want]).size === 1 && got.codePointAt(got.indexOf(hi) < 0 ? 0 : got.indexOf(hi)) === want.codePointAt(want.indexOf(hi) < 0 ? 0 : want.indexOf(hi)); out.push(label + ":" + ok); }
+chk("repeat", (lo + hi).repeat(3), lo + face + face + hi);
+chk("repeat1", (lo + "x" + hi).repeat(2), lo + "x" + face + "x" + hi);
+chk("replace-remove", (hi + "-" + lo).replace("-", ""), face);
+chk("replace-regex", (hi + "--" + lo).replace(/-+/, ""), face);
+chk("replaceAll", ("a" + hi + "-" + lo + "-b").replaceAll("-", ""), "a" + face + "b");
+chk("replace-fn", "a-b".replace("-", function () { return hi; }) .replace("b", lo), "a" + face);
+chk("replace-with-half", "xy".replace("x", hi).replace("y", lo), face);
+chk("replace-$", (hi + "-").replace("-", "$`").length === 2 ? "ok" : "bad", "ok");
+chk("replace-insert-after", hi.replace(/$/, lo), face);
+chk("replace-insert-before", lo.replace(/^/, hi), face);
+chk("replace-$&", (hi + "x").replace("x", lo + "$&"), face + "x");
+chk("replace-groups", ("<" + lo + hi + ">").replace(/<(.)(.)>/, "$2$1"), face);
+chk("split-join", (hi + "," + lo).split(",").join(""), face);
+chk("join-sep", ["a" + hi, "b"].join(lo), "a" + face + "b");
+chk("join-many", [hi, lo, hi, lo].join(""), face + face);
+chk("reverse-join", [lo, hi].reverse().join(""), face);
+chk("array-tostring", String([hi]).concat(lo), face);
+chk("json-escape", JSON.parse('"\\ud83d\\ude00"'), face);
+chk("json-escape-mixed", JSON.parse('"\\ud83d"') + JSON.parse('"\\ude00"'), face);
+chk("json-roundtrip", JSON.parse(JSON.stringify(hi)) + JSON.parse(JSON.stringify(lo)), face);
+chk("json-in-array", JSON.parse('["\\ud83d","\\ude00"]').join(""), face);
+chk("json-raw-then-escape", JSON.parse('"a\\ud83d' + '\\ude00b"'), "a" + face + "b");
+chk("fromCharCode-sep", String.fromCharCode(0xD83D) + String.fromCharCode(0xDE00), face);
+chk("fromCharCode-many", String.fromCharCode(0x61, 0xD83D, 0xDE00, 0x62), "a" + face + "b");
+chk("fromCodePoint", String.fromCodePoint(0xD83D) + String.fromCodePoint(0xDE00), face);
+chk("padStart", lo.padStart(2, hi), face);
+chk("padStart-long", lo.padStart(4, "ab" + hi), "ab" + hi + lo);
+chk("padEnd-cycle", "".padEnd(4, lo + hi), lo + face + hi);
+chk("trim", (" " + hi).trim() + (lo + " ").trim(), face);
+chk("concat-method", hi.concat(lo), face);
+chk("concat-3", "".concat(hi, lo, hi, lo), face + face);
+chk("template", `${hi}${lo}`, face);
+chk("template-text", `a${hi}` + `${lo}b`, "a" + face + "b");
+chk("raw", String.raw`${hi}${lo}`, face);
+chk("slice-concat", face.slice(0, 1) + face.slice(1), face);
+chk("substr-concat", face.substr(0, 1) + face.substr(1, 1), face);
+chk("charAt-concat", face.charAt(0) + face.charAt(1), face);
+chk("index-concat", face[0] + face[1], face);
+chk("at-concat", face.at(0) + face.at(-1), face);
+chk("split-empty-join", face.split("").join(""), face);
+chk("spread-units", Array.prototype.map.call(face, function (c) { return c; }).join(""), face);
+chk("plus-eq", (function () { var s = "a"; s += hi; s += lo; s += "b"; return s; })(), "a" + face + "b");
+chk("plus-eq-prop", (function () { var o = { s: hi }; o.s += lo; return o.s; })(), face);
+chk("upper", (hi + "a").toUpperCase().slice(0, 1) + lo.toLowerCase(), face);
+chk("normalize", hi.normalize() + lo.normalize(), face);
+chk("number-concat", hi + lo + 1, face + "1");
+chk("key-concat", Object.keys((function () { var o = {}; o[hi + lo] = 1; return o; })())[0], face);
+chk("key-computed", Object.keys({ [hi + lo]: 1 })[0], face);
+chk("map-key", (function () { var m = new Map(); m.set(hi + lo, 7); return m.get(face) === 7 ? face : ""; })(), face);
+chk("regex-capture-concat", /(.)(.)/.exec(face)[1] + /(.)(.)/.exec(face)[2], face);
+chk("match-join", face.match(/[\s\S]/g).join(""), face);
+chk("decodeURI", decodeURIComponent("%F0%9F%98%80"), face);
+chk("escape-seq", "\u{1F600}", face);
+chk("substring-wide", ("xx" + hi).substring(2) + (lo + "yy").substring(0, 1), face);
+chk("sort-join", [lo, hi].sort().join(""), face);
+chk("toString", new String(hi) + new String(lo), face);
+chk("localeUpper", hi.toLocaleUpperCase() + lo.toLocaleLowerCase(), face);
+chk("Array.from", Array.from(face.split("")).join(""), face);
+chk("reduce", [hi, lo].reduce(function (a, b) { return a + b; }, ""), face);
+chk("label-symbol", Symbol(hi + lo).description, face);
+chk("fn-name", ({ [hi + lo]: function () {} })[face].name, face);
+chk("error-msg", new Error(hi + lo).message, face);
+chk("date-nope", "x", "x");
+console.log(out.filter(function (l) { return !/:true$/.test(l); }).join(" ") || "all " + out.length + " ok");
+#expect
+all 63 ok
+
+#name isWellFormed and toWellFormed
+#code
+var hi = "\uD83D", lo = "\uDE00", f = hi + lo, out = [];
+var list = ["", "abc", f, hi, lo, lo + hi, hi + hi + lo, f + lo, "a" + hi + "b" + lo + "c", "\uD7FF\uE000\uFFFD", "\u00ed\u00a0", "x".repeat(1000) + hi, (lo + f).repeat(3), "\uDBFF\uDFFF", "\uDBFF", "\uDC00\uDBFF\uDC00"];
+list.forEach(function (s) { var w = s.toWellFormed(); out.push(s.isWellFormed() + ":" + w.isWellFormed() + ":" + (w === s) + ":" + w.length + ":" + Array.prototype.map.call(w.slice(-6), function (c) { return c.charCodeAt(0).toString(16); }).join(".")); });
+out.push(String.prototype.isWellFormed.length, String.prototype.toWellFormed.name, String.prototype.isWellFormed.call(123), String.prototype.toWellFormed.call(true));
+try { String.prototype.isWellFormed.call(null); } catch (e) { out.push(e.name); }
+console.log(out.join(" "));
+#expect
+true:true:true:0: true:true:true:3:61.62.63 true:true:true:2:d83d.de00 false:true:false:1:fffd false:true:false:1:fffd false:true:false:2:fffd.fffd false:true:false:3:fffd.d83d.de00 false:true:false:3:d83d.de00.fffd false:true:false:5:61.fffd.62.fffd.63 true:true:true:3:d7ff.e000.fffd true:true:true:2:ed.a0 false:true:false:1001:78.78.78.78.78.fffd false:true:false:9:fffd.d83d.de00.fffd.d83d.de00 true:true:true:2:dbff.dfff false:true:false:1:fffd false:true:false:3:fffd.dbff.dc00 0 toWellFormed true true TypeError

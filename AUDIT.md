@@ -1233,9 +1233,9 @@ The parser's walks down the stack of open elements and the cycle check of
 `<a>` case are in `html_parser_nesting_limit_holds_for_every_kind_of_element`,
 and the class lists in `style_resolver_indexed_candidates_preserve_cascade`.
 Six bugs planted in the float change, one at a time, are each caught by a
-unit test. With the two layout changes, 1,616 pages (the examples and every
-html5lib input) give the same output as before in five modes, 8,080 runs,
-and so do 305 pages of random floats in three.
+unit test. With the two layout changes, 1,746 pages (the examples and every
+distinct html5lib input) give the same output as before in five modes, 8,730
+runs, and so do 305 pages of random floats in three.
 
 ---
 

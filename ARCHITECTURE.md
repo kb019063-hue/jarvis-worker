@@ -1563,13 +1563,13 @@ long.
 | Check | Result |
 | :--- | :--- |
 | `make deep`: 145 generated pages, each run three ways (the DOM, layout and paint dumps with a bitmap, in one process; the terminal renderer; for a page without script, the parser alone), then 300 random pages at the nesting limit | 1,292 runs, 0 failed, under 10 minutes on two cores; the slowest run takes 21 s of the 60 allowed. On `main`, 264 of the 392 runs over the generated pages fail: 139 by `SIGSEGV`, 106 out of time, 8 aborted, 7 out of memory, 3 with a wrong result, 1 with more than 4 GB of output |
-| The same pages in the ASan + UBSan build, for memory errors: 10,000 levels on a 2 MB stack (`make asan-deep`, part of `make asan`) | 842 runs, 0 failed, no sanitizer report. The same at 50,000 levels, here and in CI, where it added about 13 minutes to the job |
+| The same pages in the ASan + UBSan build, for memory errors: 10,000 levels on a 2 MB stack (`make asan-deep`, part of `make asan`) | 842 runs, 0 failed, no sanitizer report. The same at 50,000 levels, here and in CI, where it added 14 minutes to the job |
 | ASan + UBSan: unit tests, the JavaScript corpus, both fuzzers (`make asan-core`) | 95 / 95; corpus 839 / 845, as before; 400 + 400 fuzz runs; no report |
 | A chain of 1,000,000 nodes walked and released in a unit test, in both builds | passes with 8 bytes of stack a level, less than a function that calls itself uses |
 | Random pages at the limit, from the tags the tree builder treats specially | 4,500 over three seeds: no crash, no element deeper than 512 |
 | Unit tests (`make test`) | 95 / 95; seven are new and one was rewritten |
 | html5lib tree construction | 1771 / 1792, one more than before (an `<a>` inside an `<a>`) |
-| The same 1,616 pages (html5lib inputs and the examples) through five output modes, before and after | 8,080 outputs; 4 differ, all one page, whose tree now equals parse5's |
+| 1,746 pages (every distinct html5lib input and the 16 examples) through five output modes, `main` against this | 8,730 outputs; 4 differ, all one page, whose tree now equals parse5's |
 | 1,500 shallow random pages against parse5, an independent parser | equal on 1,316, up from 1,308; none got worse |
 | JavaScript corpus | 840 / 845, the same five failures as before; 845 / 845 under Node 22 |
 | Bugs planted in the float change, one at a time | 6 of 6 caught by a unit test |
@@ -1577,6 +1577,9 @@ long.
 
 `make deep` is a CI job of its own. The random pages are generated from a
 fixed seed (`--seed`), so a failure names a page that can be generated again.
+In its first two runs that job took 8 and 12 minutes, 7 and 10 of them in
+`make deep`. It runs beside the sanitizer job, which went from 9 minutes to
+11, and the pipeline as a whole from 11 minutes to 13.
 
 ### 9. What is still open here
 

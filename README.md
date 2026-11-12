@@ -69,7 +69,7 @@ case mappings, part of `\p{L}`).
 script can catch. And 34 (`long-strings.dat`) loop over, build or take apart
 strings of 100,000 characters and more, work that used to grow with the
 square of the length: reading a string copied it. The engine before that fix
-passes 12 of the 34 and times out on 15 (AUDIT.md, finding 25).
+passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual

@@ -814,7 +814,7 @@ checks that both engines print the same result.
 | one long string passed to a function 200,000 times | 46,722 | 199 | 29 |
 | `s.substring(i, i + 5)` at each of 100,000 positions | 17,640 | 62 | 33 |
 | the same in text that is not ASCII | 72,321 | 66 | 33 |
-| `indexOf` from hit to hit, 20,000 hits | 4,000 | 35 | 30 |
+| `indexOf` from hit to hit, 20,000 hits | 4,000 | 13 | 30 |
 | `s += x`, 100,000 times | 9,811 | 49 | 45 |
 | `obj.s += x`, 100,000 times | 4,154 | 35 | 41 |
 | 30,000 table rows appended to one string | 5,440 | 26 | 44 |
@@ -907,7 +907,9 @@ reads it one character at a time, and some results are 90,000 characters.
 
 - `tests/js-conformance/long-strings.dat`: 34 scripts with Node's output, most
   of them the loops in the table at a size where the old cost is a timeout.
-  The engine before passes 12 of them; 15 time out and 2 end the process.
+  The engine before passes 12 of them at best: 15 time out, 2 end the
+  process, and one of the 12 (100,000 appends) takes 9.9 s of the 10 s limit,
+  so on a busy machine it is 11.
 - `js_string_matches_a_utf16_model_under_random_edits`: 60,000 random
   operations on a pool of strings, each compared with a `std::u16string` after
   every step and the whole pool every 50, then every pair of 585 short strings

@@ -504,7 +504,7 @@ void install_date_builtins(JsIntrinsics& realm) {
                 return make_date(*std::static_pointer_cast<double>(value.object_val->internal));
             }
             JsValue primitive = js_to_primitive(value);
-            if (primitive.type == JsType::String) return make_date(parse_date(primitive.string_val));
+            if (primitive.type == JsType::String) return make_date(parse_date(primitive.string_val.str()));
             return make_date(time_clip(js_to_number(primitive)));
         }
         return make_date(time_from_components(args, true));

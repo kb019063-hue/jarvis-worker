@@ -231,7 +231,7 @@ JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviv
 // Serialising
 // ---------------------------------------------------------------------------
 
-void quote_into(std::string& out, const std::string& s) {
+void quote_into(std::string& out, std::string_view s) {
     static const char* hex = "0123456789abcdef";
     out += '"';
     for (size_t i = 0; i < s.size(); ++i) {
@@ -286,7 +286,7 @@ public:
             int count = static_cast<int>(std::min(10.0, std::max(0.0, js_to_integer(space.number_val))));
             m_gap.assign(static_cast<size_t>(count), ' ');
         } else if (space.type == JsType::String) {
-            m_gap = space.string_val.substr(0, 10);
+            m_gap = space.string_val.substring(0, 10).str();      // the first ten code units
         }
     }
 
@@ -313,7 +313,7 @@ public:
         switch (value.type) {
             case JsType::Null: out += "null"; return true;
             case JsType::Boolean: out += value.bool_val ? "true" : "false"; return true;
-            case JsType::String: quote_into(out, value.string_val); return true;
+            case JsType::String: quote_into(out, value.string_val.view()); return true;
             case JsType::Number:
                 out += std::isfinite(value.number_val) ? js_number_to_string(value.number_val) : "null";
                 return true;

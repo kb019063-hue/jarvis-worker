@@ -672,9 +672,16 @@ private:
 
 class Matcher {
 public:
-    Matcher(const Program& program, const std::u16string& subject)
+    Matcher(const Program& program, const Utf16View& subject)
         : m_program(program), m_subject(subject),
           m_captures(static_cast<size_t>(program.group_count) * 2, -1) {}
+
+    /// In unicode mode the subject is a sequence of code points, so no match
+    /// may begin between the two halves of a surrogate pair.
+    bool splits_pair(size_t pos) const {
+        return m_program.unicode && pos > 0 && pos < m_subject.size() && m_subject[pos] >= 0xDC00 &&
+               m_subject[pos] <= 0xDFFF && m_subject[pos - 1] >= 0xD800 && m_subject[pos - 1] <= 0xDBFF;
+    }
 
     /// Tries to match starting exactly at `start`. On success the captures
     /// hold [start, end) pairs in UTF-16 units, -1 for unmatched groups.
@@ -724,6 +731,35 @@ private:
         return c;
     }
 
+    /// The code point that ends at `pos`, read right to left, and its width.
+    uint32_t code_point_before(size_t pos, size_t& width) const {
+        uint32_t c = m_subject[pos - 1];
+        width = 1;
+        if (m_program.unicode && c >= 0xDC00 && c <= 0xDFFF && pos >= 2) {
+            uint32_t high = m_subject[pos - 2];
+            if (high >= 0xD800 && high <= 0xDBFF) {
+                width = 2;
+                return 0x10000 + ((high - 0xD800) << 10) + (c - 0xDC00);
+            }
+        }
+        return c;
+    }
+
+    /// Where a match that consumed `width` units from `pos` now stands.
+    size_t step(size_t pos, size_t width) const { return m_backward ? pos - width : pos + width; }
+
+    /// The body of a lookbehind is matched right to left, as the language
+    /// defines it: the last term first, each character read from before the
+    /// position. A lookahead inside it goes left to right again. Lookarounds
+    /// run to completion before their continuation, so the direction is plain
+    /// state that this scope sets and puts back.
+    struct Direction {
+        Matcher& m;
+        bool previous;
+        Direction(Matcher& matcher, bool backward) : m(matcher), previous(matcher.m_backward) { m.m_backward = backward; }
+        ~Direction() { m.m_backward = previous; }
+    };
+
     bool same_char(uint32_t a, uint32_t b) const {
         if (a == b) return true;
         return m_program.ignore_case && fold_case(a) == fold_case(b);
@@ -735,10 +771,17 @@ private:
         return hit != set.negated;
     }
 
-    /// Matches one character-consuming atom at `pos`.
+    /// Matches one character-consuming atom at `pos`: the character after it,
+    /// or the one before it when matching backward.
     bool single(const Node* node, size_t pos, size_t& width) const {
-        if (pos >= m_subject.size()) return false;
-        uint32_t c = code_point_at(pos, width);
+        uint32_t c;
+        if (m_backward) {
+            if (pos == 0) return false;
+            c = code_point_before(pos, width);
+        } else {
+            if (pos >= m_subject.size()) return false;
+            c = code_point_at(pos, width);
+        }
         switch (node->type) {
             case Node::Type::Char: return same_char(c, node->ch);
             case Node::Type::Any: return m_program.dot_all || !is_line_terminator(c);
@@ -764,7 +807,8 @@ private:
         rest.items = &items;
         rest.next = index + 1;
         rest.k = &k;
-        return match(items[index].get(), pos, rest);
+        const Node* item = m_backward ? items[items.size() - 1 - index].get() : items[index].get();
+        return match(item, pos, rest);
     }
 
     void clear_groups(int first, int last) {
@@ -843,7 +887,7 @@ private:
             for (size_t count = 0;; ++count) {
                 if (count >= node->min && k.run(p)) return true;
                 if (count >= node->max || !single(atom, p, width)) return false;
-                p += width;
+                p = step(p, width);
                 charge();
             }
         }
@@ -851,11 +895,11 @@ private:
         if (!m_program.unicode) {
             // Every match is exactly one unit wide.
             size_t count = 0;
-            while (count < node->max && single(atom, pos + count, width)) ++count;
+            while (count < node->max && single(atom, step(pos, count), width)) ++count;
             if (count < node->min) return false;
             for (size_t i = count + 1; i-- > node->min;) {
                 charge();
-                if (k.run(pos + i)) return true;
+                if (k.run(step(pos, i))) return true;
             }
             return false;
         }
@@ -864,7 +908,7 @@ private:
         ends.push_back(pos);
         size_t p = pos;
         while (ends.size() - 1 < node->max && single(atom, p, width)) {
-            p += width;
+            p = step(p, width);
             ends.push_back(p);
         }
         if (ends.size() - 1 < node->min) return false;
@@ -885,7 +929,7 @@ private:
             case Node::Type::Any:
             case Node::Type::Class: {
                 size_t width = 1;
-                return single(node, pos, width) && k.run(pos + width);
+                return single(node, pos, width) && k.run(step(pos, width));
             }
 
             case Node::Type::LineStart:
@@ -924,8 +968,8 @@ private:
                     bool run(size_t end) override {
                         long old_start = m->m_captures[slot];
                         long old_end = m->m_captures[slot + 1];
-                        m->m_captures[slot] = static_cast<long>(start);
-                        m->m_captures[slot + 1] = static_cast<long>(end);
+                        m->m_captures[slot] = static_cast<long>(std::min(start, end));
+                        m->m_captures[slot + 1] = static_cast<long>(std::max(start, end));
                         if (k->run(end)) return true;
                         m->m_captures[slot] = old_start;
                         m->m_captures[slot + 1] = old_end;
@@ -948,19 +992,25 @@ private:
                 if (slot + 1 >= m_captures.size() || m_captures[slot] < 0) return k.run(pos);     // unset group matches empty
                 size_t start = static_cast<size_t>(m_captures[slot]);
                 size_t length = static_cast<size_t>(m_captures[slot + 1]) - start;
-                if (pos + length > m_subject.size()) return false;
+                if (m_backward ? length > pos : pos + length > m_subject.size()) return false;
+                const size_t at = m_backward ? pos - length : pos;
                 for (size_t i = 0; i < length; ++i) {
-                    if (!same_char(m_subject[start + i], m_subject[pos + i])) return false;
+                    if (!same_char(m_subject[start + i], m_subject[at + i])) return false;
                 }
-                return k.run(pos + length);
+                return k.run(step(pos, length));
             }
 
-            case Node::Type::LookAhead: {
+            case Node::Type::LookAhead:
+            case Node::Type::LookBehind: {
                 struct Accept : Continuation {
                     bool run(size_t) override { return true; }
                 } accept;
                 std::vector<long> saved = m_captures;
-                bool found = match(node->children[0].get(), pos, accept);
+                bool found;
+                {
+                    Direction direction(*this, node->type == Node::Type::LookBehind);
+                    found = match(node->children[0].get(), pos, accept);
+                }
                 if (node->negate) {
                     m_captures = saved;
                     return !found && k.run(pos);
@@ -973,36 +1023,17 @@ private:
                 m_captures = saved;
                 return false;
             }
-
-            case Node::Type::LookBehind: {
-                struct EndsAt : Continuation {
-                    size_t target;
-                    bool run(size_t p) override { return p == target; }
-                } ends_at;
-                ends_at.target = pos;
-                std::vector<long> saved = m_captures;
-                bool found = false;
-                for (size_t start = pos + 1; start-- > 0;) {
-                    if (match(node->children[0].get(), start, ends_at)) { found = true; break; }
-                    m_captures = saved;
-                }
-                if (node->negate) {
-                    m_captures = saved;
-                    return !found && k.run(pos);
-                }
-                if (!found) return false;
-                if (k.run(pos)) return true;
-                m_captures = saved;
-                return false;
-            }
         }
         return false;
     }
 
     const Program& m_program;
-    const std::u16string& m_subject;
+    // The subject is read in place: an ASCII string byte by byte, any other
+    // through the UTF-16 form its string keeps. Nothing is converted per match.
+    const Utf16View& m_subject;
     std::vector<long> m_captures;
     uint64_t m_steps{0};
+    bool m_backward{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -1058,27 +1089,13 @@ JsValue make_regexp(std::shared_ptr<Program> program) {
     return regex;
 }
 
-/// The subject converted to UTF-16, cached because exec() in a loop is called
-/// with the same string every time.
-const std::u16string& wide_subject(const std::string& subject) {
-    static thread_local std::string cached_source;
-    static thread_local std::u16string cached_wide;
-    static thread_local bool valid = false;
-    if (!valid || cached_source != subject) {
-        cached_source = subject;
-        cached_wide = js_utf8_to_utf16(subject);
-        valid = true;
-    }
-    return cached_wide;
-}
-
 struct MatchResult {
     bool matched{false};
     std::vector<long> captures;
 };
 
 /// Finds the first match at or after `from` (exactly at `from` when sticky).
-MatchResult run_match(const Program& program, const std::u16string& subject, size_t from, bool sticky) {
+MatchResult run_match(const Program& program, const Utf16View& subject, size_t from, bool sticky) {
     MatchResult result;
     if (from > subject.size()) return result;
     Matcher matcher(program, subject);
@@ -1092,9 +1109,10 @@ MatchResult run_match(const Program& program, const std::u16string& subject, siz
     for (size_t start = from; start <= subject.size(); ++start) {
         if (literal_start && !sticky) {
             size_t found = subject.find(static_cast<char16_t>(first->ch), start);
-            if (found == std::u16string::npos) return result;
+            if (found == Utf16View::npos) return result;
             start = found;
         }
+        if (start > from && matcher.splits_pair(start)) continue;
         if (matcher.match_at(start)) {
             result.matched = true;
             result.captures = matcher.captures();
@@ -1105,23 +1123,33 @@ MatchResult run_match(const Program& program, const std::u16string& subject, siz
     return result;
 }
 
-std::u16string capture_text(const std::u16string& subject, const std::vector<long>& captures, size_t group) {
+/// What group `group` matched, as UTF-16 (empty when it did not take part).
+std::u16string capture_text(const Utf16View& subject, const std::vector<long>& captures, size_t group) {
     long start = captures[group * 2];
     long end = captures[group * 2 + 1];
     if (start < 0) return std::u16string();
-    return subject.substr(static_cast<size_t>(start), static_cast<size_t>(end - start));
+    return subject.copy(static_cast<size_t>(start), static_cast<size_t>(end - start));
 }
 
-JsValue build_match_array(const Program& program, const std::string& input, const std::u16string& subject,
-                          const std::vector<long>& captures) {
+/// What group `group` matched, as a string value's text.
+JsString capture_string(const Utf16View& subject, const std::vector<long>& captures, size_t group) {
+    long start = captures[group * 2];
+    long end = captures[group * 2 + 1];
+    if (start < 0) return JsString();
+    return subject.slice(static_cast<size_t>(start), static_cast<size_t>(end));
+}
+
+JsValue build_match_array(const Program& program, const Utf16View& subject, const std::vector<long>& captures) {
     std::vector<JsValue> items;
     for (int g = 0; g < program.group_count; ++g) {
         if (captures[static_cast<size_t>(g) * 2] < 0) items.push_back(JsValue::make_undefined());
-        else items.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, captures, static_cast<size_t>(g)))));
+        else items.push_back(JsValue::make_string(capture_string(subject, captures, static_cast<size_t>(g))));
     }
     JsValue array = JsValue::make_array(items);
     array.set_property("index", JsValue::make_number(static_cast<double>(captures[0])));
-    array.set_property("input", JsValue::make_string(input));
+    // `input` is the subject itself, not a copy: an exec() loop over a long
+    // string makes one match array per match.
+    array.set_property("input", JsValue::make_string(subject.string()));
     if (program.names.empty()) {
         array.set_property("groups", JsValue::make_undefined());
     } else {
@@ -1143,12 +1171,19 @@ void set_last_index(JsValue regex, size_t value) {
 }
 
 /// RegExp.prototype.exec: honours and updates lastIndex for global/sticky.
-bool exec_raw(const JsValue& regex, const Program& program, const std::u16string& subject, MatchResult& out) {
+bool exec_raw(const JsValue& regex, const Program& program, const Utf16View& subject, MatchResult& out) {
     const bool uses_last_index = program.global || program.sticky;
     size_t from = uses_last_index ? last_index_of(regex) : 0;
     if (from > subject.size()) {
         set_last_index(regex, 0);
         return false;
+    }
+    // In unicode mode the subject is a sequence of code points. A lastIndex
+    // that points at the second half of a surrogate pair is inside a
+    // character, and matching starts at the character.
+    if (program.unicode && from > 0 && from < subject.size() && subject[from] >= 0xDC00 && subject[from] <= 0xDFFF &&
+        subject[from - 1] >= 0xD800 && subject[from - 1] <= 0xDBFF) {
+        --from;
     }
     out = run_match(program, subject, from, program.sticky);
     if (!out.matched) {
@@ -1161,7 +1196,7 @@ bool exec_raw(const JsValue& regex, const Program& program, const std::u16string
 
 /// Where to resume after an empty match: one unit on, or one code point in
 /// unicode mode.
-size_t advance_index(const Program& program, const std::u16string& subject, size_t index) {
+size_t advance_index(const Program& program, const Utf16View& subject, size_t index) {
     if (program.unicode && index + 1 < subject.size() && subject[index] >= 0xD800 && subject[index] <= 0xDBFF &&
         subject[index + 1] >= 0xDC00 && subject[index + 1] <= 0xDFFF) {
         return index + 2;
@@ -1204,20 +1239,20 @@ JsValue js_regexp_create(const std::string& pattern, const std::string& flags) {
     return make_regexp(compile(pattern, flags));
 }
 
-JsValue js_regexp_match(const JsValue& regex, const std::string& subject_utf8) {
+JsValue js_regexp_match(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.match");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     if (!program->global) {
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) return JsValue::make_null();
-        return build_match_array(*program, subject_utf8, subject, result.captures);
+        return build_match_array(*program, subject, result.captures);
     }
     set_last_index(regex, 0);
     std::vector<JsValue> matches;
     while (true) {
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) break;
-        matches.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, result.captures, 0))));
+        matches.push_back(JsValue::make_string(capture_string(subject, result.captures, 0)));
         if (result.captures[0] == result.captures[1]) {
             set_last_index(regex, advance_index(*program, subject, static_cast<size_t>(result.captures[1])));
         }
@@ -1226,15 +1261,15 @@ JsValue js_regexp_match(const JsValue& regex, const std::string& subject_utf8) {
     return JsValue::make_array(matches);
 }
 
-JsValue js_regexp_match_all(const JsValue& regex, const std::string& subject_utf8) {
+JsValue js_regexp_match_all(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.matchAll");
     // Iterate with a private copy so the caller's lastIndex is left alone.
     JsValue clone = make_regexp(program);
     set_last_index(clone, last_index_of(regex));
-    auto subject = std::make_shared<std::u16string>(js_utf8_to_utf16(subject_utf8));
-    auto input = std::make_shared<std::string>(subject_utf8);
+    // The view keeps the string alive for as long as the iterator lives.
+    auto subject = std::make_shared<const Utf16View>(subject_string);
     auto done = std::make_shared<bool>(false);
-    return js_make_iterator([clone, program, subject, input, done](JsValue& value) {
+    return js_make_iterator([clone, program, subject, done](JsValue& value) {
         if (*done) return false;
         MatchResult result;
         if (!exec_raw(clone, *program, *subject, result)) {
@@ -1245,23 +1280,23 @@ JsValue js_regexp_match_all(const JsValue& regex, const std::string& subject_utf
             set_last_index(clone, advance_index(*program, *subject, static_cast<size_t>(result.captures[1])));
         }
         if (!program->global) *done = true;
-        value = build_match_array(*program, *input, *subject, result.captures);
+        value = build_match_array(*program, *subject, result.captures);
         return true;
     }, {clone});
 }
 
-double js_regexp_search(const JsValue& regex, const std::string& subject_utf8) {
+double js_regexp_search(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.search");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     MatchResult result = run_match(*program, subject, 0, program->sticky);
     return result.matched ? static_cast<double>(result.captures[0]) : -1.0;
 }
 
-JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8, const JsValue& replacement) {
+JsValue js_regexp_replace(const JsValue& regex, const JsString& subject_string, const JsValue& replacement) {
     auto program = program_of(regex, "String.prototype.replace");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     const bool functional = replacement.is_function();
-    const std::u16string replacement_template = functional ? std::u16string() : js_utf8_to_utf16(js_to_string(replacement));
+    const std::u16string replacement_template = functional ? std::u16string() : Utf16View(js_to_js_string(replacement)).copy();
 
     if (program->global) set_last_index(regex, 0);
     std::vector<MatchResult> matches;
@@ -1275,13 +1310,15 @@ JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8,
         }
     }
 
+    if (matches.empty()) return JsValue::make_string(subject_string);      // nothing matched: the same string
+
     std::u16string out;
     size_t cursor = 0;
     for (const auto& match : matches) {
         size_t start = static_cast<size_t>(match.captures[0]);
         size_t end = static_cast<size_t>(match.captures[1]);
         if (start < cursor) continue;
-        out.append(subject, cursor, start - cursor);
+        subject.append_to(out, cursor, start - cursor);
 
         std::vector<JsReplaceCapture> captures(static_cast<size_t>(program->group_count));
         for (int g = 0; g < program->group_count; ++g) {
@@ -1292,39 +1329,40 @@ JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8,
         if (functional) {
             std::vector<JsValue> args;
             for (const auto& capture : captures) {
-                args.push_back(capture.matched ? JsValue::make_string(js_utf16_to_utf8(capture.text)) : JsValue::make_undefined());
+                args.push_back(capture.matched ? JsValue::make_string(JsString::from_utf16(capture.text)) : JsValue::make_undefined());
             }
             args.push_back(JsValue::make_number(static_cast<double>(start)));
-            args.push_back(JsValue::make_string(subject_utf8));
+            args.push_back(JsValue::make_string(subject_string));
             if (!program->names.empty()) {
                 JsValue groups = JsValue::make_object();
                 for (const auto& [name, index] : program->names) groups.set_property(name, args[index]);
                 args.push_back(groups);
             }
-            out += js_utf8_to_utf16(js_to_string(replacement.call(args)));
+            Utf16View(js_to_js_string(replacement.call(args))).append_to(out);
         } else {
             out += js_expand_replacement(replacement_template, subject, start, captures, program->names);
         }
         cursor = end;
     }
-    out.append(subject, cursor, std::u16string::npos);
-    return JsValue::make_string(js_utf16_to_utf8(out));
+    subject.append_to(out, cursor);
+    return JsValue::make_string(JsString::from_utf16(out));
 }
 
-JsValue js_regexp_split(const JsValue& regex, const std::string& subject_utf8, double limit) {
+JsValue js_regexp_split(const JsValue& regex, const JsString& subject_string, double limit) {
     auto program = program_of(regex, "String.prototype.split");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     std::vector<JsValue> parts;
     if (limit == 0) return JsValue::make_array(parts);
 
-    auto push = [&](const std::u16string& text) {
-        parts.push_back(JsValue::make_string(js_utf16_to_utf8(text)));
+    // Adds code units [begin, end) of the subject; true when the limit is reached.
+    auto push = [&](size_t begin, size_t end) {
+        parts.push_back(JsValue::make_string(subject.slice(begin, end)));
         return parts.size() >= limit;
     };
 
     if (subject.empty()) {
         // Splitting "" yields [""] unless the pattern matches the empty string.
-        if (!run_match(*program, subject, 0, true).matched) push(subject);
+        if (!run_match(*program, subject, 0, true).matched) push(0, 0);
         return JsValue::make_array(parts);
     }
 
@@ -1343,20 +1381,20 @@ JsValue js_regexp_split(const JsValue& regex, const std::string& subject_utf8, d
             search = advance_index(*program, subject, search);
             continue;
         }
-        if (push(subject.substr(piece_start, search - piece_start))) return JsValue::make_array(parts);
+        if (push(piece_start, search)) return JsValue::make_array(parts);
         // Captured groups are spliced into the result.
         for (int g = 1; g < program->group_count; ++g) {
             if (result.captures[static_cast<size_t>(g) * 2] < 0) {
                 parts.push_back(JsValue::make_undefined());
             } else {
-                parts.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, result.captures, static_cast<size_t>(g)))));
+                parts.push_back(JsValue::make_string(capture_string(subject, result.captures, static_cast<size_t>(g))));
             }
             if (parts.size() >= limit) return JsValue::make_array(parts);
         }
         piece_start = match_end;
         search = match_end;
     }
-    push(subject.substr(piece_start));
+    push(piece_start, subject.size());
     return JsValue::make_array(parts);
 }
 
@@ -1393,16 +1431,15 @@ void install_regexp_builtins(JsIntrinsics& realm) {
     js_define_method(rp, "exec", 1, [](Args args) {
         JsValue regex = self();
         auto program = program_of(regex, "RegExp.prototype.exec");
-        std::string input = js_to_string(js_arg(args, 0));
-        const std::u16string subject = wide_subject(input);
+        const Utf16View subject(js_to_js_string(js_arg(args, 0)));
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) return JsValue::make_null();
-        return build_match_array(*program, input, subject, result.captures);
+        return build_match_array(*program, subject, result.captures);
     });
     js_define_method(rp, "test", 1, [](Args args) {
         JsValue regex = self();
         auto program = program_of(regex, "RegExp.prototype.test");
-        const std::u16string subject = wide_subject(js_to_string(js_arg(args, 0)));
+        const Utf16View subject(js_to_js_string(js_arg(args, 0)));
         MatchResult result;
         return JsValue::make_boolean(exec_raw(regex, *program, subject, result));
     });

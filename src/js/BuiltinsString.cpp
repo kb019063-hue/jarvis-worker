@@ -1,8 +1,11 @@
 // String, String.prototype and the URI encoding globals.
 //
 // JavaScript strings are sequences of UTF-16 code units; this engine stores
-// UTF-8. Every index-based method therefore goes through StringView, which
-// answers in UTF-16 units and only converts when the text is not plain ASCII.
+// UTF-8. The text of a string value is a JsString, which knows its length in
+// code units and reads one in constant time, and every index-based method
+// here goes through it or through Utf16View. No method copies `this`: a
+// method that runs once per character of a long string (charCodeAt in a
+// loop) must cost the same whatever the length of the string.
 
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
@@ -17,7 +20,8 @@ namespace {
 
 using Args = const std::vector<JsValue>&;
 
-std::string this_string(const char* method) {
+/// `this` as a string. Shares the text; nothing is copied.
+JsString this_string(const char* method) {
     const JsValue& me = JsValue::current_this();
     if (me.type == JsType::String) return me.string_val;
     if (me.is_nullish()) {
@@ -27,56 +31,14 @@ std::string this_string(const char* method) {
     if (const JsValue* inner = js_wrapped_primitive(me); inner && inner->type == JsType::String) {
         return inner->string_val;
     }
-    return js_to_string(me);
+    return JsString(js_to_string(me));
 }
 
-/// A string addressed in UTF-16 code units.
-class StringView {
-public:
-    explicit StringView(const std::string& source) : m_source(source), m_ascii(js_is_ascii(source)) {
-        if (!m_ascii) m_wide = js_utf8_to_utf16(source);
-    }
+/// `this`, addressed by UTF-16 code unit.
+Utf16View this_units(const char* method) { return Utf16View(this_string(method)); }
 
-    size_t size() const { return m_ascii ? m_source.size() : m_wide.size(); }
-    bool ascii() const { return m_ascii; }
-
-    char16_t at(size_t i) const {
-        return m_ascii ? static_cast<char16_t>(static_cast<unsigned char>(m_source[i])) : m_wide[i];
-    }
-
-    std::string slice(size_t begin, size_t end) const {
-        if (begin >= end) return std::string();
-        if (m_ascii) return m_source.substr(begin, end - begin);
-        return js_utf16_to_utf8(m_wide.substr(begin, end - begin));
-    }
-
-    std::u16string wide() const {
-        if (!m_ascii) return m_wide;
-        return std::u16string(m_source.begin(), m_source.end());
-    }
-
-    size_t find(const std::string& needle, size_t from) const {
-        if (from > size()) return std::string::npos;
-        if (m_ascii) {
-            if (!js_is_ascii(needle)) return std::string::npos;
-            return m_source.find(needle, from);
-        }
-        return m_wide.find(js_utf8_to_utf16(needle), from);
-    }
-
-    size_t rfind(const std::string& needle, size_t from) const {
-        if (m_ascii) {
-            if (!js_is_ascii(needle)) return std::string::npos;
-            return m_source.rfind(needle, from);
-        }
-        return m_wide.rfind(js_utf8_to_utf16(needle), from);
-    }
-
-private:
-    const std::string& m_source;
-    bool m_ascii;
-    std::u16string m_wide;
-};
+/// ToString(args[index]), addressed by UTF-16 code unit.
+Utf16View arg_units(Args args, size_t index) { return Utf16View(js_to_js_string(js_arg(args, index))); }
 
 /// ToIntegerOrInfinity clamped into [0, length].
 size_t clamp_index(const JsValue& arg, size_t length, size_t fallback) {
@@ -108,12 +70,12 @@ bool is_space_unit(char16_t c) {
     }
 }
 
-std::string trim(const std::string& s, bool start, bool end) {
-    StringView view(s);
+JsString trim(const JsString& s, bool start, bool end) {
+    Utf16View view(s);
     size_t b = 0;
     size_t e = view.size();
-    if (start) while (b < e && is_space_unit(view.at(b))) ++b;
-    if (end) while (e > b && is_space_unit(view.at(e - 1))) --e;
+    if (start) while (b < e && is_space_unit(view[b])) ++b;
+    if (end) while (e > b && is_space_unit(view[e - 1])) --e;
     return view.slice(b, e);
 }
 
@@ -151,44 +113,52 @@ char16_t to_lower_unit(char16_t c) {
     return c;
 }
 
-std::string change_case(const std::string& s, bool upper) {
-    if (js_is_ascii(s)) {
-        std::string out = s;
-        for (char& c : out) {
+JsString change_case(const JsString& s, bool upper) {
+    if (s.is_ascii()) {
+        const std::string_view text = s.view();
+        // Text that is already in the case asked for is the same string.
+        size_t first = 0;
+        while (first < text.size() && !(upper ? (text[first] >= 'a' && text[first] <= 'z')
+                                              : (text[first] >= 'A' && text[first] <= 'Z'))) {
+            ++first;
+        }
+        if (first == text.size()) return s;
+        std::string out(text);
+        for (size_t i = first; i < out.size(); ++i) {
+            char& c = out[i];
             if (upper && c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
             else if (!upper && c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
         }
-        return out;
+        return JsString(out);
     }
-    std::u16string wide = js_utf8_to_utf16(s);
+    Utf16View view(s);
     std::u16string out;
-    out.reserve(wide.size());
-    for (char16_t c : wide) {
+    out.reserve(view.size());
+    for (size_t i = 0; i < view.size(); ++i) {
+        const char16_t c = view[i];
         if (upper && c == 0xDF) { out += u"SS"; continue; }     // sharp s has no single upper form
         out += upper ? to_upper_unit(c) : to_lower_unit(c);
     }
-    return js_utf16_to_utf8(out);
+    return JsString::from_utf16(out);
 }
 
-std::string pad(const std::string& s, Args args, bool at_start) {
-    StringView view(s);
+JsString pad(const JsString& s, Args args, bool at_start) {
     double target = js_to_integer(js_to_number(js_arg(args, 0)));
-    std::string filler = js_arg(args, 1).is_undefined() ? " " : js_to_string(js_arg(args, 1));
-    if (target <= static_cast<double>(view.size()) || filler.empty()) return s;
+    const JsString filler = js_arg(args, 1).is_undefined() ? JsString::from_unit(' ') : js_to_js_string(js_arg(args, 1));
+    if (target <= static_cast<double>(s.length()) || filler.empty()) return s;
     if (target > (1u << 28)) js_throw_range_error("Invalid string length");
-    size_t needed = static_cast<size_t>(target) - view.size();
-    StringView fill_view(filler);
+    size_t needed = static_cast<size_t>(target) - s.length();
     std::string padding;
     size_t produced = 0;
-    while (produced + fill_view.size() <= needed) {
-        padding += filler;
-        produced += fill_view.size();
+    while (produced + filler.length() <= needed) {
+        padding += filler.view();
+        produced += filler.length();
     }
-    padding += fill_view.slice(0, needed - produced);
-    return at_start ? padding + s : s + padding;
+    padding += filler.substring(0, needed - produced).view();
+    return at_start ? JsString::concat(std::string_view(padding), s) : JsString::concat(s, std::string_view(padding));
 }
 
-JsValue split_string(const std::string& s, Args args) {
+JsValue split_string(const JsString& s, Args args) {
     const JsValue& separator = js_arg(args, 0);
     double limit = js_arg(args, 1).is_undefined() ? 4294967295.0 : js_to_uint32(js_to_number(js_arg(args, 1)));
     if (js_is_regexp(separator)) return js_regexp_split(separator, s, limit);
@@ -199,64 +169,67 @@ JsValue split_string(const std::string& s, Args args) {
         parts.push_back(JsValue::make_string(s));
         return JsValue::make_array(parts);
     }
-    std::string sep = js_to_string(separator);
+    const Utf16View sep(js_to_js_string(separator));
+    const Utf16View view(s);
     if (sep.empty()) {
         // Split into UTF-16 code units, as the specification says.
-        StringView view(s);
         for (size_t i = 0; i < view.size() && parts.size() < limit; ++i) {
-            parts.push_back(JsValue::make_string(view.slice(i, i + 1)));
+            parts.push_back(JsValue::make_string(JsString::from_unit(view[i])));
         }
         return JsValue::make_array(parts);
     }
     size_t start = 0;
     while (parts.size() < limit) {
-        size_t found = s.find(sep, start);      // byte search is exact for UTF-8
-        if (found == std::string::npos) {
-            parts.push_back(JsValue::make_string(s.substr(start)));
+        size_t found = view.find(sep, start);
+        if (found == Utf16View::npos) {
+            parts.push_back(JsValue::make_string(view.slice(start, view.size())));
             break;
         }
-        parts.push_back(JsValue::make_string(s.substr(start, found - start)));
+        parts.push_back(JsValue::make_string(view.slice(start, found)));
         start = found + sep.size();
     }
     return JsValue::make_array(parts);
 }
 
-JsValue replace_string(const std::string& s, const JsValue& pattern, const JsValue& replacement, bool all) {
+JsValue replace_string(const JsString& s, const JsValue& pattern, const JsValue& replacement, bool all) {
     if (js_is_regexp(pattern)) {
         if (all && !pattern.get_property("global").is_truthy()) {
             js_throw_type_error("replaceAll must be called with a global RegExp");
         }
         return js_regexp_replace(pattern, s, replacement);
     }
-    std::string needle = js_to_string(pattern);
+    const JsString needle_string = js_to_js_string(pattern);
     const bool functional = replacement.is_function();
-    std::u16string templ = functional ? std::u16string() : js_utf8_to_utf16(js_to_string(replacement));
-    std::u16string subject = js_utf8_to_utf16(s);
-    std::u16string wide_needle = js_utf8_to_utf16(needle);
+    const std::u16string templ = functional ? std::u16string() : Utf16View(js_to_js_string(replacement)).copy();
+    const Utf16View subject(s);
+    const Utf16View needle(needle_string);
 
     std::u16string out;
     size_t cursor = 0;
     size_t search_from = 0;
+    bool replaced = false;
     while (true) {
-        size_t found = subject.find(wide_needle, search_from);
-        if (found == std::u16string::npos) break;
-        out.append(subject, cursor, found - cursor);
+        size_t found = subject.find(needle, search_from);
+        if (found == Utf16View::npos) break;
+        replaced = true;
+        subject.append_to(out, cursor, found - cursor);
         if (functional) {
-            JsValue result = replacement.call({JsValue::make_string(needle), JsValue::make_number(static_cast<double>(found)),
+            JsValue result = replacement.call({JsValue::make_string(needle_string), JsValue::make_number(static_cast<double>(found)),
                                                JsValue::make_string(s)});
-            out += js_utf8_to_utf16(js_to_string(result));
+            Utf16View(js_to_js_string(result)).append_to(out);
         } else {
             JsReplaceCapture whole;
             whole.matched = true;
-            whole.text = wide_needle;
+            whole.text = needle.copy();
             out += js_expand_replacement(templ, subject, found, {whole}, {});
         }
-        cursor = found + wide_needle.size();
-        search_from = wide_needle.empty() ? found + 1 : cursor;
+        cursor = found + needle.size();
+        search_from = needle.empty() ? found + 1 : cursor;
         if (!all || search_from > subject.size()) break;
     }
-    out.append(subject, cursor, std::u16string::npos);
-    return JsValue::make_string(js_utf16_to_utf8(out));
+    if (!replaced) return JsValue::make_string(s);      // nothing found: the same string, not a copy
+    subject.append_to(out, cursor);
+    return JsValue::make_string(JsString::from_utf16(out));
 }
 
 // ---- URI encoding ---------------------------------------------------------
@@ -319,7 +292,8 @@ std::string uri_decode(const std::string& input, bool keep_reserved) {
         int first = 0;
         if (i + 2 >= input.size() || !read_byte(i, first)) js_throw_error(JsErrorKind::URIError, "URI malformed");
         if (first < 0x80) {
-            if (keep_reserved && std::strchr(kUriReserved, first)) out.append(input, i, 3);
+            // `first != 0`: strchr finds the terminator, and %00 is not reserved.
+            if (keep_reserved && first != 0 && std::strchr(kUriReserved, first)) out.append(input, i, 3);
             else out += static_cast<char>(first);
             i += 3;
             continue;
@@ -338,6 +312,14 @@ std::string uri_decode(const std::string& input, bool keep_reserved) {
             bytes += static_cast<char>(next);
             at += 3;
         }
+        // Shortest form, not a surrogate, not above U+10FFFF: anything else is
+        // not UTF-8, however well the bytes are shaped.
+        uint32_t cp = static_cast<uint32_t>(first) & (extra == 1 ? 0x1Fu : extra == 2 ? 0x0Fu : 0x07u);
+        for (size_t k = 1; k < bytes.size(); ++k) cp = (cp << 6) | (static_cast<unsigned char>(bytes[k]) & 0x3Fu);
+        static const uint32_t smallest[] = {0, 0x80, 0x800, 0x10000};
+        if (cp < smallest[extra] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            js_throw_error(JsErrorKind::URIError, "URI malformed");
+        }
         out += bytes;
         i = at;
     }
@@ -346,7 +328,7 @@ std::string uri_decode(const std::string& input, bool keep_reserved) {
 
 } // namespace
 
-std::u16string js_expand_replacement(const std::u16string& replacement, const std::u16string& subject,
+std::u16string js_expand_replacement(const std::u16string& replacement, const Utf16View& subject,
                                      size_t position, const std::vector<JsReplaceCapture>& captures,
                                      const std::vector<std::pair<std::string, size_t>>& named_groups) {
     std::u16string out;
@@ -365,11 +347,11 @@ std::u16string js_expand_replacement(const std::u16string& replacement, const st
             out += matched;
             ++i;
         } else if (next == '`') {
-            out.append(subject, 0, position);
+            subject.append_to(out, 0, position);
             ++i;
         } else if (next == '\'') {
             size_t after = std::min(subject.size(), position + matched.size());
-            out.append(subject, after, std::u16string::npos);
+            subject.append_to(out, after);
             ++i;
         } else if (next >= '0' && next <= '9') {
             // One or two digits; prefer the two-digit group when it exists.
@@ -422,7 +404,7 @@ void install_string_builtins(JsIntrinsics& realm) {
             // String(symbol) is allowed and gives the description form.
             text = JsValue::make_string(args[0].to_string());
         } else {
-            text = JsValue::make_string(js_to_string(args[0]));
+            text = JsValue::make_string(js_to_js_string(args[0]));
         }
         // `new String("a")` is an object that wraps the string.
         return construct ? js_to_object(text) : text;
@@ -433,7 +415,8 @@ void install_string_builtins(JsIntrinsics& realm) {
     js_define_method(string_ctor, "fromCharCode", 1, [](Args args) {
         std::u16string units;
         for (const auto& arg : args) units += static_cast<char16_t>(js_to_uint32(js_to_number(arg)) & 0xFFFF);
-        return JsValue::make_string(js_utf16_to_utf8(units));
+        if (units.size() == 1) return JsValue::make_string(JsString::from_unit(units[0]));
+        return JsValue::make_string(JsString::from_utf16(units));
     });
     js_define_method(string_ctor, "fromCodePoint", 1, [](Args args) {
         std::string out;
@@ -465,111 +448,104 @@ void install_string_builtins(JsIntrinsics& realm) {
     js_define_method(sp, "toString", 0, [](Args) { return JsValue::make_string(this_string("toString")); });
     js_define_method(sp, "valueOf", 0, [](Args) { return JsValue::make_string(this_string("valueOf")); });
     js_define_method(sp, "charAt", 1, [](Args args) {
-        std::string s = this_string("charAt");
-        StringView view(s);
+        const JsString s = this_string("charAt");
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0 || index >= static_cast<double>(view.size())) return JsValue::make_string("");
-        size_t i = static_cast<size_t>(index);
-        return JsValue::make_string(view.slice(i, i + 1));
+        if (index < 0 || index >= static_cast<double>(s.length())) return JsValue::make_string(JsString());
+        return JsValue::make_string(JsString::from_unit(s.unit_at(static_cast<size_t>(index))));
     });
     js_define_method(sp, "charCodeAt", 1, [](Args args) {
-        std::string s = this_string("charCodeAt");
-        StringView view(s);
+        const JsString s = this_string("charCodeAt");
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0 || index >= static_cast<double>(view.size())) {
+        if (index < 0 || index >= static_cast<double>(s.length())) {
             return JsValue::make_number(std::numeric_limits<double>::quiet_NaN());
         }
-        return JsValue::make_number(view.at(static_cast<size_t>(index)));
+        return JsValue::make_number(s.unit_at(static_cast<size_t>(index)));
     });
     js_define_method(sp, "codePointAt", 1, [](Args args) {
-        std::string s = this_string("codePointAt");
-        StringView view(s);
+        const JsString s = this_string("codePointAt");
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0 || index >= static_cast<double>(view.size())) return JsValue::make_undefined();
+        if (index < 0 || index >= static_cast<double>(s.length())) return JsValue::make_undefined();
         size_t i = static_cast<size_t>(index);
-        uint32_t cp = view.at(i);
-        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < view.size()) {
-            uint32_t low = view.at(i + 1);
+        uint32_t cp = s.unit_at(i);
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < s.length()) {
+            uint32_t low = s.unit_at(i + 1);
             if (low >= 0xDC00 && low <= 0xDFFF) cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
         }
         return JsValue::make_number(cp);
     });
     js_define_method(sp, "at", 1, [](Args args) {
-        std::string s = this_string("at");
-        StringView view(s);
+        const JsString s = this_string("at");
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0) index += static_cast<double>(view.size());
-        if (index < 0 || index >= static_cast<double>(view.size())) return JsValue::make_undefined();
-        size_t i = static_cast<size_t>(index);
-        return JsValue::make_string(view.slice(i, i + 1));
+        if (index < 0) index += static_cast<double>(s.length());
+        if (index < 0 || index >= static_cast<double>(s.length())) return JsValue::make_undefined();
+        return JsValue::make_string(JsString::from_unit(s.unit_at(static_cast<size_t>(index))));
     });
 
     // ---- Searching --------------------------------------------------------
     js_define_method(sp, "indexOf", 1, [](Args args) {
-        std::string s = this_string("indexOf");
-        StringView view(s);
-        size_t found = view.find(js_to_string(js_arg(args, 0)), clamp_index(js_arg(args, 1), view.size(), 0));
-        return JsValue::make_number(found == std::string::npos ? -1.0 : static_cast<double>(found));
+        const Utf16View view = this_units("indexOf");
+        const Utf16View needle = arg_units(args, 0);
+        size_t found = view.find(needle, clamp_index(js_arg(args, 1), view.size(), 0));
+        return JsValue::make_number(found == Utf16View::npos ? -1.0 : static_cast<double>(found));
     });
     js_define_method(sp, "lastIndexOf", 1, [](Args args) {
-        std::string s = this_string("lastIndexOf");
-        StringView view(s);
-        double position = js_to_number(js_arg(args, 1));
-        size_t from = std::isnan(position) ? std::string::npos : clamp_index(js_arg(args, 1), view.size(), view.size());
-        size_t found = view.rfind(js_to_string(js_arg(args, 0)), from);
-        return JsValue::make_number(found == std::string::npos ? -1.0 : static_cast<double>(found));
+        const Utf16View view = this_units("lastIndexOf");
+        const Utf16View needle = arg_units(args, 0);
+        // NaN (which is what a missing position converts to) means "from the end".
+        const double position = js_to_number(js_arg(args, 1));
+        size_t from = Utf16View::npos;
+        if (!std::isnan(position)) {
+            const double k = js_to_integer(position);
+            from = k < 0 ? 0 : k > static_cast<double>(view.size()) ? view.size() : static_cast<size_t>(k);
+        }
+        size_t found = view.rfind(needle, from);
+        return JsValue::make_number(found == Utf16View::npos ? -1.0 : static_cast<double>(found));
     });
     js_define_method(sp, "includes", 1, [](Args args) {
-        std::string s = this_string("includes");
+        const Utf16View view = this_units("includes");
         if (js_is_regexp(js_arg(args, 0))) js_throw_type_error("First argument to String.prototype.includes must not be a regular expression");
-        StringView view(s);
-        return JsValue::make_boolean(view.find(js_to_string(js_arg(args, 0)), clamp_index(js_arg(args, 1), view.size(), 0)) != std::string::npos);
+        const Utf16View needle = arg_units(args, 0);
+        return JsValue::make_boolean(view.find(needle, clamp_index(js_arg(args, 1), view.size(), 0)) != Utf16View::npos);
     });
     js_define_method(sp, "startsWith", 1, [](Args args) {
-        std::string s = this_string("startsWith");
+        const Utf16View view = this_units("startsWith");
         if (js_is_regexp(js_arg(args, 0))) js_throw_type_error("First argument to String.prototype.startsWith must not be a regular expression");
-        StringView view(s);
-        std::string needle = js_to_string(js_arg(args, 0));
+        const Utf16View needle = arg_units(args, 0);
         size_t start = clamp_index(js_arg(args, 1), view.size(), 0);
-        StringView needle_view(needle);
-        if (start + needle_view.size() > view.size()) return JsValue::make_boolean(false);
-        return JsValue::make_boolean(view.slice(start, start + needle_view.size()) == needle);
+        return JsValue::make_boolean(view.matches_at(start, needle));
     });
     js_define_method(sp, "endsWith", 1, [](Args args) {
-        std::string s = this_string("endsWith");
+        const Utf16View view = this_units("endsWith");
         if (js_is_regexp(js_arg(args, 0))) js_throw_type_error("First argument to String.prototype.endsWith must not be a regular expression");
-        StringView view(s);
-        std::string needle = js_to_string(js_arg(args, 0));
+        const Utf16View needle = arg_units(args, 0);
         size_t end = clamp_index(js_arg(args, 1), view.size(), view.size());
-        StringView needle_view(needle);
-        if (needle_view.size() > end) return JsValue::make_boolean(false);
-        return JsValue::make_boolean(view.slice(end - needle_view.size(), end) == needle);
+        if (needle.size() > end) return JsValue::make_boolean(false);
+        return JsValue::make_boolean(view.matches_at(end - needle.size(), needle));
     });
 
     // ---- Extracting -------------------------------------------------------
+    // JsString::substring decides whether the piece is copied or shares the
+    // text it came from; see "Taking pieces" in JsString.hpp.
     js_define_method(sp, "slice", 2, [](Args args) {
-        std::string s = this_string("slice");
-        StringView view(s);
-        size_t begin = relative_index(js_arg(args, 0), view.size(), 0);
-        size_t end = relative_index(js_arg(args, 1), view.size(), view.size());
-        return JsValue::make_string(view.slice(begin, end));
+        const JsString s = this_string("slice");
+        size_t begin = relative_index(js_arg(args, 0), s.length(), 0);
+        size_t end = relative_index(js_arg(args, 1), s.length(), s.length());
+        return JsValue::make_string(s.substring(begin, end));
     });
     js_define_method(sp, "substring", 2, [](Args args) {
-        std::string s = this_string("substring");
-        StringView view(s);
-        size_t a = clamp_index(js_arg(args, 0), view.size(), 0);
-        size_t b = clamp_index(js_arg(args, 1), view.size(), view.size());
-        return JsValue::make_string(view.slice(std::min(a, b), std::max(a, b)));
+        const JsString s = this_string("substring");
+        size_t a = clamp_index(js_arg(args, 0), s.length(), 0);
+        size_t b = clamp_index(js_arg(args, 1), s.length(), s.length());
+        return JsValue::make_string(s.substring(std::min(a, b), std::max(a, b)));
     });
     js_define_method(sp, "substr", 2, [](Args args) {
-        std::string s = this_string("substr");
-        StringView view(s);
-        size_t begin = relative_index(js_arg(args, 0), view.size(), 0);
-        double length = js_arg(args, 1).is_undefined() ? static_cast<double>(view.size())
+        const JsString s = this_string("substr");
+        size_t begin = relative_index(js_arg(args, 0), s.length(), 0);
+        double length = js_arg(args, 1).is_undefined() ? static_cast<double>(s.length())
                                                       : js_to_integer(js_to_number(js_arg(args, 1)));
-        if (length <= 0) return JsValue::make_string("");
-        size_t end = static_cast<size_t>(std::min(static_cast<double>(view.size()), static_cast<double>(begin) + length));
-        return JsValue::make_string(view.slice(begin, end));
+        if (length <= 0) return JsValue::make_string(JsString());
+        size_t end = static_cast<size_t>(std::min(static_cast<double>(s.length()), static_cast<double>(begin) + length));
+        return JsValue::make_string(s.substring(begin, end));
     });
 
     // ---- Transforming -----------------------------------------------------
@@ -585,31 +561,38 @@ void install_string_builtins(JsIntrinsics& realm) {
     js_define_method(sp, "padStart", 2, [](Args args) { return JsValue::make_string(pad(this_string("padStart"), args, true)); });
     js_define_method(sp, "padEnd", 2, [](Args args) { return JsValue::make_string(pad(this_string("padEnd"), args, false)); });
     js_define_method(sp, "repeat", 1, [](Args args) {
-        std::string s = this_string("repeat");
+        const JsString s = this_string("repeat");
         double count = js_to_integer(js_to_number(js_arg(args, 0)));
         if (count < 0 || std::isinf(count)) js_throw_range_error("Invalid count value: " + js_to_string(js_arg(args, 0)));
         if (static_cast<double>(s.size()) * count > (1u << 28)) js_throw_range_error("Invalid string length");
+        if (count == 1) return JsValue::make_string(s);
         std::string out;
         out.reserve(s.size() * static_cast<size_t>(count));
-        for (size_t i = 0; i < static_cast<size_t>(count); ++i) out += s;
+        for (size_t i = 0; i < static_cast<size_t>(count); ++i) out += s.view();
         return JsValue::make_string(out);
     });
     js_define_method(sp, "concat", 1, [](Args args) {
-        std::string s = this_string("concat");
-        for (const auto& arg : args) s += js_to_string(arg);
+        JsString s = this_string("concat");
+        for (const auto& arg : args) s = JsString::concat(s, js_to_js_string(arg));
         return JsValue::make_string(s);
     });
     js_define_method(sp, "normalize", 0, [](Args) { return JsValue::make_string(this_string("normalize")); });
+    js_define_method(sp, "isWellFormed", 0, [](Args) {
+        return JsValue::make_boolean(this_string("isWellFormed").is_well_formed());
+    });
+    js_define_method(sp, "toWellFormed", 0, [](Args) {
+        return JsValue::make_string(this_string("toWellFormed").to_well_formed());
+    });
     js_define_method(sp, "localeCompare", 1, [](Args args) {
-        std::string a = this_string("localeCompare");
-        std::string b = js_to_string(js_arg(args, 0));
+        const JsString a = this_string("localeCompare");
+        const JsString b = js_to_js_string(js_arg(args, 0));
         // No collation data: compare case-insensitively first so that "a" sorts
         // before "B", then by code unit.
-        std::string la = change_case(a, false);
-        std::string lb = change_case(b, false);
-        if (la != lb) return JsValue::make_number(la < lb ? -1 : 1);
+        const JsString la = change_case(a, false);
+        const JsString lb = change_case(b, false);
+        if (la != lb) return JsValue::make_number(JsString::compare(la.view(), lb.view()) < 0 ? -1 : 1);
         if (a == b) return JsValue::make_number(0);
-        return JsValue::make_number(a > b ? -1 : 1);
+        return JsValue::make_number(JsString::compare(a.view(), b.view()) > 0 ? -1 : 1);
     });
     js_define_method(sp, "split", 2, [](Args args) { return split_string(this_string("split"), args); });
     js_define_method(sp, "replace", 2, [](Args args) {
@@ -619,13 +602,13 @@ void install_string_builtins(JsIntrinsics& realm) {
         return replace_string(this_string("replaceAll"), js_arg(args, 0), js_arg(args, 1), true);
     });
     js_define_method(sp, "match", 1, [](Args args) {
-        std::string s = this_string("match");
+        const JsString s = this_string("match");
         JsValue regex = js_is_regexp(js_arg(args, 0)) ? js_arg(args, 0)
                       : js_regexp_create(js_arg(args, 0).is_undefined() ? "(?:)" : js_to_string(js_arg(args, 0)), "");
         return js_regexp_match(regex, s);
     });
     js_define_method(sp, "matchAll", 1, [](Args args) {
-        std::string s = this_string("matchAll");
+        const JsString s = this_string("matchAll");
         JsValue regex = js_arg(args, 0);
         if (js_is_regexp(regex)) {
             if (!regex.get_property("global").is_truthy()) {
@@ -637,7 +620,7 @@ void install_string_builtins(JsIntrinsics& realm) {
         return js_regexp_match_all(regex, s);
     });
     js_define_method(sp, "search", 1, [](Args args) {
-        std::string s = this_string("search");
+        const JsString s = this_string("search");
         JsValue regex = js_is_regexp(js_arg(args, 0)) ? js_arg(args, 0)
                       : js_regexp_create(js_arg(args, 0).is_undefined() ? "(?:)" : js_to_string(js_arg(args, 0)), "");
         return JsValue::make_number(js_regexp_search(regex, s));
@@ -645,16 +628,16 @@ void install_string_builtins(JsIntrinsics& realm) {
 
     // Strings iterate by code point.
     auto string_iterator = [](Args) {
-        auto text = std::make_shared<std::string>(this_string("[Symbol.iterator]"));
+        const JsString text = this_string("[Symbol.iterator]");
         auto offset = std::make_shared<size_t>(0);
         return js_make_iterator([text, offset](JsValue& value) {
-            const std::string& s = *text;
+            const std::string_view s = text.view();
             size_t i = *offset;
             if (i >= s.size()) return false;
             unsigned char c = static_cast<unsigned char>(s[i]);
             size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
             if (i + len > s.size()) len = s.size() - i;
-            value = JsValue::make_string(s.substr(i, len));
+            value = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
             *offset = i + len;
             return true;
         });

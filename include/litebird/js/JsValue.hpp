@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <exception>
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/js/JsString.hpp"
 
 namespace litebird {
 
@@ -144,7 +146,9 @@ public:
     JsType type{JsType::Undefined};
     double number_val{0.0};
     bool bool_val{false};
-    std::string string_val;
+    /// The text of a string. For a symbol, the unique property key it stands
+    /// for. A shared handle: copying the value does not copy the text.
+    JsString string_val;
 
     // The heap cell this value refers to, if any. A counted handle: see CellRef.
     CellRef object_val;
@@ -254,7 +258,15 @@ public:
         v.number_val = n;
         return v;
     }
-    static JsValue make_string(std::string s) {
+    /// A string holding a copy of `s` (UTF-8; anything malformed is repaired).
+    static JsValue make_string(std::string_view s) {
+        JsValue v;
+        v.type = JsType::String;
+        v.string_val = JsString(s);
+        return v;
+    }
+    /// A string that shares `s`: nothing is copied.
+    static JsValue make_string(JsString s) {
         JsValue v;
         v.type = JsType::String;
         v.string_val = std::move(s);

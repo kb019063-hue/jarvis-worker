@@ -73,7 +73,7 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     size_t index = 0;
     if (object.type == JsType::String) {
         if (key == "length") return data(object.get_property("length"), false, false, false);
-        if (parse_index(key, index) && index < js_string_length(object.string_val)) {
+        if (parse_index(key, index) && index < object.string_val.length()) {
             return data(object.get_property(key), false, true, false);
         }
         return JsValue::make_undefined();
@@ -182,7 +182,7 @@ std::string object_tag(const JsValue& value) {
     }
     if (value.is_object_like()) {
         JsValue tag = value.get_property("@@toStringTag");
-        if (tag.type == JsType::String) return tag.string_val;
+        if (tag.type == JsType::String) return tag.string_val.str();
     }
     if (JsObject* cell = value.object_val) {
         switch (cell->klass) {
@@ -552,7 +552,8 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(symbol_ctor, "keyFor", 1, [](Args args) {
         const JsValue& symbol = js_arg(args, 0);
         if (symbol.type != JsType::Symbol) js_throw_type_error("Symbol.keyFor requires a symbol");
-        if (symbol.string_val.compare(0, 6, "@@for:") == 0) return JsValue::make_string(symbol.string_val.substr(6));
+        const std::string_view key = symbol.string_val.view();
+        if (key.substr(0, 6) == "@@for:") return JsValue::make_string(key.substr(6));
         return JsValue::make_undefined();
     });
     // The symbol `this` stands for: itself, or the one inside a Symbol object.

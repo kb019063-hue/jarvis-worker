@@ -30,7 +30,26 @@ The runner sets `TZ=UTC` for both engines so date cases are stable.
 | `errors.dat`, `collections-iterators.dat`, `async.dat`, `misc.dat` | Exceptions, Map/Set/generators, promises and timers |
 | `programs.dat` | 20-40 line programs that combine features the way real scripts do |
 | `deep-nesting.dat` | Input nested or chained far deeper than the native stack: 200,000 nested parentheses, blocks or functions, a million-node linked list, a 100,000-link promise chain. Too deep must be a `RangeError` the script can catch, never the end of the process. Engines differ on where "too deep" begins, so these cases accept either a result or a `RangeError` and print which invariant held |
+| `long-strings.dat` | Strings of 100,000 characters and more: read one character at a time, built with `+=`, eaten from the front by a tokenizer, searched by a regular expression. Each script does work proportional to its input, so it takes milliseconds unless reading, appending or slicing a string costs its whole length, in which case it takes minutes and the 10 s limit ends it. The rest of the file is what sharing text must not change: every earlier value of a string that was appended to, the two halves of a surrogate pair meeting, order by code unit, `RangeError` for a string too long to exist |
 | `gc-safety.dat` | Scripts that run a collection in the middle of everything: inside callbacks, half-built expressions, loops, suspended generators and async functions. The result must not change |
+
+## Beside the corpus: a grid compared with Node
+
+The corpus holds scripts somebody thought of. `tools/conformance/diff_strings.py`
+checks strings the other way: it sends 36 subject strings (ASCII, accented,
+CJK, characters outside the BMP, lone halves of a surrogate pair, text long
+enough to cross the engine's internal boundaries) through every string method,
+the operators, the URI and JSON functions and 51 regular expressions, in
+Litebird and in Node, and lists every result that differs.
+
+```bash
+python3 tools/conformance/diff_strings.py              # 50,580 results; the summary and the first 20 differences
+python3 tools/conformance/diff_strings.py --only split # only expressions that contain "split"
+```
+
+It has no expectations to maintain, since Node answers at run time, so it is
+not part of `make js-conformance`. When it finds something a page could meet,
+that becomes a corpus case.
 
 ## Format
 
@@ -55,7 +74,9 @@ the expected output and exits 0.
 3. No local-time output. Use the UTC getters or `toISOString()`.
 4. Keep timers short (under 100 ms) and let every promise settle.
 5. Write the code, run it with `node -e`, paste the output as `#expect`, then
-   run `--reference "node -e"` to confirm.
+   run `--reference "node -e"` to confirm. `tools/conformance/add_js_case.py
+   FILE.dat "name" script.js` does the first three steps in one, so the
+   expectation is never typed by hand.
 6. Add cases for what JavaScript does, including things Litebird cannot do
    yet. A corpus that only contains passing cases measures nothing.
 7. A case that needs `gc()` must still run under Node, which has none. Start

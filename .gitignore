@@ -6,3 +6,4 @@ build/
 build-asan/
 build-*/
 conformance.json
+__pycache__/

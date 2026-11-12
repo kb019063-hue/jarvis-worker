@@ -18,21 +18,24 @@ scoreboard cannot see at all.
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
-| **JavaScript corpus** | **796 / 801 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 85 suites, all passing | `make test` |
+| Engine unit tests | 88 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
-make test            # 85 engine suites
+make test            # 88 engine suites
 make asan            # sanitizer build, tests, the JavaScript corpus and a fuzz run
+make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
+make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
+make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 801 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 845 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -50,16 +53,23 @@ Read the number for what it is:
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
 
-The engine as it was before Phase 23 passes 140 of these 801 cases, and 25 of
-the 90 cases in the fixed "everyday" probe (`everyday-es5.dat` and
-`everyday-es2015.dat`), which now passes 90/90.
+The engine as it was before Phase 23 passes 140 of the 801 cases the corpus
+had when it was replaced, and 25 of the 90 cases in the fixed "everyday" probe
+(`everyday-es5.dat` and `everyday-es2015.dat`), which now passes 90/90.
 
-Two other checks sit behind the number. A differential run evaluates 67,545
+Four other checks sit behind the number. A differential run evaluates 67,545
 generated expressions in Litebird and in Node and compares the results: 99
-(0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`. And
+(0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`.
+`make diff-strings` does the same for strings (36 subjects through every
+string method and 51 regular expressions): 95 of 50,580 results differ, all
+of them Unicode data the engine does not have (collation, normalization, some
+case mappings, part of `\p{L}`).
 63 of the corpus cases (`deep-nesting.dat`) hand the engine input nested
 200,000 deep, which used to end the process and must now end in an error the
-script can catch.
+script can catch. And 34 (`long-strings.dat`) loop over, build or take apart
+strings of 100,000 characters and more, work that used to grow with the
+square of the length: reading a string copied it. The engine before that fix
+passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
@@ -273,6 +283,11 @@ twice.
   arguments), `queueMicrotask`, `requestAnimationFrame`, `performance.now()`.
   The loop's clock can skip ahead, so `--run-js` and one-shot page rendering
   never sleep waiting for a timer.
+- **Strings:** a string value is a 24-byte handle on a shared block of UTF-8
+  (`JsString`). Passing, reading and indexing a string copy nothing, `s += x`
+  appends in place, and a large slice is a range of its parent, so a loop over
+  a long string or a string built piece by piece costs what it reads
+  (`ARCHITECTURE.md`, Phase 24).
 - **Garbage collector:** mark and sweep, including cycles through closures.
   Every value holds a counted handle to its object, and the collector treats
   an object with more handles than it can find inside the heap as held by
@@ -344,7 +359,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 85 engine test suites
+# Run the 88 engine test suites
 make test
 ```
 
@@ -405,14 +420,14 @@ make test
 make test
 ```
 
-Output (85 suites; the first and last lines shown):
+Output (88 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 85 engine test suites passed successfully!
+All 88 engine test suites passed successfully!
 ```
 
 ```bash

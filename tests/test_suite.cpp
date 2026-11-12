@@ -34,6 +34,7 @@
 #include "litebird/dom/History.hpp"
 #include "litebird/render/ImageFilter.hpp"
 #include "litebird/net/AbortController.hpp"
+#include "js_string_stress.hpp"
 
 #include <iostream>
 #include <functional>
@@ -4439,6 +4440,356 @@ TEST(dom_insertion_cannot_make_a_node_its_own_ancestor) {
     }
 }
 
+TEST(js_strings_are_shared_and_read_in_constant_time) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 25. A string value used to own a private std::string:
+    // reading a variable copied the text, `s.length` re-counted it and `s[i]`
+    // re-scanned it, so a loop over n characters did n*n work, and so did
+    // building a string with `s += x`. These checks are about cost. They count
+    // work (JsString::stats) instead of timing it, because a count does not
+    // depend on how fast or how busy the machine is.
+
+    // --- The value: copying a string value shares its text ---------------------------
+    {
+        JsValue a = JsValue::make_string(std::string(5000, 'x'));
+        const auto before = JsString::stats();
+        JsValue b = a;
+        std::vector<JsValue> many(100, a);
+        JsValue c = many[50];
+        const auto after = JsString::stats();
+        assert(after.bytes_copied == before.bytes_copied && after.blocks == before.blocks);
+        assert(b.string_val.shares_text_with(a.string_val) && c.string_val.shares_text_with(a.string_val));
+        assert(a.string_val.use_count() == 103);
+        assert(strict_equals(a, c));
+        // The handle is a pointer and four 32-bit fields.
+        assert(sizeof(JsString) == 24);
+    }
+
+    // --- Length and indexing ---------------------------------------------------------
+    {
+        JsString ascii("hello");
+        assert(ascii.length() == 5 && ascii.size() == 5 && ascii.is_ascii() && ascii.unit_at(1) == 'e');
+        JsString mixed("h\xC3\xA9llo \xF0\x9F\x98\x80!");       // "héllo 😀!"
+        assert(mixed.length() == 9 && mixed.size() == 12 && !mixed.is_ascii());
+        assert(mixed.unit_at(1) == 0xE9 && mixed.unit_at(6) == 0xD83D && mixed.unit_at(7) == 0xDE00 && mixed.unit_at(8) == '!');
+
+        // Text that is not ASCII is converted to UTF-16 once, at the first
+        // index, and the conversion is kept with the text: a copy of the
+        // handle finds it there.
+        std::string body;
+        for (int i = 0; i < 10000; ++i) body += "ab\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80";       // "abé中😀": 6 code units, 11 bytes
+        JsString text(body);
+        assert(text.length() == 60000 && text.size() == 110000);
+        const auto before = JsString::stats();
+        uint64_t sum = 0;
+        for (size_t i = 0; i < text.length(); ++i) sum += text.unit_at(i);
+        const auto once = JsString::stats();
+        assert(sum == 10000ull * ('a' + 'b' + 0xE9 + 0x4E2D + 0xD83D + 0xDE00));
+        assert(once.units_widened - before.units_widened == 60000);
+        JsString copy = text;
+        for (size_t i = 0; i < copy.length(); ++i) sum += copy.unit_at(i);
+        const auto twice = JsString::stats();
+        assert(twice.units_widened == once.units_widened && twice.bytes_copied == before.bytes_copied);
+
+        JsString empty;
+        assert(empty.length() == 0 && empty.view().empty() && empty.use_count() == 0 && empty == JsString(""));
+        // The one-character ASCII strings exist once.
+        assert(JsString::from_unit('a').shares_text_with(JsString("a")));
+        assert(JsString("abc").substring(1, 2).shares_text_with(JsString::from_unit('b')));
+    }
+
+    // --- Well-formedness -------------------------------------------------------------
+    {
+        // Bytes that are not UTF-8 become U+FFFD, as when a browser decodes a page.
+        JsString bad(std::string("a\xFF" "b\xC3"));
+        assert(bad.view() == "a\xEF\xBF\xBD" "b\xEF\xBF\xBD" && bad.length() == 4);
+        JsString overlong(std::string("\xC0\x80"));
+        assert(overlong.view() == "\xEF\xBF\xBD\xEF\xBF\xBD" && overlong.length() == 2);
+        // Half a surrogate pair can stand alone, since script can make one.
+        JsString high = JsString::from_unit(0xD83D);
+        JsString low = JsString::from_unit(0xDE00);
+        assert(high.size() == 3 && high.length() == 1 && high.unit_at(0) == 0xD83D);
+        // Two halves that meet are stored as the one character they spell, so
+        // that equal strings have equal bytes.
+        JsString joined = JsString::concat(high, low);
+        assert(joined.view() == "\xF0\x9F\x98\x80" && joined.length() == 2 && joined == JsString("\xF0\x9F\x98\x80"));
+        assert(JsString(std::string("\xED\xA0\xBD\xED\xB8\x80")).view() == "\xF0\x9F\x98\x80");
+        // The other way round they are still two halves.
+        JsString reversed = JsString::concat(low, high);
+        assert(reversed.size() == 6 && reversed.length() == 2 && reversed.unit_at(0) == 0xDE00);
+
+        // A lone half has no UTF-8 encoding. Inside the engine it is kept;
+        // text that leaves (the console, an error report) carries U+FFFD.
+        assert(!high.is_well_formed() && !reversed.is_well_formed() && joined.is_well_formed());
+        assert(JsString("caf\xC3\xA9 \xED\x9F\xBF \xEE\x80\x80").is_well_formed());      // U+D7FF and U+E000 are not halves
+        assert(reversed.to_well_formed().view() == "\xEF\xBF\xBD\xEF\xBF\xBD" && reversed.to_well_formed().length() == 2);
+        assert(joined.to_well_formed().shares_text_with(joined));
+        assert(js_output_text("a" + high.str() + "b" + low.str()) == "a\xEF\xBF\xBD" "b\xEF\xBF\xBD");
+        // Two values printed side by side can bring two halves together.
+        assert(js_output_text(high.str() + low.str()) == "\xF0\x9F\x98\x80");
+        assert(js_output_text(low.str() + high.str() + low.str()) == "\xEF\xBF\xBD\xF0\x9F\x98\x80");
+        assert(js_output_text("plain \xC3\xA9 \xED\x9F\xBF \xF0\x9F\x98\x80") == "plain \xC3\xA9 \xED\x9F\xBF \xF0\x9F\x98\x80");
+    }
+
+    // --- The representation: appending and taking pieces ----------------------------
+    {
+        // A block has room after short text. The first append to "abc" is
+        // written there; "abc" itself still reads "abc".
+        JsString abc("abc");
+        JsString abcd = JsString::concat(abc, JsString("d"));
+        assert(abcd == std::string_view("abcd") && abc == std::string_view("abc"));
+        assert(abcd.shares_text_with(abc));
+        // A second append to the same "abc" finds the room taken and copies.
+        JsString abce = JsString::concat(abc, JsString("e"));
+        assert(abce == std::string_view("abce") && abcd == std::string_view("abcd") && abc == std::string_view("abc"));
+        assert(!abce.shares_text_with(abc));
+        // The one-character strings are shared by everything: never written into.
+        JsString q = JsString::from_unit('q');
+        assert(!JsString::concat(q, JsString("r")).shares_text_with(q));
+        assert(JsString::from_unit('q') == std::string_view("q"));
+
+        // A piece that is a good part of its text shares the block; a small
+        // piece gets its own, so a few characters cannot pin a long text.
+        JsString text(std::string(4000, 'x') + "tail");
+        JsString most = text.substring(100, 4004);
+        JsString few = text.substring(100, 120);
+        assert(most.shares_text_with(text) && most.length() == 3904 && most.unit_at(3903) == 'l');
+        assert(!few.shares_text_with(text) && few == std::string_view(std::string(20, 'x')));
+        assert(most.substring(3900, 3904) == std::string_view("tail"));
+
+        // The same for text that is not ASCII, where a code unit is not a byte.
+        std::string accents;
+        for (int i = 0; i < 1000; ++i) accents += "caf\xC3\xA9 \xF0\x9F\x98\x80 ";       // "café 😀 ", 8 code units
+        JsString wide_text(accents);
+        assert(wide_text.length() == 8000 && wide_text.size() == 11000);
+        JsString rest = wide_text.substring(803, 8000);         // starts at the "é" of the 101st "café"
+        assert(rest.shares_text_with(wide_text) && rest.length() == 7197);
+        assert(rest.unit_at(0) == 0xE9 && rest.unit_at(2) == 0xD83D && rest.unit_at(3) == 0xDE00);
+        assert(rest.substring(0, 1) == std::string_view("\xC3\xA9"));
+        // A piece that starts between the two halves of a pair holds a lone
+        // half, which is not in the block as such: it is built, not shared.
+        JsString from_low_half = wide_text.substring(6, 8000);
+        assert(!from_low_half.shares_text_with(wide_text));
+        assert(from_low_half.length() == 7994 && from_low_half.unit_at(0) == 0xDE00 && from_low_half.unit_at(1) == ' ');
+        // Appending to a piece that ends where its block ends still works in place.
+        JsString grown = JsString::concat(JsString::concat(JsString("0123456789abcdef"), JsString("0123456789abcdef")),
+                                          JsString("0123456789abcdef"));
+        JsString back = grown.substring(20, 48);
+        JsString back_more = JsString::concat(back, JsString("!"));
+        assert(back_more == std::string_view("456789abcdef0123456789abcdef!") && back == std::string_view("456789abcdef0123456789abcdef"));
+        assert(grown == std::string_view("0123456789abcdef0123456789abcdef0123456789abcdef"));
+
+        // Order is by UTF-16 code unit. An emoji is a surrogate pair there
+        // (0xD83D 0xDE00), so it sorts before U+FFFF although its bytes are larger.
+        auto order = [](const char* a, const char* b) { return JsString::compare(JsString(a).view(), JsString(b).view()); };
+        assert(order("a", "b") < 0 && order("b", "a") > 0 && order("ab", "ab") == 0 && order("ab", "abc") < 0);
+        assert(order("\xF0\x9F\x98\x80", "\xEF\xBF\xBF") < 0);                 // U+1F600 < U+FFFF
+        assert(order("\xEF\xBF\xBF", "\xF0\x9F\x98\x80") > 0);
+        assert(order("\xF0\x9F\x98\x80", "\xED\x9F\xBF") > 0);                 // U+1F600 > U+D7FF
+        assert(order("\xF0\x9F\x98\x80", "\xED\xB8\x80") < 0);                 // D83D.. < lone DE00
+        assert(order("\xF0\x9F\x98\x80", "\xED\xA0\xBD") > 0);                 // D83D DE00 > lone D83D
+        assert(order("\xF0\x9F\x98\x80", "\xED\xA0\xBD" "a") > 0);             // D83D DE00 > D83D 0061
+        assert(order("\xF0\x9F\x98\x80", "\xED\xA0\xBD\xEF\xBF\xBF") < 0);     // D83D DE00 < D83D FFFF
+        assert(order("\xF0\x9F\x98\x80", "\xF0\x9F\x98\x81") < 0);
+    }
+
+    // --- Script: a loop over a long ASCII string ---------------------------------------
+    {
+        JsInterpreter js;
+        js.eval_ast("var s = 'abcdefghij'.repeat(6000);");          // 60,000 characters
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var total = 0, hits = 0;"
+            "for (var i = 0; i < s.length; i++) {"
+            "  total += s.charCodeAt(i);"
+            "  if (s[i] === 'c') hits++;"
+            "  if (s.charAt(i) === 'd') hits++;"
+            "  if (s.at(i) === 'e') hits++;"
+            "  total += s.codePointAt(i);"
+            "}");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("total").to_number() == 12180000);
+        assert(js.global_env()->get("hits").to_number() == 18000);
+        // 360,000 reads of a 60,000-byte string. Copying or scanning the text
+        // on each would be 21,600,000,000 bytes; nothing at all is copied,
+        // because the characters handed back are the shared one-character strings.
+        assert(after.bytes_copied - before.bytes_copied < 4096);
+        assert(after.units_widened == before.units_widened);
+    }
+
+    // --- Script: the same over text that is not ASCII -----------------------------------
+    {
+        JsInterpreter js;
+        js.eval_ast("var s = 'ab\\u00e9\\u4e2d\\ud83d\\ude00'.repeat(10000);");     // 60,000 code units, 110,000 bytes
+        const auto before = JsString::stats();
+        js.eval_ast("var n = 0; for (var i = 0; i < s.length; i++) n++;");
+        const auto counted = JsString::stats();
+        assert(js.global_env()->get("n").to_number() == 60000);
+        // `.length` is a field of the handle: the loop bound reads no text.
+        assert(counted.bytes_copied - before.bytes_copied < 4096 && counted.units_widened == before.units_widened);
+
+        js.eval_ast(
+            "var total = 0, marks = 0;"
+            "for (var i = 0; i < s.length; i++) {"
+            "  total += s.charCodeAt(i);"
+            "  if (s[i] === '\\u4e2d') marks++;"
+            "  if (s.codePointAt(i) > 0xFFFF) marks++;"
+            "}");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("total").to_number() == 1326300000);
+        assert(js.global_env()->get("marks").to_number() == 20000);
+        // The UTF-16 form is built once, at the first index: 60,000 units,
+        // not 60,000 units for each of the 180,000 reads.
+        assert(after.units_widened - counted.units_widened == 60000);
+        // `s[i]` makes a string of one code unit: a few bytes each time.
+        assert(after.bytes_copied - counted.bytes_copied < 400000);
+    }
+
+    // --- Script: a long string handed around ---------------------------------------------
+    {
+        JsInterpreter js;
+        js.eval_ast("var s = 'abcdefghij'.repeat(6000);");
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "function f(x, i) { return x.charCodeAt(i); }"
+            "var o = { text: s }, list = [s, s, s], t = 0;"
+            "for (var i = 0; i < 20000; i++) {"
+            "  t += f(s, i) + o.text.length + list[i % 3].charCodeAt(i);"
+            "  var copy = s; t += copy.length;"
+            "}");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("t").to_number() == 2404060000.0);
+        // Argument, property, array element, variable: each is the same text.
+        assert(after.bytes_copied - before.bytes_copied < 4096);
+    }
+
+    // --- Script: building a string by appending ----------------------------------------
+    {
+        JsInterpreter js;
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var s = '';"
+            "for (var i = 0; i < 20000; i++) s += 'row ' + i + '\\n';"
+            "var o = { text: '' }, list = [''];"
+            "for (var i = 0; i < 20000; i++) { o.text += 'ab'; list[0] = list[0] + 'cd'; }"
+            "var built = s.length + ':' + o.text.length + ':' + list[0].length + ':' + s.slice(-10);");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("built").to_string() == "188890:40000:40000:row 19999\n");
+        // About 270,000 bytes are built. Copying the text so far on every one
+        // of the 60,000 appends would be about 2,500,000,000 bytes.
+        assert(after.bytes_copied - before.bytes_copied < 3000000);
+    }
+
+    // --- Script: every prefix kept, and read, while the string grows ----------------------
+    {
+        JsInterpreter js;
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var s = '', keep = [], last = 0;"
+            "for (var i = 0; i < 6000; i++) { s += '\\u00e9' + (i % 10); keep.push(s); last += s.charCodeAt(s.length - 2); }"
+            "var ok = true;"
+            "for (var i = 0; i < 6000; i += 13) {"
+            "  var p = keep[i];"
+            "  if (p.length !== 2 * (i + 1) || p.charCodeAt(2 * i) !== 0xE9 || p[2 * i + 1] !== String(i % 10)) ok = false;"
+            "}"
+            "var first = keep[0], middle = keep[2999].length;");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("ok").bool_val);
+        assert(js.global_env()->get("last").to_number() == 6000.0 * 0xE9);
+        assert(js.global_env()->get("first").to_string() == "\xC3\xA9" "0");
+        assert(js.global_env()->get("middle").to_number() == 6000);
+        // The final text is 12,000 code units. The UTF-16 form grows with the
+        // string; rebuilding it at each of the 6,000 reads would be 36,000,000.
+        assert(after.units_widened - before.units_widened < 100000);
+        assert(after.bytes_copied - before.bytes_copied < 600000);
+        // All 6,000 prefixes are ranges of a handful of blocks, not 6,000 copies.
+        assert(after.blocks - before.blocks < 20000);
+    }
+
+    // --- Script: a tokenizer that eats its input from the front ---------------------------
+    {
+        JsInterpreter js;
+        js.eval_ast("var ascii = 'token,'.repeat(10000), accented = 't\\u00f6k\\u00ebn,'.repeat(10000);");
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "function eat(s) { var n = 0; while (s.length) { s = s.slice(s.indexOf(',') + 1); n++; } return n; }"
+            "function eat_regex(s) { var n = 0, m; while (s.length) { m = /^[^,]*,/.exec(s); s = s.substring(m[0].length); n++; } return n; }"
+            "var eaten = [eat(ascii), eat(accented), eat_regex(ascii), eat_regex(accented)].join();");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("eaten").to_string() == "10000,10000,10000,10000");
+        // 40,000 slices of texts of 60,000 to 80,000 bytes. Copying what is left
+        // each time would be about 1,400,000,000 bytes.
+        assert(after.bytes_copied - before.bytes_copied < 3000000);
+        assert(after.units_widened - before.units_widened < 600000);
+    }
+
+    // --- Script: a regular expression applied again and again to one long string ----------
+    {
+        JsInterpreter js;
+        js.eval_ast("var s = 'cl\\u00e9=val\\u00fcr;'.repeat(5000);");      // 50,000 code units
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var re = /([^=;]+)=([^=;]+);/g, m, found = 0, shared = true;"
+            "while ((m = re.exec(s))) { found += m[1].length + m[2].length; if (m.input !== s) shared = false; }");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("found").to_number() == 5000 * 8);
+        assert(js.global_env()->get("shared").bool_val);
+        // 5,000 calls to exec(). The subject is converted to UTF-16 once, and
+        // each match array's `input` is the subject itself.
+        assert(after.units_widened - before.units_widened < 70000);
+        assert(after.bytes_copied - before.bytes_copied < 500000);
+    }
+
+    // --- Script: halves of a surrogate pair -----------------------------------------
+    {
+        // Every line is true in Node. Ten of them were false while a string was
+        // UTF-8 bytes with no rule for two halves that meet.
+        JsInterpreter js;
+        js.eval_ast(
+            "var hi = '\\uD83D', lo = '\\uDE00', face = '\\uD83D\\uDE00';"
+            "var checks = ["
+            "  (hi + lo) === face, (hi + lo).length === 2, face.charCodeAt(0) === 0xD83D, face[1] === lo,"
+            "  face.slice(0, 1) === hi, face.slice(1) === lo, (face.slice(0, 1) + face.slice(1)) === face,"
+            "  [...face].length === 1, [...(lo + hi)].length === 2, face.codePointAt(0) === 0x1F600,"
+            "  String.fromCharCode(0xD83D, 0xDE00) === face, face.split('').join('') === face,"
+            "  hi < face, face < '\\uFFFF', '\\uD7FF' < face, ['\\uFFFF', face, 'a'].sort().join() === 'a,' + face + ',\\uFFFF',"
+            "  (lo + hi).length === 2, (lo + hi) !== face, (hi + 'x' + lo).length === 3, face.at(-1) === lo,"
+            "  ('a' + hi).concat(lo, 'b') === 'a' + face + 'b', (hi.repeat(2) + lo).codePointAt(1) === 0x1F600,"
+            "  'x'.padEnd(3, hi + lo) === 'x' + face, 'x'.padEnd(2, face) === 'x' + hi, [hi, lo].join('') === face,"
+            "  `${hi}${lo}` === face, face.localeCompare(hi + lo) === 0"
+            "];"
+            "var all_true = checks.length === 27 && checks.every(function (c) { return c === true; });"
+            "var failed = checks.map(function (c, i) { return c ? '' : i; }).join('');");
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("failed").to_string().empty());
+        assert(js.global_env()->get("all_true").bool_val);
+    }
+
+    // --- Script: a string cannot grow without limit --------------------------------------
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var message = 'no error';"
+            "try { 'abc'.repeat(Math.pow(2, 29)); } catch (e) { message = (e instanceof RangeError) + ': ' + e.message; }");
+        assert(js.global_env()->get("message").to_string() == "true: Invalid string length");
+    }
+}
+
+// Strings share blocks of text; these two check that script can never tell.
+// The tests themselves are in js_string_stress.hpp, which `make tsan` also
+// builds on its own for ThreadSanitizer.
+TEST(js_string_matches_a_utf16_model_under_random_edits) { litebird_tests::js_string_model_test(); }
+
+TEST(js_strings_can_be_used_from_several_threads) { litebird_tests::js_string_thread_test(); }
+
 TEST(phase19_js_compatibility_basics) {
     using namespace litebird;
 
@@ -4808,6 +5159,9 @@ int main() {
     RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
     RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
     RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
+    RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
+    RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
+    RUN_TEST(js_strings_can_be_used_from_several_threads);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

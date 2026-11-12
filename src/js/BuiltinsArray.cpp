@@ -28,8 +28,9 @@ JsValue receiver(const char* method, bool mutates = false) {
     }
     std::vector<JsValue> elements;
     if (me.type == JsType::String) {
-        std::u16string units = js_utf8_to_utf16(me.string_val);
-        for (char16_t unit : units) elements.push_back(JsValue::make_string(js_utf16_to_utf8(std::u16string(1, unit))));
+        const JsString& text = me.string_val;
+        elements.reserve(text.length());
+        for (size_t i = 0; i < text.length(); ++i) elements.push_back(JsValue::make_string(JsString::from_unit(text.unit_at(i))));
     } else if (me.is_object_like()) {
         double length = js_to_integer(js_to_number(me.get_property("length")));
         for (double i = 0; i < length && i < 4294967295.0; ++i) {
@@ -76,7 +77,8 @@ std::string join_array(const JsValue& array, const std::string& separator) {
     for (size_t i = 0; i < elements_of(array).size(); ++i) {
         if (i) out += separator;
         JsValue item = elements_of(array)[i];
-        if (!item.is_nullish()) out += js_to_string(item);
+        if (item.type == JsType::String) out += item.string_val.view();
+        else if (!item.is_nullish()) out += js_to_string(item);
     }
     return out;
 }
@@ -118,11 +120,14 @@ void sort_values(std::vector<JsValue>& items, const JsValue& comparator) {
         });
     } else {
         // Default order compares the string forms, so [10, 9, 1] sorts as 1, 10, 9.
-        std::vector<std::pair<std::string, JsValue>> keyed;
+        // The order is by UTF-16 code unit, like `<`. An element that is a
+        // string already lends its text as the key; nothing is copied.
+        std::vector<std::pair<JsString, JsValue>> keyed;
         keyed.reserve(defined.size());
-        for (auto& item : defined) keyed.emplace_back(js_to_string(item), std::move(item));
-        std::stable_sort(keyed.begin(), keyed.end(),
-                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (auto& item : defined) keyed.emplace_back(js_to_js_string(item), std::move(item));
+        std::stable_sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) {
+            return JsString::compare(a.first.view(), b.first.view()) < 0;
+        });
         defined.clear();
         for (auto& entry : keyed) defined.push_back(std::move(entry.second));
     }

@@ -33,6 +33,7 @@ SRCS = src/dom/Node.cpp \
        src/render/BitmapRenderer.cpp \
        src/render/ImageFilter.cpp \
        src/js/JsValue.cpp \
+       src/js/JsString.cpp \
        src/js/JsLexer.cpp \
        src/js/JsParser.cpp \
        src/js/Bytecode.cpp \
@@ -72,9 +73,19 @@ JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.
-JS_ASAN_FLOOR ?= 789
+JS_ASAN_FLOOR ?= 833
 
-.PHONY: all clean test run conformance js-conformance fuzz asan help
+# The string type stands alone, so its stress tests can be built without the
+# rest of the engine and run under sanitizers the whole engine cannot use yet.
+STRING_STRESS_SRCS = src/js/JsString.cpp tests/js_string_stress_main.cpp
+STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-pointer
+
+# How many results of the string grid may differ from Node's. Every one of them
+# today is Unicode data the engine does not have (collation, normalization,
+# some case mappings, part of \p{L}); lower this as that data arrives.
+STRING_DIFF_CEILING ?= 95
+
+.PHONY: all clean test run conformance js-conformance diff-strings fuzz asan tsan bench help
 
 all: $(TARGET)
 
@@ -93,7 +104,7 @@ $(BUILD_DIR)/main.o: src/main.cpp
 
 -include $(OBJS:.o=.d) $(BUILD_DIR)/main.d
 
-$(TEST_TARGET): $(OBJS) tests/test_suite.cpp
+$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
@@ -110,6 +121,12 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## A grid of string expressions (subjects x methods, operators and regular
+## expressions) evaluated by Litebird and by Node.js, results compared.
+## Needs Node.js; there are no expectations to maintain.
+diff-strings: $(TARGET)
+	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
 ## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
@@ -128,8 +145,24 @@ asan:
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
+## The JavaScript string type under ThreadSanitizer, then under AddressSanitizer
+## with leak checking on. Strings are shared between threads without locks
+## (suspended async functions and workers run on their own threads), and that
+## is a claim only ThreadSanitizer can check. Takes about a minute.
+tsan:
+	@mkdir -p build-tsan
+	$(CXX) $(STRING_STRESS_FLAGS) -fsanitize=thread $(STRING_STRESS_SRCS) -o build-tsan/js_string_tsan
+	./build-tsan/js_string_tsan
+	$(CXX) $(STRING_STRESS_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(STRING_STRESS_SRCS) -o build-tsan/js_string_asan
+	./build-tsan/js_string_asan
+
+## Times string-heavy scripts against Node.js when it is installed. Fails if a
+## case takes seconds: each one does work that grows in step with its input.
+bench: $(TARGET)
+	@python3 tools/bench/bench_strings.py --max-ms 3000
+
 clean:
-	rm -rf build build-asan
+	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, fuzz, asan, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, asan, tsan, bench, clean"

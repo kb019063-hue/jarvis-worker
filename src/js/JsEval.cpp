@@ -768,7 +768,7 @@ void JsInterpreter::initialize_fields(const JsValue& ctor, const JsValue& instan
     for (const auto& member : cls->members) {
         if (member.kind != ClassMember::Kind::Field || member.is_static) continue;
         if (index >= keys.size()) break;
-        const std::string& key = keys[index++].string_val;
+        const std::string key = keys[index++].string_val.str();
         JsValue value = member.value ? evaluate_named(member.value.get(), field_env, key)
                                      : JsValue::make_undefined();
         target.define_property(key, value, PropertyMap::Default);
@@ -1613,10 +1613,10 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
             if (operand->kind == NodeKind::Identifier) {
                 const std::string& name = static_cast<const IdentifierExpr*>(operand)->name;
                 if (!env->lookup(name) && !m_global_object.has_property(name)) {
-                    return JsValue::make_string("undefined");
+                    return js_typeof_value(JsValue::make_undefined());
                 }
             }
-            return JsValue::make_string(js_typeof(evaluate(operand, env)));
+            return js_typeof_value(evaluate(operand, env));
         }
         case JsTokenType::Delete: {
             if (operand->kind == NodeKind::Member || operand->kind == NodeKind::Index) {
@@ -2037,12 +2037,14 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
             std::string result;
             for (size_t i = 0; i < parts.size(); ++i) {
                 if (i % 2 == 0) {
-                    result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val;
+                    result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val.view();
                 } else {
-                    result += js_to_string(evaluate(parts[i].get(), env));
+                    JsValue part = evaluate(parts[i].get(), env);
+                    if (part.type == JsType::String) result += part.string_val.view();
+                    else result += js_to_string(part);
                 }
             }
-            return JsValue::make_string(std::move(result));
+            return JsValue::make_string(result);
         }
 
         case NodeKind::TaggedTemplate:

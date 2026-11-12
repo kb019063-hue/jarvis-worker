@@ -42,8 +42,8 @@ struct CollectionData {
                 if (std::isnan(key.number_val)) return "nNaN";
                 if (key.number_val == 0.0) return "n0";         // +0 and -0 are the same key
                 return "n" + js_number_to_string(key.number_val);
-            case JsType::String: return "s" + key.string_val;
-            case JsType::Symbol: return "y" + key.string_val;
+            case JsType::String: return "s" + key.string_val.str();
+            case JsType::Symbol: return "y" + key.string_val.str();
             default: {
                 char buffer[32];
                 std::snprintf(buffer, sizeof(buffer), "o%p", key.identity());

@@ -59,7 +59,7 @@ std::string primitive_text(const JsValue& value) {
         case JsType::Null: return "null";
         case JsType::Boolean: return value.bool_val ? "true" : "false";
         case JsType::Number: return js_number_to_string(value.number_val);
-        case JsType::String: return value.string_val;
+        case JsType::String: return value.string_val.str();
         default: return "";
     }
 }
@@ -140,7 +140,7 @@ JsValue js_value_from_exception(const std::exception& ex) {
 
 void js_report_uncaught(const JsValue& value) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << js_describe_thrown(value) << std::endl;
+    std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
 }
 
 void js_report_uncaught(const std::exception& ex) {
@@ -159,7 +159,7 @@ void js_report_uncaught(const std::exception& ex) {
 
 void js_report_unhandled_rejection(const JsValue& reason) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught (in promise) " << js_describe_thrown(reason) << std::endl;
+    std::cerr << "Uncaught (in promise) " << js_output_text(js_describe_thrown(reason)) << std::endl;
 }
 
 JsScriptScope::JsScriptScope() : m_loop(EventLoop::default_loop()) {
@@ -311,7 +311,7 @@ std::string js_number_to_string_radix(double value, int radix) {
 
 namespace {
 
-bool is_js_space(const std::string& s, size_t i, size_t& width) {
+bool is_js_space(std::string_view s, size_t i, size_t& width) {
     unsigned char c = static_cast<unsigned char>(s[i]);
     if (c == ' ' || (c >= 0x09 && c <= 0x0D)) { width = 1; return true; }
     if (c == 0xC2 && i + 1 < s.size() && static_cast<unsigned char>(s[i + 1]) == 0xA0) { width = 2; return true; }
@@ -328,7 +328,7 @@ bool is_js_space(const std::string& s, size_t i, size_t& width) {
 
 } // namespace
 
-double js_string_to_number(const std::string& text) {
+double js_string_to_number(std::string_view text) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     size_t begin = 0;
     size_t end = text.size();
@@ -342,7 +342,7 @@ double js_string_to_number(const std::string& text) {
         else break;
     }
     if (begin == end) return 0.0;
-    std::string s = text.substr(begin, end - begin);
+    const std::string s(text.substr(begin, end - begin));
 
     if (s.size() > 2 && s[0] == '0') {
         int radix = 0;
@@ -420,7 +420,7 @@ JsValue js_to_object(const JsValue& value) {
             // `length` is an own property of a String object, fixed at creation.
             {
                 auto& length = cell->properties.entry("length");
-                length.second = JsValue::make_number(static_cast<double>(js_string_length(value.string_val)));
+                length.second = JsValue::make_number(static_cast<double>(value.string_val.length()));
                 length.flags = 0;
             }
             break;
@@ -475,7 +475,7 @@ double js_to_number(const JsValue& value) {
         case JsType::Null: return 0.0;
         case JsType::Boolean: return value.bool_val ? 1.0 : 0.0;
         case JsType::Number: return value.number_val;
-        case JsType::String: return js_string_to_number(value.string_val);
+        case JsType::String: return js_string_to_number(value.string_val.view());
         case JsType::Symbol: js_throw_type_error("Cannot convert a Symbol value to a number");
         default: return js_to_number(js_to_primitive(value, JsPrimitiveHint::Number));
     }
@@ -505,16 +505,34 @@ std::string js_to_string(const JsValue& value) {
         case JsType::Null: return "null";
         case JsType::Boolean: return value.bool_val ? "true" : "false";
         case JsType::Number: return js_number_to_string(value.number_val);
-        case JsType::String: return value.string_val;
+        case JsType::String: return value.string_val.str();
         case JsType::Symbol: js_throw_type_error("Cannot convert a Symbol value to a string");
         default: return js_to_string(js_to_primitive(value, JsPrimitiveHint::String));
     }
 }
 
+std::string js_output_text(std::string text) {
+    if (JsString::find_lone_half(text) == std::string::npos) return text;
+    // Rare. `text` may be several values written side by side, so a high half
+    // from one can stand next to a low half from the next; a string value
+    // joins those into the character they spell before the rest is replaced.
+    return JsString(text).to_well_formed().str();
+}
+
+JsString js_to_js_string(const JsValue& value) {
+    if (value.type == JsType::String) return value.string_val;
+    if (value.is_object_like()) {
+        JsValue primitive = js_to_primitive(value, JsPrimitiveHint::String);
+        if (primitive.type == JsType::String) return primitive.string_val;
+        return JsString(js_to_string(primitive));
+    }
+    return JsString(js_to_string(value));
+}
+
 std::string js_to_property_key(const JsValue& value) {
     switch (value.type) {
-        case JsType::String: return value.string_val;
-        case JsType::Symbol: return value.string_val;       // the symbol's unique key
+        case JsType::String: return value.string_val.str();
+        case JsType::Symbol: return value.string_val.str();     // the symbol's unique key
         case JsType::Number: {
             double n = value.number_val;
             if (n >= 0 && n < 4294967295.0 && n == std::floor(n)) {
@@ -544,6 +562,35 @@ const char* js_typeof(const JsValue& value) {
     return "undefined";
 }
 
+JsValue js_typeof_value(const JsValue& value) {
+    // `typeof x === "string"` runs in every hot loop of real script. The
+    // answers are made once; handing one out copies a handle, not text.
+    struct Answers {
+        JsValue undefined_{JsValue::make_string("undefined")};
+        JsValue object_{JsValue::make_string("object")};
+        JsValue boolean_{JsValue::make_string("boolean")};
+        JsValue number_{JsValue::make_string("number")};
+        JsValue string_{JsValue::make_string("string")};
+        JsValue symbol_{JsValue::make_string("symbol")};
+        JsValue function_{JsValue::make_string("function")};
+    };
+    // Never destroyed: a value can ask for its type during static destruction.
+    static const Answers* const answers = new Answers;
+    switch (value.type) {
+        case JsType::Undefined: return answers->undefined_;
+        case JsType::Boolean: return answers->boolean_;
+        case JsType::Number: return answers->number_;
+        case JsType::String: return answers->string_;
+        case JsType::Symbol: return answers->symbol_;
+        case JsType::Function:
+        case JsType::NativeFunction: return answers->function_;
+        case JsType::Null:
+        case JsType::Object:
+        case JsType::DomNode: return answers->object_;
+    }
+    return answers->undefined_;
+}
+
 // ---------------------------------------------------------------------------
 // Operators
 // ---------------------------------------------------------------------------
@@ -553,8 +600,8 @@ bool js_loose_equals(const JsValue& a, const JsValue& b) {
     if (a.is_nullish() && b.is_nullish()) return true;
     if (a.is_nullish() || b.is_nullish()) return false;
 
-    if (a.type == JsType::Number && b.type == JsType::String) return a.number_val == js_string_to_number(b.string_val);
-    if (a.type == JsType::String && b.type == JsType::Number) return js_string_to_number(a.string_val) == b.number_val;
+    if (a.type == JsType::Number && b.type == JsType::String) return a.number_val == js_string_to_number(b.string_val.view());
+    if (a.type == JsType::String && b.type == JsType::Number) return js_string_to_number(a.string_val.view()) == b.number_val;
     if (a.type == JsType::Boolean) return js_loose_equals(JsValue::make_number(a.bool_val ? 1 : 0), b);
     if (b.type == JsType::Boolean) return js_loose_equals(a, JsValue::make_number(b.bool_val ? 1 : 0));
 
@@ -590,7 +637,8 @@ int js_less_than(const JsValue& a, const JsValue& b) {
     JsValue pa = js_to_primitive(a, JsPrimitiveHint::Number);
     JsValue pb = js_to_primitive(b, JsPrimitiveHint::Number);
     if (pa.type == JsType::String && pb.type == JsType::String) {
-        return pa.string_val < pb.string_val ? 1 : 0;
+        // By UTF-16 code unit, which is not the order of the UTF-8 bytes.
+        return JsString::compare(pa.string_val.view(), pb.string_val.view()) < 0 ? 1 : 0;
     }
     double na = js_to_number(pa);
     double nb = js_to_number(pb);
@@ -602,13 +650,30 @@ JsValue js_add(const JsValue& a, const JsValue& b) {
     if (a.type == JsType::Number && b.type == JsType::Number) {
         return JsValue::make_number(a.number_val + b.number_val);
     }
+    // JsString::concat is what keeps `s += x` in a loop linear: when `a` is
+    // the newest text in its block, `b` is written after it and nothing of `a`
+    // is copied.
     if (a.type == JsType::String && b.type == JsType::String) {
-        return JsValue::make_string(a.string_val + b.string_val);
+        return JsValue::make_string(JsString::concat(a.string_val, b.string_val));
+    }
+    // A string and a number, as in `'item' + i`: nothing here can run script,
+    // so the general path's conversions (and the copies they make) are skipped.
+    if (a.type == JsType::String && b.type == JsType::Number) {
+        return JsValue::make_string(JsString::concat(a.string_val, std::string_view(js_number_to_string(b.number_val))));
+    }
+    if (a.type == JsType::Number && b.type == JsType::String) {
+        return JsValue::make_string(JsString::concat(std::string_view(js_number_to_string(a.number_val)), b.string_val));
     }
     JsValue pa = js_to_primitive(a);
     JsValue pb = js_to_primitive(b);
-    if (pa.type == JsType::String || pb.type == JsType::String) {
-        return JsValue::make_string(js_to_string(pa) + js_to_string(pb));
+    if (pa.type == JsType::String && pb.type == JsType::String) {
+        return JsValue::make_string(JsString::concat(pa.string_val, pb.string_val));
+    }
+    if (pa.type == JsType::String) {
+        return JsValue::make_string(JsString::concat(pa.string_val, std::string_view(js_to_string(pb))));
+    }
+    if (pb.type == JsType::String) {
+        return JsValue::make_string(JsString::concat(std::string_view(js_to_string(pa)), pb.string_val));
     }
     return JsValue::make_number(js_to_number(pa) + js_to_number(pb));
 }
@@ -660,7 +725,7 @@ JsValue js_bind_this(const JsValue& fn, const JsValue& receiver) {
 // Strings
 // ---------------------------------------------------------------------------
 
-bool js_is_ascii(const std::string& s) {
+bool js_is_ascii(std::string_view s) {
     for (unsigned char c : s) {
         if (c >= 0x80) return false;
     }
@@ -685,7 +750,7 @@ void js_append_code_point(std::string& out, uint32_t cp) {
     }
 }
 
-std::u16string js_utf8_to_utf16(const std::string& s) {
+std::u16string js_utf8_to_utf16(std::string_view s) {
     std::u16string out;
     out.reserve(s.size());
     size_t i = 0;
@@ -726,7 +791,7 @@ std::u16string js_utf8_to_utf16(const std::string& s) {
     return out;
 }
 
-std::string js_utf16_to_utf8(const std::u16string& s) {
+std::string js_utf16_to_utf8(std::u16string_view s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
@@ -740,7 +805,7 @@ std::string js_utf16_to_utf8(const std::u16string& s) {
     return out;
 }
 
-size_t js_string_length(const std::string& s) {
+size_t js_string_length(std::string_view s) {
     size_t units = 0;
     for (unsigned char c : s) {
         if ((c & 0xC0) == 0x80) continue;      // continuation byte
@@ -798,14 +863,19 @@ void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&
         return;
     }
     if (iterable.type == JsType::String) {
-        // Strings iterate by code point, not by UTF-16 code unit.
-        const std::string& s = iterable.string_val;
+        // Strings iterate by code point, not by UTF-16 code unit. The text is
+        // well-formed UTF-8, so a code point is one sequence of bytes. The
+        // handle is held here because `visit` runs script, which may drop the
+        // last other reference to the text.
+        const JsString text = iterable.string_val;
+        const std::string_view s = text.view();
         size_t i = 0;
         while (i < s.size()) {
             unsigned char c = static_cast<unsigned char>(s[i]);
             size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
             if (i + len > s.size()) len = s.size() - i;
-            if (!visit(JsValue::make_string(s.substr(i, len)))) return;
+            JsValue item = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
+            if (!visit(item)) return;
             i += len;
         }
         return;

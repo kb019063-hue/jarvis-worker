@@ -86,8 +86,8 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 STRING_DIFF_CEILING ?= 95
 
 # How many of the 1,500 random pages may get another tree here than in parse5.
-# The eleven are listed, cut down to a few tags each, in AUDIT.md, finding 29;
-# lower this as they are fixed.
+# The eleven are three of the five bugs in AUDIT.md, finding 29 (`--reduce`
+# cuts each page down to a few tags); lower this as they are fixed.
 TREE_DIFF_CEILING ?= 11
 
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:

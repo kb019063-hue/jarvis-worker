@@ -108,8 +108,10 @@ std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
     append(m_author_selector_index.by_tag, element->tag_name());
 
     const std::string class_attr = element->get_attribute("class");
+    // Any ASCII whitespace separates class names, not only a space: markup
+    // formatted by a tool breaks a long list of classes across lines.
     const auto is_class_space = [](char c) {
-        return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f';
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     };
     std::size_t pos = 0;
     while (pos < class_attr.size()) {

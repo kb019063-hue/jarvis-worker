@@ -185,6 +185,24 @@ TEST(style_resolver_indexed_candidates_preserve_cascade) {
     assert(style.background_color == Color::parse("#eeeeee")); // indexed compound class
     assert(style.font_weight == 700); // universal fallback bucket for attribute selector
     assert(style.text_decoration == "none"); // candidate must still pass full matching
+
+    // A class attribute is a list separated by any ASCII whitespace, and
+    // markup formatted by a tool breaks a long list across lines. The index
+    // split the list on spaces only (its tests for the other separators were
+    // written '\\t', '\\n'..., which are no characters), so two classes with a
+    // newline or a tab between them were looked up as one name, and no rule
+    // for either was a candidate.
+    for (const std::string separator : {" ", "\n", "\t", "\r\n", "\f", " \n\t "}) {
+        auto listed = HtmlParser::parse("<div id=\"t\" class=\"first" + separator + "second\"></div>");
+        auto element = listed->get_element_by_id("t");
+        assert(element && element->has_class("first") && element->has_class("second"));
+        StyleResolver by_class;
+        by_class.add_stylesheet(CssParser::parse(
+            ".first { color: #010203; } .second { background-color: #040506; } .firstsecond { color: #ffffff; }"));
+        auto computed = by_class.resolve_style(element);
+        assert(computed.color == Color::parse("#010203"));
+        assert(computed.background_color == Color::parse("#040506"));
+    }
 }
 
 TEST(layout_box_tree) {
@@ -5545,8 +5563,8 @@ TEST(canvas_and_svg_bitmaps_are_bounded) {
     // Every <canvas> and every <svg> is drawn into a bitmap as large as the
     // element says it is, and nothing bounded what it could say:
     // <svg width="1e9" height="1e9"> ended the process with an uncaught
-    // std::length_error, width="100000" with std::bad_alloc, and 200,000
-    // <svg> of the default size asked for 36 GB a little at a time.
+    // std::length_error, width="100000" with std::bad_alloc, and 20,000
+    // <svg> of the default size asked for 3.6 GB a little at a time.
     const std::int64_t before = RasterBudget::live_pixels();
 
     // One bitmap that is too large: the canvas keeps the size it was given,

@@ -11,6 +11,7 @@
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include <array>
 #include <cstdint>
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
@@ -5638,6 +5639,121 @@ TEST(canvas_and_svg_bitmaps_are_bounded) {
     assert(RasterBudget::live_pixels() == before);
 }
 
+TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length) {
+    using namespace litebird;
+
+    // After line breaking, every text child is told which of its words ended
+    // up on which line, and every image where it was put. What each child is
+    // told must be what the line boxes say.
+    auto check = [](const std::string& html, float width) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, width, 600.0f);
+        assert(root != nullptr);
+
+        size_t contexts = 0;
+        size_t text_children = 0;
+        size_t text_on_several_lines = 0;
+        size_t images = 0;
+        std::vector<std::shared_ptr<LayoutBox>> pending{root};
+        while (!pending.empty()) {
+            auto box = pending.back();
+            pending.pop_back();
+            for (const auto& child : box->children) pending.push_back(child);
+            if (box->line_boxes.empty()) continue;
+            ++contexts;
+            for (const auto& child : box->children) {
+                if (child->box_type == BoxType::TextNode) {
+                    std::vector<std::string> expected;
+                    for (const auto& line : box->line_boxes) {
+                        std::string on_this_line;
+                        for (const auto& frag : line.fragments) {
+                            if (frag.box == child) on_this_line += frag.text;
+                        }
+                        if (!on_this_line.empty()) expected.push_back(on_this_line);
+                    }
+                    if (expected.empty() && !child->text.empty()) expected.push_back(child->text);
+                    assert(child->lines == expected);
+                    ++text_children;
+                    if (expected.size() > 1) ++text_on_several_lines;
+                } else if (child->box_type == BoxType::ImageNode) {
+                    bool found = false;
+                    Rect expected;
+                    for (const auto& line : box->line_boxes) {
+                        for (const auto& frag : line.fragments) {
+                            if (frag.box != child) continue;
+                            expected = frag.rect;
+                            found = true;
+                            break;
+                        }
+                    }
+                    assert(found);
+                    assert(child->dimensions.content.x == expected.x);
+                    assert(child->dimensions.content.y == expected.y);
+                    assert(child->dimensions.content.width == expected.width);
+                    assert(child->dimensions.content.height == expected.height);
+                    ++images;
+                }
+            }
+        }
+        return std::array<size_t, 4>{contexts, text_children, text_on_several_lines, images};
+    };
+
+    {
+        // Text that wraps over several lines on both sides of an image, and
+        // inline elements whose text belongs to no direct child.
+        const auto seen = check(R"(<div style="width: 120px; font-size: 10px;">one two three four five six seven eight nine ten<img width="30" height="20">eleven twelve <b>bold words inside</b> thirteen fourteen fifteen sixteen<br>after the break<img width="100" height="10"><img width="100" height="10"></div>)", 400.0f);
+        assert(seen[0] >= 1);
+        assert(seen[1] >= 3);
+        assert(seen[2] >= 2);      // some text child is on more than one line
+        assert(seen[3] == 3);
+    }
+    {
+        // Nothing but images, more than one line of them.
+        const auto seen = check(R"(<p style="width: 100px">)" + []{ std::string images; for (int i = 0; i < 40; ++i) images += "<img width=\"30\" height=\"10\">"; return images; }(), 400.0f);
+        assert(seen[3] == 40);
+    }
+
+    // A long paragraph. Each child used to look for itself in every fragment
+    // of every line, as the check above does, which made the cost the square
+    // of the length: layout of this one took a minute, and now takes about as
+    // long as parsing it. No time is asserted; a test that takes a minute is
+    // the signal. (So the check here is one pass too: every child was told
+    // something, and every image was put on a line of the paragraph.)
+    {
+        std::string html = "<!doctype html><p id=\"long\">";
+        const int runs = 40000;
+        for (int i = 0; i < runs; ++i) html += "word <b>bold</b> <img width=\"10\" height=\"10\">x<br>";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto paragraph = find_box_by_id(root, "long");
+        assert(paragraph != nullptr);
+        assert(paragraph->line_boxes.size() > 100);
+
+        size_t fragments = 0;
+        for (const auto& line : paragraph->line_boxes) fragments += line.fragments.size();
+        assert(fragments >= static_cast<size_t>(runs) * 4);    // word, bold, the image, x
+
+        const float top = paragraph->dimensions.content.y;
+        const float bottom = top + paragraph->dimensions.content.height;
+        size_t texts = 0;
+        size_t images = 0;
+        for (const auto& child : paragraph->children) {
+            if (child->box_type == BoxType::TextNode) {
+                assert(!child->lines.empty());
+                ++texts;
+            } else if (child->box_type == BoxType::ImageNode) {
+                assert(child->dimensions.content.width == 10.0f);
+                assert(child->dimensions.content.y >= top && child->dimensions.content.y < bottom);
+                ++images;
+            }
+        }
+        assert(texts >= static_cast<size_t>(runs));
+        assert(images == static_cast<size_t>(runs));
+    }
+}
+
 TEST(replacing_children_detaches_the_old_ones) {
     using namespace litebird;
 
@@ -5813,6 +5929,7 @@ int main() {
     RUN_TEST(css_values_survive_hostile_nesting);
     RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
     RUN_TEST(replacing_children_detaches_the_old_ones);
+    RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_strings_can_be_used_from_several_threads);

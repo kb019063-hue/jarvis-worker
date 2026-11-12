@@ -230,6 +230,26 @@ def parsed_pages(n: int) -> list[Page]:
     for name, (open_tag, token) in after_open.items():
         pages.append(unclosed(f"open elements, then {name}", open_tag * n + token * then, bottom=False))
 
+    # Long, not deep: one paragraph with very many children. After breaking
+    # the lines, layout tells each child where its pieces went. When each
+    # child searched every line for its own, 100,000 images in a paragraph
+    # took half a minute, and 100,000 words with an inline element between
+    # each two did not finish in a minute and a half.
+    #
+    # The two with an inline element per word are half as long as the others:
+    # an inline element with a word in it costs about 10 KB of memory (a
+    # computed style is 920 bytes and every box, line item and fragment has
+    # its own copy; AUDIT.md, finding 12), so 200,000 of them pass 2 GB.
+    in_one_paragraph = {
+        "images": ("<img width=10 height=10>", 200000),
+        "line breaks": ("a<br>", 200000),
+        "svg": ("<svg width=10 height=10></svg>", 200000),
+        "words and inline elements": ("word <b>bold</b> ", 100000),
+        "links": ("<a href=#>link</a>, ", 100000),
+    }
+    for name, (item, most) in in_one_paragraph.items():
+        pages.append(deep(f"one paragraph, many {name}", f"<p>{item * min(n, most)}<span>{BOTTOM}</span></p>"))
+
     values = {
         "calc nested": f"width: {'calc(' * n}1px{')' * n}",
         "calc nested, never closed": f"width: {'calc(' * n}1px",

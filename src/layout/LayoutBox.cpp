@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <sstream>
 #include <numeric>
+#include <unordered_map>
 
 namespace litebird {
 
@@ -1090,32 +1091,54 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     dimensions.content.height = (style.height >= 0.0f) ? style.height : y_cursor;
 
     // 5. Populate child TextNodes for backward-compatibility & inspection
+    //
+    // One pass over the fragments notes, for each box, what it has on each
+    // line; the children then pick up their own. Each child used to search
+    // every fragment of every line for itself, so a paragraph of n images,
+    // or of n short runs of text between <br> tags, cost n * n: 50,000
+    // images took 6.7 seconds to lay out, 200,000 two minutes.
+    struct OnLines {
+        std::vector<std::string> text;          // the box's text on each line it has text on
+        Rect image;                             // its first fragment on the last line it is on
+        size_t last_text_line{static_cast<size_t>(-1)};
+        size_t last_line{static_cast<size_t>(-1)};
+        bool placed{false};
+    };
+    std::unordered_map<const LayoutBox*, OnLines> on_lines;
+    for (size_t line_index = 0; line_index < line_boxes.size(); ++line_index) {
+        for (const auto& frag : line_boxes[line_index].fragments) {
+            if (!frag.box) continue;
+            if (frag.box->box_type == BoxType::TextNode) {
+                if (frag.text.empty()) continue;
+                OnLines& on = on_lines[frag.box.get()];
+                if (on.last_text_line != line_index) {
+                    on.text.emplace_back();
+                    on.last_text_line = line_index;
+                }
+                on.text.back() += frag.text;
+            } else if (frag.box->box_type == BoxType::ImageNode) {
+                OnLines& on = on_lines[frag.box.get()];
+                if (on.last_line != line_index) {
+                    on.image = frag.rect;
+                    on.last_line = line_index;
+                    on.placed = true;
+                }
+            }
+        }
+    }
     for (auto& child : children) {
         if (child->box_type == BoxType::TextNode) {
             child->lines.clear();
-            for (const auto& line : line_boxes) {
-                std::string line_text;
-                for (const auto& frag : line.fragments) {
-                    if (frag.box == child && !frag.text.empty()) {
-                        line_text += frag.text;
-                    }
-                }
-                if (!line_text.empty()) {
-                    child->lines.push_back(line_text);
-                }
+            if (auto found = on_lines.find(child.get()); found != on_lines.end()) {
+                child->lines = std::move(found->second.text);
             }
             if (child->lines.empty() && !child->text.empty()) {
                 child->lines.push_back(child->text);
             }
             child->dimensions = dimensions;
         } else if (child->box_type == BoxType::ImageNode) {
-            for (const auto& line : line_boxes) {
-                for (const auto& frag : line.fragments) {
-                    if (frag.box == child) {
-                        child->dimensions.content = frag.rect;
-                        break;
-                    }
-                }
+            if (auto found = on_lines.find(child.get()); found != on_lines.end() && found->second.placed) {
+                child->dimensions.content = found->second.image;
             }
         }
     }

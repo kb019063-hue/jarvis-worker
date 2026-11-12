@@ -85,7 +85,12 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 # some case mappings, part of \p{L}); lower this as that data arrives.
 STRING_DIFF_CEILING ?= 95
 
-.PHONY: all clean test run conformance js-conformance diff-strings fuzz asan tsan bench help
+# Random pages at the parser's nesting limit, on top of the fixed deep pages:
+# how many `make deep` runs, and how many the sanitizer build runs.
+DEEP_RANDOM ?= 300
+DEEP_ASAN_RANDOM ?= 150
+
+.PHONY: all clean test run conformance js-conformance diff-strings fuzz deep asan tsan bench help
 
 all: $(TARGET)
 
@@ -133,6 +138,18 @@ fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
 	@python3 tools/fuzz/fuzz_pipeline.py
 
+## Pages that are hostile by size, not by content: one construct nested
+## 200,000 levels (markup of every kind, trees built by script, CSS values),
+## bitmaps of absurd dimensions, and 100,000 tokens after 100,000 elements
+## left open. The mutation fuzzers above start from small pages and never get
+## near any of this. Each run is a child process with an 8 MB stack, 2 GB of
+## memory and 60 seconds; it fails on a signal, on a limit, or when the text
+## after the deep part is missing from the tree, the layout or the paint list.
+## Then random pages that keep the parser at its nesting limit. About ten
+## minutes on two cores.
+deep: $(TARGET)
+	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
+
 ## Address + UB sanitizer build, then the test suite, the JavaScript corpus and
 ## a fuzz smoke run. The corpus is run for what the sanitizers see while the
 ## scripts execute, not for its score: a sanitizer report makes a case fail, and
@@ -165,4 +182,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, asan, tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, deep, asan, tsan, bench, clean"

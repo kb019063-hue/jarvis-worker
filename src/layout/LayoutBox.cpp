@@ -180,7 +180,7 @@ void LayoutBox::layout_block(float containing_width) {
     // `float_bands` holds the bands that can intrude on something. A band
     // of no height covers no position, so no question about a position is
     // ever answered by it, and every float placed looks at every band: with
-    // those kept, 200,000 empty floats in one box took half a minute. What
+    // those kept, 200,000 empty floats in one box took 20 seconds. What
     // such a band was still read for is noted here as the floats are placed:
     // that this box has floats at all, and where the lowest float of each
     // side ends (for `clear`, and for the height of a box that contains its

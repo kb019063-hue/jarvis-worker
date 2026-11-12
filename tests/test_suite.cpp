@@ -5145,7 +5145,12 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
     //
     // These walks have no limit now. They are not allowed one: a selector
     // that misses matches below some depth is a wrong answer.
-    const int depth = 200000;
+    //
+    // A million levels on the usual 8 MB stack leave 8 bytes of stack for each
+    // level. A function that calls itself uses at least 16 (the return address
+    // and the alignment the calling convention asks for), so a walk that
+    // recurses once per level cannot finish here, however small its frame.
+    const int depth = 1000000;
 
     {
         auto doc = std::make_shared<Document>();
@@ -5183,7 +5188,8 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
         assert(doc->query_selector_all("#bottom").size() == 1);
 
         // The indented dump is for reading. It prints 1,024 levels and says
-        // what it left out, instead of 200,000 lines of 400,000 spaces.
+        // what it left out, instead of a million lines of up to two million
+        // spaces.
         std::ostringstream dump;
         doc->dump(dump);
         const std::string text = dump.str();
@@ -5199,7 +5205,7 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
 
         doc->remove_child(top);
         assert(!at->is_connected() && top->parent() == nullptr);
-    }   // and here 200,000 nodes are released, one inside the other
+    }   // and here a million nodes are released, one inside the other
 
     // Shadow trees inside shadow trees: the same, through the other link.
     {
@@ -5851,8 +5857,8 @@ TEST(floats_of_no_height_cost_nothing_and_still_count) {
     }
 
     // Many of them. Every float placed looked at every band before it, so
-    // 200,000 empty floats in one box took half a minute. What is asserted
-    // is the reason they no longer do: they leave no band behind.
+    // 200,000 empty floats in one box took 20 seconds. What is asserted is
+    // the reason they no longer do: they leave no band behind.
     {
         std::string html = R"(<body style="margin:0"><div id="box" style="width:300px; font-size:10px">)";
         for (int i = 0; i < 20000; ++i) html += R"(<div style="float:left"></div>)";

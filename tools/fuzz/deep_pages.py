@@ -59,13 +59,14 @@ Usage:
     python3 tools/fuzz/deep_pages.py --list
     python3 tools/fuzz/deep_pages.py --keep /tmp/pages  # leave the generated pages there
 
-A sanitizer build has stack frames an order of magnitude larger and runs an
-order of magnitude slower. Give it a small stack and a depth to match, and do
-not ask it to lay out the bottom of the nest (layout stops when the stack is
-nearly used up, and with frames that large it is used up early):
+A sanitizer build has stack frames an order of magnitude larger and runs
+several times slower. It is run for memory errors on these pages, not to find
+recursion, so give it less depth and a small stack, and do not ask it to lay
+out the bottom of the nest (layout stops when the stack is nearly used up, and
+with frames that large it is used up early). `make asan-deep` runs:
 
     python3 tools/fuzz/deep_pages.py --binary build-asan/litebird \\
-        --depth 50000 --stack-mb 2 --no-layout-check --timeout 300
+        --depth 10000 --stack-mb 2 --no-layout-check --timeout 300
 """
 
 from __future__ import annotations

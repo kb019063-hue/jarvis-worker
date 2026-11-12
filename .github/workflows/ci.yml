@@ -129,7 +129,14 @@ jobs:
         run: |
           sudo sysctl -w vm.mmap_rnd_bits=28 || true
           make tsan
-      - name: Sanitizer build, tests and fuzz smoke run
+      - name: Sanitizer build, tests, the JavaScript corpus and a fuzz smoke run
         env:
           ASAN_OPTIONS: detect_leaks=0
-        run: make asan
+        run: make -j"$(nproc)" asan-core
+      - name: Deep and oversized pages in the sanitizer build
+        # For memory errors on these pages. They are a twentieth as deep as in
+        # the deep-pages job, which is the one that looks for recursion: a
+        # sanitizer build is several times slower.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: make asan-deep

@@ -1563,7 +1563,9 @@ long.
 | Check | Result |
 | :--- | :--- |
 | `make deep`: 145 generated pages, each run three ways (the DOM, layout and paint dumps with a bitmap, in one process; the terminal renderer; for a page without script, the parser alone), then 300 random pages at the nesting limit | 1,292 runs, 0 failed, under 10 minutes on two cores; the slowest run takes 21 s of the 60 allowed. On `main`, 264 of the 392 runs over the generated pages fail: 139 by `SIGSEGV`, 106 out of time, 8 aborted, 7 out of memory, 3 with a wrong result, 1 with more than 4 GB of output |
-| The same pages under ASan + UBSan, 50,000 levels on a 2 MB stack (`make asan`) | 842 runs, 0 failed, no sanitizer report |
+| The same pages in the ASan + UBSan build, for memory errors: 10,000 levels on a 2 MB stack (`make asan-deep`, part of `make asan`) | 842 runs, 0 failed, no sanitizer report. The same at 50,000 levels, here and in CI, where it added about 13 minutes to the job |
+| ASan + UBSan: unit tests, the JavaScript corpus, both fuzzers (`make asan-core`) | 95 / 95; corpus 839 / 845, as before; 400 + 400 fuzz runs; no report |
+| A chain of 1,000,000 nodes walked and released in a unit test, in both builds | passes with 8 bytes of stack a level, less than a function that calls itself uses |
 | Random pages at the limit, from the tags the tree builder treats specially | 4,500 over three seeds: no crash, no element deeper than 512 |
 | Unit tests (`make test`) | 95 / 95; seven are new and one was rewritten |
 | html5lib tree construction | 1771 / 1792, one more than before (an `<a>` inside an `<a>`) |
@@ -1649,9 +1651,12 @@ AUDIT.md, finding 28, has the list with measurements. In short:
    cases; the bindings were not rebuilt and have no scoreboard. Present:
    `getElementById`, `querySelector(All)`, `createElement`, `appendChild`,
    attributes, `innerHTML`, `textContent`, `children`, `parentNode`, events,
-   timers, `fetch`, storage. Missing, among others: `className`, `classList`,
+   timers, `fetch`, storage. `querySelector(All)` understands one simple
+   selector (`#id`, `.class`, a tag name or `*`). Anything else (`div.card`,
+   `ul li`, `a > b`, `[id]`, `a, b`, a pseudo-class) finds nothing and does
+   not throw. Missing, among others: `className`, `classList`,
    `dataset`, `firstElementChild`, `getElementsByTagName`/`ClassName`,
-   `matches`, `closest`, `remove`,
+   `matches`, `closest`, `remove`, `contains`,
    `cloneNode`, `insertAdjacentHTML`, `Event`/`CustomEvent` constructors,
    `location`, `navigator`, `getComputedStyle`, `XMLHttpRequest`, `alert`,
    `matchMedia`. `tagName` is lower-case. `style` is not a live declaration

@@ -874,11 +874,22 @@ far down as the stack goes. `--dump-dom` prints 1,024 levels and then says
 how many nodes it left out and how deep they go.
 
 **How it stays fixed.** `make deep` runs the deep pages and 300 random pages
-at the nesting limit, and is a CI job. `make asan` runs them at a quarter of
-the depth on a quarter of the stack, which asks the same of each level of
-recursion (42 bytes), under AddressSanitizer and UBSan. Unit tests:
-`dom_trees_of_any_depth_can_be_walked_and_released` (a chain of 200,000),
-`html_parser_nesting_limit_holds_for_every_kind_of_element`, and
+at the nesting limit, and is a CI job. At 200,000 levels on an 8 MB stack a
+walk has 42 bytes of stack for each level, which stops every recursion but
+one with a very small frame. The unit test
+`dom_trees_of_any_depth_can_be_walked_and_released` closes that gap for the
+DOM: it walks and releases a chain of a million nodes, which leaves 8 bytes a
+level, and a function that calls itself uses at least 16. It runs in the
+normal build and in the sanitizer build. From script, a chain of 2,000,000
+(4 bytes a level) is built, read through `textContent`, `innerHTML` and
+`querySelectorAll`, attached, removed and dropped in 10 s; it takes 2 GB,
+about 1 KB a level.
+
+`make asan` runs the deep pages in the sanitizer build as well, for memory
+errors and not for recursion: a twentieth as deep, which keeps a build that
+is several times slower to a few minutes, on a quarter of the stack. The
+other unit tests are
+`html_parser_nesting_limit_holds_for_every_kind_of_element` and
 `deeply_nested_markup_does_not_overflow_the_stack`, which used to require
 6,000 nested levels to survive and now requires 6,000 elements, none deeper
 than 512.

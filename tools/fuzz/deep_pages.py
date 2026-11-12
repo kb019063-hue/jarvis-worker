@@ -204,6 +204,32 @@ def parsed_pages(n: int) -> list[Page]:
         deep("svg, 36 GB of them at 180 KB each", "<svg></svg>" * min(n, 20000) + BOTTOM),
     ]
 
+    # Many elements left open, then many tokens. The stack of open elements
+    # is as long as the markup is deep (the nesting limit bounds the tree, not
+    # the stack), and the standard answers several questions by walking down
+    # it: which <li> a new <li> closes, what an end tag closes, which table an
+    # element is in. A walk per token over 200,000 open elements does not
+    # finish in a minute.
+    then = min(n, 100000)
+    after_open = {
+        "bold text": ("<div>", "<b>x</b>"),
+        "tables": ("<div>", "<table></table>"),
+        "list items": ("<div>", "<li>x</li>"),
+        "definition items": ("<div>", "<dd>x</dd><dt>y</dt>"),
+        "end tags that close nothing": ("<span>", "</x>"),
+        "table end tags that close nothing": ("<div>", "</td></tr></table>"),
+        "paragraphs": ("<div>", "<p>x"),
+        "links": ("<div>", "<a href=#>x"),
+        "misnested formatting": ("<div>", "<b><p>x</b>"),
+        "forms closed too early": ("<div>", "<form><div></form>"),
+        "selects": ("<div>", "<select><option>x</select>"),
+        "svg": ("<div>", "<svg><g></g></svg>"),
+        "templates": ("<div>", "<template>x</template>"),
+        "headings": ("<div>", "<h1>x</h1>"),
+    }
+    for name, (open_tag, token) in after_open.items():
+        pages.append(unclosed(f"open elements, then {name}", open_tag * n + token * then, bottom=False))
+
     values = {
         "calc nested": f"width: {'calc(' * n}1px{')' * n}",
         "calc nested, never closed": f"width: {'calc(' * n}1px",

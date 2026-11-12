@@ -5346,6 +5346,114 @@ TEST(html_parser_nesting_limit_holds_for_every_kind_of_element) {
         assert(longest_indent <= static_cast<size_t>(max_open) * 4 + 8);
     }
 
+    // The adoption agency algorithm moves a block, with everything in it,
+    // to another parent, and then puts the block's children one level
+    // further down. In markup like this each </b> used to move one <div>
+    // under the previous one, limit or no limit: 2,000 levels more.
+    {
+        auto doc = HtmlParser::parse("<!doctype html>" + repeat("<div>", 600) + repeat("<b><div>x</b>", 2000));
+        assert(deepest_element_below(*doc) <= max_open);
+        assert(doc->body()->text_content() == std::string(2000, 'x'));
+        assert(doc->get_elements_by_tag_name("div").size() == 2600);
+    }
+    // The same block as the target of many formatting elements, one after
+    // another: each wrapped its children in one more element.
+    //
+    // Everything written is in the tree, but not always in the order it was
+    // written. The <p> belongs inside the <section> and, at the limit, was
+    // attached next to it; the algorithm then moves the <section> and has no
+    // reason to take the <p> along. The limit keeps content, not order, once
+    // misnested formatting tags move a block that sits on it.
+    {
+        std::string html = "<!doctype html>" + repeat("<div>", 505);
+        for (int i = 0; i < 300; ++i) html += "<b id=\"b" + std::to_string(i) + "\">";
+        html += "<section>x<p>y</p>";
+        html += repeat("</b>", 300);
+        auto doc = HtmlParser::parse(html);
+        assert(deepest_element_below(*doc) <= max_open);
+        std::string text = doc->body()->text_content();
+        std::sort(text.begin(), text.end());
+        assert(text == "xy");
+        assert(doc->get_elements_by_tag_name("section").size() == 1);
+        assert(doc->get_elements_by_tag_name("p").size() == 1);
+    }
+    // Below the limit the same markup is untouched by it: the tree is the
+    // standard's, and so is the order.
+    {
+        std::string html = "<!doctype html>" + repeat("<div>", 100);
+        for (int i = 0; i < 300; ++i) html += "<b id=\"b" + std::to_string(i) + "\">";
+        html += "<section>x<p>y</p>";
+        html += repeat("</b>", 300);
+        auto doc = HtmlParser::parse(html);
+        assert(deepest_element_below(*doc) <= max_open);
+        assert(doc->body()->text_content() == "xy");
+        auto paragraph = doc->get_elements_by_tag_name("p").front();
+        std::shared_ptr<Node> up = paragraph;
+        while (up && !(up->type() == NodeType::Element &&
+                       std::static_pointer_cast<Element>(up)->tag_name() == "section")) up = up->parent();
+        assert(up != nullptr);     // the <p> is inside the <section>
+    }
+    // </form> takes the form off the stack of open elements and leaves what
+    // is open inside it where it is, so here the tree is twice as deep as the
+    // stack is long. The limit is about the tree.
+    {
+        auto doc = HtmlParser::parse("<!doctype html>" + repeat("<form><div></form>", 600) + "x");
+        assert(deepest_element_below(*doc) <= max_open);
+        assert(deepest_element_below(*doc) >= max_open - 3);
+        assert(doc->get_elements_by_tag_name("div").size() == 600);
+    }
+
+    // The limit changes where a node is attached and nothing else. An earlier
+    // version closed the current node at the limit instead, and the insertion
+    // mode went on assuming it was open: here "in select in table" without a
+    // <select>, whose rule for </table> then popped every open element,
+    // <html> included. Found by random pages at the limit.
+    {
+        auto doc = HtmlParser::parse("<!doctype html>" + repeat("<div>", 504) +
+                                     "<pre><div><table><a><pre><select><svg></table>x<li a=7><a>after");
+        assert(doc->body() != nullptr);
+        assert(deepest_element_below(*doc) <= max_open);
+        assert(doc->body()->text_content().find("after") != std::string::npos);
+        // What follows is still parsed inside <body>, not at the root.
+        assert(doc->get_elements_by_tag_name("li").size() == 1);
+        std::shared_ptr<Node> up = doc->get_elements_by_tag_name("li").front();
+        while (up && up != doc->body()) up = up->parent();
+        assert(up == doc->body());
+    }
+
+    // 62 bytes with no nesting at all did the same on their own: the second
+    // <button> closes the first and the <select> with it, the insertion mode
+    // stays "in select in table", and <tr> pops until a select has been
+    // popped. With none open that emptied the stack, and the adoption agency
+    // algorithm then read the open element above the first one
+    // (heap-buffer-overflow under AddressSanitizer, SIGSEGV without).
+    {
+        auto doc = HtmlParser::parse("<template><th><a><button><select><button><tr a=0><button><a>");
+        assert(doc->get_elements_by_tag_name("html").size() == 1);
+        assert(doc->get_elements_by_tag_name("head").size() == 1);
+        assert(!dump_tree_webplatform(*doc).empty());
+    }
+
+    // Many elements left open, then many tokens. The stack of open elements
+    // is as long as the markup is deep, and each of these used to walk down
+    // it once per token: 40,000 open <div> and 40,000 list items took two
+    // minutes. No time is asserted; a walk per token would make this block
+    // take minutes instead of a second.
+    {
+        const int open = 60000;
+        const int then = 60000;
+        const std::pair<const char*, const char*> shapes[] = {
+            {"<div>", "<li>x</li>"},          {"<div>", "<dd>x</dd>"},       {"<span>", "</x>"},
+            {"<div>", "<table></table>"},     {"<div>", "<b>x</b>"},         {"<div>", "</td>"},
+            {"<div>", "<b><p>x</b>"},         {"<div>", "<form><div></form>"},
+        };
+        for (const auto& [open_tag, token] : shapes) {
+            auto doc = HtmlParser::parse("<!doctype html>" + repeat(open_tag, open) + repeat(token, then));
+            assert(doc->body() != nullptr);
+            assert(deepest_element_below(*doc) <= max_open);
+        }
+    }
+
     // Found by random pages at the limit: the handler for a second <a> held a
     // pointer into the list of active formatting elements across the adoption
     // agency algorithm, which rewrites that list. Afterwards the pointer was

@@ -272,7 +272,14 @@ void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_pt
         }
         if (name == "ol" || name == "ul") m_scope_boundary_indices[1].push_back(index);
         if (name == "button") m_scope_boundary_indices[2].push_back(index);
-    } else if (element->element_namespace() == ElementNamespace::MathML) {
+        if (special_html_tags().count(name)) {
+            m_scope_boundary_indices[3].push_back(index);
+            if (name != "address" && name != "div" && name != "p") m_scope_boundary_indices[4].push_back(index);
+        }
+        return;
+    }
+    ++m_open_foreign_elements;
+    if (element->element_namespace() == ElementNamespace::MathML) {
         if (is_mathml_text_integration_point_tag(name) || name == "annotation-xml") {
             m_scope_boundary_indices[0].push_back(index);
         }
@@ -293,6 +300,8 @@ void HtmlTreeBuilder::unindex_open_element(std::size_t index, const std::shared_
             it->second.pop_back();
             if (it->second.empty()) m_open_html_tag_indices.erase(it);
         }
+    } else if (m_open_foreign_elements > 0) {
+        --m_open_foreign_elements;
     }
     for (auto& boundaries : m_scope_boundary_indices) {
         if (!boundaries.empty() && boundaries.back() == index) boundaries.pop_back();
@@ -314,6 +323,7 @@ int HtmlTreeBuilder::open_element_position(const std::shared_ptr<Element>& eleme
 
 void HtmlTreeBuilder::push_element(const std::shared_ptr<Element>& element) {
     m_open_elements.push_back(element);
+    m_open_depths.push_back(0);
     index_open_element(m_open_elements.size() - 1, element);
 }
 
@@ -321,6 +331,7 @@ void HtmlTreeBuilder::pop_current_node() {
     if (m_open_elements.empty()) return;
     unindex_open_element(m_open_elements.size() - 1, m_open_elements.back());
     m_open_elements.pop_back();
+    m_open_depths.pop_back();
 }
 
 void HtmlTreeBuilder::resize_open_elements(std::size_t size) {
@@ -332,6 +343,7 @@ void HtmlTreeBuilder::erase_open_element(std::size_t index, bool descendants_mov
     if (!descendants_moved && index + 1 < m_open_elements.size()) ++m_depth_beyond_stack;
     unindex_open_elements_from(index);
     m_open_elements.erase(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index));
+    m_open_depths.erase(m_open_depths.begin() + static_cast<std::ptrdiff_t>(index));
     index_open_elements_from(index);
 }
 
@@ -339,6 +351,7 @@ void HtmlTreeBuilder::insert_open_element(std::size_t index, const std::shared_p
     index = std::min(index, m_open_elements.size());
     unindex_open_elements_from(index);
     m_open_elements.insert(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index), element);
+    m_open_depths.insert(m_open_depths.begin() + static_cast<std::ptrdiff_t>(index), 0);
     index_open_elements_from(index);
 }
 
@@ -346,6 +359,7 @@ void HtmlTreeBuilder::replace_open_element(std::size_t index, const std::shared_
     if (index >= m_open_elements.size()) return;
     unindex_open_elements_from(index);
     m_open_elements[index] = element;
+    m_open_depths[index] = 0;
     index_open_elements_from(index);
 }
 
@@ -389,6 +403,51 @@ int HtmlTreeBuilder::element_index_in_stack(const std::string& tag) const {
     auto found = m_open_html_tag_indices.find(tag);
     if (found == m_open_html_tag_indices.end() || found->second.empty()) return -1;
     return static_cast<int>(found->second.back());
+}
+
+// The two walks below are the standard's, and they are what runs whenever a
+// foreign element is open. While every open element is an HTML element (any
+// page without SVG or MathML open at that point), the indexes give the same
+// answer without the walk: where the walk stops is the highest special
+// element, and the stack can be 200,000 elements long with none of them
+// special (<span>) or with all of them skipped (<div>, for a list item).
+std::string HtmlTreeBuilder::open_list_item_closed_by(const std::string& name) const {
+    auto closes = [&](const std::string& open) {
+        return name == "li" ? open == "li" : (open == "dd" || open == "dt");
+    };
+    if (m_open_foreign_elements == 0) {
+        const auto& stops = m_scope_boundary_indices[4];
+        if (stops.empty()) return {};
+        // li, dd and dt are special themselves, so the walk ends at the
+        // highest special element that is not address, div or p: on one of
+        // them, or on something that hides them.
+        const std::string& open = m_open_elements[stops.back()]->tag_name();
+        return closes(open) ? open : std::string();
+    }
+    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
+        const std::string& open = m_open_elements[static_cast<std::size_t>(i)]->tag_name();
+        if (closes(open)) return open;
+        if (special_html_tags().count(open) && open != "address" && open != "div" && open != "p") break;
+    }
+    return {};
+}
+
+int HtmlTreeBuilder::open_element_closed_by_end_tag(const std::string& name) const {
+    if (m_open_foreign_elements == 0) {
+        const int target = element_index_in_stack(name);
+        if (target < 0) return -1;
+        const auto& special = m_scope_boundary_indices[3];
+        // The name is tested before the category at each element, so an
+        // element that is itself special is still closed by its own tag.
+        if (!special.empty() && static_cast<int>(special.back()) > target) return -1;
+        return target;
+    }
+    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
+        const std::string& open = m_open_elements[static_cast<std::size_t>(i)]->tag_name();
+        if (open == name) return i;
+        if (special_html_tags().count(open)) return -1;
+    }
+    return -1;
 }
 
 bool HtmlTreeBuilder::has_element_in_scope(const std::string& tag, Scope scope) const {
@@ -595,10 +654,38 @@ std::shared_ptr<Node> HtmlTreeBuilder::node_above(const Node& node) const {
 }
 
 std::size_t HtmlTreeBuilder::element_depth(const Node& node) const {
-    std::size_t depth = node.is_element() ? 1 : 0;
-    for (std::shared_ptr<Node> at = node_above(node); at; at = node_above(*at)) {
-        if (at->is_element()) ++depth;
+    // Up to the root, or to the first open element whose depth is already
+    // known. What is learned on the way is kept for the open elements passed,
+    // so at the limit, where every insertion asks, the walk is a step or two
+    // and not 512.
+    struct Passed {
+        std::size_t position;       // on the stack of open elements
+        std::size_t below;          // elements counted before this one
+    };
+    std::vector<Passed> passed;
+    std::size_t counted = 0;
+    std::size_t depth = 0;
+    std::shared_ptr<Node> keep;
+    for (const Node* at = &node;;) {
+        if (at->is_element()) {
+            auto open = m_open_positions.find(static_cast<const Element*>(at));
+            if (open != m_open_positions.end()) {
+                if (const std::size_t known = m_open_depths[open->second]) {
+                    depth = counted + known;
+                    break;
+                }
+                passed.push_back({open->second, counted});
+            }
+            ++counted;
+        }
+        keep = node_above(*at);
+        if (!keep) {
+            depth = counted;
+            break;
+        }
+        at = keep.get();
     }
+    for (const Passed& open : passed) m_open_depths[open.position] = depth - open.below;
     return depth;
 }
 
@@ -858,6 +945,10 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         // Only measured near the nesting limit; see the new element below.
         const bool at_limit = near_depth_limit();
         const std::size_t furthest_depth_before = at_limit ? element_depth(*furthest_block) : 0;
+        // From here on the formatting element, the furthest block and what
+        // is open inside them move about in the tree. Their depths are
+        // measured again when next asked for.
+        std::fill(m_open_depths.begin() + formatting_stack_index, m_open_depths.end(), 0);
 
         int bookmark = formatting_entry_index(formatting_element);
         auto node = furthest_block;

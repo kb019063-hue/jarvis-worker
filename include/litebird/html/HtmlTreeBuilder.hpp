@@ -38,9 +38,9 @@ public:
     /// a sibling of the element it was written inside (see
     /// within_depth_limit).
     ///
-    /// The HTML standard has no such limit, and every browser has one, with
-    /// this number: `kMaximumHTMLParserDOMTreeDepth` in Blink
-    /// (`HTMLConstructionSite::AttachLater`) and
+    /// The HTML standard has no such limit. Blink and WebKit both have one,
+    /// with this number: `kMaximumHTMLParserDOMTreeDepth` in Blink
+    /// (`HTMLConstructionSite::Attach`) and
     /// `defaultMaximumHTMLParserDOMTreeDepth` in WebKit
     /// (`HTMLConstructionSite::attachLater`). The rule is Blink's: only the
     /// place a node is attached changes. The stack of open elements, the
@@ -154,6 +154,14 @@ private:
     bool has_element_in_table_scope(const std::string& tag) const;
     bool has_element_in_select_scope(const std::string& tag) const;
     int element_index_in_stack(const std::string& tag) const;
+    /// For a start tag li, dd or dt: the name of the open li (or dd, dt)
+    /// that it closes, or empty. The standard's walk down the stack to the
+    /// first of them, stopped by a special element other than address, div
+    /// and p.
+    std::string open_list_item_closed_by(const std::string& name) const;
+    /// "Any other end tag": the index of the open element with that name
+    /// that the tag closes, or -1 when a special element is in the way.
+    int open_element_closed_by_end_tag(const std::string& name) const;
     void generate_implied_end_tags(const std::string& except = std::string());
     void generate_all_implied_end_tags();
     void clear_stack_back_to_table_context();
@@ -241,8 +249,18 @@ private:
     // it for each token is the difference between a page that parses in a
     // fraction of a second and one that takes minutes.
     std::unordered_map<std::string, std::vector<std::size_t>> m_open_html_tag_indices;
-    std::array<std::vector<std::size_t>, 3> m_scope_boundary_indices;
+    // 0 to 2: the boundaries of the default, list item and button scopes.
+    // 3: every element in the "special" category. 4: the same without
+    // address, div and p. The last two answer the two questions the standard
+    // settles by walking down the stack until a special element stops it.
+    std::array<std::vector<std::size_t>, 5> m_scope_boundary_indices;
     std::unordered_map<const Element*, std::size_t> m_open_positions;
+    // Open elements that are not HTML elements. While there are none, the
+    // indexes above (which are about HTML elements) answer exactly.
+    std::size_t m_open_foreign_elements{0};
+    // The depth in the tree of each open element, 0 while not measured.
+    // Filled in by element_depth(), which is only asked near the limit.
+    mutable std::vector<std::size_t> m_open_depths;
     // How much deeper in the tree an open element can be than its place on
     // the stack (see erase_open_element). Never decreases: it only decides
     // whether within_depth_limit() has to measure.

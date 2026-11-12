@@ -18,24 +18,6 @@ bool is_ws_only(const std::string& text) {
     return std::all_of(text.begin(), text.end(), ws);
 }
 
-const std::unordered_set<std::string>& special_tags() {
-    static const std::unordered_set<std::string> tags = {
-        "address", "applet", "area", "article", "aside", "base", "basefont",
-        "bgsound", "blockquote", "body", "br", "button", "caption", "center",
-        "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed",
-        "fieldset", "figcaption", "figure", "footer", "form", "frame",
-        "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
-        "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li",
-        "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed",
-        "noframes", "noscript", "object", "ol", "p", "param", "plaintext",
-        "pre", "script", "search", "section", "select", "source", "style",
-        "summary", "table", "tbody", "td", "template", "textarea", "tfoot",
-        "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp"};
-    return tags;
-}
-
-bool is_special(const std::string& tag) { return special_tags().count(tag) > 0; }
-
 bool is_formatting(const std::string& tag) {
     static const std::unordered_set<std::string> tags = {
         "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small",
@@ -496,22 +478,10 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
 
             if (name == "li" || name == "dd" || name == "dt") {
                 m_frameset_ok = false;
-                for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-                    const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-                    const std::string& node_name = element->tag_name();
-                    if (name == "li" && node_name == "li") {
-                        generate_implied_end_tags("li");
-                        pop_until_tag("li");
-                        break;
-                    }
-                    if ((name == "dd" || name == "dt") && (node_name == "dd" || node_name == "dt")) {
-                        generate_implied_end_tags(node_name);
-                        pop_until_tag(node_name);
-                        break;
-                    }
-                    if (is_special(node_name) && node_name != "address" && node_name != "div" && node_name != "p") {
-                        break;
-                    }
+                const std::string closed = open_list_item_closed_by(name);
+                if (!closed.empty()) {
+                    generate_implied_end_tags(closed);
+                    pop_until_tag(closed);
                 }
                 if (has_element_in_scope("p", Scope::Button)) close_p_element();
                 insert_html_element(token);
@@ -836,14 +806,10 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             if (is_formatting(name) && name != "nobr") {
                 if (!adoption_agency(token)) {
                     // "Any other end tag"
-                    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-                        auto element = m_open_elements[static_cast<std::size_t>(i)];
-                        if (element->tag_name() == name) {
-                            generate_implied_end_tags(name);
-                            resize_open_elements(static_cast<std::size_t>(i));
-                            return;
-                        }
-                        if (is_special(element->tag_name())) return;
+                    const int closed = open_element_closed_by_end_tag(name);
+                    if (closed >= 0) {
+                        generate_implied_end_tags(name);
+                        resize_open_elements(static_cast<std::size_t>(closed));
                     }
                 }
                 return;
@@ -874,14 +840,10 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             }
 
             // Any other end tag.
-            for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-                auto element = m_open_elements[static_cast<std::size_t>(i)];
-                if (element->tag_name() == name) {
-                    generate_implied_end_tags(name);
-                    resize_open_elements(static_cast<std::size_t>(i));
-                    return;
-                }
-                if (is_special(element->tag_name())) return;
+            const int closed = open_element_closed_by_end_tag(name);
+            if (closed >= 0) {
+                generate_implied_end_tags(name);
+                resize_open_elements(static_cast<std::size_t>(closed));
             }
             return;
         }

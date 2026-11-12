@@ -5422,7 +5422,7 @@ TEST(html_parser_nesting_limit_holds_for_every_kind_of_element) {
         assert(up == doc->body());
     }
 
-    // 62 bytes with no nesting at all did the same on their own: the second
+    // 60 bytes with no nesting at all did the same on their own: the second
     // <button> closes the first and the <select> with it, the insertion mode
     // stays "in select in table", and <tr> pops until a select has been
     // popped. With none open that emptied the stack, and the adoption agency
@@ -5754,6 +5754,146 @@ TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length) {
     }
 }
 
+TEST(floats_of_no_height_cost_nothing_and_still_count) {
+    using namespace litebird;
+
+    // A float with no height covers no line, so nothing ever wraps around it
+    // and it is not kept as a band to look through. It is still a float:
+    // `clear` goes below it, and a box that contains its floats reaches down
+    // to it.
+    auto layout = [](const std::string& html) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    };
+
+    {
+        // Beside an empty float, the next float and the text start at the edge.
+        auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; font-size:10px">
+            <div style="float:left; width:100px"></div>
+            <div id="second" style="float:left; width:50px; height:20px">a</div>
+            some text beside the floats</div>)");
+        auto box = find_box_by_id(root, "box");
+        auto second = find_box_by_id(root, "second");
+        assert(box && second);
+        assert(second->dimensions.content.x == box->dimensions.content.x);
+        assert(box->float_bands.size() == 1);       // the float that has a height
+    }
+
+    // A is 200 wide and 50 high on the left, B is 80 wide and 90 high on the
+    // right. C is 250 wide and has no height: there is no room for it beside
+    // A (20 left over) or beside B alone (220), so it goes below both, at 90.
+    const std::string floats = R"(
+            <div style="float:left; width:200px; height:50px">A</div>
+            <div style="float:right; width:80px; height:90px">B</div>
+            <div id="c" style="float:left; width:250px"></div>)";
+    {
+        // `clear: left` goes below the lowest float on the left, and that is
+        // C at 90, not A at 50.
+        auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; font-size:10px">)" + floats +
+                           R"(<div id="cleared" style="clear:left">below</div></div>)");
+        auto box = find_box_by_id(root, "box");
+        auto c = find_box_by_id(root, "c");
+        auto cleared = find_box_by_id(root, "cleared");
+        assert(box && c && cleared);
+        assert(c->dimensions.content.y == box->dimensions.content.y + 90.0f);
+        assert(cleared->dimensions.content.y == box->dimensions.content.y + 90.0f);
+        assert(box->float_bands.size() == 2);       // A and B
+    }
+    {
+        // `clear: right` has only B to go below, which also ends at 90; with
+        // B 40 high it is 40, and C (on the left, at 50) does not count.
+        auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; font-size:10px">
+            <div style="float:left; width:200px; height:50px">A</div>
+            <div style="float:right; width:80px; height:40px">B</div>
+            <div id="c" style="float:left; width:250px"></div>
+            <div id="cleared" style="clear:right">below</div></div>)");
+        auto box = find_box_by_id(root, "box");
+        auto c = find_box_by_id(root, "c");
+        auto cleared = find_box_by_id(root, "cleared");
+        assert(box && c && cleared);
+        assert(c->dimensions.content.y == box->dimensions.content.y + 50.0f);
+        assert(cleared->dimensions.content.y == box->dimensions.content.y + 40.0f);
+    }
+    {
+        // A box that contains its floats is as high as the lowest of them,
+        // and here the lowest is the float with no height: B ends at 89.5,
+        // and C, which is moved down a pixel at a time until it fits, lands
+        // at 90.
+        auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; overflow:hidden">
+            <div style="float:left; width:200px; height:50px">A</div>
+            <div style="float:right; width:80px; height:89.5px">B</div>
+            <div id="c" style="float:left; width:250px"></div></div>)");
+        auto box = find_box_by_id(root, "box");
+        auto c = find_box_by_id(root, "c");
+        assert(box && c);
+        assert(c->dimensions.content.y == box->dimensions.content.y + 90.0f);
+        assert(box->dimensions.content.height == 90.0f);
+        assert(box->float_bands.size() == 2);
+    }
+
+    // Many of them. Every float placed looked at every band before it, so
+    // 200,000 empty floats in one box took half a minute. What is asserted
+    // is the reason they no longer do: they leave no band behind.
+    {
+        std::string html = R"(<body style="margin:0"><div id="box" style="width:300px; font-size:10px">)";
+        for (int i = 0; i < 20000; ++i) html += R"(<div style="float:left"></div>)";
+        html += R"(<div id="last" style="float:left; width:40px; height:20px">z</div>text<div id="cleared" style="clear:both">below</div></div>)";
+        auto root = layout(html);
+        auto box = find_box_by_id(root, "box");
+        auto last = find_box_by_id(root, "last");
+        auto cleared = find_box_by_id(root, "cleared");
+        assert(box && last && cleared);
+        assert(box->children.size() >= 20002);
+        assert(box->float_bands.size() == 1);
+        assert(last->dimensions.content.x == box->dimensions.content.x);
+        assert(last->dimensions.content.y == box->dimensions.content.y);
+        assert(cleared->dimensions.content.y == box->dimensions.content.y + 20.0f);
+    }
+
+    // In a paragraph the floats are children of a box that lays out lines.
+    // They all start at its top: each goes beside the ones before it on its
+    // side, and the first line is narrowed by all of them.
+    {
+        auto root = layout(R"(<body style="margin:0"><p id="para" style="margin:0; width:300px; font-size:10px">
+            <span id="l1" style="float:left; width:40px; height:30px">a</span>
+            <span id="l2" style="float:left; width:25px; height:30px">b</span>
+            <span id="r1" style="float:right; width:50px; height:30px">c</span>
+            <span id="r2" style="float:right; width:35px; height:30px">d</span>
+            words that wrap between the floats on both sides of the paragraph</p>)");
+        auto para = find_box_by_id(root, "para");
+        auto l1 = find_box_by_id(root, "l1");
+        auto l2 = find_box_by_id(root, "l2");
+        auto r1 = find_box_by_id(root, "r1");
+        auto r2 = find_box_by_id(root, "r2");
+        assert(para && l1 && l2 && r1 && r2);
+        const float left_edge = para->dimensions.content.x;
+        assert(l1->dimensions.content.x == left_edge);
+        assert(l2->dimensions.content.x == left_edge + 40.0f);
+        assert(r1->dimensions.content.x == left_edge + 300.0f - 50.0f);
+        assert(r2->dimensions.content.x == left_edge + 300.0f - 50.0f - 35.0f);
+        assert(para->float_bands.size() == 4);
+        assert(!para->line_boxes.empty());
+        assert(para->line_boxes.front().left_intrusion == 65.0f);
+        assert(para->line_boxes.front().right_intrusion == 85.0f);
+    }
+
+    // And many with no height there.
+    {
+        std::string html = R"(<body style="margin:0"><p id="para" style="margin:0; width:300px; font-size:10px">)";
+        for (int i = 0; i < 10000; ++i) html += R"(<span style="float:left"></span>)";
+        html += R"(<span id="last" style="float:left; width:40px; height:30px">z</span>words that wrap beside the float</p>)";
+        auto root = layout(html);
+        auto para = find_box_by_id(root, "para");
+        auto last = find_box_by_id(root, "last");
+        assert(para && last);
+        assert(para->float_bands.size() == 1);
+        assert(last->dimensions.content.x == para->dimensions.content.x);
+        assert(!para->line_boxes.empty());
+        assert(para->line_boxes.front().left_intrusion == 40.0f);
+    }
+}
+
 TEST(replacing_children_detaches_the_old_ones) {
     using namespace litebird;
 
@@ -5930,6 +6070,7 @@ int main() {
     RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
     RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
+    RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_strings_can_be_used_from_several_threads);

@@ -127,6 +127,7 @@ public:
 
     // --- float context -----------------------------------------------------
     // Floats declared inside this box, in this box's content coordinates.
+    // A float of no height covers no position and has no band here.
     std::vector<FloatBand> float_bands;
     // Bands inherited from the nearest ancestor that owns floats, plus this
     // box's content origin relative to that ancestor.
@@ -135,8 +136,6 @@ public:
 
     /// Horizontal intrusions at content-relative `y`.
     static void band_at(const std::vector<FloatBand>& bands, float y, float& left, float& right);
-    /// Bottom edge of the floats that `clear` must move below, or -1.
-    static float clearance_y(const std::vector<FloatBand>& bands, ClearType clear);
     void layout(float containing_width, float containing_height = 0.0f);
     void dump(std::ostream& os, int indent = 0) const;
     void shift_position(float dx, float dy);

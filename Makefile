@@ -150,10 +150,15 @@ fuzz:
 deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
 
-## Address + UB sanitizer build, then the test suite, the JavaScript corpus and
-## a fuzz smoke run. The corpus is run for what the sanitizers see while the
-## scripts execute, not for its score: a sanitizer report makes a case fail, and
-## --min-pass turns a batch of those into a failed build.
+## Address + UB sanitizer build, then the test suite, the JavaScript corpus, a
+## fuzz smoke run and the deep pages. The corpus is run for what the sanitizers
+## see while the scripts execute, not for its score: a sanitizer report makes a
+## case fail, and --min-pass turns a batch of those into a failed build.
+## The deep pages get a quarter of the depth on a quarter of the stack, which
+## asks the same of every level of recursion (42 bytes) in a build that is
+## several times slower; layout is not required to reach the bottom of a nest,
+## because a sanitizer frame is ten times the size and layout stops when the
+## stack is nearly used up.
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan:
@@ -161,6 +166,8 @@ asan:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/deep_pages.py --binary build-asan/litebird --quiet \
+		--depth 50000 --stack-mb 2 --no-layout-check --timeout 300 --random $(DEEP_ASAN_RANDOM)
 
 ## The JavaScript string type under ThreadSanitizer, then under AddressSanitizer
 ## with leak checking on. Strings are shared between threads without locks

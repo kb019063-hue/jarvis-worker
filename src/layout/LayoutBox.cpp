@@ -1,5 +1,6 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 #include <numeric>
@@ -176,6 +177,26 @@ void LayoutBox::layout_block(float containing_width) {
     float y_cursor = 0.0f;
     float_bands.clear();
 
+    // `float_bands` holds the bands that can intrude on something. A band
+    // of no height covers no position, so no question about a position is
+    // ever answered by it, and every float placed looks at every band: with
+    // those kept, 200,000 empty floats in one box took half a minute. What
+    // such a band was still read for is noted here as the floats are placed:
+    // that this box has floats at all, and where the lowest float of each
+    // side ends (for `clear`, and for the height of a box that contains its
+    // floats).
+    bool has_floats = false;
+    float lowest_float = -1.0f;         // bottom of the lowest float; -1 without one, as clearance_y says it
+    float lowest_left_float = -1.0f;
+    float lowest_right_float = -1.0f;
+    auto add_band = [&](const FloatBand& band) {
+        has_floats = true;
+        lowest_float = std::max(lowest_float, band.bottom);
+        if (band.left > 0.0f) lowest_left_float = std::max(lowest_left_float, band.bottom);
+        if (band.right > 0.0f) lowest_right_float = std::max(lowest_right_float, band.bottom);
+        if (band.bottom > band.top) float_bands.push_back(band);
+    };
+
     for (auto& child : children) {
         if (child->style.is_out_of_flow()) {
             continue; // Handled in out-of-flow pass
@@ -206,13 +227,13 @@ void LayoutBox::layout_block(float containing_width) {
             float float_x;
             if (child->style.float_type == FloatType::Left) {
                 float_x = dimensions.content.x + left_intrusion + inset_x;
-                float_bands.push_back(FloatBand{float_top, float_top + margin_box_h,
-                                                left_intrusion + margin_box_w, 0.0f});
+                add_band(FloatBand{float_top, float_top + margin_box_h,
+                                   left_intrusion + margin_box_w, 0.0f});
             } else {
                 float_x = dimensions.content.x + dimensions.content.width - right_intrusion -
                           margin_box_w + inset_x;
-                float_bands.push_back(FloatBand{float_top, float_top + margin_box_h,
-                                                0.0f, right_intrusion + margin_box_w});
+                add_band(FloatBand{float_top, float_top + margin_box_h,
+                                   0.0f, right_intrusion + margin_box_w});
             }
 
             const float float_y = dimensions.content.y + float_top +
@@ -225,20 +246,18 @@ void LayoutBox::layout_block(float containing_width) {
 
         // --- clearance ------------------------------------------------------
         if (child->style.clear_type != ClearType::None) {
-            float clear_to = clearance_y(float_bands, child->style.clear_type);
-            if (float_bands.empty() && inherited_bands && inherited_bands->size() > 0) {
-                // Bands owned by an ancestor are measured from its content box.
-                (void)clear_to;
-            }
+            // What clearance_y() computes over the bands, kept as they came.
+            const float clear_to = child->style.clear_type == ClearType::Both ? lowest_float
+                                 : child->style.clear_type == ClearType::Left ? lowest_left_float
+                                                                              : lowest_right_float;
             if (clear_to > y_cursor) y_cursor = clear_to;
         }
 
         // --- inline content wraps around this box's floats ------------------
-        const std::vector<FloatBand>* child_bands =
-            !float_bands.empty() ? &float_bands : inherited_bands;
+        const std::vector<FloatBand>* child_bands = has_floats ? &float_bands : inherited_bands;
         child->inherited_bands = child_bands;
         child->inherited_bands_offset_y =
-            (!float_bands.empty() ? 0.0f : inherited_bands_offset_y) + y_cursor +
+            (has_floats ? 0.0f : inherited_bands_offset_y) + y_cursor +
             child->style.margin.top + child->style.border_width.top + child->style.padding.top;
 
         child->layout(dimensions.content.width, definite_height);
@@ -280,10 +299,8 @@ void LayoutBox::layout_block(float containing_width) {
     }
 
     // A block formatting context contains its floats: grow to the lowest one.
-    if (!float_bands.empty() && establishes_bfc()) {
-        float floats_bottom = 0.0f;
-        for (const auto& band : float_bands) floats_bottom = std::max(floats_bottom, band.bottom);
-        dimensions.content.height = std::max(dimensions.content.height, floats_bottom);
+    if (has_floats && establishes_bfc()) {
+        dimensions.content.height = std::max(dimensions.content.height, std::max(0.0f, lowest_float));
     }
 
     if (style.min_height >= 0.0f) {
@@ -946,7 +963,15 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
 
     // 2b. Floats that share this formatting context are placed first, so the
     //     line boxes can wrap around them.
+    //
+    //     They all start at the top, so how far the floats before this one
+    //     reach in from each side is a running maximum; asking the bands
+    //     each time made n floats in a paragraph cost n * n. A float of no
+    //     height covers no line and leaves no band (see layout_block).
     float_bands.clear();
+    bool has_floats = false;
+    float left_reach = 0.0f;
+    float right_reach = 0.0f;
     for (auto& child : children) {
         if (!child->style.is_floated()) continue;
 
@@ -957,18 +982,25 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         const float inset_x = child->dimensions.margin.left + child->dimensions.border.left +
                               child->dimensions.padding.left;
 
-        float left_intrusion = 0.0f;
-        float right_intrusion = 0.0f;
-        band_at(float_bands, 0.0f, left_intrusion, right_intrusion);
+        const float left_intrusion = left_reach;
+        const float right_intrusion = right_reach;
 
         float float_x;
+        FloatBand band;
         if (child->style.float_type == FloatType::Left) {
             float_x = dimensions.content.x + left_intrusion + inset_x;
-            float_bands.push_back(FloatBand{0.0f, margin_box_h, left_intrusion + margin_box_w, 0.0f});
+            band = FloatBand{0.0f, margin_box_h, left_intrusion + margin_box_w, 0.0f};
         } else {
             float_x = dimensions.content.x + dimensions.content.width - right_intrusion -
                       margin_box_w + inset_x;
-            float_bands.push_back(FloatBand{0.0f, margin_box_h, 0.0f, right_intrusion + margin_box_w});
+            band = FloatBand{0.0f, margin_box_h, 0.0f, right_intrusion + margin_box_w};
+        }
+        has_floats = true;
+        if (band.bottom > band.top) {
+            // What band_at(float_bands, 0, ...) would add to its answer.
+            left_reach = std::max(left_reach, band.left);
+            right_reach = std::max(right_reach, band.right);
+            float_bands.push_back(band);
         }
 
         child->shift_position(float_x - child->dimensions.content.x,
@@ -978,8 +1010,8 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     }
 
     // 3. Line Breaking, wrapping around any floats in scope
-    const std::vector<FloatBand>* bands = !float_bands.empty() ? &float_bands : inherited_bands;
-    const float bands_offset = !float_bands.empty() ? 0.0f : inherited_bands_offset_y;
+    const std::vector<FloatBand>* bands = has_floats ? &float_bands : inherited_bands;
+    const float bands_offset = has_floats ? 0.0f : inherited_bands_offset_y;
     auto measure_band = [&](float y, float& left, float& right) -> float {
         if (!bands) {
             left = 0.0f;

@@ -100,11 +100,12 @@ PAINTED = ') "%s'
 
 class Page:
     def __init__(self, name: str, html: str, *, bottom: bool = False, after: bool = True,
-                 expect: str | None = None, max_depth: int | None = None) -> None:
+                 after_is_deep: bool = False, expect: str | None = None, max_depth: int | None = None) -> None:
         self.name = name
         self.html = html
         self.bottom = bottom        # the innermost text must reach the tree, layout and paint
         self.after = after          # so must the text after the nest
+        self.after_is_deep = after_is_deep  # ... which is itself at the nesting limit in this page
         self.expect = expect        # what the last script prints after SCRIPT_OK
         self.max_depth = max_depth  # deepest element allowed in the html5lib dump
         self.has_script = "<script" in html
@@ -159,9 +160,14 @@ def parsed_pages(n: int) -> list[Page]:
         deep("table", nest("<table><tr><td>", "</td></tr></table>", n)),
         deep("table with caption", nest("<table><caption>", "</caption></table>", n)),
         deep("table, text straight inside", "<table>" * n + BOTTOM),
-        deep("tables with fostered text at the limit", at_limit + f"<table>{BOTTOM}<b>x" * min(n, 20000), bottom=False),
-        deep("formatting misnested at the limit", at_limit + "<b><i><p>x</b></i>" * min(n, 20000) + BOTTOM, bottom=False),
-        deep("comments and void elements at the limit", at_limit + "<!--c--><br><img><div>" * min(n, 50000) + BOTTOM, bottom=False),
+        # Nothing closes these nests, so the paragraph after them is in them,
+        # at the limit.
+        deep("tables with fostered text at the limit", at_limit + f"<table>{BOTTOM}<b>x" * min(n, 20000),
+             bottom=False, after_is_deep=True),
+        deep("formatting misnested at the limit", at_limit + "<b><i><p>x</b></i>" * min(n, 20000) + BOTTOM,
+             bottom=False, after_is_deep=True),
+        deep("comments and void elements at the limit", at_limit + "<!--c--><br><img><div>" * min(n, 50000) + BOTTOM,
+             bottom=False, after_is_deep=True),
         deep("details", nest("<details open><summary>s</summary>", "</details>", n)),
         deep("button", nest("<div><button>", "</button></div>", n)),
         deep("fieldset", nest("<fieldset><legend>l</legend>", "</fieldset>", n)),
@@ -616,7 +622,7 @@ def judge(page: Page, kind: str, outcome: Outcome, layout_check: bool) -> str:
                 continue
             if not has(IN_TREE, text):
                 return f"the text {what} is not in the tree"
-            if text == BOTTOM and not layout_check:
+            if not layout_check and (text == BOTTOM or page.after_is_deep):
                 continue
             if not has(LAID_OUT, text):
                 return f"the text {what} was not laid out"

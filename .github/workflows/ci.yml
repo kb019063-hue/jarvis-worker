@@ -93,6 +93,26 @@ jobs:
           name: js-conformance-report
           path: build/js-conformance.json
 
+  deep-pages:
+    name: Deep and oversized pages (stack, memory and time limits)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Pages nested 200,000 deep, oversized bitmaps, long runs of one thing
+        # 142 generated pages, each nesting or repeating one construct far past
+        # what a recursive walk or a quadratic loop survives, then 300 random
+        # pages that keep the parser at its nesting limit. Every run is a child
+        # process with an 8 MB stack, 2 GB of memory and 60 seconds. The
+        # slowest takes about half a minute on a two-core machine; what this
+        # is here to catch does not finish at all.
+        run: make deep
+
   sanitizers:
     name: Address/UB sanitizers + parser fuzzing
     runs-on: ubuntu-latest

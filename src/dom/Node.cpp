@@ -115,9 +115,30 @@ bool Node::is_host_including_inclusive_ancestor_of(const Node& other) const {
     }
     if (!can_be_ancestor) return false;
 
+    // Two searches for the same answer take turns, one step each: up from
+    // `other`, looking for this node, and down through this node's subtree,
+    // looking for `other`. The first to finish decides. Alone, the walk up
+    // costs the depth of `other` and the search down costs the size of this
+    // subtree; together they cost twice the smaller of the two. So a script
+    // that appends small pieces to the bottom of a deep tree (a fragment with
+    // one element in it, two hundred thousand times) pays for the pieces, not
+    // for the depth, and a script that hangs a large tree under a new node
+    // pays one step.
+    //
+    // Both follow the same links in opposite directions: child and parent,
+    // shadow root and host.
+    struct Frame {
+        const Node* node;
+        std::size_t next;       // index of the next child to look at
+        bool shadow_seen;       // the node's shadow root has been looked at
+    };
+    std::vector<Frame> open;
+    open.push_back({this, 0, false});
+
     std::shared_ptr<Node> keep;             // keeps the node `at` points to alive
     const Node* at = &other;
     for (;;) {
+        // One step up.
         std::shared_ptr<Node> up = at->parent();
         if (!up) {
             auto* shadow = dynamic_cast<const ShadowRoot*>(at);
@@ -128,6 +149,28 @@ bool Node::is_host_including_inclusive_ancestor_of(const Node& other) const {
         if (up.get() == this) return true;
         keep = std::move(up);
         at = keep.get();
+
+        // One step down.
+        if (open.empty()) return false;     // everything below this node has been seen
+        Frame& top = open.back();
+        const Node* found = nullptr;
+        if (!top.shadow_seen) {
+            top.shadow_seen = true;
+            if (top.node->is_element()) {
+                found = static_cast<const Element*>(top.node)->m_shadow_root.get();
+            }
+        }
+        if (!found) {
+            if (top.next >= top.node->m_children.size()) {
+                open.pop_back();
+                continue;
+            }
+            found = top.node->m_children[top.next++].get();
+            if (!found) continue;
+        }
+        if (found == &other) return true;
+        // `top` is not used after this: push_back may move the frames.
+        open.push_back({found, 0, false});
     }
 }
 
@@ -167,16 +210,12 @@ static void notify_subtree_connected(const std::shared_ptr<Node>& node, bool con
 void Node::append_child(std::shared_ptr<Node> child) {
     if (!child) return;
 
+    if (child->is_host_including_inclusive_ancestor_of(*this)) return;
+
     if (child->is_document_fragment()) {
-        auto frag_children = child->children();
-        for (const auto& ch : frag_children) {
-            append_child(ch);
-        }
-        child->children().clear();
+        for (const auto& node : child->take_children()) append_child(node);
         return;
     }
-
-    if (child->is_host_including_inclusive_ancestor_of(*this)) return;
 
     if (auto old_p = child->parent()) {
         old_p->remove_child(child);
@@ -201,16 +240,12 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
         return;
     }
 
+    if (new_child->is_host_including_inclusive_ancestor_of(*this)) return;
+
     if (new_child->is_document_fragment()) {
-        auto frag_children = new_child->children();
-        for (const auto& ch : frag_children) {
-            insert_before(ch, ref_child);
-        }
-        new_child->children().clear();
+        for (const auto& node : new_child->take_children()) insert_before(node, ref_child);
         return;
     }
-
-    if (new_child->is_host_including_inclusive_ancestor_of(*this)) return;
 
     if (auto old_p = new_child->parent()) {
         old_p->remove_child(new_child);
@@ -250,6 +285,26 @@ void Node::remove_child(std::shared_ptr<Node> child) {
         // node out of a tree that was never in one is not that.
         if (is_connected()) notify_subtree_connected(removed, false);
     }
+}
+
+std::vector<std::shared_ptr<Node>> Node::take_children() {
+    std::vector<std::shared_ptr<Node>> removed;
+    removed.swap(m_children);
+    if (removed.empty()) return removed;
+    for (const auto& child : removed) child->set_parent(nullptr);
+    mark_needs_layout();
+
+    MutationObserver::notify_child_list(shared_from_this(), {}, removed, nullptr, nullptr);
+
+    if (is_connected()) {
+        for (const auto& child : removed) notify_subtree_connected(child, false);
+    }
+    return removed;
+}
+
+void Node::replace_children(const std::vector<std::shared_ptr<Node>>& nodes) {
+    take_children();
+    for (const auto& node : nodes) append_child(node);
 }
 
 void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture,
@@ -656,12 +711,8 @@ std::shared_ptr<Element> Element::query_selector(const std::string& selector) co
 }
 
 void Element::set_inner_html(const std::string& html) {
-    auto children_copy = m_children;
-    for (const auto& ch : children_copy) {
-        remove_child(ch);
-    }
-    auto parsed = HtmlParser::parse_fragment(html);
-    for (const auto& ch : parsed) {
+    take_children();
+    for (const auto& ch : HtmlParser::parse_fragment(html)) {
         append_child(ch);
     }
     mark_needs_layout();

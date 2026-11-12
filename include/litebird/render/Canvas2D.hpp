@@ -40,9 +40,16 @@ class CanvasRenderingContext2D {
 public:
     CanvasRenderingContext2D(int width, int height);
 
-    int width() const { return m_width; }
-    int height() const { return m_height; }
+    /// The size the canvas was given: what `canvas.width` reads back and
+    /// what layout uses.
+    int width() const { return m_nominal_width; }
+    int height() const { return m_nominal_height; }
     void resize(int w, int h);
+
+    /// False when the canvas was given a size that is over a limit of
+    /// RasterBudget. It then has a backing store of one pixel: every drawing
+    /// call is accepted and changes nothing, and the canvas paints blank.
+    bool has_backing_store() const { return m_width == m_nominal_width && m_height == m_nominal_height; }
 
     std::shared_ptr<ImageData> image_data() const { return m_image; }
 
@@ -82,9 +89,15 @@ public:
     JsValue to_js_value(std::shared_ptr<CanvasRenderingContext2D> self = nullptr);
 
 private:
+    // The size of the backing store. Everything that touches pixels uses
+    // these, never the nominal size.
     int m_width{300};
     int m_height{150};
+    int m_nominal_width{300};
+    int m_nominal_height{150};
     std::shared_ptr<ImageData> m_image;
+
+    void allocate(int width, int height);
 
     struct SubPath {
         std::vector<Point> points;

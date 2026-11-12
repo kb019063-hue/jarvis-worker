@@ -342,12 +342,9 @@ void HtmlTreeBuilder::process_after_head(const HtmlToken& token) {
                 name == "template" || name == "title") {
                 if (m_head_element) push_element(m_head_element);
                 process_in_head(token);
-                for (auto it = m_open_elements.rbegin(); it != m_open_elements.rend(); ++it) {
-                    if (*it == m_head_element) {
-                        const auto erase_it = std::next(it).base();
-                        erase_open_element(static_cast<std::size_t>(std::distance(m_open_elements.begin(), erase_it)));
-                        break;
-                    }
+                if (m_head_element) {
+                    const int position = open_element_position(m_head_element);
+                    if (position >= 0) erase_open_element(static_cast<std::size_t>(position));
                 }
                 return;
             }
@@ -540,20 +537,22 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             }
 
             if (name == "a") {
-                auto entry = last_formatting_entry_by_tag("a");
-                if (entry) {
+                if (const auto* entry = last_formatting_entry_by_tag("a")) {
+                    // Keep the element, not the entry: the adoption agency
+                    // erases from and inserts into the list the entry lives
+                    // in, and afterwards the same slot holds another
+                    // formatting element (or none). Removing "that element"
+                    // through the stale entry closed whichever element had
+                    // moved into the slot: <a><em><div><a> lost its <em>.
+                    const std::shared_ptr<Element> open_a = entry->element;
                     HtmlToken a_token;
                     a_token.type = HtmlTokenType::EndTag;
                     a_token.name = "a";
                     adoption_agency(a_token);
-                    const int index = formatting_entry_index(entry->element);
+                    const int index = formatting_entry_index(open_a);
                     if (index >= 0) m_formatting.erase(m_formatting.begin() + index);
-                    for (std::size_t i = 0; i < m_open_elements.size(); ++i) {
-                        if (m_open_elements[i] == entry->element) {
-                            erase_open_element(i);
-                            break;
-                        }
-                    }
+                    const int position = open_element_position(open_a);
+                    if (position >= 0) erase_open_element(static_cast<std::size_t>(position));
                 }
                 reconstruct_formatting_elements();
                 auto element = insert_html_element(token);
@@ -799,10 +798,8 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                     if (!node) return;
                     if (!has_element_in_scope("form")) return;
                     generate_implied_end_tags();
-                    auto it = std::find(m_open_elements.begin(), m_open_elements.end(), node);
-                    if (it != m_open_elements.end()) {
-                        erase_open_element(static_cast<std::size_t>(std::distance(m_open_elements.begin(), it)));
-                    }
+                    const int position = open_element_position(node);
+                    if (position >= 0) erase_open_element(static_cast<std::size_t>(position));
                     return;
                 }
                 if (!has_element_in_scope("form")) return;

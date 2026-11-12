@@ -1,5 +1,6 @@
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/RasterBudget.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <sstream>
 #include <cmath>
@@ -481,13 +482,20 @@ std::shared_ptr<ImageData> SvgRenderer::render(
         if (h <= 0.0f && vb.valid) h = vb.height;
     }
 
-    if (w <= 0.0f) w = 300.0f;
-    if (h <= 0.0f) h = 150.0f;
+    // Written so that a NaN also takes the default.
+    if (!(w > 0.0f)) w = 300.0f;
+    if (!(h > 0.0f)) h = 150.0f;
 
+    // An <svg> that is too large to draw into a bitmap, or that comes when
+    // the page's other bitmaps have used up the budget, keeps its box and
+    // stays blank (RasterBudget.hpp). The comparison is made on the floats:
+    // converting 1e12 to int would be undefined.
+    if (w > static_cast<float>(RasterBudget::kMaxSide) || h > static_cast<float>(RasterBudget::kMaxSide)) return nullptr;
     int img_w = std::max(1, static_cast<int>(std::round(w)));
     int img_h = std::max(1, static_cast<int>(std::round(h)));
 
     CanvasRenderingContext2D ctx(img_w, img_h);
+    if (!ctx.has_backing_store()) return nullptr;
     SvgStyle root_style;
     root_style.fill = Color::black();
     root_style.has_fill = true;

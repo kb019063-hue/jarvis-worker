@@ -4,6 +4,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/StyleResolver.hpp"
@@ -19,6 +20,7 @@
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/RasterBudget.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
@@ -37,7 +39,10 @@
 #include "js_string_stress.hpp"
 
 #include <iostream>
+#include <algorithm>
 #include <functional>
+#include <sstream>
+#include <vector>
 #include <cassert>
 #include <string>
 #include <thread>
@@ -3991,10 +3996,10 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     // fine, which is what made it look like a parser bug.
     //
     // Two things stand between markup like this and the stack now. The parser
-    // stops nesting at HtmlTreeBuilder::kMaxOpenElements, so the tree it
-    // builds from 6,000 nested <div> is 512 elements deep; and layout asks at
-    // every level whether there is stack left, because the cost of a level
-    // differs ~12x between an -O2 and an ASan build.
+    // stops nesting at HtmlTreeBuilder::kMaxTreeDepth, so the tree it builds
+    // from 6,000 nested <div> is 512 elements deep; and layout asks at every
+    // level whether there is stack left, because the cost of a level differs
+    // ~12x between an -O2 and an ASan build.
     const int depth = 6000;
     std::string html;
     html.reserve(static_cast<size_t>(depth) * 11 + 8);
@@ -4008,9 +4013,10 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     // Every <div> is in the tree; none of them was dropped.
     assert(doc->get_elements_by_tag_name("div").size() == static_cast<size_t>(depth));
 
-    // They nest until 512 elements are open (<html>, <body> and 510 <div>).
-    // From there each new <div> closes the one before it and becomes its
-    // sibling, so the stack of open elements stays at 512.
+    // They nest until the tree is 512 deep (<html>, <body> and 510 <div>).
+    // From there each new <div> is attached next to the one it was written
+    // inside. It is still an open element like any other: the text that
+    // follows goes into the last one.
     auto current = std::static_pointer_cast<Node>(doc->body());
     int parsed_depth = 0;
     while (current) {
@@ -4025,7 +4031,7 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
         ++parsed_depth;
         current = std::move(nested);
     }
-    const int max_open = static_cast<int>(HtmlTreeBuilder::kMaxOpenElements);
+    const int max_open = static_cast<int>(HtmlTreeBuilder::kMaxTreeDepth);
     assert(parsed_depth == max_open - 2);
     // `current` is the 510th <div>; the 511th to the 6,000th are its siblings.
     assert(current->children().empty());
@@ -5091,6 +5097,528 @@ TEST(overflow_hidden_clips_painting) {
     assert(leaked.r > 200 && leaked.g < 60 && leaked.b < 60);
 }
 
+// Depth of the deepest element below `root`, counting `root`'s children as 1.
+static int deepest_element_below(const litebird::Node& root) {
+    struct Frame { const litebird::Node* node; std::size_t next; };
+    std::vector<Frame> open;
+    open.push_back({&root, 0});
+    int deepest = 0;
+    while (!open.empty()) {
+        Frame& top = open.back();
+        if (top.next >= top.node->children().size()) { open.pop_back(); continue; }
+        const litebird::Node* child = top.node->children()[top.next++].get();
+        if (child->is_element()) deepest = std::max(deepest, static_cast<int>(open.size()));
+        open.push_back({child, 0});
+    }
+    return deepest;
+}
+
+TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
+    using namespace litebird;
+
+    // The HTML parser stops nesting at 512 open elements, but a script can
+    // still append a child to a child to a child for as long as it likes.
+    // Every walk over the DOM used to call itself once per level, and so did
+    // the destructor: at some tens of thousands of levels the first of them
+    // to run ended the process. Which one that was depended on the page:
+    // looking up the <title>, textContent, innerHTML, a selector, a custom
+    // element callback, or just dropping the last reference.
+    //
+    // These walks have no limit now. They are not allowed one: a selector
+    // that misses matches below some depth is a wrong answer.
+    const int depth = 200000;
+
+    {
+        auto doc = std::make_shared<Document>();
+        auto top = std::make_shared<Element>("div");
+        std::shared_ptr<Element> at = top;
+        for (int i = 1; i < depth; ++i) {
+            auto next = std::make_shared<Element>("div");
+            at->append_child(next);
+            at = next;
+        }
+        at->set_attribute("id", "bottom");
+        at->append_child(std::make_shared<Text>("deep"));
+
+        assert(top->text_content() == "deep");
+        const std::string innermost = "<div id=\"bottom\">deep</div>";
+        assert(top->inner_html().size() == static_cast<size_t>(depth - 2) * 11 + innermost.size());
+        assert(top->outer_html().size() == static_cast<size_t>(depth - 1) * 11 + innermost.size());
+        assert(top->descendants_with_tag("div").size() == static_cast<size_t>(depth - 1));
+        assert(top->descendant_with_id("bottom") == at);
+        assert(top->query_selector_all("div").size() == static_cast<size_t>(depth - 1));
+        assert(top->query_selector("#bottom") == at);
+        assert(top->query_selector("p") == nullptr);
+        assert(deepest_element_below(*top) == depth - 1);
+
+        // The bottom cannot take the top as its child, however far apart.
+        at->append_child(top);
+        assert(at->children().size() == 1 && top->parent() == nullptr);
+
+        // In a document: every node learns it is connected, and the
+        // document-wide lookups see all of it.
+        doc->append_child(top);
+        assert(at->is_connected());
+        assert(doc->get_element_by_id("bottom") == at);
+        assert(doc->get_elements_by_tag_name("div").size() == static_cast<size_t>(depth));
+        assert(doc->query_selector_all("#bottom").size() == 1);
+
+        // The indented dump is for reading. It prints 1,024 levels and says
+        // what it left out, instead of 200,000 lines of 400,000 spaces.
+        std::ostringstream dump;
+        doc->dump(dump);
+        const std::string text = dump.str();
+        assert(text.size() < 8 * 1024 * 1024);
+        assert(text.find(" nodes not shown, nested up to ") != std::string::npos);
+
+        // Layout and painting do recurse, and ask at every level whether
+        // there is stack left. What matters here is that they return.
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root != nullptr);
+        DisplayList::build(root);
+
+        doc->remove_child(top);
+        assert(!at->is_connected() && top->parent() == nullptr);
+    }   // and here 200,000 nodes are released, one inside the other
+
+    // Shadow trees inside shadow trees: the same, through the other link.
+    {
+        auto top = std::make_shared<Element>("div");
+        std::shared_ptr<Element> at = top;
+        for (int i = 0; i < 50000; ++i) {
+            auto shadow = at->attach_shadow("open");
+            auto inner = std::make_shared<Element>("div");
+            shadow->append_child(inner);
+            at = inner;
+        }
+        at->append_child(top);                  // a host contains its shadow tree, at any depth
+        assert(at->children().empty());
+    }
+
+    // A fragment appended at every level. Whether the fragment contains the
+    // node it is appended to is asked from both ends at once; walking up from
+    // the bottom alone made this loop cost depth * depth steps, a minute here.
+    {
+        auto top = std::make_shared<Element>("div");
+        std::shared_ptr<Element> at = top;
+        for (int i = 0; i < depth; ++i) {
+            auto fragment = std::make_shared<Node>(NodeType::DocumentFragment);
+            auto next = std::make_shared<Element>("div");
+            fragment->append_child(next);
+            at->append_child(fragment);
+            at = next;
+        }
+        assert(at->parent() != nullptr);
+        assert(top->descendants_with_tag("div").size() == static_cast<size_t>(depth));
+    }
+
+    // The same from script.
+    {
+        auto doc = HtmlParser::parse("<!doctype html><title>t</title><body></body>");
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var top = document.createElement('div'), at = top;
+            for (var i = 1; i < 100000; i++) { var d = document.createElement('div'); at.appendChild(d); at = d; }
+            at.appendChild(document.createTextNode('deep'));
+            var text = top.textContent;
+            var markup = top.innerHTML.length;
+            var found = top.querySelectorAll('div').length;
+            var error = 'none';
+            try { at.appendChild(top); } catch (e) { error = e.name; }
+            document.body.appendChild(top);
+            var connected = at.isConnected;
+            var all = document.querySelectorAll('div').length;
+            var steps = 0; for (var p = at; p && p !== document.body; p = p.parentNode) steps++;
+            var copy = document.createElement('div'); copy.innerHTML = top.outerHTML;
+            var copied = copy.querySelectorAll('div').length;
+            document.body.removeChild(top);
+            top = at = d = p = copy = null;
+            var done = 'released';
+        )");
+        auto value = [&](const char* name) { return js.global_env()->get(name).to_string(); };
+        assert(value("text") == "deep");
+        assert(value("markup") == std::to_string(99999 * 11 + 4));
+        assert(value("found") == "99999");
+        assert(value("error") == "HierarchyRequestError");
+        assert(value("connected") == "true");
+        assert(value("all") == "100000");
+        assert(value("steps") == "100000");
+        assert(value("copied") == "100000");
+        assert(value("done") == "released");
+    }
+
+    // A callback that changes the tree it is being told about. The elements
+    // to notify are listed before the first callback runs, so one that
+    // removes its siblings does not pull the tree out from under the walk.
+    {
+        auto doc = HtmlParser::parse("<!doctype html><body></body>");
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var calls = 0;
+            class Eater extends HTMLElement {
+                connectedCallback() {
+                    calls++;
+                    var p = this.parentNode;
+                    while (p && p.firstChild) p.removeChild(p.firstChild);
+                }
+            }
+            customElements.define('eat-el', Eater);
+            var top = document.createElement('div');
+            for (var i = 0; i < 50; i++) {
+                var e = document.createElement('eat-el');
+                e.appendChild(document.createElement('eat-el'));
+                top.appendChild(e);
+            }
+            document.body.appendChild(top);
+            var left = top.childNodes.length;
+        )");
+        assert(js.global_env()->get("calls").to_number() >= 1);
+        assert(js.global_env()->get("left").to_string() == "0");
+    }
+}
+
+TEST(html_parser_nesting_limit_holds_for_every_kind_of_element) {
+    using namespace litebird;
+
+    // deeply_nested_markup_does_not_overflow_the_stack pins the rule down for
+    // <div>. Elements reach the tree by other roads too: the table modes
+    // insert rows and cells the markup never mentions, formatting elements
+    // are reconstructed, the adoption agency algorithm moves whole subtrees,
+    // foreign elements have an insertion routine of their own, and a
+    // template's children go into its contents. Each must stop at the limit
+    // and lose nothing.
+    const int max_open = static_cast<int>(HtmlTreeBuilder::kMaxTreeDepth);
+    auto repeat = [](const std::string& piece, int times) {
+        std::string out;
+        out.reserve(piece.size() * static_cast<size_t>(times));
+        for (int i = 0; i < times; ++i) out += piece;
+        return out;
+    };
+    struct Case { const char* open; const char* count_tag; int per_level; };
+    const Case cases[] = {
+        {"<span>", "span", 1},
+        {"<b>", "b", 1},
+        {"<ul><li>", "li", 1},
+        {"<table><tr><td>", "td", 1},
+        {"<blockquote><p>", "blockquote", 1},
+        {"<details><summary>s</summary>", "details", 1},
+    };
+    for (const auto& c : cases) {
+        const int levels = 3000;
+        auto doc = HtmlParser::parse("<!doctype html>" + repeat(c.open, levels) + "bottom");
+        assert(doc->get_elements_by_tag_name(c.count_tag).size() == static_cast<size_t>(levels * c.per_level));
+        // <html> is at depth 1.
+        assert(deepest_element_below(*doc) <= max_open);
+        assert(deepest_element_below(*doc) >= max_open - 3);
+        assert(doc->body()->text_content().find("bottom") != std::string::npos);
+
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root != nullptr);
+        DisplayList::build(root);
+    }
+
+    // Foreign content: SVG groups.
+    {
+        auto doc = HtmlParser::parse("<!doctype html><svg>" + repeat("<g>", 3000) + "<rect/>");
+        assert(doc->get_elements_by_tag_name("g").size() == 3000);
+        assert(deepest_element_below(*doc) <= max_open);
+    }
+
+    // Templates: the children of a template are in its contents, which the
+    // html5lib dump shows one step further in. 3,000 of them nested must
+    // neither crash nor print 3,000 levels.
+    {
+        auto doc = HtmlParser::parse("<!doctype html>" + repeat("<template>", 3000) + "x");
+        const std::string dump = dump_tree_webplatform(*doc);
+        size_t longest_indent = 0;
+        size_t line_start = 0;
+        while (line_start < dump.size()) {
+            size_t first = dump.find_first_not_of(' ', line_start + 1);
+            if (first == std::string::npos) break;
+            longest_indent = std::max(longest_indent, first - line_start);
+            size_t end = dump.find('\n', line_start);
+            if (end == std::string::npos) break;
+            line_start = end + 1;
+        }
+        // Two spaces a level, and a template counts twice (element, contents).
+        assert(longest_indent <= static_cast<size_t>(max_open) * 4 + 8);
+    }
+
+    // Found by random pages at the limit: the handler for a second <a> held a
+    // pointer into the list of active formatting elements across the adoption
+    // agency algorithm, which rewrites that list. Afterwards the pointer was
+    // at whatever formatting element had moved into the slot, and that one
+    // was closed instead of the <a>: here the <em>, so "y" lost its emphasis
+    // and the tree ended up one level deeper than the stack of open elements.
+    {
+        auto doc = HtmlParser::parse("<!doctype html><a><em><div><a>x</div>y");
+        const std::string expected =
+            "| <!DOCTYPE html>\n"
+            "| <html>\n"
+            "|   <head>\n"
+            "|   <body>\n"
+            "|     <a>\n"
+            "|       <em>\n"
+            "|     <em>\n"
+            "|       <div>\n"
+            "|         <a>\n"
+            "|         <a>\n"
+            "|           \"x\"\n"
+            "|       <a>\n"
+            "|         \"y\"\n";
+        assert(dump_tree_webplatform(*doc) == expected);
+    }
+}
+
+TEST(css_values_survive_hostile_nesting) {
+    using namespace litebird;
+
+    // `width: calc(1px` is all it took: the length parser handed the text to
+    // the calc() evaluator, which handed what it could not read back to the
+    // length parser, forever. Parentheses and signs inside calc() recursed
+    // once each, and every var( that is never closed made the resolver read
+    // the rest of the value again.
+    StyleResolver resolver;
+    auto width_of = [&](const std::string& declarations) {
+        auto doc = HtmlParser::parse("<div id=\"t\" style=\"" + declarations + "\"></div>");
+        return resolver.resolve_style(doc->get_element_by_id("t")).width;
+    };
+    auto repeat = [](const std::string& piece, int times) {
+        std::string out;
+        for (int i = 0; i < times; ++i) out += piece;
+        return out;
+    };
+    const float automatic = width_of("color: red");
+
+    // A calc( that is not closed is closed by the end of the value, as every
+    // open bracket in CSS is.
+    assert(width_of("width: calc(100px") == 100.0f);
+    assert(width_of("width: calc(100px + 20px") == 120.0f);
+    assert(width_of("width: calc((100px + 20px") == 120.0f);
+
+    // calc() inside calc() is a parenthesis. (It used to evaluate to 0.)
+    assert(width_of("width: calc(calc(50px))") == 50.0f);
+    assert(width_of("width: calc(10px + calc(20px * 2) + (5px + 5px))") == 60.0f);
+
+    // Signs are read in a loop.
+    assert(width_of("width: calc(--60px)") == 60.0f);
+    assert(width_of("width: calc(100px - -+-60px)") == 40.0f);
+    assert(width_of("width: calc(" + std::string(200000, '-') + "7px)") == 7.0f);
+
+    // 100 levels of nesting are an expression; more is not one, and the
+    // declaration is dropped. The number is Blink's.
+    assert(width_of("width: calc(" + repeat("(", 100) + "50px" + repeat(")", 100) + ")") == 50.0f);
+    assert(width_of("width: calc(" + repeat("(", 101) + "50px" + repeat(")", 101) + ")") == automatic);
+    assert(width_of("width: " + repeat("calc(", 101) + "50px" + repeat(")", 101)) == 50.0f);
+    assert(width_of("width: " + repeat("calc(", 102) + "50px" + repeat(")", 102)) == automatic);
+
+    // Far past the limit, closed or not: an answer, not a crash.
+    assert(width_of("width: calc(" + repeat("(", 200000) + "1px" + repeat(")", 200000) + ")") == automatic);
+    assert(width_of("width: " + repeat("calc(", 200000) + "1px" + repeat(")", 200000)) == automatic);
+    assert(width_of("width: " + repeat("calc(", 200000) + "1px") == automatic);
+
+    // var(): a fallback, a fallback in a fallback, and a var( that is never
+    // closed, which is not a var() at all.
+    assert(width_of("width: var(--none, 33px)") == 33.0f);
+    assert(width_of("width: var(--none, var(--none-either, 34px))") == 34.0f);
+    assert(width_of("width: var( --none ,   35px  )") == 35.0f);
+    assert(width_of("width: var(--none, 33px") == automatic);
+    // 200,000 of them, never closed. This took minutes.
+    assert(width_of("width: " + repeat("var(--x, ", 200000) + "33px") == automatic);
+    assert(width_of("width: " + repeat("var(--x, ", 200000) + "33px" + repeat(")", 200000)) == automatic);
+}
+
+TEST(canvas_and_svg_bitmaps_are_bounded) {
+    using namespace litebird;
+
+    // Every <canvas> and every <svg> is drawn into a bitmap as large as the
+    // element says it is, and nothing bounded what it could say:
+    // <svg width="1e9" height="1e9"> ended the process with an uncaught
+    // std::length_error, width="100000" with std::bad_alloc, and 200,000
+    // <svg> of the default size asked for 36 GB a little at a time.
+    const std::int64_t before = RasterBudget::live_pixels();
+
+    // One bitmap that is too large: the canvas keeps the size it was given,
+    // has one pixel behind it, and accepts every drawing call.
+    {
+        CanvasRenderingContext2D canvas(100000, 100000);
+        assert(!canvas.has_backing_store());
+        assert(canvas.width() == 100000 && canvas.height() == 100000);
+        assert(canvas.image_data()->width == 1 && canvas.image_data()->height == 1);
+        assert(canvas.image_data()->pixels.size() == 1);
+        assert(RasterBudget::live_pixels() == before);
+        canvas.fill_style = Color(255, 0, 0);
+        canvas.fill_rect(0.0f, 0.0f, 50000.0f, 50000.0f);
+        canvas.clear_rect(10.0f, 10.0f, 99999.0f, 99999.0f);
+        canvas.begin_path();
+        canvas.move_to(1.0f, 1.0f);
+        canvas.line_to(90000.0f, 90000.0f);
+        canvas.line_to(1.0f, 90000.0f);
+        canvas.close_path();
+        canvas.fill();
+        canvas.stroke();
+
+        // Given a size it can have, it is a canvas again.
+        canvas.resize(20, 20);
+        assert(canvas.has_backing_store());
+        assert(canvas.image_data()->width == 20 && canvas.image_data()->pixels.size() == 400);
+        assert(RasterBudget::live_pixels() == before + 400);
+        canvas.fill_rect(0.0f, 0.0f, 10.0f, 10.0f);
+        assert(canvas.image_data()->get_pixel(5, 5) == Color(255, 0, 0).to_argb());
+        assert(canvas.image_data()->get_pixel(15, 15) == 0);
+    }
+    assert(RasterBudget::live_pixels() == before);      // and its share went back
+
+    // The limits for one bitmap: a side, and the area.
+    assert(RasterBudget::allows(RasterBudget::kMaxSide, 1));
+    assert(!RasterBudget::allows(RasterBudget::kMaxSide + 1, 1));
+    assert(RasterBudget::allows(4096, 4096));
+    assert(!RasterBudget::allows(4097, 4096));
+    assert(!RasterBudget::allows(INT_MAX, INT_MAX));
+    assert(!RasterBudget::allows(0, 10) && !RasterBudget::allows(10, -1));
+    assert(!CanvasRenderingContext2D(INT_MAX, INT_MAX).has_backing_store());
+    assert(!CanvasRenderingContext2D(RasterBudget::kMaxSide + 1, 1).has_backing_store());
+    assert(CanvasRenderingContext2D(RasterBudget::kMaxSide, 1).has_backing_store());
+
+    // The limit for all of them together. With the budget used up, the next
+    // canvas and the next <svg> are blank; when it is given back they work.
+    {
+        RasterReservation most, rest;
+        assert(most.resize(RasterBudget::kMaxLivePixels - before - 100));
+        assert(!rest.resize(101));
+        assert(rest.pixels() == 0);
+        assert(rest.resize(100));
+        assert(RasterBudget::live_pixels() == RasterBudget::kMaxLivePixels);
+
+        assert(!CanvasRenderingContext2D(300, 150).has_backing_store());
+        auto svg = std::make_shared<Element>("svg");
+        assert(SvgRenderer::render(svg, 40.0f, 30.0f) == nullptr);
+
+        assert(rest.resize(0));
+        assert(!CanvasRenderingContext2D(11, 10).has_backing_store());
+        assert(CanvasRenderingContext2D(10, 10).has_backing_store());
+    }
+    assert(RasterBudget::live_pixels() == before);
+
+    // A page. Each element keeps its box; the ones too large to draw have no
+    // image, the small one has, and layout and painting go on.
+    {
+        auto doc = HtmlParser::parse(
+            "<!doctype html>"
+            "<svg id=\"vast\" width=\"1e9\" height=\"1e9\"><rect width=\"5\" height=\"5\"/></svg>"
+            "<svg id=\"wide\" width=\"100000\" height=\"100000\"></svg>"
+            "<svg id=\"icon\" width=\"40\" height=\"30\"><rect width=\"5\" height=\"5\"/></svg>"
+            "<canvas id=\"sheet\" width=\"100000\" height=\"100000\"></canvas>"
+            "<p id=\"after\">after</p>");
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        assert(root != nullptr);
+        auto vast = find_box_by_id(root, "vast");
+        auto wide = find_box_by_id(root, "wide");
+        auto icon = find_box_by_id(root, "icon");
+        auto sheet = find_box_by_id(root, "sheet");
+        assert(vast && vast->image == nullptr && vast->style.width == 1e9f);
+        assert(wide && wide->image == nullptr && wide->style.width == 100000.0f);
+        assert(icon && icon->image != nullptr && icon->image->width == 40 && icon->image->height == 30);
+        assert(sheet && sheet->style.width == 100000.0f);
+        assert(sheet->image != nullptr && sheet->image->pixels.size() == 1);
+        assert(find_box_by_id(root, "after") != nullptr);
+        DisplayList::build(root);
+    }
+    assert(RasterBudget::live_pixels() == before);
+}
+
+TEST(replacing_children_detaches_the_old_ones) {
+    using namespace litebird;
+
+    // Setting textContent used to clear the element's list of children and
+    // nothing else. The removed children went on naming the element as their
+    // parent: parentNode was wrong, isConnected was wrong, appending the
+    // element to one of them was refused as a loop, and custom elements among
+    // them never heard that they had left the document.
+    {
+        auto doc = HtmlParser::parse("<!doctype html><body></body>");
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var el = document.createElement('div'), child = document.createElement('span');
+            el.appendChild(child);
+            el.textContent = 'x';
+            var orphaned = child.parentNode === null;
+            var moved = 'ok';
+            try { child.appendChild(el); } catch (e) { moved = e.name; }
+
+            var emptied = document.createElement('div');
+            emptied.appendChild(document.createElement('i'));
+            emptied.textContent = '';
+            var emptiedCount = emptied.childNodes.length;
+
+            var gone = 0;
+            class Leaf extends HTMLElement { disconnectedCallback() { gone++; } }
+            customElements.define('leaf-el', Leaf);
+            var host = document.createElement('div');
+            document.body.appendChild(host);
+            var leaf = document.createElement('leaf-el');
+            host.appendChild(leaf);
+            host.appendChild(document.createElement('leaf-el'));
+            host.textContent = 'bye';
+            var leafConnected = leaf.isConnected;
+            var hostText = host.textContent + ':' + host.childNodes.length;
+        )");
+        auto value = [&](const char* name) { return js.global_env()->get(name).to_string(); };
+        assert(value("orphaned") == "true");
+        assert(value("moved") == "ok");
+        assert(value("emptiedCount") == "0");
+        assert(value("gone") == "2");
+        assert(value("leafConnected") == "false");
+        assert(value("hostText") == "bye:1");
+    }
+
+    // Emptying a node takes its children in one step. One at a time, each
+    // removal moved all the remaining children down a place.
+    const int count = 100000;
+    auto list = std::make_shared<Element>("ul");
+    for (int i = 0; i < count; ++i) list->append_child(std::make_shared<Element>("li"));
+    auto first = list->children().front();
+    auto last = list->children().back();
+    auto removed = list->take_children();
+    assert(removed.size() == static_cast<size_t>(count) && list->children().empty());
+    assert(removed.front() == first && removed.back() == last);
+    assert(first->parent() == nullptr && last->parent() == nullptr);
+
+    // A fragment gives up its children the same way, in order.
+    auto fragment = std::make_shared<Node>(NodeType::DocumentFragment);
+    for (const auto& item : removed) fragment->append_child(item);
+    removed.clear();
+    list->append_child(fragment);
+    assert(fragment->children().empty());
+    assert(list->children().size() == static_cast<size_t>(count));
+    assert(list->children().front() == first && list->children().back() == last && first->parent() == list);
+
+    auto more = std::make_shared<Node>(NodeType::DocumentFragment);
+    auto one = std::make_shared<Element>("li");
+    auto two = std::make_shared<Element>("li");
+    more->append_child(one);
+    more->append_child(two);
+    list->insert_before(more, first);
+    assert(more->children().empty());
+    assert(list->children()[0] == one && list->children()[1] == two && list->children()[2] == first);
+
+    // A fragment cannot be put inside something it contains, and is left as
+    // it was when that is tried.
+    auto outer = std::make_shared<Node>(NodeType::DocumentFragment);
+    auto inside = std::make_shared<Element>("div");
+    outer->append_child(inside);
+    inside->append_child(outer);
+    assert(outer->children().size() == 1 && inside->children().empty() && inside->parent() == outer);
+
+    // innerHTML replaces the children too, and observers get one record for
+    // everything that was removed.
+    list->set_inner_html("<li>only</li>");
+    assert(list->children().size() == 1 && first->parent() == nullptr && one->parent() == nullptr);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -5172,6 +5700,11 @@ int main() {
     RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
     RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
     RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
+    RUN_TEST(dom_trees_of_any_depth_can_be_walked_and_released);
+    RUN_TEST(html_parser_nesting_limit_holds_for_every_kind_of_element);
+    RUN_TEST(css_values_survive_hostile_nesting);
+    RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
+    RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_strings_can_be_used_from_several_threads);

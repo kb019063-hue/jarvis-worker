@@ -1,23 +1,50 @@
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/RasterBudget.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
+#include <new>
+#include <vector>
 
 namespace litebird {
 
-CanvasRenderingContext2D::CanvasRenderingContext2D(int width, int height)
-    : m_width(std::max(1, width)), m_height(std::max(1, height)) {
+CanvasRenderingContext2D::CanvasRenderingContext2D(int width, int height) {
     m_image = std::make_shared<ImageData>();
-    m_image->width = m_width;
-    m_image->height = m_height;
-    m_image->pixels.resize(static_cast<size_t>(m_width * m_height), 0);
+    allocate(width, height);
 }
 
 void CanvasRenderingContext2D::resize(int w, int h) {
-    m_width = std::max(1, w);
-    m_height = std::max(1, h);
+    allocate(w, h);
+}
+
+// Gives the canvas a cleared backing store of the size asked for, or of a
+// single pixel when that size is over a limit (RasterBudget.hpp) or the
+// memory cannot be had. The bitmap object stays the same one, so whoever
+// already holds it (a layout box, a drawImage in progress) sees the new store.
+void CanvasRenderingContext2D::allocate(int width, int height) {
+    m_nominal_width = std::max(1, width);
+    m_nominal_height = std::max(1, height);
+
+    const std::int64_t pixels = static_cast<std::int64_t>(m_nominal_width) * m_nominal_height;
+    bool backed = RasterBudget::allows(m_nominal_width, m_nominal_height) && m_image->budget.resize(pixels);
+    if (backed) {
+        try {
+            m_image->pixels.assign(static_cast<std::size_t>(pixels), 0);
+        } catch (const std::bad_alloc&) {
+            backed = false;
+        }
+    }
+    if (backed) {
+        m_width = m_nominal_width;
+        m_height = m_nominal_height;
+    } else {
+        std::vector<uint32_t>(1, 0).swap(m_image->pixels);     // also returns the old store
+        m_image->budget.resize(0);
+        m_width = 1;
+        m_height = 1;
+    }
     m_image->width = m_width;
     m_image->height = m_height;
-    m_image->pixels.assign(static_cast<size_t>(m_width * m_height), 0);
 }
 
 void CanvasRenderingContext2D::set_pixel_safe(int x, int y, Color c) {

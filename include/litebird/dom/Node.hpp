@@ -58,6 +58,19 @@ public:
     void remove_child(std::shared_ptr<Node> child);
     void insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> ref_child);
 
+    /// Removes every child in one step and returns them, in order. Each of
+    /// them ends up with no parent; observers get one record that lists them
+    /// all, and custom elements among them are told they were disconnected.
+    ///
+    /// Removing the children one at a time with remove_child() moves every
+    /// remaining child down a place each time, which is quadratic in their
+    /// number; emptying a list of 100,000 items took seconds that way.
+    std::vector<std::shared_ptr<Node>> take_children();
+
+    /// Removes every child, then appends `nodes` in order. What setting
+    /// textContent does, with one text node or none.
+    void replace_children(const std::vector<std::shared_ptr<Node>>& nodes);
+
     /// True when this node is `other`, contains it, or hosts a shadow tree
     /// that contains it (the DOM standard's "host-including inclusive
     /// ancestor"). Inserting a node under something it contains would make it
@@ -65,7 +78,9 @@ public:
     /// script bindings throw HierarchyRequestError for it.
     ///
     /// A node without children and without a shadow tree answers at once, so
-    /// building a tree one new node at a time costs nothing here.
+    /// building a tree one new node at a time costs nothing here. Otherwise
+    /// the cost is the smaller of the depth of `other` and the size of the
+    /// subtree of this node.
     bool is_host_including_inclusive_ancestor_of(const Node& other) const;
 
     // Searches over the descendants of this node, in tree order. None of them

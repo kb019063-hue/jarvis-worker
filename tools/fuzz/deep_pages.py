@@ -14,12 +14,16 @@ A run passes when
 
   * the process exits 0: no signal, no sanitizer report;
   * it finishes inside the time and memory limits, and its output is bounded
-    (work or output that grows with the square of the depth does not finish);
+    (work or output that grows with the square of the depth does not finish).
+    The output limit is generous on purpose: a tree dump indents by depth, so
+    at the parser's nesting limit a line is a kilobyte long and the dumps of
+    a page with 800,000 nodes come to 1.7 GB. That is linear. What the limit
+    is there to stop was 800 MB at 20,000 levels and growing with the square;
   * the text after the deep part is in the tree, laid out and painted, which
     shows that the engine went on working;
   * for a page the HTML parser builds: the text at the very bottom of the nest
-    is in the tree, laid out and painted too. The parser stops nesting at 512
-    open elements (HtmlTreeBuilder::kMaxOpenElements), so nothing in a parsed
+    is in the tree, laid out and painted too. The parser attaches no element
+    deeper than 512 (HtmlTreeBuilder::kMaxTreeDepth), so nothing in a parsed
     tree is out of layout's reach;
   * for a page that builds its tree from script: the last script prints the
     values it is expected to compute (the length of innerHTML, the number of
@@ -79,8 +83,8 @@ BOTTOM = "DEEPBOTTOM"       # text at the innermost level of the nest
 AFTER = "DEEPAFTER"         # text in a shallow paragraph after it
 SCRIPT_OK = "DEEP-SCRIPT"   # prefix of the line a page's last script prints
 
-# HtmlTreeBuilder::kMaxOpenElements. No element the parser inserts is deeper.
-MAX_OPEN_ELEMENTS = 512
+# HtmlTreeBuilder::kMaxTreeDepth. No element the parser attaches is deeper.
+MAX_TREE_DEPTH = 512
 
 RUNS = {
     "dumps": ["--dump-dom", "--dump-layout", "--dump-paint", "--render-bmp", "{bmp}"],
@@ -138,7 +142,7 @@ def parsed_pages(n: int) -> list[Page]:
         options.setdefault("bottom", True)
         return Page(name, f"<!doctype html><title>deep</title><p>{AFTER}</p>" + body, **options)
 
-    at_limit = "<div>" * (MAX_OPEN_ELEMENTS + 100)
+    at_limit = "<div>" * (MAX_TREE_DEPTH + 100)
     pages = [
         deep("div", nest("<div>", "</div>", n)),
         unclosed("div, never closed", "<div>" * n + BOTTOM),
@@ -191,6 +195,13 @@ def parsed_pages(n: int) -> list[Page]:
         unclosed("nobr", "<nobr>" * n + BOTTOM),
         deep("ruby", nest("<ruby><rb>", "</rb></ruby>", n)),
         deep("unknown elements", nest("<x-y>", "</x-y>", n)),
+        # Not deep, but found by the deep SVG pages: every <svg> and <canvas>
+        # is drawn into a bitmap as large as the element says it is.
+        deep("svg larger than memory", f'<svg width="100000" height="100000"><rect width="5" height="5"/></svg>{BOTTOM}'),
+        deep("svg with a size no vector can have", f'<svg width="1e9" height="1e9"></svg>{BOTTOM}'),
+        deep("svg sized by a style", f'<svg style="width:100000px;height:100000px"></svg>{BOTTOM}'),
+        deep("canvas larger than memory", f'<canvas width="100000" height="100000"></canvas>{BOTTOM}'),
+        deep("svg, 36 GB of them at 180 KB each", "<svg></svg>" * min(n, 20000) + BOTTOM),
     ]
 
     values = {
@@ -326,6 +337,15 @@ def scripted_pages(n: int) -> list[Page]:
              "for (var i = 0; i < 50; i++) { var e = document.createElement('eat-el'); e.appendChild(document.createElement('eat-el')); top.appendChild(e); }"
              "document.body.appendChild(top);",
              ["calls > 0", "top.childNodes.length"], "true 0"),
+        page("canvas resized by script to more than memory",
+             "var c = document.createElement('canvas'); document.body.appendChild(c);"
+             "c.width = 100000; c.height = 100000; var ctx = c.getContext('2d'); ctx.fillRect(0, 0, 10, 10);"
+             "var w = c.width; c.width = 20; c.height = 20; ctx.fillRect(0, 0, 10, 10);",
+             ["w", "c.width", "c.height"], "100000 20 20"),
+        page("canvases, more than memory holds",
+             f"var kept = []; for (var i = 0; i < {min(n, 2000)}; i++) {{ var c = document.createElement('canvas');"
+             " c.width = 2000; c.height = 2000; c.getContext('2d').fillRect(0, 0, 1, 1); kept.push(c); }",
+             ["kept.length"], f"{min(n, 2000)}"),
         page("mutation observer on a deep subtree",
              c + "document.body.appendChild(top); var records = 0;"
                  "new MutationObserver(function (list) { records += list.length; }).observe(document.body, { childList: true, subtree: true });"
@@ -371,11 +391,10 @@ VOID = "br img input hr col wbr meta link area".split()
 
 
 def random_page(rng: random.Random, tokens: int) -> str:
-    """Start tags, end tags, comments and text. Mostly start tags, so that most
-    of the page is parsed with the stack of open elements full."""
-    out = ["<!doctype html>"]
-    for _ in range(MAX_OPEN_ELEMENTS + 20):
-        out.append(f"<{rng.choice(('div', 'span', 'b', 'p', 'table', 'tr', 'td', 'template', 'svg', 'g', 'select', 'li'))}>")
+    """Start tags, end tags, comments and text, after enough <div> to reach
+    the nesting limit. Mostly start tags, so that most of the page is parsed
+    at the limit."""
+    out = ["<!doctype html>", "<div>" * (MAX_TREE_DEPTH - rng.randrange(0, 40))]
     favourites = rng.sample(NESTING, 6)
     for _ in range(tokens):
         roll = rng.random()
@@ -575,7 +594,7 @@ def main() -> int:
                              "(a sanitizer build or a small stack stops layout earlier)")
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per run (default 60)")
     parser.add_argument("--memory-mb", type=int, default=2048, help="resident memory at which a run is ended (default 2048)")
-    parser.add_argument("--output-mb", type=int, default=1024, help="output at which a run is ended (default 1024)")
+    parser.add_argument("--output-mb", type=int, default=4096, help="output at which a run is ended (default 4096)")
     parser.add_argument("--jobs", type=int, default=max(1, min(4, (os.cpu_count() or 1))), help="runs at a time")
     parser.add_argument("--keep", default="", help="write the pages to this directory and leave them there")
     parser.add_argument("--list", action="store_true", help="print the page names and exit")
@@ -587,11 +606,11 @@ def main() -> int:
         pages = [page for page in pages if args.only in page.name]
     rng = random.Random(args.seed)
     for index in range(args.random):
-        # Elements stop at the limit. Templates do not make it deeper, they
-        # are not counted (see deepest_element); two levels of slack are for
-        # the adoption agency, which moves a subtree under a new element.
+        # No element may be deeper than the limit, whatever road it took into
+        # the tree: inserted, reconstructed, foster-parented, or moved by the
+        # adoption agency algorithm together with everything inside it.
         pages.append(Page(f"random page {index} (seed {args.seed})", random_page(rng, rng.randrange(500, 6000)),
-                          after=False, max_depth=MAX_OPEN_ELEMENTS + 2))
+                          after=False, max_depth=MAX_TREE_DEPTH))
     if args.list:
         for page in pages:
             print(page.name)

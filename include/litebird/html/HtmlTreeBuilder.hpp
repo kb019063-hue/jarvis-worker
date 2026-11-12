@@ -32,17 +32,21 @@ public:
     /// The scripting flag, which changes <noscript> handling.
     void set_scripting(bool enabled) { m_scripting = enabled; }
 
-    /// How many elements can be open at once, and so how deep the parser
-    /// nests. An element that would be opened inside the 512th is made its
-    /// sibling instead, and the 512th is closed (see place_for_new_node).
+    /// How deep the parser nests elements: <html> is at depth 1, and nothing
+    /// the parser attaches is deeper than this. An element that would be is
+    /// attached to the nearest ancestor that can still take it, so it becomes
+    /// a sibling of the element it was written inside (see
+    /// within_depth_limit).
     ///
-    /// The HTML standard has no such limit, and every browser has one. This is
-    /// WebKit's rule and WebKit's number (`defaultMaximumHTMLParserDOMTreeDepth`
-    /// in SettingsBase.h; `HTMLConstructionSite::attachLater`). Blink uses the
-    /// same number but leaves the 512th element open
-    /// (`kMaximumHTMLParserDOMTreeDepth`, `HTMLConstructionSite::Attach`), so
-    /// its stack of open elements still grows with the input.
-    static constexpr std::size_t kMaxOpenElements = 512;
+    /// The HTML standard has no such limit, and every browser has one, with
+    /// this number: `kMaximumHTMLParserDOMTreeDepth` in Blink
+    /// (`HTMLConstructionSite::AttachLater`) and
+    /// `defaultMaximumHTMLParserDOMTreeDepth` in WebKit
+    /// (`HTMLConstructionSite::attachLater`). The rule is Blink's: only the
+    /// place a node is attached changes. The stack of open elements, the
+    /// insertion mode and everything else the tree builder keeps are what the
+    /// standard says they are, at any depth.
+    static constexpr std::size_t kMaxTreeDepth = 512;
 
 private:
     enum class Mode {
@@ -123,11 +127,26 @@ private:
     void push_element(const std::shared_ptr<Element>&);
     void pop_current_node();
     void resize_open_elements(std::size_t size);
-    void erase_open_element(std::size_t index);
+    /// Removes an element from the middle of the stack. Unless
+    /// `descendants_moved` says the tree was rearranged to match (the
+    /// adoption agency algorithm does that), the elements above it stay
+    /// inside it in the tree, one level deeper than their place on the stack
+    /// suggests: </form> does this, and <a> inside an <a> that cannot be
+    /// closed. within_depth_limit() needs to know how often that happened.
+    void erase_open_element(std::size_t index, bool descendants_moved = false);
     void insert_open_element(std::size_t index, const std::shared_ptr<Element>& element);
     void replace_open_element(std::size_t index, const std::shared_ptr<Element>& element);
+    // The indexes below describe the stack of open elements; these keep them
+    // in step with it. An edit in the middle of the stack (the adoption
+    // agency algorithm makes several) takes the entries from that point up
+    // out of the indexes and puts them back afterwards, which costs the
+    // distance from the top of the stack, not its length.
     void index_open_element(std::size_t index, const std::shared_ptr<Element>& element);
-    void rebuild_open_element_indexes();
+    void unindex_open_element(std::size_t index, const std::shared_ptr<Element>& element);
+    void unindex_open_elements_from(std::size_t index);
+    void index_open_elements_from(std::size_t index);
+    /// Where `element` is on the stack of open elements, or -1.
+    int open_element_position(const std::shared_ptr<Element>& element) const;
     void pop_until_tag(const std::string& tag);
     void pop_until_one_of(const std::vector<std::string>& tags);
     bool has_element_in_scope(const std::string& tag, Scope scope = Scope::Default) const;
@@ -153,11 +172,27 @@ private:
         std::shared_ptr<Element> override_target = nullptr,
         bool force_foster = false);
     /// Where a node the parser has just created goes: the appropriate place
-    /// for inserting a node, unless kMaxOpenElements elements are open
-    /// already. Then the current node is closed and the new node goes next to
-    /// it. Used for elements and comments; text always goes into the current
+    /// for inserting a node, moved up the tree if that place is too deep.
+    /// Used for elements and comments; text always goes into the current
     /// node, as in WebKit and Blink.
     InsertionPlace place_for_new_node();
+    /// `place`, or the nearest place above it where a node can be attached
+    /// so that it, and the `levels_below` levels of elements it brings with
+    /// it (the chain of clones the adoption agency builds), end up no deeper
+    /// than `ceiling`.
+    InsertionPlace within_depth_limit(InsertionPlace place, std::size_t levels_below = 0,
+                                      std::size_t ceiling = kMaxTreeDepth) const;
+    /// The node above `node` when counting depth: its parent, or, for the
+    /// contents of a template, the template.
+    std::shared_ptr<Node> node_above(const Node& node) const;
+    /// How many elements there are from the root down to and including
+    /// `node`. Walks up; only called when near_depth_limit() says it matters.
+    std::size_t element_depth(const Node& node) const;
+    /// False while so few elements are open that nothing can be near the
+    /// limit, which is the case for every ordinary page.
+    bool near_depth_limit(std::size_t levels_below = 0) const {
+        return m_open_elements.size() + m_depth_beyond_stack + 1 + levels_below > kMaxTreeDepth;
+    }
     std::shared_ptr<Element> create_element_for_token(const HtmlToken& token, ElementNamespace ns);
     std::shared_ptr<Element> insert_html_element(const HtmlToken& token);
     std::shared_ptr<Element> insert_foreign_element(const HtmlToken& token, ElementNamespace ns);
@@ -199,12 +234,23 @@ private:
     std::shared_ptr<Document> m_document;
     HtmlTokenizer* m_tokenizer{nullptr};
     std::vector<std::shared_ptr<Element>> m_open_elements;
-    // Stack-indexed HTML tag positions and scope boundaries make scope queries
-    // independent of stack depth. Rebuilt only for rare middle edits to the
-    // tree-construction stack (e.g. adoption-agency repairs).
+    // Stack-indexed HTML tag positions, scope boundaries and the position of
+    // each open element make the questions the tree builder asks about the
+    // stack independent of its depth. The stack is as long as the markup is
+    // deep (the nesting limit bounds the tree, not the stack), so a walk down
+    // it for each token is the difference between a page that parses in a
+    // fraction of a second and one that takes minutes.
     std::unordered_map<std::string, std::vector<std::size_t>> m_open_html_tag_indices;
     std::array<std::vector<std::size_t>, 3> m_scope_boundary_indices;
+    std::unordered_map<const Element*, std::size_t> m_open_positions;
+    // How much deeper in the tree an open element can be than its place on
+    // the stack (see erase_open_element). Never decreases: it only decides
+    // whether within_depth_limit() has to measure.
+    std::size_t m_depth_beyond_stack{0};
     std::vector<FormattingEntry> m_formatting;
+    // The template each template-contents fragment belongs to. The fragment
+    // has no pointer back; counting depth needs the way up.
+    std::unordered_map<const Node*, std::weak_ptr<Element>> m_template_of_contents;
     std::shared_ptr<Element> m_head_element;
     std::shared_ptr<Element> m_form_element;
     Mode m_mode{Mode::Initial};

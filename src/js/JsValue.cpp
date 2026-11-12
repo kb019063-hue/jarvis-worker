@@ -1354,8 +1354,15 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         }
         if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
             if (name == "textContent" || name == "innerText") {
-                el->children().clear();
-                el->append_child(std::make_shared<Text>(val.to_string()));
+                // "String replace all": the old children are removed (they
+                // used to be dropped from the list with their parent pointers
+                // left behind, so a removed child still claimed this element
+                // as its parent), and a text node replaces them unless the
+                // string is empty.
+                std::vector<std::shared_ptr<Node>> nodes;
+                std::string text = val.to_string();
+                if (!text.empty()) nodes.push_back(std::make_shared<Text>(std::move(text)));
+                el->replace_children(nodes);
                 return;
             }
             if (name == "value") {
@@ -1370,18 +1377,17 @@ void JsValue::set_property(const std::string& name, JsValue val) {
                 el->set_checked(val.is_truthy());
                 return;
             }
-            if (name == "width" && el->tag_name() == "canvas") {
-                int w = std::max(1, static_cast<int>(val.to_number()));
-                el->set_attribute("width", std::to_string(w));
+            if ((name == "width" || name == "height") && el->tag_name() == "canvas") {
+                // Any number may be assigned; converting one that does not
+                // fit an int (1e12, NaN) is undefined, so it is brought into
+                // range as a double first. A size the canvas cannot have is
+                // kept as its size and leaves it blank (RasterBudget.hpp).
+                const double asked = val.to_number();
+                const int size = asked >= 1.0 ? static_cast<int>(std::min(asked, 2147483647.0)) : 1;
+                el->set_attribute(name, std::to_string(size));
                 auto ctx = el->get_or_create_canvas_context_2d();
-                ctx->resize(w, ctx->height());
-                return;
-            }
-            if (name == "height" && el->tag_name() == "canvas") {
-                int h = std::max(1, static_cast<int>(val.to_number()));
-                el->set_attribute("height", std::to_string(h));
-                auto ctx = el->get_or_create_canvas_context_2d();
-                ctx->resize(ctx->width(), h);
+                if (name == "width") ctx->resize(size, ctx->height());
+                else ctx->resize(ctx->width(), size);
                 return;
             }
         }

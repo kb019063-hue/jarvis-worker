@@ -261,6 +261,7 @@ std::shared_ptr<Element> HtmlTreeBuilder::adjusted_current_node() const {
 
 void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
     if (!element) return;
+    m_open_positions[element.get()] = index;
     const std::string& name = element->tag_name();
     if (element->element_namespace() == ElementNamespace::HTML) {
         m_open_html_tag_indices[name].push_back(index);
@@ -280,24 +281,13 @@ void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_pt
     }
 }
 
-void HtmlTreeBuilder::rebuild_open_element_indexes() {
-    m_open_html_tag_indices.clear();
-    for (auto& boundaries : m_scope_boundary_indices) boundaries.clear();
-    for (std::size_t i = 0; i < m_open_elements.size(); ++i) {
-        index_open_element(i, m_open_elements[i]);
-    }
-}
-
-void HtmlTreeBuilder::push_element(const std::shared_ptr<Element>& element) {
-    m_open_elements.push_back(element);
-    index_open_element(m_open_elements.size() - 1, element);
-}
-
-void HtmlTreeBuilder::pop_current_node() {
-    if (m_open_elements.empty()) return;
-    const std::size_t index = m_open_elements.size() - 1;
-    auto element = m_open_elements.back();
-    if (element && element->element_namespace() == ElementNamespace::HTML) {
+// Undoes index_open_element for the entry at `index`, which must be the
+// highest one still indexed: every list is in stack order, so what belongs to
+// that entry is at the end of each.
+void HtmlTreeBuilder::unindex_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
+    if (!element) return;
+    m_open_positions.erase(element.get());
+    if (element->element_namespace() == ElementNamespace::HTML) {
         auto it = m_open_html_tag_indices.find(element->tag_name());
         if (it != m_open_html_tag_indices.end() && !it->second.empty() && it->second.back() == index) {
             it->second.pop_back();
@@ -307,6 +297,29 @@ void HtmlTreeBuilder::pop_current_node() {
     for (auto& boundaries : m_scope_boundary_indices) {
         if (!boundaries.empty() && boundaries.back() == index) boundaries.pop_back();
     }
+}
+
+void HtmlTreeBuilder::unindex_open_elements_from(std::size_t index) {
+    for (std::size_t i = m_open_elements.size(); i-- > index;) unindex_open_element(i, m_open_elements[i]);
+}
+
+void HtmlTreeBuilder::index_open_elements_from(std::size_t index) {
+    for (std::size_t i = index; i < m_open_elements.size(); ++i) index_open_element(i, m_open_elements[i]);
+}
+
+int HtmlTreeBuilder::open_element_position(const std::shared_ptr<Element>& element) const {
+    auto found = m_open_positions.find(element.get());
+    return found == m_open_positions.end() ? -1 : static_cast<int>(found->second);
+}
+
+void HtmlTreeBuilder::push_element(const std::shared_ptr<Element>& element) {
+    m_open_elements.push_back(element);
+    index_open_element(m_open_elements.size() - 1, element);
+}
+
+void HtmlTreeBuilder::pop_current_node() {
+    if (m_open_elements.empty()) return;
+    unindex_open_element(m_open_elements.size() - 1, m_open_elements.back());
     m_open_elements.pop_back();
 }
 
@@ -314,22 +327,26 @@ void HtmlTreeBuilder::resize_open_elements(std::size_t size) {
     while (m_open_elements.size() > size) pop_current_node();
 }
 
-void HtmlTreeBuilder::erase_open_element(std::size_t index) {
+void HtmlTreeBuilder::erase_open_element(std::size_t index, bool descendants_moved) {
     if (index >= m_open_elements.size()) return;
+    if (!descendants_moved && index + 1 < m_open_elements.size()) ++m_depth_beyond_stack;
+    unindex_open_elements_from(index);
     m_open_elements.erase(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index));
-    rebuild_open_element_indexes();
+    index_open_elements_from(index);
 }
 
 void HtmlTreeBuilder::insert_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
     index = std::min(index, m_open_elements.size());
+    unindex_open_elements_from(index);
     m_open_elements.insert(m_open_elements.begin() + static_cast<std::ptrdiff_t>(index), element);
-    rebuild_open_element_indexes();
+    index_open_elements_from(index);
 }
 
 void HtmlTreeBuilder::replace_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
     if (index >= m_open_elements.size()) return;
+    unindex_open_elements_from(index);
     m_open_elements[index] = element;
-    rebuild_open_element_indexes();
+    index_open_elements_from(index);
 }
 
 namespace {
@@ -340,7 +357,15 @@ bool is_html_element(const std::shared_ptr<Element>& element) {
 }
 } // namespace
 
+// "Pop elements from the stack of open elements until an X element has been
+// popped." The standard only says this where an X is known to be open. Here
+// that has not always been true (rules for <select> content that close the
+// <select> without leaving its insertion mode), and popping until an element
+// that is not there empties the stack: <html> and <body> are gone, the rest of
+// the page is parsed with nothing open, and the adoption agency algorithm then
+// read the element "above" the first one. So: no such element, nothing popped.
 void HtmlTreeBuilder::pop_until_tag(const std::string& tag) {
+    if (element_index_in_stack(tag) < 0) return;
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
         pop_current_node();
@@ -349,6 +374,9 @@ void HtmlTreeBuilder::pop_until_tag(const std::string& tag) {
 }
 
 void HtmlTreeBuilder::pop_until_one_of(const std::vector<std::string>& tags) {
+    bool open = false;
+    for (const auto& tag : tags) open = open || element_index_in_stack(tag) >= 0;
+    if (!open) return;
     while (!m_open_elements.empty()) {
         auto element = m_open_elements.back();
         pop_current_node();
@@ -358,11 +386,9 @@ void HtmlTreeBuilder::pop_until_one_of(const std::vector<std::string>& tags) {
 }
 
 int HtmlTreeBuilder::element_index_in_stack(const std::string& tag) const {
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (is_html_element(element) && element->tag_name() == tag) return i;
-    }
-    return -1;
+    auto found = m_open_html_tag_indices.find(tag);
+    if (found == m_open_html_tag_indices.end() || found->second.empty()) return -1;
+    return static_cast<int>(found->second.back());
 }
 
 bool HtmlTreeBuilder::has_element_in_scope(const std::string& tag, Scope scope) const {
@@ -401,16 +427,13 @@ bool HtmlTreeBuilder::has_element_in_scope_where(const std::vector<std::string>&
 }
 
 bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (is_html_element(element) && element->tag_name() == tag) return true;
-        if (element->element_namespace() == ElementNamespace::HTML &&
-            (element->tag_name() == "html" || element->tag_name() == "table" ||
-             element->tag_name() == "template")) {
-            return false;
-        }
-    }
-    return false;
+    // Going down the stack, the element is looked for before the boundary is
+    // tested, so an element that is itself a boundary is in scope.
+    const int target = element_index_in_stack(tag);
+    if (target < 0) return false;
+    const int boundary = std::max({element_index_in_stack("html"), element_index_in_stack("table"),
+                                   element_index_in_stack("template")});
+    return target >= boundary;
 }
 
 bool HtmlTreeBuilder::has_element_in_select_scope(const std::string& tag) const {
@@ -493,14 +516,11 @@ HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::appropriate_place_for_inserting
     }
 
     // Foster parenting: insert before the nearest table, or into its parent.
-    int last_template = -1;
-    int last_table = -1;
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (last_template < 0 && element->tag_name() == "template") last_template = i;
-        if (last_table < 0 && element->tag_name() == "table") last_table = i;
-        if (last_template >= 0 && last_table >= 0) break;
-    }
+    // Looked up in the index of open HTML elements: a walk down the stack
+    // for each fostered node is one step per open element, and the stack is
+    // as long as the markup is deep.
+    const int last_template = element_index_in_stack("template");
+    const int last_table = element_index_in_stack("table");
 
     if (last_template >= 0 && (last_table < 0 || last_template > last_table)) {
         place.parent = m_open_elements[static_cast<std::size_t>(last_template)]->template_contents();
@@ -534,7 +554,9 @@ std::shared_ptr<Element> HtmlTreeBuilder::create_element_for_token(const HtmlTok
         if (!element->has_attribute(attr_name)) element->set_attribute(attr_name, value);
     }
     if (ns == ElementNamespace::HTML && token.name == "template") {
-        element->set_template_contents(std::make_shared<Node>(NodeType::DocumentFragment));
+        auto contents = std::make_shared<Node>(NodeType::DocumentFragment);
+        m_template_of_contents[contents.get()] = element;
+        element->set_template_contents(std::move(contents));
     }
     return element;
 }
@@ -542,33 +564,78 @@ std::shared_ptr<Element> HtmlTreeBuilder::create_element_for_token(const HtmlTok
 // The nesting limit.
 //
 // Markup can nest without end, and the parser used to follow it: 300,000
-// <div> start tags made a tree 300,000 levels deep and a stack of open
-// elements just as long. Everything that looks at an element's ancestors then
-// costs 300,000 steps per element (selector matching, the scope checks of the
-// tree builder itself, the indentation of a dump), and everything recursive
-// runs out of stack.
+// <div> start tags made a tree 300,000 levels deep. Everything that looks at
+// an element's ancestors then costs 300,000 steps per element (selector
+// matching, the indentation of a dump), and everything recursive runs out of
+// stack.
 //
-// With kMaxOpenElements elements open, the next node does not go inside the
-// current node. The current node is popped, as if its end tag had been seen,
-// and the new node is inserted into its parent. Because of the pop the stack
-// of open elements never grows past the limit, so neither does the depth of
-// the tree, and nothing in the tree builder works on a longer stack than
-// that. A node that is being foster-parented is left alone: it is inserted
-// next to a table, not into the current node.
-HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::place_for_new_node() {
-    InsertionPlace place = appropriate_place_for_inserting_node();
-    if (m_open_elements.size() < kMaxOpenElements) return place;
+// No element is attached deeper than kMaxTreeDepth. One that would be is
+// attached to the nearest ancestor that can still take it, and so becomes a
+// sibling of the element it was written inside. Nothing else changes: the new
+// element is pushed onto the stack of open elements like any other, later
+// text goes into it, and its end tag closes it. The stack therefore still
+// grows with the markup, as the standard says it does, and every rule that
+// reads the stack (scopes, insertion modes, the adoption agency algorithm)
+// works on the state the standard describes.
+//
+// An earlier version popped the current node at the limit instead, which is
+// what WebKit does. That keeps the stack short, but the insertion mode goes
+// on assuming that the element it was set for is still open: "in select"
+// without a <select>, "in cell" without a cell. Random pages at the limit
+// found the first "pop until a select has been popped" that emptied the stack
+// within minutes.
+//
+// Depth is the number of elements from the root down to and including the
+// node; what is inside a template counts as inside the template.
+std::shared_ptr<Node> HtmlTreeBuilder::node_above(const Node& node) const {
+    if (auto parent = node.parent()) return parent;
+    if (!node.is_document_fragment()) return nullptr;
+    auto found = m_template_of_contents.find(&node);
+    return found == m_template_of_contents.end() ? nullptr : found->second.lock();
+}
 
-    const auto current = current_node();
-    const bool goes_into_current =
-        !place.before && (place.parent == current || place.parent == current->template_contents());
-    if (!goes_into_current) return place;
+std::size_t HtmlTreeBuilder::element_depth(const Node& node) const {
+    std::size_t depth = node.is_element() ? 1 : 0;
+    for (std::shared_ptr<Node> at = node_above(node); at; at = node_above(*at)) {
+        if (at->is_element()) ++depth;
+    }
+    return depth;
+}
 
-    auto above = current->parent();
-    if (!above) return place;
-    pop_current_node();
-    place.parent = std::move(above);
+HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::within_depth_limit(InsertionPlace place,
+                                                                    std::size_t levels_below,
+                                                                    std::size_t ceiling) const {
+    // An open element is no deeper in the tree than its place on the stack,
+    // plus one for every element that was taken out of the middle of the
+    // stack with its descendants left inside it: each element was attached
+    // to one opened before it, or next to one. So with few elements open
+    // nothing can be too deep, and an ordinary page pays one comparison here.
+    if (!place.parent || !near_depth_limit(levels_below)) return place;
+
+    std::size_t depth = element_depth(*place.parent);
+    // The node goes one level below its parent and brings levels_below more.
+    ceiling = std::min(ceiling, kMaxTreeDepth);
+    const std::size_t deepest_parent = ceiling > levels_below + 1 ? ceiling - 1 - levels_below : 0;
+    if (depth <= deepest_parent) return place;
+
+    // Up, until the parent is shallow enough. Stepping from the contents of
+    // a template to the template does not change the depth, so the walk never
+    // stops on a template element: what belongs in a template goes into its
+    // contents, never under the element itself.
+    std::shared_ptr<Node> at = place.parent;
+    while (depth > deepest_parent) {
+        std::shared_ptr<Node> above = node_above(*at);
+        if (!above) break;
+        if (at->is_element()) --depth;
+        at = std::move(above);
+    }
+    place.parent = std::move(at);
+    place.before = nullptr;     // `before` was a child of the old parent
     return place;
+}
+
+HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::place_for_new_node() {
+    return within_depth_limit(appropriate_place_for_inserting_node());
 }
 
 void HtmlTreeBuilder::append_node_at(const std::shared_ptr<Node>& node, InsertionPlace place) {
@@ -702,15 +769,15 @@ void HtmlTreeBuilder::reconstruct_formatting_elements() {
     if (m_formatting.empty()) return;
     if (m_formatting.back().marker) return;
 
-    auto last = m_formatting.back().element;
-    bool in_stack = std::find(m_open_elements.begin(), m_open_elements.end(), last) != m_open_elements.end();
-    if (in_stack) return;
+    // Asked for every start tag and every run of text in the body, so it
+    // must not walk the stack.
+    if (open_element_position(m_formatting.back().element) >= 0) return;
 
     int index = static_cast<int>(m_formatting.size()) - 1;
     while (index > 0) {
         const auto& previous = m_formatting[static_cast<std::size_t>(index - 1)];
         if (previous.marker) break;
-        if (std::find(m_open_elements.begin(), m_open_elements.end(), previous.element) != m_open_elements.end()) break;
+        if (open_element_position(previous.element) >= 0) break;
         --index;
     }
 
@@ -726,13 +793,10 @@ void HtmlTreeBuilder::reconstruct_formatting_elements() {
 bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
     const std::string subject = token.name;
     auto is_in_stack = [&](const std::shared_ptr<Element>& element) {
-        return std::find(m_open_elements.begin(), m_open_elements.end(), element) != m_open_elements.end();
+        return open_element_position(element) >= 0;
     };
     auto stack_index = [&](const std::shared_ptr<Element>& element) {
-        for (std::size_t i = 0; i < m_open_elements.size(); ++i) {
-            if (m_open_elements[i] == element) return static_cast<int>(i);
-        }
-        return -1;
+        return open_element_position(element);
     };
 
     // Spec step 2.
@@ -758,6 +822,14 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         if (!has_element_in_scope(subject)) return true;
 
         const int formatting_stack_index = stack_index(formatting_element);
+        if (formatting_stack_index < 1) {
+            // Nothing is open above the formatting element, so there is no
+            // common ancestor to move anything to. Cannot happen while <html>
+            // is open; it used to, after the stack had been emptied (see
+            // pop_until_tag), and then read one element before the first.
+            m_formatting.erase(m_formatting.begin() + formatting_entry_index(formatting_element));
+            return true;
+        }
 
         // Find the furthest block.
         int furthest_index = -1;
@@ -783,11 +855,15 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
 
         auto furthest_block = m_open_elements[static_cast<std::size_t>(furthest_index)];
         auto common_ancestor = m_open_elements[static_cast<std::size_t>(formatting_stack_index - 1)];
+        // Only measured near the nesting limit; see the new element below.
+        const bool at_limit = near_depth_limit();
+        const std::size_t furthest_depth_before = at_limit ? element_depth(*furthest_block) : 0;
 
         int bookmark = formatting_entry_index(formatting_element);
         auto node = furthest_block;
         auto last_node = furthest_block;
         int node_index = furthest_index;
+        std::size_t clones = 0;     // levels the furthest block ends up below last_node
 
         for (int inner = 1; ; ++inner) {
             --node_index;
@@ -802,7 +878,7 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
                 node_entry_index = -1;
             }
             if (node_entry_index < 0) {
-                erase_open_element(static_cast<std::size_t>(node_index));
+                erase_open_element(static_cast<std::size_t>(node_index), /*descendants_moved=*/true);
                 continue;
             }
 
@@ -818,23 +894,42 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
             if (auto parent = last_node->parent()) parent->remove_child(last_node);
             node->append_child(last_node);
             last_node = node;
+            ++clones;
         }
 
         // Insert last_node at the appropriate place for common_ancestor.
         if (auto parent = last_node->parent()) parent->remove_child(last_node);
 
-        append_node_at(last_node, appropriate_place_for_inserting_node(common_ancestor, true));
+        // Both attachments below are subject to the nesting limit like any
+        // other. Without that, <b><div>x</b> repeated at the limit nests one
+        // level deeper each time: every <div> is moved under the one before.
+        //
+        // The furthest block brings its whole subtree along, so at the limit
+        // it must not end up deeper than it was. Normally it cannot: it comes
+        // out of the formatting element, which is more than the clones put
+        // back. At the limit it may have been attached next to all of them.
+        append_node_at(last_node,
+                       within_depth_limit(appropriate_place_for_inserting_node(common_ancestor, true), clones,
+                                          at_limit ? furthest_depth_before : kMaxTreeDepth));
 
         bookmark = std::max(0, std::min(bookmark, static_cast<int>(m_formatting.size())));
         auto new_element = create_element_for_token(formatting_token, ElementNamespace::HTML);
 
-        // Move all children of the furthest block into the new element.
-        auto children = furthest_block->children();
-        for (const auto& child : children) {
-            furthest_block->remove_child(child);
-            new_element->append_child(child);
+        // Move all children of the furthest block into the new element, and
+        // the new element into the furthest block. That puts the children
+        // one level further down. Normally the furthest block has just come
+        // up at least one level, out of the formatting element, so nothing
+        // ends up deeper than it was. At the nesting limit it may never have
+        // been inside the formatting element (it was attached next to it),
+        // and then each run of this algorithm would push its children one
+        // level deeper, without end. There the new element goes next to the
+        // furthest block instead of into it.
+        InsertionPlace for_new_element{furthest_block, nullptr};
+        if (at_limit && element_depth(*furthest_block) >= furthest_depth_before) {
+            if (auto beside = furthest_block->parent()) for_new_element.parent = std::move(beside);
         }
-        furthest_block->append_child(new_element);
+        for (const auto& child : furthest_block->take_children()) new_element->append_child(child);
+        append_node_at(new_element, within_depth_limit(std::move(for_new_element)));
 
         // Update the formatting list and the stack of open elements.
         const int entry_index = formatting_entry_index(formatting_element);
@@ -846,7 +941,7 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         m_formatting.insert(m_formatting.begin() + bookmark, FormattingEntry{new_element, formatting_token, false});
 
         const int old_index = stack_index(formatting_element);
-        if (old_index >= 0) erase_open_element(static_cast<std::size_t>(old_index));
+        if (old_index >= 0) erase_open_element(static_cast<std::size_t>(old_index), /*descendants_moved=*/true);
         const int furthest_now = stack_index(furthest_block);
         insert_open_element(static_cast<std::size_t>(furthest_now + 1), new_element);
     }
@@ -987,7 +1082,17 @@ QuirksMode HtmlTreeBuilder::quirks_mode_for(const Doctype& doctype, bool force_q
 }
 
 void HtmlTreeBuilder::reset_insertion_mode() {
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
+    // The standard walks down the stack to the first element that decides
+    // the mode. All of those are HTML elements with one of these names, so
+    // the walk can start at the highest of them: everything above it would
+    // be skipped anyway, and there can be 200,000 elements above it.
+    static const char* const deciding[] = {"select", "td", "th", "tr", "tbody", "thead", "tfoot", "caption",
+                                           "colgroup", "table", "template", "head", "body", "frameset", "html"};
+    int start = 0;
+    for (const char* name : deciding) start = std::max(start, element_index_in_stack(name));
+    start = std::min(start, static_cast<int>(m_open_elements.size()) - 1);
+
+    for (int i = start; i >= 0; --i) {
         // Fragment case: the first (root) node is replaced by the context
         // element passed to the fragment parsing algorithm.
         std::shared_ptr<Element> node = m_open_elements[static_cast<std::size_t>(i)];
@@ -998,15 +1103,14 @@ void HtmlTreeBuilder::reset_insertion_mode() {
 
         if (html) {
             if (name == "select") {
-                for (int j = i - 1; j > 0; --j) {
-                    const auto& ancestor = m_open_elements[static_cast<std::size_t>(j)];
-                    if (ancestor->tag_name() == "template") break;
-                    if (ancestor->tag_name() == "table") {
-                        m_mode = Mode::InSelectInTable;
-                        return;
-                    }
-                }
-                m_mode = Mode::InSelect;
+                // Below the select: a table before any template means "in
+                // select in table". Nothing that decides the mode is above
+                // the select, so the highest table and the highest template
+                // on the stack are the nearest ones below it.
+                const int table = element_index_in_stack("table");
+                const int template_index = element_index_in_stack("template");
+                m_mode = (table > 0 && table < i && table > template_index) ? Mode::InSelectInTable
+                                                                            : Mode::InSelect;
                 return;
             }
             if (name == "td" || name == "th") { m_mode = Mode::InCell; return; }

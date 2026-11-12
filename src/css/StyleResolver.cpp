@@ -1391,65 +1391,74 @@ std::string StyleResolver::resolve_var_functions(
     int depth
 ) const {
     if (depth > 12) return "";
+    if (value.find("var(") == std::string::npos) return value;
 
-    std::string result = value;
-    size_t var_pos = 0;
-    while ((var_pos = result.find("var(", var_pos)) != std::string::npos) {
-        size_t content_start = var_pos + 4;
-        int paren_depth = 1;
-        size_t i = content_start;
-        for (; i < result.size() && paren_depth > 0; ++i) {
-            if (result[i] == '(') paren_depth++;
-            else if (result[i] == ')') paren_depth--;
+    // Where each "(" closes, found in one pass. Looking for the end of every
+    // var( by scanning forward from it reads the rest of the value once per
+    // var(: a value of 200,000 var( that are never closed took minutes.
+    constexpr std::size_t kNotClosed = std::string::npos;
+    std::vector<std::size_t> closes_at(value.size(), kNotClosed);
+    {
+        std::vector<std::size_t> open;
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            if (value[i] == '(') {
+                open.push_back(i);
+            } else if (value[i] == ')' && !open.empty()) {
+                closes_at[open.back()] = i;
+                open.pop_back();
+            }
         }
-        if (paren_depth != 0) {
-            var_pos += 4;
+    }
+
+    auto trimmed = [](const std::string& text, std::size_t from, std::size_t to) {
+        while (from < to && std::isspace(static_cast<unsigned char>(text[from]))) ++from;
+        while (to > from && std::isspace(static_cast<unsigned char>(text[to - 1]))) --to;
+        return text.substr(from, to - from);
+    };
+
+    // The value is read once, left to right, and the result is built by
+    // appending: text up to a var(, then what the var( stands for.
+    std::string result;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t var_pos = value.find("var(", pos);
+        if (var_pos == std::string::npos) {
+            result.append(value, pos, std::string::npos);
+            break;
+        }
+        result.append(value, pos, var_pos - pos);
+        const std::size_t content_start = var_pos + 4;
+        const std::size_t content_end = closes_at[var_pos + 3];
+        if (content_end == kNotClosed) {
+            // Never closed: the text stays, and a var( inside it may still
+            // be a complete one.
+            result.append("var(");
+            pos = content_start;
             continue;
         }
-        size_t content_end = i - 1;
-        std::string inner = result.substr(content_start, content_end - content_start);
 
-        std::string var_name;
-        std::string fallback;
-        bool has_fallback = false;
-        int inner_depth = 0;
-        size_t comma_idx = std::string::npos;
-        for (size_t c = 0; c < inner.size(); ++c) {
-            if (inner[c] == '(') inner_depth++;
-            else if (inner[c] == ')') inner_depth--;
-            else if (inner[c] == ',' && inner_depth == 0) {
-                comma_idx = c;
+        // The name ends at the first comma that is not inside parentheses;
+        // the rest is the fallback.
+        std::size_t comma = kNotClosed;
+        for (std::size_t c = content_start; c < content_end; ++c) {
+            if (value[c] == '(') {
+                // Matched inside the var(, so it closes inside it too.
+                c = closes_at[c] == kNotClosed ? c : closes_at[c];
+            } else if (value[c] == ',') {
+                comma = c;
                 break;
             }
         }
+        const bool has_fallback = comma != kNotClosed;
+        const std::string var_name = trimmed(value, content_start, has_fallback ? comma : content_end);
 
-        if (comma_idx != std::string::npos) {
-            var_name = inner.substr(0, comma_idx);
-            fallback = inner.substr(comma_idx + 1);
-            has_fallback = true;
-        } else {
-            var_name = inner;
-        }
-
-        auto trim = [](std::string& s) {
-            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
-            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
-        };
-        trim(var_name);
-        trim(fallback);
-
-        std::string replacement;
         auto it = custom_props.find(var_name);
         if (it != custom_props.end()) {
-            replacement = resolve_var_functions(it->second, custom_props, depth + 1);
+            result += resolve_var_functions(it->second, custom_props, depth + 1);
         } else if (has_fallback) {
-            replacement = resolve_var_functions(fallback, custom_props, depth + 1);
-        } else {
-            replacement = "";
+            result += resolve_var_functions(trimmed(value, comma + 1, content_end), custom_props, depth + 1);
         }
-
-        result.replace(var_pos, content_end - var_pos + 1, replacement);
-        var_pos += replacement.size();
+        pos = content_end + 1;
     }
     return result;
 }

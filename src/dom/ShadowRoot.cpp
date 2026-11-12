@@ -17,10 +17,7 @@ std::string ShadowRoot::inner_html() const {
 }
 
 void ShadowRoot::set_inner_html(const std::string& html) {
-    auto children_copy = m_children;
-    for (const auto& ch : children_copy) {
-        remove_child(ch);
-    }
+    take_children();
     m_stylesheets.clear();
     m_parsed_stylesheets.clear();
 

@@ -1,0 +1,320 @@
+#name charCodeAt over 200,000 characters
+#code
+var s = "abcdefghij".repeat(20000), t = 0;
+for (var i = 0; i < s.length; i++) t += s.charCodeAt(i);
+console.log(s.length, t);
+#expect
+200000 20300000
+
+#name index over 200,000 characters
+#code
+var s = "abcdefghij".repeat(20000), n = 0;
+for (var i = 0; i < s.length; i++) if (s[i] === "c") n++;
+console.log(n, s[199999], s[200000]);
+#expect
+20000 j undefined
+
+#name charAt and at over a long string
+#code
+var s = "0123456789".repeat(15000), n = 0;
+for (var i = 0; i < s.length; i++) { if (s.charAt(i) === "7") n++; if (s.at(-1 - i) === "2") n++; }
+console.log(n, s.charAt(s.length) === "", s.at(s.length));
+#expect
+30000 true undefined
+
+#name charCodeAt over text that is not ASCII
+#code
+var s = "ab\u00e9\u4e2d\ud83d\ude00".repeat(20000), t = 0;
+for (var i = 0; i < s.length; i++) t += s.charCodeAt(i);
+console.log(s.length, t);
+#expect
+120000 2652600000
+
+#name index over text that is not ASCII
+#code
+var s = "ab\u00e9\u4e2d\ud83d\ude00".repeat(20000), n = 0, halves = 0;
+for (var i = 0; i < s.length; i++) { if (s[i] === "\u4e2d") n++; if (s[i] === "\ude00") halves++; }
+console.log(n, halves, s[2], s[3], s[4].charCodeAt(0).toString(16));
+#expect
+20000 20000 é 中 d83d
+
+#name length of a non-ASCII string as a loop bound
+#code
+var s = "\u00e9\u4e2dxyz".repeat(40000), n = 0;
+for (var i = 0; i < s.length; i++) n++;
+console.log(n);
+#expect
+200000
+
+#name codePointAt walk over emoji
+#code
+var s = "a\ud83d\ude00b\ud83c\udf55".repeat(20000), astral = 0, t = 0;
+for (var i = 0; i < s.length; i++) { var cp = s.codePointAt(i); if (cp > 0xFFFF) { astral++; i++; } t += cp; }
+console.log(s.length, astral, t);
+#expect
+120000 40000 5130720000
+
+#name for-of over a long string counts code points
+#code
+var s = "ab\u00e9\u4e2d\ud83d\ude00".repeat(30000), n = 0, units = 0;
+for (var ch of s) { n++; units += ch.length; }
+console.log(n, units, [..."x\ud83d\ude00y"].length);
+#expect
+150000 180000 3
+
+#name substring window over a long string
+#code
+var s = "abcdefghij".repeat(10000), t = 0, hits = 0;
+for (var i = 0; i + 5 <= s.length; i++) { var w = s.substring(i, i + 5); t += w.length; if (w === "cdefg") hits++; }
+var u = "ab\u00e9\u4e2d\ud83d\ude00".repeat(10000), t2 = 0, hits2 = 0;
+for (var i = 0; i + 3 <= u.length; i++) { var w = u.substr(i, 3); t2 += w.length; if (w === "\u00e9\u4e2d\ud83d") hits2++; }
+console.log(t, hits, t2, hits2);
+#expect
+499980 10000 179994 10000
+
+#name indexOf and lastIndexOf walks
+#code
+var s = "abcdefghi,".repeat(20000), n = 0, p = 0;
+while ((p = s.indexOf(",", p)) !== -1) { n++; p++; }
+var m = 0, q = s.length;
+while ((q = s.lastIndexOf(",", q - 1)) !== -1) { m++; if (q === 0) break; }
+var u = "caf\u00e9 \u4e2d\u6587,".repeat(20000), k = 0, r = 0;
+while ((r = u.indexOf("\u4e2d\u6587", r)) !== -1) { k++; r += 2; }
+console.log(n, m, k, u.indexOf("\u6587,c", 100), u.lastIndexOf("\u00e9"), s.includes("j"), u.startsWith("\u00e9 ", 3), u.endsWith("\u6587,"));
+#expect
+20000 20000 20000 102 159995 false true true
+
+#name a long string through calls, properties and arrays
+#code
+var s = "abcdefghij".repeat(20000);
+function f(x, i) { return x.charCodeAt(i); }
+function g(x) { return function (i) { return x[i]; }; }
+var o = { text: s }, list = [s, s, s], h = g(s), t = 0, c = 0;
+for (var i = 0; i < 100000; i++) {
+  t += f(s, i) + o.text.length + list[i % 3].charCodeAt(i);
+  if (h(i) === "a") c++;
+}
+console.log(t, c, o.text === s, list[2] === list[0]);
+#expect
+20020300000 10000 true true
+
+#name append 100,000 times
+#code
+var s = "";
+for (var i = 0; i < 100000; i++) s += "item" + (i % 10) + ",";
+console.log(s.length, s.slice(0, 18), s.slice(-12));
+#expect
+600000 item0,item1,item2, item8,item9,
+
+#name s = s + x and obj.s += x
+#code
+var s = "", o = { s: "" }, a = [""];
+for (var i = 0; i < 100000; i++) { s = s + "ab"; o.s += "abc"; a[0] += i % 10; }
+console.log(s.length, o.s.length, a[0].length, a[0].slice(-10), s === "ab".repeat(100000));
+#expect
+200000 300000 100000 0123456789 true
+
+#name append text that is not ASCII and read the end each time
+#code
+var s = "", t = 0;
+for (var i = 0; i < 50000; i++) { s += "\u00e9\ud83d\ude00" + (i % 10); t += s.charCodeAt(s.length - 2) + s.charCodeAt(s.length - 4); }
+console.log(s.length, t, s.slice(-4) === "\u00e9\ud83d\ude009", s.codePointAt(s.length - 3));
+#expect
+200000 2853250000 true 128512
+
+#name every prefix stays what it was
+#code
+var s = "", keep = [];
+for (var i = 0; i < 20000; i++) { s += String.fromCharCode(97 + i % 26); keep.push(s); }
+var ok = true;
+for (var i = 0; i < keep.length; i += 7) {
+  var p = keep[i];
+  if (p.length !== i + 1 || p.charCodeAt(i) !== 97 + i % 26 || p.charCodeAt(0) !== 97) ok = false;
+}
+console.log(ok, keep[0], keep[25], keep[19999].length, keep[5000] === s.slice(0, 5001));
+#expect
+true a abcdefghijklmnopqrstuvwxyz 20000 true
+
+#name two strings grown from one base
+#code
+var base = "base:";
+var a = base, b = base, c = base + "!";
+for (var i = 0; i < 30000; i++) { a += "a"; b += "b"; }
+var d = a.slice(0, 10) + "<", e = a.slice(0, 10) + ">";
+console.log(base, c, a.length, b.length, a.slice(0, 8), b.slice(0, 8), a[30004], b[30004], d, e);
+#expect
+base: base:! 30005 30005 base:aaa base:bbb a b base:aaaaa< base:aaaaa>
+
+#name appending to a string and to its slices
+#code
+var s = "0123456789".repeat(2000);
+var tail = s.slice(100), head = s.slice(0, 19000), mid = s.substring(5000, 15000);
+var s2 = s + "S", tail2 = tail + "T", head2 = head + "H", mid2 = mid + "M", tail3 = tail + "U";
+console.log(s.length, tail.length, head.length, mid.length,
+  s2.slice(-3), tail2.slice(-3), head2.slice(-3), mid2.slice(-3), tail3.slice(-3),
+  s.slice(-3), tail.slice(-3), head.slice(-3), mid.slice(-3), tail === s.slice(100), s2.length);
+#expect
+20000 19900 19000 10000 89S 89T 89H 89M 89U 789 789 789 789 true 20001
+
+#name html table built row by row
+#code
+var h = "<table>";
+for (var i = 0; i < 30000; i++) h += "<tr><td>" + i + "</td><td class=\"n\">" + (i * 2) + "</td></tr>";
+h += "</table>";
+console.log(h.length, h.slice(0, 40), h.slice(-45), h.split("<tr>").length);
+#expect
+1393350 <table><tr><td>0</td><td class="n">0</td 999</td><td class="n">59998</td></tr></table> 30001
+
+#name tokenizer that slices from the front
+#code
+function eat(s) { var n = 0, total = 0; while (s.length) { var k = s.indexOf(","); total += k; s = s.slice(k + 1); n++; } return n + ":" + total; }
+console.log(eat("token,".repeat(20000)), eat("t\u00f6k\u00ebn,".repeat(20000)), eat("\ud83d\ude00,x,".repeat(20000)));
+#expect
+20000:100000 20000:100000 40000:60000
+
+#name tokenizer with a regular expression at the front
+#code
+var s = "word 123 \u00e9t\u00e9 ".repeat(4000), words = 0, numbers = 0, m;
+while (s.length) {
+  if ((m = /^\d+\s*/.exec(s))) numbers++; else { m = /^\S+\s*/.exec(s); words++; }
+  s = s.substring(m[0].length);
+}
+console.log(words, numbers);
+#expect
+8000 4000
+
+#name regex exec loop over a long string
+#code
+var s = "key=value;cl\u00e9=val\u00fcr;".repeat(10000), re = /([^=;]+)=([^=;]+);/g, m, n = 0, t = 0, same = true;
+while ((m = re.exec(s))) { n++; t += m[1].length + m[2].length + m.index; if (m.input !== s) same = false; }
+console.log(n, t, same, re.lastIndex);
+#expect
+20000 2000060000 true 0
+
+#name sticky regex tokenizer
+#code
+var s = "let x1 = 42 + y;\n".repeat(9000), re = /\s*([A-Za-z_]\w*|\d+|[=+;])/y, m, n = 0, idents = 0;
+while ((m = re.exec(s))) { n++; if (/^[A-Za-z_]/.test(m[1])) idents++; }
+console.log(n, idents, re.lastIndex);
+#expect
+63000 27000 0
+
+#name replace, split and match on a long string
+#code
+var s = "hello w\u00f6rld ".repeat(20000);
+var r = s.replace(/o/g, "0"), parts = s.split(" "), all = s.match(/\u00f6/g);
+console.log(r.length, r.slice(0, 12), parts.length, parts[1], all.length, s.replace("zzz", "y") === s,
+  s.replaceAll("l", "").length, s.split("").length, s.search(/rld/), parts.join(" ") === s);
+#expect
+240000 hell0 wörld  40001 wörld 20000 true 180000 240000 8 true
+
+#name halves of a surrogate pair
+#code
+var hi = "\uD83D", lo = "\uDE00", face = "\uD83D\uDE00";
+console.log([
+  (hi + lo) === face, (hi + lo).length === 2, face.charCodeAt(0) === 0xD83D, face[1] === lo,
+  face.slice(0, 1) === hi, face.slice(1) === lo, (face.slice(0, 1) + face.slice(1)) === face,
+  [...face].length === 1, [...(lo + hi)].length === 2, face.codePointAt(0) === 0x1F600,
+  String.fromCharCode(0xD83D, 0xDE00) === face, face.split("").join("") === face,
+  (lo + hi).length === 2, (lo + hi) !== face, (hi + "x" + lo).length === 3, face.at(-1) === lo,
+  ("a" + hi).concat(lo, "b") === "a" + face + "b", (hi.repeat(2) + lo).codePointAt(1) === 0x1F600,
+  "x".padEnd(3, hi + lo) === "x" + face, "x".padEnd(2, face) === "x" + hi, [hi, lo].join("") === face,
+  `${hi}${lo}` === face, String.fromCodePoint(0xD83D, 0xDE00) === face, (hi + lo).codePointAt(0)
+].join());
+#expect
+true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,128512
+
+#name pairs made a half at a time in a long string
+#code
+var s = "";
+for (var i = 0; i < 20000; i++) { s += "\uD83D"; s += "\uDE00"; s += "-"; }
+var t = "";
+for (var i = 0; i < 20000; i++) t += "\uD83D\uDE00-";
+var n = 0;
+for (var ch of s) if (ch.length === 2) n++;
+console.log(s.length, s === t, n, s.codePointAt(3), s.slice(1, 2) === "\uDE00", s.lastIndexOf("\uD83D"), s.indexOf("\uDE00-\uD83D", 5));
+#expect
+60000 true 20000 128512 true 59997 7
+
+#name order is by code unit
+#code
+var face = "\uD83D\uDE00";
+console.log([
+  "\uD83D" < face, face < "\uFFFF", "\uD7FF" < face, face < "\uE000", "\uFFFF" > face, face > "\uD83D",
+  face < "\uD83D\uFFFF", face > "\uD83Da", "\uDE00" > face, "a" + face < "a\uFF5E", face < "\uD83D\uDE01"
+].join());
+var list = ["\uFFFF", face, "a", "\uE000", "\uD83D", "\uDE00", "\uD7FF", "", "\uD83D\uDE01", "\uFF5E"];
+console.log(list.sort().map(function (x) { return x.length ? x.charCodeAt(0).toString(16) + (x.length > 1 ? "+" + x.charCodeAt(1).toString(16) : "") : "empty"; }).join(" "));
+console.log(list.slice().sort(function (a, b) { return a < b ? -1 : a > b ? 1 : 0; }).join("") === list.join(""));
+#expect
+true,true,true,true,true,true,true,true,true,true,true
+empty 61 d7ff d83d d83d+de00 d83d+de01 de00 e000 ff5e ffff
+true
+
+#name unicode regex and lastIndex inside a pair
+#code
+var s = "a\uD83D\uDE00b\uD83D\uDE00c";
+var re = /./gu; re.lastIndex = 2;
+var m = re.exec(s);
+var re2 = /./g; re2.lastIndex = 2;
+var m2 = re2.exec(s);
+var re3 = /\uD83D\uDE00/yu; re3.lastIndex = 2;
+var m3 = re3.exec(s);
+console.log(m.index, m[0].length, re.lastIndex, m2.index, m2[0].length, re2.lastIndex, m3 && m3.index, re3.lastIndex,
+  s.match(/./gu).length, s.match(/./g).length, s.replace(/\uDE00/u, "x") === s, s.replace(/\uDE00/, "x").length, s.split(/(?:)/u).length);
+#expect
+1 2 3 2 1 3 1 3 5 7 true 7 5
+
+#name split and join round trip
+#code
+var s = "ab\u00e9\u4e2d\ud83d\ude00,".repeat(20000);
+var units = s.split(""), fields = s.split(","), points = Array.from(s);
+console.log(units.length, fields.length, points.length, units.join("") === s, fields.join(",") === s, points.join("") === s,
+  units.reverse().join("").length, fields[19999].length, fields[20000] === "");
+#expect
+140000 20001 120000 true true true 140000 6 true
+
+#name case, trim and pad on long strings
+#code
+var s = "  " + "Hello W\u00d6rld ".repeat(10000) + "  ";
+var u = s.toUpperCase(), l = s.toLowerCase(), t = s.trim();
+console.log(u.length, l.length, t.length, u.slice(2, 14), l.slice(2, 14), t.slice(-5), s.trimStart().length, s.trimEnd().length,
+  "x".padStart(100000, "ab").length, "x".padEnd(7, "\u00e9\u4e2d") + "|", u.toUpperCase() === u, "abc".toLowerCase() === "abc");
+#expect
+120004 120004 119999 HELLO WÖRLD  hello wörld  WÖrld 120002 120001 100000 xé中é中é中| true true
+
+#name json round trip of a long string
+#code
+var s = "line \"quoted\" \u00e9\u4e2d\ud83d\ude00\n".repeat(10000);
+var j = JSON.stringify(s), back = JSON.parse(j);
+var o = JSON.parse(JSON.stringify({ a: s, b: [s, s] }));
+console.log(s.length, j.length, back === s, o.a === s, o.b[1].length, JSON.stringify("\uD83D") + JSON.stringify("\uDE00\uD83D"));
+#expect
+190000 220002 true true 190000 "\ud83d""\ude00\ud83d"
+
+#name a string too long is a RangeError
+#code
+var out = [];
+try { "abc".repeat(Math.pow(2, 30)); out.push("no error"); } catch (e) { out.push(e instanceof RangeError); }
+try { "x".padEnd(Math.pow(2, 31), "y"); out.push("no error"); } catch (e) { out.push(e instanceof RangeError); }
+console.log(out.join(), "ok".repeat(3));
+#expect
+true,true okokok
+
+#name lookbehind over a long string
+#code
+var s = "ab,cd;".repeat(20000), re = /(?<=,)\w+/g, n = 0, m;
+while ((m = re.exec(s))) n += m[0].length;
+var none = 0, neg = /(?<!,)c/g;
+while (neg.exec(s)) none++;
+console.log(n, none, s.replace(/(?<=;)a/g, "A").length, s.match(/(?<=b),(?=c)/g).length, s.split(/(?<=;)/).length, s.search(/(?<=d;ab,c)d;$/));
+#expect
+40000 0 120000 20000 20000 119998
+
+#name lookbehind over a long string that is not ASCII
+#code
+var s = "\u00e9t\u00e9 \ud83d\ude00! ".repeat(15000);
+console.log(s.match(/(?<=\ud83d\ude00)!/gu).length, s.match(/(?<=\ude00)!/g).length, s.match(/(?<=\ude00)!/gu), s.replace(/(?<=\u00e9)t/g, "T").indexOf("t"),
+  s.match(/(?<!\u00e9)\u00e9/g).length, s.match(/(?<=.)\s/gu).length);
+#expect
+15000 15000 null -1 30000 30000

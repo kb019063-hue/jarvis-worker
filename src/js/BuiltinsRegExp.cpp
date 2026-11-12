@@ -676,6 +676,13 @@ public:
         : m_program(program), m_subject(subject),
           m_captures(static_cast<size_t>(program.group_count) * 2, -1) {}
 
+    /// In unicode mode the subject is a sequence of code points, so no match
+    /// may begin between the two halves of a surrogate pair.
+    bool splits_pair(size_t pos) const {
+        return m_program.unicode && pos > 0 && pos < m_subject.size() && m_subject[pos] >= 0xDC00 &&
+               m_subject[pos] <= 0xDFFF && m_subject[pos - 1] >= 0xD800 && m_subject[pos - 1] <= 0xDBFF;
+    }
+
     /// Tries to match starting exactly at `start`. On success the captures
     /// hold [start, end) pairs in UTF-16 units, -1 for unmatched groups.
     bool match_at(size_t start) {
@@ -724,6 +731,35 @@ private:
         return c;
     }
 
+    /// The code point that ends at `pos`, read right to left, and its width.
+    uint32_t code_point_before(size_t pos, size_t& width) const {
+        uint32_t c = m_subject[pos - 1];
+        width = 1;
+        if (m_program.unicode && c >= 0xDC00 && c <= 0xDFFF && pos >= 2) {
+            uint32_t high = m_subject[pos - 2];
+            if (high >= 0xD800 && high <= 0xDBFF) {
+                width = 2;
+                return 0x10000 + ((high - 0xD800) << 10) + (c - 0xDC00);
+            }
+        }
+        return c;
+    }
+
+    /// Where a match that consumed `width` units from `pos` now stands.
+    size_t step(size_t pos, size_t width) const { return m_backward ? pos - width : pos + width; }
+
+    /// The body of a lookbehind is matched right to left, as the language
+    /// defines it: the last term first, each character read from before the
+    /// position. A lookahead inside it goes left to right again. Lookarounds
+    /// run to completion before their continuation, so the direction is plain
+    /// state that this scope sets and puts back.
+    struct Direction {
+        Matcher& m;
+        bool previous;
+        Direction(Matcher& matcher, bool backward) : m(matcher), previous(matcher.m_backward) { m.m_backward = backward; }
+        ~Direction() { m.m_backward = previous; }
+    };
+
     bool same_char(uint32_t a, uint32_t b) const {
         if (a == b) return true;
         return m_program.ignore_case && fold_case(a) == fold_case(b);
@@ -735,10 +771,17 @@ private:
         return hit != set.negated;
     }
 
-    /// Matches one character-consuming atom at `pos`.
+    /// Matches one character-consuming atom at `pos`: the character after it,
+    /// or the one before it when matching backward.
     bool single(const Node* node, size_t pos, size_t& width) const {
-        if (pos >= m_subject.size()) return false;
-        uint32_t c = code_point_at(pos, width);
+        uint32_t c;
+        if (m_backward) {
+            if (pos == 0) return false;
+            c = code_point_before(pos, width);
+        } else {
+            if (pos >= m_subject.size()) return false;
+            c = code_point_at(pos, width);
+        }
         switch (node->type) {
             case Node::Type::Char: return same_char(c, node->ch);
             case Node::Type::Any: return m_program.dot_all || !is_line_terminator(c);
@@ -764,7 +807,8 @@ private:
         rest.items = &items;
         rest.next = index + 1;
         rest.k = &k;
-        return match(items[index].get(), pos, rest);
+        const Node* item = m_backward ? items[items.size() - 1 - index].get() : items[index].get();
+        return match(item, pos, rest);
     }
 
     void clear_groups(int first, int last) {
@@ -843,7 +887,7 @@ private:
             for (size_t count = 0;; ++count) {
                 if (count >= node->min && k.run(p)) return true;
                 if (count >= node->max || !single(atom, p, width)) return false;
-                p += width;
+                p = step(p, width);
                 charge();
             }
         }
@@ -851,11 +895,11 @@ private:
         if (!m_program.unicode) {
             // Every match is exactly one unit wide.
             size_t count = 0;
-            while (count < node->max && single(atom, pos + count, width)) ++count;
+            while (count < node->max && single(atom, step(pos, count), width)) ++count;
             if (count < node->min) return false;
             for (size_t i = count + 1; i-- > node->min;) {
                 charge();
-                if (k.run(pos + i)) return true;
+                if (k.run(step(pos, i))) return true;
             }
             return false;
         }
@@ -864,7 +908,7 @@ private:
         ends.push_back(pos);
         size_t p = pos;
         while (ends.size() - 1 < node->max && single(atom, p, width)) {
-            p += width;
+            p = step(p, width);
             ends.push_back(p);
         }
         if (ends.size() - 1 < node->min) return false;
@@ -885,7 +929,7 @@ private:
             case Node::Type::Any:
             case Node::Type::Class: {
                 size_t width = 1;
-                return single(node, pos, width) && k.run(pos + width);
+                return single(node, pos, width) && k.run(step(pos, width));
             }
 
             case Node::Type::LineStart:
@@ -924,8 +968,8 @@ private:
                     bool run(size_t end) override {
                         long old_start = m->m_captures[slot];
                         long old_end = m->m_captures[slot + 1];
-                        m->m_captures[slot] = static_cast<long>(start);
-                        m->m_captures[slot + 1] = static_cast<long>(end);
+                        m->m_captures[slot] = static_cast<long>(std::min(start, end));
+                        m->m_captures[slot + 1] = static_cast<long>(std::max(start, end));
                         if (k->run(end)) return true;
                         m->m_captures[slot] = old_start;
                         m->m_captures[slot + 1] = old_end;
@@ -948,19 +992,25 @@ private:
                 if (slot + 1 >= m_captures.size() || m_captures[slot] < 0) return k.run(pos);     // unset group matches empty
                 size_t start = static_cast<size_t>(m_captures[slot]);
                 size_t length = static_cast<size_t>(m_captures[slot + 1]) - start;
-                if (pos + length > m_subject.size()) return false;
+                if (m_backward ? length > pos : pos + length > m_subject.size()) return false;
+                const size_t at = m_backward ? pos - length : pos;
                 for (size_t i = 0; i < length; ++i) {
-                    if (!same_char(m_subject[start + i], m_subject[pos + i])) return false;
+                    if (!same_char(m_subject[start + i], m_subject[at + i])) return false;
                 }
-                return k.run(pos + length);
+                return k.run(step(pos, length));
             }
 
-            case Node::Type::LookAhead: {
+            case Node::Type::LookAhead:
+            case Node::Type::LookBehind: {
                 struct Accept : Continuation {
                     bool run(size_t) override { return true; }
                 } accept;
                 std::vector<long> saved = m_captures;
-                bool found = match(node->children[0].get(), pos, accept);
+                bool found;
+                {
+                    Direction direction(*this, node->type == Node::Type::LookBehind);
+                    found = match(node->children[0].get(), pos, accept);
+                }
                 if (node->negate) {
                     m_captures = saved;
                     return !found && k.run(pos);
@@ -969,28 +1019,6 @@ private:
                     m_captures = saved;
                     return false;
                 }
-                if (k.run(pos)) return true;
-                m_captures = saved;
-                return false;
-            }
-
-            case Node::Type::LookBehind: {
-                struct EndsAt : Continuation {
-                    size_t target;
-                    bool run(size_t p) override { return p == target; }
-                } ends_at;
-                ends_at.target = pos;
-                std::vector<long> saved = m_captures;
-                bool found = false;
-                for (size_t start = pos + 1; start-- > 0;) {
-                    if (match(node->children[0].get(), start, ends_at)) { found = true; break; }
-                    m_captures = saved;
-                }
-                if (node->negate) {
-                    m_captures = saved;
-                    return !found && k.run(pos);
-                }
-                if (!found) return false;
                 if (k.run(pos)) return true;
                 m_captures = saved;
                 return false;
@@ -1005,6 +1033,7 @@ private:
     const Utf16View& m_subject;
     std::vector<long> m_captures;
     uint64_t m_steps{0};
+    bool m_backward{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -1083,6 +1112,7 @@ MatchResult run_match(const Program& program, const Utf16View& subject, size_t f
             if (found == Utf16View::npos) return result;
             start = found;
         }
+        if (start > from && matcher.splits_pair(start)) continue;
         if (matcher.match_at(start)) {
             result.matched = true;
             result.captures = matcher.captures();

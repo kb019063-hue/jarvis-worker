@@ -33,6 +33,7 @@ SRCS = src/dom/Node.cpp \
        src/render/BitmapRenderer.cpp \
        src/render/ImageFilter.cpp \
        src/js/JsValue.cpp \
+       src/js/JsString.cpp \
        src/js/JsLexer.cpp \
        src/js/JsParser.cpp \
        src/js/Bytecode.cpp \
@@ -74,7 +75,12 @@ JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 # case that the normal build passes.
 JS_ASAN_FLOOR ?= 789
 
-.PHONY: all clean test run conformance js-conformance fuzz asan help
+# The string type stands alone, so its stress tests can be built without the
+# rest of the engine and run under sanitizers the whole engine cannot use yet.
+STRING_STRESS_SRCS = src/js/JsString.cpp tests/js_string_stress_main.cpp
+STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-pointer
+
+.PHONY: all clean test run conformance js-conformance fuzz asan tsan bench help
 
 all: $(TARGET)
 
@@ -93,7 +99,7 @@ $(BUILD_DIR)/main.o: src/main.cpp
 
 -include $(OBJS:.o=.d) $(BUILD_DIR)/main.d
 
-$(TEST_TARGET): $(OBJS) tests/test_suite.cpp
+$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
@@ -128,8 +134,24 @@ asan:
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
+## The JavaScript string type under ThreadSanitizer, then under AddressSanitizer
+## with leak checking on. Strings are shared between threads without locks
+## (suspended async functions and workers run on their own threads), and that
+## is a claim only ThreadSanitizer can check. Takes about a minute.
+tsan:
+	@mkdir -p build-tsan
+	$(CXX) $(STRING_STRESS_FLAGS) -fsanitize=thread $(STRING_STRESS_SRCS) -o build-tsan/js_string_tsan
+	./build-tsan/js_string_tsan
+	$(CXX) $(STRING_STRESS_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=undefined $(STRING_STRESS_SRCS) -o build-tsan/js_string_asan
+	./build-tsan/js_string_asan
+
+## Times string-heavy scripts against Node.js when it is installed. Fails if a
+## case takes seconds: each one does work that grows in step with its input.
+bench: $(TARGET)
+	@python3 tools/bench/bench_strings.py --max-ms 3000
+
 clean:
-	rm -rf build build-asan
+	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, fuzz, asan, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, fuzz, asan, tsan, bench, clean"

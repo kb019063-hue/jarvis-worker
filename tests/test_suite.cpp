@@ -34,6 +34,7 @@
 #include "litebird/dom/History.hpp"
 #include "litebird/render/ImageFilter.hpp"
 #include "litebird/net/AbortController.hpp"
+#include "js_string_stress.hpp"
 
 #include <iostream>
 #include <functional>
@@ -4439,6 +4440,13 @@ TEST(dom_insertion_cannot_make_a_node_its_own_ancestor) {
     }
 }
 
+// Strings share blocks of text; these two check that script can never tell.
+// The tests themselves are in js_string_stress.hpp, which `make tsan` also
+// builds on its own for ThreadSanitizer.
+TEST(js_string_matches_a_utf16_model_under_random_edits) { litebird_tests::js_string_model_test(); }
+
+TEST(js_strings_can_be_used_from_several_threads) { litebird_tests::js_string_thread_test(); }
+
 TEST(phase19_js_compatibility_basics) {
     using namespace litebird;
 
@@ -4808,6 +4816,8 @@ int main() {
     RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
     RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
     RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
+    RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
+    RUN_TEST(js_strings_can_be_used_from_several_threads);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

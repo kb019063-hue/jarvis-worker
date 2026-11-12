@@ -386,7 +386,7 @@ JsValue JsValue::make_object(JsObject* obj) {
 JsValue JsValue::make_symbol(std::string key, std::string description) {
     JsValue v;
     v.type = JsType::Symbol;
-    v.string_val = std::move(key);
+    v.string_val = JsString(key);
     // The description rides in the property table so the value stays small.
     v.properties = std::make_shared<PropertyMap>();
     (*v.properties)["description"] = JsValue::make_string(std::move(description));
@@ -490,9 +490,9 @@ std::string JsValue::to_string() const {
         case JsType::Null: return "null";
         case JsType::Boolean: return bool_val ? "true" : "false";
         case JsType::Number: return js_number_to_string(number_val);
-        case JsType::String: return string_val;
+        case JsType::String: return string_val.str();
         case JsType::Symbol: {
-            std::string desc = properties ? (*properties)["description"].string_val : std::string();
+            std::string desc = properties ? (*properties)["description"].string_val.str() : std::string();
             return "Symbol(" + desc + ")";
         }
         case JsType::Object: {
@@ -530,7 +530,7 @@ std::string JsValue::to_string() const {
             }
             else if (const PropertyMap* map = loose_properties()) {
                 auto it = map->find("name");
-                if (it != map->end()) name = it->second.string_val;
+                if (it != map->end()) name = it->second.string_val.str();
             }
             // Bound functions print without a name, as V8 prints them.
             if (name.compare(0, 6, "bound ") == 0) name.clear();
@@ -574,7 +574,7 @@ double JsValue::to_number() const {
         case JsType::Boolean: return bool_val ? 1.0 : 0.0;
         case JsType::Number: return number_val;
         case JsType::String: {
-            try { return std::stod(string_val); } catch (...) { return 0.0; }
+            try { return std::stod(string_val.str()); } catch (...) { return 0.0; }
         }
         default: return 0.0;
     }
@@ -602,14 +602,14 @@ static bool is_wrapped_string_index(const JsObject* cell, const std::string& nam
     const auto* wrapped = static_cast<const JsValue*>(cell->internal.get());
     size_t index = 0;
     return wrapped && wrapped->type == JsType::String && parse_array_index(name, index) &&
-           index < js_string_length(wrapped->string_val);
+           index < wrapped->string_val.length();
 }
 
 bool JsValue::has_own_property(const std::string& name) const {
     size_t index = 0;
     if (type == JsType::String) {
         if (name == "length") return true;
-        return parse_array_index(name, index) && index < js_string_length(string_val);
+        return parse_array_index(name, index) && index < string_val.length();
     }
     if (JsObject* cell = property_cell()) {
         if (cell->is_array) {
@@ -680,7 +680,7 @@ bool JsValue::delete_property(const std::string& name) {
 std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     std::vector<std::string> keys;
     if (type == JsType::String) {
-        size_t length = js_string_length(string_val);
+        size_t length = string_val.length();
         for (size_t i = 0; i < length; ++i) keys.push_back(std::to_string(i));
         if (include_non_enumerable) keys.emplace_back("length");
         return keys;
@@ -696,7 +696,7 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         // The characters come first; `length` is in the property map already.
         const auto* wrapped = static_cast<const JsValue*>(cell->internal.get());
         if (wrapped && wrapped->type == JsType::String) {
-            size_t length = js_string_length(wrapped->string_val);
+            size_t length = wrapped->string_val.length();
             for (size_t i = 0; i < length; ++i) keys.push_back(std::to_string(i));
         }
     }
@@ -880,15 +880,13 @@ JsValue JsValue::get_property(const std::string& name) const {
     // Primitives have no properties of their own; they borrow the methods of
     // their wrapper prototype (String.prototype and friends).
     if (type == JsType::String) {
-        if (name == "length") return JsValue::make_number(static_cast<double>(js_string_length(string_val)));
+        // `s.length` and `s[i]` run once per character in any loop over a
+        // string, so neither may read the text: the length is a field of the
+        // handle and a code unit is one array read. See JsString.
+        if (name == "length") return JsValue::make_number(static_cast<double>(string_val.length()));
         size_t index = 0;
         if (parse_array_index(name, index)) {
-            if (js_is_ascii(string_val)) {
-                if (index < string_val.size()) return JsValue::make_string(std::string(1, string_val[index]));
-                return JsValue::make_undefined();
-            }
-            std::u16string units = js_utf8_to_utf16(string_val);
-            if (index < units.size()) return JsValue::make_string(js_utf16_to_utf8(units.substr(index, 1)));
+            if (index < string_val.length()) return JsValue::make_string(JsString::from_unit(string_val.unit_at(index)));
             return JsValue::make_undefined();
         }
         JsValue found;

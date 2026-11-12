@@ -706,7 +706,7 @@ void JsInterpreter::init_language_builtins() {
     m_global_env->define("eval", js_make_native("eval", 1, [this](const std::vector<JsValue>& args) {
         if (args.empty() || args[0].type != JsType::String) return js_arg(args, 0);
         try {
-            return run(args[0].string_val);
+            return run(args[0].string_val.str());
         } catch (const JsSyntaxError& error) {
             js_throw_error(JsErrorKind::SyntaxError, error.what());
         }

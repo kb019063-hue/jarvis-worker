@@ -28,18 +28,21 @@ double js_current_time_ms();
 JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots = {});
 
 // --- RegExp entry points used by String.prototype methods -----------------
+// The subject is passed as the string value's own text, so that a pattern
+// applied again and again to one long string (an exec() loop) does not copy
+// or convert the string on every call.
 bool js_is_regexp(const JsValue& value);
 JsValue js_regexp_create(const std::string& pattern, const std::string& flags);
 /// String.prototype.replace / replaceAll with a regular expression.
-JsValue js_regexp_replace(const JsValue& regex, const std::string& subject, const JsValue& replacement);
+JsValue js_regexp_replace(const JsValue& regex, const JsString& subject, const JsValue& replacement);
 /// String.prototype.match.
-JsValue js_regexp_match(const JsValue& regex, const std::string& subject);
+JsValue js_regexp_match(const JsValue& regex, const JsString& subject);
 /// String.prototype.matchAll: an iterator of match arrays.
-JsValue js_regexp_match_all(const JsValue& regex, const std::string& subject);
+JsValue js_regexp_match_all(const JsValue& regex, const JsString& subject);
 /// String.prototype.search: index of the first match in UTF-16 units, or -1.
-double js_regexp_search(const JsValue& regex, const std::string& subject);
+double js_regexp_search(const JsValue& regex, const JsString& subject);
 /// String.prototype.split with a regular expression separator.
-JsValue js_regexp_split(const JsValue& regex, const std::string& subject, double limit);
+JsValue js_regexp_split(const JsValue& regex, const JsString& subject, double limit);
 
 /// Expands `$&`, `$1`, `$<name>`, "$`", `$'` and `$$` in a replacement template.
 /// `captures[0]` is the whole match; an unmatched group is marked absent.
@@ -47,7 +50,7 @@ struct JsReplaceCapture {
     bool matched{false};
     std::u16string text;
 };
-std::u16string js_expand_replacement(const std::u16string& replacement, const std::u16string& subject,
+std::u16string js_expand_replacement(const std::u16string& replacement, const Utf16View& subject,
                                      size_t position, const std::vector<JsReplaceCapture>& captures,
                                      const std::vector<std::pair<std::string, size_t>>& named_groups);
 

@@ -177,7 +177,7 @@ private:
             skip_whitespace();
             if (peek() != '"') throw std::runtime_error("Expected string key in JSON object");
             JsValue key_val = parse_string();
-            std::string key = key_val.string_val;
+            std::string key = key_val.string_val.str();
 
             skip_whitespace();
             if (peek() != ':') throw std::runtime_error("Expected ':' after key in JSON object");
@@ -252,7 +252,7 @@ std::string Json::stringify(const JsValue& value) {
             return ss.str();
         }
         case JsType::String:
-            return escape_string(value.string_val);
+            return escape_string(value.string_val.str());
         case JsType::Object: {
             if (value.object_val && value.object_val->is_array) {
                 std::string res = "[";

@@ -483,7 +483,7 @@ JsValue VM::run() {
                 break;
             }
             case OpCode::OpGetGlobal: {
-                const auto& name = read_constant().string_val;
+                const std::string name = read_constant().string_val.str();
                 auto it = m_globals.find(name);
                 if (it != m_globals.end()) {
                     push(it->second);
@@ -493,12 +493,12 @@ JsValue VM::run() {
                 break;
             }
             case OpCode::OpSetGlobal: {
-                const auto& name = read_constant().string_val;
+                const std::string name = read_constant().string_val.str();
                 m_globals[name] = peek(0);
                 break;
             }
             case OpCode::OpGetProperty: {
-                const auto& prop = read_constant().string_val;
+                const std::string prop = read_constant().string_val.str();
                 JsValue obj = pop();
                 JsValue value = obj.get_property(prop);
                 // OpCall has no receiver operand, and built-in methods now read
@@ -508,7 +508,7 @@ JsValue VM::run() {
                 break;
             }
             case OpCode::OpSetProperty: {
-                const auto& prop = read_constant().string_val;
+                const std::string prop = read_constant().string_val.str();
                 JsValue obj = pop();
                 JsValue val = peek(0);
                 obj.set_property(prop, val);
@@ -547,7 +547,7 @@ JsValue VM::run() {
                 for (int i = static_cast<int>(count) - 1; i >= 0; --i) {
                     JsValue val = pop();
                     JsValue key = pop();
-                    entries[i] = {key.string_val, std::move(val)};
+                    entries[i] = {key.string_val.str(), std::move(val)};
                 }
                 for (auto& [k, v] : entries) {
                     obj.set_property(k, std::move(v));

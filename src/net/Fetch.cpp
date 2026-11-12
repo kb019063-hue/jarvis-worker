@@ -180,7 +180,7 @@ JsValue ResponseObject::create_constructor() {
             if (st.type == JsType::Number) status = static_cast<int>(st.number_val);
 
             JsValue st_txt = init.get_property("statusText");
-            if (st_txt.type == JsType::String) status_text = st_txt.string_val;
+            if (st_txt.type == JsType::String) status_text = st_txt.string_val.str();
 
             JsValue h = init.get_property("headers");
             if (h.type == JsType::Object) {

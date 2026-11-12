@@ -28,8 +28,9 @@ JsValue receiver(const char* method, bool mutates = false) {
     }
     std::vector<JsValue> elements;
     if (me.type == JsType::String) {
-        std::u16string units = js_utf8_to_utf16(me.string_val);
-        for (char16_t unit : units) elements.push_back(JsValue::make_string(js_utf16_to_utf8(std::u16string(1, unit))));
+        const JsString& text = me.string_val;
+        elements.reserve(text.length());
+        for (size_t i = 0; i < text.length(); ++i) elements.push_back(JsValue::make_string(JsString::from_unit(text.unit_at(i))));
     } else if (me.is_object_like()) {
         double length = js_to_integer(js_to_number(me.get_property("length")));
         for (double i = 0; i < length && i < 4294967295.0; ++i) {

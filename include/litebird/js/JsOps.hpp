@@ -132,7 +132,7 @@ bool js_capture_throw(Body&& body, JsValue& thrown) {
 std::string js_number_to_string(double value);
 std::string js_number_to_string_radix(double value, int radix);
 /// StringToNumber: "" is 0, "0x1f" is 31, anything unparsable is NaN.
-double js_string_to_number(const std::string& text);
+double js_string_to_number(std::string_view text);
 enum class JsPrimitiveHint { Default, Number, String };
 /// ToPrimitive: objects are converted through valueOf()/toString(). The hint
 /// picks which is tried first; with Default, dates prefer toString().
@@ -151,9 +151,15 @@ int32_t js_to_int32(double value);
 uint32_t js_to_uint32(double value);
 /// ToString. Throws TypeError for symbols.
 std::string js_to_string(const JsValue& value);
+/// ToString, as the text of a string value. A value that is a string already
+/// passes through with nothing copied, which is what every String.prototype
+/// method wants for `this` and for its string arguments.
+JsString js_to_js_string(const JsValue& value);
 /// ToPropertyKey: the string a value addresses when used as `object[value]`.
 std::string js_to_property_key(const JsValue& value);
 const char* js_typeof(const JsValue& value);
+/// `typeof value` as a string value. The answers are made once and shared.
+JsValue js_typeof_value(const JsValue& value);
 
 // ---------------------------------------------------------------------------
 // Operators
@@ -186,11 +192,14 @@ JsValue js_bind_this(const JsValue& fn, const JsValue& receiver);
 // Strings: UTF-16 semantics over UTF-8 storage
 // ---------------------------------------------------------------------------
 
-bool js_is_ascii(const std::string& s);
-std::u16string js_utf8_to_utf16(const std::string& s);
-std::string js_utf16_to_utf8(const std::u16string& s);
-/// `string.length`: the number of UTF-16 code units.
-size_t js_string_length(const std::string& s);
+// The text of a string value is a JsString, which knows its length in code
+// units and reads one in constant time. These helpers are for text that is
+// not in a string value yet: they read all of it on every call.
+bool js_is_ascii(std::string_view s);
+std::u16string js_utf8_to_utf16(std::string_view s);
+std::string js_utf16_to_utf8(std::u16string_view s);
+/// The number of UTF-16 code units in UTF-8 text.
+size_t js_string_length(std::string_view s);
 /// Appends the UTF-8 encoding of a code point. Lone surrogates are encoded as
 /// three bytes so a split surrogate pair survives a round trip.
 void js_append_code_point(std::string& out, uint32_t code_point);

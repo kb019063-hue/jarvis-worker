@@ -672,7 +672,7 @@ private:
 
 class Matcher {
 public:
-    Matcher(const Program& program, const std::u16string& subject)
+    Matcher(const Program& program, const Utf16View& subject)
         : m_program(program), m_subject(subject),
           m_captures(static_cast<size_t>(program.group_count) * 2, -1) {}
 
@@ -1000,7 +1000,9 @@ private:
     }
 
     const Program& m_program;
-    const std::u16string& m_subject;
+    // The subject is read in place: an ASCII string byte by byte, any other
+    // through the UTF-16 form its string keeps. Nothing is converted per match.
+    const Utf16View& m_subject;
     std::vector<long> m_captures;
     uint64_t m_steps{0};
 };
@@ -1058,27 +1060,13 @@ JsValue make_regexp(std::shared_ptr<Program> program) {
     return regex;
 }
 
-/// The subject converted to UTF-16, cached because exec() in a loop is called
-/// with the same string every time.
-const std::u16string& wide_subject(const std::string& subject) {
-    static thread_local std::string cached_source;
-    static thread_local std::u16string cached_wide;
-    static thread_local bool valid = false;
-    if (!valid || cached_source != subject) {
-        cached_source = subject;
-        cached_wide = js_utf8_to_utf16(subject);
-        valid = true;
-    }
-    return cached_wide;
-}
-
 struct MatchResult {
     bool matched{false};
     std::vector<long> captures;
 };
 
 /// Finds the first match at or after `from` (exactly at `from` when sticky).
-MatchResult run_match(const Program& program, const std::u16string& subject, size_t from, bool sticky) {
+MatchResult run_match(const Program& program, const Utf16View& subject, size_t from, bool sticky) {
     MatchResult result;
     if (from > subject.size()) return result;
     Matcher matcher(program, subject);
@@ -1092,7 +1080,7 @@ MatchResult run_match(const Program& program, const std::u16string& subject, siz
     for (size_t start = from; start <= subject.size(); ++start) {
         if (literal_start && !sticky) {
             size_t found = subject.find(static_cast<char16_t>(first->ch), start);
-            if (found == std::u16string::npos) return result;
+            if (found == Utf16View::npos) return result;
             start = found;
         }
         if (matcher.match_at(start)) {
@@ -1105,23 +1093,33 @@ MatchResult run_match(const Program& program, const std::u16string& subject, siz
     return result;
 }
 
-std::u16string capture_text(const std::u16string& subject, const std::vector<long>& captures, size_t group) {
+/// What group `group` matched, as UTF-16 (empty when it did not take part).
+std::u16string capture_text(const Utf16View& subject, const std::vector<long>& captures, size_t group) {
     long start = captures[group * 2];
     long end = captures[group * 2 + 1];
     if (start < 0) return std::u16string();
-    return subject.substr(static_cast<size_t>(start), static_cast<size_t>(end - start));
+    return subject.copy(static_cast<size_t>(start), static_cast<size_t>(end - start));
 }
 
-JsValue build_match_array(const Program& program, const std::string& input, const std::u16string& subject,
-                          const std::vector<long>& captures) {
+/// What group `group` matched, as a string value's text.
+JsString capture_string(const Utf16View& subject, const std::vector<long>& captures, size_t group) {
+    long start = captures[group * 2];
+    long end = captures[group * 2 + 1];
+    if (start < 0) return JsString();
+    return subject.slice(static_cast<size_t>(start), static_cast<size_t>(end));
+}
+
+JsValue build_match_array(const Program& program, const Utf16View& subject, const std::vector<long>& captures) {
     std::vector<JsValue> items;
     for (int g = 0; g < program.group_count; ++g) {
         if (captures[static_cast<size_t>(g) * 2] < 0) items.push_back(JsValue::make_undefined());
-        else items.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, captures, static_cast<size_t>(g)))));
+        else items.push_back(JsValue::make_string(capture_string(subject, captures, static_cast<size_t>(g))));
     }
     JsValue array = JsValue::make_array(items);
     array.set_property("index", JsValue::make_number(static_cast<double>(captures[0])));
-    array.set_property("input", JsValue::make_string(input));
+    // `input` is the subject itself, not a copy: an exec() loop over a long
+    // string makes one match array per match.
+    array.set_property("input", JsValue::make_string(subject.string()));
     if (program.names.empty()) {
         array.set_property("groups", JsValue::make_undefined());
     } else {
@@ -1143,12 +1141,19 @@ void set_last_index(JsValue regex, size_t value) {
 }
 
 /// RegExp.prototype.exec: honours and updates lastIndex for global/sticky.
-bool exec_raw(const JsValue& regex, const Program& program, const std::u16string& subject, MatchResult& out) {
+bool exec_raw(const JsValue& regex, const Program& program, const Utf16View& subject, MatchResult& out) {
     const bool uses_last_index = program.global || program.sticky;
     size_t from = uses_last_index ? last_index_of(regex) : 0;
     if (from > subject.size()) {
         set_last_index(regex, 0);
         return false;
+    }
+    // In unicode mode the subject is a sequence of code points. A lastIndex
+    // that points at the second half of a surrogate pair is inside a
+    // character, and matching starts at the character.
+    if (program.unicode && from > 0 && from < subject.size() && subject[from] >= 0xDC00 && subject[from] <= 0xDFFF &&
+        subject[from - 1] >= 0xD800 && subject[from - 1] <= 0xDBFF) {
+        --from;
     }
     out = run_match(program, subject, from, program.sticky);
     if (!out.matched) {
@@ -1161,7 +1166,7 @@ bool exec_raw(const JsValue& regex, const Program& program, const std::u16string
 
 /// Where to resume after an empty match: one unit on, or one code point in
 /// unicode mode.
-size_t advance_index(const Program& program, const std::u16string& subject, size_t index) {
+size_t advance_index(const Program& program, const Utf16View& subject, size_t index) {
     if (program.unicode && index + 1 < subject.size() && subject[index] >= 0xD800 && subject[index] <= 0xDBFF &&
         subject[index + 1] >= 0xDC00 && subject[index + 1] <= 0xDFFF) {
         return index + 2;
@@ -1204,20 +1209,20 @@ JsValue js_regexp_create(const std::string& pattern, const std::string& flags) {
     return make_regexp(compile(pattern, flags));
 }
 
-JsValue js_regexp_match(const JsValue& regex, const std::string& subject_utf8) {
+JsValue js_regexp_match(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.match");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     if (!program->global) {
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) return JsValue::make_null();
-        return build_match_array(*program, subject_utf8, subject, result.captures);
+        return build_match_array(*program, subject, result.captures);
     }
     set_last_index(regex, 0);
     std::vector<JsValue> matches;
     while (true) {
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) break;
-        matches.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, result.captures, 0))));
+        matches.push_back(JsValue::make_string(capture_string(subject, result.captures, 0)));
         if (result.captures[0] == result.captures[1]) {
             set_last_index(regex, advance_index(*program, subject, static_cast<size_t>(result.captures[1])));
         }
@@ -1226,15 +1231,15 @@ JsValue js_regexp_match(const JsValue& regex, const std::string& subject_utf8) {
     return JsValue::make_array(matches);
 }
 
-JsValue js_regexp_match_all(const JsValue& regex, const std::string& subject_utf8) {
+JsValue js_regexp_match_all(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.matchAll");
     // Iterate with a private copy so the caller's lastIndex is left alone.
     JsValue clone = make_regexp(program);
     set_last_index(clone, last_index_of(regex));
-    auto subject = std::make_shared<std::u16string>(js_utf8_to_utf16(subject_utf8));
-    auto input = std::make_shared<std::string>(subject_utf8);
+    // The view keeps the string alive for as long as the iterator lives.
+    auto subject = std::make_shared<const Utf16View>(subject_string);
     auto done = std::make_shared<bool>(false);
-    return js_make_iterator([clone, program, subject, input, done](JsValue& value) {
+    return js_make_iterator([clone, program, subject, done](JsValue& value) {
         if (*done) return false;
         MatchResult result;
         if (!exec_raw(clone, *program, *subject, result)) {
@@ -1245,23 +1250,23 @@ JsValue js_regexp_match_all(const JsValue& regex, const std::string& subject_utf
             set_last_index(clone, advance_index(*program, *subject, static_cast<size_t>(result.captures[1])));
         }
         if (!program->global) *done = true;
-        value = build_match_array(*program, *input, *subject, result.captures);
+        value = build_match_array(*program, *subject, result.captures);
         return true;
     }, {clone});
 }
 
-double js_regexp_search(const JsValue& regex, const std::string& subject_utf8) {
+double js_regexp_search(const JsValue& regex, const JsString& subject_string) {
     auto program = program_of(regex, "String.prototype.search");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     MatchResult result = run_match(*program, subject, 0, program->sticky);
     return result.matched ? static_cast<double>(result.captures[0]) : -1.0;
 }
 
-JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8, const JsValue& replacement) {
+JsValue js_regexp_replace(const JsValue& regex, const JsString& subject_string, const JsValue& replacement) {
     auto program = program_of(regex, "String.prototype.replace");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     const bool functional = replacement.is_function();
-    const std::u16string replacement_template = functional ? std::u16string() : js_utf8_to_utf16(js_to_string(replacement));
+    const std::u16string replacement_template = functional ? std::u16string() : Utf16View(js_to_js_string(replacement)).copy();
 
     if (program->global) set_last_index(regex, 0);
     std::vector<MatchResult> matches;
@@ -1275,13 +1280,15 @@ JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8,
         }
     }
 
+    if (matches.empty()) return JsValue::make_string(subject_string);      // nothing matched: the same string
+
     std::u16string out;
     size_t cursor = 0;
     for (const auto& match : matches) {
         size_t start = static_cast<size_t>(match.captures[0]);
         size_t end = static_cast<size_t>(match.captures[1]);
         if (start < cursor) continue;
-        out.append(subject, cursor, start - cursor);
+        subject.append_to(out, cursor, start - cursor);
 
         std::vector<JsReplaceCapture> captures(static_cast<size_t>(program->group_count));
         for (int g = 0; g < program->group_count; ++g) {
@@ -1292,39 +1299,40 @@ JsValue js_regexp_replace(const JsValue& regex, const std::string& subject_utf8,
         if (functional) {
             std::vector<JsValue> args;
             for (const auto& capture : captures) {
-                args.push_back(capture.matched ? JsValue::make_string(js_utf16_to_utf8(capture.text)) : JsValue::make_undefined());
+                args.push_back(capture.matched ? JsValue::make_string(JsString::from_utf16(capture.text)) : JsValue::make_undefined());
             }
             args.push_back(JsValue::make_number(static_cast<double>(start)));
-            args.push_back(JsValue::make_string(subject_utf8));
+            args.push_back(JsValue::make_string(subject_string));
             if (!program->names.empty()) {
                 JsValue groups = JsValue::make_object();
                 for (const auto& [name, index] : program->names) groups.set_property(name, args[index]);
                 args.push_back(groups);
             }
-            out += js_utf8_to_utf16(js_to_string(replacement.call(args)));
+            Utf16View(js_to_js_string(replacement.call(args))).append_to(out);
         } else {
             out += js_expand_replacement(replacement_template, subject, start, captures, program->names);
         }
         cursor = end;
     }
-    out.append(subject, cursor, std::u16string::npos);
-    return JsValue::make_string(js_utf16_to_utf8(out));
+    subject.append_to(out, cursor);
+    return JsValue::make_string(JsString::from_utf16(out));
 }
 
-JsValue js_regexp_split(const JsValue& regex, const std::string& subject_utf8, double limit) {
+JsValue js_regexp_split(const JsValue& regex, const JsString& subject_string, double limit) {
     auto program = program_of(regex, "String.prototype.split");
-    const std::u16string subject = wide_subject(subject_utf8);
+    const Utf16View subject(subject_string);
     std::vector<JsValue> parts;
     if (limit == 0) return JsValue::make_array(parts);
 
-    auto push = [&](const std::u16string& text) {
-        parts.push_back(JsValue::make_string(js_utf16_to_utf8(text)));
+    // Adds code units [begin, end) of the subject; true when the limit is reached.
+    auto push = [&](size_t begin, size_t end) {
+        parts.push_back(JsValue::make_string(subject.slice(begin, end)));
         return parts.size() >= limit;
     };
 
     if (subject.empty()) {
         // Splitting "" yields [""] unless the pattern matches the empty string.
-        if (!run_match(*program, subject, 0, true).matched) push(subject);
+        if (!run_match(*program, subject, 0, true).matched) push(0, 0);
         return JsValue::make_array(parts);
     }
 
@@ -1343,20 +1351,20 @@ JsValue js_regexp_split(const JsValue& regex, const std::string& subject_utf8, d
             search = advance_index(*program, subject, search);
             continue;
         }
-        if (push(subject.substr(piece_start, search - piece_start))) return JsValue::make_array(parts);
+        if (push(piece_start, search)) return JsValue::make_array(parts);
         // Captured groups are spliced into the result.
         for (int g = 1; g < program->group_count; ++g) {
             if (result.captures[static_cast<size_t>(g) * 2] < 0) {
                 parts.push_back(JsValue::make_undefined());
             } else {
-                parts.push_back(JsValue::make_string(js_utf16_to_utf8(capture_text(subject, result.captures, static_cast<size_t>(g)))));
+                parts.push_back(JsValue::make_string(capture_string(subject, result.captures, static_cast<size_t>(g))));
             }
             if (parts.size() >= limit) return JsValue::make_array(parts);
         }
         piece_start = match_end;
         search = match_end;
     }
-    push(subject.substr(piece_start));
+    push(piece_start, subject.size());
     return JsValue::make_array(parts);
 }
 
@@ -1393,16 +1401,15 @@ void install_regexp_builtins(JsIntrinsics& realm) {
     js_define_method(rp, "exec", 1, [](Args args) {
         JsValue regex = self();
         auto program = program_of(regex, "RegExp.prototype.exec");
-        std::string input = js_to_string(js_arg(args, 0));
-        const std::u16string subject = wide_subject(input);
+        const Utf16View subject(js_to_js_string(js_arg(args, 0)));
         MatchResult result;
         if (!exec_raw(regex, *program, subject, result)) return JsValue::make_null();
-        return build_match_array(*program, input, subject, result.captures);
+        return build_match_array(*program, subject, result.captures);
     });
     js_define_method(rp, "test", 1, [](Args args) {
         JsValue regex = self();
         auto program = program_of(regex, "RegExp.prototype.test");
-        const std::u16string subject = wide_subject(js_to_string(js_arg(args, 0)));
+        const Utf16View subject(js_to_js_string(js_arg(args, 0)));
         MatchResult result;
         return JsValue::make_boolean(exec_raw(regex, *program, subject, result));
     });

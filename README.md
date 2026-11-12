@@ -18,6 +18,7 @@ scoreboard cannot see at all.
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1771 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
+| Trees for random pages | 1,489 of 1,500 equal to the ones parse5 builds; the 11 others are known | `make diff-trees` (needs Node.js; not in CI) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 95 suites, all passing | `make test` |
@@ -33,6 +34,7 @@ make asan            # sanitizer build, tests, the JavaScript corpus, a fuzz run
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
+make diff-trees      # 1,500 random pages parsed here and by parse5; fails if more than the known 11 trees differ
 ```
 
 ### The JavaScript scoreboard
@@ -79,6 +81,22 @@ Every remaining failure can be inspected with
 customizable-`<select>` work (6 cases), plus a handful of adoption-agency,
 `innerHTML` and character-reference edge cases. They are catalogued in
 `ARCHITECTURE.md` rather than papered over.
+
+### Pages nobody wrote
+
+The corpus is 1,792 inputs somebody thought of. `make diff-trees`
+(`tools/conformance/diff_trees.py`) makes pages nobody did, a few dozen tags
+in random order and most of them misnested, and compares the tree Litebird
+builds with the one parse5 builds, an independent parser written from the
+same standard. Of 6,000 such pages, 5,948 get the same tree. The other 52
+come down to five bugs: the commonest are an end tag that meets an open SVG
+or MathML element (`<a><svg></a>`) and `</button>` with an element still open
+inside it (`<button><p>a</button>x` puts the "x" in the paragraph). Three of
+the five are also behind one of the 21 failing corpus cases each. A failing
+case says a bug exists; the random pages say how often a page meets it, and
+cut it down to a few tags. They are in AUDIT.md, finding 29, and are not
+fixed. The check needs Node.js and, the first time, the npm registry, so CI
+does not run it.
 
 ### Pages that are hostile by size
 

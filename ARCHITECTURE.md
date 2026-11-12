@@ -1570,7 +1570,7 @@ long.
 | Unit tests (`make test`) | 95 / 95; seven are new and one was rewritten |
 | html5lib tree construction | 1771 / 1792, one more than before (an `<a>` inside an `<a>`) |
 | 1,746 pages (every distinct html5lib input and the 16 examples) through five output modes, `main` against this | 8,730 outputs; 4 differ, all one page, whose tree now equals parse5's |
-| 1,500 shallow random pages against parse5, an independent parser | equal on 1,316, up from 1,308; none got worse |
+| `make diff-trees` (new): random pages of 3 to 39 misnested tags parsed here and by parse5, an independent parser, trees compared | 1,489 of 1,500 equal, 1,478 on `main`. Over four seeds 5,948 of 6,000, 5,919 on `main`, and no page that was equal there differs now. The 52 that differ are five bugs older than this phase (AUDIT.md, finding 29) |
 | JavaScript corpus | 840 / 845, the same five failures as before; 845 / 845 under Node 22 |
 | Bugs planted in the float change, one at a time | 6 of 6 caught by a unit test |
 | 915 runs over 305 pages of random floats, before and after the float change | identical output |
@@ -1644,7 +1644,15 @@ AUDIT.md, finding 28, has the list with measurements. In short:
    adoption-agency corner cases, `innerHTML` fragment oddities and
    character-reference edges. Everything else in the corpus, including
    `tests16.dat` (197/197), `scriptdata01.dat` (26/26), `svg.dat` (8/8) and
-   `math.dat` (8/8), now passes.
+   `math.dat` (8/8), now passes. A failing case does not say how much it
+   matters, and the corpus does not hold everything: of 6,000 random pages
+   of misnested tags, 52 get another tree than parse5 builds
+   (`make diff-trees`). They come down to five bugs, three of them behind
+   one of the 21 cases each. The commonest are an end tag that meets an open
+   SVG or MathML element (`<a><svg></a>`, the `adoption01.dat` case) and
+   `</button>` with an element still open inside it (`<button><p>a</button>x`
+   puts the "x" in the paragraph; the `tests20.dat` case). AUDIT.md, finding
+   29, has all five, and the cause of two in a line each.
 7. **Conformance is not rendering.** 98.8% of the parser corpus is a DOM
    guarantee, not a promise that real pages look right.
 8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches

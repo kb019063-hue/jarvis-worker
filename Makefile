@@ -85,6 +85,11 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 # some case mappings, part of \p{L}); lower this as that data arrives.
 STRING_DIFF_CEILING ?= 95
 
+# How many of the 1,500 random pages may get another tree here than in parse5.
+# The eleven are listed, cut down to a few tags each, in AUDIT.md, finding 29;
+# lower this as they are fixed.
+TREE_DIFF_CEILING ?= 11
+
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:
 # how many `make deep` runs, and how many the sanitizer build runs. The
 # sanitizer build also nests its pages less deep (see asan-deep).
@@ -92,7 +97,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance diff-strings fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -134,6 +139,13 @@ js-conformance: $(TARGET)
 ## Needs Node.js; there are no expectations to maintain.
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
+
+## 1,500 random pages, a few dozen misnested tags each, parsed by Litebird and
+## by parse5 (an independent HTML parser), trees compared. Needs Node.js and,
+## the first time, npm and the network: parse5 is installed into build/parse5.
+## Not part of CI for that reason.
+diff-trees: $(TARGET)
+	@python3 tools/conformance/diff_trees.py --show 3 --max-differ $(TREE_DIFF_CEILING)
 
 ## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
@@ -201,4 +213,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

@@ -42,6 +42,7 @@ The rest are documented with enough detail to act on.
 | 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
+| 29 | About one random page in 115 gets another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | Open |
 
 ---
 
@@ -1289,3 +1290,85 @@ the tag.
 its own copy of a 920-byte computed style (finding 12). One paragraph of
 100,000 times `word <b>bold</b>` takes 1.3 GB, and 200,000 pass the 2 GB the
 deep pages allow, so those two pages run at 100,000.
+
+---
+
+## 29. What the comparison with another parser found
+
+The corpus is 1,792 inputs somebody wrote, and Litebird passes 1,771. The
+work on finding 24 needed to know more than that: that a rewritten stack of
+open elements still builds the same trees for pages nobody wrote. So
+`tools/conformance/diff_trees.py` makes such pages (3 to 39 start tags, end
+tags, comments and pieces of text in random order, from the elements the
+tree builder has rules of its own for, which leaves most pages misnested)
+and compares the tree Litebird builds with the one parse5 builds. parse5 is
+an independent parser written from the same standard. Of the 1,573 corpus
+cases that are whole documents with scripting on, it gives the expected tree
+for 1,548, and the other 25 all have a `<select>` in them, whose parsing the
+standard changed and parse5 8.1 has not, so the pages leave `<select>` out.
+
+Of 6,000 pages (four seeds), **5,948 get the same tree and 52 do not**. On
+`main` it was 5,919 and 81; no page that was equal there differs now. `make
+diff-trees` runs the first 1,500, of which 11 differ, and fails if more do.
+`--reduce` cuts each page down to the tokens that still make a difference.
+The 52 come down to five things, all of them on `main` as well, **none of
+them fixed here**:
+
+| Reduced page | The standard, and parse5 | Litebird | Pages |
+| :--- | :--- | :--- | ---: |
+| `<a><svg></a>` | the `<svg>` stays inside the `<a>`, and both are closed | the `<svg>` is moved out beside the `<a>` and gets an `<a>` of its own | 26, with the next two rows |
+| `<svg><title><em></title><tr>` | `</title>` is ignored: with an HTML element open it may only close an HTML `<title>`. The `<tr>` is ignored as well | the SVG `<title>` is closed, and the `<tr>` becomes an SVG element | |
+| `<math><mtext><i></math><mtext>` | `</math>` is ignored, the second `<mtext>` goes inside the `<i>` | the `<math>` is closed | |
+| `<button><div></button>x` | the button is closed, the "x" follows it | the "x" is inside the `<div>` | 17 |
+| `<i><i><div><i><i></div>x` | two `<i>` are opened again around the "x" | one | 4 |
+| `<table><em><table><div>`, then a newline | the newline opens the `<em>` again, inside the `<div>` | the newline is in the `<div>` with no `<em>` | 3 |
+| `<h2><noscript></noscript><frameset>` | the `<frameset>` replaces the body | the `<frameset>` is ignored | 2 |
+
+Three of the five were in the corpus all along, as one failing case each
+among the 21: `<a><svg><tr><input></a>` in `adoption01.dat`,
+`<button><p></button>x` in `tests20.dat`, and the first case of
+`tests23.dat`, which is the `<i>` row with `<font>`. A failing case says a
+bug exists. The random pages say how often a page meets it, and `--reduce`
+turns it into a few tags to read the standard against.
+
+The 17 and the 4 were measured, by making the two changes described below
+and counting the pages that became equal. The other counts sort the reduced
+pages by eye, and a reduced page is not always the difference its page began
+with, so they say which of these is common and no more than that.
+
+The first three rows are one family: an end tag reaches an element of
+another namespace than the rules it is being processed by expect. The
+standard matches an end tag against HTML elements only when it is handled by
+the HTML rules, and treats an `<svg>` or a `<math>` as an ordinary element
+for the adoption agency (of the SVG and MathML elements only
+`foreignObject`, `desc`, `title`, `mi`, `mo`, `mn`, `ms`, `mtext` and
+`annotation-xml` are special).
+
+`</button>` is the one a page is most likely to meet: `<button><p>a</button>x`
+puts the "x" into the paragraph inside the button. The cause is one word. In
+the "in body" rules `</button>` belongs to the end tags that close their
+element whatever is still open inside it, with `</div>` and `</ul>`.
+`is_block_container()` in `src/html/HtmlTreeBuilderModes.cpp` is the list of
+those and `button` is not in it, because the same function serves the start
+tags, where `button` has a rule of its own. So `</button>` falls through to
+"any other end tag", which gives up at the first special element. With
+`button` added there the `tests20.dat` case passes (1772 of 1792) and 17 of
+the 52 pages become equal, none the other way.
+
+The fourth identical formatting element is the "Noah's Ark" rule, and it is
+one line as well. The list of active formatting elements keeps three of a
+kind, and when a fourth arrives the standard removes the earliest of the
+three. `push_formatting_element()` in `src/html/HtmlTreeBuilder.cpp` searches
+the list from its end and removes the latest. With the earliest removed
+instead, and the change above, the `tests23.dat` case passes too (1773) and
+21 of the 52 pages are equal, none the other way. The last two rows were not
+looked into.
+
+Both changes were tried in a copy and are not in this phase: its checks were
+all run on the tree builder as it stands, and the scoreboard should move
+once, with the rest of this list.
+
+**How to see them.** `python3 tools/conformance/diff_trees.py --reduce`, with
+`--seed 1`, `2` or `3` for the other pages. It needs Node.js, and the first
+time npm and the network to install parse5 into `build/parse5`, which is why
+it is not a CI job.

@@ -5981,6 +5981,37 @@ TEST(replacing_children_detaches_the_old_ones) {
     // everything that was removed.
     list->set_inner_html("<li>only</li>");
     assert(list->children().size() == 1 && first->parent() == nullptr && one->parent() == nullptr);
+
+    // What innerHTML parses arrives the same way: the parser hands over all
+    // the nodes it made at once, twice (from its root element to a fragment,
+    // from the fragment to the caller). One at a time from the front, a
+    // string with 100,000 elements in it took 9 seconds to assign.
+    {
+        auto nodes = HtmlParser::parse_fragment("<i>a</i>text<b>b</b><!--c-->");
+        assert(nodes.size() == 4);
+        assert(nodes[0]->is_element() && nodes[0]->as_element()->tag_name() == "i");
+        assert(nodes[1]->type() == NodeType::Text);
+        assert(nodes[2]->is_element() && nodes[2]->as_element()->tag_name() == "b");
+        assert(nodes[3]->type() == NodeType::Comment);
+        for (const auto& node : nodes) assert(node->parent() == nullptr);
+
+        auto parsed = HtmlParser::parse_fragment_with_context("<td>1<td>2", "tr");
+        assert(parsed->type() == NodeType::DocumentFragment);
+        assert(parsed->children().size() == 2);
+        for (const auto& cell : parsed->children()) {
+            assert(cell->as_element()->tag_name() == "td" && cell->parent() == parsed);
+        }
+
+        std::string markup;
+        const int items = 50000;
+        for (int i = 0; i < items; ++i) markup += (i % 2 == 0) ? "<li>even</li>" : "<li>odd</li>";
+        list->set_inner_html(markup);
+        assert(list->children().size() == static_cast<size_t>(items));
+        assert(list->children().front()->text_content() == "even");
+        assert(list->children().back()->text_content() == "odd");
+        assert(list->children()[items / 2]->parent() == list);
+        assert(list->text_content().size() == static_cast<size_t>(items / 2) * 7);
+    }
 }
 
 int main() {

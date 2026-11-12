@@ -404,6 +404,28 @@ def scripted_pages(n: int) -> list[Page]:
                  "at.appendChild(document.createElement('i'));",
              ["typeof records"], "number"),
     ]
+
+    # Wide, not deep: one parent with very many children, made and taken
+    # apart by script. The nodes parsed for `innerHTML` were taken off the
+    # front of a list one at a time, twice over, and every later sibling
+    # moved up each time: 100,000 elements in one string took 9 seconds.
+    wide = min(n, 200000)
+    pages += [
+        page("innerHTML with many elements side by side",
+             f"var host = document.createElement('div'); host.innerHTML = '<i>x</i>'.repeat({wide});",
+             ["host.children.length", "host.innerHTML.length", "host.textContent.length"], f"{wide} {wide * 8} {wide}"),
+        page("innerHTML with many elements, emptied and filled again",
+             "var host = document.createElement('div'); document.body.appendChild(host);"
+             f"host.innerHTML = '<i></i>'.repeat({wide}); var first = host.children.length; host.innerHTML = '';"
+             f"var none = host.childNodes.length; host.innerHTML = '<b></b>'.repeat({wide}); host.textContent = '';",
+             ["first", "none", "host.childNodes.length"], f"{wide} 0 0"),
+        page("fragment with many children",
+             "var f = document.createDocumentFragment();"
+             f"for (var i = 0; i < {wide}; i++) f.appendChild(document.createElement('i'));"
+             "var host = document.createElement('div'); document.body.appendChild(host); host.appendChild(f);",
+             ["host.children.length"], f"{wide}"),
+    ]
+
     # The same chain in the document, as each kind of box layout knows.
     kinds = {
         "blocks": ("div", ""),

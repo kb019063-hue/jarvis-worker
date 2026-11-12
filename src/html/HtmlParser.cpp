@@ -22,9 +22,10 @@ std::shared_ptr<Node> HtmlParser::parse_fragment_with_context(std::string_view h
 std::vector<std::shared_ptr<Node>> HtmlParser::parse_fragment(std::string_view html,
                                                               std::vector<std::string>* out_stylesheets) {
     auto fragment = parse_fragment_with_context(html, "body");
-    std::vector<std::shared_ptr<Node>> nodes = fragment->children();
-    // Detach so callers can re-parent the nodes freely.
-    for (const auto& node : nodes) fragment->remove_child(node);
+    // Detach so callers can re-parent the nodes freely. All at once: taking
+    // them off the front one by one moved every later sibling each time, and
+    // `innerHTML` with 100,000 elements in it took 7 seconds.
+    std::vector<std::shared_ptr<Node>> nodes = fragment->take_children();
     if (out_stylesheets) {
         for (const auto& node : nodes) {
             if (node->is_element() && static_cast<Element*>(node.get())->tag_name() == "style") {

@@ -237,12 +237,10 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
     }
     m_tokenizer = nullptr;
 
+    // All of them at once: removing them from the front one at a time moves
+    // every later sibling each time.
     auto fragment = std::make_shared<Node>(NodeType::DocumentFragment);
-    auto children = root->children();
-    for (const auto& child : children) {
-        root->remove_child(child);
-        fragment->append_child(child);
-    }
+    for (const auto& child : root->take_children()) fragment->append_child(child);
     return fragment;
 }
 

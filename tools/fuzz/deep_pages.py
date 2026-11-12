@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """Pages that nest one thing far deeper than the native stack is long.
 
-The mutation fuzzers start from small pages and never nest anything more than
-a few dozen levels, so they cannot find the oldest way to end a process from a
-web page: recursion. Every walk over a tree that calls itself once per level
-(a destructor, a serializer, a selector search, layout, painting) works for
-any page a person wrote and dies on a page a program wrote. This generates
-those pages. Each one nests a single construct `--depth` levels and is run
-through the engine. At the default depth of 200,000 on the default 8 MB stack,
-a walk that uses as little as 42 bytes of stack per level cannot finish.
+The mutation fuzzers start from the html5lib inputs, a few lines each, and
+change them a few bytes at a time, so they cannot find the oldest way to end a
+process from a web page: recursion. Every walk over a tree that calls itself
+once per level (a destructor, a serializer, a selector search, layout,
+painting) works for any page a person wrote and dies on a page a program
+wrote. This generates those pages. Each one nests a single construct `--depth`
+levels and is run through the engine. At the default depth of 200,000 on the
+default 8 MB stack, a walk that uses as little as 42 bytes of stack per level
+cannot finish.
+
+Not every page here is deep. Some are long or large instead: one paragraph
+with 200,000 children, 200,000 elements left open and then 100,000 tokens, one
+parent given 200,000 children by script, a canvas or an SVG larger than
+memory. They were added as the deep pages ran into them. Work that grows with
+the square of the input fails the time limit the way recursion fails the
+stack, and neither is found by mutating a small page.
 
 A run passes when
 
@@ -207,7 +215,7 @@ def parsed_pages(n: int) -> list[Page]:
         deep("svg with a size no vector can have", f'<svg width="1e9" height="1e9"></svg>{BOTTOM}'),
         deep("svg sized by a style", f'<svg style="width:100000px;height:100000px"></svg>{BOTTOM}'),
         deep("canvas larger than memory", f'<canvas width="100000" height="100000"></canvas>{BOTTOM}'),
-        deep("svg, 36 GB of them at 180 KB each", "<svg></svg>" * min(n, 20000) + BOTTOM),
+        deep("svg, 3.6 GB of bitmaps at 180 KB each", "<svg></svg>" * min(n, 20000) + BOTTOM),
     ]
 
     # Many elements left open, then many tokens. The stack of open elements
@@ -240,12 +248,13 @@ def parsed_pages(n: int) -> list[Page]:
     # the lines, layout tells each child where its pieces went. When each
     # child searched every line for its own, 100,000 images in a paragraph
     # took half a minute, and 100,000 words with an inline element between
-    # each two did not finish in a minute and a half.
+    # each two took over two minutes.
     #
     # The two with an inline element per word are half as long as the others:
-    # an inline element with a word in it costs about 10 KB of memory (a
-    # computed style is 920 bytes and every box, line item and fragment has
-    # its own copy; AUDIT.md, finding 12), so 200,000 of them pass 2 GB.
+    # a word and an inline element with a word in it cost about 13 KB of
+    # memory between them (a computed style is 920 bytes and every box, line
+    # item and fragment has its own copy; AUDIT.md, finding 12), so 200,000
+    # of them pass 2 GB.
     in_one_paragraph = {
         "images": ("<img width=10 height=10>", 200000),
         "line breaks": ("a<br>", 200000),

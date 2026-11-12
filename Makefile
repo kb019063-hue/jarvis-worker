@@ -140,7 +140,7 @@ fuzz:
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
-## bitmaps of absurd dimensions, and 100,000 tokens after 100,000 elements
+## bitmaps of absurd dimensions, and 100,000 tokens after 200,000 elements
 ## left open. The mutation fuzzers above start from small pages and never get
 ## near any of this. Each run is a child process with an 8 MB stack, 2 GB of
 ## memory and 60 seconds; it fails on a signal, on a limit, or when the text

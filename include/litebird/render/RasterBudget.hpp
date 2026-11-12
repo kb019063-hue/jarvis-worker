@@ -6,8 +6,8 @@
 // as the element says it is. Nothing bounded that. One line of markup,
 // <svg width="100000" height="100000">, asked for 40 GB and the process ended
 // with std::bad_alloc; width="1e9" ended it with std::length_error before any
-// memory was requested at all; and two hundred thousand <svg> elements of the
-// default size, 180 KB each, asked for 36 GB a little at a time.
+// memory was requested at all; and twenty thousand <svg> elements of the
+// default size, 180 KB each, asked for 3.6 GB a little at a time.
 //
 // Two limits, both in pixels (four bytes each):
 //

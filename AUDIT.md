@@ -37,9 +37,11 @@ The rest are documented with enough detail to act on.
 | 21 | Script nested 200,000 deep ended the process (28 of 46 stress pages) | **Critical** | ✅ Fixed (Phase 23) |
 | 22 | A template literal dropped substitutions that were literals | **High** | ✅ Fixed (Phase 23) |
 | 23 | 1.2% of 67,545 generated expressions disagreed with Node | **High** | ✅ Fixed where pages meet it (Phase 23); 0.15% left |
-| 24 | `node.appendChild(node)` ended the process; very deep trees still do | **High** | 🟡 Cycles are refused; a tree 300,000 deep still overflows the stack |
+| 24 | `node.appendChild(node)` ended the process, and so did any tree deeper than the stack: 300,000 nested `<div>` were a `SIGSEGV` | **High** | ✅ Fixed (Phase 25): cycles are refused, the parser stops nesting at 512, nothing that walks the DOM recurses |
 | 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
 | 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
+| 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
+| 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
 
 ---
 
@@ -235,6 +237,11 @@ collection on one thread can free objects the other is using.
 > Normal builds get thousands of levels; an ASan build gets ~1,000 for layout and
 > ~130 for JS, because its frames are ~20-55x larger. That is a measurement of
 > the sanitizer, not a regression.
+>
+> The limit on nesting in the parser that the text below asks for arrived in
+> Phase 25 (finding 24). The HTML standard has no such rule; Blink and WebKit
+> do, and what goes past the limit is attached as a sibling, not turned into
+> text.
 
 
 ```
@@ -731,7 +738,7 @@ Left as they are, and listed in ARCHITECTURE.md: arrays are dense, last-digit
 differences in `Math.atan2`, `cbrt` and `pow`, and date strings such as
 `new Date('1')`.
 
-## 24. 🟡 `node.appendChild(node)` ended the process; very deep trees still do
+## 24. ✅ `node.appendChild(node)` ended the process, and so did a very deep tree
 
 ```js
 var d = document.createElement('div');
@@ -750,26 +757,131 @@ ancestor, counting a shadow tree as part of its host. The script bindings throw
 for a node with no children, which is every node the HTML parser appends.
 Test: `dom_insertion_cannot_make_a_node_its_own_ancestor`.
 
-**Still open: depth.** The DOM and the code that walks it are recursive
-throughout (more than 20 functions: `textContent`, `innerHTML`, selectors,
-`getElementsByTagName`, the dumps, the destructors). Only the layout tree
-builder checks the stack. Measured with nested `<div>` elements and no script
-at all:
+### Depth (fixed in Phase 25)
 
-| Nesting | Normal build | Sanitizer build |
+A tree does not need a cycle to be too deep to walk. The DOM and the code
+that walked it were recursive throughout (`textContent`, `innerHTML`, the
+id, tag and selector searches, the dumps, the destructor), and only the
+layout tree builder checked the stack. The mutation fuzzers start from the
+html5lib inputs, a few lines each, and change them a few bytes at a time.
+They never come near the tens of thousands of levels this takes, which is
+why they reported nothing.
+
+`tools/fuzz/deep_pages.py` generates the pages they cannot. Each of its
+145 pages nests or repeats one construct, most of them 200,000 times, and is
+run in a child process with an 8 MB stack, 2 GB of memory and 60 seconds: 49
+nest one kind of markup, 29 a CSS value or rule, 43 build their tree from
+script, 14 leave 200,000 elements open and then send 100,000 tokens, 5 put
+100,000 or 200,000 children in one paragraph, and 5 ask for bitmaps larger
+than memory.
+
+| | Before | Now |
 | :--- | :--- | :--- |
-| 20,000 | renders | renders |
-| 100,000 | renders | stack overflow in `find_by_tag_recursive` |
-| 300,000 (a 3.3 MB file) | `SIGSEGV` | not run |
+| 300,000 nested `<div>`, a 3.3 MB file, in each of five output modes | `SIGSEGV` after 0.4 s | exit 0 in 3.7 to 5.0 s |
+| `appendChild` in a loop, 20,000 levels | 3.2 s | 0.07 s |
+| the same, 40,000 levels | 13.2 s | 0.12 s |
+| the same, 200,000 levels | not finished after 120 s | 0.42 s |
+| 20,000 levels, then `textContent`, `innerHTML` and `querySelectorAll` on the top, attached to the document, removed, dropped | `SIGSEGV` | 0.12 s |
+| the same, 200,000 levels | not finished after 120 s | 0.68 s |
+| Runs of the deep pages that fail, of 392 | 264, on 110 of the 145 pages: 139 `SIGSEGV`, 106 out of time, 8 aborted, 7 out of memory, 4 others | 0 |
 
-A tree built by script fails sooner: 200,000 levels made with `appendChild` in
-a loop, or 100,000 nested tags assigned to `innerHTML`, are a `SIGSEGV` in the
-normal build. The fuzzers mutate small seed pages and never nest this deep,
-which is why 400 runs of each report nothing. Two ways to close it: limit nesting where the tree grows, as
-Blink and WebKit do in their parsers (512 levels), or make the destructor
-iterative and give each walker the stack check the JavaScript engine now has.
-The existing test `deeply_nested_markup_does_not_overflow_the_stack` requires
-6,000 parsed levels to survive, so a limit would have to sit above that.
+Three things were done, because a tree gets deep in two ways and is walked by
+two kinds of code.
+
+**1. The parser stops nesting at 512.** Nothing the HTML parser attaches is
+deeper than `HtmlTreeBuilder::kMaxTreeDepth`, counting `<html>` as 1. An
+element that would be deeper is attached to the nearest ancestor that can
+still take it, which makes it a sibling of the element it was written inside.
+Of 6,000 nested `<div>` elements all 6,000 are in the tree: the first 510
+inside one another, the other 5,490 beside the innermost of those. The text
+is in the last one, and a paragraph after the closing tags is a child of
+`<body>`, where it would be without the limit.
+
+The HTML standard has no such limit. Blink and WebKit both have one, and both
+set it to 512. (Gecko was not looked at.) They differ in the rule, and the
+difference matters:
+
+- WebKit closes the current node when the limit is reached
+  (`HTMLConstructionSite::attachLater`). This was implemented first. It
+  leaves the insertion mode describing an element that is no longer open:
+  "in select" with no `<select>` on the stack. Of 1,500 random pages written
+  to sit on the limit, 12 then crashed, one of them by a road that needs no
+  depth at all (finding 27).
+- Blink changes only where the node is attached
+  (`HTMLConstructionSite::Attach`). The stack of open elements, the insertion
+  mode and the list of formatting elements stay what the standard says they
+  are, at any depth. This is what Litebird does now. Of 4,500 random pages at
+  the limit, none crashes and none has an element deeper than 512; 300 more
+  run in CI.
+
+Two things go beyond Blink's rule. The depth is measured in the tree and not
+as the length of the stack, because the two differ: `</form>` takes the form
+off the stack and leaves what is open inside it, so `<form><div></form>`
+repeated nests two levels for each element the stack gains. And the adoption
+agency algorithm, which moves a block with everything in it under a new
+element, is held to the same limit: it used to carry content past it.
+
+With the stack no longer capped, every question the standard answers by
+walking down it would cost the depth of the page for every token. Finding 16
+gave the scope queries an index. The walks that were left ("which `<li>` does
+this `<li>` close", "what does this end tag close", "is anything on the stack
+foreign", resetting the insertion mode) now have one too. 20,000 elements
+left open, followed by 20,000 times the same token, parsed and printed as a
+tree:
+
+| Token | Before | Now |
+| :--- | :--- | :--- |
+| `<table></table>` | 63.1 s | 0.79 s |
+| `<li>x</li>` | out of memory: killed by the system at 3.6 GB, after about 40 s | 1.19 s |
+| `<b>x</b>` | out of memory: killed at 3.6 GB, after about 15 s | 1.16 s |
+| `</x>`, an end tag that closes nothing, after `<span>` | 14.6 s | 0.35 s |
+
+The dump of such a tree used to grow with the square of its depth as well,
+because each line is indented by how deep its node is (finding 16). With the
+limit a line is indented by at most 1 KB.
+
+What the limit does not always keep is the order of content. An element
+written inside another is attached beside it, and misnested formatting tags
+can then move the outer one: `<section>x<p>y</p>` inside 300 open `<b>` at
+the limit, followed by their end tags, reads "yx". Everything written is in
+the tree. This was not compared with a browser. Below the limit nothing
+changes: the html5lib corpus, whose deepest tree has 15 levels, went from
+1770 to 1771 of 1792, the one being a parser bug found on the way (finding
+27).
+
+**2. A tree built by script has no limit, so nothing that walks the DOM
+recurses.** A browser lets a script `appendChild` 200,000 levels deep, and so
+does Litebird. The destructor releases a subtree with a loop and a list of
+what is left to release, and `textContent`, `innerHTML`, `querySelector(All)`,
+`getElementById`, the tag and class searches, the propagation of "is
+connected" and the tree dumps are loops over
+`include/litebird/dom/TreeWalk.hpp`. A stack check would not have done here:
+a `textContent` that stops halfway returns a wrong answer, where layout that
+stops halfway draws less.
+
+The check that an insertion makes no cycle (the first half of this finding)
+walked from the new parent to the root, which made building a chain cost the
+square of its depth: the 3.2 s and 13.2 s above. It now walks up from the
+parent and down from the node in turn, and stops when either ends. For a node
+with few descendants that is at once.
+
+**3. Layout, painting, SVG rendering and hit testing still recurse, and ask
+`stack_is_exhausted()` at every level** (finding 5). What lies deeper than
+the stack reaches is not laid out. For a parsed page in a normal build that
+cannot happen: 512 levels of `build_box` are 1.4 MB. A tree that a script
+built deeper than that is in the DOM, answers every query, and is laid out as
+far down as the stack goes. `--dump-dom` prints 1,024 levels and then says
+how many nodes it left out and how deep they go.
+
+**How it stays fixed.** `make deep` runs the deep pages and 300 random pages
+at the nesting limit, and is a CI job. `make asan` runs them at a quarter of
+the depth on a quarter of the stack, which asks the same of each level of
+recursion (42 bytes), under AddressSanitizer and UBSan. Unit tests:
+`dom_trees_of_any_depth_can_be_walked_and_released` (a chain of 200,000),
+`html_parser_nesting_limit_holds_for_every_kind_of_element`, and
+`deeply_nested_markup_does_not_overflow_the_stack`, which used to require
+6,000 nested levels to survive and now requires 6,000 elements, none deeper
+than 512.
 
 ## 25. ✅ Strings were copied on every read
 
@@ -986,3 +1098,183 @@ needs 200 million; it throws after 0.2 s here and answers `false` after 0.46 s
 in Node. (Node is quadratic there too: 2 s at 40,000 characters, 39 s at
 200,000.) The limit is deliberate, so that one expression cannot hang a page,
 but it is lower than what a real engine will sit through.
+
+---
+
+## 27. ✅ What the deep pages found that was not depth
+
+`deep_pages.py` (finding 24) was written to find recursion. Much of what it
+found was something else: a page that is hostile by its size, or an old bug
+that a generated page happened to walk into. Everything below was on `main`.
+
+**Crashes**
+
+| Input | Before | Now |
+| :--- | :--- | :--- |
+| `<div style="width: calc(1px">` | `SIGSEGV` | 1px: the `calc(` is closed where the value ends |
+| `<template><th><a><button><select><button><tr a=0><button><a>`, 60 bytes | `SIGSEGV`: a read one element before the start of the stack of open elements | parses |
+| `<svg width="1e9" height="1e9">` | abort, `std::length_error` | the element keeps its box and is blank |
+| `<svg width="100000" height="100000">`, and the same on `<canvas>` | abort, `std::bad_alloc` | the same |
+| 20,000 `<svg></svg>`, 180 KB of bitmap each | stopped at the 2 GB the deep pages allow | renders; past the budget they are blank |
+
+- **`calc(`.** The evaluator read past the end of a value that never closed
+  its parenthesis. A `calc()` inside a `calc()` also ended the expression
+  early: `calc(10px + calc(20px * 2) + (5px + 5px))` was 10px and is 60px.
+  Nesting is limited to 100 levels (`kMaxCalcDepth`; Blink's
+  `kMaxExpressionDepth` is the same number), and a value nested deeper is
+  invalid.
+- **The 60 bytes.** No depth is involved. The page gets the parser into the
+  "in select" insertion mode with no `<select>` on the stack of open
+  elements; "pop until a `<select>` has been popped" then emptied the stack,
+  and the adoption agency algorithm read from it. Popping until a given
+  element now pops nothing when no such element is open, and the adoption
+  agency checks what it indexes. Random pages at the nesting limit found it;
+  it reduces to these 60 bytes.
+- **Bitmaps.** Every `<svg>` and `<canvas>` was drawn into a bitmap of the
+  size the element asked for. One bitmap is now at most 16,384 pixels a side
+  and 16 million pixels, and all that are alive at one time 64 million
+  (`include/litebird/render/RasterBudget.hpp`). Over that the element keeps
+  its size in layout and draws nothing; `canvas.width` reads back what was
+  set.
+
+**Wrong results**
+
+- **`<a>` inside `<a>`.** A second `<a>` start tag runs the adoption agency
+  for the first and then takes the first out of the list of formatting
+  elements. The handler took out whatever stood at the first one's old place
+  in the list, which after the adoption agency could be another element.
+  `<a><em><div><a>x</div>y` put the last `<a>`, with the "y" in it, outside
+  the `<em>` it belongs inside, and `<a X>0<b>1<a Y>2` lost the `<b>` around
+  its second `<a>`. The second is an html5lib case, the one gained
+  (`tests1.dat`, 108 to 109 of 112). Both trees now equal the ones parse5
+  builds.
+- **`el.textContent = 'x'`** emptied the element's list of children and did
+  nothing else. Each removed child went on naming `el` as its parent:
+  `parentNode` was wrong, `isConnected` was wrong, appending `el` to one of
+  them was refused as a cycle, and a custom element among them never got its
+  `disconnectedCallback`.
+- **`textContent`** included the text of comments:
+  `<div>one<!--hidden-->two</div>` read "onehiddentwo".
+- **Class names with a newline or a tab between them** missed every rule
+  whose last compound selector has a class and no id (`.b`, `p.b`,
+  `div .b`). The index that picks the candidate rules for an element split
+  its class list on spaces only: the tests for the other separators were
+  written `'\\t'`, `'\\n'` and so on, constants of two characters that no
+  character equals. `class="a` newline `b"` was looked up as one name, so no
+  rule for `.a` or for `.b` was a candidate. Markup formatted by a tool
+  breaks long class lists this way. No deep page found this one: the
+  compiler had been warning about the line on every build.
+
+**Work that grew with the square of the input**
+
+| Page | Before | Now |
+| :--- | ---: | ---: |
+| `color: var(--x, var(--x, ...`, 20,000 times, never closed | 1.8 s | 0.01 s |
+| the same, 200,000 times | not finished after 120 s | 0.12 s |
+| `innerHTML` assigned 100,000 elements side by side | 8.8 s | 0.2 s |
+| that element emptied again with `innerHTML = ''` | 4.1 s | 0.02 s |
+| a fragment with 50,000 children appended | 1.1 s | 0.12 s |
+| one paragraph of 100,000 `<img>` | 35 s | 1.3 s |
+| one paragraph, `a<br>` 100,000 times | 33 s | 1.3 s |
+| one paragraph, `a <b>b</b> ` 100,000 times | 130 s | 3.6 s |
+| 200,000 floats of no size, side by side in one box | 20.3 s | 1.2 s |
+
+One cause each:
+
+- `var(`: every unclosed `var(` scanned the rest of the value again. The
+  value is now resolved in one pass (the limit of 12 references inside one
+  another is unchanged).
+- `innerHTML`: the parser moved its nodes from its root element to a
+  fragment, and the fragment gave them to the caller, by taking them off the
+  front of a list one at a time. Emptying an element did the same. Both hand
+  over the whole list (`Node::take_children`).
+- The paragraph: after breaking the lines, each text and image child searched
+  every fragment of every line for its own pieces. One pass over the
+  fragments now notes what each child has on each line.
+- The floats: placing a float looks at the band of every float before it,
+  and a float of no height left a band that no position can fall inside.
+  Such a float still counts for `clear` and for the height of a box that
+  contains its floats; it is no longer kept as a band.
+
+The parser's walks down the stack of open elements and the cycle check of
+`appendChild` belong here too; they are in finding 24.
+
+**Behaviour that changed**, besides crashes that no longer happen:
+
+- `textContent` leaves out comments, and `textContent = ''` leaves the
+  element with no children (it had one empty text node).
+- Children removed by `textContent`, `innerHTML` or a replaced fragment have
+  no parent afterwards, custom elements among them get `disconnectedCallback`
+  when the element was in the document, and a `MutationObserver` gets one
+  record that lists them all.
+- Appending a fragment that contains the node it is appended to throws
+  `HierarchyRequestError` and leaves the fragment as it was.
+- An unclosed `calc(` is a value, not a crash; nested `calc()` is evaluated.
+- A `<canvas>` or `<svg>` larger than the bitmap budget is blank.
+- Rules for a class apply when the class list is separated by newlines or
+  tabs.
+
+**Tests.** The pages are part of `deep_pages.py`. Unit tests:
+`css_values_survive_hostile_nesting`, `canvas_and_svg_bitmaps_are_bounded`,
+`replacing_children_detaches_the_old_ones`,
+`inline_children_know_their_lines_in_a_paragraph_of_any_length`,
+`floats_of_no_height_cost_nothing_and_still_count`; the 60 bytes and the
+`<a>` case are in `html_parser_nesting_limit_holds_for_every_kind_of_element`,
+and the class lists in `style_resolver_indexed_candidates_preserve_cascade`.
+Six bugs planted in the float change, one at a time, are each caught by a
+unit test. With the two layout changes, 1,616 pages (the examples and every
+html5lib input) give the same output as before in five modes, 8,080 runs,
+and so do 305 pages of random floats in three.
+
+---
+
+## 28. What the deep pages found that is still open
+
+**Layout drops a block inside an inline box.** `<a href="#">x<p>y</p></a>`
+paints "x" and not "y", at any depth, and did on `main`. The tree is right;
+layout has no rule for a block-level box inside an inline one (CSS 2.1,
+9.2.1.1: the inline box is broken around the block). The nesting limit makes
+it easier to meet, because a block attached beside its parent can land inside
+an inline element. The deep pages put their closing paragraph before an
+unclosed inline nest for this reason.
+
+**Content order at the nesting limit**, as described in finding 24.
+
+**A tree a script built deeper than the stack reaches** is laid out only as
+far as the stack goes (finding 24, point 3).
+
+**Input that still costs the square of its length**, measured on this branch:
+
+| Input | Time |
+| :--- | ---: |
+| 5,000 floats that have a size, in one box | 10 s |
+| 10,000 | 46 s |
+| 20,000 | not finished after 60 s |
+| `while (el.firstChild) el.removeChild(el.firstChild)`, 50,000 children | 1.0 s |
+| 300,000 spaces inside `:nth-child( )` | 8.8 s |
+| 300,000 spaces inside an attribute selector | 6.3 s |
+| one element with 50,000 attributes | 4.5 s |
+| 300,000 spaces inside `repeat(`, `minmax(` or `translate(` | 2.1 s each |
+
+The floats are the one that matters. A float that does not fit beside the
+ones before it is moved down a quarter of its own height at a time, starting
+each time from where the flow stands (the top of the box, when the box holds
+only floats), and every step looks at every band. After 512 steps it is
+placed where it stands, which is wrong as well as slow: with floats of 100 by
+10 pixels in a box 800 wide, the first 1,024 fill 128 rows of eight, and
+every float after them goes into one more row that runs out of the box to the
+right (float 1,100 lands at x = 7,500). It needs a placement that goes
+straight to the bottom edge of the float in the way. That can move a float
+(today it lands on a multiple of a quarter of its height) and is a change of
+its own.
+
+Removing the first child moves every other child up, because children are a
+vector. The spaces are trimmed one character at a time from the front of a
+string, in about twenty places in the CSS code. The tokenizer drops a
+duplicate attribute by comparing each one with every attribute already on
+the tag.
+
+**Memory of inline content.** Every box, line item and line fragment carries
+its own copy of a 920-byte computed style (finding 12). One paragraph of
+100,000 times `word <b>bold</b>` takes 1.3 GB, and 200,000 pass the 2 GB the
+deep pages allow, so those two pages run at 100,000.

@@ -32,6 +32,18 @@ public:
     /// The scripting flag, which changes <noscript> handling.
     void set_scripting(bool enabled) { m_scripting = enabled; }
 
+    /// How many elements can be open at once, and so how deep the parser
+    /// nests. An element that would be opened inside the 512th is made its
+    /// sibling instead, and the 512th is closed (see place_for_new_node).
+    ///
+    /// The HTML standard has no such limit, and every browser has one. This is
+    /// WebKit's rule and WebKit's number (`defaultMaximumHTMLParserDOMTreeDepth`
+    /// in SettingsBase.h; `HTMLConstructionSite::attachLater`). Blink uses the
+    /// same number but leaves the 512th element open
+    /// (`kMaximumHTMLParserDOMTreeDepth`, `HTMLConstructionSite::Attach`), so
+    /// its stack of open elements still grows with the input.
+    static constexpr std::size_t kMaxOpenElements = 512;
+
 private:
     enum class Mode {
         Initial,
@@ -140,6 +152,12 @@ private:
     InsertionPlace appropriate_place_for_inserting_node(
         std::shared_ptr<Element> override_target = nullptr,
         bool force_foster = false);
+    /// Where a node the parser has just created goes: the appropriate place
+    /// for inserting a node, unless kMaxOpenElements elements are open
+    /// already. Then the current node is closed and the new node goes next to
+    /// it. Used for elements and comments; text always goes into the current
+    /// node, as in WebKit and Blink.
+    InsertionPlace place_for_new_node();
     std::shared_ptr<Element> create_element_for_token(const HtmlToken& token, ElementNamespace ns);
     std::shared_ptr<Element> insert_html_element(const HtmlToken& token);
     std::shared_ptr<Element> insert_foreign_element(const HtmlToken& token, ElementNamespace ns);

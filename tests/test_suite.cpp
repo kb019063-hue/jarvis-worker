@@ -3990,10 +3990,11 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     // died mid-layout with no diagnostic; parsing and DOM dumping alone were
     // fine, which is what made it look like a parser bug.
     //
-    // The limit is the remaining native stack, not a fixed depth, because the
-    // per-frame cost differs ~12x between an -O2 and an ASan build. This depth
-    // is deliberately far past what an 8 MB stack can hold uninstrumented, so
-    // the test exercises the guard rather than the payload.
+    // Two things stand between markup like this and the stack now. The parser
+    // stops nesting at HtmlTreeBuilder::kMaxOpenElements, so the tree it
+    // builds from 6,000 nested <div> is 512 elements deep; and layout asks at
+    // every level whether there is stack left, because the cost of a level
+    // differs ~12x between an -O2 and an ASan build.
     const int depth = 6000;
     std::string html;
     html.reserve(static_cast<size_t>(depth) * 11 + 8);
@@ -4004,8 +4005,12 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
     auto doc = HtmlParser::parse(html);
     assert(doc != nullptr);
 
-    // Verify the whole nesting survived tree construction, without recursively
-    // walking the DOM from the test itself.
+    // Every <div> is in the tree; none of them was dropped.
+    assert(doc->get_elements_by_tag_name("div").size() == static_cast<size_t>(depth));
+
+    // They nest until 512 elements are open (<html>, <body> and 510 <div>).
+    // From there each new <div> closes the one before it and becomes its
+    // sibling, so the stack of open elements stays at 512.
     auto current = std::static_pointer_cast<Node>(doc->body());
     int parsed_depth = 0;
     while (current) {
@@ -4020,7 +4025,15 @@ TEST(deeply_nested_markup_does_not_overflow_the_stack) {
         ++parsed_depth;
         current = std::move(nested);
     }
-    assert(parsed_depth == depth);
+    const int max_open = static_cast<int>(HtmlTreeBuilder::kMaxOpenElements);
+    assert(parsed_depth == max_open - 2);
+    // `current` is the 510th <div>; the 511th to the 6,000th are its siblings.
+    assert(current->children().empty());
+    auto widest = current->parent();
+    assert(widest->children().size() == static_cast<size_t>(depth - (max_open - 2) + 1));
+    // The text went into the last <div> that was opened, as in a browser.
+    assert(widest->children().back()->text_content() == "x");
+    assert(doc->body()->text_content() == "x");
 
     // Building the box tree must terminate without a stack overflow.
     StyleResolver resolver;

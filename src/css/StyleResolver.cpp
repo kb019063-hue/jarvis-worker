@@ -314,6 +314,11 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
 
     if (val.find("calc(") != std::string_view::npos) {
         std::string resolved = resolve_calc_functions(std::string(val), m_viewport_width);
+        // resolve_calc_functions replaces every calc(), so this comes back here
+        // at most once. It used to leave an unclosed `calc(` in place, and then
+        // this function called itself until the stack ran out: one missing
+        // parenthesis in a style attribute ended the process.
+        if (resolved.find("calc(") != std::string::npos) return default_val;
         return parse_length(resolved, default_val);
     }
 
@@ -1450,9 +1455,19 @@ std::string StyleResolver::resolve_var_functions(
 }
 
 namespace {
+
+// How deeply a calc() expression may nest parentheses and calc() functions.
+// The parser below calls itself once per level, so the nesting of the input
+// must not decide how much native stack it uses. Blink has the same limit and
+// the same number (kMaxExpressionDepth in css_math_expression_node.h); a
+// deeper expression is invalid there, and here.
+constexpr int kMaxCalcDepth = 100;
+
 struct CalcLexer {
     std::string_view text;
     size_t pos{0};
+    int depth{0};
+    bool invalid{false};
 
     void skip_whitespace() {
         while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) {
@@ -1476,32 +1491,57 @@ struct CalcLexer {
         if (pos >= text.size()) return '\0';
         return text[pos++];
     }
+
+    // Gives up on the expression: nothing is left to read, so every loop in
+    // the parser ends.
+    void fail() {
+        invalid = true;
+        pos = text.size();
+    }
 };
 
 static float parse_calc_primary(CalcLexer& lex, float ref_size);
 static float parse_calc_term(CalcLexer& lex, float ref_size);
 static float parse_calc_expr(CalcLexer& lex, float ref_size);
 
+// `(` has been read: the expression inside, and the `)` if there is one. A
+// parenthesis still open at the end of the value is closed by the end.
+static float parse_calc_group(CalcLexer& lex, float ref_size) {
+    if (lex.depth >= kMaxCalcDepth) {
+        lex.fail();
+        return 0.0f;
+    }
+    lex.depth++;
+    float val = parse_calc_expr(lex, ref_size);
+    lex.depth--;
+    if (lex.peek() == ')') {
+        lex.get(); // consume ')'
+    }
+    return val;
+}
+
 static float parse_calc_primary(CalcLexer& lex, float ref_size) {
-    lex.skip_whitespace();
+    // A run of signs is read in a loop. (It used to be one call per sign, so a
+    // long enough run of `-` overflowed the stack.)
+    bool negative = false;
+    for (;;) {
+        const char sign = lex.peek();
+        if (sign == '+') {
+            lex.get();
+        } else if (sign == '-') {
+            lex.get();
+            negative = !negative;
+        } else {
+            break;
+        }
+    }
     if (!lex.has_more()) return 0.0f;
 
-    char c = lex.peek();
-    if (c == '+') {
-        lex.get();
-        return parse_calc_primary(lex, ref_size);
-    }
-    if (c == '-') {
-        lex.get();
-        return -parse_calc_primary(lex, ref_size);
-    }
-    if (c == '(') {
+    float value = 0.0f;
+    if (lex.peek() == '(') {
         lex.get(); // consume '('
-        float val = parse_calc_expr(lex, ref_size);
-        if (lex.peek() == ')') {
-            lex.get(); // consume ')'
-        }
-        return val;
+        value = parse_calc_group(lex, ref_size);
+        return negative ? -value : value;
     }
 
     size_t start = lex.pos;
@@ -1518,20 +1558,29 @@ static float parse_calc_primary(CalcLexer& lex, float ref_size) {
     std::string token(lex.text.substr(start, lex.pos - start));
     if (token.empty()) return 0.0f;
 
-    if (token.ends_with("px")) {
-        try { return std::stof(token.substr(0, token.size() - 2)); } catch (...) { return 0.0f; }
-    }
-    if (token.ends_with("%")) {
-        try { return (std::stof(token.substr(0, token.size() - 1)) / 100.0f) * ref_size; } catch (...) { return 0.0f; }
-    }
-    if (token.ends_with("em") || token.ends_with("rem")) {
-        try { return std::stof(token.substr(0, token.size() - (token.ends_with("rem") ? 3 : 2))) * 16.0f; } catch (...) { return 0.0f; }
-    }
-    if (token.ends_with("pt")) {
-        try { return std::stof(token.substr(0, token.size() - 2)) * 1.33333f; } catch (...) { return 0.0f; }
+    // calc() inside calc() is a pair of parentheses.
+    if (token == "calc" && lex.pos < lex.text.size() && lex.text[lex.pos] == '(') {
+        lex.pos++;
+        value = parse_calc_group(lex, ref_size);
+        return negative ? -value : value;
     }
 
-    try { return std::stof(token); } catch (...) { return 0.0f; }
+    try {
+        if (token.ends_with("px")) {
+            value = std::stof(token.substr(0, token.size() - 2));
+        } else if (token.ends_with("%")) {
+            value = (std::stof(token.substr(0, token.size() - 1)) / 100.0f) * ref_size;
+        } else if (token.ends_with("em") || token.ends_with("rem")) {
+            value = std::stof(token.substr(0, token.size() - (token.ends_with("rem") ? 3 : 2))) * 16.0f;
+        } else if (token.ends_with("pt")) {
+            value = std::stof(token.substr(0, token.size() - 2)) * 1.33333f;
+        } else {
+            value = std::stof(token);
+        }
+    } catch (...) {
+        value = 0.0f;
+    }
+    return negative ? -value : value;
 }
 
 static float parse_calc_term(CalcLexer& lex, float ref_size) {
@@ -1561,34 +1610,47 @@ static float parse_calc_expr(CalcLexer& lex, float ref_size) {
 }
 } // namespace
 
-float StyleResolver::evaluate_calc_expression(std::string_view expr, float reference_size) const {
+float StyleResolver::evaluate_calc_expression(std::string_view expr, float reference_size, bool* valid) const {
     CalcLexer lex{expr, 0};
-    return parse_calc_expr(lex, reference_size);
+    const float value = parse_calc_expr(lex, reference_size);
+    if (valid) *valid = !lex.invalid;
+    return lex.invalid ? 0.0f : value;
 }
 
+// Replaces each calc(...) in `value` by its result in px. A calc() that is
+// still open where the value ends is closed there, which is how CSS reads an
+// unterminated function. One that nests too deeply to evaluate is replaced by
+// a word no property accepts, so the declaration has no effect.
+//
+// The result is built by appending. (It used to be edited in place, and an
+// unclosed `calc(` was skipped and searched for again from five characters
+// further on, so a value made of N of them cost N*N steps.)
 std::string StyleResolver::resolve_calc_functions(const std::string& value, float reference_size) const {
-    std::string result = value;
-    size_t calc_pos = 0;
-    while ((calc_pos = result.find("calc(", calc_pos)) != std::string::npos) {
-        size_t content_start = calc_pos + 5;
+    std::string result;
+    size_t at = 0;
+    for (;;) {
+        const size_t calc_pos = value.find("calc(", at);
+        if (calc_pos == std::string::npos) {
+            result.append(value, at, std::string::npos);
+            break;
+        }
+        result.append(value, at, calc_pos - at);
+
+        const size_t content_start = calc_pos + 5;
         int paren_depth = 1;
         size_t i = content_start;
-        for (; i < result.size() && paren_depth > 0; ++i) {
-            if (result[i] == '(') paren_depth++;
-            else if (result[i] == ')') paren_depth--;
+        for (; i < value.size() && paren_depth > 0; ++i) {
+            if (value[i] == '(') paren_depth++;
+            else if (value[i] == ')') paren_depth--;
         }
-        if (paren_depth != 0) {
-            calc_pos += 5;
-            continue;
-        }
-        size_t content_end = i - 1;
-        std::string inner = result.substr(content_start, content_end - content_start);
+        const bool closed = paren_depth == 0;
+        const size_t content_end = closed ? i - 1 : value.size();
 
-        float val = evaluate_calc_expression(inner, reference_size);
-        std::string replacement = std::to_string(val) + "px";
-
-        result.replace(calc_pos, content_end - calc_pos + 1, replacement);
-        calc_pos += replacement.size();
+        bool valid = true;
+        const float val = evaluate_calc_expression(
+            std::string_view(value).substr(content_start, content_end - content_start), reference_size, &valid);
+        result += valid ? std::to_string(val) + "px" : std::string("invalid");
+        at = closed ? i : value.size();
     }
     return result;
 }

@@ -1,5 +1,6 @@
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <sstream>
 #include <cmath>
 #include <cctype>
@@ -329,6 +330,10 @@ void render_element(
     float dest_h
 ) {
     if (!el) return;
+    // One call per level of <g> nesting, over a tree a script can make as deep
+    // as it likes: stop where the stack does. What is nested deeper than that
+    // is not drawn.
+    if (stack_is_exhausted()) return;
     std::string tag = el->tag_name();
     SvgStyle style = parse_style(el, parent_style);
 

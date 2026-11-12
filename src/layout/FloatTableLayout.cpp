@@ -1,4 +1,5 @@
 #include "litebird/layout/LayoutBox.hpp"
+#include "litebird/common/StackLimit.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -79,6 +80,7 @@ float LayoutBox::clearance_y(const std::vector<FloatBand>& bands, ClearType clea
 }
 
 float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
+    if (stack_is_exhausted()) return fallback;
     if (box.box_type == BoxType::TextNode) {
         return longest_word_width(box.text, box.style);
     }

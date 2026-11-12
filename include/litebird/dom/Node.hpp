@@ -29,7 +29,10 @@ class Node : public std::enable_shared_from_this<Node> {
 public:
     explicit Node(NodeType type)
         : m_type(type), m_is_connected(type == NodeType::Document) {}
-    virtual ~Node() = default;
+    /// Releases the children without recursion: a tree of any depth is
+    /// destroyed in a loop, so dropping the last reference to a deep tree
+    /// cannot overflow the native stack. See Node.cpp.
+    virtual ~Node();
 
     NodeType type() const { return m_type; }
     bool is_document() const { return m_type == NodeType::Document; }
@@ -54,6 +57,24 @@ public:
     void append_child(std::shared_ptr<Node> child);
     void remove_child(std::shared_ptr<Node> child);
     void insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> ref_child);
+
+    /// True when this node is `other`, contains it, or hosts a shadow tree
+    /// that contains it (the DOM standard's "host-including inclusive
+    /// ancestor"). Inserting a node under something it contains would make it
+    /// its own ancestor; append_child and insert_before refuse that, and the
+    /// script bindings throw HierarchyRequestError for it.
+    ///
+    /// A node without children and without a shadow tree answers at once, so
+    /// building a tree one new node at a time costs nothing here.
+    bool is_host_including_inclusive_ancestor_of(const Node& other) const;
+
+    // Searches over the descendants of this node, in tree order. None of them
+    // recurses, so they work on a tree of any depth. A "simple selector" is
+    // `#id`, `.class`, a tag name or `*`.
+    std::shared_ptr<Element> descendant_with_id(const std::string& id) const;
+    std::vector<std::shared_ptr<Element>> descendants_with_tag(const std::string& tag) const;
+    std::vector<std::shared_ptr<Element>> descendants_matching(const std::string& simple_selector) const;
+    std::shared_ptr<Element> first_descendant_matching(const std::string& simple_selector) const;
 
     // Invalidation / dirty tracking
     bool needs_layout() const { return m_needs_layout; }
@@ -85,8 +106,21 @@ public:
         return it != m_listeners.end() && !it->second.empty();
     }
 
+    /// The children of this node as markup: elements and text, in tree
+    /// order, written into one buffer by one walk. What innerHTML returns.
+    std::string inner_markup() const;
+
+    /// The text of every Text node below this node, in tree order. A Text or
+    /// Comment node answers with its own data.
     virtual std::string text_content() const;
-    virtual void dump(std::ostream& os, int indent = 0) const;
+
+    /// Writes this node and what is below it, one node per line, indented by
+    /// depth. Does not recurse. Nesting deeper than kMaxDumpDepth levels below
+    /// this node is not written out (every line would carry that much
+    /// indentation, so the dump of a chain of N nodes would be N*N bytes): one
+    /// line says how many nodes were left out.
+    void dump(std::ostream& os, int indent = 0) const;
+    static constexpr int kMaxDumpDepth = 1024;
 
     Element* as_element();
     const Element* as_element() const;
@@ -96,6 +130,13 @@ public:
     const Document* as_document() const;
 
 protected:
+    /// This node's own line in dump(). `has_content` says whether nodes will
+    /// be written inside it.
+    virtual void dump_open(std::ostream& os, const std::string& indent, bool has_content) const;
+    /// The line that ends what dump_open() started. Called only when
+    /// `has_content` was true.
+    virtual void dump_close(std::ostream& os, const std::string& indent) const;
+
     // Connectivity is maintained as the tree is attached/detached. Keeping it
     // cached makes append_child's connectedness check O(1) instead of walking
     // every ancestor for every parser insertion.

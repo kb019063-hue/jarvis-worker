@@ -859,21 +859,13 @@ JsValue js_event_target_method(const std::shared_ptr<Node>& target, const std::s
 // its own, so this only decides what the script is told.
 static void require_insertable(const std::shared_ptr<Node>& parent, const std::shared_ptr<Node>& child,
                                const char* method) {
-    for (std::shared_ptr<Node> at = parent; at;) {
-        if (at == child) {
-            JsValue error = js_make_error(JsErrorKind::Error,
-                std::string("Failed to execute '") + method +
-                "' on 'Node': The new child element contains the parent.");
-            error.set_property("name", JsValue::make_string("HierarchyRequestError"));
-            error.set_property("code", JsValue::make_number(3));
-            js_throw(std::move(error));
-        }
-        std::shared_ptr<Node> up = at->parent();
-        if (!up) {
-            if (auto shadow = std::dynamic_pointer_cast<ShadowRoot>(at)) up = shadow->host();
-        }
-        at = std::move(up);
-    }
+    if (!child->is_host_including_inclusive_ancestor_of(*parent)) return;
+    JsValue error = js_make_error(JsErrorKind::Error,
+        std::string("Failed to execute '") + method +
+        "' on 'Node': The new child element contains the parent.");
+    error.set_property("name", JsValue::make_string("HierarchyRequestError"));
+    error.set_property("code", JsValue::make_number(3));
+    js_throw(std::move(error));
 }
 
 JsValue JsValue::get_property(const std::string& name) const {

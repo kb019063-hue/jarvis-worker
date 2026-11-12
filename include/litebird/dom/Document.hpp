@@ -48,7 +48,8 @@ public:
     std::shared_ptr<Text> create_text_node(const std::string& text);
     std::shared_ptr<Node> create_document_fragment();
 
-    void dump(std::ostream& os, int indent = 0) const override;
+protected:
+    void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
 
 private:
     std::string m_title;

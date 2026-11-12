@@ -539,6 +539,38 @@ std::shared_ptr<Element> HtmlTreeBuilder::create_element_for_token(const HtmlTok
     return element;
 }
 
+// The nesting limit.
+//
+// Markup can nest without end, and the parser used to follow it: 300,000
+// <div> start tags made a tree 300,000 levels deep and a stack of open
+// elements just as long. Everything that looks at an element's ancestors then
+// costs 300,000 steps per element (selector matching, the scope checks of the
+// tree builder itself, the indentation of a dump), and everything recursive
+// runs out of stack.
+//
+// With kMaxOpenElements elements open, the next node does not go inside the
+// current node. The current node is popped, as if its end tag had been seen,
+// and the new node is inserted into its parent. Because of the pop the stack
+// of open elements never grows past the limit, so neither does the depth of
+// the tree, and nothing in the tree builder works on a longer stack than
+// that. A node that is being foster-parented is left alone: it is inserted
+// next to a table, not into the current node.
+HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::place_for_new_node() {
+    InsertionPlace place = appropriate_place_for_inserting_node();
+    if (m_open_elements.size() < kMaxOpenElements) return place;
+
+    const auto current = current_node();
+    const bool goes_into_current =
+        !place.before && (place.parent == current || place.parent == current->template_contents());
+    if (!goes_into_current) return place;
+
+    auto above = current->parent();
+    if (!above) return place;
+    pop_current_node();
+    place.parent = std::move(above);
+    return place;
+}
+
 void HtmlTreeBuilder::append_node_at(const std::shared_ptr<Node>& node, InsertionPlace place) {
     if (!place.parent) place.parent = m_document;
     if (place.parent == node) return;  // never build a cycle
@@ -551,14 +583,14 @@ void HtmlTreeBuilder::append_node_at(const std::shared_ptr<Node>& node, Insertio
 
 std::shared_ptr<Element> HtmlTreeBuilder::insert_html_element(const HtmlToken& token) {
     auto element = create_element_for_token(token, ElementNamespace::HTML);
-    append_node_at(element, appropriate_place_for_inserting_node());
+    append_node_at(element, place_for_new_node());
     push_element(element);
     return element;
 }
 
 std::shared_ptr<Element> HtmlTreeBuilder::insert_foreign_element(const HtmlToken& token, ElementNamespace ns) {
     auto element = create_element_for_token(token, ns);
-    append_node_at(element, appropriate_place_for_inserting_node());
+    append_node_at(element, place_for_new_node());
     push_element(element);
     return element;
 }
@@ -602,7 +634,7 @@ void HtmlTreeBuilder::insert_comment_at(const HtmlToken& token, const std::share
 }
 
 void HtmlTreeBuilder::insert_comment(const HtmlToken& token) {
-    auto place = appropriate_place_for_inserting_node();
+    auto place = place_for_new_node();
     insert_comment_at(token, place.parent ? place.parent : m_document, place.before);
 }
 
@@ -685,7 +717,7 @@ void HtmlTreeBuilder::reconstruct_formatting_elements() {
     for (; index < static_cast<int>(m_formatting.size()); ++index) {
         auto& entry = m_formatting[static_cast<std::size_t>(index)];
         auto element = create_element_for_token(entry.token, ElementNamespace::HTML);
-        append_node_at(element, appropriate_place_for_inserting_node());
+        append_node_at(element, place_for_new_node());
         push_element(element);
         entry.element = element;
     }

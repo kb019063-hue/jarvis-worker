@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+"""Pages that nest one thing far deeper than the native stack is long.
+
+The mutation fuzzers start from small pages and never nest anything more than
+a few dozen levels, so they cannot find the oldest way to end a process from a
+web page: recursion. Every walk over a tree that calls itself once per level
+(a destructor, a serializer, a selector search, layout, painting) works for
+any page a person wrote and dies on a page a program wrote. This generates
+those pages. Each one nests a single construct `--depth` levels and is run
+through the engine. At the default depth of 200,000 on the default 8 MB stack,
+a walk that uses as little as 42 bytes of stack per level cannot finish.
+
+A run passes when
+
+  * the process exits 0: no signal, no sanitizer report;
+  * it finishes inside the time and memory limits, and its output is bounded
+    (work or output that grows with the square of the depth does not finish);
+  * the text after the deep part is in the tree, laid out and painted, which
+    shows that the engine went on working;
+  * for a page the HTML parser builds: the text at the very bottom of the nest
+    is in the tree, laid out and painted too. The parser stops nesting at 512
+    open elements (HtmlTreeBuilder::kMaxOpenElements), so nothing in a parsed
+    tree is out of layout's reach;
+  * for a page that builds its tree from script: the last script prints the
+    values it is expected to compute (the length of innerHTML, the number of
+    matches of a selector, the name of an exception, ...).
+
+Three kinds of run per page:
+
+  dumps      --dump-dom --dump-layout --dump-paint --render-bmp, in one process
+  terminal   the default mode: the page rendered as text
+  html5lib   --dump-dom-webplatform: the parser alone (it runs no scripts, so
+             only pages without script get this run)
+
+With --random N, N more pages are generated from a seed: a few thousand start
+tags, end tags, comments and text runs drawn from the tags the tree builder
+treats specially (tables, templates, select, formatting elements, SVG and
+MathML), biased towards start tags so that the parser spends most of the page
+at its nesting limit. Those runs check for survival and that no element ends
+up deeper than the limit allows.
+
+Usage:
+    python3 tools/fuzz/deep_pages.py                    # every page, build/litebird
+    python3 tools/fuzz/deep_pages.py --only table       # pages whose name contains "table"
+    python3 tools/fuzz/deep_pages.py --depth 300        # a depth any stack holds: checks the checks
+    python3 tools/fuzz/deep_pages.py --random 500       # 500 random pages at the nesting limit as well
+    python3 tools/fuzz/deep_pages.py --list
+    python3 tools/fuzz/deep_pages.py --keep /tmp/pages  # leave the generated pages there
+
+A sanitizer build has stack frames an order of magnitude larger and runs an
+order of magnitude slower. Give it a small stack and a depth to match, and do
+not ask it to lay out the bottom of the nest (layout stops when the stack is
+nearly used up, and with frames that large it is used up early):
+
+    python3 tools/fuzz/deep_pages.py --binary build-asan/litebird \\
+        --depth 50000 --stack-mb 2 --no-layout-check --timeout 300
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import os
+import random
+import re
+import resource
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+DEFAULT_BINARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "litebird")
+
+BOTTOM = "DEEPBOTTOM"       # text at the innermost level of the nest
+AFTER = "DEEPAFTER"         # text in a shallow paragraph after it
+SCRIPT_OK = "DEEP-SCRIPT"   # prefix of the line a page's last script prints
+
+# HtmlTreeBuilder::kMaxOpenElements. No element the parser inserts is deeper.
+MAX_OPEN_ELEMENTS = 512
+
+RUNS = {
+    "dumps": ["--dump-dom", "--dump-layout", "--dump-paint", "--render-bmp", "{bmp}"],
+    "terminal": ["--render-terminal"],
+    "html5lib": ["--dump-dom-webplatform"],
+}
+
+# How each stage of the pipeline writes a piece of text in the "dumps" run.
+IN_TREE = '#text: "%s'
+LAID_OUT = 'text="%s'
+PAINTED = ') "%s'
+
+
+class Page:
+    def __init__(self, name: str, html: str, *, bottom: bool = False, after: bool = True,
+                 expect: str | None = None, max_depth: int | None = None) -> None:
+        self.name = name
+        self.html = html
+        self.bottom = bottom        # the innermost text must reach the tree, layout and paint
+        self.after = after          # so must the text after the nest
+        self.expect = expect        # what the last script prints after SCRIPT_OK
+        self.max_depth = max_depth  # deepest element allowed in the html5lib dump
+        self.has_script = "<script" in html
+
+
+def document(body: str, head: str = "") -> str:
+    return f"<!doctype html><html><head><title>deep</title>{head}</head><body>{body}<p>{AFTER}</p></body></html>"
+
+
+def nest(open_tag: str, close_tag: str, n: int, inner: str = BOTTOM) -> str:
+    return open_tag * n + inner + close_tag * n
+
+
+def script(code: str) -> str:
+    return f"<script>{code}</script>"
+
+
+def report(*values: str) -> str:
+    """The last line of a script page: SCRIPT_OK and the values it computed."""
+    return "console.log(" + ", ".join([repr(SCRIPT_OK)] + list(values)) + ");"
+
+
+# --- Pages the HTML parser builds -------------------------------------------------
+
+def parsed_pages(n: int) -> list[Page]:
+    def deep(name: str, body: str, head: str = "", **options) -> Page:
+        options.setdefault("bottom", True)
+        return Page(name, document(body, head), **options)
+
+    def unclosed(name: str, body: str, **options) -> Page:
+        """A nest of inline elements that is never closed. The paragraph that
+        every page carries goes before it: after it, the paragraph would be a
+        block inside an inline box, and layout loses those at any depth
+        (AUDIT.md, finding 28), which is not what this tool is looking for."""
+        options.setdefault("bottom", True)
+        return Page(name, f"<!doctype html><title>deep</title><p>{AFTER}</p>" + body, **options)
+
+    at_limit = "<div>" * (MAX_OPEN_ELEMENTS + 100)
+    pages = [
+        deep("div", nest("<div>", "</div>", n)),
+        unclosed("div, never closed", "<div>" * n + BOTTOM),
+        deep("span", nest("<span>", "</span>", n)),
+        deep("div and span alternating", nest("<div><span>", "</span></div>", n)),
+        deep("b (formatting element)", nest("<b>", "</b>", n)),
+        unclosed("b with a different attribute each time", "".join(f"<b id=b{i}>" for i in range(min(n, 2000))) + BOTTOM),
+        unclosed("i and p interleaved", "<i><p>" * n + BOTTOM),
+        unclosed("a inside a", "<a href=#>" * n + BOTTOM),
+        deep("ul li", nest("<ul><li>", "</li></ul>", n)),
+        deep("ol li", nest("<ol><li>", "</li></ol>", n)),
+        deep("dl dd", nest("<dl><dd>", "</dd></dl>", n)),
+        deep("blockquote", nest("<blockquote>", "</blockquote>", n)),
+        deep("table", nest("<table><tr><td>", "</td></tr></table>", n)),
+        deep("table with caption", nest("<table><caption>", "</caption></table>", n)),
+        deep("table, text straight inside", "<table>" * n + BOTTOM),
+        deep("tables with fostered text at the limit", at_limit + f"<table>{BOTTOM}<b>x" * min(n, 20000), bottom=False),
+        deep("formatting misnested at the limit", at_limit + "<b><i><p>x</b></i>" * min(n, 20000) + BOTTOM, bottom=False),
+        deep("comments and void elements at the limit", at_limit + "<!--c--><br><img><div>" * min(n, 50000) + BOTTOM, bottom=False),
+        deep("details", nest("<details open><summary>s</summary>", "</details>", n)),
+        deep("button", nest("<div><button>", "</button></div>", n)),
+        deep("fieldset", nest("<fieldset><legend>l</legend>", "</fieldset>", n)),
+        deep("svg g", "<svg width=10 height=10>" + nest("<g>", "</g>", n, "<rect width=1 height=1 />") + "</svg>", bottom=False),
+        deep("svg inside svg", nest("<svg>", "</svg>", n, "<rect width=1 height=1 />"), bottom=False),
+        deep("svg foreignObject", "<svg>" + nest("<foreignObject><svg>", "</svg></foreignObject>", n, "<rect/>") + "</svg>", bottom=False),
+        deep("math mrow", "<math>" + nest("<mrow>", "</mrow>", n, f"<mi>{BOTTOM}</mi>") + "</math>"),
+        deep("template", nest("<template>", "</template>", n), bottom=False),
+        deep("template in table", nest("<table><template>", "</template></table>", n), bottom=False),
+        deep("select optgroup", "<select>" + "<optgroup>" * n + "<option>o</option></select>", bottom=False),
+        deep("flex containers", nest('<div style="display:flex">', "</div>", n)),
+        deep("grid containers", nest('<div style="display:grid">', "</div>", n)),
+        deep("floats", nest('<div style="float:left">', "</div>", n)),
+        deep("inline-block", nest('<div style="display:inline-block">', "</div>", n)),
+        deep("overflow hidden", nest('<div style="overflow:hidden">', "</div>", n)),
+        deep("positioned", nest('<div style="position:relative">', "</div>", n)),
+        deep("absolutely positioned", nest('<div style="position:absolute">', "</div>", n), bottom=False),
+        deep("transformed", nest('<div style="transform:translate(1px,1px)">', "</div>", n)),
+        deep("padding and border", nest('<div style="padding:1px;border:1px solid red">', "</div>", n)),
+        deep("percentage widths", nest('<div style="width:99%">', "</div>", n)),
+        deep("comments between", nest("<div><!--c-->", "</div>", n)),
+        deep("style rule on every level", nest('<div class="d">', "</div>", n),
+             "<style>.d { color: red } div div { margin: 0 } div > div { padding: 0 }</style>"),
+        deep("descendant selector as long as the nest", nest("<div>", "</div>", min(n, 2000)),
+             "<style>" + "div " * min(n, 2000) + "{ color: red }</style>"),
+        deep("noscript", nest("<noscript>", "</noscript>", n), bottom=False),
+        deep("attributes with quotes", nest('<div title="&quot;&lt;">', "</div>", n)),
+        Page("frameset", "<!doctype html><title>deep</title>" + "<frameset>" * n + "<frame>" + "</frameset>" * n, after=False),
+        deep("h1 to h3", nest("<h1><h2><h3>", "</h3></h2></h1>", n)),
+        unclosed("p inside button inside p", "<p><button>" * n + BOTTOM),
+        unclosed("nobr", "<nobr>" * n + BOTTOM),
+        deep("ruby", nest("<ruby><rb>", "</rb></ruby>", n)),
+        deep("unknown elements", nest("<x-y>", "</x-y>", n)),
+    ]
+
+    values = {
+        "calc nested": f"width: {'calc(' * n}1px{')' * n}",
+        "calc nested, never closed": f"width: {'calc(' * n}1px",
+        "calc, one, never closed": "width: calc(1px",
+        "calc with nested parentheses": f"width: calc({'(' * n}1px{')' * n})",
+        "calc with a run of signs": f"width: calc({'-' * n}1px)",
+        "calc with a long sum": f"width: calc({'1px + ' * n}1px)",
+        "var nested fallbacks": f"color: {'var(--x, ' * n}red{')' * n}",
+        "var nested, never closed": f"color: {'var(--x, ' * n}red",
+        "parentheses": f"width: {'(' * n}1px{')' * n}",
+        "functions": f"color: {'rgb(' * n}0{')' * n}",
+        "brackets": f"grid-template-areas: {'[' * n}a{']' * n}",
+    }
+    for name, declaration in values.items():
+        pages.append(deep(f"css {name}, in a style attribute", f'<div style="{declaration}">{BOTTOM}</div>'))
+        pages.append(deep(f"css {name}, in a style sheet", f"<div>{BOTTOM}</div>", f"<style>div {{ {declaration} }}</style>"))
+    sheet = {
+        "var chain": ":root { " + " ".join(f"--v{i}: var(--v{i + 1});" for i in range(n)) + f" --v{n}: red; }} div {{ color: var(--v0) }}",
+        "var cycle": ":root { --a: var(--b); --b: var(--a); } div { color: var(--a) }",
+        ":not nested": f"div{':not(' * n}p{')' * n} {{ color: red }}",
+        "blocks nested": f"{'@media screen {' * n} div {{ color: red }} {'}' * n}",
+        "braces, never closed": "a {" * n,
+        "selector with many combinators": f"{'div > ' * n}div {{ color: red }} {'div ~ ' * n}div {{ color: red }}",
+        "attribute selectors": "div" + "[a]" * n + " { color: red }",
+    }
+    for name, css in sheet.items():
+        pages.append(deep(f"css {name}", f"<div>{BOTTOM}</div>", f"<style>{css}</style>"))
+    return pages
+
+
+# --- Pages that build the tree from script ------------------------------------------
+
+def chain(n: int, tag: str = "div", style: str = "") -> str:
+    """Script that builds `top`, a chain of n elements, with `at` the innermost."""
+    styled = f"d.setAttribute('style', '{style}');" if style else ""
+    return (f"var top = document.createElement('{tag}'), at = top;"
+            f"for (var i = 1; i < {n}; i++) {{ var d = document.createElement('{tag}'); {styled} at.appendChild(d); at = d; }}"
+            f"at.appendChild(document.createTextNode('{BOTTOM}'));")
+
+
+def scripted_pages(n: int) -> list[Page]:
+    def page(name: str, build: str, values: list[str], expect: str) -> Page:
+        return Page(name, document(script(build) + script(report(*values))), expect=expect)
+
+    c = chain(n)
+    custom = min(n, 20000)
+    pages = [
+        page("chain, dropped", c + "top = at = d = null;", ["'dropped'"], "dropped"),
+        page("chain, textContent", c, ["top.textContent"], BOTTOM),
+        page("chain, innerHTML and outerHTML", c, ["top.innerHTML.length", "top.outerHTML.length"],
+             f"{(n - 1) * 11 + len(BOTTOM)} {n * 11 + len(BOTTOM)}"),
+        page("chain, querySelectorAll", c, ["top.querySelectorAll('div').length", "top.querySelector('p')"], f"{n - 1} null"),
+        page("chain, attached to the document", c + "document.body.appendChild(top);",
+             ["document.querySelectorAll('div').length", "at.isConnected", "document.getElementById('nothing')"], f"{n} true null"),
+        page("chain, attached and removed again", c + "document.body.appendChild(top); document.body.removeChild(top);",
+             ["at.isConnected", "top.parentNode"], "false null"),
+        page("chain, replaced through innerHTML",
+             c + f"document.body.appendChild(top); top = at = d = null; document.body.innerHTML = '<p>{AFTER}</p>';",
+             ["document.querySelectorAll('div').length"], "0"),
+        page("chain, cleared through textContent", c + "document.body.appendChild(top); top.textContent = 'gone';",
+             ["top.textContent", "top.childNodes.length"], "gone 1"),
+        page("chain, an event from the bottom",
+             c + "document.body.appendChild(top); var seen = 0;"
+                 "top.addEventListener('ping', function () { seen++; });"
+                 "document.addEventListener('ping', function () { seen++; });"
+                 "at.dispatchEvent(typeof Event === 'function' ? new Event('ping', { bubbles: true }) : { type: 'ping', bubbles: true });",
+             ["seen"], "2"),
+        page("chain, the bottom moved to the top",
+             c + "var moved = 0; try { top.appendChild(at); moved = 1; } catch (e) { moved = e.name; }",
+             ["moved", "top.childNodes.length"], "1 2"),
+        page("chain, the top appended to the bottom",
+             c + "var name = 'no error'; try { at.appendChild(top); } catch (e) { name = e.name; }",
+             ["name"], "HierarchyRequestError"),
+        page("chain, walked up from the bottom", c + "var steps = 0; for (var p = at; p; p = p.parentNode) steps++;", ["steps"], f"{n}"),
+        page("chain built from the bottom up",
+             f"var top = document.createElement('div'); top.appendChild(document.createTextNode('{BOTTOM}'));"
+             f"for (var i = 1; i < {n}; i++) {{ var d = document.createElement('div'); d.appendChild(top); top = d; }}",
+             ["top.textContent", "top.querySelectorAll('div').length"], f"{BOTTOM} {n - 1}"),
+        page("innerHTML set to a deep nest",
+             f"var host = document.createElement('div'); host.innerHTML = '<div>'.repeat({n}) + '{BOTTOM}';"
+             "document.body.appendChild(host);",
+             ["host.querySelectorAll('div').length", "host.textContent"], f"{n} {BOTTOM}"),
+        page("innerHTML read back and set again",
+             f"var host = document.createElement('div'); host.innerHTML = '<span>'.repeat({n}) + '{BOTTOM}';"
+             "var copy = document.createElement('div'); copy.innerHTML = host.innerHTML;",
+             ["copy.querySelectorAll('span').length", "copy.textContent"], f"{n} {BOTTOM}"),
+        page("innerHTML nested through script, level by level",
+             f"var top = document.createElement('div'), at = top;"
+             f"for (var i = 0; i < {min(n, 30000)}; i++) {{ at.innerHTML = '<div><div></div></div>'; at = at.querySelector('div').querySelector('div'); }}",
+             ["top.querySelectorAll('div').length"], f"{2 * min(n, 30000)}"),
+        page("shadow roots inside shadow roots",
+             f"var top = document.createElement('div'), at = top;"
+             f"for (var i = 0; i < {n}; i++) {{ var root = at.attachShadow({{ mode: 'open' }});"
+             f" var d = document.createElement('div'); root.appendChild(d); at = d; }}"
+             "document.body.appendChild(top);",
+             ["at.isConnected", "top.shadowRoot.querySelectorAll('div').length"], "true 1"),
+        page("shadow roots inside shadow roots, dropped",
+             f"var top = document.createElement('div'), at = top;"
+             f"for (var i = 0; i < {n}; i++) {{ var root = at.attachShadow({{ mode: 'open' }});"
+             f" var d = document.createElement('div'); root.appendChild(d); at = d; }}"
+             "top = at = root = d = null;",
+             ["'dropped'"], "dropped"),
+        page("shadow root filled through innerHTML",
+             f"var host = document.createElement('div'); var root = host.attachShadow({{ mode: 'open' }});"
+             f"root.innerHTML = '<div>'.repeat({n}) + '{BOTTOM}'; document.body.appendChild(host);",
+             ["root.querySelectorAll('div').length", "root.innerHTML.length"], f"{n} {n * 11 + len(BOTTOM)}"),
+        page("fragment appended level by level",
+             f"var top = document.createElement('div'), at = top;"
+             f"for (var i = 0; i < {n}; i++) {{ var f = document.createDocumentFragment();"
+             f" var d = document.createElement('div'); f.appendChild(d); at.appendChild(f); at = d; }}",
+             ["top.querySelectorAll('div').length"], f"{n}"),
+        page("insertBefore chain",
+             f"var top = document.createElement('div'), at = top;"
+             f"for (var i = 0; i < {n}; i++) {{ var d = document.createElement('div');"
+             f" var t = document.createTextNode(''); at.appendChild(t); at.insertBefore(d, t); at = d; }}",
+             ["top.querySelectorAll('div').length", "top.textContent.length"], f"{n} 0"),
+        page("custom elements, connected and disconnected",
+             "var connected = 0, gone = 0;"
+             "class Deep extends HTMLElement { connectedCallback() { connected++; } disconnectedCallback() { gone++; } }"
+             "customElements.define('deep-el', Deep);"
+             f"var top = document.createElement('deep-el'), at = top;"
+             f"for (var i = 1; i < {custom}; i++) {{ var d = document.createElement('deep-el'); at.appendChild(d); at = d; }}"
+             "document.body.appendChild(top); document.body.removeChild(top);",
+             ["connected", "gone"], f"{custom} {custom}"),
+        page("custom element that empties its parent when connected",
+             "var calls = 0;"
+             "class Eater extends HTMLElement { connectedCallback() { calls++; var p = this.parentNode;"
+             " while (p && p.firstChild) p.removeChild(p.firstChild); } }"
+             "customElements.define('eat-el', Eater);"
+             "var top = document.createElement('div');"
+             "for (var i = 0; i < 50; i++) { var e = document.createElement('eat-el'); e.appendChild(document.createElement('eat-el')); top.appendChild(e); }"
+             "document.body.appendChild(top);",
+             ["calls > 0", "top.childNodes.length"], "true 0"),
+        page("mutation observer on a deep subtree",
+             c + "document.body.appendChild(top); var records = 0;"
+                 "new MutationObserver(function (list) { records += list.length; }).observe(document.body, { childList: true, subtree: true });"
+                 "at.appendChild(document.createElement('i'));",
+             ["typeof records"], "number"),
+    ]
+    # The same chain in the document, as each kind of box layout knows.
+    kinds = {
+        "blocks": ("div", ""),
+        "inline boxes": ("span", ""),
+        "flex containers": ("div", "display:flex"),
+        "grid containers": ("div", "display:grid"),
+        "floats": ("div", "float:left"),
+        "inline-blocks": ("div", "display:inline-block"),
+        "clipping boxes": ("div", "overflow:hidden"),
+        "positioned boxes": ("div", "position:relative"),
+        "absolutely positioned boxes": ("div", "position:absolute"),
+        "table cells": ("div", "display:table-cell"),
+        "list items": ("li", ""),
+        "boxes with padding and border": ("div", "padding:1px;border:1px solid red"),
+    }
+    for name, (tag, style) in kinds.items():
+        pages.append(page(f"laid out: chain of {name}", chain(n, tag, style) + "document.body.appendChild(top);",
+                          ["at.isConnected"], "true"))
+    pages.append(page("laid out: tables built by script",
+                      f"var top = document.createElement('table'), at = top;"
+                      f"for (var i = 0; i < {n}; i++) {{ var tr = document.createElement('tr'), td = document.createElement('td'),"
+                      f" t = document.createElement('table'); at.appendChild(tr); tr.appendChild(td); td.appendChild(t); at = t; }}"
+                      "document.body.appendChild(top);", ["at.isConnected"], "true"))
+    pages.append(page("laid out: svg groups built by script",
+                      f"var top = document.createElement('svg'), at = top;"
+                      f"for (var i = 0; i < {n}; i++) {{ var g = document.createElement('g'); at.appendChild(g); at = g; }}"
+                      "at.appendChild(document.createElement('rect')); document.body.appendChild(top);", ["at.isConnected"], "true"))
+    return pages
+
+
+# --- Random pages at the nesting limit -------------------------------------------------
+
+NESTING = ("div div div div span p b i a table tbody tr td th caption colgroup ul li dl dd dt form button select "
+           "optgroup option h1 h2 svg g foreignObject desc math mi mtext annotation-xml template nobr em font "
+           "frameset noscript object marquee applet title textarea pre listing center section ruby rt rb").split()
+VOID = "br img input hr col wbr meta link area".split()
+
+
+def random_page(rng: random.Random, tokens: int) -> str:
+    """Start tags, end tags, comments and text. Mostly start tags, so that most
+    of the page is parsed with the stack of open elements full."""
+    out = ["<!doctype html>"]
+    for _ in range(MAX_OPEN_ELEMENTS + 20):
+        out.append(f"<{rng.choice(('div', 'span', 'b', 'p', 'table', 'tr', 'td', 'template', 'svg', 'g', 'select', 'li'))}>")
+    favourites = rng.sample(NESTING, 6)
+    for _ in range(tokens):
+        roll = rng.random()
+        tag = rng.choice(favourites) if rng.random() < 0.6 else rng.choice(NESTING)
+        if roll < 0.55:
+            out.append(f"<{tag}>" if rng.random() < 0.9 else f"<{tag} a={rng.randrange(9)}>")
+        elif roll < 0.75:
+            out.append(f"</{tag}>")
+        elif roll < 0.83:
+            out.append(rng.choice(("x", " ", "text &amp; more", "\n")))
+        elif roll < 0.90:
+            out.append(f"<{rng.choice(VOID)}>")
+        elif roll < 0.95:
+            out.append("<!--c-->")
+        else:
+            out.append(rng.choice(("</table>", "</template>", "</select>", "</svg>", "</math>", "</body>", "</html>", "<body>", "<html>")))
+    out.append(f"<p>{AFTER}</p>")
+    return "".join(out)
+
+
+def deepest_element(dump: bytes) -> int:
+    """Depth of the deepest element in an html5lib tree dump (<html> is 1).
+    A template's contents are one pseudo-level ("content") deeper than the
+    template; that level is not an element and is not counted."""
+    deepest = 0
+    content_levels: list[int] = []      # indentations of the open "content" lines
+    for line in dump.split(b"\n"):
+        if not line.startswith(b"| "):
+            continue
+        body = line[2:]
+        indent = len(body) - len(body.lstrip(b" "))
+        level = indent // 2
+        while content_levels and content_levels[-1] >= level:
+            content_levels.pop()
+        text = body[indent:]
+        if text == b"content":
+            content_levels.append(level)
+        elif text.startswith(b"<") and not text.startswith(b"<!"):
+            deepest = max(deepest, level + 1 - len(content_levels))
+    return deepest
+
+
+# --- Running ----------------------------------------------------------------------
+
+class Outcome:
+    def __init__(self) -> None:
+        self.status = "ok"                  # ok | signal NAME | exit N | timeout | memory | output
+        self.seconds = 0.0
+        self.peak_mb = 0.0
+        self.out_bytes = 0
+        self.head = b""                     # the start of the output: what scripts print comes first
+        self.seen: set[bytes] = set()       # which of the markers occur anywhere in the output
+        self.stderr_tail = b""
+        self.deepest = 0                    # deepest element, when asked to measure an html5lib dump
+
+
+def kill(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def run(argv: list[str], *, timeout: float, memory_mb: int, output_mb: int, stack_mb: int,
+        markers: tuple[bytes, ...], measure_depth: bool = False) -> Outcome:
+    """Runs one process. Its output is searched for `markers` as it arrives and
+    thrown away, except for the start: the dump of a deep tree is large."""
+    outcome = Outcome()
+    started = time.time()
+
+    def limit_stack() -> None:
+        _, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        soft = stack_mb << 20
+        if hard != resource.RLIM_INFINITY:
+            soft = min(soft, hard)
+        resource.setrlimit(resource.RLIMIT_STACK, (soft, hard))
+
+    env = dict(os.environ)
+    env.setdefault("ASAN_OPTIONS", "detect_leaks=0")
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                               preexec_fn=limit_stack, env=env)
+    killed_for: list[str] = []
+
+    def drain(stream, is_stdout: bool) -> None:
+        head, tail, total = b"", b"", 0
+        kept: list[bytes] = []
+        overlap = max((len(m) for m in markers), default=1) - 1
+        while True:
+            chunk = stream.read(1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if len(head) < 1 << 18:
+                head += chunk[: (1 << 18) - len(head)]
+            window = tail[-overlap:] + chunk if overlap and is_stdout else chunk
+            if is_stdout:
+                for marker in markers:
+                    if marker not in outcome.seen and marker in window:
+                        outcome.seen.add(marker)
+                if measure_depth:
+                    kept.append(chunk)
+            tail = window[-4000:]
+            if is_stdout and total > output_mb << 20 and not killed_for:
+                killed_for.append("output")
+                kill(process)
+        if is_stdout:
+            outcome.out_bytes, outcome.head = total, head
+            if measure_depth:
+                outcome.deepest = deepest_element(b"".join(kept))
+        else:
+            outcome.stderr_tail = tail
+
+    readers = [threading.Thread(target=drain, args=(process.stdout, True), daemon=True),
+               threading.Thread(target=drain, args=(process.stderr, False), daemon=True)]
+    for reader in readers:
+        reader.start()
+    page_kb = os.sysconf("SC_PAGE_SIZE") / 1024.0
+    while process.poll() is None:
+        if time.time() - started > timeout and not killed_for:
+            killed_for.append("timeout")
+            kill(process)
+        try:
+            with open(f"/proc/{process.pid}/statm") as statm:
+                resident_mb = int(statm.read().split()[1]) * page_kb / 1024.0
+            outcome.peak_mb = max(outcome.peak_mb, resident_mb)
+            if resident_mb > memory_mb and not killed_for:
+                killed_for.append("memory")
+                kill(process)
+        except (OSError, ValueError, IndexError):
+            pass
+        time.sleep(0.02)
+    for reader in readers:
+        reader.join()
+    outcome.seconds = time.time() - started
+    code = process.returncode
+    if killed_for:
+        outcome.status = killed_for[0]
+    elif code < 0:
+        try:
+            outcome.status = f"signal {signal.Signals(-code).name}"
+        except ValueError:
+            outcome.status = f"signal {-code}"
+    elif code != 0:
+        outcome.status = f"exit {code}"
+    return outcome
+
+
+def judge(page: Page, kind: str, outcome: Outcome, layout_check: bool) -> str:
+    """What is wrong with this run; empty when nothing is."""
+    if outcome.status != "ok":
+        return outcome.status
+    seen = outcome.seen
+
+    def has(pattern: str, text: str) -> bool:
+        return (pattern % text).encode() in seen
+
+    if page.expect is not None and kind != "html5lib":
+        printed = [line for line in outcome.head.split(b"\n") if line.startswith(SCRIPT_OK.encode())]
+        if not printed:
+            return "the last script printed nothing"
+        if printed[-1].decode("utf-8", "replace") != f"{SCRIPT_OK} {page.expect}":
+            return f"the last script printed {printed[-1][len(SCRIPT_OK) + 1:][:60]!r}, expected {page.expect[:60]!r}"
+    if page.max_depth is not None and kind == "html5lib" and outcome.deepest > page.max_depth:
+        return f"an element is {outcome.deepest} deep; the parser's limit is {page.max_depth}"
+    if kind == "html5lib":
+        if page.after and AFTER.encode() not in seen:
+            return "the text after the nest is not in the tree"
+        if page.bottom and BOTTOM.encode() not in seen:
+            return "the text at the bottom of the nest is not in the tree"
+    if kind == "dumps":
+        for wanted, text, what in ((page.after, AFTER, "after the nest"), (page.bottom, BOTTOM, "at the bottom of the nest")):
+            if not wanted:
+                continue
+            if not has(IN_TREE, text):
+                return f"the text {what} is not in the tree"
+            if text == BOTTOM and not layout_check:
+                continue
+            if not has(LAID_OUT, text):
+                return f"the text {what} was not laid out"
+            if not has(PAINTED, text):
+                return f"the text {what} was not painted"
+    return ""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--binary", default=DEFAULT_BINARY)
+    parser.add_argument("--depth", type=int, default=200_000, help="levels of nesting (default 200000)")
+    parser.add_argument("--only", default="", help="only pages whose name contains this text")
+    parser.add_argument("--runs", default="", help="comma-separated kinds of run (dumps, terminal, html5lib); default: all")
+    parser.add_argument("--random", type=int, default=0, metavar="N", help="also run N random pages at the nesting limit")
+    parser.add_argument("--seed", type=int, default=20261110, help="seed of the random pages")
+    parser.add_argument("--random-only", action="store_true", help="run only the random pages")
+    parser.add_argument("--stack-mb", type=int, default=8, help="stack size each run gets (default 8, the usual default)")
+    parser.add_argument("--no-layout-check", action="store_true",
+                        help="do not require the innermost text to be laid out and painted "
+                             "(a sanitizer build or a small stack stops layout earlier)")
+    parser.add_argument("--timeout", type=float, default=60.0, help="seconds per run (default 60)")
+    parser.add_argument("--memory-mb", type=int, default=2048, help="resident memory at which a run is ended (default 2048)")
+    parser.add_argument("--output-mb", type=int, default=1024, help="output at which a run is ended (default 1024)")
+    parser.add_argument("--jobs", type=int, default=max(1, min(4, (os.cpu_count() or 1))), help="runs at a time")
+    parser.add_argument("--keep", default="", help="write the pages to this directory and leave them there")
+    parser.add_argument("--list", action="store_true", help="print the page names and exit")
+    parser.add_argument("--quiet", action="store_true", help="print failures and the summary only")
+    args = parser.parse_args()
+
+    pages: list[Page] = [] if args.random_only else parsed_pages(args.depth) + scripted_pages(args.depth)
+    if args.only:
+        pages = [page for page in pages if args.only in page.name]
+    rng = random.Random(args.seed)
+    for index in range(args.random):
+        # Elements stop at the limit. Templates do not make it deeper, they
+        # are not counted (see deepest_element); two levels of slack are for
+        # the adoption agency, which moves a subtree under a new element.
+        pages.append(Page(f"random page {index} (seed {args.seed})", random_page(rng, rng.randrange(500, 6000)),
+                          after=False, max_depth=MAX_OPEN_ELEMENTS + 2))
+    if args.list:
+        for page in pages:
+            print(page.name)
+        return 0
+    if not Path(args.binary).exists():
+        print(f"error: {args.binary} not found (run `make`)", file=sys.stderr)
+        return 2
+    kinds = [kind for kind in (args.runs.split(",") if args.runs else RUNS) if kind]
+    for kind in kinds:
+        if kind not in RUNS:
+            print(f"error: no such kind of run: {kind} (there are: {', '.join(RUNS)})", file=sys.stderr)
+            return 2
+
+    workdir = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="litebird-deep-"))
+    workdir.mkdir(parents=True, exist_ok=True)
+    markers = tuple((pattern % text).encode() for pattern in (IN_TREE, LAID_OUT, PAINTED) for text in (BOTTOM, AFTER))
+    markers += (BOTTOM.encode(), AFTER.encode())
+    failures: list[str] = []
+    slowest = (0.0, "")
+    total_runs = 0
+    print_lock = threading.Lock()
+
+    def one(job: tuple[int, Page, str]) -> tuple[str, float]:
+        index, page, kind = job
+        path = workdir / f"page{index:04d}.html"
+        if not path.exists():
+            path.write_text(page.html, encoding="utf-8")
+        argv = [args.binary] + [part.replace("{bmp}", str(workdir / f"page{index:04d}.bmp")) for part in RUNS[kind]] + [str(path)]
+        outcome = run(argv, timeout=args.timeout, memory_mb=args.memory_mb, output_mb=args.output_mb,
+                      stack_mb=args.stack_mb, markers=markers,
+                      measure_depth=kind == "html5lib" and page.max_depth is not None)
+        problem = judge(page, kind, outcome, not args.no_layout_check)
+        line = (f"{'FAIL' if problem else 'ok  '} {page.name:52.52} {kind:9} {outcome.seconds:6.1f}s "
+                f"{outcome.peak_mb:6.0f}MB {outcome.out_bytes / 1e6:8.1f}MB out  {problem}")
+        if problem:
+            detail = outcome.stderr_tail.decode("utf-8", "replace").strip().split("\n")
+            summary = next((l for l in detail if "ERROR: " in l or "SUMMARY: " in l or "runtime error" in l), "")
+            if summary:
+                line += f"\n       {summary[:220]}"
+        if problem or not args.quiet:
+            with print_lock:
+                print(line, flush=True)
+        try:
+            os.remove(workdir / f"page{index:04d}.bmp")
+        except OSError:
+            pass
+        return (f"{page.name} [{kind}]: {problem}" if problem else "", outcome.seconds)
+
+    try:
+        jobs = [(index, page, kind) for index, page in enumerate(pages) for kind in kinds
+                if not (kind == "html5lib" and page.has_script)]
+        for index, page in enumerate(pages):
+            (workdir / f"page{index:04d}.html").write_text(page.html, encoding="utf-8")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            for job, (failure, seconds) in zip(jobs, pool.map(one, jobs)):
+                total_runs += 1
+                if failure:
+                    failures.append(failure)
+                if seconds > slowest[0]:
+                    slowest = (seconds, f"{job[1].name} [{job[2]}]")
+    finally:
+        if not args.keep:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    print(f"deep pages: {total_runs} runs over {len(pages)} pages at depth {args.depth} on a {args.stack_mb} MB stack, "
+          f"{len(failures)} failed; slowest {slowest[0]:.1f} s ({slowest[1]})")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

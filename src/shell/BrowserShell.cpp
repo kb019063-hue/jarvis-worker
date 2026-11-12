@@ -1,4 +1,6 @@
 #include "litebird/shell/BrowserShell.hpp"
+#include "litebird/common/StackLimit.hpp"
+#include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/css/CssParser.hpp"
 #include <iostream>
@@ -229,6 +231,7 @@ void BrowserShell::relayout() {
 
 Rect BrowserShell::compute_element_bounds(const std::shared_ptr<Element>& el, const std::shared_ptr<LayoutBox>& box) const {
     if (!box || !el) return Rect();
+    if (stack_is_exhausted()) return Rect();
 
     Rect result;
     bool found = false;
@@ -282,27 +285,22 @@ void BrowserShell::scan_interactive_elements() {
 
     std::vector<std::shared_ptr<Element>> candidates;
 
-    // Helper DOM visitor
-    std::function<void(const std::shared_ptr<Node>&)> visitor = [&](const std::shared_ptr<Node>& n) {
-        if (!n) return;
-        if (auto el = std::dynamic_pointer_cast<Element>(n)) {
-            std::string tag = el->tag_name();
-            std::string cls = el->get_attribute("class");
-            std::string id = el->id();
-            bool is_link = (tag == "a" && el->has_attribute("href"));
-            bool is_btn = (tag == "button" || cls.find("btn") != std::string::npos || id.find("btn") != std::string::npos || el->has_listeners("click"));
-            bool is_inp = (tag == "input");
+    // Every element of the document, in tree order, without recursion.
+    for_each_descendant(*m_document, [&](Node& n) {
+        if (!n.is_element()) return true;
+        auto el = std::static_pointer_cast<Element>(n.shared_from_this());
+        std::string tag = el->tag_name();
+        std::string cls = el->get_attribute("class");
+        std::string id = el->id();
+        bool is_link = (tag == "a" && el->has_attribute("href"));
+        bool is_btn = (tag == "button" || cls.find("btn") != std::string::npos || id.find("btn") != std::string::npos || el->has_listeners("click"));
+        bool is_inp = (tag == "input");
 
-            if (is_link || is_btn || is_inp) {
-                candidates.push_back(el);
-            }
+        if (is_link || is_btn || is_inp) {
+            candidates.push_back(el);
         }
-        for (const auto& ch : n->children()) {
-            visitor(ch);
-        }
-    };
-
-    visitor(m_document);
+        return true;
+    });
 
     for (const auto& el : candidates) {
         Rect bounds = compute_element_bounds(el, m_layout_root);
@@ -385,6 +383,7 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
 
     std::function<void(const std::shared_ptr<LayoutBox>&)> search = [&](const std::shared_ptr<LayoutBox>& box) {
         if (!box) return;
+        if (stack_is_exhausted()) return;
         Rect b_rect = box->dimensions.border_box();
         bool inside = false;
         if (box->style.has_transform && !box->style.transform_matrix.is_identity()) {

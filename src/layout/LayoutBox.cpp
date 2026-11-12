@@ -1,4 +1,5 @@
 #include "litebird/layout/LayoutBox.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <iomanip>
 #include <sstream>
 #include <numeric>
@@ -39,6 +40,15 @@ void LayoutBox::layout(float containing_width, float containing_height) {
     if (!needs_layout && !child_needs_layout) {
         return;
     }
+
+    // Every way layout goes one level deeper passes through here (block, flex,
+    // grid, table and inline layout all call layout() on their children), so
+    // this is the one place that has to ask whether there is stack left for
+    // another level. LayoutTree::build_box asks the same question when it
+    // builds the tree, but a level of layout does not cost what a level of
+    // tree building costs, so a tree that could be built is not thereby a
+    // tree that can be laid out. A box that is too deep keeps its zero size.
+    if (stack_is_exhausted()) return;
 
     resolve_percentages(containing_width, containing_height);
 
@@ -818,6 +828,7 @@ static void collect_items(
 ) {
     (void)parent_style;
     if (!box) return;
+    if (stack_is_exhausted()) return;   // inline boxes nested too deeply to follow
 
     if (box->box_type == BoxType::TextNode) {
         ComputedStyle effective_style = box->style;
@@ -1116,6 +1127,7 @@ void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& 
     std::function<void(const std::shared_ptr<LayoutBox>&, const std::shared_ptr<LayoutBox>&)> pass =
         [&](const std::shared_ptr<LayoutBox>& box, const std::shared_ptr<LayoutBox>& positioned_ancestor) {
         if (!box) return;
+        if (stack_is_exhausted()) return;
 
         if (box->style.is_out_of_flow()) {
             Rect cb;
@@ -1200,6 +1212,7 @@ void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& 
 
 void LayoutBox::shift_position(float dx, float dy) {
     if (dx == 0.0f && dy == 0.0f) return;
+    if (stack_is_exhausted()) return;
     dimensions.content.x += dx;
     dimensions.content.y += dy;
     for (auto& line : line_boxes) {
@@ -1234,6 +1247,10 @@ void LayoutBox::layout_image(float containing_width) {
 
 void LayoutBox::dump(std::ostream& os, int indent) const {
     std::string spaces(indent * 2, ' ');
+    if (stack_is_exhausted()) {
+        os << spaces << "... (nested too deeply to print)\n";
+        return;
+    }
     os << spaces;
 
     switch (box_type) {

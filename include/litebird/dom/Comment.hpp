@@ -16,7 +16,8 @@ public:
 
     std::string text_content() const override { return m_data; }
 
-    void dump(std::ostream& os, int indent = 0) const override;
+protected:
+    void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
 
 private:
     std::string m_data;

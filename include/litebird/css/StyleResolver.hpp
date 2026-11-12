@@ -294,7 +294,9 @@ public:
 
     // CSS Variables and Calc Resolvers
     std::string resolve_var_functions(const std::string& value, const std::unordered_map<std::string, std::string>& custom_props, int depth = 0) const;
-    float evaluate_calc_expression(std::string_view expr, float reference_size = 0.0f) const;
+    /// `valid`, when given, is set to false for an expression that cannot be
+    /// evaluated (it nests more deeply than the parser follows).
+    float evaluate_calc_expression(std::string_view expr, float reference_size = 0.0f, bool* valid = nullptr) const;
     std::string resolve_calc_functions(const std::string& value, float reference_size = 0.0f) const;
 
 private:

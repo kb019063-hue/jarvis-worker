@@ -294,6 +294,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
 
     std::function<void(const std::shared_ptr<LayoutBox>&)> sync_boxes = [&](const std::shared_ptr<LayoutBox>& box) {
         if (!box) return;
+        if (stack_is_exhausted()) return;
         if (box->node && box->node->is_element()) {
             box->node->as_element()->set_bounding_box(box->dimensions.border_box());
         }

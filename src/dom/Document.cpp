@@ -50,72 +50,23 @@ std::shared_ptr<Element> Document::body() const {
     return nullptr;
 }
 
-static std::shared_ptr<Element> find_by_id_recursive(const std::shared_ptr<Node>& node, const std::string& id) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        if (el->id() == id) return el;
-    }
-    for (const auto& ch : node->children()) {
-        auto found = find_by_id_recursive(ch, id);
-        if (found) return found;
-    }
-    return nullptr;
-}
-
+// The searches walk the tree without recursion (see TreeWalk.hpp). The first
+// of them, the <title> lookup at the end of every parse, used to be where a
+// page with 300,000 nested elements ended the process.
 std::shared_ptr<Element> Document::get_element_by_id(const std::string& id) const {
-    for (const auto& ch : m_children) {
-        auto found = find_by_id_recursive(ch, id);
-        if (found) return found;
-    }
-    return nullptr;
-}
-
-static void find_by_tag_recursive(const std::shared_ptr<Node>& node, const std::string& tag, std::vector<std::shared_ptr<Element>>& out) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        if (tag == "*" || el->tag_name() == tag) {
-            out.push_back(el);
-        }
-    }
-    for (const auto& ch : node->children()) {
-        find_by_tag_recursive(ch, tag, out);
-    }
+    return descendant_with_id(id);
 }
 
 std::vector<std::shared_ptr<Element>> Document::get_elements_by_tag_name(const std::string& tag) const {
-    std::vector<std::shared_ptr<Element>> result;
-    for (const auto& ch : m_children) {
-        find_by_tag_recursive(ch, tag, result);
-    }
-    return result;
-}
-
-static void query_selector_all_recursive(const std::shared_ptr<Node>& node, const std::string& sel, std::vector<std::shared_ptr<Element>>& out) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        bool match = false;
-        if (sel.starts_with("#")) {
-            match = (el->id() == sel.substr(1));
-        } else if (sel.starts_with(".")) {
-            match = el->has_class(sel.substr(1));
-        } else {
-            match = (sel == "*" || el->tag_name() == sel);
-        }
-        if (match) out.push_back(el);
-    }
-    for (const auto& ch : node->children()) {
-        query_selector_all_recursive(ch, sel, out);
-    }
+    return descendants_with_tag(tag);
 }
 
 std::vector<std::shared_ptr<Element>> Document::query_selector_all(const std::string& selector) const {
-    std::vector<std::shared_ptr<Element>> res;
-    for (const auto& ch : m_children) {
-        query_selector_all_recursive(ch, selector, res);
-    }
-    return res;
+    return descendants_matching(selector);
 }
 
 std::shared_ptr<Element> Document::query_selector(const std::string& selector) const {
-    auto all = query_selector_all(selector);
-    return all.empty() ? nullptr : all.front();
+    return first_descendant_matching(selector);
 }
 
 std::shared_ptr<Element> Document::create_element(const std::string& tag_name) {
@@ -131,14 +82,10 @@ std::shared_ptr<Node> Document::create_document_fragment() {
     return std::make_shared<Node>(NodeType::DocumentFragment);
 }
 
-void Document::dump(std::ostream& os, int indent) const {
-    std::string spaces(indent * 2, ' ');
-    os << spaces << "#document";
+void Document::dump_open(std::ostream& os, const std::string& indent, bool) const {
+    os << indent << "#document";
     if (!m_title.empty()) os << " (title: \"" << m_title << "\")";
     os << "\n";
-    for (const auto& ch : m_children) {
-        ch->dump(os, indent + 1);
-    }
 }
 
 } // namespace litebird

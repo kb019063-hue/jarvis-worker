@@ -292,7 +292,8 @@ std::string uri_decode(const std::string& input, bool keep_reserved) {
         int first = 0;
         if (i + 2 >= input.size() || !read_byte(i, first)) js_throw_error(JsErrorKind::URIError, "URI malformed");
         if (first < 0x80) {
-            if (keep_reserved && std::strchr(kUriReserved, first)) out.append(input, i, 3);
+            // `first != 0`: strchr finds the terminator, and %00 is not reserved.
+            if (keep_reserved && first != 0 && std::strchr(kUriReserved, first)) out.append(input, i, 3);
             else out += static_cast<char>(first);
             i += 3;
             continue;

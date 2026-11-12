@@ -455,7 +455,9 @@ console.log([
   t(function () { return decodeURIComponent("%E4%B8"); }), t(function () { return decodeURIComponent("%E4%B8%AD%E6%96%87"); }), t(function () { return decodeURIComponent("%F0%9F%98%80") === "\uD83D\uDE00"; }),
   t(function () { return decodeURI("%ED%A0%BD%ED%B8%80"); }), t(function () { return decodeURI("%C3%A9%2F%23"); }), t(function () { return decodeURIComponent("%c3%A9%2f"); }),
   t(function () { return encodeURIComponent(decodeURIComponent("%F4%8F%BF%BF")); }), t(function () { return decodeURIComponent("a%"); }), t(function () { return decodeURIComponent("%4"); }),
-  t(function () { return decodeURIComponent("%E4%B8%41"); }), t(function () { return decodeURIComponent("100%25"); })
+  t(function () { return decodeURIComponent("%E4%B8%41"); }), t(function () { return decodeURIComponent("100%25"); }),
+  t(function () { return decodeURI("a%00b").length; }), t(function () { return decodeURI("%23%00%24").length; }), t(function () { return decodeURIComponent("%00").charCodeAt(0); }),
+  t(function () { return encodeURI("a\u0000b"); }), t(function () { return decodeURI(encodeURI("a\u0000b")) === "a\u0000b"; })
 ].join(" "));
 #expect
-URIError URIError 55295 57344 URIError URIError 128 URIError URIError 2048 URIError URIError 65536 1114111 URIError URIError URIError URIError URIError 中文 true URIError é%2F%23 é/ %F4%8F%BF%BF URIError URIError URIError 100%
+URIError URIError 55295 57344 URIError URIError 128 URIError URIError 2048 URIError URIError 65536 1114111 URIError URIError URIError URIError URIError 中文 true URIError é%2F%23 é/ %F4%8F%BF%BF URIError URIError URIError 100% 3 7 0 a%00b true

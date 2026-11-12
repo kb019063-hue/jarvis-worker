@@ -336,7 +336,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 21** | **Indexed CSS cascade:** pre-index author selectors by a rightmost ID/class/tag key with a universal fallback; query candidate selectors per element, retain full selector matching and stable source order. Selective 1,600-rule/1,600-element benchmark improved **88.25 → 30.35 ms (2.9×)**. **82/82 engine suites.** | ✅ Completed |
 | **Phase 22** | **Pipeline fuzz coverage:** run HTML corpus mutations through layout and bitmap rendering, plus valid and malformed BMP/PPM headers through image loading and rendering. Fuzzing exposed and fixed signed overflow while parsing overlong PPM numeric fields. **82/82 engine suites; 400 parser mutations + 400 pipeline runs, 0 findings under ASan/UBSan.** | ✅ Completed |
 | **Phase 23** | **The JavaScript engine, rebuilt against an outside scoreboard:** an 801-case corpus with expected output recorded from Node.js (`make js-conformance`, enforced in CI); new lexer, parser, evaluator and standard library on shared prototypes; promises with the specification's ordering and `await` that suspends; an event loop with a microtask checkpoint and a virtual clock; a collector that derives its roots from reference counts and collects closure cycles; `DOMContentLoaded`/`load` and `removeEventListener`; deep JavaScript ends in a `RangeError`, not a crash. | ✅ Completed (corpus 140 → 796 of 801 cases; 85/85 unit suites) |
-| **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`) |
+| **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`, `make diff-strings`) |
 
 ---
 
@@ -1223,10 +1223,14 @@ are not affected.
 - **Missing language features:** BigInt, `Proxy`, typed arrays and
   `ArrayBuffer`, modules, `with`, and holes in arrays (`delete a[1]` leaves
   `undefined`, and `1 in a` stays true).
-- **Approximate library corners:** `localeCompare` is not real collation, case
-  mapping covers Latin, Greek and Cyrillic, Unicode property escapes in
-  regular expressions are approximate, there is no `Intl`, regular expressions
-  have no `d` flag, and `WeakMap`/`WeakSet` hold their keys strongly.
+- **Approximate library corners:** `localeCompare` is not real collation,
+  `normalize()` returns its string unchanged, case mapping covers Latin, Greek
+  and Cyrillic, Unicode property escapes in regular expressions are
+  approximate (`\p{L}` misses fullwidth letters and letters outside the BMP),
+  there is no `Intl`, regular expressions have no `d` flag, and
+  `WeakMap`/`WeakSet` hold their keys strongly. The first four are all missing
+  Unicode data; `tools/conformance/diff_strings.py` lists the results they
+  change.
 - **`console.log` of an object** prints `[object Object]`, not its contents.
 - **`await` outside an async function** (the top level of a script, an async
   generator body) blocks and runs the event loop instead of suspending.
@@ -1332,14 +1336,21 @@ that one rule is what makes the sharing invisible to script.
   thread, and the unit tests assert on those counts, not on time.
 - `String.prototype` methods take their receiver as a handle and search it in
   place. The regular-expression matcher reads its subject through a
-  `Utf16View` (it used to convert the subject to UTF-16 on every call), and a
-  match array's `input` is the subject itself, not a copy.
+  `Utf16View`; it used to compare the subject with a cached UTF-16 copy, and
+  copy that, on every call. A match array's `input` is the subject itself,
+  not a copy.
 - `'key' + i` has a direct path in `js_add`. The general path converts both
   operands first, and with a string that is now a block of its own that was a
   measurable cost.
 - Property names are still `std::string`. A string value used as a key
   (`o[k]`) is copied once per lookup; that is bounded by the key's length and
   is the same as before.
+- Text that leaves the engine is UTF-8. Inside, half of a surrogate pair is
+  three bytes that no decoder accepts; `console.log` and the uncaught-error
+  report pass their text through `js_output_text`, which writes U+FFFD for a
+  lone half, as Node does. The other direction is strict too:
+  `decodeURIComponent` throws `URIError` for bytes that are not UTF-8
+  (a surrogate, an overlong form, anything above U+10FFFF).
 
 ### 4. Lookbehind
 
@@ -1366,17 +1377,18 @@ begin between the halves of a surrogate pair; both the search loop and the
 | The corpus re-run under Node 22 | 845 / 845 |
 | Unit tests (`make test`) | 88 / 88. Three are new: a random-edit model test, a thread test, and one that asserts on counted work through the interpreter |
 | `make tsan`: the two stress tests alone, under ThreadSanitizer, and under ASan + UBSan with leak checking | no report, nothing leaked |
-| Planted bugs: 40 in `JsString`, one at a time | 39 caught by the stress tests; the other changes no result and no counted work |
+| Planted bugs: 47 in `JsString`, one at a time | 46 caught by the stress tests; the other changes no result and no counted work |
 | Planted data races: 4 | ThreadSanitizer reports all 4; the assertions alone catch 2 |
-| Differential run against Node: 8,814 string expressions | 3 differ (`localeCompare` without collation data, special case mapping of `ǅ` and `İ`); Phase 23's engine differs on 72 |
-| Differential run against Node: 75 lookbehind patterns over 20 subjects | 0 of 1,500 results differ; Phase 23's engine differs on 89 |
+| `make diff-strings`: 1,133 string expressions over 36 subjects, evaluated here and in Node | 95 of 50,580 results differ, every one of them Unicode data the engine lacks: collation (46), the letter table behind `\p{L}` (24), normalization (17), case mapping of `ǅ`, `İ` and fullwidth letters (8). Phase 23's engine differs on 1,103: 720 are the two methods it did not have, 290 are fixed, 93 remain |
+| Differential run against Node when the matcher changed: 75 lookbehind patterns over 20 subjects | 0 of 1,500 results differ; Phase 23's engine differs on 89 |
 | ASan + UBSan: unit tests, the corpus, both fuzzers (`make asan`) | ASAN_RESULT |
-| `make bench`: 39 string-heavy scripts against Node | every result equal to Node's; the slowest takes 199 ms, the limit is 3 s |
+| `make bench`: 39 string-heavy scripts against Node | every result equal to Node's; the slowest takes 0.2 s, the limit is 3 s |
 | html5lib tree construction | 1770 / 1792, unchanged |
 
-The scripts that plant bugs and make the differential runs are not in the
-repository; what they found is, as corpus cases and as assertions in
-`tests/js_string_stress.hpp`.
+The string differential is `tools/conformance/diff_strings.py`; it takes a few
+seconds, needs Node, and runs in CI with the 95 as a ceiling. The scripts that
+plant bugs and the lookbehind grid are not in the repository; what they found
+is, as corpus cases and as assertions in `tests/js_string_stress.hpp`.
 
 ### 6. What is still open here
 

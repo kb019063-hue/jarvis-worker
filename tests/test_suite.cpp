@@ -4518,6 +4518,18 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         // The other way round they are still two halves.
         JsString reversed = JsString::concat(low, high);
         assert(reversed.size() == 6 && reversed.length() == 2 && reversed.unit_at(0) == 0xDE00);
+
+        // A lone half has no UTF-8 encoding. Inside the engine it is kept;
+        // text that leaves (the console, an error report) carries U+FFFD.
+        assert(!high.is_well_formed() && !reversed.is_well_formed() && joined.is_well_formed());
+        assert(JsString("caf\xC3\xA9 \xED\x9F\xBF \xEE\x80\x80").is_well_formed());      // U+D7FF and U+E000 are not halves
+        assert(reversed.to_well_formed().view() == "\xEF\xBF\xBD\xEF\xBF\xBD" && reversed.to_well_formed().length() == 2);
+        assert(joined.to_well_formed().shares_text_with(joined));
+        assert(js_output_text("a" + high.str() + "b" + low.str()) == "a\xEF\xBF\xBD" "b\xEF\xBF\xBD");
+        // Two values printed side by side can bring two halves together.
+        assert(js_output_text(high.str() + low.str()) == "\xF0\x9F\x98\x80");
+        assert(js_output_text(low.str() + high.str() + low.str()) == "\xEF\xBF\xBD\xF0\x9F\x98\x80");
+        assert(js_output_text("plain \xC3\xA9 \xED\x9F\xBF \xF0\x9F\x98\x80") == "plain \xC3\xA9 \xED\x9F\xBF \xF0\x9F\x98\x80");
     }
 
     // --- The representation: appending and taking pieces ----------------------------

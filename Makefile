@@ -80,7 +80,12 @@ JS_ASAN_FLOOR ?= 833
 STRING_STRESS_SRCS = src/js/JsString.cpp tests/js_string_stress_main.cpp
 STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-pointer
 
-.PHONY: all clean test run conformance js-conformance fuzz asan tsan bench help
+# How many results of the string grid may differ from Node's. Every one of them
+# today is Unicode data the engine does not have (collation, normalization,
+# some case mappings, part of \p{L}); lower this as that data arrives.
+STRING_DIFF_CEILING ?= 95
+
+.PHONY: all clean test run conformance js-conformance diff-strings fuzz asan tsan bench help
 
 all: $(TARGET)
 
@@ -116,6 +121,12 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## A grid of string expressions (subjects x methods, operators and regular
+## expressions) evaluated by Litebird and by Node.js, results compared.
+## Needs Node.js; there are no expectations to maintain.
+diff-strings: $(TARGET)
+	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
 ## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
@@ -154,4 +165,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, fuzz, asan, tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, asan, tsan, bench, clean"

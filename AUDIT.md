@@ -23,7 +23,7 @@ The rest are documented with enough detail to act on.
 | 7 | `var` has block scope instead of function scope | **High** | ✅ Fixed (Phase 19) |
 | 8 | No recursion guard in the JS engine | **High** | ✅ Fixed |
 | 9 | `get_property()` allocates on every property read | **High (perf)** | Open |
-| 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | 🟡 Improved: 96-byte value; payloads tagged/out-of-line |
+| 10 | `JsValue` is 296 bytes and most of it is dead | **High (perf)** | 🟡 Improved: 88-byte value; payloads tagged/out-of-line |
 | 11 | HTTP header injection + no response size cap | **Medium** | Open |
 | 12 | `ComputedStyle` is 920 bytes; `LayoutBox` is 1,200 | **Medium (perf)** | Open |
 | 13 | Build uses `-O2` only (no LTO / `-march=native`) | Low | Open |
@@ -34,6 +34,12 @@ The rest are documented with enough detail to act on.
 | 18 | A script was cut off at the first character the lexer did not know, and could run twice | **Critical** | ✅ Fixed (Phase 23) |
 | 19 | `gc()` freed objects held only by native code or the native stack | **Critical** | ✅ Fixed (Phase 23) |
 | 20 | A collection on one thread examined and freed a worker's objects | **High** | 🟡 Collections are per agent; the cell list is still shared |
+| 21 | Script nested 200,000 deep ended the process (28 of 46 stress pages) | **Critical** | ✅ Fixed (Phase 23) |
+| 22 | A template literal dropped substitutions that were literals | **High** | ✅ Fixed (Phase 23) |
+| 23 | 1.2% of 67,545 generated expressions disagreed with Node | **High** | ✅ Fixed where pages meet it (Phase 23); 0.15% left |
+| 24 | `node.appendChild(node)` ended the process; very deep trees still do | **High** | 🟡 Cycles are refused; a tree 300,000 deep still overflows the stack |
+| 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
+| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
 
 ---
 
@@ -365,9 +371,10 @@ ran five times per build: median wall time fell from **177.16 ms to 71.99 ms**
 (-59.4%). These are indicative local measurements, not CI performance
 thresholds; the RSS comparison used one run per mode.
 
-The common representation still includes a `std::string`, object pointer, and
+The common representation still includes a string, an object pointer, and a
 property-map pointer, so further tagged scalar/string compaction remains
-possible. The previous 98 MB figure used a different page/workload and should
+possible. Since Phase 24 the string is a 24-byte handle on shared text
+(finding 25), not a 32-byte `std::string`, and the value is 88 bytes. The previous 98 MB figure used a different page/workload and should
 not be compared directly to these measurements.
 
 ---
@@ -674,11 +681,12 @@ g(); }` took threads until the system refused one, 15,724 on the test machine,
 and under AddressSanitizer ran out of memory first. Frames may now nest 2,000
 deep; beyond that the script gets the same `RangeError`.
 
-**Still open.** Two stress pages do not crash but are killed for time or
-memory: 100,000 chained `bind` calls (the name `bound bound ...` grows
-quadratically; 20,000 take 2 s and 1.3 GB) and a string built from two million
-`+` terms (finding 25). And the DOM is not covered by any of this: see finding
-24.
+**Still open.** One stress page does not crash but is killed for memory:
+100,000 chained `bind` calls (the name `bound bound ...` grows quadratically;
+20,000 take 1.3 s and 1.2 GB). The other one that was, a string built from two
+million `+` terms, gave no answer in two minutes; since finding 25 was fixed
+it finishes in 3.7 s (Node: 0.5 s), though the syntax tree of that 12 MB
+script takes 1 GB. And the DOM is not covered by any of this: see finding 24.
 
 ## 22. ✅ A template literal dropped substitutions that were literals
 
@@ -850,9 +858,10 @@ three follow from storing text one way; the rest were found by the same
 tests.
 
 - Two halves of a surrogate pair that meet are the character they spell:
-  `"\uD83D" + "\uDE00" === "😀"` was false, as were the same halves brought
-  together by `join`, `repeat`, `replace`, `padEnd` or `JSON.parse`. A corpus
-  case now checks 63 ways for two halves to meet.
+  `"\uD83D" + "\uDE00" === "😀"` was false, and so were the same halves
+  brought together by `join`, `repeat` or `padEnd`; as a property key the
+  two were different keys, and `for`...`of` saw two characters. A corpus case
+  now checks 63 ways for two halves to meet.
 - `<` and `sort()` order by UTF-16 code unit. They compared UTF-8 bytes, which
   puts `"😀"` above `"\uFFFF"`; JavaScript puts it below.
 - A string too long to exist is a `RangeError`. Doubling a string in a loop
@@ -865,12 +874,34 @@ tests.
   Node does.
 - `decodeURIComponent` accepts only UTF-8. `"%ED%A0%BD"` (a surrogate) and
   `"%C0%80"` (an overlong form) decoded to something; both are a `URIError`.
+  And `decodeURI("%00")` is the NUL character; it was left as `%00`.
 
-A run of 8,814 string expressions (32 subjects, among them lone halves and
-astral characters, through every `String.prototype` method and 20 regular
-expressions) compared with Node: 3 results differ, all two known
-approximations (`localeCompare` has no collation data; `ǅ` and `İ` have no
-special case mapping). The engine before differed on 72.
+`tools/conformance/diff_strings.py` (`make diff-strings`, and a step in CI)
+evaluates a grid in Litebird and in Node and compares every result: 36 subjects (ASCII, accented, CJK, characters
+outside the BMP, lone halves in every arrangement, text that crosses the
+256-unit marks) through every `String.prototype` method, the operators, the
+URI and JSON functions and 51 regular expressions. That is 1,133 expressions
+and 50,580 results. 95 differ, and each of the 95 is Unicode data the engine
+does not have:
+
+| Results | What is missing |
+| ---: | :--- |
+| 46 | collation: `localeCompare` folds case, then compares code units |
+| 24 | the letter table behind `\p{L}` is a short list of ranges; fullwidth letters and most letters outside the BMP are not in it |
+| 17 | normalization: `normalize()` returns its string unchanged |
+| 8 | case mapping for `ǅ`, `İ` and fullwidth letters |
+
+The engine before differs on 1,103. 720 of those are the two methods it did
+not have. Of the other 383, 290 are fixed (order, halves that meet, splitting
+and matching inside a pair, what a lookbehind captures, `%00`) and 93 are
+among the 95 above. The other two are new: `localeCompare` of a character
+outside the BMP with a lone half, which comparing bytes got right by accident
+and comparing code units gets wrong. Code units agree with Node's collation on
+ten more of these results than bytes do, so they stay.
+
+It also takes the engine before about 7 minutes to get through the grid. This
+one takes 3 seconds and Node half a second: the function that prints a result
+reads it one character at a time, and some results are 90,000 characters.
 
 **Tests.**
 
@@ -891,12 +922,13 @@ special case mapping). The engine before differed on 72.
   the two stress tests alone under ThreadSanitizer and under AddressSanitizer
   with leak checking (the engine-wide `make asan` has leak checking off).
 - How much these tests can see was measured by planting bugs in `JsString`
-  one at a time. Of 40 (a wrong offset, a unit miscounted, a pair not joined,
-  room claimed that is not free, a count not kept, a copy where there should
-  be none), the two stress tests catch 39. The fortieth changes no result and
-  no counted work: it makes a small slice of non-ASCII text walk up to 256
-  bytes further. The first run caught 32 of 38, which is how the tests got
-  their boundary characters, their search checks and their work counts. Of
+  one at a time. Of 47 (a wrong offset, a unit miscounted, a pair not joined,
+  room claimed that is not free, a count not kept, a lone half not found, a
+  copy where there should be none), the two stress tests catch 46. The other
+  one changes no result and no counted work: it makes a small slice of
+  non-ASCII text walk up to 256 bytes further. The first run caught 32 of 38,
+  which is how the tests got their boundary characters, their search checks
+  and their work counts. Of
   four data races planted the same way, ThreadSanitizer reports all four and
   the assertions alone catch two, which is why `make tsan` runs in CI.
 

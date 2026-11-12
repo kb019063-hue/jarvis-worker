@@ -82,6 +82,12 @@ jobs:
         # fifth of a second, so this fails on a cost that grows with the square
         # of the length, not on a slow runner. It also compares results.
         run: make bench
+      - name: String results against Node.js
+        # 36 subject strings through every string method and 51 regular
+        # expressions: 50,580 results, each compared with what Node computes on
+        # the spot. The ceiling in the Makefile is the number that differ
+        # today, all of them Unicode data the engine does not have.
+        run: make diff-strings
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report

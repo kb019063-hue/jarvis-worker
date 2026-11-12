@@ -512,10 +512,11 @@ std::string js_to_string(const JsValue& value) {
 }
 
 std::string js_output_text(std::string text) {
-    for (size_t at = JsString::find_lone_half(text); at != std::string::npos; at = JsString::find_lone_half(text, at + 3)) {
-        text.replace(at, 3, "\xEF\xBF\xBD");
-    }
-    return text;
+    if (JsString::find_lone_half(text) == std::string::npos) return text;
+    // Rare. `text` may be several values written side by side, so a high half
+    // from one can stand next to a low half from the next; a string value
+    // joins those into the character they spell before the rest is replaced.
+    return JsString(text).to_well_formed().str();
 }
 
 JsString js_to_js_string(const JsValue& value) {

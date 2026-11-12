@@ -30,6 +30,7 @@ make test            # 88 engine suites
 make asan            # sanitizer build, tests, the JavaScript corpus and a fuzz run
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
+make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
 ```
 
 ### The JavaScript scoreboard
@@ -56,9 +57,13 @@ The engine as it was before Phase 23 passes 140 of the 801 cases the corpus
 had when it was replaced, and 25 of the 90 cases in the fixed "everyday" probe
 (`everyday-es5.dat` and `everyday-es2015.dat`), which now passes 90/90.
 
-Three other checks sit behind the number. A differential run evaluates 67,545
+Four other checks sit behind the number. A differential run evaluates 67,545
 generated expressions in Litebird and in Node and compares the results: 99
 (0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`.
+`make diff-strings` does the same for strings (36 subjects through every
+string method and 51 regular expressions): 95 of 50,580 results differ, all
+of them Unicode data the engine does not have (collation, normalization, some
+case mappings, part of `\p{L}`).
 63 of the corpus cases (`deep-nesting.dat`) hand the engine input nested
 200,000 deep, which used to end the process and must now end in an error the
 script can catch. And 34 (`long-strings.dat`) loop over, build or take apart
@@ -278,6 +283,11 @@ twice.
   arguments), `queueMicrotask`, `requestAnimationFrame`, `performance.now()`.
   The loop's clock can skip ahead, so `--run-js` and one-shot page rendering
   never sleep waiting for a timer.
+- **Strings:** a string value is a 24-byte handle on a shared block of UTF-8
+  (`JsString`). Passing, reading and indexing a string copy nothing, `s += x`
+  appends in place, and a large slice is a range of its parent, so a loop over
+  a long string or a string built piece by piece costs what it reads
+  (`ARCHITECTURE.md`, Phase 24).
 - **Garbage collector:** mark and sweep, including cycles through closures.
   Every value holds a counted handle to its object, and the collector treats
   an object with more handles than it can find inside the heap as held by

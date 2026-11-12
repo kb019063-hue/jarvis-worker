@@ -1,0 +1,193 @@
+#name collect inside a callee keeps the caller's locals
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function inner(){ gc(); return 1; } function outer(){ var o = {a: [1, 2, 3], s: "str"}; inner(); churn(); return o.a.length + o.s; } console.log(outer())
+#expect
+3str
+
+#name collect inside a for-let loop body
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } for (let o = {a: {b: 1}}, i = 0; i < 3; i++) { gc(); churn(); console.log(o.a.b + i); }
+#expect
+1
+2
+3
+
+#name collect inside for-of over a temporary array
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var out = []; for (const item of [{n: 1}, {n: 2}, {n: 3}]) { gc(); churn(); out.push(item.n); } console.log(out.join())
+#expect
+1,2,3
+
+#name collect inside for-in
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var out = []; for (var k in {a: {x: 1}, b: {x: 2}}) { gc(); churn(); out.push(k); } console.log(out.join())
+#expect
+a,b
+
+#name collect while arguments are being evaluated
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function f(a, b, c){ return a.v + b + c.v; } console.log(f({v: 1}, (gc(), churn(), 10), {v: 100}))
+#expect
+111
+
+#name collect while an array literal is being built
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var a = [{v: 1}, (gc(), churn(), {v: 2}), {v: 3}]; console.log(a.map(function(o){ return o.v; }).join())
+#expect
+1,2,3
+
+#name collect while an object literal is being built
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var o = {a: {v: 1}, b: (gc(), churn(), {v: 2}), c: {v: 3}}; console.log(o.a.v + o.b.v + o.c.v)
+#expect
+6
+
+#name collect in the middle of a binary expression
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function mk(v){ return {v: v, toString: function(){ return "o" + this.v; }}; } console.log(mk(1) + (gc(), churn(), "") + mk(2))
+#expect
+o1o2
+
+#name collect inside array callbacks
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var r = [1, 2, 3].map(function(x){ gc(); churn(); return {x: x * 2}; }).filter(function(o){ gc(); return o.x > 2; }).reduce(function(acc, o){ gc(); churn(); acc.sum += o.x; return acc; }, {sum: 0}); console.log(r.sum)
+#expect
+10
+
+#name collect inside a sort comparator
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var a = [{k: 3}, {k: 1}, {k: 2}].sort(function(x, y){ gc(); churn(); return x.k - y.k; }); console.log(a.map(function(o){ return o.k; }).join())
+#expect
+1,2,3
+
+#name collect inside find, some and every
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var a = [{k: 1}, {k: 2}, {k: 3}]; console.log(a.find(function(o){ gc(); churn(); return o.k === 2; }).k, a.some(function(o){ gc(); return o.k > 2; }), a.every(function(o){ gc(); churn(); return o.k > 0; }))
+#expect
+2 true true
+
+#name collect inside toString and valueOf conversions
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var o = {inner: {n: 7}, toString: function(){ gc(); churn(); return "v" + this.inner.n; }, valueOf: function(){ gc(); churn(); return this.inner.n; }}; console.log(String(o), o * 2, [o, o].join("-"))
+#expect
+v7 14 v7-v7
+
+#name collect inside getters and setters
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var store = {}; var o = {get p(){ gc(); churn(); return store.v; }, set p(v){ gc(); churn(); store.v = {wrapped: v}; }}; o.p = {deep: 5}; console.log(o.p.wrapped.deep)
+#expect
+5
+
+#name collect inside JSON replacer, toJSON and reviver
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var o = {a: {toJSON: function(){ gc(); churn(); return {t: 1}; }}, b: [1, {c: 2}]}; var s = JSON.stringify(o, function(k, v){ gc(); churn(); return v; }); var back = JSON.parse(s, function(k, v){ gc(); churn(); return v; }); console.log(s, back.b[1].c)
+#expect
+{"a":{"t":1},"b":[1,{"c":2}]} 2
+
+#name collect inside a string replace callback
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } console.log("a1b22c333".replace(/\d+/g, function(m){ gc(); churn(); return "<" + m.length + ">"; }))
+#expect
+a<1>b<2>c<3>
+
+#name collect inside Map and Set iteration
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var m = new Map([[{id: 1}, {v: "a"}], [{id: 2}, {v: "b"}]]); var out = []; m.forEach(function(v, k){ gc(); churn(); out.push(k.id + v.v); }); for (var e of new Set([{z: 1}, {z: 2}])) { gc(); churn(); out.push(e.z); } console.log(out.join())
+#expect
+1a,2b,1,2
+
+#name collect inside a generator and its consumer
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function* g(){ var local = {n: 1}; yield local; gc(); churn(); yield {n: local.n + 1}; gc(); yield {n: 3}; } var out = []; for (var v of g()) { gc(); churn(); out.push(v.n); } console.log(out.join())
+#expect
+1,2,3
+
+#name collect while a generator is suspended mid-expression
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function* g(){ var r = [{a: 1}, yield 1, {a: 3}]; yield r[0].a + r[1] + r[2].a; } var it = g(); it.next(); gc(); churn(); console.log(it.next(10).value)
+#expect
+14
+
+#name collect during spread and destructuring
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function* src(){ yield {v: 1}; gc(); churn(); yield {v: 2}; } var all = [...src(), ...[{v: 3}]]; var [a, b = (gc(), churn(), {v: 9}), ...rest] = all; var {x = (gc(), {v: 5}), y} = {y: {v: 6}}; console.log(a.v, b.v, rest[0].v, x.v, y.v)
+#expect
+1 2 3 5 6
+
+#name collect inside constructors and super calls
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } class A { constructor(){ gc(); churn(); this.a = {v: 1}; } } class B extends A { constructor(){ var t = {v: 10}; super(); gc(); churn(); this.b = t; } } var o = new B(); console.log(o.a.v + o.b.v, o instanceof A)
+#expect
+11 true
+
+#name collect with closures that refer back to their owner
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function make(){ var o = {v: 1}; o.self = o; o.get = function(){ return o; }; function helper(){ return o; } return o; } var keep = make(); for (var i = 0; i < 200; i++) make(); gc(); churn(); console.log(keep.get().self.v)
+#expect
+1
+
+#name collect inside promise callbacks
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var p = new Promise(function(res){ gc(); churn(); res({v: 1}); }); p.then(function(o){ gc(); churn(); return {v: o.v + 1}; }).then(function(o){ gc(); console.log(o.v); }); gc()
+#expect
+2
+
+#name collect while a promise is pending with nothing else holding it
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } new Promise(function(res){ setTimeout(function(){ res({v: 42}); }, 5); }).then(function(o){ gc(); churn(); return {w: o.v}; }).then(function(o){ console.log(o.w); }); gc(); churn()
+#expect
+42
+
+#name collect around awaits
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } async function f(){ var a = {v: 1}; { let b = {v: 2}; await null; gc(); churn(); a.v += b.v; } var c = [a, await Promise.resolve({v: 3})]; gc(); churn(); return c[0].v + c[1].v; } f().then(function(v){ console.log(v); }); gc(); churn()
+#expect
+6
+
+#name collect while an async function is suspended mid-expression
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function later(v){ return new Promise(function(res){ setTimeout(function(){ res(v); }, 2); }); } async function f(){ var r = [{a: 1}, await later({a: 2}), {a: 3}]; return r[0].a + r[1].a + r[2].a; } f().then(function(v){ console.log(v); }); setTimeout(function(){ gc(); churn(); }, 1)
+#expect
+6
+
+#name collect inside timers with arguments
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var holder = {n: 1}; setTimeout(function(a, b){ gc(); churn(); console.log(a.n + b.n + holder.n); }, 3, {n: 40}, {n: 1}); holder = {n: 1}; gc(); churn()
+#expect
+42
+
+#name collect inside Symbol.toPrimitive and template literals
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var o = {inner: {n: 3}, [Symbol.toPrimitive]: function(hint){ gc(); churn(); return hint === "number" ? this.inner.n : "p" + this.inner.n; }}; console.log(`${o}|${+o}|${[{t: 1}].map(function(x){ gc(); return x.t; })}`)
+#expect
+p3|3|1
+
+#name collect with bound functions and call/apply
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function f(a, b){ gc(); churn(); return this.base.v + a.v + b.v; } var bound = f.bind({base: {v: 100}}, {v: 10}); console.log(bound({v: 1}), f.call({base: {v: 1}}, {v: 2}, {v: 3}), f.apply({base: {v: 4}}, [{v: 5}, {v: 6}]))
+#expect
+111 6 15
+
+#name collect inside Object.defineProperty accessors and Object.entries
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var o = {}; Object.defineProperty(o, "p", {get: function(){ gc(); churn(); return {v: 8}; }, enumerable: true}); console.log(o.p.v, Object.entries({a: {v: 1}, b: {v: 2}}).map(function(e){ gc(); churn(); return e[0] + e[1].v; }).join())
+#expect
+8 a1,b2
+
+#name collect inside a tagged template and default parameters
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function tag(strings, a, b){ gc(); churn(); return strings.raw.join("|") + a.v + b.v; } function d(x = (gc(), churn(), {v: 4}), y = x){ return x.v + y.v; } console.log(tag`a${{v: 1}}b${{v: 2}}c`, d())
+#expect
+a|b|c12 8
+
+#name collect repeatedly while building a linked structure
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } var head = null; for (var i = 0; i < 300; i++) { head = {v: i, next: head}; if (i % 50 === 0) gc(); } var n = 0, sum = 0; for (var p = head; p; p = p.next) { n++; sum += p.v; } gc(); churn(); console.log(n, sum)
+#expect
+300 44850
+
+#name collect with try, catch and finally in flight
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; } function f(){ var o = {v: 1}; try { throw {e: {v: 2}}; } catch (err) { gc(); churn(); o.v += err.e.v; } finally { gc(); churn(); o.v += 10; } return o.v; } console.log(f())
+#expect
+13

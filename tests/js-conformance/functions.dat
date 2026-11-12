@@ -1,0 +1,318 @@
+#name function expression
+#code
+var sq = function(x){ return x * x; }; console.log(sq(7))
+#expect
+49
+
+#name named function expression recursion
+#code
+var f = function fact(n){ return n <= 1 ? 1 : n * fact(n - 1); }; console.log(f(5))
+#expect
+120
+
+#name closure keeps private state
+#code
+function counter(){ var n = 0; return { inc: function(){ return ++n; }, get: function(){ return n; } }; } var c = counter(); c.inc(); c.inc(); console.log(c.get())
+#expect
+2
+
+#name closures are independent
+#code
+function mk(){ var n = 0; return function(){ return ++n; }; } var a = mk(), b = mk(); a(); a(); console.log(a(), b())
+#expect
+3 1
+
+#name immediately invoked function expression
+#code
+var r = (function(a, b){ return a + b; })(2, 3); console.log(r)
+#expect
+5
+
+#name arguments object indexing
+#code
+function sum(){ var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; } console.log(sum(1,2,3,4))
+#expect
+10
+
+#name arguments to array
+#code
+function f(){ return Array.prototype.slice.call(arguments, 1).join("-"); } console.log(f("a","b","c"))
+#expect
+b-c
+
+#name missing arguments are undefined
+#code
+function f(a, b){ return typeof b; } console.log(f(1))
+#expect
+undefined
+
+#name extra arguments ignored
+#code
+function f(a){ return a; } console.log(f(1, 2, 3))
+#expect
+1
+
+#name default parameter uses earlier parameter
+#code
+function f(a, b = a * 2){ return a + b; } console.log(f(3), f(3, 1))
+#expect
+9 4
+
+#name default applies for undefined only
+#code
+function f(a = 5){ return a; } console.log(f(undefined), f(null), f(0))
+#expect
+5 null 0
+
+#name rest parameter after named
+#code
+function f(first, ...rest){ return first + ":" + rest.join(","); } console.log(f(1,2,3))
+#expect
+1:2,3
+
+#name spread arguments
+#code
+function f(a, b, c){ return a + b + c; } var args = [1, 2, 3]; console.log(f(...args), Math.max(...args, 10))
+#expect
+6 10
+
+#name Function.prototype.apply
+#code
+function f(a, b){ return this.k + a + b; } console.log(f.apply({k: 1}, [2, 3]))
+#expect
+6
+
+#name Function.prototype.bind
+#code
+function f(a, b){ return this.k + a + b; } var g = f.bind({k: 10}, 1); console.log(g(2))
+#expect
+13
+
+#name bind partial application
+#code
+function mul(a, b){ return a * b; } var dbl = mul.bind(null, 2); console.log(dbl(21))
+#expect
+42
+
+#name this in method call
+#code
+var o = { n: 3, f: function(){ return this.n; } }; console.log(o.f())
+#expect
+3
+
+#name this lost when method detached
+#code
+"use strict"; var o = { f: function(){ return this === undefined; } }; var g = o.f; console.log(g())
+#expect
+true
+
+#name arrow function keeps outer this
+#code
+var o = { n: 4, f: function(){ var g = () => this.n; return g(); } }; console.log(o.f())
+#expect
+4
+
+#name arrow in callback keeps this
+#code
+function T(){ this.v = 2; this.r = [1,2,3].map(x => x * this.v); } console.log(new T().r.join())
+#expect
+2,4,6
+
+#name function length and name
+#code
+function abc(a, b, c){} console.log(abc.length, abc.name)
+#expect
+3 abc
+
+#name functions are objects with properties
+#code
+function f(){} f.count = 3; console.log(f.count, typeof f)
+#expect
+3 function
+
+#name higher-order function
+#code
+function twice(f){ return function(x){ return f(f(x)); }; } console.log(twice(function(x){ return x + 3; })(1))
+#expect
+7
+
+#name function returning function chain
+#code
+var add = function(a){ return function(b){ return function(c){ return a + b + c; }; }; }; console.log(add(1)(2)(3))
+#expect
+6
+
+#name arrow returning object literal
+#code
+var mk = (a) => ({ v: a }); console.log(mk(5).v)
+#expect
+5
+
+#name arrow with block body
+#code
+var f = (a, b) => { var s = a + b; return s * 2; }; console.log(f(1, 2))
+#expect
+6
+
+#name arrow without parameters
+#code
+var f = () => 42; console.log(f())
+#expect
+42
+
+#name callback with index and array
+#code
+var r = []; [5,6].forEach(function(v, i, arr){ r.push(v + i + arr.length); }); console.log(r.join())
+#expect
+7,9
+
+#name recursion: factorial
+#code
+function fact(n){ return n === 0 ? 1 : n * fact(n - 1); } console.log(fact(10))
+#expect
+3628800
+
+#name mutual recursion
+#code
+function even(n){ return n === 0 ? true : odd(n - 1); } function odd(n){ return n === 0 ? false : even(n - 1); } console.log(even(10), odd(7))
+#expect
+true true
+
+#name deep recursion
+#code
+function d(n){ return n === 0 ? 0 : 1 + d(n - 1); } console.log(d(2000))
+#expect
+2000
+
+#name parameters are local
+#code
+var x = 1; function f(x){ x = 2; return x; } f(5); console.log(x)
+#expect
+1
+
+#name inner function shadows outer variable
+#code
+var v = "g"; function f(){ var v = "l"; return v; } console.log(f(), v)
+#expect
+l g
+
+#name assignment to outer variable
+#code
+var total = 0; function add(n){ total += n; } add(2); add(3); console.log(total)
+#expect
+5
+
+#name destructured parameters
+#code
+function f({a, b}, [c, d]){ return a + b + c + d; } console.log(f({a:1, b:2}, [3, 4]))
+#expect
+10
+
+#name destructured parameter defaults
+#code
+function f({x = 1, y = 2} = {}){ return x + y; } console.log(f(), f({x: 10}))
+#expect
+3 12
+
+#name call with this as primitive
+#code
+function f(){ return typeof this; } console.log(f.call("s"), f.call(5))
+#expect
+object object
+
+#name method borrowed via call
+#code
+console.log(Array.prototype.join.call({0: "a", 1: "b", length: 2}, "+"))
+#expect
+a+b
+
+#name function as constructor returns object
+#code
+function P(n){ this.n = n; } var p = new P(3); console.log(p.n, p instanceof P, p.constructor === P)
+#expect
+3 true true
+
+#name new without parentheses
+#code
+function Q(){ this.v = 1; } var q = new Q; console.log(q.v)
+#expect
+1
+
+#name getter on function result chained
+#code
+function mk(){ return { get v(){ return 8; } }; } console.log(mk().v)
+#expect
+8
+
+#name toString of function is string
+#code
+function f(){} console.log(typeof f.toString(), typeof String(f))
+#expect
+string string
+
+#name function toString returns the source text
+#code
+function f(a, b) { return a + b; }
+console.log(f.toString()); console.log(String(function () {})); console.log((x => x * 2).toString()); console.log((async (a, b) => { await a; }).toString()); console.log('' + f === f.toString())
+#expect
+function f(a, b) { return a + b; }
+function () {}
+x => x * 2
+async (a, b) => { await a; }
+true
+
+#name async and generator function toString
+#code
+console.log((async function af() {}).toString()); console.log((function* gen() { yield 1; }).toString()); console.log((async function* () {}).toString())
+#expect
+async function af() {}
+function* gen() { yield 1; }
+async function* () {}
+
+#name method toString returns the method text
+#code
+var ob = { m() { return 1; }, get g() { return 2; }, async am() {}, *gm() {}, ['c' + 1]() {}, f: function () { return 3; }, a: () => 4 };
+console.log(ob.m.toString()); console.log(Object.getOwnPropertyDescriptor(ob, 'g').get.toString()); console.log(ob.am.toString()); console.log(ob.gm.toString()); console.log(ob.c1.toString()); console.log(ob.f.toString()); console.log(ob.a.toString())
+#expect
+m() { return 1; }
+get g() { return 2; }
+async am() {}
+*gm() {}
+['c' + 1]() {}
+function () { return 3; }
+() => 4
+
+#name function toString keeps comments and spacing
+#code
+var f = function  ( a ,b )  { /* body */ return a  +  b ; // tail
+};
+console.log(f.toString()); console.log(f.toString().length)
+#expect
+function  ( a ,b )  { /* body */ return a  +  b ; // tail
+}
+59
+
+#name native function toString says native code
+#code
+function mine() {} console.log(Math.max.toString(), /native code/.test(Array.prototype.push.toString()), /native code/.test(mine.toString()), Function.prototype.toString.call(Object), mine.bind(null).toString())
+#expect
+function max() { [native code] } true false function Object() { [native code] } function () { [native code] }
+
+#name new Function toString
+#code
+console.log(new Function('a', 'b', 'return a+b').toString()); console.log(Function('return 1').toString())
+#expect
+function anonymous(a,b
+) {
+return a+b
+}
+function anonymous(
+) {
+return 1
+}
+
+#name feature detection with native code test
+#code
+function isNative(fn) { return typeof fn === 'function' && /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(fn)); } function user() {} console.log(isNative(Object.keys), isNative(Promise), isNative(user), isNative(function () {}), isNative(class {}), isNative(user.bind(null)), isNative(JSON.stringify))
+#expect
+true true false false false true true

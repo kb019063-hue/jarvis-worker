@@ -1,0 +1,250 @@
+#name hex literal
+#code
+console.log(0xff)
+#expect
+255
+
+#name octal and binary literals
+#code
+console.log(0o17, 0b101)
+#expect
+15 5
+
+#name exponent literal
+#code
+console.log(1e3, 2.5e-2)
+#expect
+1000 0.025
+
+#name leading-dot number
+#code
+console.log(.5 + .25)
+#expect
+0.75
+
+#name numeric separators
+#code
+console.log(1_000_000)
+#expect
+1000000
+
+#name trailing-dot number
+#code
+console.log(5. + 1)
+#expect
+6
+
+#name string escapes
+#code
+console.log("a\tb\\c\"d".length)
+#expect
+7
+
+#name unicode escape
+#code
+console.log("\u0041\x42\u{43}")
+#expect
+ABC
+
+#name newline escape in output
+#code
+console.log("line1\nline2")
+#expect
+line1
+line2
+
+#name single quotes
+#code
+console.log('it\'s')
+#expect
+it's
+
+#name line and block comments
+#code
+var a = 1; // c1
+/* c2
+ c2 */ var b = 2;
+console.log(a + b)
+#expect
+3
+
+#name asi: statements on separate lines
+#code
+var a = 1
+var b = 2
+console.log(a + b)
+#expect
+3
+
+#name asi: return followed by newline
+#code
+function f(){ return
+ 1 }
+console.log(f())
+#expect
+undefined
+
+#name division after parenthesis
+#code
+var a = 8, b = 2; console.log((a) / b / 2)
+#expect
+2
+
+#name regex literal after operator
+#code
+var r = /b/.test("abc"); console.log(r)
+#expect
+true
+
+#name keywords as property names
+#code
+var o = { if: 1, class: 2, default: 3, new: 4 }; console.log(o.if + o.class + o.default + o.new)
+#expect
+10
+
+#name trailing commas
+#code
+var a = [1,2,3,]; var o = {x:1,}; function f(p,){ return p; } console.log(a.length, o.x, f(7,))
+#expect
+3 1 7
+
+#name multi-line template literal
+#code
+console.log(`a
+b`.length)
+#expect
+3
+
+#name template literal nesting
+#code
+var n = 2; console.log(`x${`y${n}`}z`)
+#expect
+xy2z
+
+#name empty statements
+#code
+;;; var x = 1;; console.log(x)
+#expect
+1
+
+#name unicode string content
+#code
+console.log("café 日本")
+#expect
+café 日本
+
+#name dollar and underscore identifiers
+#code
+var $a = 1, _b = 2, c$_ = 3; console.log($a + _b + c$_)
+#expect
+6
+
+#name long string concatenation across lines
+#code
+var s = "a" +
+  "b" +
+  "c";
+console.log(s)
+#expect
+abc
+
+#name chained calls across lines
+#code
+var r = [3,1,2]
+  .map(function(x){ return x * 2; })
+  .join("-");
+console.log(r)
+#expect
+6-2-4
+
+#name object literal at statement start in parens
+#code
+console.log(({a: 1}).a)
+#expect
+1
+
+#name template substitution that is a number literal
+#code
+console.log(`${200000}`, `a${1}b`, `${1}${2}${3}`, `${0}`.length)
+#expect
+200000 a1b 123 1
+
+#name template substitution that is a string literal
+#code
+console.log(`${'x'}`, `[${'a'}${"b"}]`, `${''}`.length, `${'${1}'}`)
+#expect
+x [ab] 0 ${1}
+
+#name template substitution that is a keyword literal
+#code
+console.log(`${true} ${false} ${null} ${undefined}`, `${NaN}|${Infinity}|${-0}`)
+#expect
+true false null undefined NaN|Infinity|0
+
+#name template text and literal substitutions alternate
+#code
+console.log(`${1}a${2}b${3}`, `a${1}${2}b`, `${'a'}${1}`, `${1}${'a'}`, `x${`y${'z'}`}`)
+#expect
+1a2b3 a12b a1 1a xyz
+
+#name template substitution literals keep their type
+#code
+var parts = []; (function tag(s) { for (var i = 1; i < arguments.length; i++) parts.push(typeof arguments[i]); return s.length; })`a${1}b${'s'}c${null}d${true}e${1.5}`; console.log(parts.join())
+#expect
+number,string,object,boolean,number
+
+#name template with only literal substitutions and escapes
+#code
+console.log(`${1}\n${2}`.length, `\${1}`, `${'\u0041'}${65}`, `$${1}`, `${1}$`)
+#expect
+3 ${1} A65 $1 1$
+
+#name tagged template sees text around literal substitutions
+#code
+function t(s) { return s.join('|') + ' ' + s.raw.join('|') + ' ' + (arguments.length - 1); } console.log(t`${1}`, t`a${1}`, t`${1}b`, t`${1}${2}`, t`a${'q'}b${7}c`)
+#expect
+| | 1 a| a| 1 |b |b 1 || || 2 a|b|c a|b|c 2
+
+#name undefined as a parameter name
+#code
+(function (window, undefined) { console.log(typeof undefined, undefined === void 0, typeof window); })(this); (function (undefined) { console.log(undefined); })(5); console.log(((undefined) => undefined)(9), typeof undefined)
+#expect
+undefined true object
+5
+9 undefined
+
+#name undefined as a local variable name
+#code
+function f() { var undefined = 3; return undefined; } function g() { let undefined = 'L'; return undefined; } console.log(f(), g(), typeof undefined, void 0 === undefined)
+#expect
+3 L undefined true
+
+#name assigning to the global undefined does nothing
+#code
+undefined = 1; NaN = 5; Infinity = 6; var undefined = 7; console.log(typeof undefined, undefined++, typeof undefined, NaN, Infinity, 'undefined' in globalThis)
+#expect
+undefined NaN undefined NaN Infinity true
+
+#name assigning to undefined in strict code throws
+#code
+(function () { 'use strict'; var names = []; try { undefined = 1; names.push('none'); } catch (e) { names.push(e.name); } try { NaN = 1; names.push('none'); } catch (e) { names.push(e.name); } try { Infinity++; names.push('none'); } catch (e) { names.push(e.name); } console.log(names.join()); })()
+#expect
+TypeError,TypeError,TypeError
+
+#name undefined as a property name and value
+#code
+var o = { undefined: 1, a: undefined }; console.log(o.undefined, o.a, o[undefined], JSON.stringify(o), JSON.stringify([undefined]), 'a' in o)
+#expect
+1 undefined 1 {"undefined":1} [null] true
+
+#name shadowed undefined does not leak out of its function
+#code
+function shadow(undefined) { return [undefined, typeof undefined].join(); } var before = typeof undefined; var r = shadow('s'); var d; console.log(before, r, typeof undefined, d === undefined, (function () { return undefined; })())
+#expect
+undefined s,string undefined true undefined
+
+#name undefined in default values and destructuring
+#code
+var [a = undefined, b = 2] = []; function f(x = undefined, y = 3) { return [x, y].join(); } var { p = undefined, q = 4 } = {}; console.log(a, b, f(), p, q)
+#expect
+undefined 2 ,3 undefined 4

@@ -1,7 +1,9 @@
 #pragma once
 
+#include "litebird/js/JsValue.hpp"
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <memory>
 #include <functional>
@@ -11,24 +13,43 @@
 namespace litebird {
 
 class Heap;
-class JsValue;
 class Node;
 
-class HeapObject {
-public:
-    bool is_marked{false};
-    HeapObject* next_cell{nullptr};
-
-    virtual ~HeapObject() = default;
-    virtual void trace(Heap& heap) = 0;
+/// What kind of built-in object a JsObject is. Drives `Object.prototype.toString`
+/// and lets built-in methods check that `this` is the right kind of object.
+enum class ObjectClass : uint8_t {
+    Plain, Array, Function, Error, Date, RegExp, Map, Set, WeakMap, WeakSet,
+    Boolean, Number, String, Symbol, Arguments, Promise, Generator, Iterator
 };
 
 class JsObject : public HeapObject {
 public:
     JsObject* prototype{nullptr};
-    std::unordered_map<std::string, JsValue> properties;
+    PropertyMap properties;
     std::vector<JsValue> array_elements;
     bool is_array{false};
+    bool extensible{true};          // false after Object.preventExtensions/seal/freeze
+    bool frozen{false};             // Object.freeze: no writes at all
+    bool sealed{false};             // Object.seal: no adds or deletes
+    bool has_accessors{false};      // some own property is a getter/setter
+    bool has_legacy_getters{false}; // some own property is a "__get_<name>__" host getter
+    ObjectClass klass{ObjectClass::Plain};
+
+    /// Built-in state that is not a property: a Date's time value, a RegExp's
+    /// compiled program, a Map's storage. The owner knows the concrete type.
+    std::shared_ptr<void> internal;
+
+    /// Marks values this object keeps alive outside its property table, such
+    /// as the variables a closure captured or the entries of a Map.
+    std::function<void(Heap&)> trace_extra;
+
+    /// Falls back to this lookup when a property is not found on the object or
+    /// its prototypes. Used by the global object to expose global variables.
+    std::shared_ptr<std::function<bool(const std::string&, JsValue&)>> lookup_fallback;
+
+    /// Offered every write first; returning true means the hook stored the
+    /// value. Lets `window.x = 1` update a global variable named x.
+    std::shared_ptr<std::function<bool(const std::string&, const JsValue&)>> assign_hook;
 
     // Set when this JsObject is the script-visible identity of a DOM node.
     // Holding a strong reference here means the wrapper keeps its node alive, which
@@ -36,6 +57,7 @@ public:
     std::shared_ptr<Node> dom_node;
 
     void trace(Heap& heap) override;
+    void release_contents() override;
 };
 
 struct GCStats {
@@ -62,11 +84,10 @@ public:
 
     // --- Root-set providers -------------------------------------------------
     //
-    // A `JsObject` is a raw pointer with no owner, so the collector has to be
-    // told, explicitly, everything that can reach one. Values reachable only
-    // through a closure environment, a promise callback or a queued microtask
-    // live in `std::function` captures that the collector cannot see, which is
-    // why a collection with an incomplete root set frees live objects.
+    // The collector finds its own roots (see collect_garbage in Heap.cpp), so
+    // nothing has to be registered for a value held in a JsValue. Providers
+    // remain for callers that want to name roots explicitly; what they report
+    // is marked in addition to what the collector finds.
     //
     // A provider is a callback that pushes the addresses of its live JsValues.
     // Providers must stay valid for as long as they are registered.
@@ -80,21 +101,98 @@ public:
 
     const GCStats& stats() const { return m_stats; }
 
+    /// Calls `visit` for every cell, for diagnostics. The heap is locked for
+    /// the duration, so `visit` must not allocate or collect.
+    void for_each_cell(const std::function<void(const JsObject&)>& visit) const;
+
     void mark_value(const JsValue& val);
     void mark_object(HeapObject* obj);
+    void mark_property_map(const PropertyMap* map);
+    /// Reports a value that several holders may share through a shared_ptr
+    /// (an accessor's setter).
+    void mark_shared_value(const std::shared_ptr<JsValue>& value);
+
+    /// For trace functions that walk storage several cells may share (a
+    /// collection's entries after `class X extends Map`): true the first time
+    /// `storage` is reported in the current pass, false afterwards. Each stored
+    /// value must be reported exactly once per pass.
+    bool first_visit(const void* storage);
+    /// True while the collector is counting the references stored inside the
+    /// heap, as opposed to marking what is reachable. Storage that native code
+    /// can also keep alive must not be reported during this pass.
+    bool counting() const { return m_counting; }
+
+    // --- Agents -----------------------------------------------------------------
+    //
+    // A page and each of its workers run on their own threads and never share
+    // objects: messages between them are copied. They do share this heap's
+    // cell list, so every cell and scope is tagged with the agent that created
+    // it, and a collection only examines, marks through and frees what belongs
+    // to the agent running it. Everything else is left exactly as it is.
+    static uint32_t current_agent();
+    /// Makes the calling thread a new agent. A worker thread calls this first.
+    static uint32_t enter_new_agent();
+    /// Makes the calling thread part of `agent`: for threads an agent starts
+    /// to run its own script (suspended function frames).
+    static void join_agent(uint32_t agent);
+
+    // --- Lexical environments -------------------------------------------------
+    //
+    // A closure keeps its defining scopes alive, and those scopes hold values
+    // the collector must not free. The environment type belongs to the
+    // interpreter, so it supplies the two operations the collector needs.
+    struct EnvironmentTracer {
+        /// Records that `env` is being visited in collection `epoch`. Returns
+        /// false when it was already visited, which is what ends the walk.
+        bool (*enter)(void* env, uint64_t epoch){nullptr};
+        /// Reports every value bound in `env` and returns the enclosing scope.
+        void* (*trace)(Heap& heap, void* env){nullptr};
+        /// Lists every scope of `agent` that exists right now. Each entry
+        /// keeps its scope alive until the collection is over.
+        void (*snapshot)(uint32_t agent, std::vector<std::shared_ptr<void>>& out){nullptr};
+        /// Whether `env` was visited in collection `epoch`.
+        bool (*reached)(void* env, uint64_t epoch){nullptr};
+        /// Drops every binding of a scope nothing can reach any more.
+        void (*clear)(void* env){nullptr};
+    };
+    static void set_environment_tracer(EnvironmentTracer tracer);
+    void mark_environment(void* env);
 
 private:
-    void sweep();
-
     struct RootProviderEntry {
         const void* owner;
         RootProvider provider;
     };
 
+    // Bookkeeping for one collection; see collect_garbage.
+    struct PayloadInfo {
+        long seen{0};               // copies of the value found inside the heap
+        long owners{0};             // copies that exist in total
+        const JsValue::FunctionData* function{nullptr};
+        const PropertyMap* properties{nullptr};
+    };
+    struct ScopeInfo {
+        long seen{0};               // closures and child scopes found inside the heap
+        std::shared_ptr<void> hold; // keeps the scope alive during the collection
+    };
+    void count_value(const JsValue& val);
+    void mark_payload(const PayloadInfo& info);
+
+    std::unordered_map<const void*, PayloadInfo> m_payloads;
+    std::unordered_map<void*, ScopeInfo> m_scopes;
+    std::vector<const PropertyMap*> m_count_maps;
+    uint64_t m_epoch{0};
+    uint32_t m_collecting_agent{0};
+
     mutable std::mutex m_mutex;
     std::vector<RootProviderEntry> m_root_providers;
     HeapObject* m_head{nullptr};
     std::vector<HeapObject*> m_gray_stack;
+    std::vector<void*> m_gray_environments;
+    std::vector<const PropertyMap*> m_gray_maps;
+    std::vector<const PropertyMap*> m_visited_maps;
+    std::unordered_set<const void*> m_visited_storage;
+    bool m_counting{false};
     std::vector<JsValue*> m_registered_roots;
     GCStats m_stats;
 };

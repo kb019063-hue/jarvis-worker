@@ -22,6 +22,7 @@ public:
 private:
     void compile_stmt(const Stmt* stmt);
     void compile_expr(const Expr* expr);
+    static void require_simple_function(const FunctionNode& node);
 
     void begin_scope();
     void end_scope();

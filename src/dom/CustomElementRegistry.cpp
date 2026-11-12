@@ -1,4 +1,5 @@
 #include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Heap.hpp"
@@ -119,9 +120,11 @@ void CustomElementRegistry::upgrade_element(const std::shared_ptr<Element>& el) 
 
     el->set_custom_element_instance(inst);
 
-    // Call constructor if available
+    // Run the constructor as `new` would, on the element's own wrapper. A
+    // class constructor refuses to be called any other way.
     if (def.constructor.is_callable()) {
-        def.constructor.call_with_this(inst, {});
+        const JsValue ctor = def.constructor;
+        js_run_guarded([&] { ctor.construct({}, &inst); });
     }
 
     // Call attributeChangedCallback for any existing attributes that are observed
@@ -129,7 +132,7 @@ void CustomElementRegistry::upgrade_element(const std::shared_ptr<Element>& el) 
         if (std::find(def.observed_attributes.begin(), def.observed_attributes.end(), attr_name) != def.observed_attributes.end()) {
             JsValue attr_cb = inst.get_property("attributeChangedCallback");
             if (attr_cb.is_callable()) {
-                attr_cb.call_with_this(inst, {
+                js_call_guarded(attr_cb, inst, {
                     JsValue::make_string(attr_name),
                     JsValue::make_null(),
                     JsValue::make_string(attr_val)
@@ -142,7 +145,7 @@ void CustomElementRegistry::upgrade_element(const std::shared_ptr<Element>& el) 
     if (el->is_connected()) {
         JsValue conn_cb = inst.get_property("connectedCallback");
         if (conn_cb.is_callable()) {
-            conn_cb.call_with_this(inst, {});
+            js_call_guarded(conn_cb, inst, {});
         }
     }
 }
@@ -169,7 +172,7 @@ void CustomElementRegistry::notify_connected(const std::shared_ptr<Element>& el)
     auto inst = el->custom_element_instance();
     JsValue conn_cb = inst.get_property("connectedCallback");
     if (conn_cb.is_callable()) {
-        conn_cb.call_with_this(inst, {});
+        js_call_guarded(conn_cb, inst, {});
     }
 }
 
@@ -180,7 +183,7 @@ void CustomElementRegistry::notify_disconnected(const std::shared_ptr<Element>& 
 
     JsValue dis_cb = inst.get_property("disconnectedCallback");
     if (dis_cb.is_callable()) {
-        dis_cb.call_with_this(inst, {});
+        js_call_guarded(dis_cb, inst, {});
     }
 }
 
@@ -203,7 +206,7 @@ void CustomElementRegistry::notify_attribute_changed(
 
     JsValue attr_cb = inst.get_property("attributeChangedCallback");
     if (attr_cb.is_callable()) {
-        attr_cb.call_with_this(inst, {
+        js_call_guarded(attr_cb, inst, {
             JsValue::make_string(name),
             old_val.empty() ? JsValue::make_null() : JsValue::make_string(old_val),
             new_val.empty() ? JsValue::make_null() : JsValue::make_string(new_val)

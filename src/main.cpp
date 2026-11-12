@@ -9,8 +9,11 @@
 #include "litebird/render/TerminalRenderer.hpp"
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -34,6 +37,8 @@ void print_help(const char* prog) {
     std::cout << "  --dump-dom-webplatform Dump DOM in WPT/html5lib tree-dump format\n";
     std::cout << "  --fragment-context=C   Parse input as a fragment with context element C\n";
     std::cout << "  --scripting=off        Disable the scripting flag while parsing\n";
+    std::cout << "  --virtual-time-budget=MS  Let the page's timers run for MS of virtual time\n";
+    std::cout << "                         before it is rendered (default 16: one frame)\n";
     std::cout << "  --dump-css             Dump parsed CSS stylesheets & rules\n";
     std::cout << "  --dump-layout          Dump computed Layout Box tree\n";
     std::cout << "  --dump-paint           Dump display list paint commands\n";
@@ -95,6 +100,9 @@ int main(int argc, char* argv[]) {
     bool shell_mode = false;
     bool dump_dom_webplatform = false;
     bool scripting = true;
+    // How much timer time a page gets to settle before it is rendered: one
+    // animation frame by default.
+    int virtual_time_budget_ms = 16;
     std::string fragment_context;
     std::string input_file;
 
@@ -111,6 +119,8 @@ int main(int argc, char* argv[]) {
             fragment_context = arg.substr(std::string("--fragment-context=").size());
         } else if (arg == "--scripting=off") {
             scripting = false;
+        } else if (arg.rfind("--virtual-time-budget=", 0) == 0) {
+            virtual_time_budget_ms = std::max(0, std::atoi(arg.substr(std::string("--virtual-time-budget=").size()).c_str()));
         } else if (arg == "--dump-css") {
             dump_css = true;
         } else if (arg == "--dump-layout") {
@@ -165,18 +175,27 @@ int main(int argc, char* argv[]) {
         doc->set_title("Standalone JS Execution");
         litebird::JsInterpreter interp(doc);
         if (dump_bytecode) {
-            auto fn = interp.compile_to_bytecode(js_code);
-            fn->chunk.disassemble(std::cout, "CLI Script");
-        } else {
-            interp.eval(js_code);
-            auto start_wait = std::chrono::steady_clock::now();
-            while (litebird::EventLoop::default_loop().has_pending_tasks()) {
-                litebird::EventLoop::default_loop().tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                if (std::chrono::steady_clock::now() - start_wait > std::chrono::milliseconds(2000)) {
-                    break;
-                }
+            try {
+                auto fn = interp.compile_to_bytecode(js_code);
+                fn->chunk.disassemble(std::cout, "CLI Script");
+            } catch (const std::exception& ex) {
+                // The bytecode compiler covers a subset of the language.
+                std::cerr << "Cannot compile to bytecode: " << ex.what() << "\n";
+                return 1;
             }
+        } else {
+            // Nobody is watching the clock while a one-shot script runs, so the
+            // loop does not sleep until a timer is due: it jumps its clock
+            // there. The script sees the time pass (Date.now() follows the
+            // loop's clock) and timers still fire in due order. The budget
+            // bounds a script that reschedules itself forever.
+            auto& loop = litebird::EventLoop::default_loop();
+            loop.set_time_skipping(true);
+            interp.eval(js_code);
+            loop.run_until_idle(std::chrono::seconds(60));
+            // A script that ended with an uncaught exception or a syntax error
+            // is a failure; say so through the exit status.
+            if (litebird::js_uncaught_error_count() > 0) return 1;
         }
         return 0;
     }
@@ -217,19 +236,35 @@ int main(int argc, char* argv[]) {
     }
 
     // 3. JavaScript Execution for <script> tags
+    //
+    // A page is rendered once, so nobody is waiting for its timers: the event
+    // loop jumps its clock to the next one instead of sleeping.
+    auto& page_loop = litebird::EventLoop::default_loop();
+    page_loop.set_time_skipping(true);
     litebird::JsInterpreter js_engine(doc);
     for (const auto& el : doc->get_elements_by_tag_name("script")) {
         std::string script = el->text_content();
         if (!script.empty()) {
             if (dump_bytecode) {
                 std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-                auto fn = js_engine.compile_to_bytecode(script);
-                fn->chunk.disassemble(std::cout, "Inline <script>");
+                try {
+                    auto fn = js_engine.compile_to_bytecode(script);
+                    fn->chunk.disassemble(std::cout, "Inline <script>");
+                } catch (const std::exception& ex) {
+                    std::cout << "(not compiled: " << ex.what() << ")";
+                }
                 std::cout << "\n";
             }
             js_engine.eval_ast(script);
         }
     }
+
+    // The page has loaded. Then let it settle before the one picture is taken:
+    // promise callbacks, completed fetches, zero-delay timers and the first
+    // animation frame have run by the time a browser first paints, so they
+    // run here too. Timers further out than the budget stay pending.
+    js_engine.notify_document_loaded();
+    page_loop.run_until_idle(std::chrono::milliseconds(virtual_time_budget_ms));
 
     // 4. Layout Box Tree Construction
     float viewport_w = 800.0f;

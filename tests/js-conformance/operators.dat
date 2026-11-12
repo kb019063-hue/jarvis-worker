@@ -1,0 +1,281 @@
+#name modulo and negative modulo
+#code
+console.log(7 % 3, -7 % 3, 7 % -3)
+#expect
+1 -1 1
+
+#name unary plus
+#code
+console.log(+"3" + +true)
+#expect
+4
+
+#name prefix and postfix increment
+#code
+var i = 1; var a = i++; var b = ++i; console.log(a, b, i)
+#expect
+1 3 3
+
+#name bitwise and/or/xor/not
+#code
+console.log(6 & 3, 6 | 3, 6 ^ 3, ~5)
+#expect
+2 7 5 -6
+
+#name shifts
+#code
+console.log(1 << 4, -16 >> 2, -16 >>> 28)
+#expect
+16 -4 15
+
+#name to int32 idioms
+#code
+console.log(7.9 | 0, ~~-7.9, 4294967295 >>> 0, -1 >>> 0)
+#expect
+7 -7 4294967295 4294967295
+
+#name string comparison
+#code
+console.log("a" < "b", "B" < "a", "10" < "9", 10 < 9)
+#expect
+true true true false
+
+#name loose equality: null and undefined
+#code
+console.log(null == undefined, null == 0, undefined == 0)
+#expect
+true false false
+
+#name loose equality: string and number
+#code
+console.log("1" == 1, 0 == "", "0" == false)
+#expect
+true true true
+
+#name loose inequality
+#code
+console.log(1 != "1", 1 != 2, null != undefined)
+#expect
+false true false
+
+#name NaN comparisons
+#code
+console.log(NaN == NaN, NaN === NaN, NaN != NaN)
+#expect
+false false true
+
+#name object identity
+#code
+var a = {}; var b = a; console.log(a === b, a === {}, [] === [])
+#expect
+true false false
+
+#name function identity
+#code
+function f(){} function g(){} console.log(f === f, f === g)
+#expect
+true false
+
+#name logical operators return operands
+#code
+console.log(0 || "x", 1 && "y", "" && "z", null || 0)
+#expect
+x y  0
+
+#name nullish vs or
+#code
+console.log(0 ?? 5, 0 || 5, "" ?? "d", undefined ?? "d")
+#expect
+0 5  d
+
+#name nested ternary
+#code
+var n = 5; console.log(n < 3 ? "low" : n < 7 ? "mid" : "high")
+#expect
+mid
+
+#name comma operator
+#code
+var x = (1, 2, 3); console.log(x)
+#expect
+3
+
+#name typeof undeclared
+#code
+console.log(typeof notDeclaredAnywhere)
+#expect
+undefined
+
+#name typeof results
+#code
+console.log(typeof NaN, typeof [], typeof null, typeof (()=>1), typeof Symbol(), typeof 1n)
+#expect
+number object object function symbol bigint
+
+#name delete property
+#code
+var o = {a:1,b:2}; console.log(delete o.a, "a" in o, Object.keys(o).join())
+#expect
+true false b
+
+#name in operator with arrays
+#code
+var a = [1,2]; console.log(0 in a, 2 in a, "length" in a)
+#expect
+true false true
+
+#name instanceof
+#code
+console.log([] instanceof Array, [] instanceof Object, ({}) instanceof Array)
+#expect
+true true false
+
+#name compound assignment
+#code
+var x = 10; x += 5; x -= 3; x *= 2; x /= 4; x %= 4; console.log(x)
+#expect
+2
+
+#name exponent assignment and bitwise assignment
+#code
+var x = 2; x **= 3; x |= 1; x &= 13; x ^= 2; console.log(x)
+#expect
+11
+
+#name logical assignment
+#code
+var a = null; a ??= 1; var b = 0; b ||= 2; var c = 1; c &&= 3; console.log(a, b, c)
+#expect
+1 2 3
+
+#name string plus number
+#code
+console.log(1 + "2", "3" + 4 + 5, 1 + 2 + "3")
+#expect
+12 345 33
+
+#name arithmetic coercion
+#code
+console.log("6" / "2", "5" - 2, true + 1, null + 1, [] + [], [1,2] + "")
+#expect
+3 3 2 1  1,2
+
+#name undefined in arithmetic
+#code
+console.log(undefined + 1, "a" * 2)
+#expect
+NaN NaN
+
+#name float formatting
+#code
+console.log(0.1 + 0.2, 1 / 3, 100 / 3)
+#expect
+0.30000000000000004 0.3333333333333333 33.333333333333336
+
+#name large and small number formatting
+#code
+console.log(1e21, 1e-7, 123456789012345680000, 0.000001)
+#expect
+1e+21 1e-7 123456789012345680000 0.000001
+
+#name integer-valued float formatting
+#code
+console.log(5.0, 1.50, -0.0 + 0, 2e3)
+#expect
+5 1.5 0 2000
+
+#name negative zero
+#code
+console.log(Object.is(-0, 0), 1 / -0, String(-0))
+#expect
+false -Infinity 0
+
+#name Infinity arithmetic
+#code
+console.log(1 / 0, -1 / 0, Infinity - Infinity, isFinite(1 / 0))
+#expect
+Infinity -Infinity NaN false
+
+#name exponent associativity
+#code
+console.log(2 ** 3 ** 2, (-2) ** 2)
+#expect
+512 4
+
+#name precedence
+#code
+console.log(1 + 2 * 3 - 4 / 2, (1 + 2) * 3, 2 + 3 > 4 && 1 < 2)
+#expect
+5 9 true
+
+#name equality precedence with bitwise
+#code
+console.log(1 | 2 === 2, (1 | 2) === 3)
+#expect
+1 true
+
+#name short-circuit avoids evaluation
+#code
+var n = 0; function inc(){ n++; return true; } false && inc(); true || inc(); console.log(n)
+#expect
+0
+
+#name chained assignment
+#code
+var a, b, c; a = b = c = 4; console.log(a + b + c)
+#expect
+12
+
+#name increment on property and index
+#code
+var o = {n: 1}; var a = [5]; o.n++; ++a[0]; a[0] += 2; console.log(o.n, a[0])
+#expect
+2 8
+
+#name void and undefined
+#code
+console.log(void "x", typeof void 0)
+#expect
+undefined undefined
+
+#name optional chaining short-circuit
+#code
+var o = null; console.log(o?.a.b.c, o?.[0], o?.f())
+#expect
+undefined undefined undefined
+
+#name optional call
+#code
+var o = { f: null, g(){ return 1; } }; console.log(o.f?.(), o.g?.())
+#expect
+undefined 1
+
+#name relational with mixed types
+#code
+console.log("2" > 1, null >= 0, undefined > 0, "a" > 1)
+#expect
+true true false false
+
+#name string indexing and comparison
+#code
+console.log("abc"[1], "abc"[5], "abc" === "abc")
+#expect
+b undefined true
+
+#name boolean conversion
+#code
+console.log(!!"", !!"0", !!0, !!NaN, !![], !!{}, !!null)
+#expect
+false true false false true true false
+
+#name unary operand of exponent is a syntax error
+#code
+var names = []; ['-2 ** 2', '+2 ** 2', '!2 ** 2', '~2 ** 2', 'typeof 2 ** 2', 'void 2 ** 2', 'delete x ** 2', '-x ** -y'].forEach(function (src) { try { eval('var x = 1, y = 2; ' + src); names.push('ok'); } catch (e) { names.push(e.name); } }); console.log(names.join())
+#expect
+SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+#name exponent with grouped or postfix operands
+#code
+var x = 2; console.log((-2) ** 2, 2 ** -2, -(2 ** 2), 2 ** 3 ** 2, (+2) ** 2, x++ ** 2, ++x ** 2, x-- ** 2, x, 2 ** -x, (-x) ** 2)
+#expect
+4 0.25 -4 512 4 4 16 16 3 0.125 9

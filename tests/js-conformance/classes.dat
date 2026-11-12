@@ -1,0 +1,179 @@
+#name constructor and method
+#code
+class P { constructor(n){ this.n = n; } hi(){ return "hi " + this.n; } } console.log(new P("a").hi())
+#expect
+hi a
+
+#name typeof class and instance
+#code
+class A {} var a = new A(); console.log(typeof A, typeof a, a instanceof A, a.constructor === A, A.name)
+#expect
+function object true true A
+
+#name getter and setter
+#code
+class T { constructor(){ this._c = 0; } get f(){ return this._c * 9 / 5 + 32; } set f(v){ this._c = (v - 32) * 5 / 9; } } var t = new T(); t.f = 212; console.log(t._c, t.f)
+#expect
+100 212
+
+#name static method and property
+#code
+class M { static sq(x){ return x * x; } } M.count = 2; console.log(M.sq(4), M.count, typeof new M().sq)
+#expect
+16 2 undefined
+
+#name static field and instance field
+#code
+class C { static total = 5; n = 1; m = this.n + 1; } var c = new C(); console.log(C.total, c.n, c.m)
+#expect
+5 1 2
+
+#name inheritance with super constructor
+#code
+class A { constructor(x){ this.x = x; } } class B extends A { constructor(x, y){ super(x); this.y = y; } } var b = new B(1, 2); console.log(b.x + b.y, b instanceof A, b instanceof B)
+#expect
+3 true true
+
+#name default derived constructor forwards arguments
+#code
+class A { constructor(a, b){ this.s = a + b; } } class B extends A {} console.log(new B(2, 3).s)
+#expect
+5
+
+#name method override and super call
+#code
+class A { who(){ return "A"; } hi(){ return "I am " + this.who(); } } class B extends A { who(){ return "B"; } hi(){ return super.hi() + "!"; } } console.log(new B().hi())
+#expect
+I am B!
+
+#name three-level inheritance
+#code
+class A { f(){ return "a"; } } class B extends A { f(){ return super.f() + "b"; } } class C extends B { f(){ return super.f() + "c"; } } console.log(new C().f())
+#expect
+abc
+
+#name static inheritance
+#code
+class A { static make(){ return new this(); } tag(){ return "A"; } } class B extends A { tag(){ return "B"; } } console.log(B.make().tag(), A.make().tag())
+#expect
+B A
+
+#name toString override
+#code
+class V { constructor(x){ this.x = x; } toString(){ return "V(" + this.x + ")"; } } console.log("" + new V(3), `${new V(4)}`)
+#expect
+V(3) V(4)
+
+#name methods are not enumerable
+#code
+class A { constructor(){ this.own = 1; } m(){} } console.log(Object.keys(new A()).join(), JSON.stringify(new A()))
+#expect
+own {"own":1}
+
+#name class expression
+#code
+var K = class { v(){ return 7; } }; console.log(new K().v())
+#expect
+7
+
+#name private fields and methods
+#code
+class Acc { #bal = 0; dep(n){ this.#bal += n; return this; } #fee(){ return 1; } get bal(){ return this.#bal - this.#fee(); } } var a = new Acc().dep(10).dep(5); console.log(a.bal, a.bal2)
+#expect
+14 undefined
+
+#name method chaining returns this
+#code
+class Q { constructor(){ this.p = []; } add(x){ this.p.push(x); return this; } out(){ return this.p.join(""); } } console.log(new Q().add("a").add("b").out())
+#expect
+ab
+
+#name getter inherited from base
+#code
+class A { get kind(){ return "base:" + this.constructor.name; } } class B extends A {} console.log(new B().kind)
+#expect
+base:B
+
+#name instance method shadowing by own property
+#code
+class A { m(){ return "proto"; } } var a = new A(); a.m = function(){ return "own"; }; console.log(a.m(), new A().m())
+#expect
+own proto
+
+#name calling class without new throws
+#code
+class A {} try { A(); } catch (e) { console.log(e instanceof TypeError); }
+#expect
+true
+
+#name extending Array
+#code
+class Stack extends Array { top(){ return this[this.length - 1]; } } var s = new Stack(); s.push(1, 2, 3); console.log(s.top(), s.length, s instanceof Array)
+#expect
+3 3 true
+
+#name extending Error keeps message and stack
+#code
+class E extends Error {} var e = new E("m"); console.log(e.message, e instanceof E, e instanceof Error, typeof e.stack)
+#expect
+m true true string
+
+#name symbol iterator in class
+#code
+class R { constructor(n){ this.n = n; } *[Symbol.iterator](){ for (var i = 0; i < this.n; i++) yield i; } } console.log([...new R(4)].join(""))
+#expect
+0123
+
+#name computed method names
+#code
+var k = "dyn"; class A { [k + "1"](){ return 1; } static [k](){ return 2; } } console.log(new A().dyn1(), A.dyn())
+#expect
+1 2
+
+#name accessor with static and prototype lookup
+#code
+class A { static get zero(){ return 0; } } console.log(A.zero, Object.getOwnPropertyNames(A.prototype).join())
+#expect
+0 constructor
+
+#name this in callbacks inside methods
+#code
+class L { constructor(){ this.p = "#"; } tag(a){ return a.map(x => this.p + x).join(""); } } console.log(new L().tag([1, 2]))
+#expect
+#1#2
+
+#name instanceof with Symbol-free duck typing
+#code
+class A {} class B {} var a = new A(); console.log(a instanceof A, a instanceof B, Object.getPrototypeOf(a) === A.prototype)
+#expect
+true false true
+
+#name super property access in object literal
+#code
+var base = { hi(){ return "base"; } }; var o = { __proto__: base, hi(){ return super.hi() + "+o"; } }; console.log(o.hi())
+#expect
+base+o
+
+#name new.target
+#code
+function F(){ return new.target === F; } console.log(new F() instanceof F, typeof F())
+#expect
+true boolean
+
+#name static block and static private
+#code
+class C { static #n = 1; static v; static { C.v = C.#n + 1; } } console.log(C.v)
+#expect
+2
+
+#name class toString returns the class text
+#code
+class A { constructor(x) { this.x = x; } static make() { return new A(1); } get v() { return 1; } async *ag() {} m(a) { return a; } }
+console.log(A.toString()); console.log(A.make.toString()); console.log(A.prototype.m.toString()); console.log(Object.getOwnPropertyDescriptor(A.prototype, 'v').get.toString()); console.log(A.prototype.ag.toString()); console.log((class {}).toString(), (class B extends A {}).toString())
+#expect
+class A { constructor(x) { this.x = x; } static make() { return new A(1); } get v() { return 1; } async *ag() {} m(a) { return a; } }
+make() { return new A(1); }
+m(a) { return a; }
+get v() { return 1; }
+async *ag() {}
+class {} class B extends A {}

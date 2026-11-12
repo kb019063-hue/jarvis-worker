@@ -1,0 +1,127 @@
+#name epoch construction and getTime
+#code
+var d = new Date(0); console.log(d.getTime(), d.valueOf(), +d, d.toISOString())
+#expect
+0 0 0 1970-01-01T00:00:00.000Z
+
+#name UTC getters
+#code
+var d = new Date(Date.UTC(2024, 1, 29, 13, 45, 30, 250)); console.log(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds())
+#expect
+2024 1 29 4 13 45 30 250
+
+#name Date.UTC value
+#code
+console.log(Date.UTC(1970, 0, 1), Date.UTC(2000, 0, 1), Date.UTC(2024, 11, 31, 23, 59, 59))
+#expect
+0 946684800000 1735689599000
+
+#name ISO string parsing
+#code
+console.log(new Date("2024-03-10T12:00:00Z").getTime(), Date.parse("2024-03-10T12:00:00.500Z"), new Date("2024-03-10").toISOString(), Date.parse("2024-03-10T12:00:00+02:00"))
+#expect
+1710072000000 1710072000500 2024-03-10T00:00:00.000Z 1710064800000
+
+#name toISOString and toJSON
+#code
+var d = new Date(Date.UTC(1999, 11, 31, 23, 59, 59, 7)); console.log(d.toISOString(), d.toJSON(), JSON.stringify({d: d}))
+#expect
+1999-12-31T23:59:59.007Z 1999-12-31T23:59:59.007Z {"d":"1999-12-31T23:59:59.007Z"}
+
+#name month overflow normalizes
+#code
+console.log(new Date(Date.UTC(2023, 12, 1)).toISOString(), new Date(Date.UTC(2023, 0, 32)).toISOString(), new Date(Date.UTC(2023, 2, 0)).getUTCDate())
+#expect
+2024-01-01T00:00:00.000Z 2023-02-01T00:00:00.000Z 28
+
+#name leap years
+#code
+function dim(y, m){ return new Date(Date.UTC(y, m + 1, 0)).getUTCDate(); } console.log(dim(2024, 1), dim(2023, 1), dim(2000, 1), dim(1900, 1))
+#expect
+29 28 29 28
+
+#name date arithmetic in days
+#code
+var a = Date.UTC(2024, 0, 1), b = Date.UTC(2024, 2, 1); console.log((b - a) / 86400000, new Date(a + 7 * 86400000).toISOString().slice(0, 10))
+#expect
+60 2024-01-08
+
+#name UTC setters
+#code
+var d = new Date(0); d.setUTCFullYear(2020); d.setUTCMonth(5); d.setUTCDate(15); d.setUTCHours(8, 30); console.log(d.toISOString())
+#expect
+2020-06-15T08:30:00.000Z
+
+#name date comparison
+#code
+var a = new Date(1000), b = new Date(2000), c = new Date(1000); console.log(a < b, a > b, a.getTime() === c.getTime(), a === c, a - b)
+#expect
+true false true false -1000
+
+#name invalid date
+#code
+var d = new Date("not a date"); console.log(isNaN(d), isNaN(d.getTime()), String(d))
+#expect
+true true Invalid Date
+
+#name Date.now and new Date types
+#code
+var n = Date.now(); console.log(typeof n, n > 1600000000000, typeof new Date().getTime(), new Date() instanceof Date, typeof Date())
+#expect
+number true number true string
+
+#name copy and mutate independently
+#code
+var a = new Date(5000); var b = new Date(a); b.setTime(9000); console.log(a.getTime(), b.getTime(), new Date(a.getTime() + 1).getTime())
+#expect
+5000 9000 5001
+
+#name getTimezoneOffset is a number of minutes
+#code
+var o = new Date(0).getTimezoneOffset(); console.log(typeof o, o % 1 === 0)
+#expect
+number true
+
+#name local getters match UTC when TZ=UTC
+#code
+var d = new Date(Date.UTC(2021, 6, 4, 9, 8, 7)); console.log(d.getFullYear(), d.getMonth(), d.getDate(), d.getDay(), d.getHours(), d.getMinutes(), d.getSeconds())
+#expect
+2021 6 4 0 9 8 7
+
+#name component constructor is local time
+#code
+var d = new Date(2022, 0, 15, 10, 30); console.log(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.toISOString())
+#expect
+2022 0 15 10 30 2022-01-15T10:30:00.000Z
+
+#name weekday and format helper
+#code
+var days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; function fmt(d){ function p(n){ return String(n).padStart(2, "0"); } return days[d.getUTCDay()] + " " + d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()); } console.log(fmt(new Date(Date.UTC(2024, 6, 4))))
+#expect
+Thu 2024-07-04
+
+#name sorting dates
+#code
+var ds = [new Date(3000), new Date(1000), new Date(2000)]; ds.sort(function(a, b){ return a - b; }); console.log(ds.map(function(d){ return d.getTime(); }).join())
+#expect
+1000,2000,3000
+
+#name toDateString and toUTCString
+#code
+var d = new Date(Date.UTC(2024, 0, 5, 3, 4, 5)); console.log(d.toUTCString(), d.toDateString())
+#expect
+Fri, 05 Jan 2024 03:04:05 GMT Fri Jan 05 2024
+
+#name date string forms accepted by parse
+#code
+console.log(Date.parse("2024-01-05T03:04:05"), Date.parse("2024-01"), Date.parse("2024"), isNaN(Date.parse("2024-13-45")))
+#expect
+1704423845000 1704067200000 1704067200000 true
+
+#name Date toString names the UTC zone
+#code
+console.log(new Date(0).toString()); console.log(String(new Date(1700000000000))); console.log(new Date(0).toTimeString())
+#expect
+Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)
+Tue Nov 14 2023 22:13:20 GMT+0000 (Coordinated Universal Time)
+00:00:00 GMT+0000 (Coordinated Universal Time)

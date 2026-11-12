@@ -1,0 +1,194 @@
+#name then chain passes values
+#code
+Promise.resolve(1).then(function(v){ return v + 1; }).then(function(v){ return v * 10; }).then(function(v){ console.log(v); })
+#expect
+20
+
+#name sync code runs before then callbacks
+#code
+Promise.resolve().then(function(){ console.log("then"); }); console.log("sync")
+#expect
+sync
+then
+
+#name microtask before timeout
+#code
+setTimeout(function(){ console.log("timeout"); }, 0); Promise.resolve().then(function(){ console.log("micro"); }); console.log("sync")
+#expect
+sync
+micro
+timeout
+
+#name executor runs synchronously
+#code
+console.log("a"); new Promise(function(res){ console.log("b"); res(); }).then(function(){ console.log("d"); }); console.log("c")
+#expect
+a
+b
+c
+d
+
+#name catch handles rejection
+#code
+Promise.reject(new Error("bad")).catch(function(e){ console.log("caught", e.message); })
+#expect
+caught bad
+
+#name throw in then becomes rejection
+#code
+Promise.resolve(1).then(function(){ throw new Error("t"); }).then(function(){ console.log("skipped"); }).catch(function(e){ console.log(e.message); })
+#expect
+t
+
+#name catch recovers and chain continues
+#code
+Promise.reject("x").catch(function(e){ return "recovered:" + e; }).then(function(v){ console.log(v); })
+#expect
+recovered:x
+
+#name finally runs and passes value through
+#code
+Promise.resolve(7).finally(function(){ console.log("fin"); }).then(function(v){ console.log(v); })
+#expect
+fin
+7
+
+#name then returning a promise is flattened
+#code
+Promise.resolve(1).then(function(v){ return new Promise(function(res){ setTimeout(function(){ res(v + 1); }, 5); }); }).then(function(v){ console.log(v); })
+#expect
+2
+
+#name Promise.all preserves order
+#code
+var p = function(v, ms){ return new Promise(function(r){ setTimeout(function(){ r(v); }, ms); }); }; Promise.all([p("a", 20), p("b", 5), "c"]).then(function(vs){ console.log(vs.join("")); })
+#expect
+abc
+
+#name Promise.all rejects on first failure
+#code
+Promise.all([Promise.resolve(1), Promise.reject(new Error("no")), Promise.resolve(3)]).then(function(){ console.log("ok"); }, function(e){ console.log(e.message); })
+#expect
+no
+
+#name Promise.race
+#code
+var p = function(v, ms){ return new Promise(function(r){ setTimeout(function(){ r(v); }, ms); }); }; Promise.race([p("slow", 30), p("fast", 5)]).then(function(v){ console.log(v); })
+#expect
+fast
+
+#name Promise.allSettled
+#code
+Promise.allSettled([Promise.resolve(1), Promise.reject("e")]).then(function(rs){ console.log(rs.map(function(r){ return r.status; }).join()); })
+#expect
+fulfilled,rejected
+
+#name Promise.any
+#code
+Promise.any([Promise.reject("a"), Promise.resolve("b")]).then(function(v){ console.log(v); })
+#expect
+b
+
+#name async function returns a promise
+#code
+async function f(){ return 1; } var p = f(); console.log(p instanceof Promise, typeof p.then); p.then(function(v){ console.log(v); })
+#expect
+true function
+1
+
+#name await suspends until later
+#code
+async function f(){ console.log(1); await null; console.log(3); } f(); console.log(2)
+#expect
+1
+2
+3
+
+#name sequential awaits
+#code
+function wait(v, ms){ return new Promise(function(r){ setTimeout(function(){ r(v); }, ms); }); } async function run(){ var a = await wait(1, 10); var b = await wait(2, 5); return a + b; } run().then(function(v){ console.log(v); })
+#expect
+3
+
+#name await in loop
+#code
+async function run(){ var out = []; for (var i = 0; i < 3; i++) { out.push(await Promise.resolve(i * 2)); } console.log(out.join()); } run()
+#expect
+0,2,4
+
+#name async error handling with try/catch/finally
+#code
+async function f(){ try { await Promise.reject(new Error("x")); return "no"; } catch (e) { return "caught " + e.message; } finally { console.log("fin"); } } f().then(function(v){ console.log(v); })
+#expect
+fin
+caught x
+
+#name rejection from async function
+#code
+async function f(){ throw new Error("thrown"); } f().catch(function(e){ console.log(e.message); })
+#expect
+thrown
+
+#name async arrow and method
+#code
+var o = { async m(){ return await 4; } }; var g = async (x) => x * 2; Promise.all([o.m(), g(3)]).then(function(v){ console.log(v.join()); })
+#expect
+4,6
+
+#name timers fire in delay order
+#code
+setTimeout(function(){ console.log("b"); }, 20); setTimeout(function(){ console.log("a"); }, 5); setTimeout(function(){ console.log("c"); }, 30)
+#expect
+a
+b
+c
+
+#name clearTimeout cancels
+#code
+var t = setTimeout(function(){ console.log("no"); }, 5); clearTimeout(t); setTimeout(function(){ console.log("done"); }, 15)
+#expect
+done
+
+#name setInterval with clearInterval
+#code
+var n = 0; var id = setInterval(function(){ n++; if (n === 3) { clearInterval(id); console.log(n); } }, 2)
+#expect
+3
+
+#name queueMicrotask ordering
+#code
+setTimeout(function(){ console.log(3); }, 0); queueMicrotask(function(){ console.log(2); }); console.log(1)
+#expect
+1
+2
+3
+
+#name promise resolved with thenable
+#code
+var th = { then: function(res){ res("from thenable"); } }; Promise.resolve(th).then(function(v){ console.log(v); })
+#expect
+from thenable
+
+#name multiple handlers on one promise
+#code
+var p = Promise.resolve("v"); var out = []; p.then(function(v){ out.push(v + 1); }); p.then(function(v){ out.push(v + 2); }); p.then(function(){ console.log(out.join()); })
+#expect
+v1,v2
+
+#name promisified callback API
+#code
+function legacy(x, cb){ setTimeout(function(){ cb(null, x * 2); }, 1); } function promisify(fn){ return function(x){ return new Promise(function(res, rej){ fn(x, function(err, v){ if (err) rej(err); else res(v); }); }); }; } promisify(legacy)(21).then(function(v){ console.log(v); })
+#expect
+42
+
+#name async iteration with for await
+#code
+async function* gen(){ yield 1; yield 2; } (async function(){ var s = 0; for await (var v of gen()) s += v; console.log(s); })()
+#expect
+3
+
+#name interleaving of two async functions
+#code
+var log = []; async function a(){ log.push("a1"); await null; log.push("a2"); } async function b(){ log.push("b1"); await null; log.push("b2"); } a(); b(); Promise.resolve().then(function(){ return null; }).then(function(){ console.log(log.join()); })
+#expect
+a1,b1,a2,b2

@@ -47,6 +47,10 @@ private:
     std::condition_variable m_cv;
     std::queue<std::string> m_incoming_messages;
 
+    /// The event loop of the page that created the worker. Messages and errors
+    /// from the worker are delivered there, on the page's thread.
+    class EventLoop* m_owner_loop{nullptr};
+
     JsValue m_onmessage{JsValue::make_undefined()};
     JsValue m_onerror{JsValue::make_undefined()};
     std::vector<JsValue> m_message_listeners;

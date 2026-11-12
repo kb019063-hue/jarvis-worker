@@ -1,0 +1,353 @@
+#name length and index
+#code
+var s = "hello"; console.log(s.length, s[0], s[s.length - 1], s[9])
+#expect
+5 h o undefined
+
+#name charAt out of range
+#code
+console.log("abc".charAt(1), "abc".charAt(9) === "", "abc".charCodeAt(9))
+#expect
+b true NaN
+
+#name fromCharCode and codePointAt
+#code
+console.log(String.fromCharCode(72, 105), "A".codePointAt(0), String.fromCodePoint(9731).length)
+#expect
+Hi 65 1
+
+#name indexOf with position and lastIndexOf
+#code
+console.log("banana".indexOf("a", 2), "banana".lastIndexOf("a"), "banana".indexOf("x"))
+#expect
+3 5 -1
+
+#name includes startsWith endsWith
+#code
+var s = "hello world"; console.log(s.includes("lo w"), s.startsWith("world", 6), s.endsWith("hello", 5), s.includes(""))
+#expect
+true true true true
+
+#name slice with negatives
+#code
+console.log("abcdef".slice(-3), "abcdef".slice(1, -1), "abcdef".slice(4, 2) === "")
+#expect
+def bcde true
+
+#name substring swaps and clamps
+#code
+console.log("abcdef".substring(4, 1), "abcdef".substring(-2, 2), "abcdef".substring(3))
+#expect
+bcd ab def
+
+#name substr
+#code
+console.log("abcdef".substr(1, 3), "abcdef".substr(-2))
+#expect
+bcd ef
+
+#name case conversion
+#code
+console.log("MiXed".toLowerCase(), "MiXed".toUpperCase())
+#expect
+mixed MIXED
+
+#name trim variants
+#code
+var s = "\t x y \n"; console.log("[" + s.trim() + "]", s.trimStart().length, s.trimEnd().length)
+#expect
+[x y] 5 5
+
+#name padStart and padEnd
+#code
+console.log("5".padStart(3, "0"), "ab".padEnd(5, "xy") + "|", "abc".padStart(2))
+#expect
+005 abxyx| abc
+
+#name repeat
+#code
+console.log("ab".repeat(3), "x".repeat(0) === "")
+#expect
+ababab true
+
+#name split with separator and limit
+#code
+console.log("a,b,,c".split(",").length, "a b c".split(" ", 2).join("|"), "abc".split("").join("-"), "abc".split().length)
+#expect
+4 a|b a-b-c 1
+
+#name split then join
+#code
+console.log("the quick brown".split(" ").map(function(w){ return w[0].toUpperCase() + w.slice(1); }).join(" "))
+#expect
+The Quick Brown
+
+#name replace first occurrence only
+#code
+console.log("a-b-c".replace("-", "+"))
+#expect
+a+b-c
+
+#name replaceAll
+#code
+console.log("a-b-c".replaceAll("-", "+"))
+#expect
+a+b+c
+
+#name replace with function
+#code
+console.log("a1b22".replace(/\d+/g, function(m){ return "<" + m.length + ">"; }))
+#expect
+a<1>b<2>
+
+#name replace with capture groups
+#code
+console.log("John Smith".replace(/(\w+)\s(\w+)/, "$2, $1"))
+#expect
+Smith, John
+
+#name match with global flag
+#code
+console.log("a1b22c333".match(/\d+/g).join())
+#expect
+1,22,333
+
+#name match without global returns groups
+#code
+var m = "x=12".match(/(\w)=(\d+)/); console.log(m[0], m[1], m[2], m.index)
+#expect
+x=12 x 12 0
+
+#name search
+#code
+console.log("hello".search(/l+/), "hello".search(/z/))
+#expect
+2 -1
+
+#name concat and plus
+#code
+console.log("a".concat("b", 1, null), "a" + "b" + 1)
+#expect
+ab1null ab1
+
+#name string comparison and localeCompare
+#code
+console.log("apple" < "banana", "a".localeCompare("b") < 0, "b".localeCompare("a") > 0, "a".localeCompare("a"))
+#expect
+true true true 0
+
+#name strings are immutable
+#code
+var s = "abc"; s[0] = "z"; s.length = 1; console.log(s, s.length)
+#expect
+abc 3
+
+#name template literal expressions
+#code
+var n = 3, o = {k: "v"}; console.log(`n=${n} sum=${n + 1} k=${o.k} ${n > 2 ? "big" : "small"}`)
+#expect
+n=3 sum=4 k=v big
+
+#name template literal with function call
+#code
+function up(s){ return s.toUpperCase(); } console.log(`${up("a")}${[1,2].map(function(x){ return x * 2; }).join("")}`)
+#expect
+A24
+
+#name number to string conversions
+#code
+console.log(String(1.50), (0.1).toFixed(2), (1234.5678).toFixed(1), (255).toString(2), (10).toString())
+#expect
+1.5 0.10 1234.6 11111111 10
+
+#name string to number conversions
+#code
+console.log(Number("42"), Number(""), Number(" 12 "), Number("12px"), Number("0x1f"), Number("1e3"), +"3.5")
+#expect
+42 0 12 NaN 31 1000 3.5
+
+#name parseInt variants
+#code
+console.log(parseInt("42"), parseInt("  7.9"), parseInt("0x1f"), parseInt("101", 2), parseInt("z", 36), parseInt("abc"), parseInt(""))
+#expect
+42 7 31 5 35 NaN NaN
+
+#name parseFloat variants
+#code
+console.log(parseFloat("3.14abc"), parseFloat(".5"), parseFloat("-1e2x"), parseFloat("x"))
+#expect
+3.14 0.5 -100 NaN
+
+#name String conversions of values
+#code
+console.log(String(null), String(undefined), String(true), String([1,2]), String({}), String(12.0))
+#expect
+null undefined true 1,2 [object Object] 12
+
+#name unicode length in UTF-16 units
+#code
+console.log("café".length, "日本".length, "😀".length)
+#expect
+4 2 2
+
+#name unicode iteration by code point
+#code
+console.log([..."a😀b"].length, Array.from("日本").join("|"))
+#expect
+3 日|本
+
+#name unicode case and index
+#code
+console.log("é".toUpperCase(), "straße".length, "日本語".charAt(1), "日本語".indexOf("語"))
+#expect
+É 6 本 2
+
+#name at with negative index
+#code
+console.log("abc".at(-1), "abc".at(0), "abc".at(9))
+#expect
+c a undefined
+
+#name escape sequences round trip
+#code
+var s = "a\"b\\c"; console.log(s.length, JSON.stringify(s))
+#expect
+5 "a\"b\\c"
+
+#name multiline split
+#code
+console.log("a\nb\r\nc".split(/\r?\n/).length)
+#expect
+3
+
+#name trim and split words
+#code
+console.log("  one   two  three ".trim().split(/\s+/).length)
+#expect
+3
+
+#name reverse a string
+#code
+console.log("hello".split("").reverse().join(""))
+#expect
+olleh
+
+#name count occurrences
+#code
+console.log("banana".split("a").length - 1, ("banana".match(/an/g) || []).length)
+#expect
+3 2
+
+#name capitalize
+#code
+var s = "word"; console.log(s.charAt(0).toUpperCase() + s.slice(1))
+#expect
+Word
+
+#name string includes is case sensitive
+#code
+console.log("Hello".includes("hello"), "Hello".toLowerCase().includes("hello"))
+#expect
+false true
+
+#name typeof string and String object
+#code
+console.log(typeof "a", typeof String("a"), typeof new String("a"), "a" === String("a"))
+#expect
+string string object true
+
+#name string methods on literals and numbers
+#code
+console.log("abc".length, (12).toString().length, 12..toString().length)
+#expect
+3 2 2
+
+#name String.raw
+#code
+console.log(String.raw`a\nb${1}`.length)
+#expect
+5
+
+#name tagged template
+#code
+function tag(s, a, b){ return s.raw.length + ":" + s[1] + a + b; } console.log(tag`x${1}y${2}z`)
+#expect
+3:y12
+
+#name localeCompare sort
+#code
+console.log(["b","a","c"].sort(function(x, y){ return x.localeCompare(y); }).join(""))
+#expect
+abc
+
+#name codePoint handling of surrogate pair
+#code
+var s = "😀"; console.log(s.codePointAt(0), s.charCodeAt(0), s.charCodeAt(1))
+#expect
+128512 55357 56832
+
+#name lastIndexOf and slice path helpers
+#code
+var p = "/a/b/file.txt"; console.log(p.slice(p.lastIndexOf("/") + 1), p.slice(p.lastIndexOf(".") + 1))
+#expect
+file.txt txt
+
+#name number formatting helpers
+#code
+console.log((5).toString().padStart(2, "0") + ":" + String(7).padStart(2, "0"), (1234567.891).toFixed(2))
+#expect
+05:07 1234567.89
+
+#name encodeURIComponent and decodeURIComponent
+#code
+console.log(encodeURIComponent("a b&c/d?e=é"), decodeURIComponent("%E2%9C%93%20ok"))
+#expect
+a%20b%26c%2Fd%3Fe%3D%C3%A9 ✓ ok
+
+#name encodeURI keeps reserved characters
+#code
+console.log(encodeURI("http://x.y/a b?q=1&r=é#h"))
+#expect
+http://x.y/a%20b?q=1&r=%C3%A9#h
+
+#name string comparison is by code unit
+#code
+console.log("a" > "B", "Z" < "a", "abc" < "abd", "" < "a")
+#expect
+true true true true
+
+#name isWellFormed-free normalization check
+#code
+console.log("abc".normalize() === "abc")
+#expect
+true
+
+#name split with regex capture
+#code
+console.log("1a2b3".split(/[ab]/).join(), "1a2".split(/(a)/).length)
+#expect
+1,2,3 3
+
+#name escape and unescape
+#code
+console.log(escape('a b+c/@*_-.'), escape('\u00e4\u20ac\ud83d\ude00'), escape(''), unescape('%u20AC%E4%20%zz%u12') === '\u20ac\u00e4 %zz%u12', unescape(escape('\u00fc \u00df \u6f22\u5b57')) === '\u00fc \u00df \u6f22\u5b57', escape(1.5), unescape('%41%u0042c'))
+#expect
+a%20b+c/@*_-. %E4%u20AC%uD83D%uDE00  true true 1.5 ABc
+
+#name String object exposes characters as properties
+#code
+var s = new String('abc'); console.log(s[1], s.length, Object.keys(s).join(), '1' in s, s.hasOwnProperty(2), s.hasOwnProperty(3), Object.getOwnPropertyNames(s).join(), s[5], typeof s)
+#expect
+b 3 0,1,2 true true false 0,1,2,length undefined object
+
+#name String object in for-in, entries and spread
+#code
+var s = new String('hi'), keys = []; for (var k in s) keys.push(k); s.extra = 1; console.log(keys.join(), JSON.stringify(Object.entries(new String('ab'))), JSON.stringify(Object.assign({}, new String('xy'))), JSON.stringify({ ...'ab' }), Object.keys(s).join(), Array.prototype.map.call(s, function (c) { return c.toUpperCase(); }).join(''))
+#expect
+0,1 [["0","a"],["1","b"]] {"0":"x","1":"y"} {"0":"a","1":"b"} 0,1,extra HI
+
+#name String object characters are read only
+#code
+var s = new String('abc'); s[0] = 'z'; s[7] = 'q'; s.length = 1; console.log(s[0], s[7], s.length, String(s), Object.keys(s).join(), delete s[0], s[0])
+#expect
+a q 3 abc 0,1,2,7 false a

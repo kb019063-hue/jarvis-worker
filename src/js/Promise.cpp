@@ -1,280 +1,495 @@
+// Promises (ECMA-262 27.2).
+//
+// A promise's state lives in a PromiseData shared between the script-visible
+// promise objects and the engine code that settles it. Reactions always run as
+// microtasks, in the order they were registered.
+
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
-#include <iostream>
+#include "litebird/common/ReleaseQueue.hpp"
+#include <algorithm>
+#include <mutex>
 
 namespace litebird {
 
-void Promise::resolve(const std::shared_ptr<PromiseData>& data, JsValue val) {
-    if (!data || data->state != PromiseState::Pending) return;
+// `p = p.then(f)` in a loop, on a promise that has not settled yet, links each
+// promise to the next through its reaction (PromiseHandler::next_promise, or
+// a native reaction that captured the promise it will settle). Releasing the
+// first one must not release the rest from inside its own destructor.
+PromiseData::~PromiseData() {
+    if (handlers.empty()) return;
+    using Queue = ReleaseQueue<std::vector<PromiseHandler>>;
+    if (Queue::busy()) {
+        Queue::defer(std::move(handlers));
+        return;
+    }
+    Queue::Drain drain;
+    handlers.clear();
+}
 
-    if (val.type == JsType::Object) {
-        JsValue then_fn = val.get_property("then");
-        if (then_fn.is_truthy()) {
-            JsValue on_ful = JsValue::make_native_function([data](const std::vector<JsValue>& args) {
-                JsValue inner_val = !args.empty() ? args[0] : JsValue::make_undefined();
-                Promise::resolve(data, inner_val);
-                return JsValue::make_undefined();
-            });
-            JsValue on_rej = JsValue::make_native_function([data](const std::vector<JsValue>& args) {
-                JsValue err = !args.empty() ? args[0] : JsValue::make_undefined();
-                Promise::reject(data, err);
-                return JsValue::make_undefined();
-            });
-            then_fn.call({on_ful, on_rej});
+namespace {
+
+using Args = const std::vector<JsValue>&;
+
+// ---------------------------------------------------------------------------
+// Collector support
+// ---------------------------------------------------------------------------
+//
+// A pending promise's reactions are closures over script values. The promise
+// itself may be reachable only from native code (a queued network request, a
+// suspended async function), which the collector cannot see, so every pending
+// promise that has reactions is listed here and its reactions are roots.
+
+struct PendingRegistry {
+    std::mutex mutex;
+    std::vector<std::weak_ptr<PromiseData>> entries;
+
+    PendingRegistry() {
+        Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>& roots) {
+            std::lock_guard<std::mutex> lock(mutex);
+            size_t kept = 0;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                auto data = entries[i].lock();
+                if (!data || data->state != PromiseState::Pending || data->handlers.empty()) continue;
+                for (auto& handler : data->handlers) {
+                    roots.push_back(&handler.on_fulfilled);
+                    roots.push_back(&handler.on_rejected);
+                    if (handler.keep_alive) {
+                        for (auto& value : *handler.keep_alive) roots.push_back(&value);
+                    }
+                }
+                entries[kept++] = entries[i];
+            }
+            entries.resize(kept);
+        });
+    }
+
+    void add(const std::shared_ptr<PromiseData>& data) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (entries.size() >= 256 && (entries.size() & (entries.size() - 1)) == 0) {
+            // Prune whenever the list doubles, so it stays proportional to the
+            // number of promises that are actually pending.
+            entries.erase(std::remove_if(entries.begin(), entries.end(), [](const std::weak_ptr<PromiseData>& weak) {
+                auto d = weak.lock();
+                return !d || d->state != PromiseState::Pending;
+            }), entries.end());
+        }
+        entries.push_back(data);
+    }
+};
+
+PendingRegistry& pending_registry() {
+    static PendingRegistry* registry = new PendingRegistry();   // outlives every static destructor
+    return *registry;
+}
+
+// ---------------------------------------------------------------------------
+// Settling and reactions
+// ---------------------------------------------------------------------------
+
+void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValue value);
+
+void run_reaction(const PromiseHandler& handler, bool rejected, const JsValue& value) {
+    if (handler.native) {
+        handler.native(rejected, value);
+        return;
+    }
+    const JsValue& callback = rejected ? handler.on_rejected : handler.on_fulfilled;
+    if (!callback.is_function()) {
+        // No callback for this outcome: it passes through to the derived promise.
+        if (handler.next_promise) settle(handler.next_promise, rejected ? PromiseState::Rejected : PromiseState::Fulfilled, value);
+        return;
+    }
+    JsValue result;
+    JsValue thrown;
+    if (js_capture_throw([&] { result = callback.call({value}); }, thrown)) {
+        Promise::resolve(handler.next_promise, result);
+    } else {
+        // What the callback threw becomes the rejection reason, as a value:
+        // `catch (e)` further down the chain sees the same object.
+        Promise::reject(handler.next_promise, thrown);
+    }
+}
+
+void queue_reaction(PromiseHandler handler, bool rejected, const JsValue& value) {
+    std::vector<JsRootSet> roots;
+    roots.push_back(js_roots({handler.on_fulfilled, handler.on_rejected, value}));
+    if (handler.keep_alive) roots.push_back(handler.keep_alive);
+    EventLoop::default_loop().post_microtask(
+        [handler = std::move(handler), rejected, value]() { run_reaction(handler, rejected, value); },
+        std::move(roots));
+}
+
+void add_reaction(const std::shared_ptr<PromiseData>& data, PromiseHandler handler) {
+    data->handled = true;
+    if (data->state == PromiseState::Pending) {
+        const bool first = data->handlers.empty();
+        data->handlers.push_back(std::move(handler));
+        if (first) pending_registry().add(data);
+    } else {
+        queue_reaction(std::move(handler), data->state == PromiseState::Rejected, data->result);
+    }
+}
+
+void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValue value) {
+    if (!data || data->state != PromiseState::Pending) return;
+    data->state = state;
+    data->result = std::move(value);
+    data->locked = false;
+
+    auto handlers = std::move(data->handlers);
+    data->handlers.clear();
+    for (auto& handler : handlers) {
+        queue_reaction(std::move(handler), state == PromiseState::Rejected, data->result);
+    }
+
+    if (state == PromiseState::Rejected && !data->handled) {
+        // Nothing is listening yet. Give the script until the end of the
+        // current task to attach a handler, then report it: a rejection that
+        // vanishes silently is the hardest kind of bug to find.
+        EventLoop::default_loop().post_task([data]() {
+            if (!data->handled) js_report_unhandled_rejection(data->result);
+        }, {js_roots({data->result})});
+    }
+}
+
+JsValue arg_or_undefined(Args args, size_t index) {
+    return index < args.size() ? args[index] : JsValue::make_undefined();
+}
+
+std::shared_ptr<PromiseData> this_promise(const char* method) {
+    JsValue me = JsValue::current_this();
+    auto data = me.promise_value();
+    if (!data) {
+        js_throw_type_error(std::string("Method Promise.prototype.") + method +
+                            " called on incompatible receiver " + js_describe_thrown(me));
+    }
+    return data;
+}
+
+/// The pair of functions handed to an executor or a thenable. Only the first
+/// call to either has any effect.
+std::pair<JsValue, JsValue> make_resolving_functions(const std::shared_ptr<PromiseData>& data) {
+    auto called = std::make_shared<bool>(false);
+    JsValue resolve_fn = js_make_native("resolve", 1, [data, called](Args args) {
+        if (*called) return JsValue::make_undefined();
+        *called = true;
+        data->locked = false;
+        Promise::resolve(data, arg_or_undefined(args, 0));
+        return JsValue::make_undefined();
+    });
+    JsValue reject_fn = js_make_native("reject", 1, [data, called](Args args) {
+        if (*called) return JsValue::make_undefined();
+        *called = true;
+        data->locked = false;
+        settle(data, PromiseState::Rejected, arg_or_undefined(args, 0));
+        return JsValue::make_undefined();
+    });
+    return {resolve_fn, reject_fn};
+}
+
+/// Shared by all(), allSettled() and any(): walks the iterable, subscribing to
+/// each element, and settles `result` through `on_item`.
+template <typename OnItem, typename OnEmpty>
+JsValue combine(Args args, OnItem on_item, OnEmpty on_done) {
+    auto result = std::make_shared<PromiseData>();
+    auto values = std::make_shared<std::vector<JsValue>>();
+    // Starts at 1 so the combinator cannot finish while elements are still
+    // being collected.
+    auto remaining = std::make_shared<size_t>(1);
+
+    JsValue thrown;
+    const bool ok = js_capture_throw([&] {
+        size_t index = 0;
+        js_iterate(js_arg(args, 0), [&](const JsValue& item) {
+            const size_t i = index++;
+            values->push_back(JsValue::make_undefined());
+            ++*remaining;
+            Promise::subscribe(Promise::to_promise(item),
+                [result, values, remaining, i, on_item, on_done](bool rejected, const JsValue& value) {
+                    if (result->state != PromiseState::Pending) return;
+                    if (!on_item(result, *values, i, rejected, value)) return;
+                    if (--*remaining == 0) on_done(result, *values);
+                }, values);
+            return true;
+        });
+    }, thrown);
+    if (!ok) {
+        settle(result, PromiseState::Rejected, thrown);
+    } else if (--*remaining == 0) {
+        on_done(result, *values);
+    }
+    return Promise::create_promise_instance(result);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void Promise::resolve(const std::shared_ptr<PromiseData>& data, JsValue val) {
+    if (!data || data->state != PromiseState::Pending || data->locked) return;
+
+    if (val.is_object_like()) {
+        if (val.promise_value() == data) {
+            settle(data, PromiseState::Rejected,
+                   js_make_error(JsErrorKind::TypeError, "Chaining cycle detected for promise"));
+            return;
+        }
+        JsValue then_fn;
+        JsValue thrown;
+        if (!js_capture_throw([&] { then_fn = val.get_property("then"); }, thrown)) {
+            settle(data, PromiseState::Rejected, thrown);
+            return;
+        }
+        if (then_fn.is_function()) {
+            // Adopt the thenable's eventual state. Its then() is called from a
+            // microtask, never synchronously, so a misbehaving thenable cannot
+            // run code in the middle of whoever is resolving this promise.
+            data->locked = true;
+            EventLoop::default_loop().post_microtask([data, val, then_fn]() {
+                auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+                JsValue error;
+                if (!js_capture_throw([&] { then_fn.call_with_this(val, {resolve_fn, reject_fn}); }, error)) {
+                    // Only counts if the thenable had not already settled us.
+                    reject_fn.call({error});
+                }
+            }, {js_roots({val, then_fn})});
             return;
         }
     }
-
-    data->state = PromiseState::Fulfilled;
-    data->result = std::move(val);
-
-    auto handlers = std::move(data->handlers);
-    data->handlers.clear();
-
-    for (const auto& h : handlers) {
-        JsValue on_fulfilled = h.on_fulfilled;
-        JsValue cur_res = data->result;
-        auto next = h.next_promise;
-
-        EventLoop::default_loop().post_microtask([on_fulfilled, cur_res, next]() {
-            if (on_fulfilled.type == JsType::Function || on_fulfilled.type == JsType::NativeFunction) {
-                try {
-                    JsValue r = on_fulfilled.call({cur_res});
-                    if (next) {
-                        Promise::resolve(next, r);
-                    }
-                } catch (const std::exception& ex) {
-                    if (next) {
-                        Promise::reject(next, JsValue::make_string(ex.what()));
-                    }
-                }
-            } else {
-                if (next) {
-                    Promise::resolve(next, cur_res);
-                }
-            }
-        });
-    }
+    settle(data, PromiseState::Fulfilled, std::move(val));
 }
 
 void Promise::reject(const std::shared_ptr<PromiseData>& data, JsValue reason) {
-    if (!data || data->state != PromiseState::Pending) return;
+    if (!data || data->state != PromiseState::Pending || data->locked) return;
+    settle(data, PromiseState::Rejected, std::move(reason));
+}
 
-    data->state = PromiseState::Rejected;
-    data->result = std::move(reason);
+std::shared_ptr<PromiseData> Promise::to_promise(const JsValue& value) {
+    if (auto data = value.promise_value()) return data;
+    auto data = std::make_shared<PromiseData>();
+    resolve(data, value);
+    return data;
+}
 
-    auto handlers = std::move(data->handlers);
-    data->handlers.clear();
+std::shared_ptr<PromiseData> Promise::then(const std::shared_ptr<PromiseData>& data,
+                                           JsValue on_fulfilled, JsValue on_rejected) {
+    auto next = std::make_shared<PromiseData>();
+    PromiseHandler handler;
+    handler.on_fulfilled = std::move(on_fulfilled);
+    handler.on_rejected = std::move(on_rejected);
+    handler.next_promise = next;
+    add_reaction(data, std::move(handler));
+    return next;
+}
 
-    for (const auto& h : handlers) {
-        JsValue on_rejected = h.on_rejected;
-        JsValue cur_res = data->result;
-        auto next = h.next_promise;
-
-        EventLoop::default_loop().post_microtask([on_rejected, cur_res, next]() {
-            if (on_rejected.type == JsType::Function || on_rejected.type == JsType::NativeFunction) {
-                try {
-                    JsValue r = on_rejected.call({cur_res});
-                    if (next) {
-                        Promise::resolve(next, r);
-                    }
-                } catch (const std::exception& ex) {
-                    if (next) {
-                        Promise::reject(next, JsValue::make_string(ex.what()));
-                    }
-                }
-            } else {
-                if (next) {
-                    Promise::reject(next, cur_res);
-                }
-            }
-        });
-    }
+void Promise::subscribe(const std::shared_ptr<PromiseData>& data,
+                        std::function<void(bool rejected, const JsValue& value)> reaction,
+                        JsRootSet keep_alive) {
+    PromiseHandler handler;
+    handler.native = std::move(reaction);
+    handler.keep_alive = std::move(keep_alive);
+    add_reaction(data, std::move(handler));
 }
 
 JsValue Promise::create_promise_instance(std::shared_ptr<PromiseData> data) {
-    JsValue p = JsValue::make_object();
-    p.set_promise_value(data);
-    p.set_property("__is_promise__", JsValue::make_boolean(true));
-
-    p.set_property("then", JsValue::make_native_function([data](const std::vector<JsValue>& args) {
-        auto next_data = std::make_shared<PromiseData>();
-        JsValue on_fulfilled = !args.empty() ? args[0] : JsValue::make_undefined();
-        JsValue on_rejected = args.size() > 1 ? args[1] : JsValue::make_undefined();
-
-        if (data->state == PromiseState::Pending) {
-            data->handlers.push_back({on_fulfilled, on_rejected, next_data});
-        } else if (data->state == PromiseState::Fulfilled) {
-            JsValue cur_res = data->result;
-            EventLoop::default_loop().post_microtask([on_fulfilled, cur_res, next_data]() {
-                if (on_fulfilled.type == JsType::Function || on_fulfilled.type == JsType::NativeFunction) {
-                    try {
-                        JsValue r = on_fulfilled.call({cur_res});
-                        Promise::resolve(next_data, r);
-                    } catch (const std::exception& ex) {
-                        Promise::reject(next_data, JsValue::make_string(ex.what()));
-                    }
-                } else {
-                    Promise::resolve(next_data, cur_res);
-                }
-            });
-        } else if (data->state == PromiseState::Rejected) {
-            JsValue cur_res = data->result;
-            EventLoop::default_loop().post_microtask([on_rejected, cur_res, next_data]() {
-                if (on_rejected.type == JsType::Function || on_rejected.type == JsType::NativeFunction) {
-                    try {
-                        JsValue r = on_rejected.call({cur_res});
-                        Promise::resolve(next_data, r);
-                    } catch (const std::exception& ex) {
-                        Promise::reject(next_data, JsValue::make_string(ex.what()));
-                    }
-                } else {
-                    Promise::reject(next_data, cur_res);
-                }
-            });
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = JsIntrinsics::get().promise_proto;
+    cell->klass = ObjectClass::Promise;
+    // The promise's state lives outside the cell; whoever can reach the
+    // promise can reach its result and its reactions.
+    cell->trace_extra = [data](Heap& heap) {
+        // This capture and the promise value's payload are the two owners a
+        // promise has when only script refers to it. Any more and native code
+        // (a resolver handed to a timer, a suspended async function) can settle
+        // it after the object is gone, so its reactions must not be counted as
+        // belonging to this cell: they stay roots.
+        if (heap.counting() && data.use_count() > 2) return;
+        if (!heap.first_visit(data.get())) return;
+        heap.mark_value(data->result);
+        for (const auto& handler : data->handlers) {
+            heap.mark_value(handler.on_fulfilled);
+            heap.mark_value(handler.on_rejected);
+            if (handler.keep_alive) {
+                for (const auto& kept : *handler.keep_alive) heap.mark_value(kept);
+            }
         }
-
-        return Promise::create_promise_instance(next_data);
-    }));
-
-    p.set_property("catch", JsValue::make_native_function([data](const std::vector<JsValue>& args) {
-        auto next_data = std::make_shared<PromiseData>();
-        JsValue on_rejected = !args.empty() ? args[0] : JsValue::make_undefined();
-
-        if (data->state == PromiseState::Pending) {
-            data->handlers.push_back({JsValue::make_undefined(), on_rejected, next_data});
-        } else if (data->state == PromiseState::Fulfilled) {
-            JsValue cur_res = data->result;
-            EventLoop::default_loop().post_microtask([cur_res, next_data]() {
-                Promise::resolve(next_data, cur_res);
-            });
-        } else if (data->state == PromiseState::Rejected) {
-            JsValue cur_res = data->result;
-            EventLoop::default_loop().post_microtask([on_rejected, cur_res, next_data]() {
-                if (on_rejected.type == JsType::Function || on_rejected.type == JsType::NativeFunction) {
-                    try {
-                        JsValue r = on_rejected.call({cur_res});
-                        Promise::resolve(next_data, r);
-                    } catch (const std::exception& ex) {
-                        Promise::reject(next_data, JsValue::make_string(ex.what()));
-                    }
-                } else {
-                    Promise::reject(next_data, cur_res);
-                }
-            });
-        }
-
-        return Promise::create_promise_instance(next_data);
-    }));
-
-    return p;
+    };
+    JsValue promise = JsValue::make_object(cell);
+    promise.set_promise_value(std::move(data));
+    return promise;
 }
 
 JsValue Promise::make_resolved(JsValue val) {
     auto data = std::make_shared<PromiseData>();
-    data->state = PromiseState::Fulfilled;
-    data->result = std::move(val);
+    resolve(data, std::move(val));
     return create_promise_instance(data);
 }
 
 JsValue Promise::make_rejected(JsValue reason) {
     auto data = std::make_shared<PromiseData>();
-    data->state = PromiseState::Rejected;
-    data->result = std::move(reason);
+    settle(data, PromiseState::Rejected, std::move(reason));
     return create_promise_instance(data);
 }
 
 JsValue Promise::create_constructor() {
-    JsValue ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        auto data = std::make_shared<PromiseData>();
-        JsValue p = Promise::create_promise_instance(data);
+    const JsValue* ctor = JsIntrinsics::get().find_global("Promise");
+    return ctor ? *ctor : JsValue::make_undefined();
+}
 
-        if (!args.empty() && (args[0].type == JsType::Function || args[0].type == JsType::NativeFunction)) {
-            JsValue executor = args[0];
+// ---------------------------------------------------------------------------
+// The Promise object
+// ---------------------------------------------------------------------------
 
-            JsValue resolve_fn = JsValue::make_native_function([data](const std::vector<JsValue>& r_args) {
-                JsValue val = !r_args.empty() ? r_args[0] : JsValue::make_undefined();
-                Promise::resolve(data, val);
-                return JsValue::make_undefined();
-            });
+void install_promise_builtins(JsIntrinsics& realm) {
+    JsObject* pp = realm.promise_proto;
 
-            JsValue reject_fn = JsValue::make_native_function([data](const std::vector<JsValue>& r_args) {
-                JsValue reason = !r_args.empty() ? r_args[0] : JsValue::make_undefined();
-                Promise::reject(data, reason);
-                return JsValue::make_undefined();
-            });
-
-            try {
-                executor.call({resolve_fn, reject_fn});
-            } catch (const std::exception& ex) {
-                Promise::reject(data, JsValue::make_string(ex.what()));
-            }
+    JsValue ctor = js_make_native("Promise", 1, [](Args args) {
+        if (!JsValue::current_is_construct()) {
+            js_throw_type_error("Promise constructor cannot be invoked without 'new'");
         }
-        return p;
+        const JsValue executor = js_arg(args, 0);
+        if (!executor.is_function()) {
+            js_throw_type_error("Promise resolver " + js_describe_thrown(executor) + " is not a function");
+        }
+        auto data = std::make_shared<PromiseData>();
+        JsValue promise = Promise::create_promise_instance(data);
+        auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+        JsValue thrown;
+        // The executor runs synchronously; if it throws, the promise rejects.
+        if (!js_capture_throw([&] { executor.call({resolve_fn, reject_fn}); }, thrown)) {
+            reject_fn.call({thrown});
+        }
+        return promise;
+    });
+    ctor.define_property("prototype", js_object_value(pp), 0);
+    js_define_hidden(pp, "constructor", ctor);
+    js_define_hidden(pp, "@@toStringTag", JsValue::make_string("Promise"));
+
+    // ---- Promise.prototype ------------------------------------------------
+    js_define_method(pp, "then", 2, [](Args args) {
+        auto data = this_promise("then");
+        return Promise::create_promise_instance(Promise::then(data, js_arg(args, 0), js_arg(args, 1)));
+    });
+    js_define_method(pp, "catch", 1, [](Args args) {
+        auto data = this_promise("catch");
+        return Promise::create_promise_instance(Promise::then(data, JsValue::make_undefined(), js_arg(args, 0)));
+    });
+    js_define_method(pp, "finally", 1, [](Args args) {
+        auto data = this_promise("finally");
+        const JsValue callback = js_arg(args, 0);
+        if (!callback.is_function()) {
+            return Promise::create_promise_instance(Promise::then(data, callback, callback));
+        }
+        // The callback's return value is ignored (unless it is a rejected
+        // promise or it throws); the original outcome passes through.
+        auto next = std::make_shared<PromiseData>();
+        Promise::subscribe(data, [next, callback](bool rejected, const JsValue& value) {
+            JsValue returned;
+            JsValue thrown;
+            if (!js_capture_throw([&] { returned = callback.call({}); }, thrown)) {
+                Promise::reject(next, thrown);
+                return;
+            }
+            Promise::subscribe(Promise::to_promise(returned), [next, rejected, value](bool inner_rejected, const JsValue& inner) {
+                if (inner_rejected) Promise::reject(next, inner);
+                else if (rejected) Promise::reject(next, value);
+                else Promise::resolve(next, value);
+            }, js_roots({value}));
+        }, js_roots({callback}));
+        return Promise::create_promise_instance(next);
     });
 
-    ctor.set_property("resolve", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        JsValue val = !args.empty() ? args[0] : JsValue::make_undefined();
-        return Promise::make_resolved(val);
-    }));
+    // ---- Static methods ---------------------------------------------------
+    js_define_method(ctor, "resolve", 1, [](Args args) {
+        const JsValue& value = js_arg(args, 0);
+        if (value.promise_value()) return value;        // already a promise: returned as is
+        return Promise::make_resolved(value);
+    });
+    js_define_method(ctor, "reject", 1, [](Args args) {
+        return Promise::make_rejected(js_arg(args, 0));
+    });
+    js_define_method(ctor, "withResolvers", 0, [](Args) {
+        auto data = std::make_shared<PromiseData>();
+        auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+        JsValue result = JsValue::make_object();
+        result.set_property("promise", Promise::create_promise_instance(data));
+        result.set_property("resolve", resolve_fn);
+        result.set_property("reject", reject_fn);
+        return result;
+    });
 
-    ctor.set_property("reject", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        JsValue reason = !args.empty() ? args[0] : JsValue::make_undefined();
-        return Promise::make_rejected(reason);
-    }));
+    js_define_method(ctor, "all", 1, [](Args args) {
+        return combine(args,
+            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values, size_t i,
+               bool rejected, const JsValue& value) {
+                if (rejected) {
+                    Promise::reject(result, value);     // the first rejection wins
+                    return false;
+                }
+                values[i] = value;
+                return true;
+            },
+            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values) {
+                Promise::resolve(result, JsValue::make_array(values));
+            });
+    });
 
-    ctor.set_property("all", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty() || !args[0].is_array()) {
-            return Promise::make_resolved(JsValue::make_array({}));
-        }
+    js_define_method(ctor, "allSettled", 1, [](Args args) {
+        return combine(args,
+            [](const std::shared_ptr<PromiseData>&, std::vector<JsValue>& values, size_t i,
+               bool rejected, const JsValue& value) {
+                JsValue entry = JsValue::make_object();
+                entry.set_property("status", JsValue::make_string(rejected ? "rejected" : "fulfilled"));
+                entry.set_property(rejected ? "reason" : "value", value);
+                values[i] = entry;
+                return true;
+            },
+            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values) {
+                Promise::resolve(result, JsValue::make_array(values));
+            });
+    });
 
-        const auto& list = args[0].object_val->array_elements;
-        size_t total = list.size();
-        if (total == 0) {
-            return Promise::make_resolved(JsValue::make_array({}));
-        }
+    js_define_method(ctor, "any", 1, [](Args args) {
+        return combine(args,
+            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values, size_t i,
+               bool rejected, const JsValue& value) {
+                if (!rejected) {
+                    Promise::resolve(result, value);    // the first fulfilment wins
+                    return false;
+                }
+                values[i] = value;
+                return true;
+            },
+            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values) {
+                JsValue error = js_make_error(JsErrorKind::Error, "All promises were rejected");
+                error.define_property("name", JsValue::make_string("AggregateError"), PropertyMap::Hidden);
+                error.define_property("errors", JsValue::make_array(values), PropertyMap::Hidden);
+                Promise::reject(result, error);
+            });
+    });
 
-        auto all_data = std::make_shared<PromiseData>();
-        auto results = std::make_shared<std::vector<JsValue>>(total, JsValue::make_undefined());
-        auto remaining = std::make_shared<size_t>(total);
-
-        for (size_t i = 0; i < total; ++i) {
-            JsValue item = list[i];
-            JsValue item_promise;
-
-            // If item has a .then method, wrap or use it
-            if (item.type == JsType::Object && item.get_property("then").is_truthy()) {
-                item_promise = item;
-            } else {
-                item_promise = Promise::make_resolved(item);
-            }
-
-            JsValue then_fn = item_promise.get_property("then");
-            if (then_fn.is_truthy()) {
-                JsValue on_ful = JsValue::make_native_function([i, results, remaining, all_data](const std::vector<JsValue>& res_args) {
-                    (*results)[i] = !res_args.empty() ? res_args[0] : JsValue::make_undefined();
-                    (*remaining)--;
-                    if (*remaining == 0) {
-                        Promise::resolve(all_data, JsValue::make_array(*results));
-                    }
-                    return JsValue::make_undefined();
+    js_define_method(ctor, "race", 1, [](Args args) {
+        auto result = std::make_shared<PromiseData>();
+        JsValue thrown;
+        const bool ok = js_capture_throw([&] {
+            js_iterate(js_arg(args, 0), [&](const JsValue& item) {
+                Promise::subscribe(Promise::to_promise(item), [result](bool rejected, const JsValue& value) {
+                    if (rejected) Promise::reject(result, value);
+                    else Promise::resolve(result, value);
                 });
+                return true;
+            });
+        }, thrown);
+        if (!ok) Promise::reject(result, thrown);
+        return Promise::create_promise_instance(result);
+    });
 
-                JsValue on_rej = JsValue::make_native_function([all_data](const std::vector<JsValue>& err_args) {
-                    JsValue err = !err_args.empty() ? err_args[0] : JsValue::make_undefined();
-                    Promise::reject(all_data, err);
-                    return JsValue::make_undefined();
-                });
-
-                then_fn.call({on_ful, on_rej});
-            }
-        }
-
-        return Promise::create_promise_instance(all_data);
-    }));
-
-    return ctor;
+    realm.add_global("Promise", ctor);
 }
 
 } // namespace litebird

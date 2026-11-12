@@ -1,0 +1,142 @@
+#name stringify primitives
+#code
+console.log(JSON.stringify(1), JSON.stringify("a"), JSON.stringify(true), JSON.stringify(null))
+#expect
+1 "a" true null
+
+#name stringify nested
+#code
+console.log(JSON.stringify({a: 1, b: [1, "x", {c: null}], d: {e: false}}))
+#expect
+{"a":1,"b":[1,"x",{"c":null}],"d":{"e":false}}
+
+#name stringify skips undefined and functions
+#code
+console.log(JSON.stringify({a: undefined, b: function(){}, c: 1}), JSON.stringify([undefined, function(){}]))
+#expect
+{"c":1} [null,null]
+
+#name stringify special numbers
+#code
+console.log(JSON.stringify({n: NaN, i: Infinity, z: -0}), JSON.stringify(undefined))
+#expect
+{"n":null,"i":null,"z":0} undefined
+
+#name stringify string escapes
+#code
+console.log(JSON.stringify("a\"b\\c\n\t\u0001"))
+#expect
+"a\"b\\c\n\t\u0001"
+
+#name stringify with indentation
+#code
+console.log(JSON.stringify({a: 1, b: [1, 2]}, null, 2))
+#expect
+{
+  "a": 1,
+  "b": [
+    1,
+    2
+  ]
+}
+
+#name stringify with string indent
+#code
+console.log(JSON.stringify([1, {a: 2}], null, "--"))
+#expect
+[
+--1,
+--{
+----"a": 2
+--}
+]
+
+#name stringify with replacer array
+#code
+console.log(JSON.stringify({a: 1, b: 2, c: {a: 3, d: 4}}, ["a", "c"]))
+#expect
+{"a":1,"c":{"a":3}}
+
+#name stringify with replacer function
+#code
+console.log(JSON.stringify({a: 1, b: "x", c: 3}, function(k, v){ return typeof v === "number" ? v * 2 : v; }))
+#expect
+{"a":2,"b":"x","c":6}
+
+#name stringify uses toJSON
+#code
+console.log(JSON.stringify({d: {toJSON: function(){ return "custom"; }}}))
+#expect
+{"d":"custom"}
+
+#name stringify key order with integer keys
+#code
+console.log(JSON.stringify({b: 1, 2: 1, a: 1, 1: 1}))
+#expect
+{"1":1,"2":1,"b":1,"a":1}
+
+#name stringify empty containers
+#code
+console.log(JSON.stringify({}), JSON.stringify([]), JSON.stringify({a: {}, b: []}), JSON.stringify([], null, 2))
+#expect
+{} [] {"a":{},"b":[]} []
+
+#name stringify unicode
+#code
+console.log(JSON.stringify("é日"), JSON.stringify({"é": 1}))
+#expect
+"é日" {"é":1}
+
+#name parse primitives
+#code
+console.log(JSON.parse("1"), JSON.parse("\"s\""), JSON.parse("true"), JSON.parse("null"), JSON.parse(" [1, 2] ").length)
+#expect
+1 s true null 2
+
+#name parse nested
+#code
+var o = JSON.parse('{"a": {"b": [1, 2, {"c": "d"}]}, "e": -1.5e2}'); console.log(o.a.b[2].c, o.e, o.a.b.length)
+#expect
+d -150 3
+
+#name parse string escapes
+#code
+var s = JSON.parse('"a\\n\\u00e9\\"\\\\"'); console.log(s.length, s.charCodeAt(1), s.charCodeAt(2))
+#expect
+5 10 233
+
+#name parse with reviver
+#code
+var o = JSON.parse('{"a": 1, "b": {"c": 2}}', function(k, v){ return typeof v === "number" ? v + 1 : v; }); console.log(o.a, o.b.c)
+#expect
+2 3
+
+#name parse error is SyntaxError
+#code
+try { JSON.parse("{bad"); } catch (e) { console.log(e instanceof SyntaxError, e.name); }
+#expect
+true SyntaxError
+
+#name parse rejects trailing comma and single quotes
+#code
+var n = 0; ["[1,]", "{'a':1}", "", "01", "undefined"].forEach(function(s){ try { JSON.parse(s); } catch (e) { n++; } }); console.log(n)
+#expect
+5
+
+#name round trip preserves types
+#code
+var v = JSON.parse(JSON.stringify({n: 1.5, s: "x", b: false, z: null, a: [1, [2]], o: {}})); console.log(typeof v.n, typeof v.s, typeof v.b, v.z, Array.isArray(v.a[1]), typeof v.o)
+#expect
+number string boolean null true object
+
+#name deep clone via JSON
+#code
+var a = {x: [1, 2, {y: 3}]}; var b = JSON.parse(JSON.stringify(a)); b.x[2].y = 9; console.log(a.x[2].y, b.x[2].y)
+#expect
+3 9
+
+#name stringify Date and nested toJSON
+#code
+console.log(JSON.stringify({t: new Date(0)}), JSON.stringify(new Date(86400000)))
+#expect
+{"t":"1970-01-01T00:00:00.000Z"} "1970-01-02T00:00:00.000Z"

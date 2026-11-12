@@ -1,0 +1,217 @@
+#name if / else if / else
+#code
+function g(n){ if (n < 0) return "neg"; else if (n === 0) return "zero"; else return "pos"; } console.log(g(-1), g(0), g(1))
+#expect
+neg zero pos
+
+#name classic for loop sum
+#code
+var s = 0; for (var i = 1; i <= 10; i++) s += i; console.log(s)
+#expect
+55
+
+#name for with two variables
+#code
+var out = []; for (var i = 0, j = 5; i < j; i++, j--) out.push(i + ":" + j); console.log(out.join(" "))
+#expect
+0:5 1:4 2:3
+
+#name for with empty clauses
+#code
+var i = 0; for (;;) { if (++i > 3) break; } console.log(i)
+#expect
+4
+
+#name for without init
+#code
+var i = 5; for (; i > 0; i -= 2) {} console.log(i)
+#expect
+-1
+
+#name continue
+#code
+var s = 0; for (var i = 0; i < 6; i++) { if (i % 2) continue; s += i; } console.log(s)
+#expect
+6
+
+#name continue in while
+#code
+var i = 0, s = 0; while (i < 5) { i++; if (i === 3) continue; s += i; } console.log(s)
+#expect
+12
+
+#name nested loops with break
+#code
+var c = 0; for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (j === 2) break; c++; } } console.log(c)
+#expect
+6
+
+#name labelled break
+#code
+var c = 0; outer: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { if (i === 1) break outer; c++; } } console.log(c)
+#expect
+3
+
+#name do-while runs once
+#code
+var n = 0; do { n++; } while (false); console.log(n)
+#expect
+1
+
+#name for-in order with integer keys
+#code
+var o = {b:1, 2:1, a:1, 1:1}; var k = []; for (var p in o) k.push(p); console.log(k.join(","))
+#expect
+1,2,b,a
+
+#name for-in over array indices
+#code
+var k = []; for (var i in ["x","y"]) k.push(typeof i + i); console.log(k.join(","))
+#expect
+string0,string1
+
+#name for-in skips builtin methods
+#code
+var n = 0; for (var k in {}) n++; for (var j in []) n++; for (var m in "") n++; console.log(n)
+#expect
+0
+
+#name for-in includes inherited enumerable
+#code
+function A(){ this.own = 1; } A.prototype.inh = 2; var k = []; for (var p in new A()) k.push(p); console.log(k.join(","))
+#expect
+own,inh
+
+#name for-of over string
+#code
+var out = ""; for (var ch of "abc") out = ch + out; console.log(out)
+#expect
+cba
+
+#name for-of with destructuring
+#code
+var s = 0; for (var [a, b] of [[1,2],[3,4]]) s += a * b; console.log(s)
+#expect
+14
+
+#name for-of with break
+#code
+var s = 0; for (var v of [1,2,3,4]) { if (v > 2) break; s += v; } console.log(s)
+#expect
+3
+
+#name let per-iteration binding
+#code
+var fs = []; for (let i = 0; i < 3; i++) fs.push(function(){ return i; }); console.log(fs.map(function(f){ return f(); }).join(""))
+#expect
+012
+
+#name var shared across iterations
+#code
+var fs = []; for (var i = 0; i < 3; i++) fs.push(function(){ return i; }); console.log(fs.map(function(f){ return f(); }).join(""))
+#expect
+333
+
+#name switch with strings and default
+#code
+function f(x){ switch (x) { case "a": return 1; case "b": return 2; default: return 0; } } console.log(f("a"), f("b"), f("c"))
+#expect
+1 2 0
+
+#name switch default in the middle
+#code
+function f(x){ var r = ""; switch (x) { case 1: r += "1"; default: r += "d"; case 2: r += "2"; } return r; } console.log(f(1), f(2), f(3))
+#expect
+1d2 2 d2
+
+#name switch uses strict equality
+#code
+var r = "none"; switch ("1") { case 1: r = "num"; break; case "1": r = "str"; break; } console.log(r)
+#expect
+str
+
+#name break inside switch inside loop
+#code
+var n = 0; for (var i = 0; i < 3; i++) { switch (i) { case 1: break; default: n++; } } console.log(n)
+#expect
+2
+
+#name try/catch/finally order
+#code
+var log = []; try { log.push("t"); throw 1; } catch (e) { log.push("c" + e); } finally { log.push("f"); } console.log(log.join(""))
+#expect
+tc1f
+
+#name finally runs on return
+#code
+function f(){ try { return "t"; } finally { console.log("f"); } } console.log(f())
+#expect
+f
+t
+
+#name finally return overrides
+#code
+function f(){ try { return 1; } finally { return 2; } } console.log(f())
+#expect
+2
+
+#name throw non-error values
+#code
+try { throw "str"; } catch (e) { console.log(typeof e, e); } try { throw {code: 7}; } catch (e) { console.log(e.code); }
+#expect
+string str
+7
+
+#name error propagates through calls
+#code
+function a(){ throw new Error("deep"); } function b(){ a(); } try { b(); } catch (e) { console.log(e.message); }
+#expect
+deep
+
+#name nested try rethrow
+#code
+try { try { throw new Error("in"); } catch (e) { throw new Error("out:" + e.message); } } catch (e) { console.log(e.message); }
+#expect
+out:in
+
+#name catch without binding
+#code
+try { throw 1; } catch { console.log("caught"); }
+#expect
+caught
+
+#name code after throw does not run
+#code
+var n = 0; try { n = 1; throw 0; n = 2; } catch (e) {} console.log(n)
+#expect
+1
+
+#name try/finally without catch
+#code
+var n = 0; try { try { throw 1; } finally { n = 5; } } catch (e) { n += e; } console.log(n)
+#expect
+6
+
+#name block scoping of let and const
+#code
+var x = "outer"; { let x = "inner"; const y = 1; } if (true) { var z = "hoisted"; } console.log(x, z, typeof y)
+#expect
+outer hoisted undefined
+
+#name var hoisting
+#code
+console.log(typeof h, h); var h = 1;
+#expect
+undefined undefined
+
+#name function declaration hoisting
+#code
+console.log(hoisted()); function hoisted(){ return "ok"; }
+#expect
+ok
+
+#name early return in loop
+#code
+function first(a, p){ for (var i = 0; i < a.length; i++) { if (p(a[i])) return a[i]; } return -1; } console.log(first([1,4,9], function(x){ return x > 3; }))
+#expect
+4

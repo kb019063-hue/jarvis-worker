@@ -1,4 +1,5 @@
 #include "litebird/dom/Node.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
@@ -59,6 +60,41 @@ void Node::set_connected_state_subtree(bool connected) {
     }
 }
 
+// True when making `child` a child of `parent` would make a node its own
+// ancestor: `child` is `parent` itself, or contains it. Shadow trees count:
+// a host contains everything in its shadow tree.
+//
+// Every walk over the tree (textContent, serialisation, selectors, layout,
+// and the destructor) assumes there are no loops. With one, they never
+// return. The DOM standard forbids such an insertion (HierarchyRequestError);
+// the script bindings throw that, and append_child/insert_before refuse the
+// insertion for every other caller.
+static bool would_contain_itself(const Node* parent, const Node* child) {
+    if (child == parent) return true;
+    // A node with no children and no shadow tree is nobody's ancestor. That is
+    // every node the HTML parser appends, so parsing pays nothing for this.
+    bool can_be_ancestor = !child->children().empty();
+    if (!can_be_ancestor && child->is_element()) {
+        can_be_ancestor = static_cast<const Element*>(child)->shadow_root() != nullptr;
+    }
+    if (!can_be_ancestor) return false;
+
+    std::shared_ptr<Node> keep;             // keeps the node `at` points to alive
+    const Node* at = parent;
+    for (;;) {
+        std::shared_ptr<Node> up = at->parent();
+        if (!up) {
+            auto* shadow = dynamic_cast<const ShadowRoot*>(at);
+            if (!shadow) return false;
+            up = shadow->host();
+            if (!up) return false;
+        }
+        if (up.get() == child) return true;
+        keep = std::move(up);
+        at = keep.get();
+    }
+}
+
 static void trigger_connected_recursive(const std::shared_ptr<Node>& node) {
     if (!node) return;
     if (node->is_element()) {
@@ -93,6 +129,8 @@ void Node::append_child(std::shared_ptr<Node> child) {
         return;
     }
 
+    if (would_contain_itself(this, child.get())) return;
+
     if (auto old_p = child->parent()) {
         old_p->remove_child(child);
     }
@@ -124,6 +162,8 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
         new_child->children().clear();
         return;
     }
+
+    if (would_contain_itself(this, new_child.get())) return;
 
     if (auto old_p = new_child->parent()) {
         old_p->remove_child(new_child);
@@ -163,8 +203,30 @@ void Node::remove_child(std::shared_ptr<Node> child) {
     }
 }
 
-void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture) {
-    m_listeners[type].push_back({std::move(listener), use_capture});
+void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture,
+                              const void* key) {
+    auto& entries = m_listeners[type];
+    if (key) {
+        // The same callback registered twice for the same phase is one listener.
+        for (const auto& entry : entries) {
+            if (entry.key == key && entry.use_capture == use_capture) return;
+        }
+    }
+    entries.push_back({std::move(listener), use_capture, key});
+}
+
+void Node::remove_event_listener(const std::string& type, const void* key, bool use_capture) {
+    if (!key) return;
+    auto it = m_listeners.find(type);
+    if (it == m_listeners.end()) return;
+    auto& entries = it->second;
+    for (auto entry = entries.begin(); entry != entries.end(); ++entry) {
+        if (entry->key == key && entry->use_capture == use_capture) {
+            entries.erase(entry);
+            break;
+        }
+    }
+    if (entries.empty()) m_listeners.erase(it);
 }
 
 void Node::mark_needs_layout() {
@@ -204,7 +266,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
             auto copy = it->second;
             for (const auto& entry : copy) {
                 if (entry.use_capture) {
-                    entry.listener(event);
+                    js_run_guarded([&] { entry.listener(event); });
                     if (event->propagation_stopped()) return !event->default_prevented();
                 }
             }
@@ -218,7 +280,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
     if (it != m_listeners.end()) {
         auto copy = it->second;
         for (const auto& entry : copy) {
-            entry.listener(event);
+            js_run_guarded([&] { entry.listener(event); });
             if (event->propagation_stopped()) return !event->default_prevented();
         }
     }
@@ -234,7 +296,7 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
                 auto p_copy = p_it->second;
                 for (const auto& entry : p_copy) {
                     if (!entry.use_capture) {
-                        entry.listener(event);
+                        js_run_guarded([&] { entry.listener(event); });
                         if (event->propagation_stopped()) return !event->default_prevented();
                     }
                 }

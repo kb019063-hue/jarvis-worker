@@ -68,9 +68,16 @@ public:
     struct EventListenerEntry {
         EventListener listener;
         bool use_capture{false};
+        /// Identifies the callback so that it can be removed again, and so
+        /// that adding the same callback twice has no effect. Null for
+        /// listeners that are never removed individually.
+        const void* key{nullptr};
     };
 
-    void add_event_listener(const std::string& type, EventListener listener, bool use_capture = false);
+    void add_event_listener(const std::string& type, EventListener listener, bool use_capture = false,
+                            const void* key = nullptr);
+    /// Removes the listener registered with this type, key and capture flag.
+    void remove_event_listener(const std::string& type, const void* key, bool use_capture = false);
     void remove_event_listeners(const std::string& type);
     bool dispatch_event(const std::shared_ptr<Event>& event);
     bool has_listeners(const std::string& type) const {

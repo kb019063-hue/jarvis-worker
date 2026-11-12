@@ -1,0 +1,305 @@
+#name push pop shift unshift
+#code
+var a = [2]; a.push(3, 4); a.unshift(1); var p = a.pop(); var s = a.shift(); console.log(a.join(), p, s, a.length)
+#expect
+2,3 4 1 2
+
+#name push returns new length
+#code
+var a = []; console.log(a.push("x"), a.push("y", "z"))
+#expect
+1 3
+
+#name length assignment truncates
+#code
+var a = [1,2,3,4]; a.length = 2; console.log(a.join(), a.length)
+#expect
+1,2 2
+
+#name index assignment extends
+#code
+var a = [1]; a[3] = 4; console.log(a.length, a[2], a.join("|"))
+#expect
+4 undefined 1|||4
+
+#name slice variants
+#code
+var a = [1,2,3,4,5]; console.log(a.slice(1,3).join(), a.slice(-2).join(), a.slice().length, a.slice(2,-1).join())
+#expect
+2,3 4,5 5 3,4
+
+#name splice remove and insert
+#code
+var a = [1,2,3,4,5]; var r = a.splice(1, 2, "x", "y", "z"); console.log(a.join(), r.join())
+#expect
+1,x,y,z,4,5 2,3
+
+#name splice insert only and delete to end
+#code
+var a = [1,4]; a.splice(1, 0, 2, 3); var b = [1,2,3]; b.splice(1); console.log(a.join(), b.join())
+#expect
+1,2,3,4 1
+
+#name concat flattens one level
+#code
+console.log([1].concat(2, [3, [4]]).length, [].concat([1], [2]).join())
+#expect
+4 1,2
+
+#name join with separators
+#code
+console.log([1,2,3].join(), [1,2,3].join(""), [1,null,undefined,2].join("-"), [].join())
+#expect
+1,2,3 123 1---2 
+
+#name reverse mutates
+#code
+var a = [1,2,3]; var r = a.reverse(); console.log(a.join(), r === a)
+#expect
+3,2,1 true
+
+#name default sort is lexicographic
+#code
+console.log([10, 9, 1, 100].sort().join())
+#expect
+1,10,100,9
+
+#name numeric sort
+#code
+console.log([10, 9, 1, 100].sort(function(a, b){ return a - b; }).join())
+#expect
+1,9,10,100
+
+#name sort strings and stability
+#code
+var p = [{n:"b",k:1},{n:"a",k:1},{n:"c",k:0}]; p.sort(function(x, y){ return x.k - y.k; }); console.log(p.map(function(e){ return e.n; }).join(""))
+#expect
+cba
+
+#name sort objects by string key
+#code
+var p = [{n:"bob"},{n:"al"},{n:"cy"}]; p.sort(function(a, b){ return a.n < b.n ? -1 : a.n > b.n ? 1 : 0; }); console.log(p.map(function(e){ return e.n; }).join())
+#expect
+al,bob,cy
+
+#name indexOf lastIndexOf includes
+#code
+var a = [1,2,3,2,NaN]; console.log(a.indexOf(2), a.lastIndexOf(2), a.indexOf(9), a.includes(NaN), a.indexOf(NaN))
+#expect
+1 3 -1 true -1
+
+#name find findIndex
+#code
+var a = [5, 12, 8]; console.log(a.find(function(x){ return x > 6; }), a.findIndex(function(x){ return x > 6; }), a.find(function(x){ return x > 99; }))
+#expect
+12 1 undefined
+
+#name findLast and findLastIndex
+#code
+console.log([1,2,3,4].findLast(x => x % 2 === 1), [1,2,3,4].findLastIndex(x => x > 9))
+#expect
+3 -1
+
+#name map with index
+#code
+console.log([10,20].map(function(v, i){ return v + i; }).join())
+#expect
+10,21
+
+#name map parseInt pitfall
+#code
+console.log(["1","2","3"].map(Number).join(), ["10","10","10"].map(parseInt).join())
+#expect
+1,2,3 10,NaN,2
+
+#name filter then map then reduce
+#code
+var r = [1,2,3,4,5,6].filter(x => x % 2 === 0).map(x => x * x).reduce((a, b) => a + b, 0); console.log(r)
+#expect
+56
+
+#name reduce without initial value
+#code
+console.log([1,2,3,4].reduce(function(a, b){ return a * b; }))
+#expect
+24
+
+#name reduceRight
+#code
+console.log(["a","b","c"].reduceRight(function(acc, x){ return acc + x; }, ""))
+#expect
+cba
+
+#name reduce to object
+#code
+var g = ["a","bb","cc"].reduce(function(m, s){ (m[s.length] = m[s.length] || []).push(s); return m; }, {}); console.log(g[1].join(), g[2].join())
+#expect
+a bb,cc
+
+#name some every on empty
+#code
+console.log([].some(function(){ return true; }), [].every(function(){ return false; }))
+#expect
+false true
+
+#name forEach does not return
+#code
+var s = 0; var r = [1,2].forEach(function(x){ s += x; }); console.log(s, r)
+#expect
+3 undefined
+
+#name flat and flatMap
+#code
+console.log([1,[2,[3,[4]]]].flat().length, [1,[2,[3,[4]]]].flat(Infinity).join(), [1,2].flatMap(x => [x, x * 10]).join())
+#expect
+3 1,2,3,4 1,10,2,20
+
+#name fill
+#code
+console.log(new Array(3).fill(0).join(), [1,2,3,4].fill(9, 1, 3).join())
+#expect
+0,0,0 1,9,9,4
+
+#name Array constructor forms
+#code
+console.log(new Array(3).length, new Array(1,2).length, Array(2).length, new Array("3").length)
+#expect
+3 2 2 1
+
+#name Array.from string and set
+#code
+console.log(Array.from("abc").join("-"), Array.from(new Set([1,1,2])).join())
+#expect
+a-b-c 1,2
+
+#name Array.from array-like
+#code
+console.log(Array.from({length: 2, 0: "x", 1: "y"}).join(""))
+#expect
+xy
+
+#name Array.of
+#code
+console.log(Array.of(7).length, Array.of(1,2,3).join())
+#expect
+1 1,2,3
+
+#name keys values entries
+#code
+var out = []; for (var [i, v] of ["a","b"].entries()) out.push(i + v); console.log(out.join(), [...["x","y"].keys()].join(), [...["x","y"].values()].join())
+#expect
+0a,1b 0,1 x,y
+
+#name destructuring skip rest default
+#code
+var [a, , b = 9, ...r] = [1, 2, undefined, 4, 5]; console.log(a, b, r.join())
+#expect
+1 9 4,5
+
+#name swap via destructuring
+#code
+var x = 1, y = 2; [x, y] = [y, x]; console.log(x, y)
+#expect
+2 1
+
+#name spread copy and concat
+#code
+var a = [1,2]; var b = [...a, 3, ...a]; a.push(9); console.log(b.join(), b.length)
+#expect
+1,2,3,1,2 5
+
+#name at with negative index
+#code
+console.log([1,2,3].at(-1), [1,2,3].at(0), [1,2,3].at(5))
+#expect
+3 1 undefined
+
+#name array toString and String
+#code
+console.log([1,2].toString(), String([1,[2,3]]), [] + "", [null] + "", [undefined, 1] + "")
+#expect
+1,2 1,2,3   ,1
+
+#name arrays compare by identity
+#code
+var a = [1]; console.log(a == a, [1] == [1], [1] == 1, [1,2] == "1,2")
+#expect
+true false true true
+
+#name nested arrays
+#code
+var m = [[1,2],[3,4]]; m[1][0] = 9; console.log(m[1][0] + m[0][1], m.length, m[0].length)
+#expect
+11 2 2
+
+#name delete leaves a hole
+#code
+var a = [1,2,3]; delete a[1]; console.log(a.length, a[1], 1 in a)
+#expect
+3 undefined false
+
+#name includes vs indexOf with undefined
+#code
+var a = [1, undefined]; console.log(a.includes(undefined), a.indexOf(undefined))
+#expect
+true 1
+
+#name isArray and typeof
+#code
+console.log(Array.isArray([]), Array.isArray({length: 0}), typeof [], Array.isArray(Array.prototype))
+#expect
+true false object true
+
+#name copyWithin and lastIndexOf
+#code
+console.log([1,2,3,4,5].copyWithin(0, 3).join(), [1,2,1].lastIndexOf(1))
+#expect
+4,5,3,4,5 2
+
+#name chained methods on literals
+#code
+console.log([3,1,2].slice().sort().reverse().map(String).join(""))
+#expect
+321
+
+#name array of objects lookup
+#code
+var users = [{id: 1, n: "a"}, {id: 2, n: "b"}]; var u = users.find(function(x){ return x.id === 2; }); console.log(u.n, users.map(function(x){ return x.id; }).join())
+#expect
+b 1,2
+
+#name unique values
+#code
+var a = [3,1,3,2,1]; var u = a.filter(function(v, i){ return a.indexOf(v) === i; }); console.log(u.join())
+#expect
+3,1,2
+
+#name max of array
+#code
+var a = [3, 9, 4]; console.log(Math.max.apply(null, a), Math.min(...a))
+#expect
+9 3
+
+#name array length is writable number
+#code
+var a = []; a[9] = 1; console.log(a.length, typeof a.length)
+#expect
+10 number
+
+#name toSorted and toReversed do not mutate
+#code
+var a = [3,1,2]; var s = a.toSorted(); var r = a.toReversed(); console.log(a.join(), s.join(), r.join())
+#expect
+3,1,2 1,2,3 2,1,3
+
+#name sparse join and undefined entries
+#code
+console.log([,1].length, [1,,2].join("-"), [undefined].length)
+#expect
+2 1--2 1
+
+#name 2d grid construction
+#code
+var g = []; for (var r = 0; r < 2; r++) { g.push([]); for (var c = 0; c < 3; c++) g[r].push(r * 3 + c); } console.log(g.map(function(row){ return row.join(""); }).join("/"))
+#expect
+012/345

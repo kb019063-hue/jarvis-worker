@@ -1,0 +1,156 @@
+#name Error properties
+#code
+var e = new Error("boom"); console.log(e.name, e.message, String(e), e instanceof Error, typeof e.stack)
+#expect
+Error boom Error: boom true string
+
+#name error without message
+#code
+var e = new Error(); console.log(e.message === "", String(e))
+#expect
+true Error
+
+#name Error called without new
+#code
+var e = Error("m"); console.log(e instanceof Error, e.message)
+#expect
+true m
+
+#name built-in error types
+#code
+var t = new TypeError("t"); var r = new RangeError("r"); console.log(t.name, r.name, t instanceof Error, t instanceof TypeError, r instanceof TypeError, String(t))
+#expect
+TypeError RangeError true true false TypeError: t
+
+#name calling undefined throws TypeError
+#code
+try { var o = {}; o.nope(); } catch (e) { console.log(e instanceof TypeError, e.name); }
+#expect
+true TypeError
+
+#name reading property of undefined throws TypeError
+#code
+try { var u; u.x; } catch (e) { console.log(e instanceof TypeError); } try { null.x; } catch (e) { console.log(e.name); }
+#expect
+true
+TypeError
+
+#name undeclared variable throws ReferenceError
+#code
+try { notDefinedAnywhere + 1; } catch (e) { console.log(e instanceof ReferenceError, e.name); }
+#expect
+true ReferenceError
+
+#name calling a non-function throws TypeError
+#code
+try { var n = 5; n(); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+
+#name invalid array length throws RangeError
+#code
+try { new Array(-1); } catch (e) { console.log(e.name); }
+#expect
+RangeError
+
+#name toFixed range throws RangeError
+#code
+try { (1).toFixed(101); } catch (e) { console.log(e.name); }
+#expect
+RangeError
+
+#name stack overflow is catchable RangeError
+#code
+function r(){ return r() + 1; } try { r(); } catch (e) { console.log(e instanceof RangeError); }
+#expect
+true
+
+#name const assignment throws TypeError
+#code
+try { const c = 1; c = 2; } catch (e) { console.log(e.name); }
+#expect
+TypeError
+
+#name new on non-constructor throws TypeError
+#code
+try { new (function(){}.bind())(); var f = () => {}; new f(); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+
+#name custom error via prototype
+#code
+function MyErr(m){ this.name = "MyErr"; this.message = m; } MyErr.prototype = Object.create(Error.prototype); try { throw new MyErr("x"); } catch (e) { console.log(e instanceof Error, e instanceof MyErr, e.name, e.message); }
+#expect
+true true MyErr x
+
+#name custom error class
+#code
+class HttpError extends Error { constructor(status, msg){ super(msg); this.name = "HttpError"; this.status = status; } } try { throw new HttpError(404, "nf"); } catch (e) { console.log(e instanceof HttpError, e instanceof Error, e.status, e.message, e.name, String(e)); }
+#expect
+true true 404 nf HttpError HttpError: nf
+
+#name rethrow preserves identity
+#code
+var orig = new Error("o"); var got; try { try { throw orig; } catch (e) { throw e; } } catch (e2) { got = e2; } console.log(got === orig)
+#expect
+true
+
+#name error in callback propagates
+#code
+try { [1, 2, 3].forEach(function(x){ if (x === 2) throw new Error("at " + x); }); } catch (e) { console.log(e.message); }
+#expect
+at 2
+
+#name finally runs when error escapes
+#code
+var log = ""; function f(){ try { throw new Error("x"); } finally { log += "f"; } } try { f(); } catch (e) { log += "c"; } console.log(log)
+#expect
+fc
+
+#name error message and name are writable
+#code
+var e = new Error("a"); e.message = "b"; e.name = "Custom"; console.log(String(e))
+#expect
+Custom: b
+
+#name instanceof across error hierarchy
+#code
+var errs = [new SyntaxError("s"), new ReferenceError("r"), new EvalError("e"), new URIError("u")]; console.log(errs.map(function(e){ return e.name + (e instanceof Error); }).join())
+#expect
+SyntaxErrortrue,ReferenceErrortrue,EvalErrortrue,URIErrortrue
+
+#name Error cause
+#code
+var e = new Error("outer", { cause: "inner" }); console.log(e.cause)
+#expect
+inner
+
+#name throw in getter and in constructor
+#code
+var o = { get bad(){ throw new Error("g"); } }; function C(){ throw new Error("c"); } var m = []; try { o.bad; } catch (e) { m.push(e.message); } try { new C(); } catch (e) { m.push(e.message); } console.log(m.join())
+#expect
+g,c
+
+#name try/catch inside loop continues
+#code
+var ok = 0; [1, 0, 2].forEach(function(d){ try { if (d === 0) throw new Error("div"); ok += 10 / d; } catch (e) {} }); console.log(ok)
+#expect
+15
+
+#name decodeURIComponent malformed throws URIError
+#code
+try { decodeURIComponent("%"); } catch (e) { console.log(e.name); }
+#expect
+URIError
+
+#name error toString with empty name or message
+#code
+var e = new Error("m"); e.name = ""; var f = new TypeError(""); console.log(String(e), String(f))
+#expect
+m TypeError
+
+#name AggregateError-free validation pattern
+#code
+function validate(u){ var errs = []; if (!u.name) errs.push("name"); if (!(u.age > 0)) errs.push("age"); if (errs.length) throw new Error("invalid: " + errs.join(",")); return true; } try { validate({age: -1}); } catch (e) { console.log(e.message); }
+#expect
+invalid: name,age

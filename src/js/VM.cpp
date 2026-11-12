@@ -1,4 +1,5 @@
 #include "litebird/js/VM.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Promise.hpp"
@@ -499,7 +500,11 @@ JsValue VM::run() {
             case OpCode::OpGetProperty: {
                 const auto& prop = read_constant().string_val;
                 JsValue obj = pop();
-                push(obj.get_property(prop));
+                JsValue value = obj.get_property(prop);
+                // OpCall has no receiver operand, and built-in methods now read
+                // `this`; bind it here so `array.push(x)` still works on the VM.
+                if (value.is_function() && !obj.is_nullish()) value = js_bind_this(value, obj);
+                push(std::move(value));
                 break;
             }
             case OpCode::OpSetProperty: {

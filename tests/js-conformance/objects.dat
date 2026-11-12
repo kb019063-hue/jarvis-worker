@@ -1,0 +1,281 @@
+#name property access forms
+#code
+var o = {a: 1, "b c": 2}; var k = "a"; console.log(o.a, o["b c"], o[k], o.missing)
+#expect
+1 2 1 undefined
+
+#name nested objects
+#code
+var o = {a: {b: {c: 5}}}; o.a.b.d = 6; console.log(o.a.b.c + o.a.b.d)
+#expect
+11
+
+#name computed keys
+#code
+var k = "x"; var o = {[k]: 1, [k + "2"]: 2}; console.log(o.x, o.x2)
+#expect
+1 2
+
+#name shorthand methods
+#code
+var o = { n: 2, dbl(){ return this.n * 2; } }; console.log(o.dbl())
+#expect
+4
+
+#name getters and setters in literal
+#code
+var o = { _v: 1, get v(){ return this._v * 10; }, set v(x){ this._v = x; } }; o.v = 5; console.log(o.v)
+#expect
+50
+
+#name Object.keys order
+#code
+console.log(Object.keys({z:1, a:2, 10:3, 2:4}).join(","))
+#expect
+2,10,z,a
+
+#name Object.values and entries
+#code
+var o = {a: 1, b: 2}; console.log(Object.values(o).join(), Object.entries(o).map(function(e){ return e[0] + "=" + e[1]; }).join("&"))
+#expect
+1,2 a=1&b=2
+
+#name Object.assign merges and returns target
+#code
+var t = {a: 1}; var r = Object.assign(t, {b: 2}, {a: 3}); console.log(r === t, t.a, t.b)
+#expect
+true 3 2
+
+#name object spread overrides
+#code
+var a = {x: 1, y: 2}; var b = {...a, y: 3, z: 4}; console.log(b.x, b.y, b.z, a.y)
+#expect
+1 3 4 2
+
+#name hasOwnProperty
+#code
+var o = {a: 1}; console.log(o.hasOwnProperty("a"), o.hasOwnProperty("toString"), "toString" in o)
+#expect
+true false true
+
+#name Object.freeze
+#code
+var o = Object.freeze({a: 1}); o.a = 2; o.b = 3; console.log(o.a, o.b, Object.isFrozen(o))
+#expect
+1 undefined true
+
+#name Object.create with prototype
+#code
+var proto = { hi(){ return "hi " + this.n; } }; var o = Object.create(proto); o.n = "x"; console.log(o.hi(), Object.getPrototypeOf(o) === proto)
+#expect
+hi x true
+
+#name Object.create(null)
+#code
+var o = Object.create(null); o.k = 1; console.log(Object.keys(o).length, typeof o.toString)
+#expect
+1 undefined
+
+#name Object.defineProperty getter
+#code
+var o = {}; Object.defineProperty(o, "x", { get: function(){ return 42; } }); console.log(o.x)
+#expect
+42
+
+#name Object.defineProperty non-enumerable
+#code
+var o = {a: 1}; Object.defineProperty(o, "h", { value: 2, enumerable: false }); console.log(o.h, Object.keys(o).join(), JSON.stringify(o))
+#expect
+2 a {"a":1}
+
+#name Object.defineProperty non-writable
+#code
+var o = {}; Object.defineProperty(o, "c", { value: 1, writable: false }); o.c = 2; console.log(o.c)
+#expect
+1
+
+#name Object.fromEntries
+#code
+var o = Object.fromEntries([["a", 1], ["b", 2]]); console.log(o.a + o.b)
+#expect
+3
+
+#name Object.getOwnPropertyNames
+#code
+console.log(Object.getOwnPropertyNames({b: 1, a: 2}).join())
+#expect
+b,a
+
+#name object destructuring with rename and default
+#code
+var {a: x, b: y = 5, c = 7} = {a: 1}; console.log(x, y, c)
+#expect
+1 5 7
+
+#name nested destructuring
+#code
+var {p: {q: [first, second]}} = {p: {q: [10, 20]}}; console.log(first + second)
+#expect
+30
+
+#name destructuring assignment to existing variables
+#code
+var a, b; ({a, b} = {a: 1, b: 2}); [a, b] = [b, a]; console.log(a, b)
+#expect
+2 1
+
+#name valueOf in arithmetic
+#code
+var o = { valueOf: function(){ return 40; } }; console.log(o + 2, o * 2, o > 39)
+#expect
+42 80 true
+
+#name toString in template and join
+#code
+var o = { toString(){ return "T"; } }; console.log(`${o}`, [o, o].join("-"), String(o))
+#expect
+T T-T T
+
+#name default object toString
+#code
+console.log(String({}), {} + "", Object.prototype.toString.call([]), Object.prototype.toString.call(null))
+#expect
+[object Object] [object Object] [object Array] [object Null]
+
+#name prototype chain lookup
+#code
+function A(){} A.prototype.x = 1; var a = new A(); a.y = 2; console.log(a.x, a.y, a.hasOwnProperty("x"), Object.keys(a).join())
+#expect
+1 2 false y
+
+#name prototype method added later is visible
+#code
+function A(){} var a = new A(); A.prototype.late = function(){ return "late"; }; console.log(a.late())
+#expect
+late
+
+#name inheritance with Object.create
+#code
+function A(n){ this.n = n; } A.prototype.hi = function(){ return "A" + this.n; }; function B(n){ A.call(this, n); } B.prototype = Object.create(A.prototype); B.prototype.constructor = B; var b = new B(1); console.log(b.hi(), b instanceof A, b instanceof B)
+#expect
+A1 true true
+
+#name own property shadows prototype
+#code
+function A(){} A.prototype.v = "proto"; var a = new A(); a.v = "own"; var s = a.v; delete a.v; console.log(s, a.v)
+#expect
+own proto
+
+#name objects are passed by reference
+#code
+function mod(o){ o.x = 2; } var o = {x: 1}; mod(o); console.log(o.x)
+#expect
+2
+
+#name property enumeration after delete and re-add
+#code
+var o = {a: 1, b: 2, c: 3}; delete o.a; o.a = 4; console.log(Object.keys(o).join())
+#expect
+b,c,a
+
+#name numeric-like keys are strings
+#code
+var o = {}; o[1] = "a"; o["1"] = "b"; o[1.5] = "c"; console.log(Object.keys(o).join(), o[1])
+#expect
+1,1.5 b
+
+#name in operator and undefined-valued property
+#code
+var o = {u: undefined}; console.log("u" in o, o.u === undefined, "v" in o)
+#expect
+true true false
+
+#name optional chaining on nested data
+#code
+var d = {user: {tags: ["x"]}}; console.log(d.user?.tags?.[0], d.account?.id, d.user.name?.length)
+#expect
+x undefined undefined
+
+#name JSON round trip preserves structure
+#code
+var o = {a: [1, {b: 2}], c: "s"}; var c = JSON.parse(JSON.stringify(o)); console.log(c.a[1].b, c !== o, c.c)
+#expect
+2 true s
+
+#name Object.entries in for-of
+#code
+var out = []; for (var [k, v] of Object.entries({a: 1, b: 2})) out.push(k + v); console.log(out.join())
+#expect
+a1,b2
+
+#name counting with object as map
+#code
+var c = {}; "abca".split("").forEach(function(ch){ c[ch] = (c[ch] || 0) + 1; }); console.log(c.a, c.b, c.c)
+#expect
+2 1 1
+
+#name Object.is
+#code
+console.log(Object.is(NaN, NaN), Object.is(0, -0), Object.is("a", "a"))
+#expect
+true false true
+
+#name getter only property ignores assignment
+#code
+var o = { get k(){ return 1; } }; o.k = 2; console.log(o.k)
+#expect
+1
+
+#name constructor property
+#code
+console.log(({}).constructor === Object, [].constructor === Array, "".constructor === String, (1).constructor === Number)
+#expect
+true true true true
+
+#name Object.keys on array and string
+#code
+console.log(Object.keys(["a","b"]).join(), Object.keys("hi").join())
+#expect
+0,1 0,1
+
+#name propertyIsEnumerable and isPrototypeOf
+#code
+var p = {}; var o = Object.create(p); o.a = 1; console.log(o.propertyIsEnumerable("a"), p.isPrototypeOf(o), Array.prototype.isPrototypeOf([]))
+#expect
+true true true
+
+#name Object.getOwnPropertyDescriptor
+#code
+var d = Object.getOwnPropertyDescriptor({a: 1}, "a"); console.log(d.value, d.writable, d.enumerable, d.configurable)
+#expect
+1 true true true
+
+#name seal prevents adding
+#code
+var o = Object.seal({a: 1}); o.a = 2; o.b = 3; delete o.a; console.log(o.a, o.b, Object.isSealed(o))
+#expect
+2 undefined true
+
+#name symbol-free deep equality helper
+#code
+function eq(a, b){ if (a === b) return true; if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false; var ka = Object.keys(a), kb = Object.keys(b); if (ka.length !== kb.length) return false; return ka.every(function(k){ return eq(a[k], b[k]); }); } console.log(eq({a:[1,{b:2}]}, {a:[1,{b:2}]}), eq({a:1}, {a:2}))
+#expect
+true false
+
+#name a circular prototype chain is refused
+#code
+var a = {}, b = Object.create(a), c = Object.create(b), names = []; try { Object.setPrototypeOf(a, c); names.push('set'); } catch (e) { names.push(e.name); } try { a.__proto__ = b; names.push('set'); } catch (e) { names.push(e.name); } try { a.__proto__ = a; names.push('set'); } catch (e) { names.push(e.name); } console.log(names.join(), Object.getPrototypeOf(a) === Object.prototype, Reflect.setPrototypeOf(a, c), Reflect.setPrototypeOf(c, null), Reflect.setPrototypeOf(a, c), Object.getPrototypeOf(a) === c)
+#expect
+TypeError,TypeError,TypeError true false true true true
+
+#name setting a prototype that makes no cycle works
+#code
+var base = { hi: function () { return 'hi ' + this.n; } }, o = { n: 1 }; Object.setPrototypeOf(o, base); var p = { n: 2 }; p.__proto__ = base; var q = { n: 3 }; console.log(o.hi(), p.hi(), Reflect.setPrototypeOf(q, o), q.hi(), Object.setPrototypeOf(q, null) === q, typeof q.hi, Reflect.setPrototypeOf(Object.freeze({}), base))
+#expect
+hi 1 hi 2 true hi 3 true undefined false
+
+#name property found far up a long prototype chain
+#code
+var o = { deep: 'value', method: function () { return this.own; } }; for (var i = 0; i < 20000; i++) o = Object.create(o); o.own = 'mine'; var seen = 0; for (var k in o) seen++; console.log(o.deep, o.method(), 'deep' in o, o.hasOwnProperty('deep'), seen, typeof o.toString, o instanceof Object)
+#expect
+value mine true false 3 function true

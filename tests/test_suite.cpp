@@ -1083,13 +1083,14 @@ TEST(js_async_promises_and_json) {
     int step2 = 0;
 
     JsValue p = Promise::make_resolved(JsValue::make_number(10));
-    JsValue p_chained = p.get_property("then").call({
+    // `then` lives on Promise.prototype, so the receiver has to be supplied.
+    JsValue p_chained = p.get_property("then").call_with_this(p, {
         JsValue::make_native_function([&step1](const std::vector<JsValue>& args) {
             step1 = static_cast<int>(args[0].to_number()) * 2; // 20
             return JsValue::make_number(step1);
         })
     });
-    p_chained.get_property("then").call({
+    p_chained.get_property("then").call_with_this(p_chained, {
         JsValue::make_native_function([&step2](const std::vector<JsValue>& args) {
             step2 = static_cast<int>(args[0].to_number()) + 5; // 25
             return JsValue::make_number(step2);
@@ -1128,7 +1129,7 @@ TEST(js_async_promises_and_json) {
     JsValue all_fn = p_ctor.get_property("all");
     JsValue all_res = all_fn.call({JsValue::make_array({p_all_1, p_all_2})});
     bool all_passed = false;
-    all_res.get_property("then").call({
+    all_res.get_property("then").call_with_this(all_res, {
         JsValue::make_native_function([&all_passed](const std::vector<JsValue>& args) {
             if (args[0].is_array() && args[0].object_val->array_elements.size() == 2) {
                 if (args[0].object_val->array_elements[0].to_string() == "alpha" &&
@@ -4096,6 +4097,13 @@ TEST(gc_roots_are_complete_under_empty_root_set) {
     //
     // This test performs exactly that collection -- no explicit roots -- and
     // then touches everything the interpreter still holds.
+
+    // The built-in prototypes (Object.prototype, Array.prototype, ...) are
+    // heap objects shared by every interpreter and kept for the life of the
+    // process, so an "empty" heap holds exactly those.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
     {
         JsInterpreter js;
         js.eval_ast(R"(
@@ -4135,9 +4143,10 @@ TEST(gc_roots_are_complete_under_empty_root_set) {
     }
 
     // Destroying the interpreter must withdraw its provider. A collection
-    // afterwards must not call into freed memory.
+    // afterwards must not call into freed memory, and must reclaim everything
+    // the script created.
     Heap::default_heap().collect_garbage();
-    assert(Heap::default_heap().stats().alive_cells == 0);
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
 }
 
 TEST(gc_keeps_objects_captured_by_pending_microtasks) {
@@ -4158,6 +4167,276 @@ TEST(gc_keeps_objects_captured_by_pending_microtasks) {
 
     EventLoop::default_loop().tick();
     assert(js.global_env()->get("microtask_value").to_string() == "keepme");
+}
+
+TEST(gc_keeps_state_reachable_only_from_listeners_and_frames) {
+    using namespace litebird;
+
+    // Two shapes of "the only reference is somewhere the collector used to
+    // not look". Both were heap-use-after-free under AddressSanitizer while
+    // roots were registered by hand at each boundary; the collector now works
+    // out its own roots from handle counts, so neither needs registering.
+
+    // 1. A DOM listener. The closure, and the `state` object it captures, are
+    //    referenced from nothing but the listener table of a DOM node -- C++
+    //    storage the heap cannot walk. Collect, churn the heap so freed cells
+    //    would be reused, then click.
+    {
+        auto doc = std::make_shared<Document>();
+        auto button = std::make_shared<Element>("button");
+        button->set_attribute("id", "b");
+        auto out = std::make_shared<Element>("div");
+        out->set_attribute("id", "out");
+        out->append_child(std::make_shared<Text>("initial"));
+        doc->append_child(button);
+        doc->append_child(out);
+
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var handler;
+            (function () {
+                var state = { count: 0, tag: { name: "live" } };
+                var listener = function () {
+                    state.count++;
+                    document.getElementById("out").textContent = state.tag.name + ":" + state.count;
+                };
+                document.getElementById("b").addEventListener("click", listener);
+                handler = { remove: function () { document.getElementById("b").removeEventListener("click", listener); } };
+            })();
+            var junk = [];
+            gc();
+            for (var i = 0; i < 3000; i++) junk.push({ k: i, s: "x" + i });
+            document.getElementById("b").click();
+        )");
+        assert(out->text_content() == "live:1");
+
+        // The same again with the collection and the click coming from the
+        // host side, the way the shell's heap view and a real mouse click do.
+        Heap::default_heap().collect_garbage();
+        js.eval_ast("junk = []; for (var j = 0; j < 3000; j++) junk.push({ k: j });");
+        button->click();
+        assert(out->text_content() == "live:2");
+
+        // removeEventListener must find the listener after collections too:
+        // identity is the function object, and that object must not have moved
+        // or been replaced.
+        js.eval_ast("handler.remove(); gc();");
+        button->click();
+        assert(out->text_content() == "live:2");
+    }
+
+    // 2. A binding that lives only in a `for (let ...)` head while the body
+    //    collects. The per-iteration copy of the scope is held by the
+    //    evaluator's C++ frame and by nothing else.
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var seen = "";
+            for (let o = { a: { b: 1 } }, i = 0; i < 3; i++) {
+                gc();
+                var filler = [];
+                for (var k = 0; k < 500; k++) filler.push({ k: k });
+                seen += o.a.b;
+            }
+        )");
+        assert(js.global_env()->get("seen").to_string() == "111");
+    }
+}
+
+TEST(deep_nesting_never_exhausts_the_native_stack) {
+    using namespace litebird;
+
+    // The engine recurses over what a script gives it: the parser over nested
+    // syntax, the evaluator over nested statements, and C++ destructors over
+    // chains of scopes, promises and syntax tree nodes. Each of those used to
+    // overflow the native stack on a deep enough input, which killed the
+    // process: a page could take the browser down with one long line.
+    //
+    // What must hold: too-deep input is a RangeError the script can catch, a
+    // later script still runs, and long chains are released without recursion.
+    // Depths are not asserted, for the reason given in the test above.
+
+    // Syntax nested far beyond any stack: parentheses, arrays, blocks, unary
+    // operators, functions. Every one ends in a caught RangeError.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var kinds = [['(', '1', ')'], ['[', '1', ']'], ['{', ';', '}'], ['!', '1', ''],"
+            "             ['(function(){return ', '1', '})'], ['`${', '1', '}`'], ['1?', '1', ':0']];"
+            "var caught = 0;"
+            "for (var i = 0; i < kinds.length; i++) {"
+            "  var src = kinds[i][0].repeat(300000) + kinds[i][1] + kinds[i][2].repeat(300000);"
+            "  try { eval(src); } catch (e) { if (e instanceof RangeError) caught++; }"
+            "}"
+            "var after = [1, 2, 3].map(function (x) { return x * 2; }).join();");
+        assert(js.global_env()->get("caught").to_string() == "7");
+        assert(js.global_env()->get("after").to_string() == "2,4,6");
+    }
+
+    // A script that is itself too deep is reported, and the interpreter is
+    // still usable for the next script on the page.
+    {
+        JsInterpreter js;
+        js.eval_ast(std::string(300000, '(') + "1" + std::string(300000, ')'));
+        js.eval_ast("var next = 6 * 7;");
+        assert(js.global_env()->get("next").to_string() == "42");
+    }
+
+    // Long chains of operators are not nesting. They are evaluated in a loop
+    // and must give the right answer, not an error.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var sum = eval(new Array(200000).fill('1').join('+'));"
+            "var text = eval(new Array(50000).fill('\"ab\"').join('+')).length;"
+            "var last = eval(new Array(100000).fill('0').join('||') + '||7');");
+        assert(js.global_env()->get("sum").to_string() == "200000");
+        assert(js.global_env()->get("text").to_string() == "100000");
+        assert(js.global_env()->get("last").to_string() == "7");
+    }
+
+    // Chains that are released link by link: a linked list, nested closures
+    // (each holding its parent scope), a settled promise chain and a pending
+    // one. Dropping the head must not recurse once per link.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var head = null; for (var i = 0; i < 500000; i++) head = { next: head };"
+            "function wrap(inner) { return function () { return inner; }; }"
+            "var f = function () { return 0; }; for (var i = 0; i < 200000; i++) f = wrap(f);"
+            "var settled = Promise.resolve(0);"
+            "for (var i = 0; i < 100000; i++) settled = settled.then(function (v) { return v + 1; });"
+            "var total = -1; settled.then(function (v) { total = v; });"
+            "var pending = new Promise(function () {});"
+            "for (var i = 0; i < 100000; i++) pending = pending.then(function (v) { return v; });");
+        EventLoop::default_loop().run_microtasks();
+        assert(js.global_env()->get("total").to_string() == "100000");
+        js.eval_ast("head = null; f = null; settled = null; pending = null; var done = 'released';");
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("done").to_string() == "released");
+    }
+    // ...and the same when the whole interpreter goes away while holding them.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var head = null; for (var i = 0; i < 300000; i++) head = { next: head };"
+            "function wrap(inner) { return function () { return inner; }; }"
+            "var f = function () { return 0; }; for (var i = 0; i < 100000; i++) f = wrap(f);"
+            "var pending = new Promise(function () {});"
+            "for (var i = 0; i < 50000; i++) pending = pending.then(function (v) { return v; });");
+    }
+
+    // Deep data handed to recursive library code: an error or an answer.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var a = ['x']; for (var i = 0; i < 200000; i++) a = [a];"
+            "var results = [];"
+            "function attempt(fn) { try { fn(); results.push('ok'); } catch (e) { results.push(e instanceof RangeError ? 'range' : 'other'); } }"
+            "attempt(function () { String(a); });"
+            "attempt(function () { a.flat(Infinity); });"
+            "attempt(function () { JSON.stringify(a); });"
+            "attempt(function () { JSON.parse('['.repeat(200000) + ']'.repeat(200000)); });"
+            "attempt(function () { structuredClone(a); });"
+            "var bad = results.indexOf('other'); var count = results.length; a = null;");
+        assert(js.global_env()->get("bad").to_string() == "-1");
+        assert(js.global_env()->get("count").to_string() == "5");
+    }
+
+    // A prototype chain longer than the old lookup limit of 10,000 still finds
+    // what is at its far end, and a circular chain cannot be built.
+    {
+        JsInterpreter js;
+        js.eval_ast(
+            "var o = { far: 'found' }; for (var i = 0; i < 50000; i++) o = Object.create(o);"
+            "var far = o.far; var has = 'far' in o; var isObj = o instanceof Object;"
+            "var a = {}, b = Object.create(a), cyc = 'none';"
+            "try { Object.setPrototypeOf(a, b); } catch (e) { cyc = e.name; }"
+            "var cyc2 = 'none'; try { a.__proto__ = b; } catch (e) { cyc2 = e.name; }");
+        assert(js.global_env()->get("far").to_string() == "found");
+        assert(js.global_env()->get("has").to_string() == "true");
+        assert(js.global_env()->get("isObj").to_string() == "true");
+        assert(js.global_env()->get("cyc").to_string() == "TypeError");
+        assert(js.global_env()->get("cyc2").to_string() == "TypeError");
+    }
+}
+
+TEST(dom_insertion_cannot_make_a_node_its_own_ancestor) {
+    using namespace litebird;
+
+    // `d.appendChild(d)` used to succeed: the node became its own child and
+    // its own parent. Every walk over the tree assumes there are no loops, so
+    // the next textContent, serialisation, layout pass or destructor recursed
+    // until the stack was gone. Three lines of script ended the process.
+
+    // The DOM itself refuses, whoever calls it.
+    {
+        auto a = std::make_shared<Element>("div");
+        auto b = std::make_shared<Element>("span");
+        auto c = std::make_shared<Element>("b");
+        a->append_child(b);
+        b->append_child(c);
+
+        a->append_child(a);                     // into itself
+        assert(a->children().size() == 1 && a->parent() == nullptr);
+        c->append_child(a);                     // into its grandchild
+        assert(c->children().empty() && a->parent() == nullptr);
+        b->insert_before(a, c);                 // the same through insertBefore
+        assert(b->children().size() == 1 && a->parent() == nullptr);
+        b->insert_before(b, c);
+        assert(b->children().size() == 1 && b->parent() == a);
+
+        // Moves that create no loop still work: a leaf, and a subtree moved
+        // to a sibling.
+        auto d = std::make_shared<Element>("i");
+        a->append_child(d);
+        d->append_child(b);                     // b (with c inside) moves under d
+        assert(a->children().size() == 1 && d->children().size() == 1 && b->parent() == d);
+        assert(a->text_content().empty());      // and the tree can be walked
+    }
+
+    // A host contains its shadow tree.
+    {
+        auto host = std::make_shared<Element>("div");
+        auto root = host->attach_shadow("open");
+        auto inner = std::make_shared<Element>("span");
+        root->append_child(inner);
+        inner->append_child(host);
+        assert(inner->children().empty());
+        root->append_child(host);
+        assert(root->children().size() == 1);
+    }
+
+    // Script is told, with the error a browser gives, and keeps running.
+    {
+        auto doc = std::make_shared<Document>();
+        auto host = std::make_shared<Element>("div");
+        host->set_attribute("id", "host");
+        doc->append_child(host);
+
+        JsInterpreter js(doc);
+        js.eval_ast(R"(
+            var names = [];
+            function attempt(fn) { try { fn(); names.push('ok'); } catch (e) { names.push(e.name + ':' + e.code); } }
+            var host = document.getElementById('host');
+            var a = document.createElement('div'), b = document.createElement('span');
+            attempt(function () { a.appendChild(a); });
+            attempt(function () { a.appendChild(b); });
+            attempt(function () { b.appendChild(a); });
+            attempt(function () { b.insertBefore(a, null); });
+            attempt(function () { host.appendChild(a); });
+            attempt(function () { b.appendChild(host); });
+            attempt(function () { a.insertBefore(document.createElement('i'), b); });
+            var result = names.join(' ');
+            var shape = host.children.length + '/' + a.children.length + '/' + b.children.length;
+            var text = typeof host.textContent + ' ' + host.innerHTML;
+        )");
+        assert(js.global_env()->get("result").to_string() ==
+               "HierarchyRequestError:3 ok HierarchyRequestError:3 HierarchyRequestError:3 ok "
+               "HierarchyRequestError:3 ok");
+        assert(js.global_env()->get("shape").to_string() == "1/2/0");
+        assert(js.global_env()->get("text").to_string() == "string <div><i></i><span></span></div>");
+    }
 }
 
 TEST(phase19_js_compatibility_basics) {
@@ -4310,7 +4589,13 @@ TEST(strict_equality_does_not_coerce) {
     // `===` used to be folded into `==` by the lexer, so `1 === "1"` was true.
     // Strict equality must never coerce, compare null/undefined as distinct, and
     // still compare DOM wrappers by node identity rather than wrapper address.
-    JsInterpreter js;
+    //
+    // The interpreter needs a document here. It used to be constructed without
+    // one: `document` was undefined, every DOM line below silently evaluated to
+    // undefined, and `undefined === undefined` made the identity assertions
+    // pass without a single DOM node being involved.
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
 
     js.eval_ast(R"(
         var n_eq = (1 === 1);
@@ -4334,6 +4619,8 @@ TEST(strict_equality_does_not_coerce) {
     assert(js.global_env()->get("null_undef").bool_val == false);
     assert(js.global_env()->get("zero_false").bool_val == false);
     assert(js.global_env()->get("not_strict").bool_val == true);
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("el").type == JsType::DomNode);
     assert(js.global_env()->get("same_shadow").bool_val == true);
     assert(js.global_env()->get("self_identity").bool_val == true);
 }
@@ -4518,6 +4805,9 @@ int main() {
     RUN_TEST(runaway_js_recursion_reports_range_error);
     RUN_TEST(gc_roots_are_complete_under_empty_root_set);
     RUN_TEST(gc_keeps_objects_captured_by_pending_microtasks);
+    RUN_TEST(gc_keeps_state_reachable_only_from_listeners_and_frames);
+    RUN_TEST(deep_nesting_never_exhausts_the_native_stack);
+    RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);
     RUN_TEST(strict_equality_does_not_coerce);

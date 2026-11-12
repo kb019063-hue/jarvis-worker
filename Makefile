@@ -73,7 +73,7 @@ JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.
-JS_ASAN_FLOOR ?= 789
+JS_ASAN_FLOOR ?= 831
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.

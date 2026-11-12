@@ -86,6 +86,9 @@ inline void js_string_model_test() {
         std::u16string(1, char16_t(0xDE00)), u"0123456789abcdef", u"<td>", u"\uffff", u"\ue000", u"\ud7ff",
         std::u16string(40, u'x'), std::u16string(300, u'y'), u"z\u00e9z\u00e9z\u00e9z\u00e9z\u00e9z\u00e9z\u00e9z\u00e9",
         std::u16string(u"q") + char16_t(0xD83D), char16_t(0xDE00) + std::u16string(u"r"),
+        // The first and last character of every encoded length.
+        u"\u007f\u0080", u"\u07ff\u0800", u"\u0780", u"\U00010000", u"\U0010FFFF", u"\ufffd",
+        std::u16string(1, char16_t(0xDBFF)), std::u16string(1, char16_t(0xDC00)),
     };
     const size_t piece_count = sizeof(pieces) / sizeof(pieces[0]);
 
@@ -179,6 +182,37 @@ inline void js_string_model_test() {
                 result.model.resize(200);
             }
             assert(same(result));
+            {
+                // Searching, which String.prototype and the regular-expression
+                // engine do through Utf16View. The needle is a piece of the
+                // text half of the time, so that it is often there to find.
+                const Utf16View hay(result.text);
+                const std::u16string& hay_model = result.model;
+                const size_t size = hay_model.size();
+                std::u16string needle_model = pool[k].model.substr(0, rnd(4));
+                if (rnd(2) == 0 && size > 0) {
+                    const size_t begin = rnd(size);
+                    needle_model = hay_model.substr(begin, rnd(std::min<size_t>(size - begin, 5) + 1));
+                }
+                const Utf16View needle(JsString::from_utf16(needle_model));
+                const size_t from = rnd(size + 2);
+                assert(hay.find(needle, from) == hay_model.find(needle_model, from));
+                assert(hay.rfind(needle, from) == hay_model.rfind(needle_model, from));
+                assert(hay.rfind(needle) == hay_model.rfind(needle_model));
+                const char16_t unit = size > 0 && rnd(4) != 0 ? hay_model[rnd(size)] : piece.empty() ? u'a' : piece[0];
+                assert(hay.find(unit, from) == hay_model.find(unit, from));
+                const size_t at = rnd(size + 2);
+                const bool there = at <= size && needle_model.size() <= size - at &&
+                                   hay_model.compare(at, needle_model.size(), needle_model) == 0;
+                assert(hay.matches_at(at, needle) == there);
+                const size_t count = rnd(size + 2);
+                assert(hay.copy(at, count) == (at <= size ? hay_model.substr(at, count) : std::u16string()));
+                std::u16string appended = u"<";
+                hay.append_to(appended, at, count);
+                assert(appended == u"<" + (at <= size ? hay_model.substr(at, count) : std::u16string()));
+                assert(hay.slice(at, at + count).view() == js_string_test_encode(at <= size ? hay_model.substr(at, count) : std::u16string()));
+                if (size > 0) { const size_t index = rnd(size); assert(hay[index] == hay_model[index]); }
+            }
             pool[i] = std::move(result);
             if (step % 50 == 0) {
                 for (const auto& entry : pool) assert(same(entry));
@@ -215,6 +249,83 @@ inline void js_string_model_test() {
                 assert((a.text == b.text) == (a.model == b.model));
             }
         }
+    }
+
+    // Cost. Everything above would pass if every operation copied the whole
+    // text, which is the defect this type exists to remove. So count the work
+    // (JsString::stats() counts for the calling thread) and hold it to a
+    // multiple of the text's length. The quadratic versions of these loops
+    // copy between a hundred and ten thousand times more.
+    {
+        // Appending n times costs n: `s += x` in a loop.
+        JsString::Stats before = JsString::stats();
+        JsString built;
+        const JsString item("item 7,");
+        for (int n = 0; n < 20000; ++n) built = JsString::concat(built, item);
+        JsString::Stats after = JsString::stats();
+        assert(built.size() == 140000 && built.length() == 140000);
+        assert(after.bytes_copied - before.bytes_copied < 5 * built.size());
+        assert(after.blocks - before.blocks < 64);
+
+        // Passing a string around and reading it copies nothing.
+        before = JsString::stats();
+        uint64_t total = 0;
+        for (size_t n = 0; n < built.length(); ++n) {
+            const JsString copy = built;
+            total += copy.unit_at(n) + copy.length();
+        }
+        after = JsString::stats();
+        assert(total != 0);
+        assert(after.bytes_copied == before.bytes_copied && after.blocks == before.blocks);
+        assert(after.units_widened == before.units_widened);
+
+        // The same for text that is not ASCII, read at the end after every
+        // append: each code unit is converted to UTF-16 a bounded number of times.
+        before = JsString::stats();
+        JsString wide_text;
+        const JsString wide_item("\xC3\xA9t\xC3\xA9 \xF0\x9F\x98\x80;");       // "été 😀;", 7 code units in 11 bytes
+        for (int n = 0; n < 20000; ++n) {
+            wide_text = JsString::concat(wide_text, wide_item);
+            assert(wide_text.unit_at(wide_text.length() - 1) == u';');
+            assert(wide_text.unit_at(wide_text.length() - 2) == 0xDE00);
+        }
+        after = JsString::stats();
+        assert(wide_text.length() == 140000 && wide_text.size() == 220000);
+        assert(after.bytes_copied - before.bytes_copied < 5 * wide_text.size());
+        assert(after.units_widened - before.units_widened < 5 * wide_text.length());
+
+        // A second pass over text that has been indexed converts nothing.
+        before = JsString::stats();
+        total = 0;
+        for (size_t n = 0; n < wide_text.length(); ++n) total += wide_text.unit_at(n);
+        after = JsString::stats();
+        assert(total != 0 && after.units_widened == before.units_widened && after.bytes_copied == before.bytes_copied);
+
+        // A tokenizer that eats its input, `s = s.slice(k)`, costs what it
+        // reads: most of the pieces are ranges of the same block.
+        for (const JsString& source : {built, wide_text}) {
+            before = JsString::stats();
+            JsString rest = source;
+            const char16_t last = source.unit_at(source.length() - 1);
+            size_t tokens = 0;
+            while (rest.length() > 0) {
+                assert(rest.unit_at(rest.length() - 1) == last && rest.unit_at(0) == source.unit_at(0));
+                rest = rest.substring(7, rest.length());
+                ++tokens;
+            }
+            after = JsString::stats();
+            assert(tokens == 20000);
+            assert(after.bytes_copied - before.bytes_copied < source.size());
+            assert(after.units_widened - before.units_widened < source.length());
+        }
+
+        // Small pieces are copies (so they do not keep a long text alive) and
+        // cost their own length, wherever in the text they come from.
+        before = JsString::stats();
+        for (size_t n = 0; n + 5 <= wide_text.length(); n += 3) total += wide_text.substring(n, n + 5).length();
+        after = JsString::stats();
+        assert(after.bytes_copied - before.bytes_copied < 2 * wide_text.size() * 5 / 3);
+        assert(after.units_widened == before.units_widened);
     }
 }
 

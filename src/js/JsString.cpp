@@ -376,22 +376,27 @@ JsString JsString::substring(size_t begin, size_t end) const {
         const char16_t unit = unit_at(begin);
         if (unit < 0x80) return from_unit(unit);
     }
-    // A piece that is a good part of its block becomes another range of the
-    // same block. Smaller pieces are copied, so that a few characters taken
-    // from a long text do not keep the whole text alive.
-    const bool share = count * kShareDivisor >= m_buffer->capacity;
+    // A piece that is a good part of its block (a quarter of its bytes or
+    // more) becomes another range of the same block. Smaller pieces are
+    // copied, so that a few characters taken from a long text do not keep the
+    // whole text alive.
+    const size_t capacity = m_buffer->capacity;
     if (is_ascii()) {
-        if (share) return piece(begin, count, begin, count);
+        if (count * kShareDivisor >= capacity) return piece(begin, count, begin, count);
         // A piece of an ASCII string is ASCII: nothing to check or count.
         return join(view().substr(begin, count), std::string_view(), count, count);
     }
-    if (share) {
+    // Text that is not ASCII: a code unit takes one to three bytes, so how
+    // many bytes the piece has is only known by looking. A piece too small to
+    // be shared even at three bytes a unit is settled without looking.
+    if (count * 3 * kShareDivisor >= capacity) {
         // The piece has to start and end between characters. One that starts or
         // ends between the halves of a surrogate pair holds a half that is not
         // in the block as such, and is built from the code units instead.
         const size_t byte_begin = begin == 0 ? 0 : byte_of_unit(begin);
         const size_t byte_end = end == m_units ? m_bytes : byte_of_unit(end);
-        if (byte_begin != static_cast<size_t>(-1) && byte_end != static_cast<size_t>(-1)) {
+        if (byte_begin != static_cast<size_t>(-1) && byte_end != static_cast<size_t>(-1) &&
+            (byte_end - byte_begin) * kShareDivisor >= capacity) {
             return piece(byte_begin, byte_end - byte_begin, begin, count);
         }
     }

@@ -336,6 +336,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 21** | **Indexed CSS cascade:** pre-index author selectors by a rightmost ID/class/tag key with a universal fallback; query candidate selectors per element, retain full selector matching and stable source order. Selective 1,600-rule/1,600-element benchmark improved **88.25 → 30.35 ms (2.9×)**. **82/82 engine suites.** | ✅ Completed |
 | **Phase 22** | **Pipeline fuzz coverage:** run HTML corpus mutations through layout and bitmap rendering, plus valid and malformed BMP/PPM headers through image loading and rendering. Fuzzing exposed and fixed signed overflow while parsing overlong PPM numeric fields. **82/82 engine suites; 400 parser mutations + 400 pipeline runs, 0 findings under ASan/UBSan.** | ✅ Completed |
 | **Phase 23** | **The JavaScript engine, rebuilt against an outside scoreboard:** an 801-case corpus with expected output recorded from Node.js (`make js-conformance`, enforced in CI); new lexer, parser, evaluator and standard library on shared prototypes; promises with the specification's ordering and `await` that suspends; an event loop with a microtask checkpoint and a virtual clock; a collector that derives its roots from reference counts and collects closure cycles; `DOMContentLoaded`/`load` and `removeEventListener`; deep JavaScript ends in a `RangeError`, not a crash. | ✅ Completed (corpus 140 → 796 of 801 cases; 85/85 unit suites) |
+| **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 838 of 843 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`) |
 
 ---
 
@@ -1190,25 +1191,20 @@ loop takes Litebird 7.1 s and Node 0.11 s, and 3 million function calls take
 2.8 s and 0.05 s: a tree-walking interpreter is 50 to 100 times slower than a
 JIT, and this one is no exception.
 
-**Where it is worse than that.** A string is stored inside the value that
-holds it, so reading a string variable copies the string, and `length` and
-indexing scan it. Each of these is proportional to the string's length, which
-makes a loop over a long string quadratic:
+**Where it was worse than that.** A string was stored inside the value that
+held it, so reading a string variable copied the string, and `length` and
+indexing scanned it. A loop over 200,000 characters took 76 s where Node takes
+35 ms. That is fixed: see Phase 24 below. Two containers still have the same
+shape:
 
 | Script | Litebird | Node |
 | :--- | :--- | :--- |
-| `s.charCodeAt(i)` for each of 200,000 characters | 76 s | 35 ms |
-| `s[i]` for each of 200,000 characters | 55 s | 33 ms |
-| `s.substring(i, i + 1)` for each of 100,000 characters | 9.8 s | 39 ms |
-| `s += x`, 100,000 times | 18 s | 58 ms |
 | `delete` of 50,000 keys from one object | over 120 s | 91 ms |
 | `shift()` until a 50,000-element array is empty | 5.3 s | 0.2 s |
 
-Building the same text with `push` and `join` takes 0.15 s, so the cost is in
-the string handling and not in the loop. Short strings and small objects, which is most of what pages
-handle, are not affected. A page that decodes or hashes a large string character by character
-will appear to hang. The fix is a shared, immutable string representation that
-caches its length and whether it is ASCII; it is item 2 under "Known gaps".
+The property map rebuilds its index on every `delete`, and arrays are plain
+vectors. Small objects and short arrays, which is most of what pages handle,
+are not affected.
 
 ### 10. What is still approximate
 
@@ -1244,6 +1240,161 @@ caches its length and whether it is ASCII; it is item 2 under "Known gaps".
 
 ---
 
+## Phase 24 Architecture: Strings That Cost What They Read
+
+### 1. Why this phase existed
+
+Phase 23 left one defect that made ordinary scripts appear to hang. A string
+was a `std::string` inside the `JsValue` that held it. Reading a variable
+copied the text, and `length` and indexing scanned it to find out whether it
+was ASCII, so anything done once per character cost the whole string each
+time:
+
+| Script | Phase 23 | Phase 24 | Node 22 |
+| :--- | ---: | ---: | ---: |
+| `s.charCodeAt(i)` over 200,000 characters | 77,082 ms | 91 ms | 31 ms |
+| `s += x`, 100,000 times | 9,811 ms | 49 ms | 45 ms |
+| tokenizer that eats its input, `s = s.slice(k)`, 20,000 tokens | 2,556 ms | 18 ms | 31 ms |
+| `re.exec(s)` in a loop, 20,000 matches in 200,000 characters | killed: out of memory | 44 ms | 33 ms |
+
+A longer table is in AUDIT.md under finding 25. `make bench` runs these and 35
+more against Node and fails if a result differs or a script takes over 3 s.
+
+### 2. `JsString`
+
+`include/litebird/js/JsString.hpp`, `src/js/JsString.cpp`. A string value
+holds a handle of 24 bytes:
+
+```
+JsString  { block*, byte offset, byte length, unit offset, unit length }
+              |
+              v
+Block     { refs, used, capacity, moves, wide* } [ UTF-8 text ......... free room ]
+                                         |
+                                         v
+Wide      { units ready, bytes read } [ UTF-16 code units ... ] [ a mark every 256 units ]
+```
+
+The text is UTF-8 in a block that is shared and reference-counted. A handle is
+a range of its block. Bytes that have been written are never written again;
+that one rule is what makes the sharing invisible to script.
+
+- **Reading.** Copying a value copies the handle and bumps a count. `length`
+  is a field. A string whose byte length equals its unit length is ASCII, and
+  indexing it reads one byte. Any other string gets a UTF-16 copy (`Wide`) the
+  first time it is indexed. The copy belongs to the block, is extended when
+  the block's text grows, and is never rebuilt; next to it is a table that
+  says where every 256th code unit is in the bytes, so a slice can be located
+  by index without reading what comes before it.
+- **Appending.** `a + b` looks at whether `a` ends where its block's text
+  ends and whether there is room after it. If so it claims the room (one
+  compare-and-swap on `used`) and writes `b` there; `a` is not copied, and
+  every other handle still sees the bytes it saw. Otherwise the result goes
+  into a new block. Text that has moved three times in a row is being built
+  in a loop and gets half again as much room as it needs, so n appends copy
+  about 3n bytes in total instead of n²/2. Text joined once or twice carries
+  no spare room.
+- **Pieces.** `s.slice(a, b)` is another range of the same block when it is a
+  quarter of the block's bytes or more, and a copy when it is smaller. The
+  quarter bounds what a slice can keep alive to four times its own size. A
+  tokenizer that does `s = s.slice(n)` therefore copies less than its input
+  once, in a few steps, as the remainder shrinks past each quarter.
+- **One spelling.** Bytes that are not UTF-8 become U+FFFD on the way in, as
+  when a browser decodes a page. Half of a surrogate pair may stand alone
+  (three bytes), since script can make one, but a high half followed by a low
+  half is always stored as the one four-byte character. Equal strings
+  therefore have equal bytes, and `===`, property keys and `Map` keys can
+  compare bytes. The cost is that a piece cannot share its block if it starts
+  or ends between the two halves of a pair; it is built from the code units
+  instead.
+- **Order.** `<` and `sort()` compare UTF-16 code units. Comparing the bytes
+  agrees with that except for a character outside the BMP, which has the
+  highest bytes in UTF-8 but is a surrogate pair, below U+E000, in UTF-16.
+  `JsString::compare` compares bytes until the texts differ and settles that
+  one case there. Nothing else in the engine may order string text.
+- **Limit.** A string is at most 2^29 − 24 bytes. Past that script gets
+  `RangeError: Invalid string length`. For ASCII that is V8's limit exactly;
+  other text reaches it sooner than in V8, which counts code units.
+- **Threads.** Suspended async functions, generators and workers run on other
+  OS threads (Phase 23, section 4), so handles are copied, read, appended to
+  and dropped from several threads. The count, the claim on free room and the
+  publication of the UTF-16 copy are atomic; building the UTF-16 copy takes
+  one global mutex, and reading it takes none.
+
+### 3. What changed around it
+
+- `JsValue::string_val` is a `JsString`, and a value is 88 bytes (was 96).
+  Engine code reads a string as `view()` (the bytes, no copy), `length()`,
+  `unit_at(i)`, `substring(b, e)`, or through `Utf16View`, which addresses
+  any string by code unit. `str()` makes an owned copy and is the one read
+  whose cost grows with the text; code that runs once per character must not
+  call it. `JsString::stats()` counts bytes copied and units converted per
+  thread, and the unit tests assert on those counts, not on time.
+- `String.prototype` methods take their receiver as a handle and search it in
+  place. The regular-expression matcher reads its subject through a
+  `Utf16View` (it used to convert the subject to UTF-16 on every call), and a
+  match array's `input` is the subject itself, not a copy.
+- `'key' + i` has a direct path in `js_add`. The general path converts both
+  operands first, and with a string that is now a block of its own that was a
+  measurable cost.
+- Property names are still `std::string`. A string value used as a key
+  (`o[k]`) is copied once per lookup; that is bounded by the key's length and
+  is the same as before.
+
+### 4. Lookbehind
+
+`(?<=x)` used to be tried forward from every earlier position in the subject,
+so one lookbehind that failed cost the length of everything before it:
+`/(?<=,)\w+/g` over 120,000 characters took 50 s. The body of a lookbehind is
+now matched right to left from the current position, as the language defines
+it. The matcher keeps a direction; inside a lookbehind a sequence runs from
+its last term to its first, a character is read from before the position, a
+back reference is compared against the text that ends there, and a capture is
+recorded as `[low, high)` whichever way it was walked. A lookahead inside a
+lookbehind runs forward again. Lookarounds finish before their continuation
+runs, so the direction is plain state that a scope object sets and restores.
+
+In unicode mode the subject is a sequence of code points, so a match may not
+begin between the halves of a surrogate pair; both the search loop and the
+`lastIndex` a script sets are held to that.
+
+### 5. How this is verified
+
+| Check | Result |
+| :--- | :--- |
+| JavaScript corpus (`make js-conformance`) | 838 / 843; the five failures are the Phase 23 ones (BigInt, `Proxy`, typed arrays, array holes). 42 cases are new: `long-strings.dat` (34), lookbehind and unicode cases in `regexp.dat` (6), surrogate halves and `isWellFormed` in `strings.dat` (2). Phase 23's engine passes 810 of the 843 |
+| The corpus re-run under Node 22 | 843 / 843 |
+| Unit tests (`make test`) | 88 / 88. Three are new: a random-edit model test, a thread test, and one that asserts on counted work through the interpreter |
+| `make tsan`: the two stress tests alone, under ThreadSanitizer, and under ASan + UBSan with leak checking | no report, nothing leaked |
+| Planted bugs: 40 in `JsString`, one at a time | 39 caught by the stress tests; the other changes no result and no counted work |
+| Planted data races: 4 | ThreadSanitizer reports all 4; the assertions alone catch 2 |
+| Differential run against Node: 8,814 string expressions | 3 differ (`localeCompare` without collation data, special case mapping of `ǅ` and `İ`); Phase 23's engine differs on 72 |
+| Differential run against Node: 75 lookbehind patterns over 20 subjects | 0 of 1,500 results differ; Phase 23's engine differs on 89 |
+| ASan + UBSan: unit tests, the corpus, both fuzzers (`make asan`) | ASAN_RESULT |
+| `make bench`: 39 string-heavy scripts against Node | every result equal to Node's; the slowest takes 199 ms, the limit is 3 s |
+| html5lib tree construction | 1770 / 1792, unchanged |
+
+The scripts that plant bugs and make the differential runs are not in the
+repository; what they found is, as corpus cases and as assertions in
+`tests/js_string_stress.hpp`.
+
+### 6. What is still open here
+
+- **Regular expressions over long input.** A group repeated more than about
+  12,000 times ends in a `RangeError`, and a match is abandoned after 30
+  million steps. Both are in AUDIT.md, finding 26; the first needs the matcher
+  to keep its backtracking state on the heap.
+- **`delete` and `shift()`** are quadratic in the size of the object or array
+  (Phase 23, section 9). They were found by the same timing run and are not
+  string problems.
+- **`repeat`, `padStart` and `padEnd`** build their result in a temporary and
+  copy it into a block: twice the memory for a moment, on a very long result.
+- **Short strings have no inline form.** Every string except the empty one and
+  the 128 one-character ASCII strings has a block. Measured cost: no time,
+  about 20 bytes a string (AUDIT.md, finding 25).
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -1252,16 +1403,15 @@ caches its length and whether it is ASCII; it is item 2 under "Known gaps".
    shaping/HarfBuzz, `rowspan`/`colspan`, `border-collapse`, scrollable
    `overflow: auto` (it clips but cannot be scrolled), and rounded-corner
    clipping. The DOM is trustworthy; the box tree is plausible.
-2. **JavaScript is interpreted, and long strings are slow.** Scripts run on a
-   tree-walking interpreter: 50 to 100 times slower than V8 on loops and calls.
-   Strings are stored inside the value that holds them, so every read of a
-   string variable copies it and `length` and indexing scan it. A loop over a
-   200,000-character string takes over a minute where V8 takes milliseconds,
-   and so does building a long string with `+=`. Deleting many keys from one
-   object and emptying a long array with `shift()` are quadratic as well.
-   Measurements are in Phase 23, section 9. The fix is a shared, immutable
-   string that caches its length and whether it is ASCII; nothing else in the
-   engine blocks it.
+2. **JavaScript is interpreted, and two containers are quadratic.** Scripts
+   run on a tree-walking interpreter: 50 to 100 times slower than V8 on loops
+   and calls. Long strings are no longer part of this (Phase 24), but deleting
+   many keys from one object and emptying a long array with `shift()` still
+   cost the square of the size: 50,000 deletes take over two minutes.
+   Measurements are in Phase 23, section 9. In regular expressions, a group
+   repeated more than about 12,000 times (`(?:a|b)*` over a long string) ends
+   in a `RangeError` where V8 answers, because the matcher recurses; a single
+   character or class under `*` has no such limit (AUDIT.md, finding 26).
 3. **Single process, no sandbox.** Chrome's original headline feature was
    process-per-tab isolation. Untrusted input is parsed in-process.
 4. **Memory is only reclaimed on request.** The collector is sound (Phase 23,
@@ -1289,7 +1439,7 @@ caches its length and whether it is ASCII; it is item 2 under "Known gaps".
 8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
    layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
    is under-sized rather than blurry.
-9. **The DOM a script sees is thin.** The language passes 796 of 801 corpus
+9. **The DOM a script sees is thin.** The language passes 838 of 843 corpus
    cases; the bindings were not rebuilt and have no scoreboard. Present:
    `getElementById`, `querySelector(All)`, `createElement`, `appendChild`,
    attributes, `innerHTML`, `textContent`, `children`, `parentNode`, events,

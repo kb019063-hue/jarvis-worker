@@ -207,7 +207,8 @@ private:
         const uint32_t* marks() const noexcept { return const_cast<Wide*>(this)->marks(); }
     };
     static constexpr size_t kMarkEvery = 256;
-    /// A piece shares its block when it is at least this fraction of it.
+    /// A piece shares its block when it is at least this fraction of the
+    /// block's bytes.
     static constexpr size_t kShareDivisor = 4;
 
     /// The shared block: this header, then `capacity` bytes of text.

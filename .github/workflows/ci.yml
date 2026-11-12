@@ -75,7 +75,13 @@ jobs:
         # catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 790
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 832
+      - name: String-heavy scripts against Node.js
+        # Each script does work in step with its input (read a long string once,
+        # append to one many times). The limit is 3 s and the slowest takes a
+        # fifth of a second, so this fails on a cost that grows with the square
+        # of the length, not on a slow runner. It also compares results.
+        run: make bench
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report
@@ -90,6 +96,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: String stress tests under ThreadSanitizer, then with leak checking
+        # Strings are shared between threads without locks; only ThreadSanitizer
+        # can check that. It cannot map its shadow memory when the kernel
+        # randomises addresses with more than 28 bits, which some runner images do.
+        run: |
+          sudo sysctl -w vm.mmap_rnd_bits=28 || true
+          make tsan
       - name: Sanitizer build, tests and fuzz smoke run
         env:
           ASAN_OPTIONS: detect_leaks=0

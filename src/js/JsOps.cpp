@@ -648,6 +648,14 @@ JsValue js_add(const JsValue& a, const JsValue& b) {
     if (a.type == JsType::String && b.type == JsType::String) {
         return JsValue::make_string(JsString::concat(a.string_val, b.string_val));
     }
+    // A string and a number, as in `'item' + i`: nothing here can run script,
+    // so the general path's conversions (and the copies they make) are skipped.
+    if (a.type == JsType::String && b.type == JsType::Number) {
+        return JsValue::make_string(JsString::concat(a.string_val, std::string_view(js_number_to_string(b.number_val))));
+    }
+    if (a.type == JsType::Number && b.type == JsType::String) {
+        return JsValue::make_string(JsString::concat(std::string_view(js_number_to_string(a.number_val)), b.string_val));
+    }
     JsValue pa = js_to_primitive(a);
     JsValue pb = js_to_primitive(b);
     if (pa.type == JsType::String && pb.type == JsType::String) {

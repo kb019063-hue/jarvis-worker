@@ -86,10 +86,16 @@ TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
+# URL cases that must pass (tests/url). The 38 that do not are host names
+# outside ASCII.
+URL_FLOOR ?= 1150
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.
 JS_ASAN_FLOOR ?= 833
+# The DOM corpus must pass whole in the sanitizer build: none of its cases
+# is about depth.
+DOM_ASAN_FLOOR ?= 557
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -155,7 +161,7 @@ dom-conformance: $(TARGET)
 ## URL scoreboard: the web-platform-tests URL data (tests/url), run through
 ## `new URL()` and the setters of the object. Needs nothing but the binary.
 url-conformance: $(TARGET)
-	@python3 tools/conformance/run_url_conformance.py
+	@python3 tools/conformance/run_url_conformance.py --min-pass $(URL_FLOOR)
 
 ## A grid of string expressions (subjects x methods, operators and regular
 ## expressions) evaluated by Litebird and by Node.js, results compared.
@@ -196,8 +202,8 @@ fuzz:
 deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
 
-## Address + UB sanitizer build, then the test suite, the JavaScript corpus, a
-## fuzz smoke run (asan-core) and the deep pages (asan-deep).
+## Address + UB sanitizer build, then the test suite, the JavaScript, DOM and
+## URL corpora, a fuzz smoke run (asan-core) and the deep pages (asan-deep).
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan: asan-core
@@ -210,6 +216,8 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_url_conformance.py --binary build-asan/litebird --timeout 600 --min-pass $(URL_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for

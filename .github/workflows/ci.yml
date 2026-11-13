@@ -108,6 +108,45 @@ jobs:
           name: js-conformance-report
           path: build/js-conformance.json
 
+  dom-conformance:
+    name: Script DOM conformance (jsdom-verified corpus) and URLs (web-platform-tests)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          # jsdom 31, which recorded the expectations, needs Node 20 or later.
+          node-version: "22"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Check the corpus against jsdom
+        # Every expected output must be what jsdom prints. If this step fails,
+        # an expectation is wrong; it says nothing about Litebird. jsdom
+        # 31.0.0 is fetched from the npm registry into build/jsdom.
+        run: python3 tools/conformance/run_dom_conformance.py --reference --quiet
+      - name: DOM scoreboard
+        run: make dom-conformance
+      - name: Enforce the DOM floor
+        # The corpus is fixed and timers run on a virtual clock, so the score
+        # is deterministic. Every case passes today; one that stops passing is
+        # a regression.
+        run: |
+          set -euo pipefail
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 557
+      - name: URL scoreboard (web-platform-tests data)
+        # tests/url holds the URL parsing and setter cases browsers are tested
+        # with. The floor in the Makefile is the number that pass today; the
+        # rest are host names outside ASCII (see tests/url/README.md).
+        run: make url-conformance
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dom-conformance-report
+          path: build/dom-conformance.json
+
   deep-pages:
     name: Deep and oversized pages (stack, memory and time limits)
     runs-on: ubuntu-latest
@@ -144,7 +183,7 @@ jobs:
         run: |
           sudo sysctl -w vm.mmap_rnd_bits=28 || true
           make tsan
-      - name: Sanitizer build, tests, the JavaScript corpus and a fuzz smoke run
+      - name: Sanitizer build, tests, the JavaScript, DOM and URL corpora and a fuzz smoke run
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: make -j"$(nproc)" asan-core

@@ -3394,6 +3394,67 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     assert(ResourceLoader::address_of("/tmp/a b.html") == "file:///tmp/a%20b.html");
 }
 
+TEST(dom_follows_the_standard_where_jsdom_does_not) {
+    using namespace litebird;
+    // The DOM corpus records what jsdom prints. In these five places jsdom
+    // and the HTML and DOM standards differ, so the corpus stays away from
+    // them (tests/dom-conformance/README.md) and the standard's answer is
+    // asserted here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><body><div id=d tabindex='junk'></div><button id=b tabindex='junk'>b</button>"
+        "<a id=a href='#x' tabindex='junk'>a</a><span id=s></span>"
+        "<form id=f><input id=req name=req required><button id=plain>go</button>"
+        "<button id=skip formnovalidate>skip</button></form><select id=sel></select></body>");
+    js.notify_document_loaded();
+
+    // 1. A tabindex that is not a number is no tabindex: the element's own
+    //    default, -1 for a div and 0 for what takes focus anyway.
+    assert(js.eval("[d.tabIndex, b.tabIndex, a.tabIndex, s.tabIndex].join()").to_string() == "-1,0,0,-1");
+
+    // 2. A submit button with formnovalidate submits a form that is not
+    //    valid; any other button is stopped by the validation.
+    js.eval(R"JS(
+        var log = [];
+        f.addEventListener('submit', function (e) { log.push('submit:' + e.submitter.id); e.preventDefault(); });
+        req.addEventListener('invalid', function () { log.push('invalid'); });
+        plain.click();
+        skip.click();
+    )JS");
+    assert(js.eval("log.join()").to_string() == "invalid,submit:skip");
+
+    // 3. A form that is not in a document cannot be submitted: requestSubmit()
+    //    does nothing, not even fire the event.
+    js.eval(R"JS(
+        var loose = document.createElement('form'), fired = 0;
+        loose.addEventListener('submit', function (e) { fired++; e.preventDefault(); });
+        loose.requestSubmit();
+        var firedLoose = fired;
+        document.body.appendChild(loose);
+        loose.requestSubmit();
+    )JS");
+    assert(js.eval("firedLoose + ',' + fired").to_string() == "0,1");
+
+    // 4. A <select> keeps what is written inside it: the parser has no
+    //    special rules for its content any more.
+    js.eval("sel.innerHTML = '<option>a</option><p>no</p><div>d</div>';");
+    assert(js.eval("sel.innerHTML + ' ' + sel.children.length + ' ' + sel.options.length").to_string() ==
+           "<option>a</option><p>no</p><div>d</div> 3 1");
+
+    // 5. There is one microtask queue. A promise callback queued before a
+    //    mutation runs before the observer hears of the mutation.
+    js.eval(R"JS(
+        var order = [], target = document.createElement('div');
+        new MutationObserver(function () { order.push('observer'); }).observe(target, {childList: true});
+        Promise.resolve().then(function () { order.push('promise'); });
+        target.appendChild(document.createElement('i'));
+        Promise.resolve().then(function () { order.push('promise 2'); });
+    )JS");
+    assert(js.eval("order.join()").to_string() == "promise,observer,promise 2");
+}
+
 TEST(css_filters_and_canvas_blending) {
     using namespace litebird;
     // 1. ImageFilter algorithms
@@ -6874,6 +6935,7 @@ int main() {
     RUN_TEST(url_parser_follows_the_url_standard);
     RUN_TEST(url_objects_and_addresses_in_the_dom);
     RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
+    RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

@@ -667,28 +667,27 @@ void JsInterpreter::init_language_builtins() {
 
     // The global object does not own the global scope: it looks it up each
     // time, and finds nothing once the interpreter and its scope are gone.
+    // What `let`, `const` and `class` declare is not a property of it.
     std::weak_ptr<JsEnvironment> global_scope = m_global_env;
     m_global_object.object_val->lookup_fallback =
         std::make_shared<std::function<bool(const std::string&, JsValue&)>>(
             [global_scope](const std::string& name, JsValue& out) {
                 auto scope = global_scope.lock();
                 if (!scope) return false;
-                if (auto* binding = scope->find_own(name)) {
-                    out = binding->value;
-                    return true;
-                }
-                return false;
+                auto* binding = scope->find_own(name);
+                if (!binding || binding->is_lexical) return false;
+                out = binding->value;
+                return true;
             });
     m_global_object.object_val->assign_hook =
         std::make_shared<std::function<bool(const std::string&, const JsValue&)>>(
             [global_scope](const std::string& name, const JsValue& value) {
                 auto scope = global_scope.lock();
                 if (!scope) return false;
-                if (auto* binding = scope->find_own(name)) {
-                    if (!binding->is_const && !binding->is_readonly) binding->value = value;
-                    return true;
-                }
-                return false;
+                auto* binding = scope->find_own(name);
+                if (!binding || binding->is_lexical) return false;
+                if (!binding->is_const && !binding->is_readonly) binding->value = value;
+                return true;
             });
 
     // At the top level of a script `this` is the global object.

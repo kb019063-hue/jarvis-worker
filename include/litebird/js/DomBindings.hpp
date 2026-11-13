@@ -196,6 +196,15 @@ std::shared_ptr<Element> element_of(const JsValue& value);
 void trace_node(Heap& heap, const Node* node);
 /// The name of the interface an element, text node, ... is an instance of.
 std::string interface_for(const Node& node);
+/// An element's namespace URI; empty for an element in no namespace.
+std::string namespace_uri_of(const Element& element);
+/// Its name with the prefix it was created with: "svg:rect".
+std::string qualified_name(const Element& element);
+/// A new element as `createElementNS(ns, qualified)` makes it: in any
+/// namespace or none, the name as written. `ns` is the argument itself
+/// (null and "" both mean no namespace).
+std::shared_ptr<Element> create_element_ns(Realm& realm, Document& document, const JsValue& ns,
+                                           const std::string& qualified);
 /// The interface of an HTML element by its tag ("HTMLDivElement").
 const char* html_interface_for_tag(const std::string& tag);
 
@@ -698,6 +707,20 @@ std::shared_ptr<Document> make_document(Realm& realm, bool with_skeleton, const 
 std::shared_ptr<Element> create_element(Realm& realm, Document& document, const std::string& local_name,
                                         ElementNamespace ns = ElementNamespace::HTML, bool synchronous_custom = true,
                                         const std::string& is = std::string());
+
+/// What a document's object computes besides its interface members:
+/// `document.search` for `<form name="search">`.
+std::shared_ptr<JsExotic> document_exotic(Realm& realm, Document& document);
+
+// --- DomFileBindings.cpp -----------------------------------------------------------
+void register_file_interfaces();
+bool is_blob(const JsValue& value);
+bool is_file(const JsValue& value);
+/// A new File holding `bytes`.
+JsValue make_file(Realm& realm, const std::string& bytes, const std::string& name, const std::string& type);
+/// A File with the bytes and type of `blob` and the name `name`.
+JsValue file_from_blob(Realm& realm, const JsValue& blob, const std::string& name);
+std::string file_name(const JsValue& file);
 
 // --- DomTraversalBindings.cpp -----------------------------------------------------
 void register_traversal_interfaces();

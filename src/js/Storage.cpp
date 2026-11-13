@@ -1,7 +1,11 @@
 #include "litebird/js/Storage.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
 
 namespace litebird {
 
@@ -190,62 +194,99 @@ CookieJar& CookieJar::default_jar() {
 }
 
 std::string CookieJar::get_cookie_header(const std::string&) const {
-    std::string result;
-    for (const auto& [name, cookie] : m_cookies) {
-        if (!result.empty()) result += "; ";
-        result += cookie.name + "=" + cookie.value;
-    }
-    return result;
+    return get_document_cookie();
 }
 
+// One cookie from the text of a Set-Cookie header or an assignment to
+// document.cookie: "name=value; Path=/; Expires=...; Max-Age=...".
+//
+// A cookie keeps its place when its value changes, and one that is set with
+// a time in the past is deleted: that is how a page removes a cookie.
+// (Cookies used to live in a hash table, so document.cookie listed them in
+// no particular order, and deleting one left an empty cookie behind.)
 void CookieJar::set_cookie_from_header(const std::string& set_cookie_str, const std::string&) {
     if (set_cookie_str.empty()) return;
 
-    // e.g. "sessionId=abc1234; Path=/; HttpOnly"
+    auto trim = [](std::string text) {
+        const size_t start = text.find_first_not_of(" \t");
+        if (start == std::string::npos) return std::string();
+        const size_t end = text.find_last_not_of(" \t");
+        return text.substr(start, end - start + 1);
+    };
+
     std::stringstream ss(set_cookie_str);
     std::string part;
     std::string name, val, path = "/";
+    bool has_max_age = false;
+    bool max_age_expired = false;
+    bool expires_expired = false;
 
     bool first = true;
     while (std::getline(ss, part, ';')) {
-        // Trim whitespace
-        size_t start = part.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
-        size_t end = part.find_last_not_of(" \t");
-        part = part.substr(start, end - start + 1);
-
-        auto eq = part.find('=');
+        part = trim(part);
+        if (part.empty() && !first) continue;
+        const auto eq = part.find('=');
         if (first) {
             first = false;
             if (eq != std::string::npos) {
-                name = part.substr(0, eq);
-                val = part.substr(eq + 1);
+                name = trim(part.substr(0, eq));
+                val = trim(part.substr(eq + 1));
             } else {
-                name = part;
-                val = "";
+                // "value" alone is a cookie with an empty name.
+                val = part;
             }
-        } else {
-            if (eq != std::string::npos) {
-                std::string attr = part.substr(0, eq);
-                std::string attr_val = part.substr(eq + 1);
-                std::transform(attr.begin(), attr.end(), attr.begin(), ::tolower);
-                if (attr == "path") {
-                    path = attr_val;
-                }
+            continue;
+        }
+        std::string attr = trim(eq == std::string::npos ? part : part.substr(0, eq));
+        const std::string attr_val = eq == std::string::npos ? std::string() : trim(part.substr(eq + 1));
+        std::transform(attr.begin(), attr.end(), attr.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (attr == "path") {
+            if (!attr_val.empty() && attr_val[0] == '/') path = attr_val;
+        } else if (attr == "max-age") {
+            char* end = nullptr;
+            const long seconds = std::strtol(attr_val.c_str(), &end, 10);
+            if (end != attr_val.c_str()) {
+                has_max_age = true;
+                max_age_expired = seconds <= 0;
             }
+        } else if (attr == "expires") {
+            const double when = js_parse_date_string(attr_val);
+            const double now = std::chrono::duration<double, std::milli>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (when == when) expires_expired = when <= now;       // a date that does not parse is ignored
         }
     }
+    if (name.empty() && val.empty()) return;
+    // Max-Age wins over Expires, whichever comes first in the text.
+    const bool expired = has_max_age ? max_age_expired : expires_expired;
 
-    if (!name.empty()) {
-        m_cookies[name] = Cookie{name, val, path, ""};
+    auto existing = std::find_if(m_cookies.begin(), m_cookies.end(), [&](const Cookie& cookie) {
+        return cookie.name == name && cookie.path == path;
+    });
+    if (expired) {
+        if (existing != m_cookies.end()) m_cookies.erase(existing);
+        return;
+    }
+    if (existing != m_cookies.end()) {
+        existing->value = val;
+    } else {
+        m_cookies.push_back(Cookie{name, val, path, ""});
     }
 }
 
 std::string CookieJar::get_document_cookie() const {
+    // Longer paths first, and among equals the older cookie first.
+    std::vector<const Cookie*> order;
+    order.reserve(m_cookies.size());
+    for (const auto& cookie : m_cookies) order.push_back(&cookie);
+    std::stable_sort(order.begin(), order.end(), [](const Cookie* a, const Cookie* b) {
+        return a->path.size() > b->path.size();
+    });
     std::string result;
-    for (const auto& [name, cookie] : m_cookies) {
+    for (const Cookie* cookie : order) {
         if (!result.empty()) result += "; ";
-        result += cookie.name + "=" + cookie.value;
+        if (!cookie->name.empty()) result += cookie->name + "=";
+        result += cookie->value;
     }
     return result;
 }

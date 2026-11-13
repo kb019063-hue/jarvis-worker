@@ -87,7 +87,8 @@ std::string node_name(const Node& node) {
         case NodeType::Document: return "#document";
         case NodeType::Element: {
             const auto& element = static_cast<const Element&>(node);
-            return element.is_foreign() ? element.tag_name() : ascii_upper(element.tag_name());
+            const std::string name = qualified_name(element);
+            return element.is_foreign() ? name : ascii_upper(name);
         }
         case NodeType::Text: return "#text";
         case NodeType::Comment: return "#comment";
@@ -808,12 +809,8 @@ void setup_node(Iface& I) {
             at = hold.get();
         }
         if (!at || !no_prefix) return null();
-        switch (static_cast<const Element*>(at)->element_namespace()) {
-            case ElementNamespace::HTML: return str("http://www.w3.org/1999/xhtml");
-            case ElementNamespace::SVG: return str("http://www.w3.org/2000/svg");
-            case ElementNamespace::MathML: return str("http://www.w3.org/1998/Math/MathML");
-        }
-        return null();
+        const std::string uri = namespace_uri_of(static_cast<const Element&>(*at));
+        return uri.empty() ? null() : str(uri);
     });
     I.node_method(any, "lookupPrefix", 1, [](Realm&, Node&, Args) { return null(); });
     I.node_method(any, "isDefaultNamespace", 1, [](Realm&, Node& self, Args args) {
@@ -825,14 +822,7 @@ void setup_node(Iface& I) {
                                      : script_parent(*at);
             at = hold.get();
         }
-        std::string actual;
-        if (at) {
-            switch (static_cast<const Element*>(at)->element_namespace()) {
-                case ElementNamespace::HTML: actual = "http://www.w3.org/1999/xhtml"; break;
-                case ElementNamespace::SVG: actual = "http://www.w3.org/2000/svg"; break;
-                case ElementNamespace::MathML: actual = "http://www.w3.org/1998/Math/MathML"; break;
-            }
-        }
+        const std::string actual = at ? namespace_uri_of(static_cast<const Element&>(*at)) : std::string();
         return boolean(actual == wanted);
     });
 

@@ -31,7 +31,10 @@ enum class CustomElementState : uint8_t {
 enum class ElementNamespace {
     HTML,
     SVG,
-    MathML
+    MathML,
+    /// Any other namespace, or none at all. The parser never makes such an
+    /// element; `createElementNS` does. Its URI is other_namespace_uri().
+    Other
 };
 
 class Element : public Node {
@@ -51,6 +54,25 @@ public:
     }
 
     const std::string& tag_name() const { return m_tag_name; }
+    /// Replaces the name as given. The constructors lower-case an HTML name,
+    /// which is what markup means; `createElementNS` keeps the case, and an
+    /// HTML element named "DIV" is not a div.
+    void set_tag_name_verbatim(std::string name) { m_tag_name = std::move(name); }
+
+    /// The namespace prefix the element was created with
+    /// (`createElementNS(svg, 'svg:rect')`); empty for none.
+    const std::string& prefix() const { return m_rare ? m_rare->prefix : empty_string(); }
+    void set_prefix(std::string prefix) {
+        if (prefix.empty() && !m_rare) return;
+        rare().prefix = std::move(prefix);
+    }
+    /// The URI of an element in ElementNamespace::Other; empty for an
+    /// element in no namespace.
+    const std::string& other_namespace_uri() const { return m_rare ? m_rare->other_namespace : empty_string(); }
+    void set_other_namespace_uri(std::string uri) {
+        if (uri.empty() && !m_rare) return;
+        rare().other_namespace = std::move(uri);
+    }
 
     ElementNamespace element_namespace() const { return m_namespace; }
     bool is_foreign() const { return m_namespace != ElementNamespace::HTML; }
@@ -105,12 +127,14 @@ public:
     /// when the element is created: by `createElement(tag, {is})`, or from
     /// the `is` attribute the element was parsed with.
     const std::string& is_value() const {
-        if (!m_is_value.empty()) return m_is_value;
-        static const std::string none;
+        if (m_rare && !m_rare->is_value.empty()) return m_rare->is_value;
         auto attribute = m_attributes.find("is");
-        return attribute == m_attributes.end() ? none : attribute->second;
+        return attribute == m_attributes.end() ? empty_string() : attribute->second;
     }
-    void set_is_value(std::string value) { m_is_value = std::move(value); }
+    void set_is_value(std::string value) {
+        if (value.empty() && !m_rare) return;
+        rare().is_value = std::move(value);
+    }
     /// What `:defined` asks: false only for an element whose name is a valid
     /// custom element name and which has not been upgraded.
     bool is_defined() const;
@@ -227,7 +251,22 @@ public:
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
     CustomElementState m_custom_state{CustomElementState::Uncustomized};
-    std::string m_is_value;
+    /// What almost no element has, kept out of the element itself: a page of
+    /// 800,000 elements should not pay for three empty strings each.
+    struct Rare {
+        std::string is_value;
+        std::string prefix;
+        std::string other_namespace;
+    };
+    std::unique_ptr<Rare> m_rare;
+    Rare& rare() {
+        if (!m_rare) m_rare = std::make_unique<Rare>();
+        return *m_rare;
+    }
+    static const std::string& empty_string() {
+        static const std::string empty;
+        return empty;
+    }
     std::shared_ptr<FormControlState> m_form_state;
     Rect m_bounding_box;
     bool m_is_hovered{false};

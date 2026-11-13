@@ -704,13 +704,24 @@ void append_escaped(const std::string& text, bool attribute_mode, std::string& o
     }
 }
 
+// The name an element is written with: its local name, and for an element
+// outside the HTML, SVG and MathML namespaces its prefix too.
+void append_tag_name(const Element& element, std::string& out) {
+    if (element.element_namespace() == ElementNamespace::Other && !element.prefix().empty()) {
+        out += element.prefix();
+        out += ':';
+    }
+    out += element.tag_name();
+}
+
 void append_start_tag(const Element& element, bool xml, bool declare_namespace, std::string& out) {
     out += '<';
-    out += element.tag_name();
+    append_tag_name(element, out);
     if (declare_namespace) {
         out += " xmlns=\"";
         out += element.element_namespace() == ElementNamespace::SVG ? "http://www.w3.org/2000/svg"
              : element.element_namespace() == ElementNamespace::MathML ? "http://www.w3.org/1998/Math/MathML"
+             : element.element_namespace() == ElementNamespace::Other ? element.other_namespace_uri().c_str()
              : "http://www.w3.org/1999/xhtml";
         out += '"';
     }
@@ -805,7 +816,7 @@ void append_markup(const Node& root, bool with_root, bool xml, std::string& out)
     };
     auto leave = [&](const Node& node) {
         out += "</";
-        out += static_cast<const Element&>(node).tag_name();
+        append_tag_name(static_cast<const Element&>(node), out);
         out += '>';
     };
     auto raw_inside = [](const Node& node) {

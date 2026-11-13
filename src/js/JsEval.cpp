@@ -969,9 +969,11 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
             switch (mode) {
                 case BindMode::Let:
                     env->define(pattern.name, value);
+                    if (env == m_global_env) env->mark_lexical(pattern.name);
                     return;
                 case BindMode::Const:
                     env->define_const(pattern.name, value);
+                    if (env == m_global_env) env->mark_lexical(pattern.name);
                     return;
                 case BindMode::Var: {
                     // The binding was hoisted to the function scope on entry.
@@ -1160,6 +1162,7 @@ JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Fra
         case NodeKind::ClassDecl: {
             auto* decl = static_cast<const ClassDeclStmt*>(stmt);
             env->define(decl->cls->name, define_class(decl->cls, env));
+            if (env == m_global_env) env->mark_lexical(decl->cls->name);
             return Flow::Normal;
         }
         case NodeKind::FunctionDecl:    // hoisted when the enclosing block was entered

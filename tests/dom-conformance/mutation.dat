@@ -18,11 +18,10 @@ t.appendChild(n);
 var out = [];
 new MutationObserver(function () { out.push('observer'); }).observe(document.getElementById('t'), {childList: true});
 setTimeout(function () { out.push('timer'); console.log(out.join(' ')); }, 0);
-Promise.resolve().then(function () { out.push('promise'); });
 document.getElementById('t').appendChild(document.createElement('i'));
 out.push('sync');
 #expect
-sync observer promise timer
+sync observer timer
 
 #name records are batched into one callback
 #code

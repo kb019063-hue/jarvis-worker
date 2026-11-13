@@ -838,7 +838,9 @@ bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool tr
     EventState& state = *found;
     state.trusted = trusted;
     state.dispatching = true;
-    state.stop_propagation = state.stop_immediate = false;
+    // Not cleared here: an event whose propagation was stopped before it was
+    // dispatched (`e.cancelBubble = true`) reaches no listener. The flags are
+    // cleared when the dispatch is over.
 
     // The path: the target, its ancestors, and the window after the document.
     std::vector<PathEntry> path;

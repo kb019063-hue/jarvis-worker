@@ -25,6 +25,24 @@ The version is pinned in the runner (`JSDOM_VERSION`), because expectations
 are only comparable when everybody records with the same one. Both commands
 install it into `build/jsdom` from the npm registry the first time.
 
+## Where jsdom is not the standard
+
+jsdom is the reference, not the authority. Where it differs from the HTML and
+DOM standards (and from browsers), the corpus does not record its answer: the
+case is written so that it does not depend on the point, and the standard's
+behaviour is asserted in `tests/test_suite.cpp` instead. Known so far:
+
+| Point | The standard | jsdom 31 |
+| :--- | :--- | :--- |
+| `tabIndex` of a `div` whose `tabindex` attribute is not a number | `-1` (the element's default) | `0` |
+| A submit button with `formnovalidate` on an invalid form | The form is submitted without validation | Validation still blocks it |
+| `form.requestSubmit()` on a form that is not in a document | Nothing happens | `submit` is fired |
+| `<p>`, `<div>` and other content inside `<select>` | Kept, since the "in select" parsing mode was removed (html5lib's tests agree) | Dropped |
+| A promise callback queued before a mutation is observed | Runs before the observer's callback (one microtask queue, in order) | Runs after it |
+
+Do not "fix" a failing case by recording such an answer. If Litebird and jsdom
+disagree, read the standard first.
+
 ## How a case runs
 
 A case is a page and a script.

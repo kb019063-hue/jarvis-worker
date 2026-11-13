@@ -242,7 +242,9 @@ JsValue construct_form_data(Realm& realm, const InterfaceDef&, Args args, const 
         }
     }
     for (const auto& entry : forms::entry_list(static_cast<Element&>(*form), submitter)) {
-        state->entries.emplace_back(entry.name, str(entry.value));
+        // A file input with nothing chosen sends one empty, nameless file.
+        state->entries.emplace_back(entry.name, entry.is_file ? make_file(realm, "", "", "application/octet-stream")
+                                                              : str(entry.value));
     }
     // The page may still change what is sent.
     JsValue event = make_event(realm, "FormDataEvent", "formdata", true, false, {{"formData", object}});
@@ -258,10 +260,20 @@ bool form_data_entry_at(Realm&, const JsValue& self, std::size_t index, JsValue&
     return true;
 }
 
+// The value of an entry given to append() or set(): a string, or a File. A
+// Blob that is not a File becomes one called "blob"; a file name given as the
+// third argument renames it.
+JsValue form_data_value(Realm& realm, Args args) {
+    const JsValue& value = args[1];
+    if (!is_blob(value)) return str(to_str(value));
+    if (args.size() > 2 && !args[2].is_undefined()) return file_from_blob(realm, value, to_str(args[2]));
+    return is_file(value) ? value : file_from_blob(realm, value, "blob");
+}
+
 void setup_form_data(Iface& I) {
-    I.method("append", 2, [](Realm&, Args args) {
+    I.method("append", 2, [](Realm& r, Args args) {
         require_args(args, 2, "FormData.append");
-        this_form_data().entries.emplace_back(to_str(args[0]), str(to_str(args[1])));
+        this_form_data().entries.emplace_back(to_str(args[0]), form_data_value(r, args));
         return undefined();
     });
     I.method("delete", 1, [](Realm&, Args args) {
@@ -298,11 +310,11 @@ void setup_form_data(Iface& I) {
         }
         return boolean(false);
     });
-    I.method("set", 2, [](Realm&, Args args) {
+    I.method("set", 2, [](Realm& r, Args args) {
         require_args(args, 2, "FormData.set");
         auto& entries = this_form_data().entries;
         const std::string name = to_str(args[0]);
-        const JsValue value = str(to_str(args[1]));
+        const JsValue value = form_data_value(r, args);
         bool placed = false;
         for (auto it = entries.begin(); it != entries.end();) {
             if (it->first != name) {

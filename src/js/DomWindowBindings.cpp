@@ -82,24 +82,24 @@ JsValue css_namespace(Realm& realm) {
 struct WindowExotic : JsExotic {
     Realm* realm{nullptr};
 
-    // Global variables are properties of the window.
+    // Global variables are properties of the window: those declared with
+    // `var` or `function`, and those made by assignment. `let`, `const` and
+    // `class` declare a name every script sees that is not a property.
     bool get(JsObject*, const std::string& name, JsValue& out) override {
         auto scope = realm->global_scope.lock();
         if (!scope) return false;
-        if (auto* binding = scope->find_own(name)) {
-            out = binding->value;
-            return true;
-        }
-        return false;
+        auto* binding = scope->find_own(name);
+        if (!binding || binding->is_lexical) return false;
+        out = binding->value;
+        return true;
     }
     bool set(JsObject*, const std::string& name, const JsValue& value) override {
         auto scope = realm->global_scope.lock();
         if (!scope) return false;
-        if (auto* binding = scope->find_own(name)) {
-            if (!binding->is_const && !binding->is_readonly) binding->value = value;
-            return true;
-        }
-        return false;
+        auto* binding = scope->find_own(name);
+        if (!binding || binding->is_lexical) return false;
+        if (!binding->is_const && !binding->is_readonly) binding->value = value;
+        return true;
     }
     // Asked when nothing else has the name: an interface, or an element.
     bool get_last(JsObject* self, const std::string& name, JsValue& out) override {
@@ -125,7 +125,8 @@ struct WindowExotic : JsExotic {
     bool has(JsObject*, const std::string& name) override {
         if (!realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return false;
         if (auto scope = realm->global_scope.lock()) {
-            if (scope->find_own(name)) return true;
+            auto* binding = scope->find_own(name);
+            if (binding && !binding->is_lexical) return true;
         }
         if (find_interface_or_alias(name)) return true;
         if (name == "Option" || name == "Image" || name == "Audio" || name == "CSS") return true;
@@ -146,8 +147,17 @@ struct WindowExotic : JsExotic {
             part.ids.clear();
             for_each_descendant(*realm->document, [&](Node& node) {
                 if (node.is_element()) {
-                    if (const std::string* id = static_cast<Element&>(node).attribute("id")) {
-                        if (!id->empty()) part.ids.emplace(*id, shared(static_cast<Element&>(node)));
+                    auto& element = static_cast<Element&>(node);
+                    if (const std::string* id = element.attribute("id")) {
+                        if (!id->empty()) part.ids.emplace(*id, shared(element));
+                    }
+                    // A form, an image, an embed or an object is found by its name too.
+                    if (!element.is_foreign()) {
+                        const std::string& tag = element.tag_name();
+                        if (tag == "form" || tag == "img" || tag == "embed" || tag == "object") {
+                            const std::string* name = element.attribute("name");
+                            if (name && !name->empty()) part.ids.emplace(*name, shared(element));
+                        }
                     }
                 }
                 return true;

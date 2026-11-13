@@ -67,6 +67,7 @@ SRCS = src/dom/Node.cpp \
        src/js/DomTraversalBindings.cpp \
        src/js/DomHtmlBindings.cpp \
        src/js/DomFormBindings.cpp \
+       src/js/DomFileBindings.cpp \
        src/js/DomObserverBindings.cpp \
        src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \

@@ -474,8 +474,10 @@ bool dataset_property_name(const std::string& attribute, std::string& out) {
     return true;
 }
 
+// Names the engine uses for its own bookkeeping. The empty name is not one:
+// `data-=""` is the property `dataset['']`.
 bool is_internal_name(const std::string& name) {
-    return name.empty() || name[0] == '%' || (name.size() > 1 && name[0] == '@' && name[1] == '@');
+    return !name.empty() && (name[0] == '%' || (name.size() > 1 && name[0] == '@' && name[1] == '@'));
 }
 
 struct DatasetState : JsExotic {
@@ -579,21 +581,56 @@ JsValue new_attr(Realm& realm, const std::shared_ptr<Element>& owner, const std:
     return realm.make("Attr", state);
 }
 
+// The attributes with a namespace are the ones the HTML parser gives SVG and
+// MathML elements (`xlink:href`, `xml:lang`, `xmlns`, `xmlns:xlink`), and the
+// same names set by setAttributeNS. An attribute is stored under its
+// qualified name; this takes it apart again.
+struct AttrName {
+    std::string prefix;
+    std::string local;
+    const char* ns{nullptr};
+};
+
+AttrName attr_name(const AttrState& state) {
+    AttrName out;
+    out.local = state.name;
+    if (!state.owner || !state.owner->is_foreign()) return out;
+    static const std::pair<const char*, const char*> kPrefixes[] = {
+        {"xlink", "http://www.w3.org/1999/xlink"},
+        {"xml", "http://www.w3.org/XML/1998/namespace"},
+        {"xmlns", "http://www.w3.org/2000/xmlns/"},
+    };
+    if (state.name == "xmlns") {
+        out.ns = kPrefixes[2].second;
+        return out;
+    }
+    const auto colon = state.name.find(':');
+    if (colon == std::string::npos) return out;
+    for (const auto& [prefix, ns] : kPrefixes) {
+        if (state.name.compare(0, colon, prefix) != 0) continue;
+        out.prefix = prefix;
+        out.local = state.name.substr(colon + 1);
+        out.ns = ns;
+        break;
+    }
+    return out;
+}
+
 void setup_attr(Iface& I) {
     I.getter("name", [](Realm&) { return str(this_attr().name); });
-    I.getter("localName", [](Realm&) { return str(this_attr().name); });
+    I.getter("localName", [](Realm&) { return str(attr_name(this_attr()).local); });
     I.getter("nodeName", [](Realm&) { return str(this_attr().name); });
     I.getter("nodeType", [](Realm&) {
         this_attr();
         return num(2);
     });
     I.getter("namespaceURI", [](Realm&) {
-        this_attr();
-        return null();
+        const AttrName name = attr_name(this_attr());
+        return name.ns ? str(name.ns) : null();
     });
     I.getter("prefix", [](Realm&) {
-        this_attr();
-        return null();
+        const AttrName name = attr_name(this_attr());
+        return name.prefix.empty() ? null() : str(name.prefix);
     });
     I.getter("specified", [](Realm&) {
         this_attr();

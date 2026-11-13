@@ -58,7 +58,8 @@ private:
         std::string domain;
     };
 
-    std::unordered_map<std::string, Cookie> m_cookies;
+    /// In the order they were first set.
+    std::vector<Cookie> m_cookies;
 };
 
 } // namespace litebird

@@ -29,6 +29,10 @@ public:
         /// `Infinity`): assigning to it does nothing in sloppy code and throws
         /// in strict code, and it cannot be redeclared.
         bool is_readonly{false};
+        /// Declared with `let`, `const` or `class`. In the global scope such
+        /// a binding is visible to every script and is not a property of the
+        /// global object: `let x = 1; window.x` is undefined.
+        bool is_lexical{false};
     };
 
     enum class AssignResult { Ok, NotFound, Const, ReadOnly };
@@ -83,9 +87,15 @@ public:
             if (existing->is_readonly) return;
             existing->value = std::move(value);
             existing->is_const = false;
+            existing->is_lexical = false;
             return;
         }
         add(name, std::move(value), false);
+    }
+
+    /// See Binding::is_lexical.
+    void mark_lexical(const std::string& name) {
+        if (Binding* binding = find_own(name)) binding->is_lexical = true;
     }
 
     void define_const(const std::string& name, JsValue value) {
@@ -205,7 +215,7 @@ private:
         if (m_parent && name.size() == 9 && name == "undefined") {
             s_undefined_shadowed.store(true, std::memory_order_relaxed);
         }
-        m_bindings.push_back(Binding{name, std::move(value), is_const, false});
+        m_bindings.push_back(Binding{name, std::move(value), is_const, false, false});
         if (m_bindings.size() == kIndexThreshold + 1) {
             for (size_t i = 0; i < m_bindings.size(); ++i) m_index[m_bindings[i].name] = static_cast<uint32_t>(i);
         } else if (m_bindings.size() > kIndexThreshold + 1) {

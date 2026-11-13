@@ -18,6 +18,7 @@ const char* namespace_prefix(ElementNamespace ns) {
         case ElementNamespace::SVG: return "svg ";
         case ElementNamespace::MathML: return "math ";
         case ElementNamespace::HTML: break;
+        case ElementNamespace::Other: break;
     }
     return "";
 }

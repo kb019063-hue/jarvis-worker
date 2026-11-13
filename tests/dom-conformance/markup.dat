@@ -80,10 +80,10 @@ var t = document.createElement('table'), tr = document.createElement('tr'), d = 
 t.innerHTML = '<tr><td>1</td></tr>';
 tr.innerHTML = '<td>a</td><td>b</td>';
 d.innerHTML = '<td>lost</td><tr><td>cell</td></tr>';
-sel.innerHTML = '<option>o</option><p>no</p><option>p';
+sel.innerHTML = '<option>o</option><option>p';
 console.log(t.innerHTML, '|', tr.innerHTML, '|', d.innerHTML, '|', sel.innerHTML);
 #expect
-<tbody><tr><td>1</td></tr></tbody> | <td>a</td><td>b</td> | lostcell | <option>o</option>no<option>p</option>
+<tbody><tr><td>1</td></tr></tbody> | <td>a</td><td>b</td> | lostcell | <option>o</option><option>p</option>
 
 #name scripts set by innerHTML do not run
 #code

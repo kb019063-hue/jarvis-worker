@@ -45,6 +45,7 @@ void ensure_registered() {
         register_traversal_interfaces();
         register_html_interfaces();
         register_form_interfaces();
+        register_file_interfaces();
         register_observer_interfaces();
         register_window_interfaces();
     });
@@ -284,6 +285,8 @@ JsObject* create_object(Realm& realm, const std::shared_ptr<Node>& node) {
             prototype = realm.proto("HTMLUnknownElement");
         }
         exotic = element_exotic(realm, element);
+    } else if (node->is_document()) {
+        exotic = document_exotic(realm, static_cast<Document&>(*node));
     }
     if (!prototype) prototype = realm.proto(interface_for(*node));
 
@@ -520,6 +523,21 @@ const char* html_interface_for_tag(const std::string& tag) {
     return "HTMLUnknownElement";
 }
 
+std::string namespace_uri_of(const Element& element) {
+    switch (element.element_namespace()) {
+        case ElementNamespace::HTML: return "http://www.w3.org/1999/xhtml";
+        case ElementNamespace::SVG: return "http://www.w3.org/2000/svg";
+        case ElementNamespace::MathML: return "http://www.w3.org/1998/Math/MathML";
+        case ElementNamespace::Other: return element.other_namespace_uri();
+    }
+    return std::string();
+}
+
+std::string qualified_name(const Element& element) {
+    if (element.prefix().empty()) return element.tag_name();
+    return element.prefix() + ":" + element.tag_name();
+}
+
 std::string interface_for(const Node& node) {
     switch (node.type()) {
         case NodeType::Document:
@@ -534,6 +552,7 @@ std::string interface_for(const Node& node) {
                     if (element.tag_name() == "title") return "SVGTitleElement";
                     return "SVGElement";
                 case ElementNamespace::MathML:
+                case ElementNamespace::Other:
                     return "Element";
             }
             return "Element";

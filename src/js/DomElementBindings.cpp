@@ -72,13 +72,8 @@ const std::string* find_attribute_ns(const Element& element, const std::string& 
     return nullptr;
 }
 
-const char* namespace_uri(const Element& element) {
-    switch (element.element_namespace()) {
-        case ElementNamespace::HTML: return "http://www.w3.org/1999/xhtml";
-        case ElementNamespace::SVG: return "http://www.w3.org/2000/svg";
-        case ElementNamespace::MathML: return "http://www.w3.org/1998/Math/MathML";
-    }
-    return "";
+std::string namespace_uri(const Element& element) {
+    return namespace_uri_of(element);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,11 +215,16 @@ bool can_host_shadow(const Element& element) {
 
 void setup_element(Iface& I) {
     El E(I);
-    E.getter("namespaceURI", [](Realm&, Element& el) { return str(namespace_uri(el)); });
-    E.getter("prefix", [](Realm&, Element&) { return null(); });
+    E.getter("namespaceURI", [](Realm&, Element& el) {
+        const std::string uri = namespace_uri_of(el);
+        return uri.empty() ? null() : str(uri);
+    });
+    E.getter("prefix", [](Realm&, Element& el) { return el.prefix().empty() ? null() : str(el.prefix()); });
     E.getter("localName", [](Realm&, Element& el) { return str(el.tag_name()); });
     E.getter("tagName", [](Realm&, Element& el) {
-        return str(el.is_foreign() ? el.tag_name() : ascii_upper(el.tag_name()));
+        // An HTML element's name is given in upper case; any other as written.
+        const std::string name = qualified_name(el);
+        return str(el.is_foreign() ? name : ascii_upper(name));
     });
     E.string("id");
     E.string("className", "class");

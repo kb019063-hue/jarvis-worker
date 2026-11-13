@@ -101,14 +101,7 @@ void setup_implementation(Iface& I) {
         require_args(args, 2, "DOMImplementation.createDocument");
         auto document = make_document(r, false, nullptr);
         const std::string name = args[1].is_nullish() ? std::string() : to_str(args[1]);
-        if (!name.empty()) {
-            validate_name(r, name);
-            ElementNamespace ns = ElementNamespace::MathML;
-            if (!args[0].is_nullish()) namespace_from_uri(to_str(args[0]), ns);
-            const auto colon = name.find(':');
-            auto root = std::make_shared<Element>(colon == std::string::npos ? name : name.substr(colon + 1), ns);
-            document->append_child(root);
-        }
+        if (!name.empty()) document->append_child(create_element_ns(r, *document, args[0], name));
         return wrap(r, document);
     });
     I.method("createDocumentType", 3, [](Realm& r, Args args) {
@@ -283,13 +276,11 @@ void setup_document(Iface& I) {
         const std::string ns = args[0].is_nullish() ? std::string() : to_str(args[0]);
         const std::string name = to_str(args[1]);
         return make_live_list(r, "HTMLCollection", self.shared_from_this(), [ns, name](Node& root, NodeVector& out) {
-            ElementNamespace wanted = ElementNamespace::HTML;
             const bool any = ns == "*";
-            if (!any && !namespace_from_uri(ns, wanted)) return;
             for_each_descendant(root, [&](Node& node) {
                 if (!node.is_element()) return true;
                 const auto& element = static_cast<Element&>(node);
-                if ((any || element.element_namespace() == wanted) && (name == "*" || element.tag_name() == name)) {
+                if ((any || namespace_uri_of(element) == ns) && (name == "*" || element.tag_name() == name)) {
                     out.push_back(node.shared_from_this());
                 }
                 return true;
@@ -372,17 +363,9 @@ void setup_document(Iface& I) {
     });
     I.node_method(doc, "createElementNS", 2, [](Realm& r, Node& self, Args args) {
         require_args(args, 2, "Document.createElementNS");
-        const std::string qualified = to_str(args[1]);
-        validate_name(r, qualified);
-        const auto colon = qualified.find(':');
-        const bool no_namespace = args[0].is_nullish() || to_str(args[0]).empty();
-        if (colon != std::string::npos && no_namespace) throw_dom(r, "NamespaceError", "A prefix was given without a namespace.");
-        ElementNamespace ns = ElementNamespace::MathML;       // stands for "none of the three we know"
-        if (!no_namespace) namespace_from_uri(to_str(args[0]), ns);
-        const std::string local = colon == std::string::npos ? qualified : qualified.substr(colon + 1);
-        auto element = create_element(r, as_document(self), local, ns);
+        auto element = create_element_ns(r, as_document(self), args[0], to_str(args[1]));
         JsValue object = wrap(r, element);
-        if (ns == ElementNamespace::HTML && element->tag_name() == "script") set_slot(object, "runnable", boolean(true));
+        if (!element->is_foreign() && element->tag_name() == "script") set_slot(object, "runnable", boolean(true));
         return object;
     });
     I.node_method(doc, "createDocumentFragment", 0, [](Realm& r, Node& self, Args) {
@@ -554,6 +537,98 @@ std::shared_ptr<Document> make_document(Realm& realm, bool with_skeleton, const 
         html->append_child(body);
     }
     return document;
+}
+
+namespace {
+
+// `document.search` is the form called "search". The names are those of
+// forms, images, embeds, objects and iframes, and the id of an object or of
+// an image that also has a name. Not every id: that is the window's rule.
+//
+// One difference from browsers, on purpose: there a name shadows the
+// document's own members, so `<form name="getElementById">` breaks the page.
+// Here a name is only looked for when the document has no member of that
+// name.
+struct DocumentExotic : JsExotic {
+    Realm* realm{nullptr};
+    Document* document{nullptr};       // the object this is part of keeps it alive
+    uint64_t version{~uint64_t{0}};
+    std::unordered_map<std::string, std::weak_ptr<Element>> named;
+
+    std::shared_ptr<Element> find(const std::string& name) {
+        if (!realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return nullptr;
+        if (version != Node::tree_version()) {
+            named.clear();
+            for_each_descendant(*document, [&](Node& node) {
+                if (!node.is_element()) return true;
+                auto& element = static_cast<Element&>(node);
+                if (element.is_foreign()) return true;
+                const std::string& tag = element.tag_name();
+                const bool object = tag == "object";
+                const bool image = tag == "img";
+                if (!object && !image && tag != "form" && tag != "embed" && tag != "iframe") return true;
+                const std::string* name_attribute = element.attribute("name");
+                const bool has_name = name_attribute && !name_attribute->empty();
+                if (has_name) named.emplace(*name_attribute, shared(element));
+                if (object || (image && has_name)) {
+                    const std::string* id = element.attribute("id");
+                    if (id && !id->empty()) named.emplace(*id, shared(element));
+                }
+                return true;
+            });
+            version = Node::tree_version();
+        }
+        auto found = named.find(name);
+        return found == named.end() ? nullptr : found->second.lock();
+    }
+    bool get_last(JsObject*, const std::string& name, JsValue& out) override {
+        auto element = find(name);
+        if (!element) return false;
+        out = wrap(*realm, element);
+        return true;
+    }
+    bool has(JsObject*, const std::string& name) override { return find(name) != nullptr; }
+};
+
+} // namespace
+
+std::shared_ptr<JsExotic> document_exotic(Realm& realm, Document& document) {
+    auto exotic = std::make_shared<DocumentExotic>();
+    exotic->realm = &realm;
+    exotic->document = &document;
+    return exotic;
+}
+
+std::shared_ptr<Element> create_element_ns(Realm& realm, Document& document, const JsValue& ns_value,
+                                           const std::string& qualified) {
+    validate_name(realm, qualified);
+    const std::string uri = ns_value.is_nullish() ? std::string() : to_str(ns_value);
+    const auto colon = qualified.find(':');
+    const std::string prefix = colon == std::string::npos ? std::string() : qualified.substr(0, colon);
+    const std::string local = colon == std::string::npos ? qualified : qualified.substr(colon + 1);
+    static const char* const kXml = "http://www.w3.org/XML/1998/namespace";
+    static const char* const kXmlns = "http://www.w3.org/2000/xmlns/";
+    if (!prefix.empty() && uri.empty()) throw_dom(realm, "NamespaceError", "A prefix was given without a namespace.");
+    if (prefix == "xml" && uri != kXml) throw_dom(realm, "NamespaceError", "The prefix 'xml' belongs to the XML namespace.");
+    if ((qualified == "xmlns" || prefix == "xmlns") != (uri == kXmlns)) {
+        throw_dom(realm, "NamespaceError", "'xmlns' and the XMLNS namespace go together.");
+    }
+
+    ElementNamespace ns = ElementNamespace::Other;
+    namespace_from_uri(uri, ns);
+    // The name is kept as written: in the HTML namespace too, where "DIV" is
+    // not the div element.
+    const bool plain_html = ns == ElementNamespace::HTML && local == ascii_lower(local) && prefix.empty();
+    std::shared_ptr<Element> element;
+    if (plain_html) {
+        element = create_element(realm, document, local, ns);
+    } else {
+        element = create_element(realm, document, local, ns, false);
+        element->set_tag_name_verbatim(local);
+        element->set_prefix(prefix);
+        if (ns == ElementNamespace::Other) element->set_other_namespace_uri(uri);
+    }
+    return element;
 }
 
 std::shared_ptr<Element> create_element(Realm& realm, Document& document, const std::string& local_name,

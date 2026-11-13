@@ -491,6 +491,10 @@ std::string to_date_string(double t) {
 
 } // namespace
 
+double js_parse_date_string(const std::string& text) {
+    return parse_date(text);
+}
+
 void install_date_builtins(JsIntrinsics& realm) {
     JsObject* dp = realm.date_proto;
 

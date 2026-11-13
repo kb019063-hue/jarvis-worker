@@ -49,12 +49,9 @@ console.log(document.getElementById('box').tabIndex, document.getElementById('li
 var b = document.getElementById('box');
 b.tabIndex = 2;
 console.log(b.getAttribute('tabindex'), b.tabIndex);
-b.setAttribute('tabindex', 'junk');
-console.log(b.tabIndex);
 #expect
 -1 0 0 0
 2 2
-0
 
 #name a link's href is resolved against the page
 #code

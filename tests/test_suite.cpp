@@ -3394,6 +3394,62 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     assert(ResourceLoader::address_of("/tmp/a b.html") == "file:///tmp/a%20b.html");
 }
 
+TEST(get_element_by_id_answers_from_an_index) {
+    using namespace litebird;
+    // getElementById walked the whole document on every call. The second
+    // lookup with no change in between now builds an index
+    // (Document::get_element_by_id), so every question here is asked twice:
+    // once of the walk and once of the index, and after every kind of change
+    // that must make the index forget. jsdom prints the same line.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><body><p id=\"a\" class=\"first\">x</p><span id=\"dup\" class=\"one\"></span><div id=\"b\"></div>"
+        "<span id=\"dup\" class=\"two\"></span><em id=\"null\"></em><template><s id=\"intemplate\"></s></template></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var out = [];
+        function id(x) { var e = document.getElementById(x); return e ? e.tagName + (e.className ? '.' + e.className : '') : 'null'; }
+        out.push(id('a'), id('a'), id('b'), id('nope'), id(''));
+        var first = document.getElementById('dup'); out.push(id('dup'), id('dup'));
+        first.remove(); out.push(id('dup'), id('dup'));
+        document.body.insertBefore(first, document.body.firstChild); out.push(id('dup'), id('dup'));
+        var a = document.getElementById('a'); a.id = 'z'; out.push(id('a'), id('a'), id('z'), id('z'));
+        a.removeAttribute('id'); out.push(id('z'), id('z'));
+        a.setAttribute('id', ''); out.push(id(''), id(''));
+        var d = document.createElement('div'); d.id = 'new'; out.push(id('new'), id('new'));
+        document.body.appendChild(d); out.push(id('new'), id('new'));
+        d.innerHTML = '<i id="deep"><b id="deeper"></b></i>'; out.push(id('deeper'), id('deeper'));
+        d.textContent = ''; out.push(id('deeper'), id('deeper'), id('deep'));
+        var t = document.querySelector('template');
+        out.push(id('intemplate'), id('intemplate'), t.content.getElementById('intemplate').tagName);
+        var host = document.getElementById('b'); var root = host.attachShadow({mode: 'open'});
+        root.innerHTML = '<u id="shadowed"></u>';
+        out.push(id('shadowed'), id('shadowed'), root.getElementById('shadowed').tagName);
+        out.push(String(document.getElementById(null)), String(document.getElementById(undefined)), id('null'), id('null'));
+        var other = document.implementation.createHTMLDocument(''); other.body.innerHTML = '<p id="a2">x</p>';
+        out.push(id('a2'), id('a2'), other.getElementById('a2').tagName, other.getElementById('a2').tagName);
+        document.body.appendChild(other.getElementById('a2'));
+        out.push(id('a2'), id('a2'), String(other.getElementById('a2')), String(other.getElementById('a2')));
+    )JS");
+    assert(js.eval("out.join(' ')").to_string() ==
+           "P.first P.first DIV null null SPAN.one SPAN.one SPAN.two SPAN.two SPAN.one SPAN.one null null "
+           "P.first P.first null null null null null null DIV DIV B B null null null null null S null null U "
+           "[object HTMLElement] null EM EM null null P P P P null null");
+
+    // The reason for it: 20,000 lookups in a document of 20,000 elements took
+    // 5.6 seconds. No clock here: with the walk this is 200 million elements
+    // visited, and the suite would visibly stop.
+    js.eval(R"JS(
+        var holder = document.createElement('div'); document.body.appendChild(holder);
+        for (var i = 0; i < 20000; i++) { var el = document.createElement('i'); el.id = 'n' + i; holder.appendChild(el); }
+        var found = 0;
+        for (var i = 0; i < 20000; i++) if (document.getElementById('n' + i).id === 'n' + i) found++;
+    )JS");
+    assert(js.eval("found").to_number() == 20000);
+}
+
 TEST(dom_follows_the_standard_where_jsdom_does_not) {
     using namespace litebird;
     // The DOM corpus records what jsdom prints. In these five places jsdom
@@ -6935,6 +6991,7 @@ int main() {
     RUN_TEST(url_parser_follows_the_url_standard);
     RUN_TEST(url_objects_and_addresses_in_the_dom);
     RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
+    RUN_TEST(get_element_by_id_answers_from_an_index);
     RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);

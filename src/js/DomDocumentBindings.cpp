@@ -243,7 +243,7 @@ void setup_document(Iface& I) {
     I.node_method(doc, "getElementById", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.getElementById");
         const std::string id = to_str(args[0]);
-        return wrap(r, id.empty() ? nullptr : self.descendant_with_id(id));
+        return wrap(r, as_document(self).get_element_by_id(id));
     });
     I.node_method(doc, "getElementsByName", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.getElementsByName");

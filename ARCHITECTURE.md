@@ -339,6 +339,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`, `make diff-strings`) |
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
+| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 557-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 557 of 557; URL data 2 → 1150 of 1188; 107/107 unit suites) |
 
 ---
 
@@ -1811,6 +1812,240 @@ cases (1,781) instead of 98%.
 
 ---
 
+## Phase 27 Architecture: The DOM a Script Sees
+
+### 1. Why this phase existed
+
+Phase 23 rebuilt the language against a corpus recorded from Node.js and left
+the DOM as it was (Known gaps, 9): `getElementById`, one-word selectors,
+`appendChild`, `innerHTML`, events. A script that did
+`document.querySelector('ul li')`, `el.classList.add(...)` or
+`new CustomEvent(...)` stopped with an error on its first line, and most
+scripts on real pages do one of those on their first line.
+
+The reason was structural. A DOM node was a *kind of value*
+(`JsType::DomNode`), and what it could do was a chain of name comparisons in
+`JsValue::get_property`. Nothing was an object: there was no
+`HTMLElement.prototype` to inherit from, extend or test with `instanceof`,
+and every new member was another branch in one function. So the phase started the way Phase
+23 did, with a scoreboard from outside (section 9), and then replaced the
+bindings instead of adding branches.
+
+### 2. Three layers
+
+```
+src/dom/, include/litebird/dom/      the tree: Node, Element, Document, attributes,
+                                     selectors, form state, the serializer.
+                                     Knows nothing about scripts.
+src/js/Dom*Bindings.cpp              the interfaces of the DOM and HTML standards,
+                                     over that tree. 12,400 lines, 14 files.
+src/js/ (Heap, JsValue, JsOps)       the engine: what an object is.
+```
+
+**The tree** gained what the interfaces need and the old bindings did
+without: an owner document on every node, attributes as an ordered list with
+namespaces (`AttributeList.hpp`), a selector engine (`Selector.cpp`), the
+values and dirty flags of form controls and constraint validation
+(`FormState.cpp`), and the standard's fragment serializer (`Node.cpp`). It
+tells whoever is listening what changed through `DomHooks`, a table of
+function pointers (`Node.hpp`): children changed, an attribute changed, an
+element was connected or disconnected. The bindings fill the table in; the
+tree calls nothing in the bindings by name, and a tree with no interpreter
+attached (the parser's corpus run, a fragment) pays for a null check.
+
+**The engine** gained one thing: an object can carry native state and answer
+for its own properties (`JsExotic` in `Heap.hpp`). That is what a
+`NodeList` (indexed), a `DOMStringMap` (named), `document` and `window`
+(named access) are. `JsType::DomNode` is gone.
+
+### 3. One object per node (`DomBindings.cpp`)
+
+`wrap(realm, node)` returns the node's object, creating it the first time.
+The object's prototype is chosen from the node: `HTMLDivElement.prototype`
+for a `<div>`, `HTMLUnknownElement.prototype` for a tag nobody knows, the
+class of a custom element. From then on:
+
+- The object owns the node (`JsObject::dom_node`, a `shared_ptr`). The node
+  points back with a plain pointer (`Node::script_object`), cleared when the
+  collector frees the object.
+- **A node that has an object, its parent has one too.** Marking an object
+  marks the objects of its parent, its children and its document
+  (`trace_wrapper`). So holding any node of a tree keeps every object of the
+  tree, and `el.myData = ...` is still there when the script finds `el`
+  again by another route. The rule is kept by `wrap` (ancestors first, in a
+  loop: a tree can be as deep as memory allows) and by a hook for when
+  native code puts a node that has an object under one that has none.
+- Objects that are not nodes (events, lists, style declarations, ranges)
+  carry their C++ state as the object's `JsExotic`. A binding recognises
+  what it was called on by the dynamic type of that state (`this_state<T>`),
+  never by a property a script could set, and throws `Illegal invocation`
+  otherwise: `Element.prototype.getAttribute.call({})` is a `TypeError`.
+
+### 4. Interfaces (`DomBindings.hpp`)
+
+An interface is a row in a table: its name, its parent, a function that puts
+its members on a prototype, and a constructor or none (`InterfaceDef`,
+`register_interface`). A `Realm`, one per interpreter, builds a prototype
+and its constructor the first time either is asked for, parents first. The
+window finds interfaces by name the same way, when a script first says
+`HTMLElement`: an interpreter that never touches the DOM builds none of it,
+and a page that uses ten interfaces builds ten.
+
+Members are native functions made by `make_function`, defined as accessors
+and methods with the attributes WebIDL gives them. `ElementMembers` covers
+the bulk: a reflected string, boolean, integer, enumerated keyword or URL
+attribute is one line. The constructors can be subclassed
+(`class Card extends HTMLElement`), which is what custom elements need:
+`construct_as_super` in the engine lets a native constructor return the
+object the derived class is building.
+
+### 5. What the files hold
+
+| File | Interfaces |
+| :--- | :--- |
+| `DomNodeBindings.cpp` | `Node`, `CharacterData`, `Text`, `Comment`, `DocumentFragment`, `DocumentType`; insertion with the hierarchy checks, adoption, `cloneNode` |
+| `DomElementBindings.cpp` | `Element`: attributes, `classList`, selectors, `innerHTML`/`outerHTML`/`insertAdjacent*`, shadow roots, `DOMRect` |
+| `DomCollectionBindings.cpp` | `NodeList`, `HTMLCollection`, `DOMTokenList`, `NamedNodeMap`, `Attr`, `DOMStringMap`: live, indexed and named |
+| `DomHtmlBindings.cpp` | `HTMLElement` and the HTML element interfaces: reflected attributes, links, images, tables, templates, dialogs, canvas |
+| `DomFormBindings.cpp` | Form controls, `form.elements`, validation, submission and reset, `FormData`, focus |
+| `DomEventBindings.cpp` | `EventTarget`, `Event` and 27 subclasses, dispatch, `on*` handlers, `AbortController` |
+| `DomStyleBindings.cpp` | `CSSStyleDeclaration`: `el.style` as a live declaration block, and `getComputedStyle` |
+| `DomDocumentBindings.cpp` | `Document`, `DOMImplementation`, `DOMParser`, `XMLSerializer`, cookies, named access |
+| `DomTraversalBindings.cpp` | `Range`, `Selection`, `TreeWalker`, `NodeIterator`, `NodeFilter` |
+| `DomObserverBindings.cpp` | `MutationObserver`, custom elements and their reactions |
+| `DomFileBindings.cpp` | `Blob`, `File`, `FileReader` |
+| `DomUrlBindings.cpp` | `URL`, `URLSearchParams` |
+| `DomWindowBindings.cpp` | `Window`, `Location`, `History`, `Navigator`, `Storage`, `XMLHttpRequest`, `matchMedia`, error reporting, the load events |
+
+### 6. When things run
+
+**Custom element reactions** wait for the DOM call that caused them to
+return, then run before the script goes on, which is what `[CEReactions]`
+means in the standards: `el.setAttribute('a', 1); el.setAttribute('a', 2)`
+gives two `attributeChangedCallback`s, each after its own call, never one in
+the middle of the other. Every native DOM function runs inside a
+`ReactionScope` (in `make_function`), which costs a counter, a comparison
+and a `try` block when the queue is empty.
+
+**Mutation observers** get their records in a microtask. There is one
+microtask queue, the engine's, so a promise callback queued before a
+mutation runs before the observer's callback.
+
+**Events** are dispatched by `DomEventBindings.cpp` for scripts and for
+native code alike (a hook: the shell's click reaches script listeners).
+The path is computed first; listeners are objects or functions, with
+`once`, `passive`, `capture` and `signal`; an exception in one is reported
+to `window.onerror` and the next still runs. After the dispatch comes the
+default action: a click toggles a checkbox (and puts it back if a listener
+called `preventDefault()`), follows a label to its control, submits a
+form, moves the page to a fragment.
+
+**A page's scripts run while it is parsed.** `HtmlTreeBuilder` reports each
+`<script>` when its end tag has been read (`set_script_handler`), and
+`JsInterpreter::load_page()` runs it there, as `document.currentScript`,
+after a microtask checkpoint. The script sees the page up to itself:
+`document.scripts.length` in the first script is 1, and
+`scripts[scripts.length - 1]` is the script that asks. What it does to the
+tree is there for the rest of the parse; the parser keeps its own
+references to the open elements and goes on inserting into them wherever
+they now are, as the standard says. The CLI and the shell both load pages
+this way. Then the document is `interactive`, `DOMContentLoaded` is fired,
+and `load`.
+
+### 7. URLs (`src/net/UrlParser.cpp`)
+
+Addresses were resolved by cutting strings: `?q=1` against
+`/app/page.html?tab=2` gave `/app/?q=1`, `//cdn.test/lib.js` stayed on the
+page's host, `mailto:` was read as `https:`, and `new URL('nope')` did not
+throw. `Url` is the URL Standard's state machine, with the state override
+its setters use: special schemes, opaque paths, IPv4 and IPv6 hosts in every
+spelling, the percent-encode sets, `file:` URLs, origins. Everything that
+has an address goes through it: `a.href` and the parts of a link,
+`location`, `form.action`, `baseURI` with `<base href>`, `pushState`, and
+the `URL` object, whose `searchParams` is a second view of the same record.
+The page's own address is normalised when the window is made.
+
+Navigation is only within the page: assigning to `location.hash`, following
+a link to a fragment, `location.href = '#x'`. Those change the address at
+once and fire `popstate` and `hashchange` from a task. Anything else would
+be loading another page, and does nothing.
+
+### 8. What it costs
+
+@@SPEED@@
+
+`Element` grew by one pointer (`m_rare`, for what few elements have: a
+namespace that is neither HTML, SVG nor MathML, a prefix). The binary is
+7.9 MB, from 3.7 MB: the bindings are templates over lambdas, one
+instantiation for each member.
+
+### 9. How this is verified
+
+**The scoreboard.** `tests/dom-conformance/` is 20 files, 557 cases. A case
+is a page (`#html`), a script (`#code`) and what the script prints
+(`#expect`). `tools/conformance/run_dom_conformance.py` loads the page with
+`litebird --run-script`, which runs the script after the page's own, fires
+the load events and runs timers to the end on the event loop's virtual
+clock, without layout or painting. Every `#expect` was written by
+`--record`, which runs the case in jsdom 31.0.0 (`jsdom_run.mjs`), and
+`--reference` runs them all in jsdom again: CI does, so an expectation
+cannot be bent. `everyday.dat` was written first, from *You Might Not Need
+jQuery*, and is not edited.
+
+jsdom is the reference, not the authority. In five places it differs from
+the standards (the corpus README names them); those are not in the corpus
+and `dom_follows_the_standard_where_jsdom_does_not` asserts the standard's
+answer.
+
+| Check | Result |
+| :--- | :--- |
+| DOM corpus (`make dom-conformance`) | 557 / 557; 61 on `main`. The everyday probe 68 / 68; 13 on `main` |
+| The corpus in jsdom (`--reference`) | 557 / 557 |
+| URL data of web-platform-tests (`make url-conformance`): 904 parsing cases, 284 setter cases | 873 and 277, 1150 of 1188; 0 and 2 on `main`, where a URL object had no `username`. The 38 left are host names outside ASCII |
+| Unit tests (`make test`) | 107 / 107; four are new (the URL parser, URLs in the DOM, page scripts, the five points where jsdom is not the standard), and five old ones asserted what no browser does and were corrected |
+| html5lib tree construction (`make conformance`) | 1781 / 1792, as before |
+| JavaScript corpus (`make js-conformance`) | 840 / 845, as before |
+| `make diff-trees` | @@DIFFTREES@@ |
+| `make fuzz` | @@FUZZ@@ |
+| `make deep` | @@DEEP@@ |
+| `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages | @@ASAN@@ |
+
+The DOM corpus has a job of its own in CI (the reference check, the
+scoreboard with a floor of 557, the URL data with a floor of 1150), and
+`make asan` runs both corpora in the sanitizer build.
+
+### 10. What is still open here
+
+- **The corpus measures what jsdom does.** jsdom lays nothing out and loads
+  no second page, so nothing checks geometry, scrolling or navigation. In
+  the CLI the layout is made once, after the scripts, so
+  `getBoundingClientRect()` and `offsetWidth` are zero while they run.
+  `getComputedStyle` knows what the cascade knows, not used values.
+- **Nothing is fetched.** A `<script src>` or a stylesheet link is not
+  loaded (a script inserted with a `src` gets an `error` event).
+  `document.write` does nothing.
+- **Host names outside ASCII** are kept as written: `http://faß.example`
+  should become `xn--fa-hia.example` (Unicode's IDNA tables, the 38 URL
+  cases).
+- **Style sheets are not objects.** `document.styleSheets` lists the
+  `<style>` elements and nothing more: no `cssRules`, no `insertRule`. A
+  script that writes its rules that way changes nothing; one that appends
+  a `<style>` element is fine.
+- **Absent**: `TextEncoder`/`TextDecoder`, `crypto`, `indexedDB`,
+  `BroadcastChannel`, `MessageChannel`, `Request`, `EventSource`,
+  `document.evaluate` (XPath), Web Animations (`el.animate`),
+  `ElementInternals`, constructable stylesheets, the clipboard, the ARIA
+  reflections (`el.ariaLabel`), and whatever needs typed arrays
+  (`Blob.arrayBuffer()`, `FileReader.readAsArrayBuffer`).
+- **The parser upgrades a custom element when it is connected** instead of
+  constructing it before it is inserted. The element and its callbacks are
+  the same; a mutation observer hears of the insertion one callback earlier
+  than in a browser.
+- **A worker has no DOM**, as in a browser, but its `window`-less global
+  still comes from the code that was there before this phase.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -1860,23 +2095,16 @@ cases (1,781) instead of 98%.
 8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
    layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
    is under-sized rather than blurry.
-9. **The DOM a script sees is thin.** The language passes 840 of 845 corpus
-   cases; the bindings were not rebuilt and have no scoreboard. Present:
-   `getElementById`, `querySelector(All)`, `createElement`, `appendChild`,
-   attributes, `innerHTML`, `textContent`, `children`, `parentNode`, events,
-   timers, `fetch`, storage. `querySelector(All)` understands one simple
-   selector (`#id`, `.class`, a tag name or `*`). Anything else (`div.card`,
-   `ul li`, `a > b`, `[id]`, `a, b`, a pseudo-class) finds nothing and does
-   not throw. Missing, among others: `className`, `classList`,
-   `dataset`, `firstElementChild`, `getElementsByTagName`/`ClassName`,
-   `matches`, `closest`, `remove`, `contains`,
-   `cloneNode`, `insertAdjacentHTML`, `Event`/`CustomEvent` constructors,
-   `location`, `navigator`, `getComputedStyle`, `XMLHttpRequest`, `alert`,
-   `matchMedia`. `tagName` is lower-case. `style` is not a live declaration
-   object. Assigning to `innerHTML` parses for the element it is assigned
-   to (Phase 26); reading it does not escape `<` and `&` in text and
-   writes `<br />`, so text that holds `<b>` reads back as an element.
-   External scripts and stylesheets are not loaded.
+9. **The DOM a script sees is measured against jsdom, not against pages.**
+   It passes all 557 cases of its corpus (Phase 27), and the corpus can
+   only ask what jsdom can answer. No layout while scripts run
+   (`getBoundingClientRect()` is zero), no navigation to another page, no
+   external scripts or stylesheets, no `document.write`, no style sheet
+   objects (`sheet.cssRules`, `insertRule`). Absent: `TextEncoder`,
+   `crypto`, `indexedDB`, `MessageChannel`, XPath, Web Animations,
+   `ElementInternals`, and what needs typed arrays. A host name outside
+   ASCII is not converted (38 of the 1,188 URL cases). The full list is in
+   Phase 27, section 10.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10.

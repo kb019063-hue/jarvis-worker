@@ -51,12 +51,18 @@ the same time will both have changed them. So:
 ## What "done" means
 
 - The checks: `make test`, `make conformance`, `make js-conformance`,
-  `make diff-trees`, `make fuzz`, `make deep`, `make asan`. The last two take
+  `make dom-conformance`, `make url-conformance`, `make diff-trees`,
+  `make fuzz`, `make deep`, `make asan`. The last two take
   about eight minutes each. CI runs all of them, and one CI run is about 28
   minutes of runner time: run the checks here first and push when they pass,
   not to find out whether they do.
 - A floor in CI is not lowered to let a pull request pass.
-  `tests/js-conformance/everyday-*.dat` is not edited.
+  `tests/js-conformance/everyday-*.dat` and
+  `tests/dom-conformance/everyday.dat` are not edited. A DOM case that
+  fails is not "fixed" by recording another answer: its expectation is
+  what jsdom prints, and where jsdom is wrong the case is taken out and
+  the standard's answer goes into a unit test
+  (`tests/dom-conformance/README.md`).
 - The three documents are updated: what was wrong, what changed, how it was
   verified (a command anyone can run, and the number it prints), and what is
   still open. AUDIT.md says what is not fixed as plainly as what is.
@@ -72,7 +78,8 @@ Rows that share files should not be in work at the same time.
 
 | Task | Files | Described in | Note |
 | :--- | :--- | :--- | :--- |
-| **The DOM a script sees**: `innerHTML` read back, selectors in `querySelector`, the properties that are missing | `src/js/JsValue.cpp` (the DOM bindings are its second half), `src/js/JsInterpreter.cpp`, `src/js/JsEval.cpp`, `src/js/JsOps.cpp`, `src/js/Heap.cpp`, `src/js/BuiltinsObject.cpp`, `src/dom/`, `include/litebird/dom/`, `src/html/TreeDump.cpp`, `src/main.cpp` | ARCHITECTURE.md, Known gaps, 9 | **In work** on `arena/22089316-jarvis-worker`, Phase 27, finding 31 |
+| **What the DOM corpus cannot ask**: sizes and positions while scripts run (`getBoundingClientRect()` is zero: layout happens once, after them), style sheet objects (`sheet.cssRules`, `insertRule`), `document.write`, external scripts and stylesheets | `src/js/Dom*Bindings.cpp`, `src/main.cpp`, `src/shell/` | ARCHITECTURE.md, Phase 27, section 10 | jsdom does none of the first two, so each needs a reference of its own before it is built |
+| **Host names outside ASCII in URLs** (`http://faß.example` → `xn--fa-hia.example`): the 38 failing cases of `make url-conformance` | `src/net/UrlParser.cpp` | `tests/url/README.md` | Needs Unicode's IDNA mapping table (UTS #46) and Punycode. Small and self-contained |
 | **A block inside an inline box is not laid out**: `<a href="#">x<p>y</p></a>` shows "x" and no "y" | `src/layout/` | AUDIT.md, finding 28 | The open bug a real page is most likely to meet |
 | **Floats**: 10,000 with a size in one box take 46 s, and past the first 1,024 they are placed outside the box | `src/layout/FloatTableLayout.cpp` | AUDIT.md, finding 28 | Same files as the row above |
 | **Table spans and collapsed borders** (`rowspan`, `colspan`, `border-collapse`) | `src/layout/` | Known gaps, 1 | Pull request #16 (8 November) has an implementation that was never merged and is behind `main`. Same files as the two rows above |

@@ -2,8 +2,10 @@
 
 #include "litebird/dom/Node.hpp"
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <memory>
+#include <unordered_map>
 
 namespace litebird {
 
@@ -124,6 +126,13 @@ private:
     std::weak_ptr<Element> m_current_script;
     std::shared_ptr<Document> m_template_document;
     bool m_has_window{false};
+
+    // getElementById; see Document.cpp. The pointers are only read while the
+    // tree is at the version the index was built at: an element cannot leave
+    // the tree, let alone be freed, without the version moving on.
+    mutable std::unordered_map<std::string, Element*> m_ids;
+    mutable uint64_t m_ids_version{0};
+    mutable uint64_t m_id_walk_version{0};
 };
 
 } // namespace litebird

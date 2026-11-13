@@ -900,7 +900,13 @@ std::string Element::outer_html() const {
 // --- searches -----------------------------------------------------------------
 
 std::shared_ptr<Element> Node::descendant_with_id(const std::string& id) const {
-    auto found = collect_descendants(*this, true, [&](const Element& element) { return element.id() == id; });
+    // An element has an ID only when its attribute is not empty, so no id is
+    // not the id "".
+    if (id.empty()) return nullptr;
+    auto found = collect_descendants(*this, true, [&](const Element& element) {
+        const std::string* value = element.attribute("id");
+        return value && *value == id;
+    });
     return found.empty() ? nullptr : found.front();
 }
 

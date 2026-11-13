@@ -44,6 +44,7 @@ The rest are documented with enough detail to act on.
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
+| 31 | The DOM a script sees: 61 of 557 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 557 of 557; URL data 1150 of 1188 |
 
 ---
 
@@ -1529,3 +1530,90 @@ being checked is worth less than one that was not:
   and `&` in text, and writes `<br />` where the standard writes `<br>`. So
   text that holds `<b>` reads back as an element. Parsing is this finding;
   writing is not fixed.
+
+---
+
+## 31. ✅ The DOM a script sees
+
+The language had a scoreboard since Phase 23 and passed 840 of 845 cases.
+The DOM had none, and Known gap 9 listed what was missing from memory. This
+finding is what a scoreboard said: `tests/dom-conformance/`, 557 pages with
+a script each and what the script prints in jsdom 31, an independent
+implementation (ARCHITECTURE.md, Phase 27, section 9).
+
+| | `main` before | Now |
+| :--- | ---: | ---: |
+| All 557 cases | 61 | 557 |
+| `everyday.dat`: 68 snippets from *You Might Not Need jQuery*, written first and never edited | 13 | 68 |
+| URL parsing and setters, the web-platform-tests data (1,188 cases) | 2 | 1,150 |
+
+### What a script met
+
+Each line is a script on a small page, run by `litebird --run-script`.
+
+| Script | Before | Now |
+| :--- | :--- | :--- |
+| `document.querySelectorAll('div.card p').length` | `0`; `querySelector('p:nth-child(2)')` was `null` and the next line threw | `2` |
+| `a.classList.add('on')` | `TypeError`: `classList` is undefined | the class is added |
+| `p.innerHTML` for `<p>a &lt; b &amp; c</p>` | `a < b & c`: assigned back, it is other markup | `a &lt; b &amp; c` |
+| `u.children`, `u.firstElementChild` | undefined | a live `HTMLCollection`; the element |
+| `a.dataset.role = 'admin'`, `a.matches(...)`, `a.closest(...)` | `TypeError` | work |
+| `new CustomEvent('x', {detail: 1})`, `e instanceof MouseEvent` | `ReferenceError` | work |
+| `form.elements`, `new FormData(form)`, `input.validity` | undefined | work |
+| `getComputedStyle(a)`, `a.style.length` | `ReferenceError` | work; `style` is a live declaration block |
+| `document.querySelector('div[')` | no error, no result | `SyntaxError`, a `DOMException` |
+| `document.body.appendChild(document)` | no error | `HierarchyRequestError` |
+| `Object.getPrototypeOf(document.body) === HTMLBodyElement.prototype` | `ReferenceError`: there were no interfaces | `true` |
+| `a.append('x')`, `a.remove()` | `TypeError`: not a function | work |
+| `location.href` on a page loaded by the CLI | `ReferenceError` | the page's address |
+| `template.content.cloneNode(true)` | `TypeError`: `content` is undefined | works |
+
+The cause was one design decision: a node was a kind of value, and its
+members were names compared in one function. Phase 27 replaced that; the
+old code is gone, not extended.
+
+### What the work found on the way
+
+- **Addresses were cut out of strings.** On the page
+  `https://example.test/app/page.html?tab=2#top`: `a.href = '?q=1'` gave
+  `.../app/?q=1` (the file name lost), `'#x'` gave `.../app/#x`,
+  `'//cdn.test/lib.js'` stayed on `example.test`, `a.protocol` of
+  `mailto:ann@x.test` was `https:`, and `new URL('nope')` did not throw. A
+  click on `<a href="#frag">` therefore looked like a move to another page
+  and did nothing. There is one parser now, the URL Standard's
+  (`src/net/UrlParser.cpp`).
+- **Scripts ran after the whole page had been parsed.** The first script of
+  a page saw all of it: `document.scripts.length` was the number of scripts
+  on the page, so "the last script is me"
+  (`scripts[scripts.length - 1]`), which embedded widgets use to find their
+  own tag, found the wrong one. Scripts run where the parser stands now.
+- **The shell ran every `<script>` whatever its type** (JSON data, a
+  template, a module), four times over in four copies of the page-load
+  code, and its pages had no address of their own to resolve a link
+  against.
+- **Five unit tests asserted what no browser does** and passed: a method
+  taken off its object and called (`var f = el.focus; f()`),
+  `dispatchEvent('click')` with a string, `focus()` on a detached or
+  disabled control, `popstate` fired inside `history.back()` instead of
+  after it, `observedAttributes` as a method. They were corrected, not
+  kept.
+- **jsdom is wrong in five places**, by the standards' text: `tabIndex` for
+  a `tabindex` that is not a number, `formnovalidate`, `requestSubmit()` on
+  a form outside a document, content inside `<select>`, and the order of a
+  promise callback and a mutation observer's. The corpus does not record
+  those answers, and a unit test asserts the standard's
+  (`tests/dom-conformance/README.md`).
+
+### What the number does not say
+
+557 of 557 is everything the corpus asks, and the corpus asks what jsdom
+can answer. It has no layout, so no case reads a size or a position, and
+in the CLI those are zero while scripts run. It loads one page, so no case
+navigates. Nothing external is fetched. Style sheets are not objects
+(`sheet.cssRules`). The list of what is known to be absent is in
+ARCHITECTURE.md, Phase 27, section 10; it was made by asking for about
+170 names, not by reading pages, so it is not complete.
+
+The bindings are 12,400 new lines that take raw pointers into a tree a
+script can take apart while they run. `make asan` runs the whole corpus in
+the sanitizer build for that reason. @@ASANLINE@@

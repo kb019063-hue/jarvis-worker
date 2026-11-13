@@ -1,6 +1,7 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
+#include "litebird/dom/TreeWalk.hpp"
 #include <queue>
 
 namespace litebird {
@@ -53,8 +54,35 @@ std::shared_ptr<Element> Document::body() const {
 // The searches walk the tree without recursion (see TreeWalk.hpp). The first
 // of them, the <title> lookup at the end of every parse, used to be where a
 // page with 300,000 nested elements ended the process.
+//
+// getElementById was a walk over the whole document for every call, so a page
+// that looks up each of its 20,000 rows by id took 5.6 seconds to do it. The
+// second lookup with nothing changed in between builds an index; the first
+// still walks, so a script that changes the page between one lookup and the
+// next pays what it always paid and not for an index it would use once.
 std::shared_ptr<Element> Document::get_element_by_id(const std::string& id) const {
-    return descendant_with_id(id);
+    if (id.empty()) return nullptr;
+    const uint64_t version = tree_version();
+    if (m_ids_version != version) {
+        if (m_id_walk_version != version) {
+            m_id_walk_version = version;
+            return descendant_with_id(id);
+        }
+        m_ids.clear();
+        for_each_descendant(*this, [&](Node& node) {
+            if (node.is_element()) {
+                auto& element = static_cast<Element&>(node);
+                const std::string* value = element.attribute("id");
+                // emplace keeps the one that is there: the first in tree order.
+                if (value && !value->empty()) m_ids.emplace(*value, &element);
+            }
+            return true;
+        });
+        m_ids_version = version;
+    }
+    auto found = m_ids.find(id);
+    if (found == m_ids.end()) return nullptr;
+    return std::static_pointer_cast<Element>(found->second->shared_from_this());
 }
 
 std::vector<std::shared_ptr<Element>> Document::get_elements_by_tag_name(const std::string& tag) const {

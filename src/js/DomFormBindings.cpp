@@ -805,7 +805,7 @@ void setup_input(Iface& I) {
         const std::string* id = el.attribute("list");
         if (!id || id->empty()) return null();
         auto document = document_of(r, el);
-        auto found = document ? document->descendant_with_id(*id) : nullptr;
+        auto found = document ? document->get_element_by_id(*id) : nullptr;
         return found && is_html_element(*found, "datalist") ? wrap(r, found) : null();
     });
     M.accessor("valueAsNumber",

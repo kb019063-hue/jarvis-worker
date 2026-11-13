@@ -16,24 +16,31 @@ fixing what the corpus actually disagreed with, and audited the harness itself
 scoreboard cannot see at all. Phase 26 compared the tree builder with another
 parser on pages nobody wrote, which found what the corpus has no case for
 (`<br/>` closed the paragraph it stood in) and took the number to 99.4% on
-the way (see "Pages nobody wrote").
+the way (see "Pages nobody wrote"). Phase 27 did for the DOM a script sees
+what Phase 23 did for the language: a corpus recorded from another
+implementation first, then new bindings written against it (see "The DOM
+scoreboard").
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **DOM corpus** (what a script sees) | **557 / 557**; 61 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 103 suites, all passing | `make test` |
+| Engine unit tests | 107 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
-make test            # 103 engine suites
+make dom-conformance # the DOM a script sees: per-file pass rate
+make url-conformance # URL parsing and setters (web-platform-tests data)
+make test            # 107 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
-make asan            # sanitizer build, tests, the JavaScript corpus, a fuzz run and the deep pages
+make asan            # sanitizer build, tests, the JavaScript, DOM and URL corpora, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
@@ -84,6 +91,59 @@ Every remaining failure can be inspected with
 the content of a `<select>` is parsed (the 2025 customizable-`<select>` work,
 with `<selectedcontent>` cloning) and Litebird has the older rules. They are
 catalogued in `ARCHITECTURE.md` rather than papered over.
+
+### The DOM scoreboard
+
+`tests/dom-conformance/` holds 557 cases: a page, a script, and what the
+script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
+independent implementation of the DOM and HTML standards. A case passes when
+`litebird --run-script` prints the same and exits 0. CI runs the whole corpus
+in jsdom first (`--reference`), so an expectation cannot be edited to match
+what Litebird does.
+
+```bash
+make dom-conformance
+python3 tools/conformance/run_dom_conformance.py --show 20 --filter forms
+```
+
+| | Passed |
+| :--- | ---: |
+| Before Phase 27 (`main` at `6f08a70`) | 61 / 557; the everyday probe 13 / 68 |
+| Now | 557 / 557; the everyday probe 68 / 68 |
+
+`everyday.dat` is the fixed probe: 68 snippets adapted from
+[You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
+which is what plain DOM code on real pages looks like. It was written before
+any of the new code and is never edited. The other 19 files go through the
+DOM by area: nodes, elements, attributes, `classList`, `dataset`, collections,
+selectors, markup (`innerHTML` and friends), text, style, events, forms,
+mutation observers, custom elements and shadow trees, the document, the
+window, loading, errors, and 16 small programs (a to-do list, a router on the
+hash, a form with validation).
+
+The bindings were rewritten for it (`src/js/Dom*Bindings.cpp`, 12,400 lines):
+every DOM object has its interface's prototype, so `el instanceof HTMLElement`,
+`Object.getPrototypeOf(document.body) === HTMLBodyElement.prototype`,
+`class MyEl extends HTMLElement` and patching `Element.prototype` all work;
+a node has one object for as long as it lives; collections are live; selectors
+are the real grammar; and errors are the `DOMException`s the standards name.
+A page's scripts run while it is parsed, so a script sees the page up to
+itself. ARCHITECTURE.md, Phase 27, has the design.
+
+Three things about the number:
+
+- **It is 100% of what the corpus asks, not of the DOM.** jsdom does no layout
+  and loads no other page, so nothing here checks `getBoundingClientRect()`
+  (zero while scripts run), scrolling or navigation. What is known to be
+  missing is listed in ARCHITECTURE.md (Known gaps, 9).
+- **jsdom is the reference, not the authority.** In five places it differs
+  from the standards. The corpus stays away from those and a unit test
+  asserts the standard's answer (`tests/dom-conformance/README.md` names
+  them).
+- **URLs are measured separately**, with the data browsers use:
+  `tests/url/` is `urltestdata.json` and `setters_tests.json` from
+  web-platform-tests, 1,188 cases, of which 1,150 pass. The 38 others are
+  host names outside ASCII, which need Unicode's IDNA tables.
 
 ### Pages nobody wrote
 
@@ -255,6 +315,18 @@ Litebird implements the complete modern browser rendering pipeline:
 - **MutationObserver API:** Observation of DOM mutations (`childList`, `attributes`, `attributeOldValue`, `subtree`, `attributeFilter`), microtask batching, and `takeRecords()`.
 - **Autonomous Custom Elements:** `customElements.define()`, `whenDefined()`, dynamic element upgrade, and lifecycle callbacks (`connectedCallback`, `disconnectedCallback`, `attributeChangedCallback`).
 - **Shadow DOM & Slot Content Projection:** `attachShadow({ mode: 'open' | 'closed' })`, `shadowRoot`, scoped CSS encapsulation with `:host` rules, and `<slot>` content projection (`assignedNodes()`, `assignedElements()`).
+
+#### The DOM a script sees (Phase 27, `src/js/Dom*Bindings.cpp`)
+- **Interfaces with prototypes:** about 170 (`Node`, `Element`, `HTMLElement` and the HTML element interfaces, `Document`, `Event` and its kinds, `DOMTokenList`, `HTMLCollection`, `NodeList`, `Range`, `MutationObserver`, `FormData`, `URL`, ...). Members live on the prototype and check what they are called on (`Illegal invocation`), constructors can be subclassed, and one node has one object.
+- **Nodes and trees:** `append`/`prepend`/`before`/`after`/`replaceWith`/`replaceChildren`, `insertAdjacentHTML/Element/Text`, `cloneNode`, `contains`, `compareDocumentPosition`, `isEqualNode`, `normalize`, `DocumentFragment`, `<template>.content`, `Range`, `TreeWalker`, `NodeIterator`, `DOMParser`, `XMLSerializer`, and the hierarchy checks with the `DOMException` each one names.
+- **Selectors** (`src/dom/Selector.cpp`): compound and complex selectors with all four combinators, attribute selectors with every operator and the `i` flag, `:is()`, `:where()`, `:not()`, `:has()`, the `:nth-*` family with `of`, and the state pseudo-classes of forms; `querySelector(All)`, `matches`, `closest`. An invalid selector is a `SyntaxError`.
+- **Markup:** `innerHTML`/`outerHTML` written by the standard's serializer (escaped text and attributes, void elements, namespaces) and read by the parser for the element it is assigned to.
+- **Attributes and their reflections:** `classList`, `dataset`, `attributes`, `style` as a live declaration block, `id`/`className`/`hidden`/`tabIndex`/`href`/... per element type, `getComputedStyle` for what the cascade knows.
+- **Events:** `Event` and 27 subclasses with their init dictionaries, capture/target/bubble with `composedPath()`, `once`/`passive`/`signal`, `on*` properties and attributes, default actions (`click()` on a checkbox, a label, a submit button, a link to a fragment), `AbortController`.
+- **Forms** (`src/dom/FormState.cpp`): `value`/`checked`/`selected` with their dirty flags, radio groups, `<select>` and `options`, constraint validation (`validity`, `checkValidity`, `reportValidity`, `setCustomValidity`), `form.elements`, submission and reset with their events, `FormData`, `requestSubmit`.
+- **Observers and components:** `MutationObserver` with every option, custom elements (autonomous and customized built-ins, upgrades, all reactions, in the order the standard queues them), shadow trees and slots.
+- **The window:** `location` and `history` (`pushState`, `hashchange`, `popstate`), `URL`/`URLSearchParams` on the URL Standard's parser, timers, `localStorage`, cookies, `matchMedia`, `XMLHttpRequest`, `Blob`/`File`/`FileReader`, `window.onerror` and `unhandledrejection`, named access (`window.myId`, `document.forms.search`).
+- **Loading:** scripts run as the parser reaches them (`document.currentScript`, `document.readyState`), then `DOMContentLoaded` and `load`.
 
 ### 2. HTML5 Parser: spec tree construction (`include/litebird/html/`)
 - **Full WHATWG tree-construction algorithm** (`HtmlTreeBuilder`): 23 insertion modes (`initial` through `after after frameset`), including `in table`, `in table body`, `in row`, `in cell`, `in caption`, `in column group`, `in select`, `in template` and `text`.
@@ -457,7 +529,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 103 engine test suites
+# Run the 107 engine test suites
 make test
 ```
 
@@ -507,6 +579,8 @@ make test
 | `--render-terminal` | Render page to ANSI Truecolor terminal (default) |
 | `--render-bmp <file>` | Render page to an uncompressed 24-bit BMP image |
 | `--run-js "<code>"` | Run a script, then its timers and promise callbacks. Exits 1 if anything was left uncaught |
+| `--run-script <file>` | Load the page, run the file as one more script, then the page's load events and timers. Nothing is drawn. Exits 1 if anything was left uncaught |
+| `--url=<URL>` | The address the page is said to come from (`location.href`); by default the `file:` URL of the file |
 | `--virtual-time-budget=<ms>` | How much timer time a page gets to settle before it is rendered (default 16, one frame) |
 | `--repl` | Launch the interactive JavaScript & DOM REPL |
 
@@ -518,17 +592,24 @@ make test
 make test
 ```
 
-Output (103 suites; the first and last lines shown):
+Output (107 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 103 engine test suites passed successfully!
+All 107 engine test suites passed successfully!
 ```
 
 ```bash
 make js-conformance                                                     # the JavaScript scoreboard
 python3 tools/conformance/run_js_conformance.py --show 10 --filter async   # failing cases, with diffs
+```
+
+```bash
+make dom-conformance                                                    # the DOM scoreboard
+python3 tools/conformance/run_dom_conformance.py --show 10 --filter forms  # failing cases, with diffs
+python3 tools/conformance/run_dom_conformance.py --reference            # the corpus itself, against jsdom (needs Node.js and npm)
+make url-conformance                                                    # URL parsing and setters
 ```

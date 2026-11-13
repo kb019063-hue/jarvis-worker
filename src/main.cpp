@@ -11,6 +11,7 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/net/UrlParser.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 
 #include <algorithm>
@@ -296,7 +297,7 @@ int main(int argc, char* argv[]) {
     } else {
         std::error_code ignored;
         const auto absolute = std::filesystem::absolute(input_file, ignored);
-        doc->set_url("file://" + (ignored ? input_file : absolute.string()));
+        doc->set_url(litebird::file_url_from_path(ignored ? input_file : absolute.string()));
     }
     litebird::JsInterpreter js_engine(doc);
     // The scripts of the page, in document order. The list is fixed first: a

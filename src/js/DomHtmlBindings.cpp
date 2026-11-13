@@ -5,7 +5,6 @@
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
-#include "litebird/net/URL.hpp"
 #include "litebird/render/Canvas2D.hpp"
 
 #include <cmath>
@@ -246,45 +245,28 @@ void setup_svg_element(Iface& I) {
 // Links: a and area
 // ---------------------------------------------------------------------------
 
-bool link_url(Realm& r, Element& el, URLObject& url) {
+// The URL a link points at: its href read against the document's address.
+// False for a link with no href, or one that is not a URL.
+bool link_url(Realm& r, Element& el, Url& url) {
     const std::string* href = el.attribute("href");
-    if (!href) return false;
-    auto document = document_of(r, el);
-    return url.parse(strip_ascii_space(*href), document ? document->url() : std::string("about:blank"));
+    return href && parse_url(r, el, *href, url);
 }
 
-std::string serialize_url(const URLObject& url) {
-    if (url.host.empty() && url.protocol != "http:" && url.protocol != "https:" && url.protocol != "file:") {
-        return url.protocol + url.pathname + url.search + url.hash;
-    }
-    return url.protocol + "//" + url.host + url.pathname + url.search + url.hash;
-}
-
-void define_link_part(Iface& I, const char* name, std::string URLObject::*part) {
+// One part of a link's URL, to read and to assign: `a.pathname = '/x'`
+// rewrites the href attribute. `absent` is what a link without a URL says.
+void define_link_part(Iface& I, const char* name, std::string (Url::*get)() const,
+                      void (Url::*set)(std::string_view), const char* absent = "") {
     ElementMembers<&is_hyperlink> L(I);
     L.accessor(name,
-        [part](Realm& r, Element& el) {
-            URLObject url;
-            return str(link_url(r, el, url) ? url.*part : std::string());
+        [get, absent](Realm& r, Element& el) {
+            Url url;
+            return str(link_url(r, el, url) ? (url.*get)() : std::string(absent));
         },
-        [part, name](Realm& r, Element& el, const JsValue& value) {
-            URLObject url;
+        [set](Realm& r, Element& el, const JsValue& value) {
+            Url url;
             if (!link_url(r, el, url)) return;
-            std::string text = to_str(value);
-            const std::string which = name;
-            if (which == "hash" && !text.empty() && text[0] != '#') text = "#" + text;
-            if (which == "search" && !text.empty() && text[0] != '?') text = "?" + text;
-            if (which == "protocol" && !text.empty() && text.back() != ':') text += ":";
-            if (which == "pathname" && (text.empty() || text[0] != '/')) text = "/" + text;
-            url.*part = text;
-            if (which == "hostname") url.host = url.port.empty() ? text : text + ":" + url.port;
-            if (which == "port") url.host = text.empty() ? url.hostname : url.hostname + ":" + text;
-            if (which == "host") {
-                const auto colon = text.find(':');
-                url.hostname = text.substr(0, colon);
-                url.port = colon == std::string::npos ? std::string() : text.substr(colon + 1);
-            }
-            el.set_attribute("href", serialize_url(url));
+            (url.*set)(to_str(value));
+            el.set_attribute("href", url.href());
         });
 }
 
@@ -301,18 +283,38 @@ void setup_hyperlink(Iface& I) {
         return str(href ? resolve_url(r, el, *href) : std::string());
     });
     L.getter("origin", [](Realm& r, Element& el) {
-        URLObject url;
-        return str(link_url(r, el, url) ? url.origin : std::string());
+        Url url;
+        return str(link_url(r, el, url) ? url.origin() : std::string());
     });
-    define_link_part(I, "protocol", &URLObject::protocol);
-    define_link_part(I, "host", &URLObject::host);
-    define_link_part(I, "hostname", &URLObject::hostname);
-    define_link_part(I, "port", &URLObject::port);
-    define_link_part(I, "pathname", &URLObject::pathname);
-    define_link_part(I, "search", &URLObject::search);
-    define_link_part(I, "hash", &URLObject::hash);
-    L.getter("username", [](Realm&, Element&) { return str(""); });
-    L.getter("password", [](Realm&, Element&) { return str(""); });
+    define_link_part(I, "protocol", &Url::protocol, &Url::set_protocol, ":");
+    define_link_part(I, "host", &Url::host_and_port, &Url::set_host);
+    define_link_part(I, "hostname", &Url::hostname, &Url::set_hostname);
+    define_link_part(I, "port", &Url::port_text, &Url::set_port);
+    define_link_part(I, "pathname", &Url::pathname, &Url::set_pathname);
+    define_link_part(I, "search", &Url::search, &Url::set_search);
+    define_link_part(I, "hash", &Url::hash, &Url::set_hash);
+    L.accessor("username",
+        [](Realm& r, Element& el) {
+            Url url;
+            return str(link_url(r, el, url) ? url.username : std::string());
+        },
+        [](Realm& r, Element& el, const JsValue& value) {
+            Url url;
+            if (!link_url(r, el, url)) return;
+            url.set_username(to_str(value));
+            el.set_attribute("href", url.href());
+        });
+    L.accessor("password",
+        [](Realm& r, Element& el) {
+            Url url;
+            return str(link_url(r, el, url) ? url.password : std::string());
+        },
+        [](Realm& r, Element& el, const JsValue& value) {
+            Url url;
+            if (!link_url(r, el, url)) return;
+            url.set_password(to_str(value));
+            el.set_attribute("href", url.href());
+        });
     L.token_list("relList", "rel", {"noreferrer", "noopener", "opener"});
     reflect(I, "s:target s:download s:ping s:rel s:hreflang s:type s:referrerPolicy:referrerpolicy s:name s:rev "
                "s:charset s:coords s:shape s:alt b:noHref:nohref");

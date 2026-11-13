@@ -47,6 +47,7 @@
 #include "litebird/dom/Text.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
+#include "litebird/net/UrlParser.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -484,8 +485,14 @@ struct ElementMembers {
 /// text does not start with one.
 bool parse_html_integer(const std::string& text, long& out);
 bool parse_html_non_negative_integer(const std::string& text, unsigned long& out);
-/// Resolves `reference` against the address of `node`'s document. Returns
-/// the reference unchanged when it cannot be resolved.
+/// What relative addresses in `node`'s document are relative to: the
+/// document's own address, or what its first `<base href>` says. False when
+/// the document's address is not a URL at all.
+bool document_base_url(Realm& realm, const Node& node, Url& out);
+/// Parses `reference` (an attribute's value: spaces around it are dropped)
+/// against that base.
+bool parse_url(Realm& realm, const Node& node, std::string_view reference, Url& out);
+/// The same as text. Returns the reference unchanged when it is not a URL.
 std::string resolve_url(Realm& realm, const Node& node, const std::string& reference);
 
 template <bool (*Accepts)(const Node&)>
@@ -712,6 +719,9 @@ std::shared_ptr<Element> create_element(Realm& realm, Document& document, const 
 /// `document.search` for `<form name="search">`.
 std::shared_ptr<JsExotic> document_exotic(Realm& realm, Document& document);
 
+// --- DomUrlBindings.cpp ------------------------------------------------------------
+void register_url_interfaces();
+
 // --- DomFileBindings.cpp -----------------------------------------------------------
 void register_file_interfaces();
 bool is_blob(const JsValue& value);
@@ -767,11 +777,17 @@ std::shared_ptr<Element> make_option(Realm& realm, Args args);
 
 // --- DomWindowBindings.cpp --------------------------------------------------------
 void register_window_interfaces();
-/// The document's address, and the same with another fragment.
+/// The address of the window's document.
 std::string document_url(Realm& realm);
-/// Follows a link or `location.href = ...`: only a change of fragment on
-/// the same page does anything.
-void navigate(Realm& realm, const std::string& url);
+/// Follows a link or `location.href = ...` to `target`. Only a move within
+/// the page is carried out: the same address with another fragment. The
+/// address changes at once; popstate and hashchange are fired from a task.
+/// With `replace` the move takes the place of the current history entry
+/// (`location.replace`).
+void navigate(Realm& realm, const Url& target, bool replace = false);
+/// The same for an address given by a script (`location.href = x`): it is
+/// read against the page's own. A SyntaxError when it is not a URL.
+void navigate_to(Realm& realm, const JsValue& address, bool replace = false);
 /// DOMContentLoaded, readystatechange and load, in that order.
 void fire_load_events(Realm& realm);
 JsValue window_of(Realm& realm);

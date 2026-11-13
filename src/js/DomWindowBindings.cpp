@@ -8,7 +8,6 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Storage.hpp"
-#include "litebird/net/URL.hpp"
 
 #include <thread>
 
@@ -179,13 +178,18 @@ void require_window(Realm& realm) {
 // Location and history
 // ---------------------------------------------------------------------------
 
-std::string without_fragment(const std::string& url) {
-    const auto hash = url.find('#');
-    return hash == std::string::npos ? url : url.substr(0, hash);
+// The address of the window's document, parsed. False when there is no
+// document or its address is not a URL.
+bool current_url(Realm& realm, Url& url) {
+    return realm.document && Url::parse(realm.document->url(), nullptr, url);
 }
 
-bool current_url(Realm& realm, URLObject& url) {
-    return realm.document && url.parse(realm.document->url());
+// True when the two addresses differ in their fragment: "#a" and "#b", or
+// none and "#".
+bool fragment_changed(const std::string& old_url, const std::string& new_url) {
+    Url before, after;
+    if (!Url::parse(old_url, nullptr, before) || !Url::parse(new_url, nullptr, after)) return false;
+    return before.has_fragment != after.has_fragment || before.fragment != after.fragment;
 }
 
 void fire_history_events(Realm& realm, const JsValue& state, bool state_changed, const std::string& old_url,
@@ -194,7 +198,7 @@ void fire_history_events(Realm& realm, const JsValue& state, bool state_changed,
     if (state_changed) {
         dispatch(realm, realm.window, make_event(realm, "PopStateEvent", "popstate", false, false, {{"state", state}}), true);
     }
-    if (without_fragment(old_url) == without_fragment(new_url) && old_url != new_url) {
+    if (fragment_changed(old_url, new_url)) {
         dispatch(realm, realm.window,
                  make_event(realm, "HashChangeEvent", "hashchange", false, false,
                             {{"oldURL", str(old_url)}, {"newURL", str(new_url)}}),
@@ -218,19 +222,33 @@ void traverse_history(Realm& realm, long delta) {
     });
 }
 
+// May a page at `current` say its address is `wanted`? Never another site.
+// On the web any path of the same site will do; a file may only change its
+// query and fragment, and anything else only its fragment.
+bool can_rewrite_url(const Url& current, const Url& wanted) {
+    if (!current.same_site_parts(wanted)) return false;
+    if (wanted.scheme == "http" || wanted.scheme == "https") return true;
+    if (wanted.pathname() != current.pathname()) return false;
+    if (wanted.scheme == "file") return true;
+    return wanted.has_query == current.has_query && wanted.query == current.query;
+}
+
 void set_history_state(Realm& realm, Args args, bool replace, const char* what) {
     require_args(args, 2, what);
     if (!realm.document) return;
     WindowPart& part = realm.part<WindowPart>();
     std::string url = realm.document->url();
-    if (!js_arg(args, 2).is_nullish()) {
-        URLObject current, wanted;
-        const bool ok = wanted.parse(to_str(args[2]), url) && current.parse(url);
-        if (!ok || wanted.origin != current.origin) {
+    // No address, or an empty one, keeps the page where it is.
+    const std::string given = js_arg(args, 2).is_nullish() ? std::string() : to_str(args[2]);
+    if (!given.empty()) {
+        Url current, wanted;
+        const bool known = current_url(realm, current);
+        if (!known || !parse_url(realm, *realm.document, given, wanted) || !can_rewrite_url(current, wanted)) {
             throw_dom(realm, "SecurityError", std::string("Failed to execute '") + what + "' on 'History': A history state object with URL '" +
-                                              to_str(args[2]) + "' cannot be created in a document with origin '" + current.origin + "'.");
+                                              given + "' cannot be created in a document with origin '" +
+                                              (known ? current.origin() : std::string("null")) + "' and URL '" + url + "'.");
         }
-        url = wanted.href;
+        url = wanted.href();
     }
     if (part.history.empty()) part.history.push_back({realm.document->url(), null()});
     if (replace) {
@@ -297,20 +315,25 @@ void setup_history(Iface& I) {
     });
 }
 
-void define_location_part(Iface& I, const char* name, std::string URLObject::*part) {
+void define_location_part(Iface& I, const char* name, std::string (Url::*get)() const) {
     const std::string which = name;
     I.accessor(name,
-        [part](Realm& r) {
+        [get](Realm& r) {
             require_brand("Location");
-            URLObject url;
-            return str(current_url(r, url) ? url.*part : std::string());
+            Url url;
+            return str(current_url(r, url) ? (url.*get)() : std::string());
         },
         [which](Realm& r, const JsValue& value) {
             require_brand("Location");
             if (which != "hash") return;        // anything else would load another page
+            Url url;
+            if (!current_url(r, url)) return;
+            // "#" alone is a fragment too, an empty one: the address then
+            // ends in "#".
             std::string fragment = to_str(value);
-            if (!fragment.empty() && fragment[0] == '#') fragment.erase(0, 1);
-            if (r.document) navigate(r, without_fragment(r.document->url()) + "#" + fragment);
+            if (fragment.empty() || fragment[0] != '#') fragment.insert(0, "#");
+            url.set_hash(fragment);
+            navigate(r, url);
         });
 }
 
@@ -322,30 +345,30 @@ void setup_location(Iface& I) {
         },
         [](Realm& r, const JsValue& value) {
             require_brand("Location");
-            navigate(r, to_str(value));
+            navigate_to(r, value, false);
         });
     I.getter("origin", [](Realm& r) {
         require_brand("Location");
-        URLObject url;
-        return str(current_url(r, url) ? url.origin : std::string("null"));
+        Url url;
+        return str(current_url(r, url) ? url.origin() : std::string("null"));
     });
-    define_location_part(I, "protocol", &URLObject::protocol);
-    define_location_part(I, "host", &URLObject::host);
-    define_location_part(I, "hostname", &URLObject::hostname);
-    define_location_part(I, "port", &URLObject::port);
-    define_location_part(I, "pathname", &URLObject::pathname);
-    define_location_part(I, "search", &URLObject::search);
-    define_location_part(I, "hash", &URLObject::hash);
+    define_location_part(I, "protocol", &Url::protocol);
+    define_location_part(I, "host", &Url::host_and_port);
+    define_location_part(I, "hostname", &Url::hostname);
+    define_location_part(I, "port", &Url::port_text);
+    define_location_part(I, "pathname", &Url::pathname);
+    define_location_part(I, "search", &Url::search);
+    define_location_part(I, "hash", &Url::hash);
     I.method("assign", 1, [](Realm& r, Args args) {
         require_brand("Location");
         require_args(args, 1, "Location.assign");
-        navigate(r, to_str(args[0]));
+        navigate_to(r, args[0], false);
         return undefined();
     });
     I.method("replace", 1, [](Realm& r, Args args) {
         require_brand("Location");
         require_args(args, 1, "Location.replace");
-        navigate(r, to_str(args[0]));
+        navigate_to(r, args[0], true);
         return undefined();
     });
     I.method("reload", 0, [](Realm&, Args) {
@@ -709,7 +732,7 @@ void setup_window(Iface& I) {
         },
         [](Realm& r, const JsValue& value) {
             require_window(r);
-            navigate(r, to_str(value));
+            navigate_to(r, value);
         });
     I.getter("history", [](Realm& r) {
         require_window(r);
@@ -751,12 +774,12 @@ void setup_window(Iface& I) {
     I.accessor("opener", [](Realm&) { return null(); }, [](Realm&, const JsValue&) {});
     I.getter("frameElement", [](Realm&) { return null(); });
     I.getter("isSecureContext", [](Realm& r) {
-        URLObject url;
-        return boolean(current_url(r, url) && (url.protocol == "https:" || url.hostname == "localhost"));
+        Url url;
+        return boolean(current_url(r, url) && (url.scheme == "https" || url.host == "localhost"));
     });
     I.getter("origin", [](Realm& r) {
-        URLObject url;
-        return str(current_url(r, url) ? url.origin : std::string("null"));
+        Url url;
+        return str(current_url(r, url) ? url.origin() : std::string("null"));
     });
     I.getter("event", [](Realm& r) {
         require_window(r);
@@ -808,8 +831,8 @@ void setup_window(Iface& I) {
         Realm* realm = &r;
         EventLoop::default_loop().post_task([realm, data]() {
             if (!realm->alive || !realm->window.is_object()) return;
-            URLObject url;
-            const std::string origin = current_url(*realm, url) ? url.origin : std::string("null");
+            Url url;
+            const std::string origin = current_url(*realm, url) ? url.origin() : std::string("null");
             dispatch(*realm, realm->window,
                      make_event(*realm, "MessageEvent", "message", false, false,
                                 {{"data", data}, {"origin", str(origin)}, {"source", realm->window}}),
@@ -902,25 +925,40 @@ void set_script_runner(Realm& realm, ScriptRunner runner) {
     realm.part<WindowPart>().run_script = std::move(runner);
 }
 
-void navigate(Realm& realm, const std::string& reference) {
+void navigate(Realm& realm, const Url& target, bool replace) {
     if (!realm.document || !realm.window.is_object()) return;
     const std::string old_url = realm.document->url();
-    URLObject target;
-    if (!target.parse(strip_ascii_space(reference), old_url)) return;
-    // Only a move within the page is carried out: the same document, another
+    Url current;
+    if (!Url::parse(old_url, nullptr, current)) return;
+    // Only a move within the page is carried out: the same address with a
     // fragment. Anything else would be loading another page.
-    if (without_fragment(target.href) != without_fragment(old_url)) return;
-    if (target.href.find('#') == std::string::npos) return;
+    if (!target.has_fragment || target.href(true) != current.href(true)) return;
+    const std::string new_url = target.href();
+    if (new_url == current.href()) return;
     WindowPart& part = realm.part<WindowPart>();
     if (part.history.empty()) part.history.push_back({old_url, null()});
-    if (target.href == old_url) return;
-    part.history.resize(part.history_index + 1);
-    part.history.push_back({target.href, null()});
-    part.history_index = part.history.size() - 1;
-    realm.document->set_url(target.href);
+    if (replace) {
+        part.history[part.history_index] = {new_url, null()};
+    } else {
+        part.history.resize(part.history_index + 1);
+        part.history.push_back({new_url, null()});
+        part.history_index = part.history.size() - 1;
+    }
+    realm.document->set_url(new_url);
     Realm* r = &realm;
-    const std::string new_url = target.href;
     EventLoop::default_loop().post_task([r, old_url, new_url]() { fire_history_events(*r, null(), true, old_url, new_url); });
+}
+
+// `location.href = x`, assign(x), replace(x): the address is read against
+// the page's own. Only a move within the page is then carried out.
+void navigate_to(Realm& r, const JsValue& value, bool replace) {
+    if (!r.document || !r.window.is_object()) return;
+    const std::string reference = to_str(value);
+    Url target;
+    if (!parse_url(r, *r.document, reference, target)) {
+        throw_dom(r, "SyntaxError", "'" + reference + "' is not a valid URL.");
+    }
+    navigate(r, target, replace);
 }
 
 void run_inserted_script(Realm& realm, Element& script) {
@@ -1007,6 +1045,10 @@ void attach_window(Realm& realm, const JsValue& global, const std::shared_ptr<Do
     part.load_fired = false;
     if (document) {
         document->set_has_window(true);
+        // From here on the address is kept as a URL writes itself:
+        // "HTTP://Example.test" is "http://example.test/".
+        Url address;
+        if (Url::parse(document->url(), nullptr, address)) document->set_url(address.href());
         part.history.push_back({document->url(), null()});
         // `location` belongs to the document object itself, where a page
         // cannot replace it.
@@ -1016,7 +1058,7 @@ void attach_window(Realm& realm, const JsValue& global, const std::shared_ptr<Do
                 return r.window.is_object() ? r.window.get_property("location") : null();
             }),
             make_function(realm, "location", 1, [](Realm& r, Args args) -> JsValue {
-                navigate(r, to_str(js_arg(args, 0)));
+                navigate_to(r, js_arg(args, 0), false);
                 return undefined();
             }));
     }

@@ -6,7 +6,7 @@
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/ResourceLoader.hpp"
-#include "litebird/net/URL.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/WebSocket.hpp"
 #include "litebird/js/Worker.hpp"
@@ -264,8 +264,8 @@ void VM::init_builtins() {
     set_global("fetch", JsValue::make_native_function(FetchAPI::fetch));
 
     // URL & URLSearchParams built-ins
-    set_global("URLSearchParams", URLSearchParamsObject::create_constructor());
-    set_global("URL", URLObject::create_constructor());
+    set_global("URLSearchParams", dom::current_realm().ctor("URLSearchParams"));
+    set_global("URL", dom::current_realm().ctor("URL"));
 
     // Worker built-in
     set_global("Worker", WorkerObject::create_constructor());

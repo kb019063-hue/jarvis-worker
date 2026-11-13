@@ -718,7 +718,10 @@ void setup_node(Iface& I) {
     const auto any = &is_any_node;
     I.node_getter(any, "nodeType", [](Realm&, Node& self) { return num(node_type_number(self)); });
     I.node_getter(any, "nodeName", [](Realm&, Node& self) { return str(node_name(self)); });
-    I.node_getter(any, "baseURI", [](Realm& r, Node& self) { return str(resolve_url(r, self, "")); });
+    I.node_getter(any, "baseURI", [](Realm& r, Node& self) {
+        Url base;
+        return str(document_base_url(r, self, base) ? base.href() : std::string("about:blank"));
+    });
     I.node_getter(any, "isConnected", [](Realm&, Node& self) {
         if (self.is_document_type()) return boolean(static_cast<DocumentTypeNode&>(self).document() != nullptr);
         return boolean(self.is_connected());

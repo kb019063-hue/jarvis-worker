@@ -1,5 +1,4 @@
 #include "litebird/net/Fetch.hpp"
-#include "litebird/net/URL.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"

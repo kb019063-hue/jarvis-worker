@@ -222,6 +222,18 @@ FormDataState& this_form_data() {
     return this_state<FormDataState>("FormData");
 }
 
+// `form.action` and `button.formAction`: the attribute read as an address.
+// Without the attribute, or with an empty one, the form goes to the page it
+// is on, so that is the answer: the document's own address, fragment and all.
+std::string action_url(Realm& realm, Element& element, const char* attribute) {
+    const std::string* action = element.attribute(attribute);
+    if (!action || action->empty()) {
+        auto document = document_of(realm, element);
+        return document ? document->url() : std::string("about:blank");
+    }
+    return resolve_url(realm, element, *action);
+}
+
 JsValue construct_form_data(Realm& realm, const InterfaceDef&, Args args, const JsValue* derived) {
     auto state = std::make_shared<FormDataState>();
     JsValue object = realm.make("FormData", state, derived);
@@ -558,7 +570,8 @@ void after_click(Realm& realm, Activation& activation, const JsValue& event, boo
     }
     if (tag == "a" || tag == "area") {
         const std::string* href = target.attribute("href");
-        if (href && target.is_connected()) navigate(realm, resolve_url(realm, target, *href));
+        Url address;
+        if (href && target.is_connected() && parse_url(realm, target, *href, address)) navigate(realm, address);
         return;
     }
     if (tag == "summary") {
@@ -829,8 +842,7 @@ void setup_input(Iface& I) {
     M.method("showPicker", 0, [](Realm&, Element&, Args) { return undefined(); });
     M.accessor("formAction",
         [](Realm& r, Element& el) {
-            const std::string* action = el.attribute("formaction");
-            return str(resolve_url(r, el, action ? *action : std::string()));
+            return str(action_url(r, el, "formaction"));
         },
         [](Realm&, Element& el, const JsValue& value) { el.set_attribute("formaction", to_str(value)); });
     M.keyword("formMethod", {"get", "post", "dialog"}, "", "get", "formmethod");
@@ -1061,8 +1073,7 @@ void setup_button(Iface& I) {
         [](Realm&, Element& el, const JsValue& value) { el.set_attribute("type", to_str(value)); });
     M.accessor("formAction",
         [](Realm& r, Element& el) {
-            const std::string* action = el.attribute("formaction");
-            return str(resolve_url(r, el, action ? *action : std::string()));
+            return str(action_url(r, el, "formaction"));
         },
         [](Realm&, Element& el, const JsValue& value) { el.set_attribute("formaction", to_str(value)); });
     M.keyword("formMethod", {"get", "post", "dialog"}, "", "get", "formmethod");
@@ -1248,8 +1259,7 @@ void setup_form(Iface& I) {
     M.keyword("autocomplete", {"on", "off"}, "on", "on");
     M.accessor("action",
         [](Realm& r, Element& el) {
-            const std::string* action = el.attribute("action");
-            return str(resolve_url(r, el, action ? *action : std::string()));
+            return str(action_url(r, el, "action"));
         },
         [](Realm&, Element& el, const JsValue& value) { el.set_attribute("action", to_str(value)); });
     M.token_list("relList", "rel", {"noreferrer", "noopener", "opener"});

@@ -4,7 +4,6 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
-#include "litebird/net/URL.hpp"
 
 #include <cmath>
 #include <deque>
@@ -46,6 +45,7 @@ void ensure_registered() {
         register_html_interfaces();
         register_form_interfaces();
         register_file_interfaces();
+        register_url_interfaces();
         register_observer_interfaces();
         register_window_interfaces();
     });
@@ -767,26 +767,35 @@ bool parse_html_non_negative_integer(const std::string& text, unsigned long& out
     return true;
 }
 
-std::string resolve_url(Realm& realm, const Node& node, const std::string& reference) {
+bool document_base_url(Realm& realm, const Node& node, Url& out) {
     auto document = document_of(realm, node);
-    std::string base = document ? document->url() : std::string("about:blank");
-    // A <base href> changes what relative addresses are relative to.
+    if (!Url::parse(document ? document->url() : std::string("about:blank"), nullptr, out)) return false;
+    // A <base href> changes what relative addresses are relative to. One
+    // that is not a URL changes nothing.
     if (document) {
         if (auto head = document->head()) {
             for (const auto& child : head->children()) {
-                if (is_html_element(*child, "base")) {
-                    if (const std::string* href = static_cast<Element&>(*child).attribute("href")) {
-                        URLObject base_url;
-                        if (base_url.parse(strip_ascii_space(*href), base)) base = base_url.href;
-                    }
-                    break;
-                }
+                if (!is_html_element(*child, "base")) continue;
+                const std::string* href = static_cast<Element&>(*child).attribute("href");
+                if (!href) continue;
+                Url base;
+                if (Url::parse(*href, &out, base)) out = std::move(base);
+                break;
             }
         }
     }
-    URLObject url;
-    if (url.parse(strip_ascii_space(reference), base)) return url.href;
-    return reference;
+    return true;
+}
+
+bool parse_url(Realm& realm, const Node& node, std::string_view reference, Url& out) {
+    Url base;
+    if (!document_base_url(realm, node, base)) return Url::parse(reference, nullptr, out);
+    return Url::parse(reference, &base, out);
+}
+
+std::string resolve_url(Realm& realm, const Node& node, const std::string& reference) {
+    Url url;
+    return parse_url(realm, node, reference, url) ? url.href() : reference;
 }
 
 // ---------------------------------------------------------------------------

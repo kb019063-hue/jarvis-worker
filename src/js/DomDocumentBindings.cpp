@@ -219,7 +219,7 @@ void setup_document(Iface& I) {
             return r.window.get_property("location");
         },
         [](Realm& r, Node& self, const JsValue& value) {
-            if (&self == r.document.get()) navigate(r, to_str(value));
+            if (&self == r.document.get()) navigate_to(r, value);
         });
     I.node_getter(doc, "currentScript", [](Realm& r, Node& self) { return wrap(r, as_document(self).current_script()); });
     I.node_getter(doc, "activeElement", [](Realm& r, Node& self) {

@@ -26,6 +26,7 @@
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/UrlParser.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/js/Worker.hpp"
 #include "litebird/net/WebSocket.hpp"
@@ -2967,8 +2968,11 @@ TEST(history_api_and_client_routing) {
     assert(popstate_state.to_string() == "state-2-revised");
     assert(history.current_url() == "/settings/profile");
 
-    // Test with JS interpreter
+    // Test with JS interpreter. The page needs an address of its own: one
+    // at about:blank has no paths to move between, and pushState("/js1")
+    // there is a SecurityError, as in a browser.
     auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/");
     JsInterpreter interp(doc);
     interp.eval(R"(
         var popCount = 0;
@@ -2993,6 +2997,301 @@ TEST(history_api_and_client_routing) {
     assert(interp.eval("location.pathname").to_string() == "/js1");
     auto last_state = interp.eval("lastState");
     assert(last_state.to_string() == "js-page-1");
+}
+
+// A URL as text and back, for the tests below: the href `reference` makes
+// against `base`, or "(not a URL)".
+static std::string url_href(const std::string& reference, const std::string& base = "") {
+    litebird::Url url;
+    return litebird::Url::parse(reference, base, url) ? url.href() : std::string("(not a URL)");
+}
+
+TEST(url_parser_follows_the_url_standard) {
+    using namespace litebird;
+    const std::string page = "https://example.test/app/page.html?tab=2#top";
+
+    // Relative references: each keeps as much of the base as it does not replace.
+    assert(url_href("sub/file.html", page) == "https://example.test/app/sub/file.html");
+    assert(url_href("?q=1", page) == "https://example.test/app/page.html?q=1");
+    assert(url_href("#frag", page) == "https://example.test/app/page.html?tab=2#frag");
+    assert(url_href("", page) == "https://example.test/app/page.html?tab=2");
+    assert(url_href("//cdn.test/lib.js", page) == "https://cdn.test/lib.js");
+    assert(url_href("/send", page) == "https://example.test/send");
+    assert(url_href("../a/b?x=1&y=2#h", page) == "https://example.test/a/b?x=1&y=2#h");
+    assert(url_href("../../../up", page) == "https://example.test/up");
+    assert(url_href(".", page) == "https://example.test/app/");
+    assert(url_href("https:other.html", page) == "https://example.test/app/other.html");
+    assert(url_href("http://other.test", page) == "http://other.test/");
+
+    // What is not a URL.
+    assert(url_href("nope") == "(not a URL)");
+    assert(url_href("/path/only") == "(not a URL)");
+    assert(url_href("https://") == "(not a URL)");
+    assert(url_href("https://a.test:99999/") == "(not a URL)");
+    assert(url_href("https://a.test:8x/") == "(not a URL)");
+    assert(url_href("https://[::1/") == "(not a URL)");
+    assert(url_href("https://a b/") == "(not a URL)");
+    assert(url_href("https://1.2.3.4.5/") == "(not a URL)");
+    assert(url_href("x", "mailto:ann@x.test") == "(not a URL)");
+    assert(url_href("#only-this", "mailto:ann@x.test") == "mailto:ann@x.test#only-this");
+    assert(url_href("x", "not a base") == "(not a URL)");
+
+    // One spelling for each URL.
+    assert(url_href("HTTP://EXAMPLE.test:80/a/./b/../c") == "http://example.test/a/c");
+    assert(url_href("https://example.test:443") == "https://example.test/");
+    assert(url_href("https://example.test:8443") == "https://example.test:8443/");
+    assert(url_href("http:\\\\x.test\\a\\b") == "http://x.test/a/b");
+    assert(url_href("  https://a.test/x y?q= z#f g \n") == "https://a.test/x%20y?q=%20z#f%20g");
+    assert(url_href("https://a.test/a\tb\nc") == "https://a.test/abc");
+    assert(url_href("https://a.test/%7Efoo/%2e%2E/bar") == "https://a.test/bar");
+    assert(url_href("https://user:pa ss@a.test/") == "https://user:pa%20ss@a.test/");
+    assert(url_href("https://a.test/?q='x'") == "https://a.test/?q=%27x%27");
+    assert(url_href("custom://a.test/?q='x'") == "custom://a.test/?q='x'");
+    assert(url_href("https://a.test/\xC3\xA9?\xC3\xA9#\xC3\xA9") == "https://a.test/%C3%A9?%C3%A9#%C3%A9");
+
+    // Hosts that are numbers.
+    assert(url_href("http://0x7f.1/") == "http://127.0.0.1/");
+    assert(url_href("http://192.168.0.257/") == "(not a URL)");
+    assert(url_href("http://3232235521/") == "http://192.168.0.1/");
+    assert(url_href("http://[0:0:0:0:0:0:0:1]:8080/") == "http://[::1]:8080/");
+    assert(url_href("http://[2001:DB8:0:0:1:0:0:1]/") == "http://[2001:db8::1:0:0:1]/");
+    assert(url_href("http://[::ffff:192.168.0.1]/") == "http://[::ffff:c0a8:1]/");
+    assert(url_href("http://[1:2:3:4:5:6:7:8:9]/") == "(not a URL)");
+
+    // Addresses that are not places on a network have one opaque path.
+    Url mail;
+    assert(Url::parse("mailto:ann@x.test?subject=hi", nullptr, mail));
+    assert(mail.protocol() == "mailto:" && mail.pathname() == "ann@x.test" && mail.hostname().empty());
+    assert(mail.search() == "?subject=hi" && mail.origin() == "null" && mail.opaque_path);
+    assert(url_href("javascript:void(0)") == "javascript:void(0)");
+    assert(url_href("data:text/plain,a b#c d") == "data:text/plain,a b#c%20d");
+    assert(url_href("about:blank") == "about:blank");
+
+    // Files.
+    assert(url_href("file:///C|/dir/x.txt") == "file:///C:/dir/x.txt");
+    assert(url_href("file://localhost/etc/hosts") == "file:///etc/hosts");
+    assert(url_href("other.html", "file:///home/me/page.html") == "file:///home/me/other.html");
+    assert(url_href("/abs", "file:///C:/dir/page.html") == "file:///C:/abs");
+    assert(file_url_from_path("/home/a b/x#1%.html") == "file:///home/a%20b/x%231%25.html");
+    assert(url_href(file_url_from_path("/home/a b/x?y.html")) == "file:///home/a%20b/x%3Fy.html");
+
+    // Origins.
+    Url url;
+    assert(Url::parse("https://a.test:8443/x", nullptr, url) && url.origin() == "https://a.test:8443");
+    assert(Url::parse("blob:https://a.test/1234-5678", nullptr, url) && url.origin() == "https://a.test");
+    assert(Url::parse("file:///x", nullptr, url) && url.origin() == "null");
+
+    // Assigning to a part parses the value as that part, and changes nothing
+    // when it cannot be one.
+    assert(Url::parse("https://example.test/app/page.html?tab=2#top", nullptr, url));
+    url.set_pathname("/new path");
+    assert(url.pathname() == "/new%20path");
+    url.set_hash("");
+    assert(url.hash().empty() && url.href() == "https://example.test/new%20path?tab=2");
+    url.set_hash("a b");
+    assert(url.hash() == "#a%20b");
+    url.set_search("q=1 2");
+    assert(url.search() == "?q=1%202");
+    url.set_search("");
+    assert(!url.has_query && url.href() == "https://example.test/new%20path#a%20b");
+    url.set_port("8080");
+    assert(url.host_and_port() == "example.test:8080");
+    url.set_port("x");
+    assert(url.port_text() == "8080");
+    url.set_port("443");
+    assert(url.port_text().empty());
+    url.set_host("b.test:81");
+    assert(url.hostname() == "b.test" && url.port_text() == "81");
+    url.set_hostname("c.test:99");                      // a port is not part of a host name
+    assert(url.hostname() == "b.test");
+    url.set_hostname("");                               // a web address must have a host
+    assert(url.hostname() == "b.test");
+    url.set_protocol("mailto");                         // nor can it stop being a web address
+    assert(url.protocol() == "https:");
+    url.set_protocol("http");
+    assert(url.protocol() == "http:" && url.port_text() == "81");
+    url.set_username("ann");
+    url.set_password("p@ss");
+    assert(url.href() == "http://ann:p%40ss@b.test:81/new%20path#a%20b");
+    assert(Url::parse("mailto:ann@x.test", nullptr, url));
+    url.set_pathname("/x");
+    url.set_host("y.test");
+    assert(url.href() == "mailto:ann@x.test");
+
+    // Query strings as pairs, and back.
+    auto pairs = parse_urlencoded("a=1&b=x+y&c=%41%zz&&d&=e&f=%FF");
+    assert(pairs.size() == 6);
+    assert(pairs[0] == std::make_pair(std::string("a"), std::string("1")));
+    assert(pairs[1].second == "x y" && pairs[2].second == "A%zz");
+    assert(pairs[3] == std::make_pair(std::string("d"), std::string()));
+    assert(pairs[4] == std::make_pair(std::string(), std::string("e")));
+    assert(pairs[5].second == "\xEF\xBF\xBD");            // not UTF-8: U+FFFD
+    assert(serialize_urlencoded({{"a b", "c&d=e"}, {"\xC3\xA9", "*-._~!'()"}}) == "a+b=c%26d%3De&%C3%A9=*-._%7E%21%27%28%29");
+}
+
+TEST(url_objects_and_addresses_in_the_dom) {
+    using namespace litebird;
+    // The page's own address decides what every relative address means.
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><a id=plain>no href</a><a id=frag href='#frag'>frag</a>"
+        "<a id=mail href='mailto:ann@x.test'>mail</a><form id=f></form></body>");
+    doc->set_url("HTTPS://Example.test/app/page.html?tab=2#top");
+    JsInterpreter interp(doc);
+    JsValue failed = interp.eval(R"JS(
+        (function () {
+            var failed = [];
+            function check(name, actual, expected) {
+                if (actual !== expected) failed.push(name + ': ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(expected));
+            }
+            function throws(name, kind, fn) {
+                try { fn(); failed.push(name + ': no error'); } catch (e) { check(name, e.name, kind); }
+            }
+            var page = 'https://example.test/app/page.html?tab=2#top';
+            check('the address is normalised', location.href + ' ' + document.URL, page + ' ' + page);
+            check('location parts', [location.protocol, location.host, location.port, location.pathname, location.search, location.hash, location.origin].join(' '),
+                  'https: example.test  /app/page.html ?tab=2 #top https://example.test');
+
+            // URL objects.
+            var u = new URL('../a/b?x=1&y=2#h', page);
+            check('href', u.href, 'https://example.test/a/b?x=1&y=2#h');
+            check('instanceof', u instanceof URL && u.searchParams instanceof URLSearchParams, true);
+            check('searchParams is one object', u.searchParams === u.searchParams, true);
+            u.searchParams.append('z', 'a b');
+            check('the list changes the URL', u.search, '?x=1&y=2&z=a+b');
+            u.search = '?only=1';
+            check('the URL changes the list', u.searchParams.get('only') + ' ' + u.searchParams.has('x'), '1 false');
+            u.searchParams.delete('only');
+            check('an empty list leaves no question mark', u.href, 'https://example.test/a/b#h');
+            u.hash = '';
+            check('hash removed', u.href, 'https://example.test/a/b');
+            u.href = 'http://other.test:8080/p?q=2';
+            check('href replaces everything', [u.host, u.pathname, u.searchParams.get('q')].join(' '), 'other.test:8080 /p 2');
+            throws('href must be a URL', 'TypeError', function () { u.href = 'nope'; });
+            check('a failed assignment changes nothing', u.href, 'http://other.test:8080/p?q=2');
+            check('as text', String(u) + ' ' + JSON.stringify({u: u}), 'http://other.test:8080/p?q=2 {"u":"http://other.test:8080/p?q=2"}');
+            throws('not a URL', 'TypeError', function () { new URL('nope'); });
+            throws('no arguments', 'TypeError', function () { new URL(); });
+            throws('without new', 'TypeError', function () { URL('https://a.test'); });
+            check('canParse', [URL.canParse('https://a.test'), URL.canParse('nope'), URL.canParse('x', page)].join(' '), 'true false true');
+            check('parse', URL.parse('nope') + ' ' + URL.parse('x', page).href, 'null https://example.test/app/x');
+            check('members are on the prototype', Object.keys(u).length + ' ' + ('href' in URL.prototype), '0 true');
+            class Api extends URL { get first() { return this.pathname.split('/')[1]; } }
+            var api = new Api('https://api.test/v1/users');
+            check('a subclass', api.first + ' ' + (api instanceof Api) + ' ' + (api instanceof URL) + ' ' + api.host, 'v1 true true api.test');
+
+            // URLSearchParams.
+            var p = new URLSearchParams('?b=2&a=1&b=3&c=x+y%21');
+            check('from a string', p.getAll('b').join() + ' ' + p.get('c') + ' ' + p.get('none') + ' ' + p.size, '2,3 x y! null 4');
+            p.sort();
+            check('sort keeps equal names in order', p.toString(), 'a=1&b=2&b=3&c=x+y%21');
+            p.set('b', '9');
+            p.delete('c', 'no such value');
+            check('set, and delete by value', p.toString() + ' ' + p.has('b', '9') + ' ' + p.has('b', '2'), 'a=1&b=9&c=x+y%21 true false');
+            check('iteration', Array.from(p).join('|') + ' ' + Array.from(p.keys()).join() + ' ' + Array.from(p.values()).join(), 'a,1|b,9|c,x y! a,b,c 1,9,x y!');
+            var seen = [];
+            p.forEach(function (value, name, owner) { seen.push(name + '=' + value + (owner === p)); });
+            check('forEach', seen.join(), 'a=1true,b=9true,c=x y!true');
+            check('from pairs', new URLSearchParams([['a', '1'], ['a', '2']]).toString(), 'a=1&a=2');
+            check('from a record', new URLSearchParams({q: 'x y', n: 1}).toString(), 'q=x+y&n=1');
+            check('from a Map', new URLSearchParams(new Map([['k', 'v']])).toString(), 'k=v');
+            check('from another list', new URLSearchParams(p).toString(), p.toString());
+            throws('a pair of three', 'TypeError', function () { new URLSearchParams([['a', 'b', 'c']]); });
+            check('a list of its own changes no URL', new URLSearchParams('a=1').toString(), 'a=1');
+
+            // Links.
+            var a = document.createElement('a');
+            check('no href', JSON.stringify([a.href, a.protocol, a.host, a.pathname, a.origin]), '["",":","","",""]');
+            a.href = '#top';
+            check('fragment only', a.href, page);
+            a.href = '?q=1';
+            check('query only', a.href, 'https://example.test/app/page.html?q=1');
+            a.href = '//cdn.test/lib.js';
+            check('another host', a.href + ' ' + a.host + ' ' + a.getAttribute('href'), 'https://cdn.test/lib.js cdn.test //cdn.test/lib.js');
+            a.pathname = '/new path';
+            check('assigning a part rewrites the attribute', a.getAttribute('href') + ' ' + a.pathname, 'https://cdn.test/new%20path /new%20path');
+            a.hash = 'x';
+            a.search = 'y=1';
+            a.port = '8080';
+            check('more parts', a.href, 'https://cdn.test:8080/new%20path?y=1#x');
+            a.protocol = 'mailto';
+            check('a web address stays one', a.protocol, 'https:');
+            var mail = document.getElementById('mail');
+            check('mailto', [mail.protocol, mail.pathname, mail.host, mail.origin, mail.href].join(' '), 'mailto: ann@x.test  null mailto:ann@x.test');
+            a.setAttribute('href', 'https://exa mple.test/');
+            check('not a URL: the attribute as written', a.href + ' ' + a.protocol + ' ' + a.host, 'https://exa mple.test/ : ');
+
+            // The page's address.
+            check('form.action without an attribute', document.getElementById('f').action, page);
+            check('baseURI', document.baseURI + ' ' + document.body.baseURI, page + ' ' + page);
+            var base = document.createElement('base');
+            base.href = 'https://static.test/assets/';
+            document.head.appendChild(base);
+            a.setAttribute('href', 'logo.png');
+            check('a base element moves relative addresses', a.href + ' ' + document.baseURI, 'https://static.test/assets/logo.png https://static.test/assets/');
+            check('but not the page', location.href, page);
+            base.remove();
+
+            var before = history.length;
+            history.pushState({n: 1}, '', '');
+            check('pushState with an empty address stays', location.href + ' ' + (history.length - before), page + ' 1');
+            history.pushState(null, '', '/other?x=1');
+            check('pushState to another path', location.href, 'https://example.test/other?x=1');
+            throws('another site', 'SecurityError', function () { history.pushState(null, '', 'https://other.test/'); });
+            throws('another scheme', 'SecurityError', function () { history.replaceState(null, '', 'http://example.test/other'); });
+            throws('not a URL at all', 'SecurityError', function () { history.pushState(null, '', 'https://[bad'); });
+            check('a refused move changes nothing', location.href, 'https://example.test/other?x=1');
+            throws('location.href must be a URL', 'SyntaxError', function () { location.href = 'https://[bad'; });
+            return failed.join('\n');
+        })()
+    )JS");
+    if (!failed.to_string().empty()) std::cerr << failed.to_string() << "\n";
+    assert(failed.to_string().empty());
+
+    // A change of fragment moves within the page: the address changes at
+    // once, the events come later.
+    interp.eval(R"JS(
+        var log = [];
+        window.addEventListener('hashchange', function (e) { log.push('hashchange ' + e.oldURL.split('/').pop() + ' > ' + e.newURL.split('/').pop()); });
+        window.addEventListener('popstate', function () { log.push('popstate'); });
+        var entries = history.length;
+        location.hash = 'a b';
+    )JS");
+    assert(interp.eval("location.href").to_string() == "https://example.test/other?x=1#a%20b");
+    assert(interp.eval("log.length").to_number() == 0.0);
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() == "popstate,hashchange other?x=1 > other?x=1#a%20b");
+    // The same fragment again is no move; an empty one is: the address ends in "#".
+    interp.eval("log = []; location.hash = '#a b'; location.hash = '';");
+    assert(interp.eval("location.href + ' ' + JSON.stringify(location.hash)").to_string() == "https://example.test/other?x=1# \"\"");
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() == "popstate,hashchange other?x=1#a%20b > other?x=1#");
+    // A link to a fragment does the same when it is clicked; replace() does
+    // not add an entry.
+    interp.eval("log = []; entries = history.length; document.getElementById('frag').click();");
+    assert(interp.eval("location.hash + ' ' + (history.length - entries)").to_string() == "#frag 1");
+    interp.eval("location.replace('#second');");
+    assert(interp.eval("location.hash + ' ' + (history.length - entries)").to_string() == "#second 1");
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() ==
+           "popstate,hashchange other?x=1# > other?x=1#frag,popstate,hashchange other?x=1#frag > other?x=1#second");
+    // Anywhere else would be another page: nothing happens.
+    interp.eval("location.href = '/elsewhere'; location.assign('https://other.test/#x');");
+    assert(interp.eval("location.href").to_string() == "https://example.test/other?x=1#second");
+
+    // A page that is a file may change its query and fragment, not its path.
+    auto file_doc = HtmlParser::parse("<!DOCTYPE html><body></body>");
+    file_doc->set_url(file_url_from_path("/home/me/my page.html"));
+    JsInterpreter file_interp(file_doc);
+    assert(file_interp.eval("location.href + ' ' + location.origin").to_string() == "file:///home/me/my%20page.html null");
+    assert(file_interp.eval("history.pushState(null, '', '?tab=2#x'); location.href").to_string() ==
+           "file:///home/me/my%20page.html?tab=2#x");
+    assert(file_interp.eval("try { history.pushState(null, '', 'other.html'); 'no error' } catch (e) { e.name }").to_string() ==
+           "SecurityError");
+
+    // A script with no page has URL and URLSearchParams too.
+    JsInterpreter alone;
+    assert(alone.eval("new URL('/a?b=c', 'https://x.test').searchParams.get('b') + ' ' + (new URL('https://x.test') instanceof URL)")
+               .to_string() == "c true");
 }
 
 TEST(css_filters_and_canvas_blending) {
@@ -6472,6 +6771,8 @@ int main() {
     RUN_TEST(shadow_dom_and_slot_projection);
     RUN_TEST(intersection_and_resize_observers);
     RUN_TEST(history_api_and_client_routing);
+    RUN_TEST(url_parser_follows_the_url_standard);
+    RUN_TEST(url_objects_and_addresses_in_the_dom);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

@@ -68,11 +68,12 @@ SRCS = src/dom/Node.cpp \
        src/js/DomHtmlBindings.cpp \
        src/js/DomFormBindings.cpp \
        src/js/DomFileBindings.cpp \
+       src/js/DomUrlBindings.cpp \
        src/js/DomObserverBindings.cpp \
        src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
-       src/net/URL.cpp \
+       src/net/UrlParser.cpp \
        src/net/Fetch.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
@@ -107,7 +108,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -150,6 +151,11 @@ js-conformance: $(TARGET)
 ## and the network: jsdom is installed into build/jsdom.
 dom-conformance: $(TARGET)
 	@$(DOM_CONFORMANCE)
+
+## URL scoreboard: the web-platform-tests URL data (tests/url), run through
+## `new URL()` and the setters of the object. Needs nothing but the binary.
+url-conformance: $(TARGET)
+	@python3 tools/conformance/run_url_conformance.py
 
 ## A grid of string expressions (subjects x methods, operators and regular
 ## expressions) evaluated by Litebird and by Node.js, results compared.
@@ -239,4 +245,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

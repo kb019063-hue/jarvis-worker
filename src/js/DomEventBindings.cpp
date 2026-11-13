@@ -978,6 +978,10 @@ bool is_event_target(Realm& realm, const JsValue& value) {
     return false;
 }
 
+JsValue current_event(Realm& realm) {
+    return realm.part<EventsPart>().current_event;
+}
+
 double time_now(Realm& realm) {
     const auto elapsed = EventLoop::default_loop().now() - realm.part<EventsPart>().origin;
     return std::chrono::duration<double, std::milli>(elapsed).count();

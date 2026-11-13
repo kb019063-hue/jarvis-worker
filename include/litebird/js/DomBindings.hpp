@@ -588,6 +588,8 @@ bool is_event_target(Realm& realm, const JsValue& value);
 bool on_abort(const JsValue& signal, std::function<void()> algorithm, bool& aborted);
 /// Milliseconds since the realm's time origin.
 double time_now(Realm& realm);
+/// `window.event`: the event whose listener is running, or undefined.
+JsValue current_event(Realm& realm);
 /// Dispatches `event` at `target` (a node object, the window or any other
 /// EventTarget). Returns false when the event was cancelled. `shown_target`
 /// is what listeners see as `event.target` when that is not `target` itself

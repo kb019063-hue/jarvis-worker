@@ -490,6 +490,8 @@ void ElementMembers<Accepts>::keyword(const char* name, std::vector<std::string>
 // What the parts of the bindings offer each other
 // ---------------------------------------------------------------------------
 
+using NodeVector = std::vector<std::shared_ptr<Node>>;
+
 // --- DomNodeBindings.cpp ------------------------------------------------------
 void register_node_interfaces();
 bool is_any_node(const Node& node);
@@ -515,10 +517,22 @@ void set_text_content(Node& node, const std::string& text);
 void set_character_data(Node& node, const std::string& data);
 const std::string& character_data(const Node& node);
 bool is_character_data(const Node& node);
+/// The mixins several interfaces share: ChildNode (before, after,
+/// replaceWith, remove), ParentNode (children, append, querySelector, ...)
+/// and the element-sibling getters.
+void define_child_node(Iface& I, bool (*accepts)(const Node&));
+void define_parent_node(Iface& I, bool (*accepts)(const Node&));
+void define_element_siblings(Iface& I, bool (*accepts)(const Node&));
+/// Takes `node` out of its parent, if it has one.
+void remove_node(Realm& realm, Node& node);
+/// Replaces every child of `parent` by `nodes`, as one change: observers get
+/// one record.
+void replace_all_children(Realm& realm, Node& parent, const NodeVector& nodes);
+/// The node argument `index` of a call, or a TypeError.
+Node& node_argument(Args args, std::size_t index, const char* what);
 
 // --- DomCollectionBindings.cpp ------------------------------------------------
 void register_collection_interfaces();
-using NodeVector = std::vector<std::shared_ptr<Node>>;
 /// A list that is computed again whenever a tree has changed. `compute`
 /// receives the root the list was made for.
 JsValue make_live_list(Realm& realm, const char* iface, const std::shared_ptr<Node>& root,
@@ -538,6 +552,11 @@ JsValue attr_object(Realm& realm, Element& element, const std::string& name);
 /// Called when an attribute has been removed: its Attr object, if a script
 /// holds one, keeps the last value and no longer belongs to the element.
 void detach_attr_object(Realm& realm, Element& element, const std::string& name, const std::string& last_value);
+/// document.createAttribute(name): an Attr that belongs to no element yet.
+JsValue create_attribute(Realm& realm, const std::string& name);
+/// element.setAttributeNode(attr): returns the Attr it replaced, or null.
+JsValue set_attribute_node(Realm& realm, Element& element, const JsValue& attr);
+JsValue remove_attribute_node(Realm& realm, Element& element, const JsValue& attr);
 
 // --- DomEventBindings.cpp -------------------------------------------------------
 void register_event_interfaces();
@@ -661,6 +680,21 @@ void note_attribute_changed(Element& element, const std::string& name, const std
                             const std::string* new_value);
 void note_character_data_changed(Node& node, const std::string& old_value);
 void note_connected(Element& element, bool connected);
+/// While one of these exists, changes to the children of `parent` queue no
+/// mutation record of their own; commit() queues one for the whole
+/// operation (replaceChild, innerHTML, textContent).
+class ChildListBatch {
+public:
+    ChildListBatch(Realm& realm, Node& parent);
+    ~ChildListBatch();
+    ChildListBatch(const ChildListBatch&) = delete;
+    ChildListBatch& operator=(const ChildListBatch&) = delete;
+    void commit(const NodeVector& added, const NodeVector& removed, const std::shared_ptr<Node>& previous,
+                const std::shared_ptr<Node>& next);
+private:
+    Realm& m_realm;
+    Node* m_previous;
+};
 /// Upgrades `element` if a definition for its name exists.
 void try_upgrade(Realm& realm, Element& element);
 void upgrade_subtree(Realm& realm, Node& root);

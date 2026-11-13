@@ -94,24 +94,36 @@ inline void keep_wrapper_rule(Node& parent, const Node& child) {
 
 } // namespace
 
+std::size_t Node::index_in(const Node& parent) const {
+    const auto& ch = parent.children();
+    if (m_sibling_hint < ch.size() && ch[m_sibling_hint].get() == this) return m_sibling_hint;
+    for (std::size_t i = 0; i < ch.size(); ++i) {
+        if (ch[i].get() == this) {
+            m_sibling_hint = static_cast<uint32_t>(i);
+            return i;
+        }
+    }
+    return ch.size();
+}
+
 std::shared_ptr<Node> Node::previous_sibling() const {
     auto p = parent();
     if (!p) return nullptr;
     const auto& ch = p->children();
-    for (size_t i = 1; i < ch.size(); ++i) {
-        if (ch[i].get() == this) return ch[i - 1];
-    }
-    return nullptr;
+    const std::size_t i = index_in(*p);
+    if (i == 0 || i >= ch.size()) return nullptr;
+    ch[i - 1]->m_sibling_hint = static_cast<uint32_t>(i - 1);
+    return ch[i - 1];
 }
 
 std::shared_ptr<Node> Node::next_sibling() const {
     auto p = parent();
     if (!p) return nullptr;
     const auto& ch = p->children();
-    for (size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].get() == this) return ch[i + 1];
-    }
-    return nullptr;
+    const std::size_t i = index_in(*p);
+    if (i + 1 >= ch.size()) return nullptr;
+    ch[i + 1]->m_sibling_hint = static_cast<uint32_t>(i + 1);
+    return ch[i + 1];
 }
 
 void Node::set_parent(std::shared_ptr<Node> p) {

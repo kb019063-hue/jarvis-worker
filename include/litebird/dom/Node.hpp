@@ -114,6 +114,9 @@ public:
     std::shared_ptr<Node> last_child() const { return m_children.empty() ? nullptr : m_children.back(); }
     std::shared_ptr<Node> previous_sibling() const;
     std::shared_ptr<Node> next_sibling() const;
+    /// This node's index among the children of `parent`; their number when
+    /// it is not one of them.
+    std::size_t index_in(const Node& parent) const;
 
     bool is_connected() const { return m_is_connected; }
 
@@ -239,6 +242,11 @@ protected:
     std::weak_ptr<Document> m_owner;
     void* m_script_object{nullptr};
     uint64_t m_script_realm{0};
+    /// Where this node was among its parent's children the last time anybody
+    /// looked. Checked before it is used; it makes a walk along siblings
+    /// (`for (n = first; n; n = n.nextSibling)`) one step per node instead
+    /// of a search of the whole list per node.
+    mutable uint32_t m_sibling_hint{0};
     static inline uint64_t s_tree_version = 1;
     std::vector<std::shared_ptr<Node>> m_children;
     std::unordered_map<std::string, std::vector<EventListenerEntry>> m_listeners;

@@ -544,6 +544,10 @@ JsValue make_live_list(Realm& realm, const char* iface, const std::shared_ptr<No
 JsValue make_static_list(Realm& realm, NodeVector nodes, const char* iface = "NodeList");
 /// The nodes of a NodeList or HTMLCollection object; false for anything else.
 bool list_nodes(const JsValue& list, NodeVector& out);
+/// Replaces how a collection answers a name (`form.elements.size` is every
+/// radio button called "size", not the first).
+using NamedGetter = std::function<bool(const NodeVector& items, const std::string& name, JsValue& out)>;
+void set_list_named_getter(const JsValue& list, NamedGetter getter);
 /// `element.classList` and friends: a DOMTokenList over `attribute`.
 JsValue make_token_list(Realm& realm, Element& element, const std::string& attribute,
                         std::vector<std::string> supported = {});
@@ -645,6 +649,10 @@ JsValue create_traversal(Realm& realm, bool iterator, const std::shared_ptr<Node
 
 // --- DomHtmlBindings.cpp ----------------------------------------------------------
 void register_html_interfaces();
+/// Defines attributes that reflect content attributes from a description:
+/// words of the form kind:property[:attribute][=default], kinds s string,
+/// b boolean, l long, u unsigned long, p unsigned long never zero, r URL.
+void reflect_attributes(Iface& I, const char* description);
 
 // --- DomFormBindings.cpp ----------------------------------------------------------
 void register_form_interfaces();
@@ -669,6 +677,8 @@ bool is_focusable(const Element& element);
 /// form.reset() and form.requestSubmit(submitter).
 void reset_form(Realm& realm, Element& form);
 void submit_form(Realm& realm, Element& form, Element* submitter, bool validate);
+/// `new Option(text, value, defaultSelected, selected)`.
+std::shared_ptr<Element> make_option(Realm& realm, Args args);
 
 // --- DomWindowBindings.cpp --------------------------------------------------------
 void register_window_interfaces();

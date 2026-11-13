@@ -943,6 +943,10 @@ void setup_link_element(Iface& I) {
 
 } // namespace
 
+void reflect_attributes(Iface& I, const char* description) {
+    reflect(I, description);
+}
+
 void register_html_interfaces() {
     const auto element_ctor = &construct_custom_element;
     register_interface({"HTMLElement", "Element", setup_html_element, element_ctor, 0, nullptr});

@@ -93,6 +93,16 @@ struct ListState : JsExotic {
     uint64_t version{0};
     /// HTMLCollection and its relatives also answer names.
     bool named{false};
+    /// Set for collections that answer names their own way.
+    NamedGetter named_getter;
+
+    bool lookup_name(const std::string& name, JsValue& out) {
+        if (named_getter) return named_getter(items(), name, out);
+        auto node = named_item(name);
+        if (!node || !realm->alive) return false;
+        out = wrap(*realm, node);
+        return true;
+    }
 
     const NodeVector& items() {
         if (compute && version != Node::tree_version()) {
@@ -129,16 +139,14 @@ struct ListState : JsExotic {
         return true;
     }
     bool get_last(JsObject*, const std::string& name, JsValue& out) override {
-        if (!named || !realm->alive) return false;
-        auto node = named_item(name);
-        if (!node) return false;
-        out = wrap(*realm, node);
-        return true;
+        if (!named || !realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return false;
+        return lookup_name(name, out);
     }
     bool has(JsObject*, const std::string& name) override {
         std::size_t index = 0;
         if (parse_index(name, index)) return index < items().size();
-        return named && named_item(name) != nullptr;
+        JsValue ignored;
+        return named && realm->alive && !name.empty() && name[0] != '%' && name[0] != '@' && lookup_name(name, ignored);
     }
     bool set(JsObject*, const std::string& name, const JsValue&) override {
         std::size_t index = 0;
@@ -186,9 +194,10 @@ void setup_html_collection(Iface& I) {
         const std::size_t index = to_ulong(args[0]);
         return index < list.size() ? wrap(r, list[index]) : null();
     });
-    I.method("namedItem", 1, [](Realm& r, Args args) {
+    I.method("namedItem", 1, [](Realm&, Args args) {
         require_args(args, 1, "HTMLCollection.namedItem");
-        return wrap(r, this_list().named_item(to_str(args[0])));
+        JsValue out;
+        return this_list().lookup_name(to_str(args[0]), out) ? out : null();
     });
     define_list_iteration(I, &list_item_at, false);
 }
@@ -220,6 +229,10 @@ JsValue make_static_list(Realm& realm, NodeVector nodes, const char* iface) {
     state->nodes = std::move(nodes);
     state->named = is_collection_interface(realm, iface);
     return realm.make(iface, state);
+}
+
+void set_list_named_getter(const JsValue& list, NamedGetter getter) {
+    if (ListState* state = state_of<ListState>(list)) state->named_getter = std::move(getter);
 }
 
 bool list_nodes(const JsValue& list, NodeVector& out) {

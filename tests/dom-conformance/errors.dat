@@ -1,0 +1,165 @@
+#fixture
+<html><head><title>Errors</title></head><body><div id="d"><p id="p">x</p></div></body></html>
+
+#name DOMException: name, code, message and the constants
+#code
+try { document.body.removeChild(document.createElement('p')); } catch (e) {
+  console.log(e.name, e.code, typeof e.message, e.message.length > 0, e instanceof DOMException, e instanceof Error, Object.prototype.toString.call(e), String(e).indexOf('NotFoundError') === 0);
+  console.log(e.NOT_FOUND_ERR, DOMException.NOT_FOUND_ERR, DOMException.HIERARCHY_REQUEST_ERR, DOMException.SYNTAX_ERR, DOMException.INVALID_CHARACTER_ERR, DOMException.INDEX_SIZE_ERR, DOMException.INVALID_STATE_ERR, DOMException.NOT_SUPPORTED_ERR, DOMException.SECURITY_ERR, DOMException.DATA_CLONE_ERR);
+}
+#expect
+NotFoundError 8 string true true true [object DOMException] true
+8 8 3 12 5 1 11 9 18 25
+
+#name new DOMException
+#code
+var a = new DOMException('boom', 'AbortError'), b = new DOMException('plain'), c = new DOMException(), d = new DOMException('m', 'NoSuchName');
+console.log(a.name, a.message, a.code, b.name, b.code, JSON.stringify(c.message), c.name, d.name, d.code, a instanceof Error, typeof a.stack, String(a));
+try { throw a; } catch (e) { console.log(e === a, e.name); }
+#expect
+AbortError boom 20 Error 0 "" Error NoSuchName 0 true string AbortError: boom
+true AbortError
+
+#name which call throws which exception
+#code
+function name(fn) { try { fn(); return 'none'; } catch (e) { return e.name; } }
+var p = document.getElementById('p'), d = document.getElementById('d');
+console.log([
+  name(function () { p.appendChild(d); }),
+  name(function () { d.removeChild(document.body); }),
+  name(function () { d.insertBefore(document.createElement('i'), document.body); }),
+  name(function () { d.replaceChild(document.createElement('i'), document.body); }),
+  name(function () { document.createElement('a b'); }),
+  name(function () { d.setAttribute('', 'x'); }),
+  name(function () { d.querySelector('!!'); }),
+  name(function () { d.classList.add(''); }),
+  name(function () { d.classList.add('a b'); }),
+  name(function () { p.firstChild.splitText(99); }),
+  name(function () { d.insertAdjacentHTML('nowhere', ''); }),
+  name(function () { document.createEvent('Nope'); }),
+  name(function () { d.dispatchEvent(null); }),
+  name(function () { d.appendChild(null); }),
+  name(function () { document.createElement(); }),
+  name(function () { d.attachShadow({mode: 'open'}); d.attachShadow({mode: 'open'}); }),
+  name(function () { document.createElement('input').attachShadow({mode: 'open'}); })
+].join(' '));
+#expect
+HierarchyRequestError NotFoundError NotFoundError NotFoundError InvalidCharacterError InvalidCharacterError SyntaxError SyntaxError InvalidCharacterError IndexSizeError SyntaxError NotSupportedError TypeError TypeError TypeError NotSupportedError NotSupportedError
+
+#name a failed mutation leaves the tree as it was
+#code
+var p = document.getElementById('p'), d = document.getElementById('d');
+try { p.appendChild(d); } catch (e) {}
+try { d.insertBefore(document.createElement('i'), document.body); } catch (e) {}
+try { d.replaceChild(document.createElement('i'), document.body); } catch (e) {}
+console.log(d.parentNode === document.body, p.parentNode === d, d.childNodes.length, p.childNodes.length, document.body.children.length);
+#expect
+true true 1 1 1
+
+#name an uncaught error in a page script is reported and the page goes on
+#html
+<body><script>window.seen = []; window.onerror = function (m, s, l, c, e) { window.seen.push((e instanceof ReferenceError) + ' ' + (m.indexOf('undefinedFunction') >= 0)); return true; };</script><script>window.reached = 'before'; undefinedFunction(); window.reached = 'after';</script><script>window.next = 'ran';</script></body>
+#code
+window.addEventListener('load', function () { console.log('load still fires', window.reached, window.next, window.seen.join(',')); });
+#expect
+load still fires before ran true true
+
+#name window.onerror receives message, source, line, column and the error
+#code
+window.onerror = function (message, source, line, column, error) {
+  console.log(typeof message, message.indexOf('from a timer') >= 0, typeof source, typeof line, typeof column, error instanceof RangeError, error.message, arguments.length);
+};
+setTimeout(function () { throw new RangeError('from a timer'); }, 0);
+#expect
+string true string number number true from a timer 5
+
+#name the error event at window, and cancelling it
+#code
+window.addEventListener('error', function (e) {
+  console.log(e.type, e instanceof ErrorEvent, e.message.indexOf('listened') >= 0, typeof e.filename, typeof e.lineno, typeof e.colno, e.error.name, e.target === window, e.bubbles, e.cancelable);
+  e.preventDefault();
+});
+setTimeout(function () { throw new TypeError('listened'); }, 0);
+#expect
+error true true string number number TypeError true false true
+
+#name throwing something that is not an Error
+#code
+var seen = [];
+window.onerror = function (message, source, line, column, error) { seen.push(typeof message + ':' + (typeof error === 'object' ? JSON.stringify(error) : String(error))); return true; };
+setTimeout(function () { throw 'a string'; }, 0);
+setTimeout(function () { throw {code: 42}; }, 1);
+setTimeout(function () { throw null; }, 2);
+setTimeout(function () { console.log(seen.join(' | ')); }, 10);
+#expect
+string:a string | string:{"code":42} | string:null
+
+#name an error in one event listener does not stop the dispatch or the caller
+#code
+var out = [];
+window.onerror = function () { out.push('reported'); return true; };
+var p = document.getElementById('p');
+p.addEventListener('click', function () { out.push('one'); throw new Error('x'); });
+p.addEventListener('click', function () { out.push('two'); });
+var result = p.dispatchEvent(new Event('click'));
+out.push('returned ' + result);
+console.log(out.join(' '));
+#expect
+one reported two returned true
+
+#name an error inside a promise is a rejection, not an error event
+#code
+var out = [];
+window.onerror = function () { out.push('onerror'); return true; };
+Promise.resolve().then(function () { throw new Error('in promise'); }).catch(function (e) { out.push('caught ' + e.message); });
+new Promise(function (resolve, reject) { reject(new Error('handled')); }).catch(function (e) { out.push('caught ' + e.message); });
+setTimeout(function () { console.log(out.join(', ')); }, 20);
+#expect
+caught handled, caught in promise
+
+#name reading a property of null is a TypeError the script can catch
+#code
+try { document.getElementById('nosuch').textContent = 'x'; } catch (e) { console.log(e instanceof TypeError, e.name); }
+try { document.querySelector('.none').classList.add('a'); } catch (e) { console.log(e.name); }
+try { null.x; } catch (e) { console.log(e.name); }
+console.log(document.getElementById('nosuch'), document.querySelector('.none'));
+#expect
+true TypeError
+TypeError
+TypeError
+null null
+
+#name calling a DOM method with a wrong this
+#code
+var qs = document.querySelector, gid = document.getElementById, add = document.body.classList.add, ael = document.body.addEventListener;
+[function () { qs('p'); }, function () { gid('p'); }, function () { add('x'); }, function () { ael.call({}, 'x', function () {}); }, function () { ael('x', function () {}); }].forEach(function (fn) {
+  try { fn(); console.log('no error'); } catch (e) { console.log(e.name); }
+});
+console.log(qs.call(document, '#p').id, gid.bind(document)('p').id);
+#expect
+TypeError
+TypeError
+TypeError
+TypeError
+no error
+p p
+
+#name too few arguments is a TypeError
+#code
+var d = document.getElementById('d');
+[function () { d.appendChild(); }, function () { d.setAttribute('a'); }, function () { d.getAttribute(); }, function () { d.querySelector(); }, function () { d.addEventListener('x'); }, function () { document.createTextNode(); }, function () { d.insertBefore(document.createElement('i')); }, function () { d.contains(); }, function () { new Event(); }, function () { new CustomEvent(); }, function () { d.classList.contains(); }, function () { d.matches(); }].forEach(function (fn) {
+  try { fn(); console.log('no error'); } catch (e) { console.log(e.name); }
+});
+#expect
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError

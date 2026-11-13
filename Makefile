@@ -70,6 +70,7 @@ TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
+DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.
@@ -92,7 +93,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance dom-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -128,6 +129,13 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
+## Running it needs nothing but the binary. Checking or recording the
+## expectations (--reference, --record) needs Node.js and, the first time, npm
+## and the network: jsdom is installed into build/jsdom.
+dom-conformance: $(TARGET)
+	@$(DOM_CONFORMANCE)
 
 ## A grid of string expressions (subjects x methods, operators and regular
 ## expressions) evaluated by Litebird and by Node.js, results compared.
@@ -217,4 +225,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

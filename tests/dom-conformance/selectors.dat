@@ -1,0 +1,272 @@
+#fixture
+<html><head><title>Selectors</title></head><body>
+<div id="root" class="wrap">
+<h1 id="h" class="title main" lang="en-GB">Head</h1>
+<ul id="list" class="items">
+<li class="a first" data-n="1">one</li>
+<li class="b" data-n="2" data-tag="x y z">two</li>
+<li class="a" data-n="3" title="Third item">three</li>
+<li class="c last" data-n="4" title="">four</li>
+</ul>
+<p id="p1">para <span class="a">s1</span> <em>e1</em> <span>s2</span></p>
+<p id="p2" class="empty"></p>
+<form id="f"><input id="t" type="text" name="t" value="v" required><input id="c" type="checkbox" checked><input id="r" type="radio" disabled><select id="sel"><option id="o1">1</option><option id="o2" selected>2</option></select><button id="b" disabled>B</button><textarea id="ta" readonly></textarea></form>
+<a id="l1" href="https://example.test/a.pdf">pdf</a><a id="l2" href="#x">frag</a><a id="l3">no href</a>
+</div>
+</body></html>
+
+#name type, class and id selectors
+#code
+function ids(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.id || e.textContent; }).join(','); }
+console.log(ids('li'), '|', ids('.a'), '|', ids('#h'), '|', ids('li.a'), '|', ids('.title.main'), '|', ids('h1#h.title'), '|', ids('*').split(',').length);
+#expect
+one,two,three,four | one,three,s1 | h | one,three | h | h | 28
+
+#name type selectors ignore case; classes and ids do not
+#code
+console.log(document.querySelectorAll('LI').length, document.querySelectorAll('Li.a').length, document.querySelectorAll('.A').length, document.querySelector('#H'), document.querySelectorAll('.Title').length);
+#expect
+4 2 0 null 0
+
+#name descendant and child combinators
+#code
+console.log(document.querySelectorAll('#root span').length, document.querySelectorAll('#root > span').length, document.querySelectorAll('ul > li').length, document.querySelectorAll('div p span').length, document.querySelectorAll('body > div > p > span').length, document.querySelectorAll('ul li.b').length, document.querySelectorAll('html   body   li').length);
+#expect
+2 0 4 2 2 1 4
+
+#name sibling combinators
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.textContent; }).join(','); }
+console.log(t('li.first + li'), '|', t('li.first ~ li'), '|', t('li.b ~ li.a'), '|', t('span + em'), '|', t('em ~ span'), '|', t('li.last + li'), '|', t('h1 + ul > li:first-child'));
+#expect
+two | two,three,four | three | e1 | s2 |  | one
+
+#name selector lists and whitespace
+#code
+console.log(document.querySelectorAll('h1, p').length, document.querySelectorAll(' h1 ,p , li.b ').length, document.querySelectorAll('li.a,li.a').length, document.querySelector('p, h1').id, document.querySelectorAll('ul>li').length, document.querySelectorAll('li.first+li').length, document.querySelectorAll('li.first~li').length);
+#expect
+3 4 2 h 4 1 3
+
+#name attribute selectors: presence and exact value
+#code
+console.log(document.querySelectorAll('[title]').length, document.querySelectorAll('li[title]').length, document.querySelectorAll('[title=""]').length, document.querySelectorAll('[data-n="2"]').length, document.querySelectorAll("[data-n='2']").length, document.querySelectorAll('[type=text]').length, document.querySelectorAll('[title="third item"]').length, document.querySelectorAll('[title="third item" i]').length);
+#expect
+2 2 1 1 1 1 0 1
+
+#name attribute selectors: the substring operators
+#code
+console.log(document.querySelectorAll('[href^="https:"]').length, document.querySelectorAll('[href$=".pdf"]').length, document.querySelectorAll('[href*="example"]').length, document.querySelectorAll('[data-tag~="y"]').length, document.querySelectorAll('[data-tag~="x y"]').length, document.querySelectorAll('[lang|="en"]').length, document.querySelectorAll('[class^="a"]').length, document.querySelectorAll('[href^=""]').length, document.querySelectorAll('[title*="item"]').length);
+#expect
+1 1 1 1 0 1 3 0 1
+
+#name :first-child, :last-child and :only-child
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.id || e.textContent; }).join(','); }
+console.log(t('li:first-child'), '|', t('li:last-child'), '|', t('#p1 > :first-child'), '|', t('#p1 > :last-child'), '|', t('em:only-child'), '|', t('ul:only-child'), '|', t('#root > :first-child'));
+#expect
+one | four | s1 | s2 |  |  | h
+
+#name :nth-child with numbers, keywords and formulas
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.textContent; }).join(','); }
+console.log(t('li:nth-child(2)'), '|', t('li:nth-child(odd)'), '|', t('li:nth-child(even)'), '|', t('li:nth-child(2n+1)'), '|', t('li:nth-child(n+3)'), '|', t('li:nth-child(-n+2)'), '|', t('li:nth-child(3n)'), '|', t('li:nth-child( 2n + 2 )'), '|', t('li:nth-last-child(1)'), '|', t('li:nth-last-child(-n+2)'));
+#expect
+two | one,three | two,four | one,three | three,four | one,two | three | two,four | four | three,four
+
+#name :first-of-type, :last-of-type, :nth-of-type and :only-of-type
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.textContent; }).join(','); }
+console.log(t('#p1 span:first-of-type'), '|', t('#p1 span:last-of-type'), '|', t('#p1 :nth-of-type(2)'), '|', t('#p1 em:only-of-type'), '|', t('#p1 span:only-of-type'), '|', t('#p1 span:nth-last-of-type(2)'));
+#expect
+s1 | s2 | s2 | e1 |  | s1
+
+#name :not
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.textContent; }).join(','); }
+console.log(t('li:not(.a)'), '|', t('li:not(.a):not(.b)'), '|', t('li:not(.a, .b)'), '|', t('li:not([title])'), '|', t('li:not(:first-child)'), '|', t('#p1 > :not(span)'));
+#expect
+two,four | four | four | one,two | two,three,four | e1
+
+#name :is and :where
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.textContent; }).join(','); }
+console.log(t('li:is(.b, .c)'), '|', t(':is(ul, ol) > li.a'), '|', t('li:where(.first, .last)'), '|', t(':is(h1, p) > span.a'));
+#expect
+two,four | one,three | one,four | s1
+
+#name :has
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.id; }).join(','); }
+console.log(t('p:has(em)'), '|', t('p:has(> span.a)'), '|', t('div:has(#list)'), '|', t('p:not(:has(span))'), '|', t('ul:has(li.c + li)'), '|', t('h1:has(+ ul)'));
+#expect
+p1 | p1 | root | p2 |  | h
+
+#name :empty and :root
+#code
+console.log(document.querySelectorAll('p:empty').length, document.querySelector('p:empty').id, document.querySelectorAll('li:empty').length, document.querySelector(':root') === document.documentElement, document.querySelectorAll(':root').length, document.querySelector(':root > body') === document.body);
+#expect
+1 p2 0 true 1 true
+
+#name :checked, :disabled, :enabled, :required, :optional
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.id; }).join(','); }
+console.log(t(':checked'), '|', t(':disabled'), '|', t('input:enabled'), '|', t(':required'), '|', t('input:optional'), '|', t(':read-only#ta'), '|', t('option:checked'));
+#expect
+c,o2 | r,b | t,c | t | c,r | ta | o2
+
+#name state pseudo-classes follow the state, not the attribute
+#code
+var c = document.getElementById('c'), b = document.getElementById('b'), o1 = document.getElementById('o1');
+c.checked = false; b.disabled = false; o1.selected = true;
+console.log(c.matches(':checked'), c.hasAttribute('checked'), b.matches(':disabled'), b.matches(':enabled'), o1.matches(':checked'), document.getElementById('o2').matches(':checked'), document.querySelectorAll(':checked').length);
+#expect
+false true false true true false 1
+
+#name :link and :any-link need an href
+#code
+function t(sel) { return Array.from(document.querySelectorAll(sel)).map(function (e) { return e.id; }).join(','); }
+console.log(t('a:link'), '|', t(':any-link'), '|', t('a:not(:link)'));
+#expect
+l1,l2 | l1,l2 | l3
+
+#name :focus follows the focused element
+#code
+var t = document.getElementById('t');
+console.log(document.querySelector(':focus'));
+t.focus();
+console.log(document.querySelector(':focus') === t, t.matches(':focus'), document.getElementById('c').matches(':focus'), document.getElementById('f').matches(':focus-within'));
+t.blur();
+console.log(document.querySelector(':focus'));
+#expect
+null
+true true false true
+null
+
+#name :scope
+#code
+var list = document.getElementById('list');
+console.log(list.querySelectorAll(':scope > li').length, list.querySelectorAll(':scope li.a').length, list.querySelector(':scope'), document.querySelector(':scope') === document.documentElement, list.matches(':scope'), list.closest(':scope') === list);
+#expect
+4 2 null true true true
+
+#name an element query can name ancestors outside the element
+#code
+var list = document.getElementById('list');
+console.log(list.querySelectorAll('div li').length, list.querySelectorAll('body .wrap > ul > li').length, list.querySelectorAll('ul li').length, list.querySelectorAll('#list').length, list.querySelector('#root'));
+#expect
+4 4 4 0 null
+
+#name the universal selector and namespaces of elements
+#code
+var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+svg.innerHTML = '<circle class="dot"/><foreignObject><p class="dot">x</p></foreignObject>';
+document.body.appendChild(svg);
+console.log(svg.querySelectorAll('*').length, svg.querySelectorAll('.dot').length, document.querySelectorAll('circle').length, svg.querySelector('foreignObject') !== null, svg.querySelector('foreignobject'), document.querySelectorAll('svg p').length);
+#expect
+3 2 1 true null 1
+
+#name escapes in selectors
+#code
+var d = document.createElement('div');
+d.innerHTML = '<p id="1st" class="a:b w-1/2">x</p><p id="a.b" class="x#y">y</p>';
+document.body.appendChild(d);
+console.log(d.querySelector('#\\31 st').textContent, d.querySelector('.a\\:b').id, d.querySelector('.w-1\\/2').id, d.querySelector('#a\\.b').textContent, d.querySelector('[id="a.b"]').textContent, d.querySelector('.x\\#y').id, d.querySelector('#' + CSS.escape('1st')).textContent, CSS.escape('a.b'), CSS.escape('1st'));
+#expect
+x 1st 1st y y a.b x a\.b \31 st
+
+#name a selector that does not parse throws SyntaxError
+#code
+['', '  ', 'li,', ',li', 'li >', '> li', 'li..a', '#', '.', '[', '[a=]', '[data-n=2]', 'li:nosuchpseudo', 'li:nth-child(x)', ':not()', 'a b)', '1a', 'li::', '!'].forEach(function (sel) {
+  var r;
+  try { document.querySelectorAll(sel); r = 'ok'; } catch (e) { r = e.name + ' ' + (e instanceof DOMException) + ' ' + e.code; }
+  console.log(JSON.stringify(sel), r);
+});
+#expect
+"" SyntaxError true 12
+"  " SyntaxError true 12
+"li," SyntaxError true 12
+",li" SyntaxError true 12
+"li >" SyntaxError true 12
+"> li" SyntaxError true 12
+"li..a" SyntaxError true 12
+"#" SyntaxError true 12
+"." SyntaxError true 12
+"[" SyntaxError true 12
+"[a=]" SyntaxError true 12
+"[data-n=2]" SyntaxError true 12
+"li:nosuchpseudo" SyntaxError true 12
+"li:nth-child(x)" SyntaxError true 12
+":not()" SyntaxError true 12
+"a b)" SyntaxError true 12
+"1a" SyntaxError true 12
+"li::" SyntaxError true 12
+"!" SyntaxError true 12
+
+#name querySelector and matches throw the same way
+#code
+var e = document.body;
+['querySelector', 'matches', 'closest'].forEach(function (m) {
+  try { e[m]('div['); console.log(m, 'ok'); } catch (err) { console.log(m, err.name); }
+});
+try { document.querySelector(); console.log('ok'); } catch (err) { console.log(err.name); }
+console.log(document.querySelector(null), document.querySelector(undefined), document.querySelectorAll('undefined').length);
+#expect
+querySelector SyntaxError
+matches SyntaxError
+closest SyntaxError
+TypeError
+null null 0
+
+#name querySelectorAll returns a static NodeList in tree order
+#code
+var all = document.querySelectorAll('li, h1, #p1');
+console.log(all.length, all[0].id, all[all.length - 1].id, all instanceof NodeList);
+document.getElementById('list').appendChild(document.createElement('li'));
+console.log(all.length, document.querySelectorAll('li').length);
+#expect
+6 h p1 true
+6 5
+
+#name querySelector returns the first match in tree order
+#code
+console.log(document.querySelector('span, h1').id, document.querySelector('.last, .first').textContent, document.querySelector('p span:last-child').textContent, document.querySelector('nosuch'));
+#expect
+h one s2 null
+
+#name selectors on a fragment and on a detached tree
+#code
+var f = document.createDocumentFragment();
+var d = document.createElement('div');
+d.innerHTML = '<p class="x">1</p><p>2</p>';
+f.appendChild(d);
+console.log(f.querySelectorAll('p').length, f.querySelector('.x').textContent, f.querySelector('div > p:last-child').textContent, d.querySelectorAll('p').length, d.matches('div'), d.querySelector('p').matches('div > p'), f.querySelector('body'));
+#expect
+2 1 2 2 true true null
+
+#name matching is against the current tree
+#code
+var li = document.querySelector('li.b');
+console.log(li.matches('li:nth-child(2)'), li.matches('.first + li'));
+li.parentNode.insertBefore(li, li.parentNode.firstElementChild);
+console.log(li.matches('li:nth-child(2)'), li.matches(':first-child'), li.matches('.first + li'), document.querySelector('li:nth-child(2)').textContent);
+#expect
+true true
+false true false one
+
+#name a long compound selector
+#code
+console.log(document.querySelectorAll('div#root.wrap > ul#list.items > li.a[data-n]:not(.first):nth-child(odd)[title^="Third"]').length, document.querySelector('body div ul li ~ li + li.last[title=""]:last-child').textContent);
+#expect
+1 four
+
+#name pseudo-elements never match an element
+#code
+console.log(document.querySelectorAll('li::before').length, document.querySelectorAll('p::first-line').length, document.body.matches('body::after'));
+#expect
+0 0 false
+
+#name getElementsBy* against the same tree
+#code
+console.log(document.getElementsByTagName('li').length, document.getElementsByClassName('a').length, document.getElementsByClassName('a first').length, document.getElementsByName('t').length, document.getElementsByTagName('*').length === document.querySelectorAll('*').length);
+#expect
+4 3 1 1 true

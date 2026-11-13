@@ -1,0 +1,443 @@
+#fixture
+<html><head><title>Nodes</title></head><body><div id="a"><p id="p1">one</p><!-- note --><p id="p2">two <i>it</i></p>tail</div><div id="b"></div></body></html>
+
+#name nodeType and nodeName of each kind of node
+#code
+var a = document.getElementById('a');
+console.log(document.nodeType, document.nodeName, a.nodeType, a.nodeName);
+console.log(a.childNodes[1].nodeType, a.childNodes[1].nodeName, a.lastChild.nodeType, a.lastChild.nodeName);
+var f = document.createDocumentFragment();
+console.log(f.nodeType, f.nodeName, document.doctype.nodeType, document.doctype.nodeName);
+#expect
+9 #document 1 DIV
+8 #comment 3 #text
+11 #document-fragment 10 html
+
+#name the node type constants
+#code
+console.log(Node.ELEMENT_NODE, Node.TEXT_NODE, Node.COMMENT_NODE, Node.DOCUMENT_NODE, Node.DOCUMENT_TYPE_NODE, Node.DOCUMENT_FRAGMENT_NODE);
+console.log(document.body.ELEMENT_NODE, document.TEXT_NODE, document.body.nodeType === Node.ELEMENT_NODE);
+#expect
+1 3 8 9 10 11
+1 3 true
+
+#name walking with firstChild, lastChild and the siblings
+#code
+var a = document.getElementById('a');
+var names = [];
+for (var n = a.firstChild; n; n = n.nextSibling) names.push(n.nodeName);
+console.log(names.join(' '));
+names = [];
+for (var n = a.lastChild; n; n = n.previousSibling) names.push(n.nodeType);
+console.log(names.join(' '));
+console.log(a.firstChild.previousSibling, a.lastChild.nextSibling);
+#expect
+P #comment P #text
+3 1 8 1
+null null
+
+#name the element-only navigation
+#code
+var a = document.getElementById('a');
+console.log(a.firstElementChild.id, a.lastElementChild.id, a.childElementCount, a.children.length, a.childNodes.length);
+console.log(a.firstElementChild.nextElementSibling.id, a.lastElementChild.previousElementSibling.id, a.firstElementChild.previousElementSibling);
+#expect
+p1 p2 2 2 4
+p2 p1 null
+
+#name parentNode and parentElement
+#code
+var p = document.getElementById('p1');
+console.log(p.parentNode.id, p.parentElement.id, document.documentElement.parentElement, document.documentElement.parentNode.nodeType);
+console.log(document.createElement('div').parentNode, p.firstChild.parentNode === p, p.firstChild.parentElement === p);
+#expect
+a a null 9
+null true true
+
+#name a wrapper is the same object every time
+#code
+var a = document.getElementById('a');
+console.log(a === document.getElementById('a'), a === document.querySelector('#a'), a.firstChild === a.childNodes[0], a.firstChild.parentNode === a);
+console.log(document.body === document.body, document.documentElement === document.body.parentNode, document === document.body.ownerDocument);
+#expect
+true true true true
+true true true
+
+#name a property set on a node stays on it
+#code
+var a = document.getElementById('a');
+a.note = 'kept';
+a.firstChild.count = 7;
+console.log(document.getElementById('a').note, document.querySelector('#p1').count, document.body.firstChild.note, 'note' in document.getElementById('b'));
+document.body.data = {n: 1};
+console.log(document.body.data.n);
+#expect
+kept 7 kept false
+1
+
+#name appendChild returns the child and moves a node that has a parent
+#code
+var a = document.getElementById('a'), b = document.getElementById('b');
+var p = document.getElementById('p1');
+var r = b.appendChild(p);
+console.log(r === p, p.parentNode.id, a.children.length, b.children.length, a.firstChild.nodeType);
+#expect
+true b 1 1 8
+
+#name insertBefore in the middle, at the end and before itself
+#code
+var a = document.getElementById('a');
+var x = document.createElement('x');
+a.insertBefore(x, document.getElementById('p2'));
+console.log(a.children[1].tagName, x.previousSibling.nodeType, x.nextSibling.id);
+var y = document.createElement('y');
+console.log(a.insertBefore(y, null) === y, a.lastChild.tagName);
+a.insertBefore(x, x);
+console.log(a.children[1].tagName, a.childNodes.length);
+#expect
+X 8 p2
+true Y
+X 6
+
+#name removeChild returns the node and detaches it
+#code
+var a = document.getElementById('a');
+var p = document.getElementById('p1');
+var r = a.removeChild(p);
+console.log(r === p, p.parentNode, p.nextSibling, p.previousSibling, a.children.length, document.getElementById('p1'), p.isConnected);
+#expect
+true null null null 1 null false
+
+#name replaceChild returns the old node
+#code
+var a = document.getElementById('a');
+var p = document.getElementById('p1');
+var n = document.createElement('section');
+var r = a.replaceChild(n, p);
+console.log(r === p, a.firstChild === n, p.parentNode, a.children.length, n.nextSibling.nodeType);
+#expect
+true true null 2 8
+
+#name removeChild of a node that is not a child throws NotFoundError
+#code
+var a = document.getElementById('a'), b = document.getElementById('b');
+try { a.removeChild(b); console.log('no error'); }
+catch (e) { console.log(e.name, e.code, e instanceof DOMException, e instanceof Error, e.code === DOMException.NOT_FOUND_ERR); }
+#expect
+NotFoundError 8 true true true
+
+#name inserting a node into itself or its descendant throws HierarchyRequestError
+#code
+var a = document.getElementById('a');
+var p = document.getElementById('p1');
+try { p.appendChild(a); console.log('no error'); } catch (e) { console.log(e.name, e.code); }
+try { a.appendChild(a); console.log('no error'); } catch (e) { console.log(e.name, e.code); }
+try { a.insertBefore(document.body, p); console.log('no error'); } catch (e) { console.log(e.name); }
+console.log(a.parentNode === document.body, p.parentNode === a);
+#expect
+HierarchyRequestError 3
+HierarchyRequestError 3
+HierarchyRequestError
+true true
+
+#name insertBefore with a reference that is not a child throws NotFoundError
+#code
+var a = document.getElementById('a'), b = document.getElementById('b');
+try { a.insertBefore(document.createElement('x'), b); console.log('no error'); } catch (e) { console.log(e.name, a.children.length); }
+#expect
+NotFoundError 2
+
+#name appendChild of something that is not a node throws TypeError
+#code
+var a = document.getElementById('a');
+try { a.appendChild('text'); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+try { a.appendChild(null); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+try { a.appendChild(); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+try { a.removeChild({}); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+#expect
+true
+true
+true
+true
+
+#name a text node cannot have children
+#code
+var t = document.createTextNode('x');
+try { t.appendChild(document.createElement('b')); console.log('no error'); } catch (e) { console.log(e.name); }
+console.log(t.childNodes.length, t.firstChild, t.hasChildNodes());
+#expect
+HierarchyRequestError
+0 null false
+
+#name a document takes one element
+#code
+try { document.appendChild(document.createElement('html')); console.log('no error'); } catch (e) { console.log(e.name); }
+try { document.appendChild(document.createTextNode('x')); console.log('no error'); } catch (e) { console.log(e.name); }
+console.log(document.childNodes.length, document.childNodes[0].nodeType, document.childNodes[1].nodeName);
+#expect
+HierarchyRequestError
+HierarchyRequestError
+2 10 HTML
+
+#name appending a fragment moves its children and empties it
+#code
+var f = document.createDocumentFragment();
+var x = document.createElement('x'), y = document.createElement('y');
+f.appendChild(x); f.appendChild(y); f.appendChild(document.createTextNode('t'));
+console.log(f.childNodes.length, x.parentNode === f, f.firstElementChild.tagName, f.children.length);
+var b = document.getElementById('b');
+var r = b.appendChild(f);
+console.log(r === f, f.childNodes.length, b.childNodes.length, x.parentNode.id, b.innerHTML);
+#expect
+3 true X 2
+true 0 3 b <x></x><y></y>t
+
+#name cloneNode copies attributes and, when deep, the subtree
+#code
+var a = document.getElementById('a');
+var shallow = a.cloneNode(), deep = a.cloneNode(true);
+console.log(shallow.id, shallow.childNodes.length, deep.childNodes.length, deep.firstChild.id, deep.firstChild !== a.firstChild);
+console.log(deep.isEqualNode(a), shallow.isEqualNode(a), deep.isSameNode(a), a.isSameNode(a), deep.isConnected, deep.ownerDocument === document);
+#expect
+a 0 4 p1 true
+true false false true false true
+
+#name cloneNode does not copy listeners or properties
+#code
+var p = document.getElementById('p1');
+var n = 0;
+p.addEventListener('click', function () { n++; });
+p.mark = 1;
+var c = p.cloneNode(true);
+c.click(); p.click();
+console.log(n, c.mark, c.textContent);
+#expect
+1 undefined one
+
+#name isEqualNode compares type, name, attributes and children
+#code
+var x = document.createElement('div'), y = document.createElement('div');
+console.log(x.isEqualNode(y));
+x.setAttribute('a', '1'); x.setAttribute('b', '2'); y.setAttribute('b', '2'); y.setAttribute('a', '1');
+console.log(x.isEqualNode(y));
+x.textContent = 'k';
+console.log(x.isEqualNode(y), x.isEqualNode(null), document.createTextNode('q').isEqualNode(document.createTextNode('q')));
+#expect
+true
+true
+false false true
+
+#name contains
+#code
+var a = document.getElementById('a');
+var i = document.querySelector('i');
+console.log(a.contains(i), a.contains(i.firstChild), i.contains(a), a.contains(a), document.contains(a), document.contains(document.createElement('p')), a.contains(null));
+#expect
+true true false true true false false
+
+#name compareDocumentPosition
+#code
+var a = document.getElementById('a'), p1 = document.getElementById('p1'), p2 = document.getElementById('p2'), b = document.getElementById('b');
+console.log(a.compareDocumentPosition(p1), p1.compareDocumentPosition(a), p1.compareDocumentPosition(p2), p2.compareDocumentPosition(p1), a.compareDocumentPosition(a));
+console.log(Node.DOCUMENT_POSITION_FOLLOWING, Node.DOCUMENT_POSITION_CONTAINED_BY, !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING), !!(p1.compareDocumentPosition(document.createElement('p')) & Node.DOCUMENT_POSITION_DISCONNECTED));
+#expect
+20 10 4 2 0
+4 16 true true
+
+#name getRootNode and isConnected
+#code
+var p = document.getElementById('p1');
+var d = document.createElement('div'), s = document.createElement('span');
+d.appendChild(s);
+console.log(p.getRootNode() === document, s.getRootNode() === d, d.getRootNode() === d, p.isConnected, s.isConnected);
+document.body.appendChild(d);
+console.log(s.isConnected, s.getRootNode() === document);
+d.remove();
+console.log(s.isConnected, document.isConnected);
+#expect
+true true true true false
+true true
+false true
+
+#name ownerDocument
+#code
+var el = document.createElement('div');
+var t = document.createTextNode('x');
+console.log(el.ownerDocument === document, t.ownerDocument === document, document.ownerDocument, document.createDocumentFragment().ownerDocument === document, document.doctype.ownerDocument === document);
+#expect
+true true null true true
+
+#name hasChildNodes and childNodes of an empty element
+#code
+var b = document.getElementById('b');
+console.log(b.hasChildNodes(), b.childNodes.length, b.firstChild, b.lastChild, b.firstElementChild, document.getElementById('a').hasChildNodes());
+#expect
+false 0 null null null true
+
+#name textContent reads the text of the descendants and skips comments
+#code
+var a = document.getElementById('a');
+console.log(a.textContent, '|', document.getElementById('p2').textContent, '|', a.childNodes[1].textContent, '|', document.textContent, '|', document.doctype.textContent);
+#expect
+onetwo ittail | two it |  note  | null | null
+
+#name setting textContent replaces the children with one text node
+#code
+var a = document.getElementById('a');
+var old = a.firstChild;
+a.textContent = '<b>x</b>';
+console.log(a.childNodes.length, a.firstChild.nodeType, a.firstChild.data, a.children.length, old.parentNode, a.innerHTML);
+a.textContent = '';
+console.log(a.childNodes.length, a.firstChild);
+a.textContent = null;
+console.log(a.childNodes.length);
+a.textContent = 5;
+console.log(a.firstChild.data, typeof a.textContent);
+#expect
+1 3 <b>x</b> 0 null &lt;b&gt;x&lt;/b&gt;
+0 null
+0
+5 string
+
+#name nodeValue is null for elements and the data of text and comments
+#code
+var a = document.getElementById('a');
+console.log(a.nodeValue, document.nodeValue, a.childNodes[1].nodeValue, a.lastChild.nodeValue);
+a.nodeValue = 'ignored';
+a.lastChild.nodeValue = 'new';
+console.log(a.nodeValue, a.lastChild.data, a.childNodes.length);
+#expect
+null null  note  tail
+null new 4
+
+#name normalize joins adjacent text nodes and drops empty ones
+#code
+var b = document.getElementById('b');
+b.appendChild(document.createTextNode('a'));
+b.appendChild(document.createTextNode(''));
+b.appendChild(document.createTextNode('b'));
+b.appendChild(document.createElement('i'));
+b.appendChild(document.createTextNode(''));
+console.log(b.childNodes.length);
+b.normalize();
+console.log(b.childNodes.length, b.firstChild.data, b.lastChild.nodeName);
+#expect
+5
+2 ab I
+
+#name before, after and replaceWith on a child
+#code
+var p = document.getElementById('p1');
+p.before('x', document.createElement('u'));
+p.after(document.createElement('s'), 'y');
+var a = document.getElementById('a');
+console.log(Array.from(a.childNodes).slice(0, 5).map(function (n) { return n.nodeName; }).join(' '));
+p.replaceWith('z');
+console.log(a.childNodes[2].data, p.parentNode, a.childNodes.length);
+var loose = document.createElement('q');
+loose.before('nothing'); loose.remove(); loose.replaceWith('nothing');
+console.log(loose.parentNode);
+#expect
+#text U P S #text
+z null 8
+null
+
+#name append and prepend take strings and nodes
+#code
+var b = document.getElementById('b');
+b.append('one', document.createElement('i'), 2);
+b.prepend(document.createElement('u'), 'zero');
+console.log(b.childNodes.length, b.innerHTML);
+b.append();
+console.log(b.childNodes.length);
+#expect
+5 <u></u>zeroone<i></i>2
+5
+
+#name replaceChildren swaps everything in one call
+#code
+var a = document.getElementById('a');
+var keep = document.getElementById('p2');
+a.replaceChildren(keep, 'text', document.createElement('hr'));
+console.log(a.childNodes.length, a.firstChild === keep, a.innerHTML, document.getElementById('p1'));
+#expect
+3 true <p id="p2">two <i>it</i></p>text<hr> null
+
+#name moving a node keeps its descendants and its identity
+#code
+var p2 = document.getElementById('p2');
+var i = p2.querySelector('i');
+i.tag = 'mine';
+document.getElementById('b').appendChild(p2);
+console.log(document.querySelector('#b i') === i, document.querySelector('#b i').tag, p2.parentNode.id, document.getElementById('a').children.length);
+#expect
+true mine b 1
+
+#name a removed subtree stays intact and can be put back
+#code
+var a = document.getElementById('a');
+a.remove();
+console.log(document.getElementById('a'), a.querySelector('#p2 i').textContent, a.children.length, a.isConnected);
+document.body.insertBefore(a, document.body.firstChild);
+console.log(document.getElementById('p1').textContent, document.body.firstChild === a);
+#expect
+null it 2 false
+one true
+
+#name Node methods on the wrong receiver throw TypeError
+#code
+var f = document.body.appendChild;
+try { f.call({}, document.createElement('p')); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+var get = Object.getOwnPropertyDescriptor(Node.prototype, 'firstChild').get;
+try { get.call({}); console.log('no error'); } catch (e) { console.log(e instanceof TypeError); }
+console.log(get.call(document.body) === document.body.firstChild);
+#expect
+true
+true
+true
+
+#name the prototype chain of a node
+#code
+var p = document.getElementById('p1');
+console.log(p instanceof HTMLParagraphElement, p instanceof HTMLElement, p instanceof Element, p instanceof Node, p instanceof EventTarget, p instanceof Object);
+console.log(p.firstChild instanceof Text, p.firstChild instanceof CharacterData, p.firstChild instanceof Element, document instanceof Document, document instanceof HTMLDocument, document instanceof Node);
+console.log(Object.getPrototypeOf(p) === HTMLParagraphElement.prototype, Object.getPrototypeOf(HTMLParagraphElement.prototype) === HTMLElement.prototype, Object.getPrototypeOf(HTMLElement.prototype) === Element.prototype, Object.getPrototypeOf(Element.prototype) === Node.prototype, Object.getPrototypeOf(Node.prototype) === EventTarget.prototype);
+#expect
+true true true true true true
+true true false true true true
+true true true true true
+
+#name what a node looks like as a string
+#code
+var p = document.getElementById('p1');
+console.log(String(p), Object.prototype.toString.call(p), String(p.firstChild), String(document.createDocumentFragment()), String(document.createComment('c')));
+console.log(String(document.body), String(document.createElement('span')), String(document.createElement('nosuch')), String(document.createElement('my-thing')), typeof p, typeof Node, typeof HTMLElement);
+#expect
+[object HTMLParagraphElement] [object HTMLParagraphElement] [object Text] [object DocumentFragment] [object Comment]
+[object HTMLBodyElement] [object HTMLSpanElement] [object HTMLUnknownElement] [object HTMLElement] object function function
+
+#name properties live on the prototypes, not on the node
+#code
+var p = document.getElementById('p1');
+console.log(p.hasOwnProperty('id'), p.hasOwnProperty('nodeType'), 'id' in p, 'nodeType' in p, 'nosuch' in p, Object.keys(p).length);
+console.log(typeof Object.getOwnPropertyDescriptor(Element.prototype, 'id').get, typeof Object.getOwnPropertyDescriptor(Node.prototype, 'appendChild').value, Node.prototype.hasOwnProperty('textContent'), Element.prototype.hasOwnProperty('textContent'));
+#expect
+false false true true false 0
+function function true false
+
+#name read-only properties ignore assignment
+#code
+var p = document.getElementById('p1');
+p.nodeType = 5; p.tagName = 'X'; p.parentNode = null; p.firstChild = null; p.childNodes = []; p.children = 1;
+console.log(p.nodeType, p.tagName, p.parentNode.id, p.firstChild.data, p.childNodes.length, p.children.length);
+#expect
+1 P a one 1 0
+
+#name a prototype can be extended
+#code
+Element.prototype.shout = function () { return this.tagName + '!'; };
+Node.prototype.depth = function () { var d = 0; for (var n = this; n.parentNode; n = n.parentNode) d++; return d; };
+var p = document.getElementById('p1');
+console.log(p.shout(), document.body.shout(), p.depth(), p.firstChild.depth(), typeof p.firstChild.shout);
+#expect
+P! BODY! 4 5 undefined

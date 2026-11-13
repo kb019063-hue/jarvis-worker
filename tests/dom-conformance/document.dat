@@ -1,0 +1,303 @@
+#fixture
+<html lang="en"><head><meta charset="utf-8"><title>  The   Title
+ </title><meta name="description" content="About"><link rel="stylesheet" href="s.css"></head><body class="page"><h1 id="h">Heading</h1><p>para</p></body></html>
+
+#name title is the title element's text with whitespace collapsed
+#code
+console.log(JSON.stringify(document.title), JSON.stringify(document.querySelector('title').textContent));
+document.title = 'Changed';
+console.log(document.title, document.querySelector('title').textContent, document.querySelectorAll('title').length);
+document.querySelector('title').textContent = ' via   element ';
+console.log(JSON.stringify(document.title));
+#expect
+"The Title" "  The   Title\n "
+Changed Changed 1
+"via element"
+
+#name title on a document that has no title element
+#html
+<body><p>x</p></body>
+#code
+console.log(JSON.stringify(document.title), document.querySelector('title'));
+document.title = 'Made';
+console.log(document.title, document.head.firstChild.tagName, document.head.childNodes.length);
+#expect
+"" null
+Made TITLE 1
+
+#name documentElement, head and body
+#code
+console.log(document.documentElement.tagName, document.head.tagName, document.body.tagName, document.body.className, document.documentElement.lang, document.body.parentNode === document.documentElement, document.head.nextSibling === document.body, document.documentElement === document.querySelector('html'), document.firstElementChild === document.documentElement);
+#expect
+HTML HEAD BODY page en true true true true
+
+#name the doctype
+#code
+var dt = document.doctype;
+console.log(dt.name, JSON.stringify(dt.publicId), JSON.stringify(dt.systemId), dt.nodeType, dt === document.firstChild, dt === document.doctype, dt.nextSibling === document.documentElement, dt instanceof DocumentType, document.childNodes.length, dt.parentNode === document);
+#expect
+html "" "" 10 true true true true 2 true
+
+#name URL, documentURI, baseURI, referrer
+#code
+console.log(document.URL, document.documentURI, document.baseURI, document.body.baseURI, JSON.stringify(document.referrer), document.location === location, document.location.href === document.URL);
+#expect
+https://example.test/app/page.html?tab=2#top https://example.test/app/page.html?tab=2#top https://example.test/app/page.html?tab=2#top https://example.test/app/page.html?tab=2#top "" true true
+
+#name compatMode, characterSet, contentType
+#code
+console.log(document.compatMode, document.characterSet, document.charset, document.contentType, document.inputEncoding);
+#expect
+CSS1Compat UTF-8 UTF-8 text/html UTF-8
+
+#name createElement lowercases HTML names and checks them
+#code
+console.log(document.createElement('DIV').localName, document.createElement('x-y').localName, document.createElement('a:b').localName);
+['', '1a', 'a b', '<', 'a>'].forEach(function (n) { try { document.createElement(n); console.log(JSON.stringify(n), 'ok'); } catch (e) { console.log(JSON.stringify(n), e.name); } });
+try { document.createElement(); } catch (e) { console.log(e.name); }
+#expect
+div x-y a:b
+"" InvalidCharacterError
+"1a" InvalidCharacterError
+"a b" InvalidCharacterError
+"<" InvalidCharacterError
+"a>" InvalidCharacterError
+TypeError
+
+#name createTextNode, createComment and createDocumentFragment
+#code
+var t = document.createTextNode('a<b'), c = document.createComment('note'), f = document.createDocumentFragment();
+console.log(t.data, t.nodeType, t.parentNode, c.data, c.nodeType, f.nodeType, f.childNodes.length, t.ownerDocument === document, document.createTextNode(5).data, document.createTextNode(null).data);
+#expect
+a<b 3 null note 8 11 0 true 5 null
+
+#name createElementNS
+#code
+var s = document.createElementNS('http://www.w3.org/2000/svg', 'svg:rect');
+var h = document.createElementNS('http://www.w3.org/1999/xhtml', 'DIV');
+var n = document.createElementNS(null, 'thing');
+console.log(s.localName, s.prefix, s.tagName, s.namespaceURI, h.tagName, h.localName, h instanceof HTMLElement, n.namespaceURI, n.tagName, n instanceof Element, n instanceof HTMLElement);
+#expect
+rect svg svg:rect http://www.w3.org/2000/svg DIV DIV true null thing true false
+
+#name getElementById
+#code
+console.log(document.getElementById('h').tagName, document.getElementById('H'), document.getElementById(''), document.getElementById('nope'), typeof document.getElementById);
+try { document.getElementById(); } catch (e) { console.log(e.name); }
+#expect
+H1 null null null function
+TypeError
+
+#name importNode and adoptNode
+#code
+var other = document.implementation.createHTMLDocument('Other');
+var p = other.createElement('p'); p.textContent = 'from other'; other.body.appendChild(p);
+var copy = document.importNode(p, true);
+console.log(copy !== p, copy.ownerDocument === document, copy.textContent, p.ownerDocument === other, p.parentNode === other.body, document.importNode(p).childNodes.length);
+var moved = document.adoptNode(p);
+console.log(moved === p, p.ownerDocument === document, p.parentNode, other.body.childNodes.length);
+#expect
+true true from other true true 0
+true true null 0
+
+#name appending a node from another document adopts it
+#code
+var other = document.implementation.createHTMLDocument('Other');
+var p = other.createElement('p');
+other.body.appendChild(p);
+document.body.appendChild(p);
+console.log(p.ownerDocument === document, other.body.childNodes.length, document.body.lastChild === p);
+#expect
+true 0 true
+
+#name document.implementation
+#code
+var d = document.implementation.createHTMLDocument('New');
+console.log(d.title, d.documentElement.outerHTML, d.doctype.name, d.body.childNodes.length, d !== document, d instanceof Document, d.URL, d.defaultView, d.readyState);
+var e = document.implementation.createHTMLDocument();
+console.log(JSON.stringify(e.title), e.head.childNodes.length, document.implementation === document.implementation, document.implementation.hasFeature());
+#expect
+New <html><head><title>New</title></head><body></body></html> html 0 true true about:blank null complete
+"" 0 true true
+
+#name readyState while a deferred script runs
+#code
+console.log(document.readyState);
+document.addEventListener('DOMContentLoaded', function () { console.log('DOMContentLoaded', document.readyState); });
+window.addEventListener('load', function () { console.log('load', document.readyState); });
+#expect
+interactive
+DOMContentLoaded interactive
+load complete
+
+#name defaultView, and the window's document
+#code
+console.log(document.defaultView === window, window.document === document, document.defaultView.document === document, document.parentNode, document.ownerDocument, document.nodeName);
+#expect
+true true true null null #document
+
+#name document.body can be replaced
+#code
+var b = document.createElement('body');
+b.id = 'newbody';
+document.body = b;
+console.log(document.body.id, document.querySelectorAll('body').length, document.getElementById('h'));
+try { document.body = document.createElement('div'); console.log('no error'); } catch (e) { console.log(e.name); }
+try { document.body = null; console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+newbody 1 null
+HierarchyRequestError
+HierarchyRequestError
+
+#name head and body are found again after a change
+#code
+var oldBody = document.body;
+oldBody.remove();
+console.log(document.body, document.head.tagName);
+document.documentElement.appendChild(oldBody);
+console.log(document.body === oldBody);
+document.head.remove();
+console.log(document.head, document.title === '');
+#expect
+null HEAD
+true
+null true
+
+#name meta tags and links through selectors
+#code
+console.log(document.querySelector('meta[name="description"]').content, document.querySelector('meta[charset]').getAttribute('charset'), document.querySelector('link[rel="stylesheet"]').href, document.querySelector('link').rel, document.querySelector('link').relList.contains('stylesheet'));
+var m = document.createElement('meta'); m.name = 'viewport'; m.content = 'width=device-width';
+document.head.appendChild(m);
+console.log(document.head.lastChild.outerHTML, document.querySelector('meta[name=viewport]') === m);
+#expect
+About utf-8 https://example.test/app/s.css stylesheet true
+<meta name="viewport" content="width=device-width"> true
+
+#name cookies
+#code
+console.log(JSON.stringify(document.cookie));
+document.cookie = 'a=1';
+document.cookie = 'b=two; path=/';
+console.log(document.cookie);
+document.cookie = 'a=changed';
+console.log(document.cookie);
+document.cookie = 'a=; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+console.log(document.cookie);
+#expect
+""
+a=1; b=two
+a=changed; b=two
+b=two
+
+#name activeElement and hasFocus
+#code
+console.log(document.activeElement === document.body, document.activeElement.tagName);
+var i = document.createElement('input');
+document.body.appendChild(i);
+i.focus();
+console.log(document.activeElement === i);
+i.remove();
+console.log(document.activeElement === document.body);
+#expect
+true BODY
+true
+true
+
+#name document.write and friends exist
+#code
+console.log(typeof document.write, typeof document.writeln, typeof document.open, typeof document.close, typeof document.createEvent, typeof document.createRange, typeof document.createTreeWalker, typeof document.createNodeIterator, typeof document.getSelection);
+#expect
+function function function function function function function function function
+
+#name createEvent
+#code
+var e = document.createEvent('Event');
+e.initEvent('ping', true, false);
+var got = [];
+document.body.addEventListener('ping', function (ev) { got.push(ev.type, ev.bubbles, ev.cancelable, ev === e); });
+document.getElementById('h').dispatchEvent(e);
+console.log(got.join(' '), e instanceof Event);
+var c = document.createEvent('CustomEvent');
+c.initCustomEvent('made', false, false, 7);
+console.log(c.type, c.detail, c instanceof CustomEvent);
+try { document.createEvent('NoSuchEvent'); } catch (err) { console.log(err.name); }
+#expect
+ping true false true true
+made 7 true
+NotSupportedError
+
+#name TreeWalker over elements
+#code
+var w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+var names = [];
+while (w.nextNode()) names.push(w.currentNode.tagName);
+console.log(names.join(' '), w.root === document.body, w.currentNode.tagName, w.parentNode().tagName, w.firstChild().tagName, w.nextSibling().tagName, w.previousSibling().tagName);
+#expect
+H1 P true P BODY H1 P H1
+
+#name TreeWalker over text with a filter
+#code
+var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: function (n) { return n.data.indexOf('para') >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; } });
+var texts = [];
+var n; while ((n = w.nextNode())) texts.push(n.data);
+console.log(texts.join('|'), NodeFilter.SHOW_ALL, NodeFilter.SHOW_TEXT, NodeFilter.FILTER_ACCEPT, NodeFilter.FILTER_REJECT, NodeFilter.FILTER_SKIP);
+#expect
+para 4294967295 4 1 2 3
+
+#name NodeIterator
+#code
+var it = document.createNodeIterator(document.body, NodeFilter.SHOW_ELEMENT, function (n) { return n.tagName === 'P' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; });
+var first = it.nextNode();
+console.log(first.tagName, it.nextNode(), it.previousNode() === first, it.root === document.body);
+#expect
+P null true true
+
+#name elements with an id are not properties of document; forms and images with a name are
+#html
+<body><p id="para">x</p><form name="search"></form><img name="banner"><form id="byid"></form></body>
+#code
+console.log(typeof document.para, document.search === document.forms[0], document.banner === document.images[0], typeof document.byid, typeof window.para, window.para === document.getElementById('para'));
+#expect
+undefined true true undefined object true
+
+#name querySelector on the document covers head and body
+#code
+console.log(document.querySelectorAll('*').length, document.querySelector('html > head > title') !== null, document.querySelector('head meta + title') !== null, document.querySelector('title + meta').name, document.querySelectorAll('body *').length);
+#expect
+9 true true description 2
+
+#name the document's own interface
+#code
+console.log(document.constructor === Document || document.constructor === HTMLDocument, document instanceof Node, document instanceof EventTarget, typeof Document, typeof document.createElement, document.hasOwnProperty('createElement'), document.hasOwnProperty('location'));
+#expect
+true true true function function false true
+
+#name visibilityState and hidden
+#code
+console.log(document.visibilityState, document.hidden);
+#expect
+visible false
+
+#name scripts and currentScript
+#html
+<head><script>window.first = document.currentScript !== null && document.currentScript.tagName; window.countAtFirst = document.scripts.length;</script></head><body><script id="second">window.second = document.currentScript.id;</script></body>
+#code
+console.log(window.first, window.second, window.countAtFirst, document.scripts.length, document.currentScript);
+#expect
+SCRIPT second 1 2 null
+
+#name dir and lastModified exist
+#code
+console.log(JSON.stringify(document.dir), typeof document.lastModified, document.lastModified.length > 0);
+document.dir = 'rtl';
+console.log(document.documentElement.getAttribute('dir'), document.dir);
+#expect
+"" string true
+rtl rtl
+
+#name getSelection exists and is empty
+#code
+var s = document.getSelection();
+console.log(s === window.getSelection(), s.rangeCount, s.isCollapsed, String(s) === '', s.anchorNode, typeof s.removeAllRanges);
+#expect
+true 0 true true null function

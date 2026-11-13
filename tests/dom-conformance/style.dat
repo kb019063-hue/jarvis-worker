@@ -1,0 +1,291 @@
+#fixture
+<html><head><title>Style</title><style>
+p { color: green; margin: 1px }
+.box { display: flex; color: blue }
+#main { display: block }
+.gone { display: none }
+span.hi { font-weight: bold }
+</style></head><body><div id="main" class="box" style="color: red; background-color: yellow"><p id="p" class="note">text <span class="hi" id="s">hi</span></p></div><i id="i"></i></body></html>
+
+#name reading declarations from the style attribute
+#code
+var s = document.getElementById('main').style;
+console.log(s.color, s.backgroundColor, s['background-color'], s.length, s[0], s[1], s[2], JSON.stringify(s.width), s.cssText);
+#expect
+red yellow yellow 2 color background-color undefined "" color: red; background-color: yellow;
+
+#name setting a property writes the attribute
+#code
+var d = document.getElementById('i');
+d.style.width = '10px';
+console.log(d.getAttribute('style'));
+d.style.marginLeft = '2em'; d.style['padding-top'] = '1px';
+console.log(d.getAttribute('style'), d.style.length);
+d.style.width = '';
+console.log(d.getAttribute('style'), d.style.length, JSON.stringify(d.style.width));
+#expect
+width: 10px;
+width: 10px; margin-left: 2em; padding-top: 1px; 3
+margin-left: 2em; padding-top: 1px; 2 ""
+
+#name a value that is not valid for the property is ignored
+#code
+var d = document.getElementById('i');
+d.style.width = '10px';
+d.style.width = 'banana'; d.style.width = '10'; d.style.width = 10;
+console.log(d.style.width);
+d.style.display = 'nonsense'; d.style.color = 'notacolour'; d.style.position = 'floating';
+console.log(JSON.stringify(d.style.display), JSON.stringify(d.style.color), JSON.stringify(d.style.position), d.getAttribute('style'));
+d.style.width = '0';
+console.log(d.style.width);
+#expect
+10px
+"" "" "" width: 10px;
+0px
+
+#name colours are given back as rgb()
+#code
+var d = document.getElementById('i');
+d.style.color = '#ff0000'; console.log(d.style.color);
+d.style.color = '#0f0'; console.log(d.style.color);
+d.style.color = 'rgb(1,2,3)'; console.log(d.style.color);
+d.style.color = 'rgba(1, 2, 3, 0.5)'; console.log(d.style.color);
+d.style.color = 'BLUE'; console.log(d.style.color);
+d.style.backgroundColor = 'transparent'; console.log(d.style.backgroundColor);
+#expect
+rgb(255, 0, 0)
+rgb(0, 255, 0)
+rgb(1, 2, 3)
+rgba(1, 2, 3, 0.5)
+blue
+transparent
+
+#name cssText get and set
+#code
+var d = document.getElementById('i');
+d.style.cssText = 'color:red;margin-top:3px;;  WIDTH : 5px ';
+console.log(d.style.cssText, d.style.length, d.style.color, d.style.width);
+d.style.cssText = '';
+console.log(JSON.stringify(d.style.cssText), d.style.length, JSON.stringify(d.getAttribute('style')));
+d.style.cssText = 'color: red; color: blue; nonsense: 1; width: junk';
+console.log(d.style.cssText);
+#expect
+color: red; margin-top: 3px; width: 5px; 3 red 5px
+"" 0 ""
+color: blue;
+
+#name setProperty, getPropertyValue and removeProperty
+#code
+var s = document.getElementById('i').style;
+s.setProperty('margin-top', '4px');
+s.setProperty('color', 'red', 'important');
+console.log(s.getPropertyValue('margin-top'), s.getPropertyValue('color'), s.getPropertyPriority('color'), JSON.stringify(s.getPropertyPriority('margin-top')), JSON.stringify(s.getPropertyValue('width')));
+console.log(s.cssText);
+console.log(s.removeProperty('color'), JSON.stringify(s.removeProperty('color')), s.cssText);
+s.setProperty('margin-top', '');
+console.log(s.length);
+#expect
+4px red important "" ""
+margin-top: 4px; color: red !important;
+red "" margin-top: 4px;
+0
+
+#name !important in the attribute
+#code
+var d = document.getElementById('i');
+d.setAttribute('style', 'color: red !important; width: 1px');
+console.log(d.style.color, d.style.getPropertyPriority('color'), d.style.cssText);
+d.style.color = 'blue';
+console.log(d.style.cssText);
+#expect
+red important color: red !important; width: 1px;
+color: blue; width: 1px;
+
+#name custom properties
+#code
+var s = document.getElementById('i').style;
+s.setProperty('--main-gap', ' 12px ');
+s.setProperty('--Theme', 'dark');
+console.log(JSON.stringify(s.getPropertyValue('--main-gap')), s.getPropertyValue('--Theme'), JSON.stringify(s.getPropertyValue('--theme')), s.length);
+s.removeProperty('--main-gap');
+console.log(s.cssText);
+#expect
+"12px" dark "" 2
+--Theme: dark;
+
+#name style is the same object and follows the attribute
+#code
+var d = document.getElementById('main');
+var s = d.style;
+d.setAttribute('style', 'top: 1px');
+console.log(s === d.style, s.top, JSON.stringify(s.color), s.length);
+d.removeAttribute('style');
+console.log(s.length, JSON.stringify(s.cssText));
+s.left = '2px';
+console.log(d.getAttribute('style'));
+#expect
+true 1px "" 1
+0 ""
+left: 2px;
+
+#name assigning a string to style sets cssText
+#code
+var d = document.getElementById('i');
+d.style = 'color: red; top: 0px';
+console.log(d.style.color, d.style.top, d.getAttribute('style'), typeof d.style);
+#expect
+red 0px color: red; top: 0px; object
+
+#name float is cssFloat
+#code
+var s = document.getElementById('i').style;
+s.cssFloat = 'left';
+console.log(s.cssFloat, s.getPropertyValue('float'), s.cssText);
+#expect
+left left float: left;
+
+#name shorthand margin and its sides
+#code
+var s = document.getElementById('i').style;
+s.margin = '1px 2px';
+console.log(s.marginTop, s.marginRight, s.marginBottom, s.marginLeft, s.margin);
+s.marginTop = '5px';
+console.log(s.margin, s.cssText);
+#expect
+1px 2px 1px 2px 1px 2px
+5px 2px 1px margin: 5px 2px 1px;
+
+#name property names in every spelling
+#code
+var s = document.getElementById('i').style;
+s.fontSize = '12px';
+console.log(s.fontSize, s['font-size'], s.getPropertyValue('font-size'), JSON.stringify(s.getPropertyValue('fontSize')), 'fontSize' in s, 'font-size' in s, 'nonsenseProp' in s);
+s.nonsenseProp = 'x';
+console.log(s.length, s.nonsenseProp);
+#expect
+12px 12px 12px "" true true false
+1 x
+
+#name the type of a style object
+#code
+var s = document.getElementById('i').style;
+console.log(s instanceof CSSStyleDeclaration, typeof s.setProperty, s.parentRule, s.item(0) === '', s[0]);
+#expect
+true function null true undefined
+
+#name getComputedStyle: the display of common elements
+#code
+function d(tag) { var e = document.createElement(tag); document.body.appendChild(e); return getComputedStyle(e).display; }
+console.log(['div', 'span', 'p', 'a', 'b', 'ul', 'li', 'h1', 'section', 'em', 'table', 'tr', 'td', 'script', 'style', 'head', 'title'].map(function (t) { return t + '=' + d(t); }).join(' '));
+#expect
+div=block span=inline p=block a=inline b=inline ul=block li=list-item h1=block section=block em=inline table=table tr=table-row td=table-cell script=none style=none head=none title=none
+
+#name getComputedStyle: rules from a style element
+#code
+var cs = getComputedStyle(document.getElementById('main'));
+console.log(cs.display, getComputedStyle(document.getElementById('p')).display);
+document.getElementById('p').className = 'gone';
+console.log(getComputedStyle(document.getElementById('p')).display, cs === getComputedStyle(document.getElementById('main')), cs instanceof CSSStyleDeclaration);
+#expect
+block block
+none false true
+
+#name getComputedStyle: the style attribute wins over a rule
+#code
+var p = document.getElementById('p');
+p.classList.add('gone');
+console.log(getComputedStyle(p).display);
+p.style.display = 'inline-block';
+console.log(getComputedStyle(p).display);
+p.style.display = '';
+console.log(getComputedStyle(p).display);
+#expect
+none
+inline-block
+none
+
+#name getComputedStyle is live
+#code
+var p = document.getElementById('p');
+var cs = getComputedStyle(p);
+var before = cs.display;
+p.style.display = 'none';
+console.log(before, cs.display);
+#expect
+block none
+
+#name getComputedStyle: visibility is inherited
+#code
+document.getElementById('main').style.visibility = 'hidden';
+console.log(getComputedStyle(document.getElementById('s')).visibility, getComputedStyle(document.getElementById('i')).visibility);
+#expect
+hidden visible
+
+#name getComputedStyle cannot be written to
+#code
+var cs = getComputedStyle(document.getElementById('p'));
+try { cs.display = 'none'; console.log('no error', cs.display); } catch (e) { console.log(e.name, cs.display); }
+#expect
+NoModificationAllowedError block
+
+#name hiding and showing with a class
+#code
+var p = document.getElementById('p');
+function visible(e) { return getComputedStyle(e).display !== 'none'; }
+console.log(visible(p)); p.classList.add('gone'); console.log(visible(p)); p.classList.remove('gone'); console.log(visible(p));
+#expect
+true
+false
+true
+
+#name a style element added by script takes effect
+#code
+var st = document.createElement('style');
+st.textContent = '#i { display: block }';
+console.log(getComputedStyle(document.getElementById('i')).display);
+document.head.appendChild(st);
+console.log(getComputedStyle(document.getElementById('i')).display);
+st.remove();
+console.log(getComputedStyle(document.getElementById('i')).display);
+#expect
+inline
+block
+inline
+
+#name style on an element that is not in the document
+#code
+var e = document.createElement('div');
+e.style.color = 'red'; e.style.top = '1px';
+console.log(e.outerHTML, e.style.length);
+var copy = e.cloneNode();
+copy.style.color = 'blue';
+console.log(e.style.color, copy.style.color, copy.style.top);
+#expect
+<div style="color: red; top: 1px;"></div> 2
+red blue 1px
+
+#name border and background shorthands
+#code
+var s = document.getElementById('i').style;
+s.border = '1px solid red';
+console.log(s.border, s.borderTopWidth, s.borderLeftStyle, s.borderBottomColor, s.borderWidth, s.cssText);
+s.cssText = '';
+s.background = 'red';
+console.log(s.background, s.backgroundColor, s.cssText);
+s.cssText = '';
+s.padding = '1px 2px 3px 4px';
+console.log(s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft, s.padding, s.cssText);
+#expect
+1px solid red 1px solid red 1px border: 1px solid red;
+red red background: red;
+1px 2px 3px 4px 1px 2px 3px 4px padding: 1px 2px 3px 4px;
+
+#name common properties scripts set
+#code
+var s = document.getElementById('i').style;
+s.display = 'none'; s.position = 'absolute'; s.top = '10px'; s.left = '-5px'; s.zIndex = 10; s.opacity = 0.5; s.width = '50%'; s.height = 'auto'; s.overflow = 'hidden'; s.visibility = 'hidden'; s.fontWeight = 'bold'; s.textAlign = 'center'; s.cursor = 'pointer'; s.transform = 'translateX(10px)'; s.transition = 'opacity 0.3s';
+console.log(s.cssText);
+console.log(s.zIndex, typeof s.zIndex, s.opacity, typeof s.opacity);
+#expect
+display: none; position: absolute; top: 10px; left: -5px; z-index: 10; opacity: 0.5; width: 50%; height: auto; overflow: hidden; visibility: hidden; font-weight: bold; text-align: center; cursor: pointer; transform: translateX(10px); transition: opacity 0.3s;
+10 string 0.5 string

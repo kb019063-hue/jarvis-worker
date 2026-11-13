@@ -1,15 +1,17 @@
 // The reference side of the DOM scoreboard: runs corpus cases in jsdom.
 //
 // Reads one JSON object from standard input:
-//   { "url": "...", "settle_ms": 60, "cases": [ { "html": "...", "code": "..." }, ... ] }
+//   { "url": "...", "max_ms": 3000, "cases": [ { "html": "...", "code": "..." }, ... ] }
 // and writes one JSON array to standard output, one entry per case:
 //   { "output": "<what console.log printed>", "error": null | "<why the case cannot be used>" }
 //
 // Each case gets a new page. The page's own <script> elements run while it is
 // parsed; the case's code then runs the way a deferred script does: the tree
 // is complete, document.readyState is "interactive", DOMContentLoaded and
-// load are still to come. After `load` the page gets `settle_ms` of real time
-// for its timers, then it is closed.
+// load are still to come. After `load` the page runs until it has no timer
+// or queued task left, then it is closed. A page that still has one after `max_ms` (an
+// interval nobody clears) cannot be recorded: its output would depend on when
+// it was cut off.
 //
 // Only console.log is output, and only primitives may be printed: an object
 // is formatted differently by every engine, so a case that prints one is
@@ -36,9 +38,28 @@ function readStdin() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runCase(testCase, url, settleMs) {
+// How many timers and queued tasks Node is holding, jsdom's own included: it
+// uses timers for navigation and animation frames, and setImmediate for the
+// tasks that fire hashchange and popstate. Called right after one of this
+// file's sleeps has ended, so nothing counted here is ours.
+const pendingWork = () => process.getActiveResourcesInfo()
+  .filter((kind) => kind === 'Timeout' || kind === 'Immediate').length;
+
+// jsdom has no `unhandledrejection` event: a promise a page rejects and never
+// handles is Node's to report, and Node ends the process for it. Such a case
+// cannot be recorded; say so and go on with the next one.
+let escaped = null;
+process.on('unhandledRejection', () => {
+  escaped = escaped || 'a promise rejection nobody handled reached Node (jsdom has no unhandledrejection event)';
+});
+process.on('uncaughtException', (err) => {
+  escaped = escaped || 'an exception escaped from jsdom: ' + String(err && err.message);
+});
+
+async function runCase(testCase, url, maxMs) {
   const lines = [];
   let error = null;
+  escaped = null;
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('log', (...args) => {
     const parts = [];
@@ -84,19 +105,26 @@ async function runCase(testCase, url, settleMs) {
     const message = err && err.message ? err.message : String(err);
     error = error || 'the code threw ' + name + ': ' + message;
   }
-  // Wait for the page to finish loading, then let its timers run.
-  const deadline = Date.now() + 2000;
+  // Wait for the page to finish loading, then for its timers to run out.
+  const deadline = Date.now() + maxMs;
   while (window.document.readyState !== 'complete' && Date.now() < deadline) await sleep(1);
   if (window.document.readyState !== 'complete') error = error || 'the page never finished loading';
-  await sleep(1);
-  await sleep(settleMs);
+  for (let quiet = 0; quiet < 2;) {
+    await sleep(1);
+    quiet = pendingWork() === 0 ? quiet + 1 : 0;
+    if (Date.now() > deadline) {
+      error = error || 'a timer was still pending after ' + maxMs + ' ms (an interval that is never cleared?)';
+      break;
+    }
+  }
   try { window.close(); } catch (err) { /* nothing to do */ }
-  return { output: lines.join('\n'), error };
+  await sleep(0);
+  return { output: lines.join('\n'), error: error || escaped };
 }
 
 const request = JSON.parse(await readStdin());
 const results = [];
 for (const testCase of request.cases) {
-  results.push(await runCase(testCase, request.url, request.settle_ms ?? 60));
+  results.push(await runCase(testCase, request.url, request.max_ms ?? 3000));
 }
 process.stdout.write(JSON.stringify(results));

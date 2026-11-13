@@ -1,0 +1,332 @@
+#fixture
+<html><head><title>Attributes</title></head><body><div id="d" class="c" title="T" data-x="1" aria-label="L"></div><input id="i" type="checkbox" checked disabled value="v"><a id="a" HREF="/x" Target="_top">a</a></body></html>
+
+#name getAttribute returns null for an absent attribute and a string for a present one
+#code
+var d = document.getElementById('d');
+console.log(d.getAttribute('title'), d.getAttribute('nope'), d.getAttribute('data-x'), typeof d.getAttribute('data-x'), d.getAttribute('aria-label'));
+console.log(document.getElementById('i').getAttribute('checked') === '', document.getElementById('i').getAttribute('disabled') === '');
+#expect
+T null 1 string L
+true true
+
+#name setAttribute converts the value to a string
+#code
+var d = document.getElementById('d');
+d.setAttribute('n', 5); d.setAttribute('b', true); d.setAttribute('u', undefined); d.setAttribute('z', null); d.setAttribute('o', {toString: function () { return 'obj'; }});
+console.log(d.getAttribute('n'), d.getAttribute('b'), d.getAttribute('u'), d.getAttribute('z'), d.getAttribute('o'));
+#expect
+5 true undefined null obj
+
+#name attribute names are lowercased in an HTML document
+#code
+var d = document.getElementById('d');
+d.setAttribute('DATA-Big', 'x');
+console.log(d.getAttribute('data-big'), d.getAttribute('DATA-BIG'), d.hasAttribute('Data-Big'), d.getAttributeNames().indexOf('data-big') >= 0, d.getAttributeNames().indexOf('DATA-Big'));
+var a = document.getElementById('a');
+console.log(a.getAttribute('href'), a.getAttribute('HREF'), a.getAttribute('target'), a.attributes[1].name);
+#expect
+x x true true -1
+/x /x _top href
+
+#name attributes keep the order they were written in
+#code
+var d = document.getElementById('d');
+console.log(d.getAttributeNames().join(' '));
+d.setAttribute('zz', '1'); d.setAttribute('aa', '2'); d.setAttribute('title', 'changed');
+console.log(d.getAttributeNames().join(' '));
+d.removeAttribute('class'); d.setAttribute('class', 'again');
+console.log(d.getAttributeNames().join(' '));
+console.log(d.outerHTML);
+#expect
+id class title data-x aria-label
+id class title data-x aria-label zz aa
+id title data-x aria-label zz aa class
+<div id="d" title="changed" data-x="1" aria-label="L" zz="1" aa="2" class="again"></div>
+
+#name hasAttribute, removeAttribute and hasAttributes
+#code
+var d = document.getElementById('d');
+console.log(d.hasAttribute('title'), d.hasAttribute('nope'), d.hasAttributes());
+d.removeAttribute('title'); d.removeAttribute('title');
+console.log(d.hasAttribute('title'), d.getAttribute('title'), d.title === '');
+var n = document.createElement('p');
+console.log(n.hasAttributes(), n.attributes.length, n.getAttributeNames().length);
+#expect
+true false true
+false null true
+false 0 0
+
+#name the attributes collection
+#code
+var d = document.getElementById('d');
+var at = d.attributes;
+console.log(at.length, at[0].name, at[0].value, at.item(1).name, at.getNamedItem('title').value, at.getNamedItem('nope'), at['data-x'].value, at.title.value);
+console.log(at instanceof NamedNodeMap, at === d.attributes, at[99], at.item(99), Object.prototype.toString.call(at));
+d.setAttribute('added', 'y');
+console.log(at.length, at[at.length - 1].name, Array.from(at).map(function (x) { return x.name; }).join(','));
+#expect
+5 id d class T null 1 T
+true true undefined null [object NamedNodeMap]
+6 added id,class,title,data-x,aria-label,added
+
+#name an Attr node
+#code
+var d = document.getElementById('d');
+var t = d.getAttributeNode('title');
+console.log(t.name, t.value, t.localName, t.nodeType, t.nodeName, t.ownerElement === d, t.specified, t instanceof Attr, t.namespaceURI, t.prefix);
+t.value = 'via node';
+console.log(d.getAttribute('title'), d.title, t === d.getAttributeNode('title'), d.getAttributeNode('nope'));
+#expect
+title T title 2 title true true true null null
+via node via node true null
+
+#name createAttribute, setAttributeNode and removeAttributeNode
+#code
+var d = document.getElementById('d');
+var at = document.createAttribute('Fresh');
+at.value = 'f';
+console.log(at.name, at.ownerElement, d.setAttributeNode(at), at.ownerElement === d, d.getAttribute('fresh'));
+var removed = d.removeAttributeNode(at);
+console.log(removed === at, d.hasAttribute('fresh'), at.ownerElement, at.value);
+try { d.removeAttributeNode(at); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+fresh null null true f
+true false null f
+NotFoundError
+
+#name setAttribute with a name that is not a name throws InvalidCharacterError
+#code
+var d = document.getElementById('d');
+['', 'a b', 'x=y', 'ok-name', 'x:y', '_u'].forEach(function (name) {
+  try { d.setAttribute(name, '1'); console.log(JSON.stringify(name), 'ok'); } catch (e) { console.log(JSON.stringify(name), e.name, e.code); }
+});
+#expect
+"" InvalidCharacterError 5
+"a b" InvalidCharacterError 5
+"x=y" InvalidCharacterError 5
+"ok-name" ok
+"x:y" ok
+"_u" ok
+
+#name boolean attributes reflect as booleans
+#code
+var i = document.getElementById('i');
+console.log(i.disabled, i.hasAttribute('disabled'), i.required, i.readOnly, i.multiple, i.autofocus);
+i.disabled = false; i.required = true; i.readOnly = 'yes'; i.multiple = 0;
+console.log(i.hasAttribute('disabled'), i.getAttribute('required') === '', i.getAttribute('readonly') === '', i.hasAttribute('multiple'));
+i.setAttribute('disabled', 'false');
+console.log(i.disabled);
+#expect
+true true false false false false
+false true true false
+true
+
+#name string attributes reflect as strings
+#code
+var i = document.getElementById('i');
+i.name = 'field'; i.placeholder = 'type'; i.accessKey = 'k';
+console.log(i.getAttribute('name'), i.getAttribute('placeholder'), i.getAttribute('accesskey'), JSON.stringify(i.alt), JSON.stringify(i.pattern));
+i.setAttribute('name', 'other');
+console.log(i.name);
+i.name = null; i.placeholder = undefined;
+console.log(i.name, i.placeholder);
+#expect
+field type k "" ""
+other
+null undefined
+
+#name numeric attributes reflect as numbers
+#code
+var i = document.createElement('input');
+console.log(i.maxLength, i.minLength, i.size, i.tabIndex);
+i.maxLength = 10; i.size = 30;
+console.log(i.getAttribute('maxlength'), i.getAttribute('size'), typeof i.maxLength);
+i.setAttribute('maxlength', 'junk'); i.setAttribute('size', '0');
+console.log(i.maxLength, i.size);
+try { i.maxLength = -5; console.log('no error'); } catch (e) { console.log(e.name); }
+var t = document.createElement('textarea');
+console.log(t.rows, t.cols); t.rows = 7; console.log(t.getAttribute('rows'));
+var td = document.createElement('td');
+console.log(td.colSpan, td.rowSpan); td.colSpan = 3; console.log(td.getAttribute('colspan'));
+#expect
+-1 -1 20 0
+10 30 number
+-1 20
+IndexSizeError
+2 20
+7
+1 1
+3
+
+#name enumerated attributes have a limited set of values
+#code
+var i = document.createElement('input');
+console.log(i.type);
+i.type = 'CHECKBOX'; console.log(i.type, i.getAttribute('type'));
+i.setAttribute('type', 'bogus'); console.log(i.type, i.getAttribute('type'));
+var b = document.createElement('button');
+console.log(b.type); b.setAttribute('type', 'nonsense'); console.log(b.type); b.type = 'reset'; console.log(b.type);
+var f = document.createElement('form');
+console.log(f.method, f.enctype); f.method = 'POST'; console.log(f.method, f.getAttribute('method')); f.setAttribute('method', 'x'); console.log(f.method);
+#expect
+text
+checkbox CHECKBOX
+text bogus
+submit
+submit
+reset
+get application/x-www-form-urlencoded
+post POST
+get
+
+#name URL attributes resolve against the page; the attribute keeps what was written
+#code
+var a = document.createElement('a');
+console.log(JSON.stringify(a.href));
+a.href = 'sub/file.html';
+console.log(a.href, a.getAttribute('href'));
+a.setAttribute('href', '#top');
+console.log(a.href);
+a.href = '//cdn.test/lib.js';
+console.log(a.href);
+a.href = '?q=1';
+console.log(a.href);
+var f = document.createElement('form');
+console.log(f.action === document.URL);
+f.action = '/send';
+console.log(f.action, f.getAttribute('action'));
+#expect
+""
+https://example.test/app/sub/file.html sub/file.html
+https://example.test/app/page.html?tab=2#top
+https://cdn.test/lib.js
+https://example.test/app/page.html?q=1
+true
+https://example.test/send /send
+
+#name value, checked and the attributes of the same name
+#code
+var i = document.getElementById('i');
+console.log(i.value, i.checked, i.defaultValue, i.defaultChecked);
+i.checked = false; i.value = 'typed';
+console.log(i.hasAttribute('checked'), i.getAttribute('value'), i.defaultChecked, i.value);
+i.setAttribute('value', 'attr'); i.removeAttribute('checked');
+console.log(i.value, i.defaultValue, i.checked, i.defaultChecked);
+#expect
+v true v true
+true typed true typed
+attr attr false false
+
+#name class and className, htmlFor and for
+#code
+var d = document.getElementById('d');
+d.className = 'a  b';
+console.log(d.getAttribute('class'), d.classList.length, d['class'], d.getAttribute('className'));
+var l = document.createElement('label');
+l.htmlFor = 'i';
+console.log(l.getAttribute('for'), l.htmlFor, l['for']);
+d.setAttribute('class', 'q');
+console.log(d.className);
+#expect
+a  b 2 undefined null
+i i undefined
+q
+
+#name data- attributes and dataset agree
+#code
+var d = document.getElementById('d');
+console.log(d.dataset.x, d.getAttribute('data-x'));
+d.setAttribute('data-first-name', 'Ann');
+d.dataset.lastName = 'Lee';
+console.log(d.dataset.firstName, d.getAttribute('data-last-name'), d.hasAttribute('data-lastname'));
+#expect
+1 1
+Ann Lee false
+
+#name the style attribute and the style object agree
+#code
+var d = document.getElementById('d');
+d.setAttribute('style', 'color: red; margin-top: 2px');
+console.log(d.style.color, d.style.marginTop, d.style.length);
+d.style.color = 'blue';
+console.log(d.getAttribute('style'));
+d.removeAttribute('style');
+console.log(JSON.stringify(d.style.color), d.style.length, d.hasAttribute('style'));
+#expect
+red 2px 2
+color: blue; margin-top: 2px;
+"" 0 false
+
+#name an attribute with an unusual value survives serialization
+#code
+var d = document.getElementById('d');
+d.setAttribute('title', 'a "quoted" <b> & more\u00a0x');
+console.log(d.getAttribute('title').length, d.outerHTML);
+d.setAttribute('data-empty', '');
+console.log(d.outerHTML.indexOf('data-empty=""') > 0, d.getAttribute('data-empty') === '');
+#expect
+23 <div id="d" class="c" title="a &quot;quoted&quot; &lt;b&gt; &amp; more&nbsp;x" data-x="1" aria-label="L"></div>
+true true
+
+#name attributes given in markup: duplicates, case and missing values
+#html
+<body><p ID="P" id="second" Class=X data-A="1" hidden title>x</p></body>
+#code
+var p = document.querySelector('p');
+console.log(p.id, p.className, p.getAttribute('data-a'), p.hidden, p.title === '', p.getAttributeNames().join(' '), p.attributes.length);
+#expect
+P X 1 true true id class data-a hidden title 5
+
+#name getAttributeNS and setAttributeNS
+#code
+var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+svg.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#a');
+svg.setAttribute('viewBox', '0 0 1 1');
+console.log(svg.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), svg.getAttribute('xlink:href'), svg.hasAttributeNS('http://www.w3.org/1999/xlink', 'href'), svg.getAttribute('viewBox'), svg.getAttribute('viewbox'), svg.attributes[0].prefix, svg.attributes[0].localName);
+svg.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
+console.log(svg.attributes.length, svg.getAttributeNS(null, 'viewBox'));
+#expect
+#a #a true 0 0 1 1 null xlink href
+1 0 0 1 1
+
+#name changing id updates getElementById at once
+#code
+var d = document.getElementById('d');
+d.id = 'e';
+console.log(document.getElementById('d'), document.getElementById('e') === d);
+d.removeAttribute('id');
+console.log(document.getElementById('e'), JSON.stringify(d.id));
+var n = document.createElement('span'); n.id = 'loose';
+console.log(document.getElementById('loose'));
+document.body.appendChild(n);
+console.log(document.getElementById('loose') === n);
+#expect
+null true
+null ""
+null
+true
+
+#name two elements with one id: the first in tree order wins
+#html
+<body><p id="dup">first</p><p id="dup">second</p></body>
+#code
+console.log(document.getElementById('dup').textContent, document.querySelectorAll('#dup').length);
+document.getElementById('dup').remove();
+console.log(document.getElementById('dup').textContent);
+#expect
+first 2
+second
+
+#name attribute reads on the wrong receiver throw
+#code
+var get = Object.getOwnPropertyDescriptor(Element.prototype, 'id').get;
+try { get.call(document); console.log('no error'); } catch (e) { console.log(e.name); }
+try { Element.prototype.getAttribute.call(document.createTextNode('x'), 'id'); console.log('no error'); } catch (e) { console.log(e.name); }
+try { document.body.getAttribute(); console.log('no error'); } catch (e) { console.log(e.name); }
+try { document.body.setAttribute('only-one'); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+TypeError
+TypeError
+TypeError

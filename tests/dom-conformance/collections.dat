@@ -1,0 +1,210 @@
+#fixture
+<html><head><title>Collections</title></head><body><ul id="list"><li id="a" class="x">A</li><li id="b" name="bee">B</li><li id="c" class="x">C</li></ul><form name="login" id="f1"><input name="user"><input name="pass"></form><img name="logo" id="pic"><a name="anchor" id="anc" href="#">link</a></body></html>
+
+#name childNodes is a live NodeList
+#code
+var list = document.getElementById('list');
+var nodes = list.childNodes;
+console.log(nodes.length, nodes instanceof NodeList, nodes === list.childNodes);
+list.appendChild(document.createElement('li'));
+console.log(nodes.length);
+list.removeChild(list.firstChild);
+console.log(nodes.length, nodes[0].id);
+#expect
+3 true true
+4
+3 b
+
+#name NodeList: item, index, out of range, forEach, entries
+#code
+var nodes = document.getElementById('list').childNodes;
+console.log(nodes.item(0).id, nodes[2].id, nodes.item(3), nodes[3], nodes.item(-1), nodes[-1]);
+var out = [];
+nodes.forEach(function (n, i, all) { out.push(i + n.id + (all === nodes)); });
+console.log(out.join(' '), Array.from(nodes.keys()).join(''), Array.from(nodes.values()).length, Array.from(nodes.entries())[1][1].id);
+var ids = []; for (var n of nodes) ids.push(n.id); console.log(ids.join(''));
+#expect
+a c null undefined null undefined
+0atrue 1btrue 2ctrue 012 3 b
+abc
+
+#name NodeList has no array methods; Array.from and spread work
+#code
+var nodes = document.querySelectorAll('li');
+console.log(typeof nodes.map, typeof nodes.filter, typeof nodes.forEach, Array.isArray(nodes), Array.from(nodes).map(function (n) { return n.id; }).join(''), [...nodes].length, Array.prototype.slice.call(nodes, 1).length, Array.prototype.map.call(nodes, function (n) { return n.id; }).join('-'));
+#expect
+undefined undefined function false abc 3 2 a-b-c
+
+#name querySelectorAll is static
+#code
+var found = document.querySelectorAll('li');
+document.getElementById('list').appendChild(document.createElement('li'));
+document.getElementById('a').remove();
+console.log(found.length, found[0].id, found[0].isConnected, document.querySelectorAll('li').length);
+#expect
+3 a false 3
+
+#name children is a live HTMLCollection
+#code
+var list = document.getElementById('list');
+var kids = list.children;
+console.log(kids.length, kids instanceof HTMLCollection, kids instanceof NodeList, typeof kids.forEach, kids.item(1).id, kids[1].id, kids[9], kids.item(9));
+list.insertBefore(document.createElement('li'), list.firstChild);
+console.log(kids.length, kids[0].id === '', kids[1].id);
+#expect
+3 true false undefined b b undefined null
+4 true a
+
+#name HTMLCollection: named access by id and by name
+#code
+var kids = document.getElementById('list').children;
+console.log(kids.namedItem('b').textContent, kids.b.textContent, kids['c'].textContent, kids.namedItem('bee').id, kids.bee.id, kids.namedItem('nope'), kids.nope, 'a' in kids, 'nope' in kids);
+#expect
+B B C b b null undefined true false
+
+#name getElementsByTagName is live and tracks the whole subtree
+#code
+var all = document.getElementsByTagName('li');
+var n0 = all.length;
+var deep = document.createElement('div');
+deep.innerHTML = '<ul><li>deep</li></ul>';
+document.body.appendChild(deep);
+var n1 = all.length;
+deep.remove();
+console.log(n0, n1, all.length, all === document.getElementsByTagName('li'), all[0].id);
+#expect
+3 4 3 false a
+
+#name getElementsByClassName is live and follows class changes
+#code
+var xs = document.getElementsByClassName('x');
+var n0 = xs.length;
+document.getElementById('b').className = 'x y';
+var n1 = xs.length;
+document.getElementById('a').classList.remove('x');
+console.log(n0, n1, xs.length, xs[0].id, xs instanceof HTMLCollection);
+#expect
+2 3 2 b true
+
+#name removing while iterating a live collection
+#code
+var list = document.getElementById('list');
+var kids = list.children;
+var removed = 0;
+for (var i = 0; i < kids.length; i++) { kids[i].remove(); removed++; }
+console.log(removed, kids.length, list.children[0].id);
+while (kids.length) kids[0].remove();
+console.log(kids.length);
+#expect
+2 1 b
+0
+
+#name iterating a live collection backwards removes everything
+#code
+var kids = document.getElementById('list').children;
+for (var i = kids.length - 1; i >= 0; i--) kids[i].remove();
+console.log(kids.length, document.querySelectorAll('li').length);
+#expect
+0 0
+
+#name getElementsByName
+#code
+var byName = document.getElementsByName('user');
+console.log(byName.length, byName[0].tagName, byName instanceof NodeList, document.getElementsByName('logo')[0].id, document.getElementsByName('nope').length);
+document.getElementsByName('pass')[0].name = 'user';
+console.log(byName.length);
+#expect
+1 INPUT true pic 0
+2
+
+#name document.forms, images, links, scripts
+#code
+console.log(document.forms.length, document.forms[0].id, document.forms.login.id, document.forms['f1'] === document.forms[0], document.images.length, document.images.logo.id, document.links.length, document.links[0].id, document.scripts.length, document.forms instanceof HTMLCollection);
+document.body.appendChild(document.createElement('form'));
+console.log(document.forms.length);
+#expect
+1 f1 f1 true 1 pic 1 anc 0 true
+2
+
+#name form.elements
+#code
+var f = document.forms[0];
+var els = f.elements;
+console.log(els.length, els[0].name, els.user === els[0], els.namedItem('pass').name, els.nope, f.length, f[1].name, els instanceof HTMLCollection, els === f.elements);
+var extra = document.createElement('input'); extra.name = 'extra';
+f.appendChild(extra);
+console.log(els.length, f.length, els.extra === extra);
+#expect
+2 user true pass undefined 2 pass true true
+3 3 true
+
+#name select.options and selectedOptions
+#html
+<body><select id="s" multiple><option value="1">one</option><option value="2" selected>two</option><optgroup label="g"><option value="3" selected>three</option></optgroup></select></body>
+#code
+var s = document.getElementById('s');
+console.log(s.options.length, s.length, s.options[2].value, s[1].value, s.options.item(0).text, s.selectedOptions.length, s.selectedOptions[1].value, s.options instanceof HTMLCollection, s.options === s.options);
+s.options[0].selected = true;
+console.log(s.selectedOptions.length, Array.from(s.selectedOptions).map(function (o) { return o.value; }).join(','));
+#expect
+3 3 3 2 one 2 3 true true
+3 1,2,3
+
+#name a collection's own property names and for-in
+#code
+var kids = document.getElementById('list').children;
+var keys = []; for (var k in kids) keys.push(k);
+console.log(keys.slice(0, 3).join(','), Object.keys(kids).join(','), kids.hasOwnProperty('0'), kids.hasOwnProperty('a'), kids.hasOwnProperty('length'), kids.hasOwnProperty('item'));
+#expect
+0,1,2 0,1,2 true true false false
+
+#name writing to a collection index does nothing
+#code
+var kids = document.getElementById('list').children;
+kids[0] = null; kids.length = 0; kids[7] = 'x';
+console.log(kids.length, kids[0].id, kids[7]);
+var nodes = document.querySelectorAll('li');
+nodes[0] = null; nodes.length = 0;
+console.log(nodes.length, nodes[0].id);
+#expect
+3 a undefined
+3 a
+
+#name a collection as a string and its type
+#code
+console.log(String(document.getElementById('list').children), String(document.querySelectorAll('li')), String(document.getElementById('list').childNodes), Object.prototype.toString.call(document.forms), Object.prototype.toString.call(document.forms[0].elements));
+#expect
+[object HTMLCollection] [object NodeList] [object NodeList] [object HTMLCollection] [object HTMLFormControlsCollection]
+
+#name length of collections on an empty element
+#code
+var e = document.createElement('div');
+console.log(e.childNodes.length, e.children.length, e.getElementsByTagName('*').length, e.querySelectorAll('*').length, e.childNodes[0], e.children[0], e.childNodes.item(0));
+#expect
+0 0 0 0 undefined undefined null
+
+#name a collection stays valid after its root leaves the document
+#code
+var list = document.getElementById('list');
+var kids = list.children, tags = list.getElementsByTagName('li');
+list.remove();
+list.appendChild(document.createElement('li'));
+console.log(kids.length, tags.length, document.getElementsByTagName('li').length);
+#expect
+4 4 0
+
+#name destructuring and Array.from with a mapper
+#code
+var [first, second, ...rest] = document.querySelectorAll('li');
+console.log(first.id, second.id, rest.length, Array.from(document.getElementById('list').children, function (e) { return e.id.toUpperCase(); }).join(''));
+#expect
+a b 1 ABC
+
+#name childNodes of a text node and of a fragment
+#code
+var t = document.createTextNode('x');
+var f = document.createDocumentFragment();
+f.append('a', document.createElement('b'));
+console.log(t.childNodes.length, t.childNodes instanceof NodeList, f.childNodes.length, f.children.length, f.children instanceof HTMLCollection, f.childElementCount, f.firstElementChild.tagName);
+#expect
+0 true 2 1 true 1 B

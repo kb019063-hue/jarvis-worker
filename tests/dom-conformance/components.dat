@@ -1,0 +1,281 @@
+#fixture
+<html><head><title>Components</title></head><body><my-box id="early" label="first">content</my-box><div id="host"></div></body></html>
+
+#name define upgrades elements already in the page
+#code
+var early = document.getElementById('early');
+console.log(early instanceof HTMLElement, early.constructor === HTMLElement, typeof early.hello);
+class MyBox extends HTMLElement { hello() { return 'hello ' + this.getAttribute('label'); } }
+customElements.define('my-box', MyBox);
+console.log(early instanceof MyBox, early.constructor === MyBox, early.hello(), early === document.getElementById('early'), customElements.get('my-box') === MyBox, customElements.get('nope'));
+#expect
+true true undefined
+true true hello first true true undefined
+
+#name the constructor runs once per element, with this as the element
+#code
+var made = [];
+class MyBox extends HTMLElement { constructor() { super(); made.push(this.id || this.tagName); this.ready = true; } }
+customElements.define('my-box', MyBox);
+var created = document.createElement('my-box');
+var viaNew = new MyBox();
+document.getElementById('host').innerHTML = '<my-box id="parsed"></my-box>';
+console.log(made.join(' '), created.ready, viaNew.ready, viaNew.tagName, viaNew.localName, viaNew instanceof MyBox, created.constructor === MyBox, document.getElementById('parsed').ready, viaNew.parentNode, viaNew.ownerDocument === document);
+#expect
+early MY-BOX MY-BOX parsed true true MY-BOX my-box true true true null true
+
+#name connectedCallback and disconnectedCallback
+#code
+var log = [];
+class MyBox extends HTMLElement {
+  connectedCallback() { log.push('connected ' + (this.id || 'new') + ' ' + this.isConnected); }
+  disconnectedCallback() { log.push('disconnected ' + (this.id || 'new') + ' ' + this.isConnected); }
+}
+customElements.define('my-box', MyBox);
+var el = document.createElement('my-box');
+log.push('created');
+document.body.appendChild(el);
+document.getElementById('host').appendChild(el);
+el.remove();
+var frag = document.createDocumentFragment(); frag.appendChild(el);
+log.push('in fragment');
+document.body.appendChild(frag);
+console.log(log.join(', '));
+#expect
+connected early true, created, connected new true, disconnected new true, connected new true, disconnected new false, in fragment, connected new true
+
+#name attributeChangedCallback for observed attributes only
+#code
+var log = [];
+class MyBox extends HTMLElement {
+  static get observedAttributes() { return ['label', 'size']; }
+  attributeChangedCallback(name, oldValue, newValue) { log.push(name + ':' + oldValue + '>' + newValue); }
+}
+customElements.define('my-box', MyBox);
+var early = document.getElementById('early');
+early.setAttribute('label', 'second'); early.setAttribute('other', 'ignored'); early.setAttribute('size', '1'); early.setAttribute('size', '1'); early.removeAttribute('label'); early.removeAttribute('label'); early.id = 'renamed';
+var made = document.createElement('my-box');
+made.setAttribute('size', '9');
+console.log(log.join(', '));
+#expect
+label:null>first, label:first>second, size:null>1, size:1>1, label:second>null, size:null>9
+
+#name callback order when markup creates an element
+#code
+var log = [];
+class MyBox extends HTMLElement {
+  static observedAttributes = ['label'];
+  constructor() { super(); log.push('constructor ' + this.hasAttribute('label')); }
+  connectedCallback() { log.push('connected'); }
+  attributeChangedCallback(n, o, v) { log.push('attr ' + v); }
+}
+customElements.define('my-box', MyBox);
+log.push('| defined');
+document.getElementById('host').innerHTML = '<my-box label="a"></my-box>';
+log.push('| innerHTML set');
+var el = document.createElement('my-box');
+el.setAttribute('label', 'b');
+log.push('| created');
+document.body.appendChild(el);
+console.log(log.join(', '));
+#expect
+constructor true, attr first, connected, | defined, constructor true, attr a, connected, | innerHTML set, constructor false, attr b, | created, connected
+
+#name a component that renders into itself
+#code
+class UserCard extends HTMLElement {
+  connectedCallback() { this.render(); }
+  static get observedAttributes() { return ['name']; }
+  attributeChangedCallback() { if (this.isConnected) this.render(); }
+  render() { this.innerHTML = '<h2 class="name">' + (this.getAttribute('name') || 'nobody') + '</h2><slot></slot>'; }
+}
+customElements.define('user-card', UserCard);
+var card = document.createElement('user-card');
+card.setAttribute('name', 'Ann');
+console.log(card.innerHTML === '');
+document.body.appendChild(card);
+console.log(card.querySelector('.name').textContent);
+card.setAttribute('name', 'Bob');
+console.log(card.innerHTML);
+#expect
+true
+Ann
+<h2 class="name">Bob</h2><slot></slot>
+
+#name properties and methods defined by the class
+#code
+class Counter extends HTMLElement {
+  #count = 0;
+  static tag = 'x-counter';
+  get count() { return this.#count; }
+  set count(v) { this.#count = v; this.setAttribute('count', String(v)); }
+  increment() { this.count = this.count + 1; return this; }
+}
+customElements.define(Counter.tag, Counter);
+var c = document.createElement('x-counter');
+c.increment().increment();
+console.log(c.count, c.getAttribute('count'), c instanceof Counter, c instanceof HTMLElement, c instanceof Element, Object.getPrototypeOf(c) === Counter.prototype, c.tagName, c.outerHTML);
+#expect
+2 2 true true true true X-COUNTER <x-counter count="2"></x-counter>
+
+#name events from a component
+#code
+class Pinger extends HTMLElement {
+  ping() { return this.dispatchEvent(new CustomEvent('ping', {detail: {from: this.id}, bubbles: true})); }
+  connectedCallback() { this.addEventListener('click', function () { this.ping(); }); }
+}
+customElements.define('x-pinger', Pinger);
+var p = document.createElement('x-pinger');
+p.id = 'pp';
+var got = [];
+document.body.addEventListener('ping', function (e) { got.push(e.detail.from + '@' + e.target.tagName); });
+document.body.appendChild(p);
+p.click(); p.ping();
+console.log(got.join(' '));
+#expect
+pp@X-PINGER pp@X-PINGER
+
+#name whenDefined resolves when the definition arrives
+#code
+var out = [];
+customElements.whenDefined('late-one').then(function (ctor) { out.push('resolved ' + (ctor === Late)); });
+out.push('waiting ' + (customElements.get('late-one') === undefined));
+class Late extends HTMLElement {}
+setTimeout(function () {
+  customElements.define('late-one', Late);
+  customElements.whenDefined('late-one').then(function () { out.push('again'); console.log(out.join(', ')); });
+}, 5);
+#expect
+waiting true, resolved true, again
+
+#name define rejects bad names, duplicates and non-constructors
+#code
+class A extends HTMLElement {}
+class B extends HTMLElement {}
+function name(fn) { try { fn(); return 'ok'; } catch (e) { return e.name; } }
+console.log(name(function () { customElements.define('nodash', A); }), name(function () { customElements.define('Upper-Case', A); }), name(function () { customElements.define('x-a', A); }), name(function () { customElements.define('x-a', B); }), name(function () { customElements.define('x-b', A); }), name(function () { customElements.define('x-c', 5); }), name(function () { customElements.define('font-face', B); }), name(function () { customElements.define('1-x', B); }), name(function () { customElements.define('x-ok.name_1', B); }));
+#expect
+SyntaxError SyntaxError ok NotSupportedError NotSupportedError TypeError SyntaxError SyntaxError ok
+
+#name an undefined custom element is a plain HTMLElement until defined
+#code
+var u = document.createElement('not-yet');
+u.stash = 1;
+document.body.appendChild(u);
+console.log(u instanceof HTMLElement, u instanceof HTMLUnknownElement, Object.prototype.toString.call(u), u.matches(':defined'), document.body.matches(':defined'));
+class NotYet extends HTMLElement { get kind() { return 'defined now'; } }
+customElements.define('not-yet', NotYet);
+console.log(u.kind, u.stash, u.matches(':defined'), u instanceof NotYet);
+#expect
+true false [object HTMLElement] false true
+defined now 1 true true
+
+#name customElements.upgrade and elements outside the document
+#code
+var loose = document.createElement('div');
+loose.innerHTML = '<x-up></x-up>';
+class Up extends HTMLElement { constructor() { super(); this.up = true; } }
+customElements.define('x-up', Up);
+console.log(loose.firstChild instanceof Up, loose.firstChild.up);
+customElements.upgrade(loose);
+console.log(loose.firstChild instanceof Up, loose.firstChild.up);
+var loose2 = document.createElement('div');
+loose2.innerHTML = '<x-up></x-up>';
+console.log(loose2.firstChild instanceof Up);
+document.body.appendChild(loose2);
+console.log(loose2.firstChild instanceof Up);
+#expect
+false undefined
+true true
+true
+true
+
+#name a constructor that throws leaves a plain element and reports the error
+#code
+var reported = 0;
+window.onerror = function () { reported++; return true; };
+class Bad extends HTMLElement { constructor() { super(); throw new Error('bad constructor'); } }
+customElements.define('x-bad', Bad);
+var el = document.createElement('x-bad');
+console.log(reported, el instanceof Bad, el instanceof HTMLElement, el.tagName);
+try { new Bad(); console.log('no error'); } catch (e) { console.log(e.message); }
+#expect
+1 false true X-BAD
+bad constructor
+
+#name calling the HTMLElement constructor directly
+#code
+try { new HTMLElement(); console.log('no error'); } catch (e) { console.log(e.name); }
+class Unregistered extends HTMLElement {}
+try { new Unregistered(); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+TypeError
+
+#name cloning a custom element
+#code
+var made = 0;
+class Cl extends HTMLElement { constructor() { super(); made++; this.own = made; } }
+customElements.define('x-cl', Cl);
+var a = document.createElement('x-cl');
+a.setAttribute('k', 'v');
+var b = a.cloneNode(true);
+console.log(made, b instanceof Cl, b.own, b.getAttribute('k'), a.own);
+#expect
+2 true 2 v 1
+
+#name shadow DOM: attachShadow, shadowRoot, host and mode
+#code
+var host = document.getElementById('host');
+var root = host.attachShadow({mode: 'open'});
+root.innerHTML = '<p id="inner">shadow</p><slot></slot>';
+console.log(host.shadowRoot === root, root.host === host, root.mode, root.nodeType, root instanceof ShadowRoot, root instanceof DocumentFragment, root.childNodes.length, root.getElementById('inner').textContent, root.querySelector('p').id, root.innerHTML);
+console.log(document.getElementById('inner'), document.querySelectorAll('p').length, host.childNodes.length, host.innerHTML === '', root.firstChild.getRootNode() === root, root.firstChild.getRootNode({composed: true}) === document, root.firstChild.isConnected);
+var closed = document.createElement('div').attachShadow({mode: 'closed'});
+console.log(closed.mode, closed.host.shadowRoot);
+#expect
+true true open 11 true true 2 shadow inner <p id="inner">shadow</p><slot></slot>
+null 0 0 true true true true
+closed null
+
+#name events cross a shadow boundary only when composed, and are retargeted
+#code
+var host = document.getElementById('host');
+var root = host.attachShadow({mode: 'open'});
+root.innerHTML = '<button id="in">b</button>';
+var btn = root.getElementById('in');
+var out = [];
+document.body.addEventListener('click', function (e) { out.push('click target=' + (e.target === host) + ' path0=' + (e.composedPath()[0] === btn)); });
+document.body.addEventListener('inner', function (e) { out.push('inner escaped'); });
+root.addEventListener('inner', function (e) { out.push('inner at root target=' + (e.target === btn)); });
+btn.click();
+btn.dispatchEvent(new Event('inner', {bubbles: true}));
+btn.dispatchEvent(new Event('inner', {bubbles: true, composed: true}));
+console.log(out.join(', '));
+#expect
+click target=true path0=true, inner at root target=true, inner at root target=true, inner escaped
+
+#name a component with a shadow tree and a template
+#code
+var tpl = document.createElement('template');
+tpl.innerHTML = '<style>:host { display: block }</style><span class="label"></span>';
+class Tag extends HTMLElement {
+  constructor() { super(); this.attachShadow({mode: 'open'}).appendChild(tpl.content.cloneNode(true)); }
+  static get observedAttributes() { return ['text']; }
+  attributeChangedCallback(n, o, v) { this.shadowRoot.querySelector('.label').textContent = v; }
+}
+customElements.define('x-tag', Tag);
+document.getElementById('host').innerHTML = '<x-tag text="one"></x-tag><x-tag text="two"></x-tag>';
+var tags = document.querySelectorAll('x-tag');
+console.log(tags.length, tags[0].shadowRoot.querySelector('.label').textContent, tags[1].shadowRoot.querySelector('.label').textContent, tags[0].shadowRoot !== tags[1].shadowRoot, tags[0].textContent === '', tpl.content.querySelector('.label').textContent === '');
+#expect
+2 one two true true true
+
+#name customized built-in elements with is
+#code
+class Fancy extends HTMLButtonElement { get fancy() { return true; } }
+customElements.define('fancy-button', Fancy, {extends: 'button'});
+var b = document.createElement('button', {is: 'fancy-button'});
+console.log(b instanceof Fancy, b.fancy, b.tagName, b instanceof HTMLButtonElement, b.type, document.createElement('button').fancy);
+#expect
+true true BUTTON true submit undefined

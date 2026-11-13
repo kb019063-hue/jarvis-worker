@@ -1,0 +1,186 @@
+#fixture
+<html><head><title>Text</title></head><body><p id="p">Hello, <b>big</b> world<!--remark-->!</p><div id="e"></div></body></html>
+
+#name data, nodeValue, textContent and length
+#code
+var t = document.getElementById('p').firstChild;
+console.log(t.data, t.nodeValue, t.textContent, t.length, t.data.length, t.nodeName, t instanceof Text, t instanceof CharacterData, t instanceof Node);
+#expect
+Hello,  Hello,  Hello,  7 7 #text true true true
+
+#name setting data
+#code
+var t = document.getElementById('p').firstChild;
+t.data = 'Bye, ';
+console.log(document.getElementById('p').textContent, t.length);
+t.data = null; console.log(JSON.stringify(t.data), t.length);
+t.data = 12; console.log(t.data, typeof t.data);
+t.data = undefined; console.log(t.data);
+#expect
+Bye, big world! 5
+"" 0
+12 string
+undefined
+
+#name appendData, insertData, deleteData, replaceData, substringData
+#code
+var t = document.createTextNode('abcdef');
+t.appendData('gh'); console.log(t.data);
+t.insertData(2, '--'); console.log(t.data);
+t.deleteData(2, 2); console.log(t.data);
+t.replaceData(1, 3, 'XY'); console.log(t.data);
+console.log(t.substringData(1, 3), t.substringData(4, 100), JSON.stringify(t.substringData(7, 1)));
+t.deleteData(3, 100); console.log(t.data);
+#expect
+abcdefgh
+ab--cdefgh
+abcdefgh
+aXYefgh
+XYe fgh ""
+aXY
+
+#name an offset past the end throws IndexSizeError
+#code
+var t = document.createTextNode('abc');
+['substringData', 'deleteData'].forEach(function (m) { try { t[m](4, 1); console.log(m, 'ok'); } catch (e) { console.log(m, e.name, e.code); } });
+try { t.insertData(4, 'x'); } catch (e) { console.log(e.name); }
+try { t.replaceData(4, 0, 'x'); } catch (e) { console.log(e.name); }
+try { t.splitText(4); } catch (e) { console.log(e.name); }
+try { t.substringData(); } catch (e) { console.log(e.name); }
+console.log(t.data);
+#expect
+substringData IndexSizeError 1
+deleteData IndexSizeError 1
+IndexSizeError
+IndexSizeError
+IndexSizeError
+TypeError
+abc
+
+#name splitText
+#code
+var p = document.getElementById('p');
+var t = p.firstChild;
+var rest = t.splitText(5);
+console.log(JSON.stringify(t.data), JSON.stringify(rest.data), p.childNodes.length, t.nextSibling === rest, rest.parentNode === p, rest.nextSibling.tagName);
+var loose = document.createTextNode('abcd');
+var tail = loose.splitText(1);
+console.log(loose.data, tail.data, tail.parentNode);
+#expect
+"Hello" ", " 6 true true B
+a bcd null
+
+#name wholeText
+#code
+var e = document.getElementById('e');
+e.append('one', 'two', document.createElement('i'), 'three');
+console.log(e.firstChild.wholeText, e.childNodes[1].wholeText, e.lastChild.wholeText, e.childNodes.length);
+#expect
+onetwo onetwo three 4
+
+#name new Text() and new Comment()
+#code
+var t = new Text('made'), u = new Text(), c = new Comment('note'), d = new Comment();
+console.log(t.data, t.nodeType, JSON.stringify(u.data), t.ownerDocument === document, c.data, c.nodeType, JSON.stringify(d.data), t.parentNode);
+#expect
+made 3 "" true note 8 "" null
+
+#name comments
+#code
+var p = document.getElementById('p');
+var c = p.childNodes[3];
+console.log(c.nodeType, c.nodeName, c.data, c.length, c instanceof Comment, c instanceof CharacterData, c instanceof Text, p.textContent);
+c.data = 'new';
+console.log(p.innerHTML);
+#expect
+8 #comment remark 6 true true false Hello, big world!
+Hello, <b>big</b> world<!--new-->!
+
+#name text nodes created by the parser are joined; those added by script are not
+#code
+var p = document.getElementById('p');
+console.log(p.childNodes.length);
+p.appendChild(document.createTextNode(' more'));
+p.appendChild(document.createTextNode(' and more'));
+console.log(p.childNodes.length, p.textContent);
+p.normalize();
+console.log(p.childNodes.length, p.lastChild.data);
+#expect
+5
+7 Hello, big world! more and more
+5 ! more and more
+
+#name whitespace-only text nodes are nodes
+#html
+<body><ul id="l">
+  <li>a</li>
+  <li>b</li>
+</ul></body>
+#code
+var l = document.getElementById('l');
+console.log(l.childNodes.length, l.children.length, l.firstChild.nodeType, JSON.stringify(l.firstChild.data), l.firstElementChild.textContent, JSON.stringify(l.textContent));
+#expect
+5 2 3 "\n  " a "\n  a\n  b\n"
+
+#name text with characters outside ASCII and the BMP
+#code
+var t = document.createTextNode('h\u00e9llo \ud83d\ude00 \u4e16\u754c');
+console.log(t.length, t.data.length, t.substringData(6, 2), t.substringData(0, 5), t.data);
+var e = document.getElementById('e');
+e.appendChild(t);
+console.log(e.innerHTML, e.textContent.length);
+#expect
+11 11 😀 héllo héllo 😀 世界
+héllo 😀 世界 11
+
+#name isElementContentWhitespace-free checks: trimming and empty text
+#code
+var e = document.getElementById('e');
+e.textContent = '   ';
+console.log(e.childNodes.length, e.firstChild.length, e.textContent.trim() === '', e.innerHTML.length);
+e.textContent = '';
+console.log(e.childNodes.length, e.hasChildNodes());
+#expect
+1 3 true 3
+0 false
+
+#name before, after, remove and replaceWith on a text node
+#code
+var p = document.getElementById('p');
+var t = p.firstChild;
+t.before(document.createElement('u'));
+t.after('!!');
+console.log(p.firstChild.tagName, t.nextSibling.data, p.childNodes.length);
+t.replaceWith(document.createElement('s'), 'x');
+console.log(t.parentNode, p.childNodes[1].tagName, p.childNodes[2].data);
+p.lastChild.remove();
+console.log(p.lastChild.nodeType);
+#expect
+U !! 7
+null S x
+8
+
+#name textContent of the document's parts
+#code
+console.log(document.head.textContent, '|', document.body.textContent, '|', document.documentElement.textContent.length, document.title);
+#expect
+Text | Hello, big world! | 21 Text
+
+#name cloneNode and isEqualNode on text
+#code
+var t = document.createTextNode('same');
+var c = t.cloneNode();
+console.log(c !== t, c.data, c.isEqualNode(t), c.parentNode, t.cloneNode(true).data);
+c.data = 'other';
+console.log(t.data, c.isEqualNode(t));
+#expect
+true same true null same
+same false
+
+#name CharacterData navigation
+#code
+var p = document.getElementById('p');
+var t = p.firstChild, c = p.childNodes[3];
+console.log(t.nextElementSibling.tagName, t.previousElementSibling, c.previousElementSibling.tagName, c.nextElementSibling, t.nextSibling.tagName, c.nextSibling.data);
+#expect
+B null B null B !

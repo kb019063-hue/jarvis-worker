@@ -1,0 +1,730 @@
+#fixture
+<html><head><title>Forms</title></head><body>
+<form id="f" action="/submit" method="post">
+<input type="text" name="user" id="user" value="ann" maxlength="10">
+<input type="password" name="pw" id="pw">
+<input type="checkbox" name="news" id="news" value="yes" checked>
+<input type="checkbox" name="terms" id="terms">
+<input type="radio" name="size" id="small" value="s">
+<input type="radio" name="size" id="large" value="l" checked>
+<input type="hidden" name="token" value="t0k">
+<input type="number" name="age" id="age" min="1" max="120" value="30">
+<input type="email" name="mail" id="mail" required>
+<select name="color" id="color"><option value="r">Red</option><option value="g" selected>Green</option><option>Blue</option></select>
+<select name="tags" id="tags" multiple><option value="a" selected>A</option><option value="b">B</option><option value="c" selected>C</option></select>
+<textarea name="note" id="note">first
+second</textarea>
+<input type="text" name="off" id="off" value="x" disabled>
+<input type="file" name="up" id="up">
+<button type="submit" id="go" name="action" value="save">Save</button>
+<button type="button" id="plain">Plain</button>
+<input type="reset" id="reset">
+</form>
+<label id="lab" for="user">User</label>
+<label id="wrap">Terms <input type="checkbox" id="inside"></label>
+<input type="text" id="outside" form="f" name="far" value="away">
+</body></html>
+
+#name value of a text input: the attribute is the default, the property is the state
+#code
+var u = document.getElementById('user');
+console.log(u.value, u.defaultValue, u.getAttribute('value'));
+u.value = 'bob';
+console.log(u.value, u.defaultValue, u.getAttribute('value'));
+u.setAttribute('value', 'cat');
+console.log(u.value, u.defaultValue);
+u.defaultValue = 'dog';
+console.log(u.value, u.getAttribute('value'));
+u.value = null; console.log(JSON.stringify(u.value)); u.value = 5; console.log(u.value, typeof u.value);
+#expect
+ann ann ann
+bob ann ann
+bob cat
+bob dog
+""
+5 string
+
+#name before a script sets value, the attribute shows through
+#code
+var u = document.getElementById('user');
+u.setAttribute('value', 'changed');
+console.log(u.value);
+u.removeAttribute('value');
+console.log(JSON.stringify(u.value));
+#expect
+changed
+""
+
+#name checked: the attribute is the default, the property is the state
+#code
+var n = document.getElementById('news'), t = document.getElementById('terms');
+console.log(n.checked, n.defaultChecked, t.checked, t.defaultChecked);
+n.checked = false; t.checked = true;
+console.log(n.checked, n.hasAttribute('checked'), n.defaultChecked, t.checked, t.hasAttribute('checked'));
+n.removeAttribute('checked'); t.setAttribute('checked', '');
+console.log(n.checked, t.checked);
+t.defaultChecked = false;
+console.log(t.hasAttribute('checked'), t.checked);
+#expect
+true true false false
+false true true true false
+false true
+false true
+
+#name the value of a checkbox defaults to "on"
+#code
+var t = document.getElementById('terms');
+console.log(t.value, document.getElementById('news').value, t.hasAttribute('value'));
+t.value = 'agree';
+console.log(t.getAttribute('value'), t.value);
+#expect
+on yes false
+agree agree
+
+#name radio buttons with one name: checking one unchecks the others
+#code
+var s = document.getElementById('small'), l = document.getElementById('large');
+console.log(s.checked, l.checked);
+s.checked = true;
+console.log(s.checked, l.checked, l.hasAttribute('checked'));
+s.checked = false;
+console.log(s.checked, l.checked);
+var loose = document.createElement('input'); loose.type = 'radio'; loose.name = 'size'; loose.checked = true;
+console.log(loose.checked, s.checked);
+document.getElementById('f').appendChild(loose);
+l.checked = true;
+console.log(loose.checked, l.checked);
+#expect
+false true
+true false true
+false false
+true false
+false true
+
+#name the form's elements and named access
+#code
+var f = document.getElementById('f');
+console.log(f.elements.length, f.length, f.elements.user === document.getElementById('user'), f.elements['size'].length, f.elements.size.value, f.elements.far.id, f.elements.token.value);
+console.log(f.elements.size instanceof RadioNodeList, f.elements.size[0].id, f.elements.namedItem('age').value, f.elements[0].name);
+f.elements.size.value = 's';
+console.log(document.getElementById('small').checked, f.elements.size.value);
+#expect
+18 18 true 2 l outside t0k
+true small 30 user
+true s
+
+#name each control knows its form
+#code
+var f = document.getElementById('f');
+console.log(document.getElementById('user').form === f, document.getElementById('go').form === f, document.getElementById('color').form === f, document.getElementById('note').form === f, document.getElementById('outside').form === f, document.getElementById('inside').form, document.getElementById('color').options[0].form === f, document.createElement('input').form);
+#expect
+true true true true true null true null
+
+#name select: value, selectedIndex and options
+#code
+var c = document.getElementById('color');
+console.log(c.value, c.selectedIndex, c.options.length, c.length, c.options[2].value, c.options[2].text, c.type, c.multiple, c.selectedOptions.length);
+c.value = 'r';
+console.log(c.selectedIndex, c.options[0].selected, c.options[1].selected, c.options[1].hasAttribute('selected'), c.options[1].defaultSelected);
+c.selectedIndex = 2;
+console.log(c.value, c.options[2].selected);
+c.value = 'nosuch';
+console.log(c.selectedIndex, JSON.stringify(c.value));
+c.selectedIndex = -1; console.log(JSON.stringify(c.value));
+c.selectedIndex = 99; console.log(c.selectedIndex);
+#expect
+g 1 3 3 Blue Blue select-one false 1
+0 true false true true
+Blue true
+-1 ""
+""
+-1
+
+#name a select with nothing marked selects its first option
+#code
+var s = document.createElement('select');
+s.innerHTML = '<option value="1" disabled>one</option><option value="2">two</option><option value="3">three</option>';
+console.log(s.selectedIndex, s.value, s.options[1].selected);
+var t = document.createElement('select');
+console.log(t.selectedIndex, JSON.stringify(t.value));
+t.add(new Option('Late', 'late'));
+console.log(t.selectedIndex, t.value);
+#expect
+1 2 true
+-1 ""
+0 late
+
+#name option: text, value, label, index, selected
+#code
+var c = document.getElementById('color');
+var o = c.options[2];
+console.log(o.value, o.text, o.label, o.index, o.selected, o.defaultSelected, o.disabled, o.hasAttribute('value'));
+o.selected = true;
+console.log(c.value, c.selectedIndex, c.options[1].selected);
+o.value = 'b'; o.text = 'Navy';
+console.log(o.getAttribute('value'), o.textContent, c.value, o.label);
+var n = new Option('Text', 'val', true, true);
+console.log(n.text, n.value, n.defaultSelected, n.selected, n.tagName, n.hasAttribute('selected'), new Option().text === '');
+#expect
+Blue Blue Blue 2 false false false false
+Blue 2 false
+b Navy b Navy
+Text val true true OPTION true true
+
+#name adding and removing options
+#code
+var c = document.getElementById('color');
+c.add(new Option('Pink', 'p'));
+c.add(new Option('First', 'f'), 0);
+c.add(new Option('Before green', 'bg'), c.options[2]);
+console.log(Array.from(c.options).map(function (o) { return o.value; }).join(','), c.value, c.selectedIndex);
+c.remove(0);
+c.options[0].remove();
+console.log(c.length, c.value, c.selectedIndex);
+c.options.length = 2;
+console.log(c.length, c.value);
+c.innerHTML = '';
+console.log(c.length, c.selectedIndex, JSON.stringify(c.value));
+#expect
+f,r,bg,g,Blue,p g 3
+4 g 1
+2 g
+0 -1 ""
+
+#name a multiple select
+#code
+var t = document.getElementById('tags');
+console.log(t.type, t.value, t.selectedIndex, t.selectedOptions.length, Array.from(t.selectedOptions).map(function (o) { return o.value; }).join(''));
+t.options[1].selected = true; t.options[0].selected = false;
+console.log(t.value, t.selectedIndex, t.selectedOptions.length);
+t.value = 'c';
+console.log(Array.from(t.options).map(function (o) { return o.selected; }).join(','));
+t.selectedIndex = -1;
+console.log(t.selectedOptions.length, JSON.stringify(t.value));
+#expect
+select-multiple a 0 2 ac
+b 1 2
+false,false,true
+0 ""
+
+#name textarea: value, defaultValue and the text inside
+#code
+var n = document.getElementById('note');
+console.log(JSON.stringify(n.value), JSON.stringify(n.defaultValue), n.textLength, n.type, n.textContent === n.defaultValue);
+n.value = 'typed';
+console.log(n.value, JSON.stringify(n.defaultValue), n.textContent.length, n.innerHTML.length);
+n.textContent = 'new default';
+console.log(n.value, n.defaultValue);
+var fresh = document.createElement('textarea');
+fresh.textContent = 'shows';
+console.log(fresh.value);
+fresh.defaultValue = 'again';
+console.log(fresh.value, fresh.textContent);
+#expect
+"first\nsecond" "first\nsecond" 12 textarea true
+typed "first\nsecond" 12 12
+typed new default
+shows
+again again
+
+#name FormData collects the successful controls
+#code
+var fd = new FormData(document.getElementById('f'));
+var pairs = [];
+fd.forEach(function (v, k) { pairs.push(k + '=' + (typeof v === 'string' ? v.replace(/\n/g, '\\n') : 'file')); });
+console.log(pairs.join('&'));
+console.log(fd.get('user'), fd.get('nope'), fd.has('terms'), fd.has('off'), fd.getAll('tags').join('+'), fd.get('action'));
+#expect
+user=ann&pw=&news=yes&size=l&token=t0k&age=30&mail=&color=g&tags=a&tags=c&note=first\nsecond&up=file&far=away
+ann null false false a+c null
+
+#name FormData can be built and changed by hand
+#code
+var fd = new FormData();
+fd.append('a', '1'); fd.append('a', '2'); fd.append('b', 3); fd.set('c', 'x');
+console.log(fd.get('a'), fd.getAll('a').join(','), typeof fd.get('b'), fd.has('c'));
+fd.set('a', 'only'); fd.delete('b');
+console.log(Array.from(fd.keys()).join(','), Array.from(fd.values()).join(','), Array.from(fd.entries()).length, [...fd].map(function (e) { return e.join('='); }).join('&'));
+console.log(new URLSearchParams(fd).toString());
+#expect
+1 1,2 string true
+a,c only,x 2 a=only&c=x
+a=only&c=x
+
+#name FormData with a submitter and with changed state
+#code
+var f = document.getElementById('f');
+document.getElementById('user').value = 'zed';
+document.getElementById('terms').checked = true;
+document.getElementById('small').checked = true;
+document.getElementById('color').value = 'r';
+document.getElementById('note').value = 'n';
+var fd = new FormData(f, document.getElementById('go'));
+console.log(new URLSearchParams(fd).toString());
+#expect
+user=zed&pw=&news=yes&terms=on&size=s&token=t0k&age=30&mail=&color=r&tags=a&tags=c&note=n&up=%5Bobject+File%5D&action=save&far=away
+
+#name reset() puts every control back to its default
+#code
+var f = document.getElementById('f');
+document.getElementById('user').value = 'zed';
+document.getElementById('news').checked = false;
+document.getElementById('small').checked = true;
+document.getElementById('color').value = 'r';
+document.getElementById('tags').options[1].selected = true;
+document.getElementById('note').value = 'typed';
+var fired = 0;
+f.addEventListener('reset', function (e) { fired++; });
+f.reset();
+console.log(fired, document.getElementById('user').value, document.getElementById('news').checked, document.getElementById('large').checked, document.getElementById('small').checked, document.getElementById('color').value, document.getElementById('tags').selectedOptions.length, JSON.stringify(document.getElementById('note').value));
+#expect
+1 ann true true false g 2 "first\nsecond"
+
+#name a cancelled reset event keeps the state; a reset button resets
+#code
+var f = document.getElementById('f');
+var u = document.getElementById('user');
+u.value = 'zed';
+function stop(e) { e.preventDefault(); }
+f.addEventListener('reset', stop);
+f.reset();
+console.log(u.value);
+f.removeEventListener('reset', stop);
+document.getElementById('reset').click();
+console.log(u.value);
+#expect
+zed
+ann
+
+#name submit by button click: validation runs first
+#code
+var f = document.getElementById('f');
+var submits = 0, invalid = [];
+f.addEventListener('submit', function (e) { submits++; e.preventDefault(); });
+document.getElementById('mail').addEventListener('invalid', function (e) { invalid.push(e.target.id + ':' + e.bubbles + ':' + e.cancelable); });
+document.getElementById('go').click();
+console.log(submits, invalid.join(','));
+document.getElementById('mail').value = 'a@b.test';
+document.getElementById('go').click();
+console.log(submits, invalid.length);
+#expect
+0 mail:false:true
+1 1
+
+#name submit() skips validation and the submit event; requestSubmit() does both
+#code
+var f = document.getElementById('f');
+var submits = 0;
+f.addEventListener('submit', function (e) { submits++; e.preventDefault(); });
+f.requestSubmit();
+console.log(submits);
+document.getElementById('mail').value = 'a@b.test';
+f.requestSubmit();
+console.log(submits);
+f.requestSubmit(document.getElementById('go'));
+console.log(submits);
+try { f.requestSubmit(document.getElementById('plain')); } catch (e) { console.log(e.name); }
+try { f.requestSubmit(document.createElement('button')); } catch (e) { console.log(e.name); }
+#expect
+0
+1
+2
+TypeError
+NotFoundError
+
+#name novalidate and formnovalidate
+#code
+var f = document.getElementById('f');
+var submits = 0;
+f.addEventListener('submit', function (e) { submits++; e.preventDefault(); });
+f.noValidate = true;
+document.getElementById('go').click();
+console.log(submits, f.hasAttribute('novalidate'));
+f.noValidate = false;
+document.getElementById('go').formNoValidate = true;
+document.getElementById('go').click();
+console.log(submits);
+#expect
+1 true
+1
+
+#name a plain button does not submit; a button with no type does
+#code
+var f = document.getElementById('f');
+document.getElementById('mail').value = 'a@b.test';
+var submits = 0;
+f.addEventListener('submit', function (e) { submits++; e.preventDefault(); });
+document.getElementById('plain').click();
+console.log(submits);
+var b = document.createElement('button');
+f.appendChild(b);
+b.click();
+console.log(submits, b.type);
+b.disabled = true; b.click();
+console.log(submits);
+#expect
+0
+1 submit
+1
+
+#name checkValidity, reportValidity and validity for required
+#code
+var m = document.getElementById('mail'), f = document.getElementById('f');
+console.log(m.willValidate, m.checkValidity(), m.validity.valid, m.validity.valueMissing, f.checkValidity(), m.validity instanceof ValidityState, m.validationMessage.length > 0);
+m.value = 'x@y.test';
+console.log(m.checkValidity(), m.validity.valid, m.validity.valueMissing, f.checkValidity(), f.reportValidity(), JSON.stringify(m.validationMessage));
+#expect
+true false false true false true true
+true true false true true ""
+
+#name validity: typeMismatch, tooLong, rangeUnderflow, rangeOverflow, stepMismatch, patternMismatch
+#code
+var m = document.getElementById('mail'), a = document.getElementById('age');
+m.value = 'not an email';
+console.log(m.validity.typeMismatch, m.validity.valid);
+m.value = 'a@b.c'; console.log(m.validity.typeMismatch, m.validity.valid);
+a.value = '0'; console.log(a.validity.rangeUnderflow, a.validity.valid);
+a.value = '121'; console.log(a.validity.rangeOverflow, a.validity.valid);
+a.value = '5.5'; console.log(a.validity.stepMismatch, a.validity.valid);
+a.value = '50'; console.log(a.validity.valid);
+var p = document.createElement('input'); p.pattern = '[a-z]{3}'; p.value = 'ab1';
+console.log(p.validity.patternMismatch, p.checkValidity()); p.value = 'abc'; console.log(p.validity.patternMismatch); p.value = ''; console.log(p.validity.valid);
+var u = document.createElement('input'); u.type = 'url'; u.value = 'nope'; console.log(u.validity.typeMismatch); u.value = 'https://a.test/'; console.log(u.validity.typeMismatch);
+#expect
+true false
+false true
+true false
+true false
+true false
+true
+true false
+false
+true
+true
+false
+
+#name setCustomValidity
+#code
+var u = document.getElementById('user');
+u.setCustomValidity('Name taken');
+console.log(u.validity.customError, u.validity.valid, u.validationMessage, u.checkValidity(), document.getElementById('f').checkValidity());
+u.setCustomValidity('');
+console.log(u.validity.customError, u.validity.valid, JSON.stringify(u.validationMessage));
+#expect
+true false Name taken false false
+false true ""
+
+#name :valid and :invalid follow the state
+#code
+var m = document.getElementById('mail'), f = document.getElementById('f');
+console.log(m.matches(':invalid'), m.matches(':valid'), f.matches(':invalid'), document.querySelectorAll('input:invalid').length);
+m.value = 'a@b.test';
+console.log(m.matches(':invalid'), m.matches(':valid'), f.matches(':valid'), document.querySelectorAll(':invalid').length);
+#expect
+true false true 1
+false true true 0
+
+#name disabled controls and fieldsets
+#html
+<body><form id="f"><fieldset id="fs" disabled><legend><input id="inlegend" name="l" value="1"></legend><input id="a" name="a" value="2"><select id="s" name="s"><option>3</option></select></fieldset><input id="b" name="b" value="4" disabled><input id="c" name="c" value="5"></form></body>
+#code
+var q = function (id) { return document.getElementById(id); };
+console.log(q('a').disabled, q('a').matches(':disabled'), q('s').matches(':disabled'), q('inlegend').matches(':disabled'), q('b').matches(':disabled'), q('c').matches(':enabled'), q('fs').matches(':disabled'), q('a').willValidate);
+console.log(new URLSearchParams(new FormData(q('f'))).toString(), q('fs').elements.length, q('fs').type, q('fs').form === q('f'));
+q('fs').disabled = false;
+console.log(new URLSearchParams(new FormData(q('f'))).toString());
+#expect
+false true true false true true true false
+l=1&c=5 3 fieldset true
+l=1&a=2&s=3&c=5
+
+#name a click on a disabled control fires nothing
+#code
+var o = document.getElementById('off'), n = 0;
+o.addEventListener('click', function () { n++; });
+document.getElementById('f').addEventListener('click', function () { n += 10; });
+o.click();
+console.log(n, o.disabled, o.matches(':disabled'));
+o.disabled = false; o.click();
+console.log(n);
+#expect
+0 true true
+11
+
+#name label: htmlFor, control, and a click passes to the control
+#code
+var lab = document.getElementById('lab'), wrap = document.getElementById('wrap'), inside = document.getElementById('inside'), user = document.getElementById('user');
+console.log(lab.htmlFor, lab.control === user, wrap.control === inside, JSON.stringify(wrap.htmlFor), lab.form === user.form, user.labels.length, user.labels[0] === lab, inside.labels[0] === wrap);
+var clicks = 0;
+user.addEventListener('click', function () { clicks++; });
+lab.click();
+console.log(clicks, inside.checked);
+wrap.click();
+console.log(inside.checked);
+inside.click();
+console.log(inside.checked);
+#expect
+user true true "" true 1 true true
+1 false
+true
+false
+
+#name input and change events come from user-like actions, not from setting value
+#code
+var u = document.getElementById('user'), n = document.getElementById('news');
+var log = [];
+['input', 'change'].forEach(function (t) { document.getElementById('f').addEventListener(t, function (e) { log.push(t + '@' + e.target.id); }); });
+u.value = 'set by script'; n.checked = false; document.getElementById('color').value = 'r';
+console.log(log.length);
+n.click();
+document.getElementById('small').click();
+console.log(log.join(' '));
+u.dispatchEvent(new Event('input', {bubbles: true}));
+console.log(log[log.length - 1]);
+#expect
+0
+input@news change@news input@small change@small
+input@user
+
+#name clicking a radio that is already checked fires nothing more
+#code
+var l = document.getElementById('large'), log = [];
+l.addEventListener('change', function () { log.push('change'); });
+l.addEventListener('click', function () { log.push('click'); });
+l.click();
+console.log(log.join(' '), l.checked);
+document.getElementById('small').click();
+l.click();
+console.log(log.join(' '), l.checked, document.getElementById('small').checked);
+#expect
+click true
+click click change true false
+
+#name input type: known types, unknown types and what changing it does
+#code
+var i = document.createElement('input');
+console.log(i.type, i.getAttribute('type'));
+['TEXT', 'email', 'number', 'range', 'date', 'color', 'search', 'tel', 'url', 'bogus', ''].forEach(function (t) { i.type = t; console.log(JSON.stringify(t), i.type); });
+i.type = 'text'; i.value = 'keep'; i.type = 'checkbox';
+console.log(i.value, i.getAttribute('value'));
+#expect
+text null
+"TEXT" text
+"email" email
+"number" number
+"range" range
+"date" date
+"color" color
+"search" search
+"tel" tel
+"url" url
+"bogus" text
+"" text
+keep keep
+
+#name value sanitization: number, range, color, text with a newline
+#code
+var n = document.createElement('input'); n.type = 'number';
+n.value = '12'; console.log(n.value, n.valueAsNumber);
+n.value = 'abc'; console.log(JSON.stringify(n.value), isNaN(n.valueAsNumber));
+n.value = '1e2'; console.log(n.value, n.valueAsNumber);
+n.valueAsNumber = 7.5; console.log(n.value);
+var r = document.createElement('input'); r.type = 'range';
+console.log(r.value); r.value = '150'; console.log(r.value); r.min = '10'; r.max = '20'; r.value = '3'; console.log(r.value);
+var c = document.createElement('input'); c.type = 'color';
+console.log(c.value); c.value = '#ABCDEF'; console.log(c.value); c.value = 'red'; console.log(c.value);
+var t = document.createElement('input'); t.value = 'a\nb\r\nc'; console.log(JSON.stringify(t.value));
+#expect
+12 12
+"" true
+1e2 100
+7.5
+50
+100
+10
+#000000
+#abcdef
+#000000
+"abc"
+
+#name stepUp and stepDown
+#code
+var a = document.getElementById('age');
+a.stepUp(); console.log(a.value);
+a.stepDown(5); console.log(a.value);
+a.step = '10'; a.stepUp(2); console.log(a.value);
+a.value = '119'; a.step = '1'; a.stepUp(5); console.log(a.value);
+try { document.getElementById('user').stepUp(); } catch (e) { console.log(e.name); }
+#expect
+31
+26
+31
+120
+InvalidStateError
+
+#name selection in a text field
+#code
+var u = document.getElementById('user');
+u.value = 'hello world';
+console.log(u.selectionStart, u.selectionEnd, u.selectionDirection);
+u.setSelectionRange(2, 5);
+console.log(u.selectionStart, u.selectionEnd, u.value.slice(u.selectionStart, u.selectionEnd));
+u.select();
+console.log(u.selectionStart, u.selectionEnd);
+u.setRangeText('HEY', 0, 5);
+console.log(u.value, u.selectionStart, u.selectionEnd);
+try { document.getElementById('news').selectionStart = 1; } catch (e) { console.log(e.name); }
+console.log(document.getElementById('news').selectionStart);
+#expect
+11 11 none
+2 5 llo
+0 11
+HEY world 0 9
+InvalidStateError
+null
+
+#name maxlength does not cut a value set by script
+#code
+var u = document.getElementById('user');
+u.value = 'much longer than ten';
+console.log(u.value.length, u.maxLength, u.validity.tooLong, u.validity.valid);
+#expect
+20 10 false true
+
+#name button: type, value and name
+#code
+var g = document.getElementById('go'), p = document.getElementById('plain');
+console.log(g.type, g.value, g.name, p.type, JSON.stringify(p.value), g.labels.length, g.willValidate, p.willValidate);
+g.value = 'other'; g.name = 'renamed';
+console.log(g.getAttribute('value'), g.getAttribute('name'), document.getElementById('f').elements.renamed === g);
+#expect
+submit save action button "" 0 true false
+other renamed true
+
+#name the form element's own properties
+#code
+var f = document.getElementById('f');
+console.log(f.action, f.method, f.enctype, JSON.stringify(f.target), JSON.stringify(f.name), f.noValidate, typeof f.submit, typeof f.reset, typeof f.requestSubmit, typeof f.checkValidity);
+f.name = 'main'; f.target = '_blank'; f.enctype = 'multipart/form-data';
+console.log(document.forms.main === f, f.getAttribute('target'), f.enctype);
+#expect
+https://example.test/submit post application/x-www-form-urlencoded "" "" false function function function function
+true _blank multipart/form-data
+
+#name a control moved between forms follows its new parent
+#code
+var f = document.getElementById('f');
+var g = document.createElement('form');
+document.body.appendChild(g);
+var u = document.getElementById('user');
+var before = f.elements.length;
+g.appendChild(u);
+console.log(u.form === g, f.elements.length === before - 1, g.elements.length, g.elements.user === u, f.elements.user);
+u.remove();
+console.log(u.form, g.elements.length);
+#expect
+true true 1 true undefined
+null 0
+
+#name the form attribute points across the tree
+#code
+var o = document.getElementById('outside'), f = document.getElementById('f');
+console.log(o.form === f, new FormData(f).get('far'));
+o.setAttribute('form', 'nosuch');
+console.log(o.form, new FormData(f).has('far'));
+o.removeAttribute('form');
+console.log(o.form);
+#expect
+true away
+null false
+null
+
+#name file inputs
+#code
+var u = document.getElementById('up');
+console.log(u.type, JSON.stringify(u.value), u.files.length, u.files instanceof FileList, u.multiple, JSON.stringify(u.accept));
+try { u.value = 'c:\\path'; console.log('no error'); } catch (e) { console.log(e.name); }
+u.value = '';
+console.log(JSON.stringify(u.value));
+#expect
+file "" 0 true false ""
+InvalidStateError
+""
+
+#name hidden inputs and inputs of other types in FormData
+#code
+var f = document.createElement('form');
+f.innerHTML = '<input type="hidden" name="h" value="1"><input type="submit" name="s" value="2"><input type="image" name="i"><input type="button" name="b" value="3"><input type="reset" name="r" value="4"><input name="" value="noname"><input value="noname2"><input type="checkbox" name="c"><input type="radio" name="d" value="5"><button name="e" value="6">x</button><textarea name="t"></textarea><select name="o"></select><select name="p"><option></option></select>';
+console.log(new URLSearchParams(new FormData(f)).toString());
+#expect
+h=1&t=&p=
+
+#name output, datalist and meter exist as form-related elements
+#code
+var o = document.createElement('output');
+o.value = 'result';
+console.log(o.value, o.textContent, o.defaultValue, o.type, o instanceof HTMLOutputElement);
+var d = document.createElement('datalist');
+d.innerHTML = '<option value="a"><option value="b">';
+console.log(d.options.length, d.options[1].value);
+#expect
+result result  output true
+2 b
+
+#name autofocus, placeholder, readOnly, required as properties
+#code
+var i = document.createElement('input');
+i.autofocus = true; i.placeholder = 'hint'; i.readOnly = true; i.required = true; i.autocomplete = 'off'; i.inputMode = 'numeric';
+console.log(i.outerHTML);
+console.log(i.willValidate, i.matches(':read-only'), i.matches(':required'), i.matches(':placeholder-shown'));
+#expect
+<input autofocus="" placeholder="hint" readonly="" required="" autocomplete="off" inputmode="numeric">
+false true true true
+
+#name programmatic focus moves through controls and fires events in order
+#code
+var u = document.getElementById('user'), p = document.getElementById('pw');
+var log = [];
+[u, p].forEach(function (el) { ['focus', 'blur', 'focusin', 'focusout'].forEach(function (t) { el.addEventListener(t, function () { log.push(t + '@' + el.id); }); }); });
+u.focus(); p.focus(); p.blur();
+console.log(log.join(' '));
+#expect
+focus@user focusin@user blur@user focusout@user focus@pw focusin@pw blur@pw focusout@pw
+
+#name a select's change event comes from clicking an option? no: from setting state it does not
+#code
+var c = document.getElementById('color'), n = 0;
+c.addEventListener('change', function () { n++; });
+c.value = 'r'; c.selectedIndex = 2; c.options[0].selected = true;
+console.log(n, c.value);
+c.dispatchEvent(new Event('change', {bubbles: true}));
+console.log(n);
+#expect
+0 r
+1
+
+#name a form inside a detached tree works the same
+#code
+var f = document.createElement('form');
+f.innerHTML = '<input name="a" value="1"><input type="checkbox" name="b" checked><button>go</button>';
+var n = 0;
+f.addEventListener('submit', function (e) { n++; e.preventDefault(); });
+console.log(f.elements.length, f.elements.a.value, new URLSearchParams(new FormData(f)).toString());
+f.querySelector('button').click();
+console.log(n);
+f.requestSubmit();
+console.log(n);
+#expect
+3 1 a=1&b=on
+0
+1
+
+#name Enter-like implicit submission is not simulated; dispatching keydown does nothing by itself
+#code
+var f = document.getElementById('f'), n = 0;
+f.addEventListener('submit', function (e) { n++; e.preventDefault(); });
+document.getElementById('user').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+document.getElementById('user').dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter', bubbles: true}));
+console.log(n);
+#expect
+0

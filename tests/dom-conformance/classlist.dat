@@ -1,0 +1,201 @@
+#fixture
+<html><head><title>classList</title></head><body><div id="d" class="  one two  three one "></div><p id="p"></p></body></html>
+
+#name length, item and index access
+#code
+var c = document.getElementById('d').classList;
+console.log(c.length, c[0], c[1], c[2], c[3], c.item(0), c.item(3), c.item(-1));
+#expect
+3 one two three undefined one null null
+
+#name duplicates and extra spaces are ignored when reading, kept in the attribute
+#code
+var d = document.getElementById('d');
+console.log(d.classList.length, JSON.stringify(d.className), JSON.stringify(d.classList.value), JSON.stringify(String(d.classList)));
+#expect
+3 "  one two  three one " "  one two  three one " "  one two  three one "
+
+#name contains
+#code
+var c = document.getElementById('d').classList;
+console.log(c.contains('one'), c.contains('three'), c.contains('four'), c.contains('ONE'), c.contains(''), c.contains('one two'));
+#expect
+true true false false false false
+
+#name add appends and rewrites the attribute without duplicates
+#code
+var d = document.getElementById('d');
+d.classList.add('four');
+console.log(d.className);
+d.classList.add('one', 'five', 'five');
+console.log(d.className, d.classList.length);
+var p = document.getElementById('p');
+p.classList.add('x');
+console.log(p.getAttribute('class'), p.className);
+#expect
+one two three four
+one two three four five 5
+x x
+
+#name remove
+#code
+var d = document.getElementById('d');
+d.classList.remove('one');
+console.log(d.className);
+d.classList.remove('two', 'nope', 'three');
+console.log(JSON.stringify(d.className), d.hasAttribute('class'), d.classList.length);
+#expect
+two three
+"" true 0
+
+#name toggle returns whether the class is now there
+#code
+var c = document.getElementById('d').classList;
+console.log(c.toggle('one'), c.contains('one'), c.toggle('one'), c.contains('one'));
+console.log(c.toggle('z', true), c.toggle('z', true), c.toggle('z', false), c.toggle('z', false), c.contains('z'));
+#expect
+false false true true
+true true false false false
+
+#name replace
+#code
+var d = document.getElementById('d');
+console.log(d.classList.replace('two', 'deux'), d.className);
+console.log(d.classList.replace('nope', 'x'), d.className);
+console.log(d.classList.replace('one', 'three'), d.className);
+#expect
+true one deux three
+false one deux three
+true three deux
+
+#name the empty string is a SyntaxError and a space is an InvalidCharacterError
+#code
+var c = document.getElementById('d').classList;
+['add', 'remove', 'toggle'].forEach(function (m) {
+  try { c[m](''); console.log(m, 'no error'); } catch (e) { console.log(m, e.name, e.code); }
+  try { c[m]('a b'); console.log(m, 'no error'); } catch (e) { console.log(m, e.name, e.code); }
+});
+try { c.replace('one', ''); } catch (e) { console.log(e.name); }
+try { c.replace('a b', 'c'); } catch (e) { console.log(e.name); }
+console.log(c.length);
+#expect
+add SyntaxError 12
+add InvalidCharacterError 5
+remove SyntaxError 12
+remove InvalidCharacterError 5
+toggle SyntaxError 12
+toggle InvalidCharacterError 5
+SyntaxError
+InvalidCharacterError
+3
+
+#name add with one bad token adds nothing
+#code
+var d = document.getElementById('p');
+try { d.classList.add('good', 'bad one'); } catch (e) { console.log(e.name); }
+console.log(d.classList.length, d.hasAttribute('class'));
+#expect
+InvalidCharacterError
+0 false
+
+#name classList is the same object and follows the attribute
+#code
+var d = document.getElementById('d');
+var c = d.classList;
+d.className = 'fresh start';
+console.log(c === d.classList, c.length, c[0], c.contains('one'));
+d.setAttribute('class', 'x');
+console.log(c.value, c.length);
+d.removeAttribute('class');
+console.log(c.length, JSON.stringify(c.value), c[0]);
+#expect
+true 2 fresh false
+x 1
+0 "" undefined
+
+#name assigning to classList sets the attribute
+#code
+var d = document.getElementById('d');
+d.classList = 'a b';
+console.log(d.className, d.classList.length);
+d.classList.value = 'c';
+console.log(d.className);
+#expect
+a b 2
+c
+
+#name iteration
+#code
+var c = document.getElementById('d').classList;
+var seen = [];
+c.forEach(function (name, i, list) { seen.push(i + '=' + name + (list === c)); });
+console.log(seen.join(' '));
+console.log(Array.from(c).join(','), [...c].length, Array.from(c.keys()).join(','), Array.from(c.values()).join(','), Array.from(c.entries()).map(function (e) { return e.join(':'); }).join(','));
+var out = []; for (var name of c) out.push(name); console.log(out.join('|'));
+#expect
+0=onetrue 1=twotrue 2=threetrue
+one,two,three 3 0,1,2 one,two,three 0:one,1:two,2:three
+one|two|three
+
+#name the type of classList
+#code
+var c = document.getElementById('d').classList;
+console.log(c instanceof DOMTokenList, Object.prototype.toString.call(c), typeof c.add, c.hasOwnProperty('add'), typeof DOMTokenList.prototype.toggle, 'length' in c, c[10]);
+#expect
+true [object DOMTokenList] function false function true undefined
+
+#name whitespace other than a space separates classes too
+#html
+<body><p class="a&#9;b&#10;c&#12;d&#13;e">x</p></body>
+#code
+var p = document.querySelector('p');
+console.log(p.classList.length, Array.from(p.classList).join(','), p.matches('.b.c'), p.classList.contains('d'));
+#expect
+5 a,b,c,d,e true true
+
+#name a class name with unusual characters
+#code
+var p = document.getElementById('p');
+p.classList.add('w-1/2', 'md:flex', 'é', '1st');
+console.log(p.className, p.classList.contains('w-1/2'), p.classList.contains('md:flex'), p.classList.length);
+p.classList.remove('md:flex');
+console.log(p.className);
+#expect
+w-1/2 md:flex é 1st true true 4
+w-1/2 é 1st
+
+#name classList on an SVG element
+#code
+var s = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+s.classList.add('shape', 'big');
+console.log(s.getAttribute('class'), s.classList.contains('big'), s.classList.length);
+#expect
+shape big true 2
+
+#name changing classes changes what selectors match
+#code
+var d = document.getElementById('d');
+console.log(document.querySelectorAll('.one.three').length, document.querySelectorAll('.four').length);
+d.classList.replace('three', 'four');
+console.log(document.querySelectorAll('.one.three').length, document.querySelector('.four') === d, d.matches('.one.four'));
+#expect
+1 0
+0 true true
+
+#name toggle with force and a class that is absent or present
+#code
+var c = document.getElementById('p').classList;
+console.log(c.toggle('a', undefined), c.toggle('a', undefined), c.toggle('b', 1), c.toggle('b', 0), c.toggle('c', null), c.length);
+#expect
+true false true false false 0
+
+#name relList and other token lists
+#code
+var a = document.createElement('a');
+a.rel = 'noopener nofollow';
+console.log(a.relList.length, a.relList.contains('nofollow'), a.relList instanceof DOMTokenList);
+a.relList.add('external');
+console.log(a.rel, a.getAttribute('rel'));
+#expect
+2 true true
+noopener nofollow external noopener nofollow external

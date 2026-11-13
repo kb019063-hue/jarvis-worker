@@ -75,9 +75,10 @@ PAGE_URL = "https://example.test/app/page.html?tab=2#top"
 DEFAULT_HTML = "<html><head><title>Corpus page</title></head><body></body></html>"
 # The fixed probe the headline number is reported on.
 HEADLINE_FILE = "everyday.dat"
-# How long jsdom lets a page's timers run after `load`, in real milliseconds.
-# Litebird runs timers on a virtual clock and needs no such number.
-SETTLE_MS = 60
+# jsdom runs a page until it has no timer left; this is how long it may take,
+# in real milliseconds, before the case is refused. Litebird runs timers on a
+# virtual clock and needs no such number.
+MAX_PAGE_MS = 3000
 RUNNER = Path(__file__).resolve().parent / "jsdom_run.mjs"
 
 
@@ -236,7 +237,7 @@ def run_reference(cases: list[Case], jsdom_dir: Path, jobs: int) -> list[Result]
     def run_batch(batch: list[Case]) -> list[Result]:
         request = json.dumps({
             "url": PAGE_URL,
-            "settle_ms": SETTLE_MS,
+            "max_ms": MAX_PAGE_MS,
             "cases": [{"html": case.page, "code": case.code} for case in batch],
         })
         completed = subprocess.run(["node", str(RUNNER), str(jsdom_dir)], input=request.encode("utf-8"),

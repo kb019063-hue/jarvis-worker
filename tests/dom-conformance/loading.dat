@@ -1,0 +1,205 @@
+#name the order of the load events
+#code
+var out = [];
+document.addEventListener('readystatechange', function () { out.push('readystatechange:' + document.readyState); });
+document.addEventListener('DOMContentLoaded', function (e) { out.push('DOMContentLoaded:' + document.readyState); });
+window.addEventListener('DOMContentLoaded', function (e) { out.push('DOMContentLoaded at window'); });
+window.addEventListener('load', function () { out.push('load:' + document.readyState); console.log(out.join(' ')); });
+out.push('script:' + document.readyState);
+#expect
+script:interactive DOMContentLoaded:interactive DOMContentLoaded at window readystatechange:complete load:complete
+
+#name DOMContentLoaded: target, bubbling and type
+#code
+document.addEventListener('DOMContentLoaded', function (e) {
+  console.log(e.type, e.target === document, e.bubbles, e.cancelable, e.eventPhase, e instanceof Event, e.isTrusted);
+});
+#expect
+DOMContentLoaded true true false 2 true true
+
+#name load: fired at the window with the document as target
+#code
+window.addEventListener('load', function (e) {
+  console.log(e.type, e.target === document, e.currentTarget === window, this === window, e.bubbles, e.cancelable, e.eventPhase);
+});
+document.addEventListener('load', function () { console.log('load reached the document'); });
+document.body.addEventListener('load', function () { console.log('load reached the body'); });
+#expect
+load true true true false false 2
+
+#name window.onload and document.onreadystatechange
+#code
+window.onload = function (e) { console.log('onload', e.type, document.readyState); };
+document.onreadystatechange = function () { console.log('onreadystatechange', document.readyState); };
+#expect
+onreadystatechange complete
+onload load complete
+
+#name body onload attribute
+#html
+<body onload="console.log('body onload', event.type, this === window, document.readyState)"><p>x</p></body>
+#code
+console.log(typeof window.onload, document.body.onload === window.onload);
+#expect
+function true
+body onload load true complete
+
+#name a ready helper works at any time
+#code
+function ready(fn) { if (document.readyState !== 'loading') fn(); else document.addEventListener('DOMContentLoaded', fn); }
+var calls = 0;
+ready(function () { calls++; });
+console.log(calls);
+window.addEventListener('load', function () { ready(function () { calls++; }); console.log(calls); });
+#expect
+1
+2
+
+#name promises and microtasks relative to the load events
+#code
+var out = [];
+Promise.resolve().then(function () { out.push('promise'); });
+queueMicrotask(function () { out.push('microtask'); });
+document.addEventListener('DOMContentLoaded', function () { out.push('DOMContentLoaded'); });
+window.addEventListener('load', function () { out.push('load'); setTimeout(function () { console.log(out.join(' ')); }, 20); });
+out.push('sync');
+#expect
+sync promise microtask DOMContentLoaded load
+
+#name a listener added during DOMContentLoaded for load still runs
+#code
+document.addEventListener('DOMContentLoaded', function () {
+  window.addEventListener('load', function () { console.log('late load listener ran'); });
+});
+#expect
+late load listener ran
+
+#name load listeners added after load do not run
+#code
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    var ran = false;
+    window.addEventListener('load', function () { ran = true; });
+    document.addEventListener('DOMContentLoaded', function () { ran = true; });
+    setTimeout(function () { console.log(ran, document.readyState); }, 10);
+  }, 0);
+});
+#expect
+false complete
+
+#name page scripts run in document order before the deferred script
+#html
+<head><script>window.order = ['head']; window.bodyAtHead = document.body === null;</script></head>
+<body><p id="p">x</p><script>window.order.push('body'); window.sawP = document.getElementById('p') !== null; window.sawLater = document.getElementById('later') !== null;</script><p id="later">y</p></body>
+#code
+console.log(window.order.join(','), window.sawP, document.getElementById('later') !== null);
+#expect
+head,body true true
+
+#name a page script that throws does not stop the next one
+#html
+<body><script>window.a = 1; throw new Error('first script fails'); window.a = 2;</script><script>window.b = window.a + 1;</script></body>
+#code
+console.log(window.a, window.b);
+#expect
+1 2
+
+#name a page script with a syntax error is skipped whole
+#html
+<body><script>window.c = 1; var = ;</script><script>window.d = typeof window.c;</script></body>
+#code
+console.log(window.c, window.d);
+#expect
+undefined undefined
+
+#name globals declared by one script are visible to the next
+#html
+<body><script>var shared = 1; let scoped = 2; function helper() { return shared + scoped; }</script><script>var total = helper() + 10;</script></body>
+#code
+console.log(shared, scoped, total, typeof helper, window.shared, window.scoped, window.helper === helper);
+#expect
+1 2 13 function 1 undefined true
+
+#name scripts of an unknown type do not run
+#html
+<body><script type="text/template" id="tpl"><div class="row">{{name}}</div></script><script type="application/json" id="data">{"n": 5}</script><script type="module">window.moduleRan = true;</script><script type="text/javascript">window.classicRan = true;</script></body>
+#code
+console.log(document.getElementById('tpl').textContent, JSON.parse(document.getElementById('data').textContent).n, window.classicRan, document.getElementById('tpl').type);
+#expect
+<div class="row">{{name}}</div> 5 true text/template
+
+#name DOMContentLoaded listeners registered by page scripts
+#html
+<body><script>document.addEventListener('DOMContentLoaded', function () { console.log('page listener', document.querySelectorAll('p').length); });</script><p>one</p><p>two</p></body>
+#code
+console.log('deferred script', document.querySelectorAll('p').length);
+#expect
+deferred script 2
+page listener 2
+
+#name setInterval ticks until cleared
+#code
+var n = 0;
+var id = setInterval(function () { n++; if (n === 3) { clearInterval(id); console.log('stopped at', n); } }, 5);
+console.log(typeof id, n);
+#expect
+number 0
+stopped at 3
+
+#name setTimeout order, arguments and clearTimeout
+#code
+var out = [];
+setTimeout(function () { out.push('b'); }, 10);
+setTimeout(function () { out.push('a'); }, 5);
+setTimeout(function (x, y) { out.push(x + y); }, 0, 'arg', 's');
+var cancelled = setTimeout(function () { out.push('never'); }, 1);
+clearTimeout(cancelled);
+clearTimeout(undefined); clearTimeout(99999);
+setTimeout(function () { console.log(out.join(' ')); }, 30);
+#expect
+args a b
+
+#name requestAnimationFrame
+#code
+var t0;
+var id = requestAnimationFrame(function (t) {
+  t0 = t;
+  requestAnimationFrame(function (t2) { console.log(typeof t, t2 >= t0, typeof id); });
+});
+var dead = requestAnimationFrame(function () { console.log('cancelled frame ran'); });
+cancelAnimationFrame(dead);
+#expect
+number true number
+
+#name a script inserted during load runs at once
+#code
+window.addEventListener('load', function () {
+  var s = document.createElement('script');
+  s.textContent = 'window.inserted = document.readyState;';
+  document.head.appendChild(s);
+  console.log(window.inserted);
+});
+#expect
+complete
+
+#name unhandled exceptions in timers go to window.onerror and later timers still run
+#code
+var out = [];
+window.onerror = function (message, source, line, column, error) {
+  out.push('onerror ' + (message.indexOf('timer failed') >= 0) + ' ' + typeof source + ' ' + typeof line + ' ' + typeof column + ' ' + (error instanceof Error) + ' ' + (error && error.message));
+  return true;
+};
+setTimeout(function () { throw new Error('timer failed'); }, 0);
+setTimeout(function () { out.push('next timer'); console.log(out.join(', ')); }, 5);
+#expect
+onerror true string number number true timer failed, next timer
+
+#name beforeunload and unload are not fired while the page stays
+#code
+var fired = [];
+window.addEventListener('beforeunload', function () { fired.push('beforeunload'); });
+window.addEventListener('unload', function () { fired.push('unload'); });
+window.addEventListener('pagehide', function () { fired.push('pagehide'); });
+window.addEventListener('load', function () { setTimeout(function () { console.log(fired.length); }, 5); });
+#expect
+0

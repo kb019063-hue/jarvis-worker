@@ -1,0 +1,547 @@
+#fixture
+<html><head><title>Events</title></head><body><div id="outer"><div id="mid"><button id="btn">B</button></div></div><a id="link" href="#frag">link</a><input id="box" type="checkbox"><form id="form"><input id="name" name="name"><button id="send" type="submit">Send</button></form></body></html>
+
+#name the phases: capture down, target, bubble up
+#code
+var out = [];
+['outer', 'mid', 'btn'].forEach(function (id) {
+  var el = document.getElementById(id);
+  el.addEventListener('click', function (e) { out.push(id + ':capture:' + e.eventPhase); }, true);
+  el.addEventListener('click', function (e) { out.push(id + ':bubble:' + e.eventPhase); });
+});
+document.getElementById('btn').click();
+console.log(out.join(' '));
+#expect
+outer:capture:1 mid:capture:1 btn:capture:2 btn:bubble:2 mid:bubble:3 outer:bubble:3
+
+#name the path goes on to body, html, document and window
+#code
+var out = [];
+[document.body, document.documentElement, document, window].forEach(function (t, i) {
+  t.addEventListener('click', function (e) { out.push('c' + i); }, true);
+  t.addEventListener('click', function (e) { out.push('b' + i + (e.currentTarget === t)); });
+});
+document.getElementById('btn').click();
+console.log(out.join(' '));
+#expect
+c3 c2 c1 c0 b0true b1true b2true b3true
+
+#name target, currentTarget and this
+#code
+var mid = document.getElementById('mid'), btn = document.getElementById('btn');
+var saved;
+mid.addEventListener('click', function (e) {
+  saved = e;
+  console.log(e.target === btn, e.currentTarget === mid, this === mid, e.srcElement === btn, e.eventPhase, e.type, e.isTrusted);
+});
+btn.click();
+console.log(saved.currentTarget, saved.eventPhase, saved.target === btn);
+#expect
+true true true true 3 click false
+null 0 true
+
+#name an arrow function listener keeps its own this
+#code
+var btn = document.getElementById('btn');
+var self = this;
+btn.addEventListener('click', (e) => { console.log(this === self, this === window, e.currentTarget === btn); });
+btn.click();
+#expect
+true true true
+
+#name stopPropagation ends the path; listeners on the same node still run
+#code
+var out = [];
+var mid = document.getElementById('mid');
+mid.addEventListener('click', function (e) { out.push('mid1'); e.stopPropagation(); });
+mid.addEventListener('click', function () { out.push('mid2'); });
+document.getElementById('outer').addEventListener('click', function () { out.push('outer'); });
+document.getElementById('btn').click();
+console.log(out.join(' '));
+#expect
+mid1 mid2
+
+#name stopImmediatePropagation ends it at once
+#code
+var out = [];
+var mid = document.getElementById('mid');
+mid.addEventListener('click', function (e) { out.push('mid1'); e.stopImmediatePropagation(); });
+mid.addEventListener('click', function () { out.push('mid2'); });
+document.getElementById('outer').addEventListener('click', function () { out.push('outer'); });
+document.getElementById('btn').click();
+console.log(out.join(' '));
+#expect
+mid1
+
+#name stopping in the capture phase keeps the event from the target
+#code
+var out = [];
+document.getElementById('outer').addEventListener('click', function (e) { out.push('outer capture'); e.stopPropagation(); }, true);
+document.getElementById('btn').addEventListener('click', function () { out.push('target'); });
+document.getElementById('btn').click();
+console.log(out.join(', '));
+#expect
+outer capture
+
+#name preventDefault, defaultPrevented and the result of dispatchEvent
+#code
+var btn = document.getElementById('btn');
+var e1 = new Event('x', {cancelable: true}), e2 = new Event('x'), e3 = new Event('x', {cancelable: true});
+btn.addEventListener('x', function (e) { if (e !== e3) e.preventDefault(); });
+console.log(btn.dispatchEvent(e1), e1.defaultPrevented, btn.dispatchEvent(e2), e2.defaultPrevented, btn.dispatchEvent(e3), e3.defaultPrevented, e1.returnValue, e3.returnValue);
+#expect
+false true true false true false false true
+
+#name an event that does not bubble stops at the target
+#code
+var out = [];
+document.getElementById('outer').addEventListener('quiet', function () { out.push('outer bubble'); });
+document.getElementById('outer').addEventListener('quiet', function () { out.push('outer capture'); }, true);
+document.getElementById('btn').addEventListener('quiet', function () { out.push('target'); });
+document.getElementById('btn').dispatchEvent(new Event('quiet'));
+console.log(out.join(', '));
+#expect
+outer capture, target
+
+#name the Event constructor
+#code
+var e = new Event('thing', {bubbles: true, cancelable: true, composed: true});
+var d = new Event('plain');
+console.log(e.type, e.bubbles, e.cancelable, e.composed, d.bubbles, d.cancelable, d.composed, e.target, e.currentTarget, e.eventPhase, e.defaultPrevented, e.isTrusted, typeof e.timeStamp, e instanceof Event);
+try { new Event(); } catch (err) { console.log(err.name); }
+try { Event('x'); } catch (err) { console.log(err.name); }
+console.log(Event.NONE, Event.CAPTURING_PHASE, Event.AT_TARGET, Event.BUBBLING_PHASE, e.AT_TARGET);
+#expect
+thing true true true false false false null null 0 false false number true
+TypeError
+TypeError
+0 1 2 3 2
+
+#name CustomEvent and detail
+#code
+var e = new CustomEvent('made', {detail: {n: 1}, bubbles: true});
+var plain = new CustomEvent('made');
+var got;
+document.body.addEventListener('made', function (ev) { got = ev.detail; });
+document.getElementById('btn').dispatchEvent(e);
+console.log(got === e.detail, got.n, plain.detail, e instanceof Event, e instanceof CustomEvent, Object.prototype.toString.call(e), e.bubbles, plain.bubbles);
+#expect
+true 1 null true true [object CustomEvent] true false
+
+#name the same listener added twice runs once; capture and bubble are different
+#code
+var n = 0;
+function h() { n++; }
+var btn = document.getElementById('btn');
+btn.addEventListener('click', h); btn.addEventListener('click', h); btn.addEventListener('click', h, false); btn.addEventListener('click', h, {capture: false});
+btn.click();
+console.log(n);
+btn.addEventListener('click', h, true); btn.addEventListener('click', h, {capture: true});
+btn.click();
+console.log(n);
+#expect
+1
+3
+
+#name removeEventListener needs the same function and capture flag
+#code
+var n = 0;
+function h() { n++; }
+var btn = document.getElementById('btn');
+btn.addEventListener('click', h, true);
+btn.removeEventListener('click', h);
+btn.click();
+btn.removeEventListener('click', h, {capture: true});
+btn.click();
+btn.removeEventListener('click', h, true);
+btn.removeEventListener('nothing', h);
+console.log(n);
+#expect
+1
+
+#name once
+#code
+var n = 0;
+var btn = document.getElementById('btn');
+btn.addEventListener('click', function () { n++; }, {once: true});
+btn.click(); btn.click(); btn.click();
+console.log(n);
+#expect
+1
+
+#name an object with handleEvent is a listener
+#code
+var btn = document.getElementById('btn');
+var obj = { count: 0, handleEvent: function (e) { this.count++; console.log(this === obj, e.type, e.currentTarget === btn); } };
+btn.addEventListener('click', obj);
+btn.click();
+btn.removeEventListener('click', obj);
+btn.click();
+console.log(obj.count);
+#expect
+true click true
+1
+
+#name null and undefined listeners are ignored
+#code
+var btn = document.getElementById('btn');
+btn.addEventListener('click', null); btn.addEventListener('click', undefined); btn.removeEventListener('click', null);
+btn.click();
+try { btn.addEventListener('click'); console.log('no error'); } catch (e) { console.log(e.name); }
+try { btn.addEventListener(); console.log('no error'); } catch (e) { console.log(e.name); }
+console.log('done');
+#expect
+TypeError
+TypeError
+done
+
+#name a listener added during dispatch does not run for that event; a removed one does not run
+#code
+var out = [];
+var btn = document.getElementById('btn');
+function late() { out.push('late'); }
+function gone() { out.push('gone'); }
+btn.addEventListener('click', function () { out.push('first'); btn.addEventListener('click', late); btn.removeEventListener('click', gone); });
+btn.addEventListener('click', gone);
+btn.click();
+out.push('|');
+btn.click();
+console.log(out.join(' '));
+#expect
+first | first late
+
+#name on-properties: one handler, replaced by assignment
+#code
+var out = [];
+var btn = document.getElementById('btn');
+console.log(btn.onclick);
+btn.onclick = function (e) { out.push('one ' + (this === btn) + ' ' + e.type); };
+btn.onclick = function () { out.push('two'); };
+btn.addEventListener('click', function () { out.push('listener'); });
+btn.click();
+btn.onclick = null;
+btn.click();
+console.log(out.join(', '), btn.onclick, typeof btn.onmouseover, 'onclick' in btn);
+btn.onclick = 'not a function';
+console.log(btn.onclick);
+#expect
+null
+two, listener, listener null object true
+null
+
+#name on-properties keep their place among listeners
+#code
+var out = [];
+var btn = document.getElementById('btn');
+btn.addEventListener('click', function () { out.push('a'); });
+btn.onclick = function () { out.push('handler'); };
+btn.addEventListener('click', function () { out.push('b'); });
+btn.onclick = function () { out.push('handler2'); };
+btn.click();
+console.log(out.join(' '));
+#expect
+a handler2 b
+
+#name returning false from an on-handler cancels the event
+#code
+var link = document.getElementById('link');
+link.onclick = function () { return false; };
+var e = new MouseEvent('click', {cancelable: true, bubbles: true});
+console.log(link.dispatchEvent(e), e.defaultPrevented);
+link.onclick = function () { return true; };
+var e2 = new MouseEvent('click', {cancelable: true, bubbles: true});
+console.log(link.dispatchEvent(e2), e2.defaultPrevented);
+#expect
+false true
+true false
+
+#name handlers written as attributes
+#html
+<body><button id="b" onclick="window.log.push(this.id + ':' + event.type + ':' + (event.target === this))">B</button><div id="d" onclick="window.log.push('div')"><span id="s">s</span></div></body>
+#code
+window.log = [];
+var b = document.getElementById('b');
+b.click();
+document.getElementById('s').click();
+console.log(window.log.join(' '), typeof b.onclick, b.getAttribute('onclick').length > 0);
+b.setAttribute('onclick', 'window.log.push("changed")');
+b.click();
+b.removeAttribute('onclick');
+b.click();
+console.log(window.log.join(' '), b.onclick);
+#expect
+b:click:true div function true
+b:click:true div changed null
+
+#name click() fires a click that bubbles and can be cancelled
+#code
+var btn = document.getElementById('btn');
+btn.addEventListener('click', function (e) {
+  console.log(e.type, e.bubbles, e.cancelable, e.composed, e instanceof MouseEvent, e.isTrusted, e.detail, e.button, e.clientX, e.target === btn);
+});
+btn.click();
+#expect
+click true true true true false 0 0 0 true
+
+#name MouseEvent and its fields
+#code
+var e = new MouseEvent('mousedown', {clientX: 10, clientY: 20, button: 2, buttons: 2, ctrlKey: true, shiftKey: false, bubbles: true, relatedTarget: document.body, screenX: 5, detail: 3});
+console.log(e.clientX, e.clientY, e.button, e.buttons, e.ctrlKey, e.shiftKey, e.altKey, e.metaKey, e.bubbles, e.relatedTarget === document.body, e.screenX, e.detail, e.pageX, e.x, e.offsetX, e instanceof UIEvent, e.view);
+var d = new MouseEvent('click');
+console.log(d.clientX, d.button, d.bubbles, d.cancelable, d.relatedTarget, d.getModifierState('Control'), e.getModifierState('Control'));
+#expect
+10 20 2 2 true false false false true true 5 3 10 10 10 true null
+0 0 false false null false true
+
+#name KeyboardEvent and its fields
+#code
+var e = new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', ctrlKey: true, repeat: true, bubbles: true, location: 1});
+var got = [];
+document.addEventListener('keydown', function (ev) { got.push(ev.key, ev.code, ev.ctrlKey, ev.shiftKey, ev.repeat, ev.location, ev.target.id, ev instanceof KeyboardEvent, ev instanceof UIEvent, ev.isComposing); });
+document.getElementById('name').dispatchEvent(e);
+console.log(got.join(' '));
+var d = new KeyboardEvent('keyup');
+console.log(JSON.stringify(d.key), JSON.stringify(d.code), d.bubbles, d.keyCode, d.which, d.charCode, KeyboardEvent.DOM_KEY_LOCATION_LEFT);
+#expect
+Enter Enter true false true 1 name true true false
+"" "" false 0 0 0 1
+
+#name other event classes
+#code
+var f = new FocusEvent('focus', {relatedTarget: document.body});
+var i = new InputEvent('input', {data: 'x', inputType: 'insertText', bubbles: true});
+var w = new WheelEvent('wheel', {deltaY: 100, deltaMode: 1});
+var p = new PointerEvent('pointerdown', {pointerId: 7, pointerType: 'touch', isPrimary: true, clientX: 3});
+var h = new HashChangeEvent('hashchange', {oldURL: 'a', newURL: 'b'});
+var s = new PopStateEvent('popstate', {state: {k: 1}});
+var c = new ErrorEvent('error', {message: 'm', filename: 'f', lineno: 3, colno: 4, error: 'E'});
+var g = new ProgressEvent('progress', {loaded: 5, total: 10, lengthComputable: true});
+console.log(f.relatedTarget === document.body, f instanceof UIEvent, i.data, i.inputType, i.isComposing, i instanceof UIEvent, w.deltaY, w.deltaMode, w instanceof MouseEvent, p.pointerId, p.pointerType, p.isPrimary, p.clientX, p instanceof MouseEvent);
+console.log(h.oldURL, h.newURL, s.state.k, c.message, c.filename, c.lineno, c.colno, c.error, g.loaded, g.total, g.lengthComputable);
+#expect
+true true x insertText false true 100 1 true 7 touch true 3 true
+a b 1 m f 3 4 E 5 10 true
+
+#name an event can be dispatched again after it finished, not while it is running
+#code
+var btn = document.getElementById('btn');
+var e = new Event('again');
+var n = 0;
+btn.addEventListener('again', function (ev) {
+  n++;
+  if (n === 1) { try { btn.dispatchEvent(ev); console.log('no error'); } catch (err) { console.log(err.name, err.code); } }
+});
+btn.dispatchEvent(e);
+btn.dispatchEvent(e);
+console.log(n, e.eventPhase, e.currentTarget, e.target === btn);
+#expect
+InvalidStateError 11
+2 0 null true
+
+#name dispatchEvent with something that is not an event throws
+#code
+var btn = document.getElementById('btn');
+[null, undefined, {}, 'click', {type: 'click'}].forEach(function (v) { try { btn.dispatchEvent(v); console.log('ok'); } catch (e) { console.log(e.name); } });
+#expect
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+
+#name an exception in a listener is reported and the next listener still runs
+#code
+var out = [];
+window.addEventListener('error', function (e) { out.push('error event: ' + (e.message.indexOf('listener failed') >= 0) + ' ' + (e.error instanceof Error) + ' ' + (e instanceof ErrorEvent)); e.preventDefault(); });
+var btn = document.getElementById('btn');
+btn.addEventListener('click', function () { out.push('first'); throw new Error('listener failed'); });
+btn.addEventListener('click', function () { out.push('second'); });
+document.body.addEventListener('click', function () { out.push('body'); });
+btn.click();
+out.push('after');
+console.log(out.join(', '));
+#expect
+first, error event: true true true, second, body, after
+
+#name composedPath
+#code
+var btn = document.getElementById('btn');
+var path;
+btn.addEventListener('click', function (e) { path = e.composedPath(); });
+var e = new Event('click', {bubbles: true});
+btn.dispatchEvent(e);
+console.log(path.length, path[0] === btn, path[1].id, path[path.length - 2] === document, path[path.length - 1] === window, e.composedPath().length);
+#expect
+7 true mid true true 0
+
+#name events on a detached tree bubble to its root
+#code
+var root = document.createElement('div'), leaf = document.createElement('span');
+root.appendChild(leaf);
+var out = [];
+root.addEventListener('click', function (e) { out.push('root ' + (e.target === leaf)); });
+document.addEventListener('click', function () { out.push('document'); });
+window.addEventListener('click', function () { out.push('window'); });
+leaf.click();
+leaf.dispatchEvent(new Event('click', {bubbles: true}));
+console.log(out.join(', '));
+#expect
+root true, root true
+
+#name events on document and window themselves
+#code
+var out = [];
+window.addEventListener('ping', function (e) { out.push('window ' + (e.target === window) + ' ' + e.eventPhase + ' ' + (this === window)); });
+document.addEventListener('ping', function (e) { out.push('document ' + (e.target === document) + ' ' + e.eventPhase); });
+window.dispatchEvent(new Event('ping'));
+document.dispatchEvent(new Event('ping', {bubbles: true}));
+dispatchEvent(new Event('ping'));
+console.log(out.join(', '));
+#expect
+window true 2 true, document true 2, window false 3 true, window true 2 true
+
+#name EventTarget can be constructed and subclassed
+#code
+var t = new EventTarget();
+var got = [];
+t.addEventListener('go', function (e) { got.push(e.type, e.target === t, e.currentTarget === t, this === t); });
+console.log(t.dispatchEvent(new Event('go')), got.join(' '), t instanceof EventTarget);
+class Bus extends EventTarget { emit(name, detail) { return this.dispatchEvent(new CustomEvent(name, {detail: detail})); } }
+var bus = new Bus();
+bus.addEventListener('msg', function (e) { got.push(e.detail); });
+bus.emit('msg', 'hello');
+console.log(got[got.length - 1], bus instanceof Bus, bus instanceof EventTarget);
+#expect
+true go true true true true
+hello true true
+
+#name an Event subclass
+#code
+class TickEvent extends Event { constructor(n) { super('tick', {bubbles: true}); this.n = n; } double() { return this.n * 2; } }
+var e = new TickEvent(21);
+var got;
+document.body.addEventListener('tick', function (ev) { got = ev; });
+document.getElementById('btn').dispatchEvent(e);
+console.log(got === e, got.n, got.double(), got.type, got.bubbles, got instanceof TickEvent, got instanceof Event, got.target.id);
+#expect
+true 21 42 tick true true true btn
+
+#name checkbox: click toggles before the listeners run, and preventDefault undoes it
+#code
+var box = document.getElementById('box');
+var seen = [];
+box.addEventListener('click', function (e) { seen.push('click:' + box.checked); });
+box.addEventListener('input', function (e) { seen.push('input:' + box.checked + ':' + e.bubbles); });
+box.addEventListener('change', function (e) { seen.push('change:' + box.checked + ':' + e.bubbles); });
+box.click();
+console.log(seen.join(' '), box.checked);
+seen = [];
+box.addEventListener('click', function (e) { e.preventDefault(); });
+box.click();
+console.log(seen.join(' '), box.checked);
+#expect
+click:true input:true:true change:true:true true
+click:false true
+
+#name clicking a submit button fires submit on the form
+#code
+var form = document.getElementById('form');
+var out = [];
+form.addEventListener('submit', function (e) { out.push(e.type, e.bubbles, e.cancelable, e.target === form, e.submitter === document.getElementById('send'), e instanceof SubmitEvent); e.preventDefault(); });
+document.addEventListener('submit', function (e) { out.push('reached document'); });
+document.getElementById('send').click();
+console.log(out.join(' '));
+#expect
+submit true true true true true reached document
+
+#name a link click that is not cancelled changes the hash
+#code
+var link = document.getElementById('link');
+window.addEventListener('hashchange', function (e) {
+  console.log('hashchange', e.oldURL, e.newURL, location.hash, e instanceof HashChangeEvent);
+  setTimeout(function () { console.log(location.hash, location.href); }, 5);
+});
+console.log(location.hash);
+link.click();
+#expect
+#top
+hashchange https://example.test/app/page.html?tab=2#top https://example.test/app/page.html?tab=2#frag #frag true
+#frag https://example.test/app/page.html?tab=2#frag
+
+#name a cancelled link click does not navigate
+#code
+var link = document.getElementById('link');
+link.addEventListener('click', function (e) { e.preventDefault(); });
+link.click();
+console.log(location.hash, location.href);
+#expect
+#top https://example.test/app/page.html?tab=2#top
+
+#name event delegation with closest and matches
+#code
+document.body.insertAdjacentHTML('beforeend', '<ul id="menu"><li data-id="1"><span>One</span></li><li data-id="2" class="off"><span>Two</span></li></ul>');
+var picked = [];
+document.getElementById('menu').addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (!li || !this.contains(li) || li.matches('.off')) return;
+  picked.push(li.dataset.id);
+});
+document.querySelectorAll('#menu span').forEach(function (s) { s.click(); });
+document.getElementById('menu').click();
+console.log(picked.join(','));
+#expect
+1
+
+#name passive and signal options
+#code
+var btn = document.getElementById('btn');
+var n = 0;
+var ctl = new AbortController();
+btn.addEventListener('click', function (e) { n++; e.preventDefault(); console.log(e.defaultPrevented); }, {passive: true});
+btn.addEventListener('click', function () { n += 10; }, {signal: ctl.signal});
+btn.dispatchEvent(new Event('click', {cancelable: true}));
+ctl.abort();
+btn.dispatchEvent(new Event('click', {cancelable: true}));
+console.log(n);
+#expect
+false
+false
+12
+
+#name timeStamp and the legacy fields
+#code
+var e = new Event('x', {bubbles: true, cancelable: true});
+console.log(e.cancelBubble, e.returnValue, typeof e.timeStamp, e.timeStamp >= 0);
+e.cancelBubble = true; e.returnValue = false;
+console.log(e.cancelBubble, e.returnValue, e.defaultPrevented);
+var n = 0;
+document.body.addEventListener('x', function () { n++; });
+document.getElementById('btn').dispatchEvent(e);
+console.log(n);
+#expect
+false true number true
+true false true
+0
+
+#name initEvent re-initialises an event that is not being dispatched
+#code
+var e = new Event('a', {bubbles: true});
+e.initEvent('b', false, true);
+console.log(e.type, e.bubbles, e.cancelable);
+#expect
+b false true
+
+#name listeners survive moving the node and go away with nothing else
+#code
+var btn = document.getElementById('btn');
+var n = 0;
+btn.addEventListener('click', function () { n++; });
+document.body.appendChild(btn);
+btn.click();
+btn.remove();
+btn.click();
+document.getElementById('mid').appendChild(btn);
+btn.click();
+console.log(n);
+#expect
+3

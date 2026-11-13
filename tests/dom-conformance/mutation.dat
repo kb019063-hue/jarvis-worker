@@ -1,0 +1,310 @@
+#fixture
+<html><head><title>Mutation</title></head><body><div id="t" class="c"><p id="p">text</p><span id="s"></span></div><div id="u"></div></body></html>
+
+#name a childList record for an appended node
+#code
+var t = document.getElementById('t');
+var n = document.createElement('b');
+new MutationObserver(function (recs, obs) {
+  var r = recs[0];
+  console.log(recs.length, r.type, r.target === t, r.addedNodes.length, r.addedNodes[0] === n, r.removedNodes.length, r.previousSibling.id, r.nextSibling, r.attributeName, r.oldValue, obs instanceof MutationObserver);
+}).observe(t, {childList: true});
+t.appendChild(n);
+#expect
+1 childList true 1 true 0 s null null null true
+
+#name the callback runs as a microtask, after the script, before a timer
+#code
+var out = [];
+new MutationObserver(function () { out.push('observer'); }).observe(document.getElementById('t'), {childList: true});
+setTimeout(function () { out.push('timer'); console.log(out.join(' ')); }, 0);
+Promise.resolve().then(function () { out.push('promise'); });
+document.getElementById('t').appendChild(document.createElement('i'));
+out.push('sync');
+#expect
+sync observer promise timer
+
+#name records are batched into one callback
+#code
+var t = document.getElementById('t');
+var calls = 0;
+new MutationObserver(function (recs) { calls++; console.log(calls, recs.length, recs.map(function (r) { return r.type; }).join(',')); }).observe(t, {childList: true, attributes: true});
+t.appendChild(document.createElement('i'));
+t.setAttribute('a', '1');
+t.removeChild(t.lastChild);
+#expect
+1 3 childList,attributes,childList
+
+#name a record for a removed node
+#code
+var t = document.getElementById('t'), p = document.getElementById('p');
+new MutationObserver(function (recs) {
+  var r = recs[0];
+  console.log(r.removedNodes.length, r.removedNodes[0] === p, r.addedNodes.length, r.previousSibling, r.nextSibling.id);
+}).observe(t, {childList: true});
+p.remove();
+#expect
+1 true 0 null s
+
+#name insertBefore records both siblings
+#code
+var t = document.getElementById('t');
+var n = document.createElement('b');
+new MutationObserver(function (recs) {
+  var r = recs[0];
+  console.log(r.addedNodes[0] === n, r.previousSibling.id, r.nextSibling.id);
+}).observe(t, {childList: true});
+t.insertBefore(n, document.getElementById('s'));
+#expect
+true p s
+
+#name attribute records
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.type + ':' + r.attributeName + ':' + r.oldValue + ':' + (r.target === t) + ':' + r.attributeNamespace; }).join(' '));
+}).observe(t, {attributes: true});
+t.setAttribute('data-a', '1'); t.className = 'd'; t.removeAttribute('data-a'); t.id = 't';
+#expect
+attributes:data-a:null:true:null attributes:class:null:true:null attributes:data-a:null:true:null attributes:id:null:true:null
+
+#name attributeOldValue
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.attributeName + '=' + r.oldValue; }).join(' '));
+}).observe(t, {attributeOldValue: true});
+t.setAttribute('class', 'd'); t.setAttribute('class', 'e'); t.setAttribute('new', 'n'); t.removeAttribute('class');
+#expect
+class=c class=d new=null class=e
+
+#name attributeFilter
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.length, recs.map(function (r) { return r.attributeName; }).join(','));
+}).observe(t, {attributeFilter: ['class', 'title']});
+t.setAttribute('id', 't2'); t.setAttribute('class', 'x'); t.setAttribute('data-q', '1'); t.title = 'T';
+#expect
+2 class,title
+
+#name setting an attribute to the value it has still makes a record
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) { console.log(recs.length); }).observe(t, {attributes: true});
+t.setAttribute('class', 'c'); t.className = 'c';
+#expect
+2
+
+#name characterData records
+#code
+var text = document.getElementById('p').firstChild;
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.type + ':' + r.oldValue + ':' + (r.target === text); }).join(' '), text.data);
+}).observe(text, {characterData: true, characterDataOldValue: true});
+text.data = 'one'; text.nodeValue = 'two'; text.appendData('!'); text.textContent = 'three';
+#expect
+characterData:text:true characterData:one:true characterData:two:true characterData:two!:true three
+
+#name subtree
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.type + '@' + (r.target.id || r.target.nodeName); }).join(' '));
+}).observe(t, {childList: true, attributes: true, characterData: true, subtree: true});
+document.getElementById('p').setAttribute('k', 'v');
+document.getElementById('s').appendChild(document.createElement('i'));
+document.getElementById('p').firstChild.data = 'changed';
+document.getElementById('u').appendChild(document.createElement('i'));
+#expect
+attributes@p childList@s characterData@#text
+
+#name without subtree only the target is watched
+#code
+var t = document.getElementById('t');
+var seen = 0;
+new MutationObserver(function (recs) { seen += recs.length; }).observe(t, {childList: true, attributes: true});
+document.getElementById('p').setAttribute('k', 'v');
+document.getElementById('s').appendChild(document.createElement('i'));
+setTimeout(function () { console.log(seen); }, 0);
+#expect
+0
+
+#name textContent and innerHTML make one childList record
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.removedNodes.length + '>' + r.addedNodes.length; }).join(' '));
+}).observe(t, {childList: true});
+t.textContent = 'plain';
+t.innerHTML = '<i>1</i><b>2</b>';
+t.replaceChildren();
+#expect
+2>1 1>2 2>0
+
+#name appending a fragment makes one record with all its nodes
+#code
+var u = document.getElementById('u');
+var f = document.createDocumentFragment();
+f.append(document.createElement('a'), 'x', document.createElement('b'));
+new MutationObserver(function (recs) {
+  console.log(recs.length, recs[0].addedNodes.length, recs[0].addedNodes[1].nodeType, recs[0].target === u);
+}).observe(u, {childList: true});
+u.appendChild(f);
+#expect
+1 3 3 true
+
+#name moving a node makes a removal and an addition
+#code
+var t = document.getElementById('t'), u = document.getElementById('u'), p = document.getElementById('p');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.target.id + ':' + r.removedNodes.length + '>' + r.addedNodes.length; }).join(' '));
+}).observe(document.body, {childList: true, subtree: true});
+u.appendChild(p);
+#expect
+t:1>0 u:0>1
+
+#name disconnect stops delivery and drops what is queued
+#code
+var t = document.getElementById('t');
+var n = 0;
+var o = new MutationObserver(function () { n++; });
+o.observe(t, {attributes: true});
+t.setAttribute('a', '1');
+o.disconnect();
+t.setAttribute('a', '2');
+setTimeout(function () { console.log(n); }, 0);
+#expect
+0
+
+#name takeRecords empties the queue
+#code
+var t = document.getElementById('t');
+var n = 0;
+var o = new MutationObserver(function () { n++; });
+o.observe(t, {attributes: true});
+t.setAttribute('a', '1'); t.setAttribute('b', '2');
+var taken = o.takeRecords();
+console.log(taken.length, taken[0].attributeName, Array.isArray(taken), o.takeRecords().length);
+setTimeout(function () { console.log(n); }, 0);
+#expect
+2 a true 0
+0
+
+#name observe with no kind of change asked for throws TypeError
+#code
+var o = new MutationObserver(function () {});
+[{}, {subtree: true}, {attributeOldValue: true, attributes: false}, {characterDataOldValue: true, characterData: false}, {attributeFilter: ['a'], attributes: false}].forEach(function (opts) {
+  try { o.observe(document.body, opts); console.log('ok'); } catch (e) { console.log(e.name); }
+});
+try { o.observe(null, {childList: true}); console.log('ok'); } catch (e) { console.log(e.name); }
+try { o.observe(document.body); console.log('ok'); } catch (e) { console.log(e.name); }
+try { new MutationObserver(); console.log('ok'); } catch (e) { console.log(e.name); }
+try { MutationObserver(function () {}); console.log('ok'); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+
+#name observing the same node twice replaces the options
+#code
+var t = document.getElementById('t');
+var o = new MutationObserver(function (recs) { console.log(recs.length, recs[0].type); });
+o.observe(t, {attributes: true});
+o.observe(t, {childList: true});
+t.setAttribute('a', '1');
+t.appendChild(document.createElement('i'));
+#expect
+1 childList
+
+#name two observers each get their own records
+#code
+var t = document.getElementById('t');
+var out = [];
+new MutationObserver(function (recs) { out.push('first:' + recs.length); }).observe(t, {attributes: true});
+new MutationObserver(function (recs) { out.push('second:' + recs.length); }).observe(t, {childList: true, attributes: true});
+t.setAttribute('a', '1'); t.appendChild(document.createElement('i'));
+setTimeout(function () { console.log(out.join(' ')); }, 0);
+#expect
+first:1 second:2
+
+#name a change made inside the callback is delivered in a later callback
+#code
+var t = document.getElementById('t');
+var rounds = 0;
+new MutationObserver(function (recs) {
+  rounds++;
+  if (rounds < 3) t.setAttribute('round', String(rounds));
+  else console.log(rounds);
+}).observe(t, {attributes: true});
+t.setAttribute('round', '0');
+#expect
+3
+
+#name the callback's this is the observer
+#code
+var o = new MutationObserver(function (recs, obs) { console.log(this === o, obs === o, Array.isArray(recs), recs[0] instanceof MutationRecord); });
+o.observe(document.body, {attributes: true});
+document.body.setAttribute('x', '1');
+#expect
+true true true true
+
+#name records for classList, dataset and style changes
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.attributeName + '=' + r.oldValue; }).join(' '));
+}).observe(t, {attributes: true, attributeOldValue: true});
+t.classList.add('d'); t.dataset.k = 'v'; t.style.color = 'red'; t.classList.remove('c'); t.hidden = true;
+#expect
+class=c data-k=null style=null class=c d hidden=null
+
+#name an exception in the callback does not stop other observers
+#code
+var t = document.getElementById('t');
+window.onerror = function (msg) { console.log('onerror', typeof msg); return true; };
+new MutationObserver(function () { throw new Error('first fails'); }).observe(t, {attributes: true});
+new MutationObserver(function () { console.log('second runs'); }).observe(t, {attributes: true});
+t.setAttribute('a', '1');
+#expect
+onerror string
+second runs
+
+#name normalize and splitText produce records
+#code
+var p = document.getElementById('p');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.type + ':' + r.addedNodes.length + ':' + r.removedNodes.length; }).join(' '));
+}).observe(p, {childList: true, characterData: true, subtree: true});
+p.firstChild.splitText(2);
+p.normalize();
+#expect
+childList:1:0 characterData:0:0 characterData:0:0 childList:0:1
+
+#name replaceChild and replaceWith make one record
+#code
+var t = document.getElementById('t'), p = document.getElementById('p');
+new MutationObserver(function (recs) {
+  console.log(recs.map(function (r) { return r.removedNodes.length + '>' + r.addedNodes.length + ' next=' + (r.nextSibling && r.nextSibling.id); }).join(' | '));
+}).observe(t, {childList: true});
+t.replaceChild(document.createElement('h2'), p);
+document.getElementById('s').replaceWith('a', 'b');
+#expect
+1>1 next=s | 1>2 next=null
+
+#name a NodeList in a record
+#code
+var t = document.getElementById('t');
+new MutationObserver(function (recs) {
+  var list = recs[0].addedNodes;
+  console.log(list instanceof NodeList, typeof list.forEach, list.item(0).tagName, Array.from(list).length, recs[0].removedNodes instanceof NodeList);
+}).observe(t, {childList: true});
+t.appendChild(document.createElement('b'));
+#expect
+true function B 1 true

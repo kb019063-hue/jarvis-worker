@@ -36,6 +36,7 @@ void JsObject::trace(Heap& heap) {
         heap.mark_value(elem);
     }
     if (trace_extra) trace_extra(heap);
+    if (exotic) exotic->trace(heap);
 }
 
 void JsObject::release_contents() {
@@ -51,6 +52,8 @@ void JsObject::release_contents() {
     auto dropped_fallback = std::move(lookup_fallback);
     auto dropped_hook = std::move(assign_hook);
     auto dropped_node = std::move(dom_node);
+    auto dropped_exotic = std::move(exotic);
+    exotic.reset();
     internal.reset();
     trace_extra = nullptr;
     lookup_fallback.reset();

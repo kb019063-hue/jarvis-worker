@@ -806,8 +806,10 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         parent.construct(args, &this_val);
     } else {
         // A built-in parent (Error, Array, Map, ...) builds its own object;
-        // take over its state so `this` becomes that kind of object.
-        JsValue built = parent.construct(args, nullptr);
+        // take over its state so `this` becomes that kind of object. A host
+        // constructor (Event, HTMLElement) is handed `this` and makes it the
+        // object it constructs, and then there is nothing to take over.
+        JsValue built = parent.construct_as_super(args, this_val);
         if (built.object_val && this_val.object_val && built.object_val != this_val.object_val) {
             JsObject* from = built.object_val;
             JsObject* to = this_val.object_val;
@@ -821,6 +823,7 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             to->array_elements = from->array_elements;
             to->klass = from->klass;
             to->internal = from->internal;
+            to->exotic = from->exotic;
             to->trace_extra = from->trace_extra;
             to->has_accessors = to->has_accessors || from->has_accessors;
             to->has_legacy_getters = to->has_legacy_getters || from->has_legacy_getters;
@@ -850,6 +853,13 @@ JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& 
                                                 : JsValue::make_undefined();
             }
             return it->second;
+        }
+        // What the global object computes: the elements of the page by id.
+        if (global->exotic) {
+            JsValue computed;
+            if (global->exotic->get(global, name, computed) || global->exotic->get_last(global, name, computed)) {
+                return computed;
+            }
         }
     }
     js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");

@@ -10,6 +10,7 @@
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/Storage.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 
 #include <algorithm>
@@ -183,6 +184,9 @@ int main(int argc, char* argv[]) {
     }
 
     if (shell_mode) {
+        // The browser a person uses keeps localStorage between sessions.
+        // Every other mode is one run of one page and starts empty.
+        litebird::Storage::local_storage().persist_to("/tmp/litebird_localstorage.db");
         litebird::BrowserShell shell;
         std::string start_url = input_file.empty() ? "examples/browser_portal.html" : input_file;
         shell.navigate_to(start_url);

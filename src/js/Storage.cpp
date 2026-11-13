@@ -163,9 +163,18 @@ JsValue Storage::to_js_value() {
     return obj;
 }
 
+// In memory unless the host asks for a file (the interactive shell does). It
+// used to be /tmp/litebird_localstorage.db for every process: two runs at
+// once shared it, and a page that stored a key called "getItem" broke
+// localStorage for the next program that started, the unit tests included.
 Storage& Storage::local_storage() {
-    static Storage s_local("/tmp/litebird_localstorage.db");
+    static Storage s_local("");
     return s_local;
+}
+
+void Storage::persist_to(const std::string& path) {
+    m_persist_path = path;
+    if (!m_persist_path.empty()) load_from_disk();
 }
 
 Storage& Storage::session_storage() {

@@ -220,6 +220,7 @@ namespace {
 struct CallContext {
     JsValue this_val;
     const JsValue* callee{nullptr};   // the function being called; valid for the call's duration
+    const JsValue* derived_this{nullptr};   // see JsValue::construct_as_super
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
 };
@@ -232,6 +233,7 @@ struct CallContextScope {
         : saved(std::move(t_call_context)) {
         t_call_context.this_val = this_val;
         t_call_context.callee = callee;
+        t_call_context.derived_this = nullptr;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
     }
@@ -296,6 +298,10 @@ const JsValue& JsValue::current_this() {
 
 bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
+}
+
+const JsValue* JsValue::current_derived_this() {
+    return t_call_context.derived_this;
 }
 
 bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out) {
@@ -369,6 +375,18 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
         return s_function_caller(*this, args, this_val);
     }
     return JsValue::make_undefined();
+}
+
+JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const {
+    static const JsValue undefined_this;
+    if (stack_is_exhausted()) throw JsStackOverflow();
+    const NativeFn& fn = native_function();
+    if (fn) {
+        CallContextScope scope(undefined_this, true, this);
+        t_call_context.derived_this = &derived_this;
+        return fn(args);
+    }
+    return construct(args, &derived_this);
 }
 
 JsValue JsValue::make_object(JsObject* obj) {
@@ -612,6 +630,7 @@ bool JsValue::has_own_property(const std::string& name) const {
         return parse_array_index(name, index) && index < string_val.length();
     }
     if (JsObject* cell = property_cell()) {
+        if (cell->exotic && cell->exotic->has(cell, name)) return true;
         if (cell->is_array) {
             if (name == "length") return true;
             if (parse_array_index(name, index)) return index < cell->array_elements.size();
@@ -651,6 +670,10 @@ bool JsValue::has_property(const std::string& name) const {
 
 bool JsValue::delete_property(const std::string& name) {
     if (JsObject* cell = property_cell()) {
+        if (cell->exotic) {
+            bool result = true;
+            if (cell->exotic->remove(cell, name, result)) return result;
+        }
         if (cell->frozen || cell->sealed) {
             return !has_own_property(name);
         }
@@ -688,6 +711,7 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     if (type == JsType::DomNode) return keys;
 
     JsObject* cell = property_cell();
+    if (cell && cell->exotic) cell->exotic->keys(cell, keys);
     if (cell && cell->is_array) {
         for (size_t i = 0; i < cell->array_elements.size(); ++i) keys.push_back(std::to_string(i));
         if (include_non_enumerable) keys.emplace_back("length");
@@ -1216,6 +1240,12 @@ JsValue JsValue::get_property(const std::string& name) const {
             return JsValue::make_null();
         }
 
+        // Host objects first: what they compute comes before what is stored.
+        if (obj->exotic) {
+            JsValue computed;
+            if (obj->exotic->get(obj, name, computed)) return computed;
+        }
+
         if (obj->is_array) {
             if (name == "length") {
                 return JsValue::make_number(static_cast<double>(obj->array_elements.size()));
@@ -1271,6 +1301,7 @@ JsValue JsValue::get_property(const std::string& name) const {
         if (lookup_chain(obj->prototype, name, *this, found)) return found;
 
         if (obj->lookup_fallback && (*obj->lookup_fallback)(name, found)) return found;
+        if (obj->exotic && obj->exotic->get_last(obj, name, found)) return found;
     }
 
     if (canvas_context()) {
@@ -1398,6 +1429,7 @@ void JsValue::set_property(const std::string& name, JsValue val) {
     }
 
     if (JsObject* obj = property_cell(true)) {
+        if (obj->exotic && obj->exotic->set(obj, name, val)) return;
         if (obj->assign_hook && (*obj->assign_hook)(name, val)) return;
         if (name == "__proto__") {
             if (obj->frozen) return;

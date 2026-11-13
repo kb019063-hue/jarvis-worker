@@ -22,6 +22,8 @@ public:
 
     void save_to_disk();
     void load_from_disk();
+    /// Keeps the contents in `path` from now on, starting with what is there.
+    void persist_to(const std::string& path);
 
     JsValue to_js_value();
 

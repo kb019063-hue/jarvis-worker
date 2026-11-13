@@ -331,6 +331,13 @@ public:
     /// Invokes the function as a constructor (`new f(...)`). `this_val` is the
     /// freshly created instance for script functions; natives build their own.
     JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr) const;
+    /// `super(...args)` in a class whose parent is a native constructor.
+    /// `derived_this` is the object the `new` expression created, with the
+    /// subclass's prototype. A native that can turn an existing object into
+    /// what it constructs (see current_derived_this) does so, and then the
+    /// subclass instance and the native object are one; the others build
+    /// their own and the caller takes over its state.
+    JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const;
 
     // --- Call context ---------------------------------------------------------
     //
@@ -341,6 +348,9 @@ public:
     static const JsValue& current_this();
     /// True when the native function currently executing was invoked with `new`.
     static bool current_is_construct();
+    /// For a native constructor reached through `super()`: the subclass's
+    /// object, which should become the thing constructed. Null otherwise.
+    static const JsValue* current_derived_this();
     /// For script functions: consumes the pending call context. Returns false
     /// (and leaves `this_out` undefined) when the function was entered without
     /// going through call_with_this()/construct().

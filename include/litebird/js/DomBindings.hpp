@@ -713,6 +713,11 @@ private:
 /// Upgrades `element` if a definition for its name exists.
 void try_upgrade(Realm& realm, Element& element);
 void upgrade_subtree(Realm& realm, Node& root);
+/// The constructor of HTMLElement and of every HTML element interface.
+/// Called directly it is an "Illegal constructor"; reached through
+/// `super()` from a class given to customElements.define it makes `derived`
+/// the object of a new element, or of the element being upgraded.
+JsValue construct_custom_element(Realm& realm, const InterfaceDef& def, Args args, const JsValue* derived);
 /// True when `name` has been given to customElements.define in `realm`.
 bool custom_element_defined(Realm& realm, const std::string& name);
 /// The prototype an element of this name gets when it is created, when it

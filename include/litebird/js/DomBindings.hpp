@@ -620,6 +620,8 @@ void set_attribute_from_script(Realm& realm, Element& element, const std::string
 void register_style_interfaces();
 JsValue inline_style(Realm& realm, Element& element);
 JsValue computed_style(Realm& realm, Element& element);
+/// `element.style = text`: the text becomes the style attribute's list.
+void set_inline_css_text(Realm& realm, Element& element, const std::string& text);
 
 // --- DomDocumentBindings.cpp ------------------------------------------------------
 void register_document_interfaces();

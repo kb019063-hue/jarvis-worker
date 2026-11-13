@@ -88,7 +88,7 @@ void adopt_child(Node& parent, Node& child) {
 // One rule the script bindings rely on; see DomHooks::wrapper_needs_parent.
 inline void keep_wrapper_rule(Node& parent, const Node& child) {
     if (child.script_object() && !parent.script_object()) {
-        if (auto hook = Node::hooks().wrapper_needs_parent) hook(parent);
+        if (auto hook = Node::hooks().wrapper_needs_parent) hook(parent, child);
     }
 }
 

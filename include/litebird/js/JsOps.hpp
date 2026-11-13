@@ -260,6 +260,10 @@ struct JsIntrinsics {
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;
 
+    /// The DOM side of the realm (a dom::Realm), made the first time a DOM
+    /// object is needed; see DomBindings.hpp. Null until then.
+    void* dom_realm{nullptr};
+
     /// Allocates the prototype objects. The library itself is added by install().
     JsIntrinsics();
     ~JsIntrinsics();

@@ -95,6 +95,13 @@ public:
     // is what makes `document.body` stable across accesses and across collections.
     std::shared_ptr<Node> dom_node;
 
+    /// Set by the DOM bindings for objects that have a `dom_node`. The first
+    /// reports the objects of the nodes around it (see DomBindings.hpp); the
+    /// second runs when the object is freed, and clears the node's pointer
+    /// back to it.
+    static inline void (*trace_dom_node)(Heap&, JsObject&) = nullptr;
+    static inline void (*release_dom_node)(JsObject&) = nullptr;
+
     void trace(Heap& heap) override;
     void release_contents() override;
 };

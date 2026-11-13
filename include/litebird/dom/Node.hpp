@@ -33,7 +33,7 @@ struct DomHooks {
     /// A node that has a script object was put under `parent`, which has
     /// none. The bindings keep one rule about script objects (a node that has
     /// one, its parent has one), and this is where it would break.
-    void (*wrapper_needs_parent)(Node& parent) = nullptr;
+    void (*wrapper_needs_parent)(Node& parent, const Node& child) = nullptr;
     /// Native code dispatched `event` at `target`. True when the bindings ran
     /// the dispatch (script listeners included); `result` is then what
     /// dispatchEvent returns. False: do the native dispatch.
@@ -41,6 +41,19 @@ struct DomHooks {
     /// Native code asked for a click, focus or blur. True when dealt with.
     bool (*click)(Element& element) = nullptr;
     bool (*focus)(Element& element, bool focus) = nullptr;
+
+    // What changed, for mutation observers and custom elements. Each is
+    // called after the change has been made.
+    void (*children_changed)(Node& parent, const std::vector<std::shared_ptr<Node>>& added,
+                             const std::vector<std::shared_ptr<Node>>& removed,
+                             const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next) = nullptr;
+    /// `old_value` is null for an attribute that was added, `new_value` for
+    /// one that was removed.
+    void (*attribute_changed)(Element& element, const std::string& name, const std::string* old_value,
+                              const std::string* new_value) = nullptr;
+    void (*character_data_changed)(Node& node, const std::string& old_value) = nullptr;
+    /// An element entered (true) or left (false) a document.
+    void (*connected)(Element& element, bool connected) = nullptr;
 };
 
 using EventListener = std::function<void(const std::shared_ptr<Event>&)>;

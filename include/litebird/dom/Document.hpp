@@ -63,6 +63,8 @@ public:
     bool has_doctype() const { return m_doctype.present; }
     /// The doctype as a node, the same one every time; null without a doctype.
     std::shared_ptr<DocumentTypeNode> doctype_node();
+    /// The same, only if it has been made already.
+    DocumentTypeNode* existing_doctype_node() const { return m_doctype_node.get(); }
     /// Takes the doctype out of the document (`doctype.remove()`).
     void remove_doctype();
 

@@ -107,7 +107,8 @@ std::string HtmlTokenizer::consume_numeric_char_ref(bool& ok) {
     ok = false;
     // The '&#' has already been consumed.
     bool hex = false;
-    if (peek() == 'x' || peek() == 'X') {
+    const char prefix = peek();
+    if (prefix == 'x' || prefix == 'X') {
         hex = true;
         advance();
     }
@@ -126,8 +127,9 @@ std::string HtmlTokenizer::consume_numeric_char_ref(bool& ok) {
         advance();
     }
     if (!any_digits) {
-        // absence-of-digits: the consumed characters stay literal text.
-        return hex ? std::string("x") : std::string();
+        // absence-of-digits: the consumed characters stay literal text, as
+        // they were written ("&#X" is not "&#x").
+        return hex ? std::string(1, prefix) : std::string();
     }
     ok = true;
     if (peek() == ';') advance();
@@ -229,7 +231,12 @@ bool HtmlTokenizer::consume_tag(HtmlToken& token) {
             continue;  // unexpected-solidus-in-tag: reconsume in before-attribute-name
         }
 
-        // Attribute name.
+        // Attribute name. An "=" where a name should begin is the first
+        // character of the name: <a =x=y> has an attribute called "=x".
+        if (peek() == '=') {
+            attribute_name.push_back('=');
+            advance();
+        }
         while (!eof()) {
             const char a = peek();
             if (is_html_whitespace(a) || a == '/' || a == '>' || a == '=') break;
@@ -287,6 +294,15 @@ void HtmlTokenizer::consume_comment(HtmlToken& token) {
         data.push_back(peek());
         advance();
     }
+    // The page ended inside the comment. Dashes that had begun to close it
+    // ("-", "--" or "--!") are not part of its text: they are added to the
+    // data only once something else follows them.
+    auto ends_with = [&data](std::string_view tail) {
+        return data.size() >= tail.size() && data.compare(data.size() - tail.size(), tail.size(), tail) == 0;
+    };
+    if (ends_with("--!")) data.resize(data.size() - 3);
+    else if (ends_with("--")) data.resize(data.size() - 2);
+    else if (ends_with("-")) data.resize(data.size() - 1);
     token.data = std::move(data);
 }
 
@@ -428,8 +444,10 @@ bool HtmlTokenizer::scan_text_run(HtmlToken& token) {
     const bool decode_entities = (m_content_model == ContentModel::Rcdata);
 
     while (!eof()) {
-        // An appropriate end tag ends the raw text run.
-        if (peek() == '<' && peek(1) == '/') {
+        // An appropriate end tag ends the raw text run. There is none when
+        // no start tag opened the run (the content of a fragment whose
+        // context is <textarea>, <title>, <style> and the like).
+        if (!m_text_tag.empty() && peek() == '<' && peek(1) == '/') {
             const std::size_t after_slash = m_cursor + 2;
             bool matches = after_slash + m_text_tag.size() <= m_input.size();
             if (matches) {

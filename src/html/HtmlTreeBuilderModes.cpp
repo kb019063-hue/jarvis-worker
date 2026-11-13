@@ -78,6 +78,7 @@ void HtmlTreeBuilder::process_initial(const HtmlToken& token) {
             doctype.name = token.name;
             doctype.public_id = token.public_id;
             doctype.system_id = token.system_id;
+            doctype.preceding_children = m_document->children().size();
             m_document->set_doctype(doctype);
             m_document->set_quirks_mode(quirks_mode_for(doctype, token.force_quirks));
             m_mode = Mode::BeforeHtml;
@@ -188,10 +189,14 @@ void HtmlTreeBuilder::process_in_head(const HtmlToken& token) {
         case HtmlTokenType::StartTag: {
             const std::string& name = token.name;
             if (name == "html") { send_to_in_body(token); return; }
+            // Void elements: inserted and closed at once. Written with a
+            // slash (<meta ... />) or without, it is the same element and
+            // nothing else is closed. The slash used to close the parent as
+            // well, here and for every other void element: <p>a<br/>b had
+            // the "b" outside the paragraph.
             if (name == "base" || name == "basefont" || name == "bgsound" || name == "link" || name == "meta") {
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 return;
             }
             if (name == "title") {
@@ -227,6 +232,9 @@ void HtmlTreeBuilder::process_in_head(const HtmlToken& token) {
                 m_template_modes.push_back(Mode::InTemplate);
                 return;
             }
+            // A second <head> is ignored, and the head stays open: the
+            // newline after it in <head><head>\n is in the head.
+            if (name == "head") return;
             break;
         }
         case HtmlTokenType::EndTag:
@@ -341,10 +349,14 @@ void HtmlTreeBuilder::process_after_head(const HtmlToken& token) {
             break;
     }
 
+    // A body nobody wrote. Whatever came before it was in the head, and
+    // nothing in the head stands in the way of a <frameset>: a <template>
+    // there has set the flag to "not ok", and this sets it back.
     HtmlToken body_token;
     body_token.type = HtmlTokenType::StartTag;
     body_token.name = "body";
     insert_html_element(body_token);
+    m_frameset_ok = true;
     m_mode = Mode::InBody;
     process_token(token);
 }
@@ -417,7 +429,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             if (name == "body") {
                 if (m_open_elements.size() < 2) return;
                 auto body = m_open_elements[1];
-                if (body->tag_name() != "body") return;
+                if (html_name(body) != "body") return;
                 if (element_index_in_stack("template") >= 0) return;
                 m_frameset_ok = false;
                 for (const auto& [key, value] : token.attributes) {
@@ -428,7 +440,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
 
             if (name == "frameset") {
                 if (m_open_elements.size() < 2) return;
-                if (m_open_elements[1]->tag_name() != "body") return;
+                if (html_name(m_open_elements[1]) != "body") return;
                 if (!m_frameset_ok) return;
                 auto body = m_open_elements[1];
                 if (auto parent = body->parent()) parent->remove_child(body);
@@ -453,7 +465,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             if (is_heading(name)) {
                 if (has_element_in_scope("p", Scope::Button)) close_p_element();
                 if (auto current = current_node()) {
-                    if (is_heading(current->tag_name())) pop_current_node();
+                    if (is_heading(html_name(current))) pop_current_node();
                 }
                 insert_html_element(token);
                 return;
@@ -468,7 +480,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             }
 
             if (name == "form") {
-                const bool in_template = element_index_in_stack("template") >= 0;
+                const bool in_template = parsing_template_contents();
                 if (m_form_element && !in_template) return;
                 if (has_element_in_scope("p", Scope::Button)) close_p_element();
                 auto form = insert_html_element(token);
@@ -577,7 +589,6 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 reconstruct_formatting_elements();
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 m_frameset_ok = false;
                 return;
             }
@@ -586,7 +597,6 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 reconstruct_formatting_elements();
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 std::string type = token.attributes.empty() ? "" : "";
                 for (const auto& [key, value] : token.attributes) {
                     if (key == "type") {
@@ -601,7 +611,6 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             if (name == "param" || name == "source" || name == "track") {
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 return;
             }
 
@@ -609,7 +618,6 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 if (has_element_in_scope("p", Scope::Button)) close_p_element();
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 m_frameset_ok = false;
                 return;
             }
@@ -651,12 +659,12 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
-            // "in body" defers <noscript> to the "in head" rules when
-            // scripting is enabled, where it becomes raw text.
+            // With scripting enabled a <noscript> is raw text, like
+            // <noembed>. Neither says anything about a <frameset> that may
+            // follow: <noscript></noscript><frameset> is a frameset page.
             if (name == "noscript" && m_scripting) {
                 insert_html_element(token);
                 switch_to_text_mode(name, ContentModel::Rawtext);
-                m_frameset_ok = false;
                 return;
             }
 
@@ -673,7 +681,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
 
             if (name == "optgroup" || name == "option") {
                 if (auto current = current_node()) {
-                    if (current->tag_name() == "option") pop_current_node();
+                    if (html_name(current) == "option") pop_current_node();
                 }
                 reconstruct_formatting_elements();
                 insert_html_element(token);
@@ -740,13 +748,11 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
-            if (is_block_container(name) && name != "p") {
-                if (is_heading(name)) {
-                    if (!has_element_in_scope_where({"h1", "h2", "h3", "h4", "h5", "h6"}, Scope::Default)) return;
-                    generate_implied_end_tags();
-                    pop_until_one_of({"h1", "h2", "h3", "h4", "h5", "h6"});
-                    return;
-                }
+            // The end tags that close their element whatever is still open
+            // inside it. </button> is one of them (and so are </pre> and
+            // </listing>, above): <button><p>a</button>x has the "x" after
+            // the button, not in the paragraph.
+            if ((is_block_container(name) && name != "p") || name == "button") {
                 if (!has_element_in_scope(name)) return;
                 generate_implied_end_tags();
                 pop_until_tag(name);
@@ -761,7 +767,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             }
 
             if (name == "form") {
-                const bool in_template = element_index_in_stack("template") >= 0;
+                const bool in_template = parsing_template_contents();
                 if (!in_template) {
                     auto node = m_form_element;
                     m_form_element = nullptr;
@@ -803,19 +809,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
-            if (is_formatting(name) && name != "nobr") {
-                if (!adoption_agency(token)) {
-                    // "Any other end tag"
-                    const int closed = open_element_closed_by_end_tag(name);
-                    if (closed >= 0) {
-                        generate_implied_end_tags(name);
-                        resize_open_elements(static_cast<std::size_t>(closed));
-                    }
-                }
-                return;
-            }
-
-            if (name == "nobr") {
+            if (is_formatting(name)) {
                 adoption_agency(token);
                 return;
             }
@@ -839,12 +833,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
                 return;
             }
 
-            // Any other end tag.
-            const int closed = open_element_closed_by_end_tag(name);
-            if (closed >= 0) {
-                generate_implied_end_tags(name);
-                resize_open_elements(static_cast<std::size_t>(closed));
-            }
+            any_other_end_tag(name);
             return;
         }
     }
@@ -857,14 +846,19 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
 void HtmlTreeBuilder::process_in_table(const HtmlToken& token) {
     switch (token.type) {
         case HtmlTokenType::Character: {
-            auto current = current_node();
-            if (current && (current->tag_name() == "table" || current->tag_name() == "tbody" ||
-                            current->tag_name() == "tfoot" || current->tag_name() == "thead" ||
-                            current->tag_name() == "tr")) {
+            // Text directly in a table (or in a row group, a row, or a
+            // template in one of these modes) is collected first and placed
+            // when the next tag arrives. Text in anything else that is open
+            // here, such as a <div> that was foster-parented, is ordinary
+            // text and takes the "in body" rules below, which open the
+            // active formatting elements again before it.
+            const std::string& current = html_name(current_node());
+            if (current == "table" || current == "tbody" || current == "template" ||
+                current == "tfoot" || current == "thead" || current == "tr") {
                 m_pending_table_text.clear();
-                m_pending_table_text.push_back(token.data[0]);
                 m_table_text_return_mode = m_mode;
                 m_mode = Mode::InTableText;
+                process_in_table_text(token);
                 return;
             }
             break;
@@ -937,13 +931,17 @@ void HtmlTreeBuilder::process_in_table(const HtmlToken& token) {
                 if (type == "hidden") {
                     insert_html_element(token);
                     pop_current_node();
-                    acknowledge_self_closing(token);
                     return;
                 }
             }
             if (name == "form") {
-                if (element_index_in_stack("template") >= 0 || m_form_element) return;
-                m_form_element = insert_html_element(token);
+                // Ignored when a form is already open, except in the
+                // content of a template, which has no form pointer: there
+                // every <form> in a table is kept.
+                const bool in_template = parsing_template_contents();
+                if (m_form_element && !in_template) return;
+                auto form = insert_html_element(token);
+                if (!in_template) m_form_element = form;
                 pop_current_node();
                 return;
             }
@@ -977,7 +975,11 @@ void HtmlTreeBuilder::process_in_table(const HtmlToken& token) {
 
 void HtmlTreeBuilder::process_in_table_text(const HtmlToken& token) {
     if (token.type == HtmlTokenType::Character) {
-        m_pending_table_text.append(token.data);
+        // U+0000 is dropped here, before the text is looked at: spaces
+        // around one are still only spaces, and stay in the table.
+        for (char c : token.data) {
+            if (c != '\0') m_pending_table_text.push_back(c);
+        }
         return;
     }
 
@@ -1055,14 +1057,13 @@ void HtmlTreeBuilder::process_in_column_group(const HtmlToken& token) {
             if (token.name == "col") {
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 return;
             }
             if (token.name == "template") { send_to_in_head(token); return; }
             break;
         case HtmlTokenType::EndTag:
             if (token.name == "colgroup") {
-                if (current_node() && current_node()->tag_name() == "colgroup") {
+                if (current_node() && html_name(current_node()) == "colgroup") {
                     pop_current_node();
                     m_mode = Mode::InTable;
                 }
@@ -1076,7 +1077,7 @@ void HtmlTreeBuilder::process_in_column_group(const HtmlToken& token) {
             return;
     }
 
-    if (current_node() && current_node()->tag_name() != "colgroup") return;
+    if (current_node() && html_name(current_node()) != "colgroup") return;
     pop_current_node();
     m_mode = Mode::InTable;
     process_token(token);
@@ -1254,22 +1255,21 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
             const std::string& name = token.name;
             if (name == "html") { send_to_in_body(token); return; }
             if (name == "option") {
-                if (current_node() && current_node()->tag_name() == "option") pop_current_node();
+                if (current_node() && html_name(current_node()) == "option") pop_current_node();
                 insert_html_element(token);
                 return;
             }
             if (name == "optgroup") {
-                if (current_node() && current_node()->tag_name() == "option") pop_current_node();
-                if (current_node() && current_node()->tag_name() == "optgroup") pop_current_node();
+                if (current_node() && html_name(current_node()) == "option") pop_current_node();
+                if (current_node() && html_name(current_node()) == "optgroup") pop_current_node();
                 insert_html_element(token);
                 return;
             }
             if (name == "hr") {
-                if (current_node() && current_node()->tag_name() == "option") pop_current_node();
-                if (current_node() && current_node()->tag_name() == "optgroup") pop_current_node();
+                if (current_node() && html_name(current_node()) == "option") pop_current_node();
+                if (current_node() && html_name(current_node()) == "optgroup") pop_current_node();
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 return;
             }
             if (name == "select") {
@@ -1295,15 +1295,15 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
         case HtmlTokenType::EndTag: {
             const std::string& name = token.name;
             if (name == "optgroup") {
-                if (current_node() && current_node()->tag_name() == "option" &&
-                    m_open_elements.size() > 1 && m_open_elements[m_open_elements.size() - 2]->tag_name() == "optgroup") {
+                if (current_node() && html_name(current_node()) == "option" &&
+                    m_open_elements.size() > 1 && html_name(m_open_elements[m_open_elements.size() - 2]) == "optgroup") {
                     pop_current_node();
                 }
-                if (current_node() && current_node()->tag_name() == "optgroup") pop_current_node();
+                if (current_node() && html_name(current_node()) == "optgroup") pop_current_node();
                 return;
             }
             if (name == "option") {
-                if (current_node() && current_node()->tag_name() == "option") pop_current_node();
+                if (current_node() && html_name(current_node()) == "option") pop_current_node();
                 return;
             }
             if (name == "select") {
@@ -1357,36 +1357,26 @@ void HtmlTreeBuilder::process_in_template(const HtmlToken& token) {
                 return;
             }
             if (name == "caption" || name == "colgroup" || name == "tbody" || name == "tfoot" || name == "thead") {
-                m_template_modes.pop_back();
-                m_template_modes.push_back(Mode::InTable);
-                m_mode = Mode::InTable;
+                replace_template_mode(Mode::InTable);
                 process_token(token);
                 return;
             }
             if (name == "col") {
-                m_template_modes.pop_back();
-                m_template_modes.push_back(Mode::InColumnGroup);
-                m_mode = Mode::InColumnGroup;
+                replace_template_mode(Mode::InColumnGroup);
                 process_token(token);
                 return;
             }
             if (name == "tr") {
-                m_template_modes.pop_back();
-                m_template_modes.push_back(Mode::InTableBody);
-                m_mode = Mode::InTableBody;
+                replace_template_mode(Mode::InTableBody);
                 process_token(token);
                 return;
             }
             if (name == "td" || name == "th") {
-                m_template_modes.pop_back();
-                m_template_modes.push_back(Mode::InRow);
-                m_mode = Mode::InRow;
+                replace_template_mode(Mode::InRow);
                 process_token(token);
                 return;
             }
-            m_template_modes.pop_back();
-            m_template_modes.push_back(Mode::InBody);
-            m_mode = Mode::InBody;
+            replace_template_mode(Mode::InBody);
             process_token(token);
             return;
         }
@@ -1459,16 +1449,15 @@ void HtmlTreeBuilder::process_in_frameset(const HtmlToken& token) {
             if (token.name == "frame") {
                 insert_html_element(token);
                 pop_current_node();
-                acknowledge_self_closing(token);
                 return;
             }
             if (token.name == "noframes") { process_in_head(token); return; }
             return;
         case HtmlTokenType::EndTag:
             if (token.name == "frameset") {
-                if (current_node() && current_node()->tag_name() == "html") return;
+                if (current_node() && html_name(current_node()) == "html") return;
                 pop_current_node();
-                if (!m_fragment_case && current_node() && current_node()->tag_name() != "frameset") {
+                if (!m_fragment_case && current_node() && html_name(current_node()) != "frameset") {
                     m_mode = Mode::AfterFrameset;
                 }
                 return;
@@ -1607,23 +1596,24 @@ void HtmlTreeBuilder::process_foreign_content(const HtmlToken& token) {
                 process_token_in_mode(m_mode, token);
                 return;
             }
-            auto node = current_node();
-            if (node && node->tag_name() != token.name) {
-                // Parse error: fall through to the search loop below.
-            }
-            for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-                auto element = m_open_elements[static_cast<std::size_t>(i)];
-                if (element->element_namespace() == ElementNamespace::HTML) {
-                    process_token_in_mode(m_mode, token);
-                    return;
-                }
+            // "Any other end tag": down the stack through the SVG and MathML
+            // elements, closing the first whose name is the tag's, whatever
+            // the case it is written in. At the first HTML element the walk
+            // ends and the tag is an HTML end tag, for the rules of the
+            // insertion mode, which match it against HTML elements only.
+            for (std::size_t i = m_open_elements.size(); i-- > 0;) {
+                if (i == 0) return;     // only <html> left: a fragment in an SVG or MathML element
+                const auto& element = m_open_elements[i];
                 std::string lowered = element->tag_name();
-                std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+                std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 if (lowered == token.name) {
-                    resize_open_elements(static_cast<std::size_t>(i));
+                    resize_open_elements(i);
                     return;
                 }
+                if (m_open_elements[i - 1]->element_namespace() == ElementNamespace::HTML) break;
             }
+            process_token_in_mode(m_mode, token);
             return;
         }
         case HtmlTokenType::EndOfFile:

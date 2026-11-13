@@ -51,15 +51,18 @@ void print_help(const char* prog) {
     std::cout << "  --help, -h             Show this help message\n";
 }
 
-std::string read_file(const std::string& path) {
+/// False when the file cannot be opened. An empty file is a file: it is the
+/// page with nothing in it, and it has a tree like any other.
+bool read_file(const std::string& path, std::string& content) {
     std::ifstream in(path);
     if (!in) {
         std::cerr << "Error: Could not open file '" << path << "'\n";
-        return "";
+        return false;
     }
     std::stringstream buffer;
     buffer << in.rdbuf();
-    return buffer.str();
+    content = buffer.str();
+    return true;
 }
 
 void run_repl() {
@@ -205,8 +208,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string html_content = read_file(input_file);
-    if (html_content.size() == 0 && input_file != "/dev/stdin") return 1;
+    std::string html_content;
+    if (!read_file(input_file, html_content)) return 1;
 
     // 1. HTML Parsing
     if (dump_dom_webplatform) {

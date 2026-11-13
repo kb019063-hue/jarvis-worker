@@ -27,6 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Build
         run: make -j"$(nproc)"
       - name: Tree-construction scoreboard
@@ -39,10 +42,22 @@ jobs:
         # started at column 1, which is not valid YAML. The whole workflow file
         # failed to parse, so every run reported "workflow file issue" and no job
         # ever executed. Keep it as a block scalar.
+        #
+        # The floor is the number that pass today: the 11 that do not are all
+        # about <select>, and a case that stops passing is a regression.
         run: |
           set -euo pipefail
           python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
-          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['rate'] >= 98.0 else 1)"
+          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['passed'] >= 1781 else 1)"
+      - name: Random pages against parse5
+        # The corpus is the inputs somebody wrote. This is 6,000 pages and
+        # fragments nobody wrote, a few dozen misnested tags each, parsed here
+        # and by parse5: no tree may differ. It is what found that <br/> closed
+        # the paragraph it stood in, which no corpus case writes. parse5 8.1.1
+        # is fetched from the npm registry into build/parse5 and compared in a
+        # copy with nine rules corrected to the standard's
+        # (tools/conformance/diff_trees.py says which and why).
+        run: make diff-trees
       - uses: actions/upload-artifact@v4
         with:
           name: conformance-report

@@ -42,7 +42,8 @@ The rest are documented with enough detail to act on.
 | 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
-| 29 | About one random page in 115 gets another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | Open |
+| 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
+| 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
 
 ---
 
@@ -1267,6 +1268,7 @@ far as the stack goes (finding 24, point 3).
 | 300,000 spaces inside an attribute selector | 6.3 s |
 | one element with 50,000 attributes | 4.5 s |
 | 300,000 spaces inside `repeat(`, `minmax(` or `translate(` | 2.1 s each |
+| `at.innerHTML = "<div><div><form></form></div></div>"`, then the same on the inner `<div>`, 5,000 levels down (new in Phase 26) | 1.0 s |
 
 The floats are the one that matters. A float that does not fit beside the
 ones before it is moved down a quarter of its own height at a time, starting
@@ -1284,7 +1286,9 @@ Removing the first child moves every other child up, because children are a
 vector. The spaces are trimmed one character at a time from the front of a
 string, in about twenty places in the CSS code. The tokenizer drops a
 duplicate attribute by comparing each one with every attribute already on
-the tag.
+the tag. Markup assigned to `innerHTML` that holds a `<form>` has to know
+whether a form is above the element, which is a walk to the root at every
+assignment (finding 30); markup without one does not make the walk.
 
 **Memory of inline content.** Every box, line item and line fragment carries
 its own copy of a 920-byte computed style (finding 12). One paragraph of
@@ -1293,36 +1297,64 @@ deep pages allow, so those two pages run at 100,000.
 
 ---
 
-## 29. What the comparison with another parser found
+## 29. ✅ What the comparison with another parser found
 
-The corpus is 1,792 inputs somebody wrote, and Litebird passes 1,771. The
-work on finding 24 needed to know more than that: that a rewritten stack of
-open elements still builds the same trees for pages nobody wrote. So
+The corpus is 1,792 inputs somebody wrote. The work on finding 24 needed to
+know more than a corpus score: that a rewritten stack of open elements still
+builds the same trees for pages nobody wrote. So
 `tools/conformance/diff_trees.py` makes such pages (3 to 39 start tags, end
 tags, comments and pieces of text in random order, from the elements the
 tree builder has rules of its own for, which leaves most pages misnested)
 and compares the tree Litebird builds with the one parse5 builds. parse5 is
-an independent parser written from the same standard. Of the 1,573 corpus
-cases that are whole documents with scripting on, it gives the expected tree
-for 1,548, and the other 25 all have a `<select>` in them, whose parsing the
-standard changed and parse5 8.1 has not, so the pages leave `<select>` out.
+an independent parser written from the same standard. On the corpus it gives
+the expected tree for 1,764 of the 1,792 cases, and the other 28 all have a
+`<select>` in them, whose parsing the standard changed and parse5 8.1 has
+not, so the pages leave `<select>` out.
 
-Of 6,000 pages (four seeds), **5,948 get the same tree and 52 do not**. On
-`main` it was 5,919 and 81; no page that was equal there differs now. `make
-diff-trees` runs the first 1,500, of which 11 differ, and fails if more do.
-`--reduce` cuts each page down to the tokens that still make a difference.
-The 52 come down to five things, all of them on `main` as well, **none of
-them fixed here**:
+Of 6,000 pages (four seeds), 5,948 got the same tree and 52 did not. The 52
+came down to five things. Phase 25 found them and left them alone; **Phase
+26 fixed all five**, and the same 6,000 pages now get the tree the standard
+asks for (finding 30 says what that is measured against).
 
-| Reduced page | The standard, and parse5 | Litebird | Pages |
-| :--- | :--- | :--- | ---: |
-| `<a><svg></a>` | the `<svg>` stays inside the `<a>`, and both are closed | the `<svg>` is moved out beside the `<a>` and gets an `<a>` of its own | 26, with the next two rows |
-| `<svg><title><em></title><tr>` | `</title>` is ignored: with an HTML element open it may only close an HTML `<title>`. The `<tr>` is ignored as well | the SVG `<title>` is closed, and the `<tr>` becomes an SVG element | |
-| `<math><mtext><i></math><mtext>` | `</math>` is ignored, the second `<mtext>` goes inside the `<i>` | the `<math>` is closed | |
-| `<button><div></button>x` | the button is closed, the "x" follows it | the "x" is inside the `<div>` | 17 |
-| `<i><i><div><i><i></div>x` | two `<i>` are opened again around the "x" | one | 4 |
-| `<table><em><table><div>`, then a newline | the newline opens the `<em>` again, inside the `<div>` | the newline is in the `<div>` with no `<em>` | 3 |
-| `<h2><noscript></noscript><frameset>` | the `<frameset>` replaces the body | the `<frameset>` is ignored | 2 |
+| Reduced page | The standard, and parse5 | Litebird before |
+| :--- | :--- | :--- |
+| `<a><svg></a>` | the `<svg>` stays inside the `<a>`, and both are closed | the `<svg>` was moved out beside the `<a>` and got an `<a>` of its own |
+| `<svg><title><em></title><tr>` | `</title>` is ignored: with an HTML element open it may only close an HTML `<title>`. The `<tr>` is ignored as well | the SVG `<title>` was closed, and the `<tr>` became an SVG element |
+| `<math><mtext><i></math><mtext>` | `</math>` is ignored, the second `<mtext>` goes inside the `<i>` | the `<math>` was closed |
+| `<button><div></button>x` | the button is closed, the "x" follows it | the "x" was inside the `<div>` |
+| `<i><i><div><i><i></div>x` | two `<i>` are opened again around the "x" | one |
+| `<table><em><table><div>`, then a newline | the newline opens the `<em>` again, inside the `<div>` | the newline was in the `<div>` with no `<em>` |
+| `<h2><noscript></noscript><frameset>` | the `<frameset>` replaces the body | the `<frameset>` was ignored |
+
+What each one was:
+
+1. **The first three rows are one family**: an end tag reached an element of
+   another namespace than the rules handling it expect. Two things were
+   wrong. Every SVG and MathML element counted as "special", where the
+   standard names nine (`foreignObject`, `desc`, `title`, `mi`, `mo`, `mn`,
+   `ms`, `mtext`, `annotation-xml`), so an `<svg>` stopped the adoption
+   agency algorithm like a `<div>` does. And the rules matched tag names
+   without asking for the namespace, so `</title>` closed an SVG `<title>`.
+   Now the special category goes by namespace and name, and every rule that
+   names an HTML element asks `html_name()`, which is empty for an element
+   of another namespace.
+2. **`</button>`** belongs to the end tags that close their element whatever
+   is still open inside it, with `</div>` and `</ul>`. It was missing from
+   that list and fell through to "any other end tag", which gives up at the
+   first special element. `<button><p>a</button>x` put the "x" into the
+   paragraph inside the button.
+3. **The fourth identical formatting element.** The list of active
+   formatting elements keeps three of a kind, and a fourth pushes out the
+   earliest of them ("Noah's Ark"). `push_formatting_element()` searched from
+   the end and removed the latest.
+4. **Text in a table.** Text directly in a table is collected first, to see
+   whether it is only whitespace. That rule was applied whenever the
+   insertion mode was "in table". It applies when the current node is a
+   table, a row group, a row or a template; here the current node is the
+   `<div>`, so the newline is ordinary text and the `<em>` is opened again
+   around it.
+5. **`<noscript>`** set the frameset-ok flag to "not ok". With scripting
+   enabled the standard leaves the flag alone.
 
 Three of the five were in the corpus all along, as one failing case each
 among the 21: `<a><svg><tr><input></a>` in `adoption01.dat`,
@@ -1331,44 +1363,169 @@ among the 21: `<a><svg><tr><input></a>` in `adoption01.dat`,
 bug exists. The random pages say how often a page meets it, and `--reduce`
 turns it into a few tags to read the standard against.
 
-The 17 and the 4 were measured, by making the two changes described below
-and counting the pages that became equal. The other counts sort the reduced
-pages by eye, and a reduced page is not always the difference its page began
-with, so they say which of these is common and no more than that.
+**How to see them.** `python3 tools/conformance/diff_trees.py --binary OLD
+--reduce` with a binary built from before Phase 26, and `--seed 1`, `2` or
+`3` for the other pages. It needs Node.js, and the first time npm and the
+network to install parse5 into `build/parse5`.
 
-The first three rows are one family: an end tag reaches an element of
-another namespace than the rules it is being processed by expect. The
-standard matches an end tag against HTML elements only when it is handled by
-the HTML rules, and treats an `<svg>` or a `<math>` as an ordinary element
-for the adoption agency (of the SVG and MathML elements only
-`foreignObject`, `desc`, `title`, `mi`, `mo`, `mn`, `ms`, `mtext` and
-`annotation-xml` are special).
+---
 
-`</button>` is the one a page is most likely to meet: `<button><p>a</button>x`
-puts the "x" into the paragraph inside the button. The cause is one word. In
-the "in body" rules `</button>` belongs to the end tags that close their
-element whatever is still open inside it, with `</div>` and `</ul>`.
-`is_block_container()` in `src/html/HtmlTreeBuilderModes.cpp` is the list of
-those and `button` is not in it, because the same function serves the start
-tags, where `button` has a rule of its own. So `</button>` falls through to
-"any other end tag", which gives up at the first special element. With
-`button` added there the `tests20.dat` case passes (1772 of 1792) and 17 of
-the 52 pages become equal, none the other way.
+## 30. ✅ What the wider comparison found
 
-The fourth identical formatting element is the "Noah's Ark" rule, and it is
-one line as well. The list of active formatting elements keeps three of a
-kind, and when a fourth arrives the standard removes the earliest of the
-three. `push_formatting_element()` in `src/html/HtmlTreeBuilder.cpp` searches
-the list from its end and removes the latest. With the earliest removed
-instead, and the change above, the `tests23.dat` case passes too (1773) and
-21 of the 52 pages are equal, none the other way. The last two rows were not
-looked into.
+The pages of finding 29 were tags, text and comments. With those five bugs
+fixed, the pages were given the rest of what a tree builder reads
+(`--extras`: a start tag that closes itself, `type=hidden` and the other
+attributes that change a rule, `</br>` and `</p>`, CDATA, U+0000, a doctype
+out of place). They were also parsed as fragments, which is what `innerHTML`
+does, in 45 kinds of element (`--fragments`), and with scripting disabled
+(`--no-scripting`).
 
-Both changes were tried in a copy and are not in this phase: its checks were
-all run on the tree builder as it stands, and the scoreboard should move
-once, with the rest of this list.
+| 1,500 pages of each kind | Trees the standard asks for, before | Now |
+| :--- | ---: | ---: |
+| Tags, text and comments (finding 29) | 1,489 | 1,500 |
+| With the extras | 1,371 | 1,500 |
+| With the extras, as fragments | 1,371 | 1,500 |
+| With the extras, as fragments, scripting disabled | 1,361 | 1,500 |
 
-**How to see them.** `python3 tools/conformance/diff_trees.py --reduce`, with
-`--seed 1`, `2` or `3` for the other pages. It needs Node.js, and the first
-time npm and the network to install parse5 into `build/parse5`, which is why
-it is not a CI job.
+So 408 of 6,000 pages were wrong, where the plain pages alone had said 11 of
+1,500. Most of the difference is the first four rows of the next table,
+which are one bug.
+
+### What was wrong
+
+| Page | The standard | Litebird before |
+| :--- | :--- | :--- |
+| `<p>a<br/>b</p>c` | "a", the break and "b" in the paragraph, "c" after it | the "b" was outside the paragraph, followed by an empty `<p>` |
+| `<head><meta charset="utf-8"/><link rel="x"/><title>t</title></head><body>b` | a head with three elements, and a body | the head ended after the `<meta>`, and the `<link>`, the `<title>` and the `<body>` were outside `<html>` |
+| `<table><col/><tr><td>x` | a column and a row with a cell | the row and the cell were lost |
+| `<ul><li><input type="text" /> label</li></ul>` | the label in the list item | the label after the list item |
+| `<nobr><table><marquee></table><nobr>x` | the second `<nobr>` beside the first | inside the first |
+| `<template><table><form></table></template>` | the form is kept: there is no form pointer inside a template | dropped |
+| `<head><template></template></head><p><frameset>` | a frameset page: the body made for the `<p>` sets the frameset-ok flag back to "ok" | the `<frameset>` was ignored |
+| `<head><head>`, then a newline | the second `<head>` is ignored and the newline is in the head | the second `<head>` closed the head |
+| `<table>`, a space, U+0000, a space, `<tr>` | U+0000 is dropped and the spaces stay in the table | the spaces were moved out in front of the table |
+| `<span><svg><wbr></span>x` | the "x" after the `<span>`: an SVG `<wbr>` is an ordinary element | the "x" inside the SVG `<wbr>` |
+| `<table><svg><template><desc><tr>` | the row goes into the table | into the SVG `<template>` |
+| `&#X` | the text `&#X` | `&#x` |
+| `<!--x--` at the end of the page | a comment "x" | a comment "x--" |
+| `<a =>` | an `<a>` with an attribute named `=` | no attribute |
+| `</script>` in a fragment for a `<script>`, `</textarea>` in one for a `<textarea>` | text: no start tag was seen, so no end tag ends the text | the end of the text; what followed was parsed as markup |
+| `<![CDATA[x]]>` at the top of a fragment for an `<svg>` | the text "x" | a comment |
+| Any fragment for a `<template>` | parsed in the "in template" mode | the process ended with `SIGSEGV` |
+
+**A void element written with a slash closed its parent.** `<br/>`,
+`<img ... />` and `<meta ... />` are how XHTML wrote an element that has no
+end tag, and a large part of the web still writes them so. In HTML the slash
+means nothing. The tree builder "acknowledged the self-closing flag" by
+popping the current node, but a void element had been popped already, so the
+element around it went: the paragraph, the list item, the head. Of the 408
+wrong pages, 292 come right when this one line is changed in the old tree
+builder and nothing else is. The corpus has no case for it, because no case
+there writes a void element with a slash: the same change leaves the old
+score at 1,771 of 1,792. `examples/nextgen_showcase.html` in
+this repository has an `<input ... />` and was parsed wrongly. And Litebird's
+own `innerHTML` writes `<br />`, so markup read from one element and
+assigned to another came out different from what went in.
+
+**A fragment for a `<template>`** read the last entry of an empty list of
+template insertion modes. This could be reached from the command line
+(`--fragment-context=template`) and through
+`HtmlParser::parse_fragment_with_context`, not from a page, for the reason
+in the next paragraph.
+
+**`innerHTML` did not use any of it.** The fragment parser takes the element
+the markup is for, and the corpus runner passes one, which is how the 192
+fragment cases of the corpus are scored. `Element::set_inner_html`, which is
+what a script's `element.innerHTML = ...` calls, passed `<body>` for every
+element. So the cases passed and a page still got:
+
+| Script | Before | Now |
+| :--- | :--- | :--- |
+| `table.innerHTML = "<tr><td>1</td><td>2</td></tr>"` | the text "12" in the table, no row | a `<tbody>` with a row of two cells |
+| `tr.innerHTML = "<td>x<th>y"` | the text "xy" | two cells |
+| `svg.innerHTML = '<circle r="4"/><g>...</g>'` | HTML elements, and the `<g>` inside the `<circle>` | SVG elements side by side |
+| `style.innerHTML = "a > b { } /* <b> */"` | two nodes, the `<b>` an element | one text node |
+| `div.innerHTML = "<form>..."` with the `<div>` in a form | a form inside a form | the inner `<form>` is ignored |
+
+It now parses for the element it is called on (`HtmlParser::parse_inner_html`):
+its name and namespace, the encoding of a MathML `annotation-xml`, and
+whether it stands inside a form.
+
+That last one cost something the first time. Whether a form is above the
+element is a walk to the root, and made at every assignment it turned a
+script that nests 30,000 levels through `innerHTML` from 0.2 s into 44 s.
+`make deep` has that page and it still passed, at 48 of the 60 seconds a run
+may take; the line that names the slowest run is what showed it. The walk is
+now made only when the markup has the letters "form" in it, since only a
+`<form>` or `</form>` asks, and a unit test bounds the loop.
+
+The rest are smaller. An SVG element that has the name of an HTML one (`rt`,
+`template`, `td`, `option`, `wbr`) took the HTML element's rules: implied end
+tags, the place a table's rows go, select scope. A second `<nobr>` behind a
+marker went through an adoption agency algorithm that returned before doing
+what "any other end tag" does. The doctype was printed before the comments
+that precede it, which is a fault of the tree dump and not of the tree. An
+empty file exited with status 1 and no tree.
+
+### A reference that is itself behind
+
+After these fixes 49 of the 6,000 pages still get another tree than parse5
+builds. Each of them is one of nine places where parse5 8.1 does not do what
+the standard says:
+
+| Rule | The standard | parse5 8.1 |
+| :--- | :--- | :--- |
+| A `<form>` in the contents of a `<template>` | kept; no form pointer there | ignored in a table, and never nested (the rule until September 2026) |
+| The body made for the first thing after the head | sets frameset-ok to "ok" | leaves it |
+| CDATA where the current node is an SVG `<title>`, `<desc>`, `<foreignObject>` or a MathML `<mi>` and the like | text | a comment |
+| `<search>` | a special element | an ordinary one |
+| Table scope | ends at a `<template>` too | at `<table>` and `<html>` |
+| `</tbody>`, `</thead>`, `</tfoot>` in a row | ignored unless that element is open | closes the row if that element or a `<tr>` is open |
+| Whitespace directly in a `<template>` that is in a table mode | collected like text in a table | ordinary text |
+| A run of U+0000 in SVG or MathML | one U+FFFD each | one U+FFFD for the run |
+| A fragment for a `<noscript>`, scripting disabled | markup | text |
+
+A ceiling of "49 known differences" would have hidden a new bug behind an
+old excuse, so `diff_trees.py --corrected` compares with a copy of parse5 in
+which these nine rules are changed to the standard's (13 edits of a few
+lines, listed in the script and applied to a copy in `build/parse5/corrected`
+when it runs). Against that copy all 6,000 trees are equal, and `make
+diff-trees` fails if one is not.
+
+What vouches for the corrections, since a reference corrected by the party
+being checked is worth less than one that was not:
+
+- For the first four rows the web-platform-tests copy of the corpus has
+  cases, 15 of them. parse5 as published fails them and the corrected copy
+  passes them; on the 1,792 cases vendored here the two give the same trees.
+- For table scope and for `</tbody>` in a row, Blink's source does what
+  the standard says. For U+0000 in SVG and for the `<noscript>` fragment
+  there is the standard's text and no second witness.
+- For the whitespace in a template, Blink does what parse5 does, so this is
+  the one place where Litebird follows the text against two
+  implementations. A unit test pins it, and the difference is a text node's
+  position inside a template.
+- A wider run: 180,000 pages from five lists of elements (the default one,
+  every special element, tables, formatting elements, SVG and MathML), with
+  and without the extras, as documents and as fragments, with scripting on
+  and off, three seeds. Against parse5 as published 1,548 of them differ;
+  against the corrected copy none does.
+
+### What the comparison does not reach
+
+- **`<select>`.** The standard changed how its content is parsed, parse5 has
+  the older rules and so does Litebird: the 11 corpus cases that still fail.
+  Two parsers that are both behind cannot check each other.
+- **The corpus has moved.** html5lib-tests handed its tree-construction
+  tests to web-platform-tests in June 2026, and the vendored copy is the
+  last one from before. The web-platform-tests copy has 1,973 cases;
+  Litebird passes 1,868 of them (1,851 before Phase 26). Of the other 105,
+  88 need processing instructions (`<?x?>` is a node of its own in the
+  standard now and a comment here), 6 need a script to run while the page
+  is being parsed, and 11 are the `<select>` cases. Vendoring that copy is
+  the next step for the scoreboard; the runner does not read its
+  `#description` sections yet.
+- **Reading `innerHTML`.** The markup Litebird writes does not escape `<`
+  and `&` in text, and writes `<br />` where the standard writes `<br>`. So
+  text that holds `<b>` reads back as an element. Parsing is this finding;
+  writing is not fixed.

@@ -711,8 +711,12 @@ std::shared_ptr<Element> Element::query_selector(const std::string& selector) co
 }
 
 void Element::set_inner_html(const std::string& html) {
+    // Parsed as the content of this element, not of a <body>: in a <tr> or
+    // a <table> "<td>x" has to become a cell. In a <body> the <td> is
+    // dropped, and a table filled in this way came out as loose text.
+    auto parsed = HtmlParser::parse_inner_html(*this, html);
     take_children();
-    for (const auto& ch : HtmlParser::parse_fragment(html)) {
+    for (const auto& ch : parsed) {
         append_child(ch);
     }
     mark_needs_layout();

@@ -4,10 +4,16 @@
 //
 //     node parse5_tree.mjs <directory in which parse5 is installed>
 //
-// Reads the path of a page on each line of standard input, writes the tree to
+// Reads one request on each line of standard input, writes the tree to
 // <path>.tree and answers with a line saying "done", so that one process
-// serves any number of pages. A page is parsed as a document with scripting
-// enabled, which is how Litebird parses a file it is given.
+// serves any number of pages. A request is a JSON object:
+//
+//     {"path": "page.html"}                             a document, scripting enabled
+//     {"path": "page.html", "scripting": false}         the same with scripting disabled
+//     {"path": "page.html", "context": "svg title"}     a fragment, as innerHTML of that element
+//
+// The context is written as in the corpus: a tag name, with "svg " or "math "
+// before it for an element of those namespaces.
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -15,10 +21,12 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 const installed = createRequire(path.resolve(process.argv[2], 'package.json'));
-const { parse } = await import(pathToFileURL(installed.resolve('parse5')).href);
+const { parse, parseFragment, defaultTreeAdapter } = await import(pathToFileURL(installed.resolve('parse5')).href);
 
 const HTML = 'http://www.w3.org/1999/xhtml';
-const ELEMENT_PREFIX = { 'http://www.w3.org/2000/svg': 'svg ', 'http://www.w3.org/1998/Math/MathML': 'math ' };
+const SVG = 'http://www.w3.org/2000/svg';
+const MATHML = 'http://www.w3.org/1998/Math/MathML';
+const ELEMENT_PREFIX = { [SVG]: 'svg ', [MATHML]: 'math ' };
 const ATTRIBUTE_PREFIX = {
   'http://www.w3.org/1999/xlink': 'xlink ',
   'http://www.w3.org/XML/1998/namespace': 'xml ',
@@ -46,10 +54,20 @@ function dump(node, depth, lines) {
   for (const child of node.childNodes) dump(child, depth + 1, lines);
 }
 
+function contextElement(name) {
+  if (name.startsWith('svg ')) return defaultTreeAdapter.createElement(name.slice(4), SVG, []);
+  if (name.startsWith('math ')) return defaultTreeAdapter.createElement(name.slice(5), MATHML, []);
+  return defaultTreeAdapter.createElement(name, HTML, []);
+}
+
 for await (const line of readline.createInterface({ input: process.stdin })) {
   if (!line) continue;
+  const request = JSON.parse(line);
+  const source = fs.readFileSync(request.path, 'utf8');
+  const options = { scriptingEnabled: request.scripting !== false };
+  const root = request.context ? parseFragment(contextElement(request.context), source, options) : parse(source, options);
   const lines = [];
-  for (const child of parse(fs.readFileSync(line, 'utf8'), { scriptingEnabled: true }).childNodes) dump(child, 0, lines);
-  fs.writeFileSync(line + '.tree', lines.join('\n') + '\n');
+  for (const child of root.childNodes) dump(child, 0, lines);
+  fs.writeFileSync(request.path + '.tree', lines.length ? lines.join('\n') + '\n' : '');
   process.stdout.write('done\n');
 }

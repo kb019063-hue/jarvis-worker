@@ -5505,6 +5505,361 @@ TEST(html_parser_nesting_limit_holds_for_every_kind_of_element) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 26: the tree builder against pages nobody wrote
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A tree dump as one line: each node followed by its attributes in brackets
+/// and its children in parentheses. "<p class=k>a<br>b" is
+/// html(head body(p[class="k"]("a" br "b"))). An SVG or MathML element is
+/// written svg:name or math:name, the contents of a template as content(...).
+std::string outline(const std::string& dump) {
+    struct Entry {
+        std::size_t depth;
+        std::string label;
+        std::string attributes;
+        bool is_node;
+    };
+    std::vector<Entry> entries;
+    std::size_t at = 0;
+    while (at < dump.size()) {
+        std::size_t end = dump.find('\n', at);
+        if (end == std::string::npos) end = dump.size();
+        const std::string line = dump.substr(at, end - at);
+        at = end + 1;
+        if (line.rfind("| ", 0) != 0) {
+            // Text with a newline in it runs on to the next line of the dump.
+            if (!entries.empty()) entries.back().label += "\n" + line;
+            continue;
+        }
+        std::size_t indent = 2;
+        while (indent < line.size() && line[indent] == ' ') ++indent;
+        std::string label = line.substr(indent);
+        const bool element = !label.empty() && label.front() == '<' && label.back() == '>';
+        const bool node = element || (!label.empty() && label.front() == '"') || label == "content";
+        if (!node) {
+            // An attribute: it belongs to the last node one level up.
+            for (std::size_t i = entries.size(); i-- > 0;) {
+                if (!entries[i].is_node || entries[i].depth + 1 != (indent - 2) / 2) continue;
+                entries[i].attributes += (entries[i].attributes.empty() ? "" : " ") + label;
+                break;
+            }
+            continue;
+        }
+        if (element && label.rfind("<!", 0) != 0) {
+            label = label.substr(1, label.size() - 2);
+            for (char& c : label) {
+                if (c == ' ') c = ':';
+            }
+        }
+        entries.push_back({(indent - 2) / 2, std::move(label), "", true});
+    }
+
+    std::string out;
+    std::vector<std::size_t> open;      // depths of the nodes whose "(" is not closed yet
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const Entry& entry = entries[i];
+        while (!open.empty() && open.back() >= entry.depth) {
+            out += ")";
+            open.pop_back();
+        }
+        if (!out.empty() && out.back() != '(') out += " ";
+        out += entry.label;
+        if (!entry.attributes.empty()) out += "[" + entry.attributes + "]";
+        if (i + 1 < entries.size() && entries[i + 1].depth > entry.depth) {
+            out += "(";
+            open.push_back(entry.depth);
+        }
+    }
+    out.append(open.size(), ')');
+    return out;
+}
+
+std::string outline_of(const std::string& html) {
+    return outline(tree_of(html));
+}
+
+/// The outline of a fragment parsed as the content of `context`, which is
+/// written as in the corpus: "td", "svg title", "math mi".
+std::string fragment_outline(const std::string& html, std::string context, bool scripting = true) {
+    using namespace litebird;
+    ElementNamespace ns = ElementNamespace::HTML;
+    if (context.rfind("svg ", 0) == 0) { ns = ElementNamespace::SVG; context = context.substr(4); }
+    else if (context.rfind("math ", 0) == 0) { ns = ElementNamespace::MathML; context = context.substr(5); }
+    auto fragment = HtmlParser::parse_fragment_with_context(html, context, ns, scripting);
+    return outline(dump_tree_webplatform(*fragment));
+}
+
+} // namespace
+
+TEST(html_parser_void_element_with_a_slash_closes_nothing_else) {
+    // <br/>, <img ... />, <meta ... />: the XHTML way of writing an element
+    // that has no end tag. The slash means nothing in HTML. It used to close
+    // the element's parent as well, so the text after a <br/> was outside the
+    // paragraph, and a <link/> in the head put the rest of the head, and the
+    // body, outside <html>. The corpus has no void element written this way.
+    assert(outline_of("<p>a<br/>b</p>c") == "html(head body(p(\"a\" br \"b\") \"c\"))");
+    assert(outline_of("<div><img src=\"x\"/>text</div>") == "html(head body(div(img[src=\"x\"] \"text\")))");
+    assert(outline_of("<head><meta charset=\"utf-8\"/><link rel=\"x\"/><title>t</title></head><body>b") ==
+           "html(head(meta[charset=\"utf-8\"] link[rel=\"x\"] title(\"t\")) body(\"b\"))");
+    assert(outline_of("<ul><li><input type=\"text\" /> label</li></ul>") ==
+           "html(head body(ul(li(input[type=\"text\"] \" label\"))))");
+    assert(outline_of("<p>a<hr/>b") == "html(head body(p(\"a\") hr \"b\"))");
+    assert(outline_of("<p><wbr/><embed/><area/>x") == "html(head body(p(wbr embed area \"x\")))");
+    assert(outline_of("<object><param name=a />x</object>") == "html(head body(object(param[name=\"a\"] \"x\")))");
+    // The void elements that have rules of their own in the table and
+    // frameset modes.
+    assert(outline_of("<table><col/><tr><td>x") == "html(head body(table(colgroup(col) tbody(tr(td(\"x\"))))))");
+    assert(outline_of("<table><input type=hidden /><tr><td>x") ==
+           "html(head body(table(input[type=\"hidden\"] tbody(tr(td(\"x\"))))))");
+    assert(outline_of("<frameset><frame/></frameset>") == "html(head frameset(frame))");
+
+    // The same page with and without the slashes is the same tree.
+    assert(tree_of("<p>a<br/>b<img/>c<input/>d</p>e") == tree_of("<p>a<br>b<img>c<input>d</p>e"));
+
+    // On an element that is not void the slash is ignored: the <div> stays
+    // open. In SVG and MathML it does close the element.
+    assert(outline_of("<div/>x") == "html(head body(div(\"x\")))");
+    assert(outline_of("<svg><g/>x</svg>y") == "html(head body(svg:svg(svg:g \"x\") \"y\"))");
+}
+
+TEST(html_parser_end_tags_close_html_elements_only) {
+    // </button> closes the button whatever is open inside it, like </div>.
+    assert(outline_of("<button><p>a</button>x") == "html(head body(button(p(\"a\")) \"x\"))");
+    assert(outline_of("<button><div></button>x") == "html(head body(button(div) \"x\"))");
+
+    // An <svg> is an ordinary element to the adoption agency algorithm: the
+    // </a> closes it together with the <a>, and nothing is moved.
+    assert(outline_of("<a><svg></a>x") == "html(head body(a(svg:svg) \"x\"))");
+    // A MathML <mi> bounds a scope, so the <b> opened outside it is out of
+    // reach and its end tag is ignored.
+    assert(outline_of("<b><math><mi></b>x") == "html(head body(b(math:math(math:mi(\"x\")))))");
+
+    // An end tag handled by the HTML rules is matched against HTML elements.
+    // The SVG <title> is not a title to close, the <math> not a math; both
+    // end tags are ignored, and so is the <tr>, which is still inside an
+    // <em>.
+    assert(outline_of("<svg><title><em></title><tr>x") == "html(head body(svg:svg(svg:title(em(\"x\")))))");
+    assert(outline_of("<math><mtext><i></math><mtext>x") ==
+           "html(head body(math:math(math:mtext(i(mtext(\"x\"))))))");
+    assert(outline_of("<svg><desc><b></svg>x") == "html(head body(svg:svg(svg:desc(b(\"x\")))))");
+    // An SVG <wbr> is not special, so it does not stand in the way of </span>.
+    assert(outline_of("<span><svg><wbr></span>x") == "html(head body(span(svg:svg(svg:wbr)) \"x\"))");
+    // An SVG <rt> has no implied end tag: </form> leaves it open.
+    assert(outline_of("<form><svg><rt></form><g>") == "html(head body(form(svg:svg(svg:rt(svg:g)))))");
+    // An SVG <template> is not where a table's rows end up.
+    assert(outline_of("<table><svg><template><desc><tr>") ==
+           "html(head body(svg:svg(svg:template(svg:desc)) table(tbody(tr))))");
+
+    // In a fragment for an <svg>, with only the root open: an end tag that
+    // matches nothing is ignored, and </p> makes a paragraph.
+    assert(fragment_outline("</foo>x", "svg svg") == "\"x\"");
+    assert(fragment_outline("</p>x", "svg svg") == "p \"x\"");
+}
+
+TEST(html_parser_formatting_elements_follow_the_standard) {
+    // "Noah's Ark": the list of active formatting elements keeps three of a
+    // kind, and the fourth pushes out the earliest. Two of the three that
+    // are left were opened inside the <div>, so two are opened again after it.
+    assert(outline_of("<i><i><div><i><i></div>x") == "html(head body(i(i(div(i(i)) i(i(\"x\"))))))");
+    // Which one goes shows in the order of what is opened again: of
+    // b b i b b the first <b> is dropped, leaving b i b b.
+    assert(outline_of("<p><b><b><i><b><b></p>x") == "html(head body(p(b(b(i(b(b))))) b(i(b(b(\"x\"))))))");
+    assert(outline_of("<p><b><b><b><b></p>x") == "html(head body(p(b(b(b(b)))) b(b(b(\"x\")))))");
+    // Attributes are part of the kind: five <b> here, no four of them alike,
+    // and all five are opened again.
+    assert(outline_of("<p><b a=1><b a=1><b a=2><b a=1><b a=2></p>x") ==
+           "html(head body(p(b[a=\"1\"](b[a=\"1\"](b[a=\"2\"](b[a=\"1\"](b[a=\"2\"]))))) "
+           "b[a=\"1\"](b[a=\"1\"](b[a=\"2\"](b[a=\"1\"](b[a=\"2\"](\"x\")))))))");
+
+    // A second <nobr> closes the first. With the first one behind a marker
+    // (the <marquee>, whose end tag never came) the adoption agency finds no
+    // formatting element and does what any other end tag does.
+    assert(outline_of("<nobr><table><marquee></table><nobr>x") ==
+           "html(head body(nobr(marquee table) nobr(\"x\")))");
+}
+
+TEST(html_parser_text_in_a_table_follows_the_standard) {
+    // Text in an element that is open inside a table (a <div> that was
+    // foster-parented) is ordinary text: the formatting elements are opened
+    // again around it, even when it is only a newline.
+    assert(outline_of("<table><em><table><div>\n") == "html(head body(em table div(em(\"\n\")) table))");
+    assert(outline_of("<table><b><tr><td>x</td></tr><div> y") ==
+           "html(head body(b div(b(\" y\")) table(tbody(tr(td(\"x\"))))))");
+
+    // U+0000 is dropped from text in a table before the text is looked at,
+    // so the spaces around it stay in the table.
+    assert(outline_of(std::string("<table> \0 <tr>", 14)) == "html(head body(table(\"  \" tbody(tr))))");
+
+    // Whitespace directly in a template that holds rows is placed as it is,
+    // like whitespace directly in a table. (parse5 and Blink do not have the
+    // template in this rule and open the <b> again around the space.)
+    assert(outline_of("<template><tr></tr><b><td></td></tr> ") ==
+           "html(head(template(content(tr b tr(td) \" \"))) body)");
+}
+
+TEST(html_parser_frameset_follows_the_frameset_ok_flag) {
+    // A <noscript> does not rule out a frameset page.
+    assert(outline_of("<h2><noscript></noscript><frameset>") == "html(head frameset)");
+    // Text does.
+    assert(outline_of("<noscript></noscript>x<frameset>") == "html(head(noscript) body(\"x\"))");
+    // A <template> in the head sets the flag to "not ok"; the body that is
+    // then made for the <p> sets it back.
+    assert(outline_of("<head><template></template></head><p><frameset>") ==
+           "html(head(template(content)) frameset)");
+
+    // A second <head> is ignored and the first stays open.
+    assert(outline_of("<head><head>\n") == "html(head(\"\n\") body)");
+}
+
+TEST(html_parser_fragments_for_every_kind_of_context) {
+    // A fragment for a <template>: this ended the process, whatever the
+    // fragment was.
+    assert(fragment_outline("<b>x", "template") == "b(\"x\")");
+    assert(fragment_outline("<tr><td>x", "template") == "tr(td(\"x\"))");
+    assert(fragment_outline("", "template") == "");
+    // Inside a template there is no form pointer, so a form may be nested,
+    // and a form in a table is kept.
+    assert(fragment_outline("<form><form>", "template") == "form(form)");
+    assert(outline_of("<template><table><form></table></template>") ==
+           "html(head(template(content(table(form)))) body)");
+
+    // The content of an element whose content is text is all text. No start
+    // tag was seen, so no end tag ends it.
+    assert(fragment_outline("<!-- inside </script> -->", "script") == "\"<!-- inside </script> -->\"");
+    assert(fragment_outline("</textarea>x", "textarea") == "\"</textarea>x\"");
+    assert(fragment_outline("a</title>b", "title") == "\"a</title>b\"");
+    // <noscript> is text when scripting is enabled and markup when it is not.
+    assert(fragment_outline("<b>x", "noscript") == "\"<b>x\"");
+    assert(fragment_outline("<b>x", "noscript", false) == "b(\"x\")");
+
+    // CDATA sections exist where the content is SVG or MathML, and that
+    // includes the top level of a fragment parsed for such an element.
+    assert(fragment_outline("<![CDATA[x]]><g/>", "svg svg") == "\"x\" svg:g");
+    assert(fragment_outline("<![CDATA[x]]>", "svg title") == "\"x\"");
+    assert(fragment_outline("<![CDATA[x]]>", "div") == "<!-- [CDATA[x]] -->");
+}
+
+TEST(html_parser_reads_malformed_markup_as_written) {
+    // A numeric reference with no digits is text, in the case it was typed.
+    assert(outline_of("&#X") == "html(head body(\"&#X\"))");
+    assert(outline_of("FOO&#xZOO") == "html(head body(\"FOO&#xZOO\"))");
+
+    // A comment the page ends in: the dashes that had begun to close it are
+    // not its text.
+    assert(outline_of("<!--x--") == "<!-- x --> html(head body)");
+    assert(outline_of("<!--x-") == "<!-- x --> html(head body)");
+    assert(outline_of("<!--x--!") == "<!-- x --> html(head body)");
+    assert(outline_of("<!--x---") == "<!-- x- --> html(head body)");
+    assert(outline_of("<!---") == "<!--  --> html(head body)");
+
+    // "=" where an attribute name should begin is the start of the name.
+    assert(outline_of("<a =>") == "html(head body(a[==\"\"]))");
+    assert(outline_of("<a =x=y b>") == "html(head body(a[=x=\"y\" b=\"\"]))");
+
+    // The page with nothing in it has a tree like any other.
+    assert(outline_of("") == "html(head body)");
+
+    // The doctype is written where it stood: after the comments before it.
+    assert(outline_of("<!--c--><!doctype html>") == "<!-- c --> <!DOCTYPE html> html(head body)");
+    assert(outline_of("<!--a--><!--b--><!DOCTYPE html><!--c-->x") ==
+           "<!-- a --> <!-- b --> <!DOCTYPE html> <!-- c --> html(head body(\"x\"))");
+    assert(outline_of("<!DOCTYPE html><!--c-->x") == "<!DOCTYPE html> <!-- c --> html(head body(\"x\"))");
+}
+
+TEST(inner_html_is_parsed_as_the_content_of_its_element) {
+    using namespace litebird;
+
+    // What a piece of markup is depends on the element it is assigned to.
+    // All of it used to be parsed as the content of a <body>, where a <td>
+    // is dropped: a table filled through innerHTML came out as loose text.
+    auto doc = HtmlParser::parse(
+        "<table id=table></table><table><tbody id=body></tbody></table><table><tr id=row></tr></table>"
+        "<select id=select></select><textarea id=text></textarea><form><div id=inform></div></form>"
+        "<svg id=svg></svg><math><annotation-xml id=html encoding=\"text/html\"></annotation-xml>"
+        "<annotation-xml id=xml></annotation-xml></math><template id=template></template><div id=div></div>");
+    // The outline of what the element holds after the assignment.
+    auto set = [&](const char* id, const std::string& html) {
+        auto element = doc->descendant_with_id(id);
+        assert(element);
+        element->set_inner_html(html);
+        return outline(dump_tree_webplatform(*element));
+    };
+
+    assert(set("table", "<tr><td>1</td><td>2</td></tr>") == "tbody(tr(td(\"1\") td(\"2\")))");
+    assert(set("body", "<tr><td>a<tr><td>b") == "tr(td(\"a\")) tr(td(\"b\"))");
+    assert(set("row", "<td>x<th>y") == "td(\"x\") th(\"y\")");
+    assert(set("select", "<option>a<option>b") == "option(\"a\") option(\"b\")");
+    // In a <div> the same cell is still only its text.
+    assert(set("div", "<td>cell</td><p>para") == "\"cell\" p(\"para\")");
+    // The content of a <textarea> is text, tags and all.
+    assert(set("text", "<b>x</b> &amp; y") == "\"<b>x</b> & y\"");
+    // Inside a form a <form> is ignored, as it is in a document.
+    assert(set("inform", "<form><input name=q></form>after") == "input[name=\"q\"] \"after\"");
+    // In an <svg> the elements are SVG elements, a start tag may close
+    // itself, and the content of a <foreignObject> is HTML again.
+    assert(set("svg", "<circle r=4 /><g><path/></g><foreignObject><p>x</p></foreignObject>") ==
+           "svg:circle[r=\"4\"] svg:g(svg:path) svg:foreignObject(p(\"x\"))");
+    // A MathML <annotation-xml> holds HTML when its encoding says so.
+    assert(set("html", "<foo>x") == "foo(\"x\")");
+    assert(set("xml", "<foo>x") == "math:foo(\"x\")");
+    // A <template> takes rows without a table around them.
+    assert(set("template", "<tr><td>x") == "tr(td(\"x\"))");
+
+    // An element that is in no document is parsed for all the same.
+    auto row = std::make_shared<Element>("tr");
+    row->set_inner_html("<td>x");
+    assert(outline(dump_tree_webplatform(*row)) == "td(\"x\")");
+
+    // Assigning again replaces what was there.
+    assert(set("row", "<td>z") == "td(\"z\")");
+    assert(set("row", "") == "");
+    assert(doc->descendant_with_id("row")->children().empty());
+
+    // The form above is found from any depth, and whatever the case of the
+    // tag in the markup.
+    auto deep = HtmlParser::parse("<form><div><p><span id=inner></span></p></div></form><span id=outer></span>");
+    auto inner = deep->descendant_with_id("inner");
+    inner->set_inner_html("<FORM><input></FORM>x");
+    assert(outline(dump_tree_webplatform(*inner)) == "input \"x\"");
+    auto outer = deep->descendant_with_id("outer");
+    outer->set_inner_html("<FORM><input></FORM>x");
+    assert(outline(dump_tree_webplatform(*outer)) == "form(input) \"x\"");
+
+    // What an assignment costs does not grow with how deep the element is.
+    // Looking for a form above it at every assignment made this loop cost
+    // the square of its length: 44 seconds, where it takes a fifth of one.
+    // (Markup with a form in it does make the walk to the root.)
+    {
+        auto top = std::make_shared<Element>("div");
+        std::shared_ptr<Element> at = top;
+        const auto started = std::chrono::steady_clock::now();
+        for (int level = 0; level < 30000; ++level) {
+            at->set_inner_html("<div><div></div></div>");
+            at = std::static_pointer_cast<Element>(at->children().front()->children().front());
+        }
+        const auto took = std::chrono::steady_clock::now() - started;
+        assert(took < std::chrono::seconds(5));
+        std::size_t depth = 0;
+        for (std::shared_ptr<Node> node = at; node; node = node->parent()) ++depth;
+        assert(depth == 60001);
+    }
+
+    // Copying one element's markup into another gives the same tree. The
+    // markup read back has <br /> and <img ... /> in it, and the slash used
+    // to close the paragraph and the list item around them.
+    auto copy = HtmlParser::parse(
+        "<div id=from><p>a<br>b</p><ul><li>one <img src=i> two<li>three</ul></div><div id=to></div>");
+    auto from = copy->descendant_with_id("from");
+    auto to = copy->descendant_with_id("to");
+    to->set_inner_html(from->inner_html());
+    assert(to->inner_html() == from->inner_html());
+    assert(outline(dump_tree_webplatform(*to)) ==
+           "p(\"a\" br \"b\") ul(li(\"one \" img[src=\"i\"] \" two\") li(\"three\"))");
+}
+
 TEST(css_values_survive_hostile_nesting) {
     using namespace litebird;
 
@@ -6121,6 +6476,14 @@ int main() {
     RUN_TEST(dom_insertion_cannot_make_a_node_its_own_ancestor);
     RUN_TEST(dom_trees_of_any_depth_can_be_walked_and_released);
     RUN_TEST(html_parser_nesting_limit_holds_for_every_kind_of_element);
+    RUN_TEST(html_parser_void_element_with_a_slash_closes_nothing_else);
+    RUN_TEST(html_parser_end_tags_close_html_elements_only);
+    RUN_TEST(html_parser_formatting_elements_follow_the_standard);
+    RUN_TEST(html_parser_text_in_a_table_follows_the_standard);
+    RUN_TEST(html_parser_frameset_follows_the_frameset_ok_flag);
+    RUN_TEST(html_parser_fragments_for_every_kind_of_context);
+    RUN_TEST(html_parser_reads_malformed_markup_as_written);
+    RUN_TEST(inner_html_is_parsed_as_the_content_of_its_element);
     RUN_TEST(css_values_survive_hostile_nesting);
     RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
     RUN_TEST(replacing_children_detaches_the_old_ones);

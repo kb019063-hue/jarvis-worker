@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/dom/Node.hpp"
+#include <cstddef>
 #include <string>
 #include <memory>
 
@@ -12,6 +13,10 @@ struct Doctype {
     std::string name;
     std::string public_id;
     std::string system_id;
+    /// How many children of the document come before the doctype: the
+    /// comments written ahead of it. The doctype is kept here and not among
+    /// the children, and this is its place among them.
+    std::size_t preceding_children{0};
 };
 
 /// Document mode, which changes a handful of parser and CSS behaviours.

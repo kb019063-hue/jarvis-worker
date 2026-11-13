@@ -48,6 +48,18 @@ bool is_svg_html_integration_point_tag(const std::string& tag) {
     return tag == "foreignObject" || tag == "desc" || tag == "title";
 }
 
+/// The elements of the "special" category that are not HTML elements: MathML
+/// mi, mo, mn, ms, mtext and annotation-xml, and SVG foreignObject, desc and
+/// title. The same nine are the SVG and MathML elements that bound a scope.
+bool is_special_foreign_element(const Element& element) {
+    const std::string& name = element.tag_name();
+    if (element.element_namespace() == ElementNamespace::MathML) {
+        return is_mathml_text_integration_point_tag(name) || name == "annotation-xml";
+    }
+    if (element.element_namespace() == ElementNamespace::SVG) return is_svg_html_integration_point_tag(name);
+    return false;
+}
+
 /// SVG element names that need case adjustment (WHATWG HTML, "adjust SVG
 /// attributes/tag names"). Only the names the parser can actually produce are
 /// listed; anything else keeps its lower-cased spelling.
@@ -164,8 +176,7 @@ std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
     m_tokenizer = &tokenizer;
 
     while (true) {
-        auto node = current_node();
-        tokenizer.set_allow_cdata(node && node->element_namespace() != ElementNamespace::HTML);
+        allow_cdata_in_foreign_content();
         HtmlToken token = tokenizer.next_token();
         if (token.type == HtmlTokenType::Character && token.data.empty()) continue;
         process_token(token);
@@ -185,15 +196,64 @@ std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
 std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
                                                       const std::string& context_tag,
                                                       ElementNamespace context_namespace) {
+    return parse_fragment_in(html, std::make_shared<Element>(context_tag, context_namespace), false);
+}
+
+namespace {
+/// Whether "form" occurs in the text, in upper or lower case. A start or
+/// end tag for a form cannot be written without those four letters.
+bool mentions_form(std::string_view html) {
+    static constexpr std::string_view word = "form";
+    for (std::size_t at = 0; at + word.size() <= html.size(); ++at) {
+        std::size_t matched = 0;
+        while (matched < word.size() &&
+               (static_cast<unsigned char>(html[at + matched]) | 0x20) == static_cast<unsigned char>(word[matched])) {
+            ++matched;
+        }
+        if (matched == word.size()) return true;
+    }
+    return false;
+}
+} // namespace
+
+std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html, const Element& context) {
+    // The parser works on a stand-in for the element, so that nothing it
+    // does can reach the tree the element is in.
+    auto stand_in = std::make_shared<Element>(context.tag_name(), context.element_namespace());
+    if (context.has_attribute("encoding")) stand_in->set_attribute("encoding", context.get_attribute("encoding"));
+
+    // A form above the element is looked for only when the markup can hold a
+    // <form> or a </form>, the two tokens that ask. The walk to the root
+    // costs the depth of the tree, and a script that nests by assigning to
+    // innerHTML level after level pays it at every level: 30,000 levels took
+    // 44 seconds with the walk made each time, and take 0.2 without.
+    bool inside_form = false;
+    if (mentions_form(html)) {
+        for (std::shared_ptr<Node> node = context.parent(); node && !inside_form; node = node->parent()) {
+            inside_form = node->is_element() && html_name(*static_cast<const Element*>(node.get())) == "form";
+        }
+    }
+    return parse_fragment_in(html, std::move(stand_in), inside_form);
+}
+
+std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment_in(std::string_view html,
+                                                         std::shared_ptr<Element> context_element,
+                                                         bool inside_form) {
     m_fragment_case = true;
     m_fragment_document = std::make_shared<Document>();
     m_document = m_fragment_document;
 
-    m_context_element = std::make_shared<Element>(context_tag, context_namespace);
+    m_context_element = std::move(context_element);
 
     auto root = std::make_shared<Element>("html");
     m_document->append_child(root);
     push_element(root);
+
+    // The content of a template starts in the "in template" mode, which
+    // replaces the current template insertion mode at the first start tag:
+    // there has to be one. Without it that was the last element of an empty
+    // vector, and any fragment parsed for a template ended the process.
+    if (html_name(m_context_element) == "template") m_template_modes.push_back(Mode::InTemplate);
 
     reset_insertion_mode();
 
@@ -215,9 +275,16 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
     } else if (tag == "plaintext") {
         m_tokenizer_pending = ContentModel::Plaintext;
     }
-    m_tokenizer_pending_tag = tag;
+    // No start tag has been seen, so no end tag is the "appropriate" one
+    // that ends this text: a </script> in the fragment of a script is text.
+    m_tokenizer_pending_tag.clear();
 
-    if (tag == "form") {
+    // The form element pointer is the nearest form at or above the context
+    // element. Only two things are ever asked of it here: whether it is
+    // set, and whether the element is on the stack of open elements, which
+    // no element outside the fragment is. So the context element stands for
+    // a form above it as well.
+    if (tag == "form" || inside_form) {
         m_form_element = m_context_element;
     }
 
@@ -228,8 +295,7 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
     }
 
     while (true) {
-        auto node = current_node();
-        tokenizer.set_allow_cdata(node && node->element_namespace() != ElementNamespace::HTML);
+        allow_cdata_in_foreign_content();
         HtmlToken token = tokenizer.next_token();
         if (token.type == HtmlTokenType::Character && token.data.empty()) continue;
         process_token(token);
@@ -257,6 +323,16 @@ std::shared_ptr<Element> HtmlTreeBuilder::adjusted_current_node() const {
     return current_node();
 }
 
+// "<![CDATA[" opens a CDATA section where the adjusted current node is an SVG
+// or MathML element, and a comment anywhere else. Asked before each token.
+// The adjusted node, so that the top level of a fragment parsed for an <svg>
+// counts as being inside it.
+void HtmlTreeBuilder::allow_cdata_in_foreign_content() {
+    if (!m_tokenizer) return;
+    const auto node = adjusted_current_node();
+    m_tokenizer->set_allow_cdata(node && node->element_namespace() != ElementNamespace::HTML);
+}
+
 void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_ptr<Element>& element) {
     if (!element) return;
     m_open_positions[element.get()] = index;
@@ -276,13 +352,14 @@ void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_pt
         }
         return;
     }
-    ++m_open_foreign_elements;
-    if (element->element_namespace() == ElementNamespace::MathML) {
-        if (is_mathml_text_integration_point_tag(name) || name == "annotation-xml") {
-            m_scope_boundary_indices[0].push_back(index);
-        }
-    } else if (element->element_namespace() == ElementNamespace::SVG) {
-        if (is_svg_html_integration_point_tag(name)) m_scope_boundary_indices[0].push_back(index);
+    // Of the SVG and MathML elements nine are special, and the same nine
+    // bound a scope. Every other one is an ordinary element whatever it is
+    // called: <svg><td> makes an SVG td, which is not a cell, not special and
+    // not the end of any scope.
+    if (is_special_foreign_element(*element)) {
+        m_scope_boundary_indices[0].push_back(index);
+        m_scope_boundary_indices[3].push_back(index);
+        m_scope_boundary_indices[4].push_back(index);
     }
 }
 
@@ -298,8 +375,6 @@ void HtmlTreeBuilder::unindex_open_element(std::size_t index, const std::shared_
             it->second.pop_back();
             if (it->second.empty()) m_open_html_tag_indices.erase(it);
         }
-    } else if (m_open_foreign_elements > 0) {
-        --m_open_foreign_elements;
     }
     for (auto& boundaries : m_scope_boundary_indices) {
         if (!boundaries.empty() && boundaries.back() == index) boundaries.pop_back();
@@ -369,6 +444,16 @@ bool is_html_element(const std::shared_ptr<Element>& element) {
 }
 } // namespace
 
+const std::string& HtmlTreeBuilder::html_name(const Element& element) {
+    static const std::string none;
+    return element.element_namespace() == ElementNamespace::HTML ? element.tag_name() : none;
+}
+
+const std::string& HtmlTreeBuilder::html_name(const std::shared_ptr<Element>& element) {
+    static const std::string none;
+    return element ? html_name(*element) : none;
+}
+
 // "Pop elements from the stack of open elements until an X element has been
 // popped." The standard only says this where an X is known to be open. Here
 // that has not always been true (rules for <select> content that close the
@@ -403,49 +488,42 @@ int HtmlTreeBuilder::element_index_in_stack(const std::string& tag) const {
     return static_cast<int>(found->second.back());
 }
 
-// The two walks below are the standard's, and they are what runs whenever a
-// foreign element is open. While every open element is an HTML element (any
-// page without SVG or MathML open at that point), the indexes give the same
-// answer without the walk: where the walk stops is the highest special
-// element, and the stack can be 200,000 elements long with none of them
-// special (<span>) or with all of them skipped (<div>, for a list item).
+// The standard answers the next two questions by walking down the stack until
+// a special element stops the walk. Where it stops is the highest special
+// element, which the index knows, and the stack can be 200,000 elements long
+// with none of them special (<span>) or with all of them skipped (<div>, for
+// a list item).
+//
+// Both are about HTML elements: "an li element" is an HTML li, and the names
+// are looked up among the open HTML elements only. Which elements are special
+// depends on the namespace as well (see index_open_element).
 std::string HtmlTreeBuilder::open_list_item_closed_by(const std::string& name) const {
-    auto closes = [&](const std::string& open) {
-        return name == "li" ? open == "li" : (open == "dd" || open == "dt");
-    };
-    if (m_open_foreign_elements == 0) {
-        const auto& stops = m_scope_boundary_indices[4];
-        if (stops.empty()) return {};
-        // li, dd and dt are special themselves, so the walk ends at the
-        // highest special element that is not address, div or p: on one of
-        // them, or on something that hides them.
-        const std::string& open = m_open_elements[stops.back()]->tag_name();
-        return closes(open) ? open : std::string();
-    }
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const std::string& open = m_open_elements[static_cast<std::size_t>(i)]->tag_name();
-        if (closes(open)) return open;
-        if (special_html_tags().count(open) && open != "address" && open != "div" && open != "p") break;
-    }
-    return {};
+    const auto& stops = m_scope_boundary_indices[4];
+    if (stops.empty()) return {};
+    // li, dd and dt are special themselves, so the walk ends at the highest
+    // special element that is not address, div or p: on one of them, or on
+    // something that hides them.
+    const std::string& open = html_name(m_open_elements[stops.back()]);
+    const bool closes = name == "li" ? open == "li" : (open == "dd" || open == "dt");
+    return closes ? open : std::string();
 }
 
 int HtmlTreeBuilder::open_element_closed_by_end_tag(const std::string& name) const {
-    if (m_open_foreign_elements == 0) {
-        const int target = element_index_in_stack(name);
-        if (target < 0) return -1;
-        const auto& special = m_scope_boundary_indices[3];
-        // The name is tested before the category at each element, so an
-        // element that is itself special is still closed by its own tag.
-        if (!special.empty() && static_cast<int>(special.back()) > target) return -1;
-        return target;
-    }
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const std::string& open = m_open_elements[static_cast<std::size_t>(i)]->tag_name();
-        if (open == name) return i;
-        if (special_html_tags().count(open)) return -1;
-    }
-    return -1;
+    const int target = element_index_in_stack(name);
+    if (target < 0) return -1;
+    const auto& special = m_scope_boundary_indices[3];
+    // The name is tested before the category at each element, so an element
+    // that is itself special is still closed by its own tag.
+    if (!special.empty() && static_cast<int>(special.back()) > target) return -1;
+    return target;
+}
+
+// "Any other end tag" of the "in body" rules.
+void HtmlTreeBuilder::any_other_end_tag(const std::string& name) {
+    const int closed = open_element_closed_by_end_tag(name);
+    if (closed < 0) return;
+    generate_implied_end_tags(name);
+    resize_open_elements(static_cast<std::size_t>(closed));
 }
 
 bool HtmlTreeBuilder::has_element_in_scope(const std::string& tag, Scope scope) const {
@@ -496,15 +574,17 @@ bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
 bool HtmlTreeBuilder::has_element_in_select_scope(const std::string& tag) const {
     for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
         const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        if (is_html_element(element) && element->tag_name() == tag) return true;
-        if (!(element->tag_name() == "optgroup" || element->tag_name() == "option")) return false;
+        const std::string& name = html_name(element);
+        if (name == tag) return true;
+        if (!(name == "optgroup" || name == "option")) return false;
     }
     return false;
 }
 
 void HtmlTreeBuilder::generate_implied_end_tags(const std::string& except) {
     while (!m_open_elements.empty()) {
-        const std::string& name = m_open_elements.back()->tag_name();
+        // HTML elements only: an SVG <rt> has no implied end tag.
+        const std::string& name = html_name(m_open_elements.back());
         if (implied_end_tags().count(name) && name != except) {
             pop_current_node();
         } else {
@@ -519,7 +599,7 @@ void HtmlTreeBuilder::generate_all_implied_end_tags() {
 
 void HtmlTreeBuilder::clear_stack_back_to_table_context() {
     while (!m_open_elements.empty()) {
-        const std::string& name = m_open_elements.back()->tag_name();
+        const std::string& name = html_name(m_open_elements.back());
         if (name == "table" || name == "template" || name == "html") return;
         pop_current_node();
     }
@@ -527,7 +607,7 @@ void HtmlTreeBuilder::clear_stack_back_to_table_context() {
 
 void HtmlTreeBuilder::clear_stack_back_to_table_body_context() {
     while (!m_open_elements.empty()) {
-        const std::string& name = m_open_elements.back()->tag_name();
+        const std::string& name = html_name(m_open_elements.back());
         if (name == "tbody" || name == "tfoot" || name == "thead" || name == "template" || name == "html") return;
         pop_current_node();
     }
@@ -535,7 +615,7 @@ void HtmlTreeBuilder::clear_stack_back_to_table_body_context() {
 
 void HtmlTreeBuilder::clear_stack_back_to_row_context() {
     while (!m_open_elements.empty()) {
-        const std::string& name = m_open_elements.back()->tag_name();
+        const std::string& name = html_name(m_open_elements.back());
         if (name == "tr" || name == "template" || name == "html") return;
         pop_current_node();
     }
@@ -795,29 +875,26 @@ void HtmlTreeBuilder::insert_comment(const HtmlToken& token) {
 // ---------------------------------------------------------------------------
 
 void HtmlTreeBuilder::push_formatting_element(const std::shared_ptr<Element>& element, const HtmlToken& token) {
-    // Noah's Ark clause: at most three identical entries after the last marker.
-    int count = 0;
-    bool seen_marker = false;
-    for (int i = static_cast<int>(m_formatting.size()) - 1; i >= 0; --i) {
-        const auto& entry = m_formatting[static_cast<std::size_t>(i)];
-        if (entry.marker) { seen_marker = true; break; }
-        if (entry.element->tag_name() == element->tag_name() &&
-            entry.element->attributes() == element->attributes()) {
-            ++count;
+    // The "Noah's Ark" clause: of the entries after the last marker, at most
+    // three may have this tag name and these attributes. When a fourth
+    // arrives, the earliest of the three goes. (The entries are HTML
+    // elements, each made from its token, so comparing the elements compares
+    // what the standard says to compare.)
+    std::size_t after_marker = m_formatting.size();
+    while (after_marker > 0 && !m_formatting[after_marker - 1].marker) --after_marker;
+    auto same = [&](const FormattingEntry& entry) {
+        return entry.element->tag_name() == element->tag_name() &&
+               entry.element->attributes() == element->attributes();
+    };
+    std::size_t alike = 0;
+    for (std::size_t i = after_marker; i < m_formatting.size(); ++i) alike += same(m_formatting[i]);
+    if (alike >= 3) {
+        for (std::size_t i = after_marker; i < m_formatting.size(); ++i) {
+            if (!same(m_formatting[i])) continue;
+            m_formatting.erase(m_formatting.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
         }
     }
-    if (count >= 3) {
-        for (int i = static_cast<int>(m_formatting.size()) - 1; i >= 0; --i) {
-            const auto& entry = m_formatting[static_cast<std::size_t>(i)];
-            if (entry.marker) break;
-            if (entry.element->tag_name() == element->tag_name() &&
-                entry.element->attributes() == element->attributes()) {
-                m_formatting.erase(m_formatting.begin() + i);
-                break;
-            }
-        }
-    }
-    (void)seen_marker;
     m_formatting.push_back(FormattingEntry{element, token, false});
 }
 
@@ -875,7 +952,7 @@ void HtmlTreeBuilder::reconstruct_formatting_elements() {
     }
 }
 
-bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
+void HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
     const std::string subject = token.name;
     auto is_in_stack = [&](const std::shared_ptr<Element>& element) {
         return open_element_position(element) >= 0;
@@ -886,15 +963,21 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
 
     // Spec step 2.
     if (auto current = current_node()) {
-        if (current->tag_name() == subject && formatting_entry_index(current) < 0) {
+        if (html_name(current) == subject && formatting_entry_index(current) < 0) {
             pop_current_node();
-            return true;
+            return;
         }
     }
 
     for (int outer = 0; outer < 8; ++outer) {
         FormattingEntry* formatting_entry = last_formatting_entry_by_tag(subject);
-        if (!formatting_entry) return false;  // Act as "any other end tag".
+        if (!formatting_entry) {
+            // "Act as described in the 'any other end tag' entry", whoever
+            // asked: an end tag, or the start tag <nobr>, which runs this
+            // algorithm to close the <nobr> that is open.
+            any_other_end_tag(subject);
+            return;
+        }
 
         auto formatting_element = formatting_entry->element;
         // Copy the token now: the formatting list is mutated below and both
@@ -902,40 +985,40 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         const HtmlToken formatting_token = formatting_entry->token;
         if (!is_in_stack(formatting_element)) {
             m_formatting.erase(m_formatting.begin() + formatting_entry_index(formatting_element));
-            return true;
+            return;
         }
-        if (!has_element_in_scope(subject)) return true;
-
         const int formatting_stack_index = stack_index(formatting_element);
+        // "In scope" is asked of this element, not of its name: nothing that
+        // bounds a scope may have been opened after it.
+        if (!m_scope_boundary_indices[0].empty() &&
+            static_cast<int>(m_scope_boundary_indices[0].back()) > formatting_stack_index) {
+            return;
+        }
         if (formatting_stack_index < 1) {
             // Nothing is open above the formatting element, so there is no
             // common ancestor to move anything to. Cannot happen while <html>
             // is open; it used to, after the stack had been emptied (see
             // pop_until_tag), and then read one element before the first.
             m_formatting.erase(m_formatting.begin() + formatting_entry_index(formatting_element));
-            return true;
+            return;
         }
 
-        // Find the furthest block.
+        // The furthest block: the first special element opened after the
+        // formatting element. An <svg> or a <math> is not special, so
+        // <a><svg></a> has none and the </a> closes both.
         int furthest_index = -1;
-        for (int i = formatting_stack_index + 1; i < static_cast<int>(m_open_elements.size()); ++i) {
-            const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-            if (element->element_namespace() == ElementNamespace::HTML &&
-                special_html_tags().count(element->tag_name())) {
-                furthest_index = i;
-                break;
-            }
-            if (element->element_namespace() != ElementNamespace::HTML) {
-                furthest_index = i;
-                break;
-            }
+        {
+            const auto& special = m_scope_boundary_indices[3];
+            const auto found = std::upper_bound(special.begin(), special.end(),
+                                                static_cast<std::size_t>(formatting_stack_index));
+            if (found != special.end()) furthest_index = static_cast<int>(*found);
         }
 
         if (furthest_index < 0) {
             resize_open_elements(static_cast<std::size_t>(formatting_stack_index));
             const int entry_index = formatting_entry_index(formatting_element);
             if (entry_index >= 0) m_formatting.erase(m_formatting.begin() + entry_index);
-            return true;
+            return;
         }
 
         auto furthest_block = m_open_elements[static_cast<std::size_t>(furthest_index)];
@@ -1034,7 +1117,6 @@ bool HtmlTreeBuilder::adoption_agency(const HtmlToken& token) {
         const int furthest_now = stack_index(furthest_block);
         insert_open_element(static_cast<std::size_t>(furthest_now + 1), new_element);
     }
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1139,16 @@ void HtmlTreeBuilder::switch_to_text_mode(const std::string& tag, ContentModel m
     m_original_mode = m_mode;
     m_mode = Mode::Text;
     if (m_tokenizer) m_tokenizer->set_content_model(model, tag);
+}
+
+bool HtmlTreeBuilder::parsing_template_contents() const {
+    return element_index_in_stack("template") >= 0 || html_name(m_context_element) == "template";
+}
+
+void HtmlTreeBuilder::replace_template_mode(Mode mode) {
+    if (!m_template_modes.empty()) m_template_modes.pop_back();
+    m_template_modes.push_back(mode);
+    m_mode = mode;
 }
 
 void HtmlTreeBuilder::close_p_element() {
@@ -1083,10 +1175,6 @@ bool HtmlTreeBuilder::is_html_integration_point(const Element& element) const {
         return encoding == "text/html" || encoding == "application/xhtml+xml";
     }
     return false;
-}
-
-void HtmlTreeBuilder::acknowledge_self_closing(const HtmlToken& token) {
-    if (token.self_closing) pop_current_node();
 }
 
 void HtmlTreeBuilder::stop_parsing() {
@@ -1280,11 +1368,6 @@ void HtmlTreeBuilder::process_token(const HtmlToken& token) {
     // Any other token consumes the one-shot newline skip.
     m_skip_next_newline = false;
 
-    if (m_tokenizer) {
-        m_tokenizer->set_allow_cdata(!m_open_elements.empty() &&
-                                     m_open_elements.back()->element_namespace() != ElementNamespace::HTML);
-    }
-
     process_token_in_mode(m_mode, token);
 }
 
@@ -1325,13 +1408,8 @@ void HtmlTreeBuilder::process_character(char c) {
             insert_character(c);
             return;
         case Mode::InTable:
-            m_table_text_return_mode = m_mode;
-            m_mode = Mode::InTableText;
-            m_pending_table_text.clear();
-            m_pending_table_text.push_back(c);
-            return;
         case Mode::InTableText:
-            m_pending_table_text.push_back(c);
+            process_token_in_mode(m_mode, token);
             return;
         case Mode::InColumnGroup:
             if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r') {

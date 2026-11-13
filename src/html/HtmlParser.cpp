@@ -19,6 +19,11 @@ std::shared_ptr<Node> HtmlParser::parse_fragment_with_context(std::string_view h
     return builder.parse_fragment(html, context_tag, context_namespace);
 }
 
+std::vector<std::shared_ptr<Node>> HtmlParser::parse_inner_html(const Element& context, std::string_view html) {
+    HtmlTreeBuilder builder;
+    return builder.parse_fragment(html, context)->take_children();
+}
+
 std::vector<std::shared_ptr<Node>> HtmlParser::parse_fragment(std::string_view html,
                                                               std::vector<std::string>* out_stylesheets) {
     auto fragment = parse_fragment_with_context(html, "body");

@@ -13,28 +13,31 @@ Phase 17 then spent the scoreboard: it drove the number from 88.0% to 98.8% by
 fixing what the corpus actually disagreed with, and audited the harness itself
 (see "What the scoreboard measured wrong" below). Phase 18 moved back to
 *layout* -- percentage lengths and `overflow` clipping -- which the parser
-scoreboard cannot see at all.
+scoreboard cannot see at all. Phase 26 compared the tree builder with another
+parser on pages nobody wrote, which found what the corpus has no case for
+(`<br/>` closed the paragraph it stood in) and took the number to 99.4% on
+the way (see "Pages nobody wrote").
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1771 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
-| Trees for random pages | 1,489 of 1,500 equal to the ones parse5 builds; the 11 others are known | `make diff-trees` (needs Node.js; not in CI) |
+| **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
+| Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 95 suites, all passing | `make test` |
+| Engine unit tests | 103 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
-make test            # 95 engine suites
+make test            # 103 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript corpus, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
-make diff-trees      # 1,500 random pages parsed here and by parse5; fails if more than the known 11 trees differ
+make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
 
 ### The JavaScript scoreboard
@@ -77,10 +80,10 @@ passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
-1.2% is **21 cases**: the `selectedcontent` cloning behaviour of the 2025
-customizable-`<select>` work (6 cases), plus a handful of adoption-agency,
-`innerHTML` and character-reference edge cases. They are catalogued in
-`ARCHITECTURE.md` rather than papered over.
+0.6% is **11 cases, all of them about `<select>`**: the standard changed how
+the content of a `<select>` is parsed (the 2025 customizable-`<select>` work,
+with `<selectedcontent>` cloning) and Litebird has the older rules. They are
+catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### Pages nobody wrote
 
@@ -88,15 +91,52 @@ The corpus is 1,792 inputs somebody thought of. `make diff-trees`
 (`tools/conformance/diff_trees.py`) makes pages nobody did, a few dozen tags
 in random order and most of them misnested, and compares the tree Litebird
 builds with the one parse5 builds, an independent parser written from the
-same standard. Of 6,000 such pages, 5,948 get the same tree. The other 52
-come down to five bugs: the commonest are an end tag that meets an open SVG
-or MathML element (`<a><svg></a>`) and `</button>` with an element still open
-inside it (`<button><p>a</button>x` puts the "x" in the paragraph). Three of
-the five are also behind one of the 21 failing corpus cases each. A failing
-case says a bug exists; the random pages say how often a page meets it, and
-cut it down to a few tags. They are in AUDIT.md, finding 29, and are not
-fixed. The check needs Node.js and, the first time, the npm registry, so CI
-does not run it.
+same standard. A failing corpus case says a bug exists. A random page says
+how often a page meets it, and `--reduce` cuts the page down to a few tags
+to read the standard against.
+
+The first run of it, in Phase 25, found five bugs in 6,000 pages. Phase 26
+fixed those and then widened what the pages contain, and the wider pages
+found more than the first ones had:
+
+| What the pages contain | Trees equal before Phase 26 | Now |
+| :--- | ---: | ---: |
+| Tags, text and comments | 1,489 of 1,500 | 1,500 |
+| The same with what else the tree builder reads: `<br/>`, `type=hidden`, CDATA, U+0000, a stray doctype | 1,371 | 1,500 |
+| Those parsed as fragments, which is what `innerHTML` does, in 45 kinds of element | 1,371 | 1,500 |
+| Those fragments with scripting disabled | 1,361 | 1,500 |
+
+The worst of what they found is not in the corpus at all, because no case
+there writes it: **a void element written the XHTML way closed its parent.**
+In `<p>a<br/>b</p>` the "b" landed outside the paragraph, and a
+`<link .../>` in the head put the rest of the head, and the body, outside
+`<html>`. One line was wrong, and 292 of the 408 wrong pages in the table
+come right when only that line is changed. One of the example pages in this
+repository was parsed wrongly for that reason, and so was any markup read
+back from `innerHTML` and assigned again, because Litebird itself writes
+`<br />`.
+
+The fragment rows led to the other thing a page would notice. The parser
+was right about fragments for a `<tr>` or an `<svg>`, and `innerHTML` never
+asked it: a script's `element.innerHTML = ...` was parsed as the content of
+a `<body>` whatever the element was. `table.innerHTML =
+"<tr><td>1</td><td>2</td></tr>"` left the text "12" in the table and no
+row. It is parsed for its element now. The rest is in AUDIT.md, findings 29
+and 30.
+
+Two things about the numbers. The comparison is with a copy of parse5 in
+which nine rules are corrected, because parse5 8.1 is itself behind the
+standard there (a form inside a `<template>`, CDATA in an SVG `<title>` and
+seven more; `diff_trees.py` lists them with the correction, a few lines
+each). Against parse5 as published 5,951 of the 6,000 trees are equal and
+the other 49 differ for those nine reasons. For four of the nine the
+web-platform-tests copy of the corpus has cases that say the same, for two
+more Blink's source does, and for the last three there is only the
+standard's text (AUDIT.md, finding 30). And `<select>` is left out of the
+pages: parse5 has the older rules for it, and so does Litebird.
+
+The check needs Node.js and, the first time, the npm registry to fetch
+parse5. CI runs it in the conformance job and fails if a tree differs.
 
 ### Pages that are hostile by size
 
@@ -149,7 +189,15 @@ Ladybird use as their parser baseline, so the number is comparable across
 engines rather than self-referential. It is vendored under
 `tests/html5lib/tree-construction/` (BSD-licensed, see the LICENSE there).
 
-> **Honest scope:** 98.8% on parser conformance means the DOM this engine builds
+The vendored copy is the last one html5lib-tests published: in June 2026 its
+tree-construction tests moved into web-platform-tests, and that copy has
+grown to 1,973 cases since. Litebird passes 1,868 of them. Of the other 105,
+88 need processing instructions (`<?x?>` is a node of its own in the
+standard now, and a comment here), 6 need a script to run while the page is
+being parsed, and 11 are the `<select>` cases above. That copy is not
+vendored yet, so `make conformance` and CI still score the 1,792.
+
+> **Honest scope:** 99.4% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
 > floats and tables now lay out (Phase 16), percentages resolve (Phase 18) and
 > `overflow` clips (Phase 18), but there is no bidi, no `rowspan`/`colspan`, no
@@ -409,7 +457,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 95 engine test suites
+# Run the 103 engine test suites
 make test
 ```
 
@@ -470,14 +518,14 @@ make test
 make test
 ```
 
-Output (95 suites; the first and last lines shown):
+Output (103 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 95 engine test suites passed successfully!
+All 103 engine test suites passed successfully!
 ```
 
 ```bash

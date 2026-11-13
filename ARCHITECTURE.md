@@ -2107,7 +2107,7 @@ looked at, not of what is wrong.
 | JavaScript corpus (`make js-conformance`) | 840 / 845, as before |
 | `make diff-trees` | 4 × 1,500 random pages against parse5 8.1.1, 0 differ, as before |
 | `make fuzz` (in the sanitizer build) | 400 parser mutations and 400 pipeline runs, 0 findings |
-| `make deep` | 1,292 runs over 445 pages at 200,000 levels, 0 failed. The slowest page takes as long as on `main` |
+| `make deep` | 1,292 runs over 445 pages at 200,000 levels, 0 failed. The slowest takes 19 s of the 60 allowed; the same page takes 21 s with the binary of `main` |
 | `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages at 10,000 levels | 110 / 110; JavaScript 839 / 845, as before; DOM 572 / 572; URL 1150 / 1188; 400 + 400 runs; 842 runs over 295 pages, 0 failed. No report |
 
 The DOM corpus has a job of its own in CI (the reference check, the

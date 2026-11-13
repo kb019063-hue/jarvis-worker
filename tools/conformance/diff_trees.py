@@ -59,14 +59,25 @@ TAGS = ("div div div div span p b i a table tbody tr td th caption colgroup ul l
 SELECT_TAGS = "select optgroup option".split()
 VOID = "br img input hr col wbr meta link area".split()
 STRAY = ["</table>", "</template>", "</svg>", "</math>", "</body>", "</html>", "<body>", "<html>"]
+# With --extras: the few things other than a tag name that the tree builder
+# looks at. Attributes it has a rule for, end tags that act as start tags, a
+# start tag that closes itself, CDATA, a doctype out of place, U+0000.
+EXTRAS = ["<input type=hidden>", "<input type=text>", "<font color=red>", "<font size=2>",
+          "<annotation-xml encoding=text/html>", "<annotation-xml encoding=x>", "</br>", "</p>", "<br/>",
+          "<svg/>", "<math/>", "<g/>", "<div/>", "<p/>", "<script/>", "<![CDATA[x]]>", "<!doctype html>",
+          "\0", "<image>", "</sarcasm>", "<a href=x>", "<mglyph>", "<malignmark>"]
 
 
-def random_page(rng: random.Random, tags: list[str], stray: list[str]) -> str:
+def random_page(rng: random.Random, tags: list[str], stray: list[str], extras: bool = False) -> str:
     """3 to 39 tokens. Six tags are drawn first and used for most of the
-    page, so that end tags meet their start tags more often than chance."""
+    page, so that end tags meet their start tags more often than chance.
+    Without `extras` a seed gives the pages it always gave."""
     out = ["<!doctype html>"] if rng.random() < 0.8 else []
     favourites = rng.sample(tags, 6)
     for _ in range(rng.randrange(3, 40)):
+        if extras and rng.random() < 0.15:
+            out.append(rng.choice(EXTRAS))
+            continue
         roll = rng.random()
         tag = rng.choice(favourites) if rng.random() < 0.6 else rng.choice(tags)
         if roll < 0.55:
@@ -195,6 +206,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20261110, help="seed of the pages (default 20261110)")
     parser.add_argument("--with-select", action="store_true",
                         help="use <select>, <optgroup> and <option> too (parse5 parses these by older rules)")
+    parser.add_argument("--extras", action="store_true",
+                        help="also draw attributes the tree builder reads (type=hidden, encoding=, color=), "
+                             "self-closing tags, </br> and </p>, CDATA, a stray doctype and U+0000")
+    parser.add_argument("--tags", default="", metavar="NAMES",
+                        help="the elements to make pages from, separated by spaces, instead of the built-in list; "
+                             "a name given twice is drawn twice as often")
     parser.add_argument("--show", type=int, default=10, help="how many differing pages to print (default 10)")
     parser.add_argument("--reduce", action="store_true",
                         help="cut every differing page down to the tokens that matter and list the distinct results")
@@ -217,7 +234,12 @@ def main() -> int:
     if not version:
         return 2
 
-    tags = TAGS + SELECT_TAGS if args.with_select else TAGS
+    tags = args.tags.split() or TAGS
+    if args.with_select:
+        tags = tags + SELECT_TAGS
+    if len(tags) < 6:
+        print("--tags needs at least six names: six are drawn first for each page", file=sys.stderr)
+        return 2
     stray = STRAY + ["</select>"] if args.with_select else STRAY
     rng = random.Random(args.seed)
     reference = Reference(args.parse5_dir)
@@ -228,13 +250,13 @@ def main() -> int:
 
             def trees_of(name: str, source: str) -> tuple[str, list[str]]:
                 path = os.path.join(scratch, name)
-                with open(path, "w", encoding="ascii") as out:
+                with open(path, "w", encoding="ascii", newline="") as out:
                     out.write(source)
                 return reference.tree(path), [litebird_tree(binary, path) for binary in binaries]
 
             differing, lost, gained, baseline_equal = [], [], [], 0
             for number in range(args.pages):
-                source = random_page(rng, tags, stray)
+                source = random_page(rng, tags, stray, args.extras)
                 expected, actual = trees_of(f"page{number}.html", source)
                 equal = actual[0] == expected
                 if not equal:

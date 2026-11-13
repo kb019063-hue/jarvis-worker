@@ -107,16 +107,23 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
         }
     };
 
-    // A document node contributes its doctype, then its children at depth 0;
-    // a fragment root contributes only its children.
+    // A document node contributes its doctype and its children at depth 0,
+    // the doctype where it was written: after the comments that came before
+    // it. A fragment root contributes only its children.
+    const Document* with_doctype = nullptr;
     if (root.type() == NodeType::Document) {
         const auto& document = static_cast<const Document&>(root);
-        if (document.has_doctype()) dump_doctype(os, document, 0);
+        if (document.has_doctype()) with_doctype = &document;
     }
     open.push_back({&root, 0, 0});
     while (!open.empty()) {
         Frame& top = open.back();
         const auto& children = top.node->children();
+        if (with_doctype && top.node == &root &&
+            top.next >= std::min(with_doctype->doctype().preceding_children, children.size())) {
+            dump_doctype(os, *with_doctype, 0);
+            with_doctype = nullptr;
+        }
         if (top.next >= children.size()) {
             open.pop_back();
             continue;

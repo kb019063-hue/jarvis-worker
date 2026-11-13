@@ -124,6 +124,7 @@ private:
     // --- stack of open elements / active formatting -------------------------
     std::shared_ptr<Element> current_node() const;
     std::shared_ptr<Element> adjusted_current_node() const;
+    void allow_cdata_in_foreign_content();
     void push_element(const std::shared_ptr<Element>&);
     void pop_current_node();
     void resize_open_elements(std::size_t size);
@@ -159,9 +160,18 @@ private:
     /// first of them, stopped by a special element other than address, div
     /// and p.
     std::string open_list_item_closed_by(const std::string& name) const;
-    /// "Any other end tag": the index of the open element with that name
-    /// that the tag closes, or -1 when a special element is in the way.
+    /// "Any other end tag": the index of the open HTML element with that
+    /// name that the tag closes, or -1 when a special element is in the way.
     int open_element_closed_by_end_tag(const std::string& name) const;
+    /// The "any other end tag" steps of the "in body" rules: closes that
+    /// element and what is open inside it, or does nothing.
+    void any_other_end_tag(const std::string& name);
+    /// The tag name of an HTML element, and an empty string for an element
+    /// of any other namespace. Where the standard says "a td element" it
+    /// means an HTML one. <svg><td> makes an SVG element called td, and no
+    /// rule about cells, scopes or implied end tags applies to it.
+    static const std::string& html_name(const Element& element);
+    static const std::string& html_name(const std::shared_ptr<Element>& element);
     void generate_implied_end_tags(const std::string& except = std::string());
     void generate_all_implied_end_tags();
     void clear_stack_back_to_table_context();
@@ -223,7 +233,10 @@ private:
     int formatting_entry_index(const std::shared_ptr<Element>&) const;
     FormattingEntry* last_formatting_entry_by_tag(const std::string& tag);
     void clear_formatting_to_marker();
-    bool adoption_agency(const HtmlToken& token);
+    /// The adoption agency algorithm for an end tag (or for the start tags
+    /// <a> and <nobr>, which run it to close the one that is open). With no
+    /// such formatting element it does what "any other end tag" does.
+    void adoption_agency(const HtmlToken& token);
 
     // --- misc ---------------------------------------------------------------
     void reset_insertion_mode();
@@ -233,8 +246,15 @@ private:
     void switch_to_text_mode(const std::string& tag, ContentModel model);
     bool is_mathml_text_integration_point(const Element&) const;
     bool is_html_integration_point(const Element&) const;
-    void acknowledge_self_closing(const HtmlToken&);
     void close_p_element();
+    /// "Parsing template contents": a template is open, or the fragment
+    /// being parsed is the content of one. The form element pointer is
+    /// neither read nor set there.
+    bool parsing_template_contents() const;
+    /// The first start tag in a template decides what its content is (rows,
+    /// cells, columns or anything else): that mode takes the place of the
+    /// current template insertion mode and becomes the insertion mode.
+    void replace_template_mode(Mode mode);
     void stop_parsing();
 
     static QuirksMode quirks_mode_for(const Doctype&, bool force_quirks);
@@ -251,13 +271,13 @@ private:
     std::unordered_map<std::string, std::vector<std::size_t>> m_open_html_tag_indices;
     // 0 to 2: the boundaries of the default, list item and button scopes.
     // 3: every element in the "special" category. 4: the same without
-    // address, div and p. The last two answer the two questions the standard
+    // address, div and p. The last two answer the questions the standard
     // settles by walking down the stack until a special element stops it.
+    // Each list is in stack order, and each knows the nine SVG and MathML
+    // elements that are special and bound a scope, so the answers hold
+    // whatever is open.
     std::array<std::vector<std::size_t>, 5> m_scope_boundary_indices;
     std::unordered_map<const Element*, std::size_t> m_open_positions;
-    // Open elements that are not HTML elements. While there are none, the
-    // indexes above (which are about HTML elements) answer exactly.
-    std::size_t m_open_foreign_elements{0};
     // The depth in the tree of each open element, 0 while not measured.
     // Filled in by element_depth(), which is only asked near the limit.
     mutable std::vector<std::size_t> m_open_depths;

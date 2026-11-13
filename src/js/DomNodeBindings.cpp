@@ -110,7 +110,9 @@ int node_type_number(const Node& node) {
     return 0;
 }
 
-int compare_position(const Node& self, const Node& other) {
+} // namespace
+
+int compare_document_position(const Node& self, const Node& other) {
     if (&self == &other) return 0;
     // Chains are raw pointers into trees held by the two arguments' roots.
     std::vector<std::shared_ptr<Node>> self_chain, other_chain;
@@ -133,6 +135,8 @@ int compare_position(const Node& self, const Node& other) {
     const std::size_t other_index = script_index(common, *other_chain[j - 1]);
     return other_index < self_index ? 2 : 4;
 }
+
+namespace {
 
 bool nodes_equal(const Node& a, const Node& b) {
     // Pairs still to compare; no recursion, a tree can be very deep.
@@ -743,7 +747,7 @@ void setup_node(Iface& I) {
     });
     I.node_method(any, "compareDocumentPosition", 1, [](Realm&, Node& self, Args args) {
         require_args(args, 1, "Node.compareDocumentPosition");
-        return num(compare_position(self, node_argument(args, 0, "Node.compareDocumentPosition")));
+        return num(compare_document_position(self, node_argument(args, 0, "Node.compareDocumentPosition")));
     });
     I.node_method(any, "contains", 1, [](Realm&, Node& self, Args args) {
         require_args(args, 1, "Node.contains");

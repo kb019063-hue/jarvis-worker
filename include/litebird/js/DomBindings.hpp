@@ -523,6 +523,9 @@ bool is_character_data(const Node& node);
 void define_child_node(Iface& I, bool (*accepts)(const Node&));
 void define_parent_node(Iface& I, bool (*accepts)(const Node&));
 void define_element_siblings(Iface& I, bool (*accepts)(const Node&));
+/// Node.compareDocumentPosition: the DOCUMENT_POSITION bits of `other`
+/// as seen from `self`.
+int compare_document_position(const Node& self, const Node& other);
 /// Takes `node` out of its parent, if it has one.
 void remove_node(Realm& realm, Node& node);
 /// Replaces every child of `parent` by `nodes`, as one change: observers get
@@ -629,6 +632,16 @@ void register_document_interfaces();
 std::shared_ptr<Document> make_document(Realm& realm, bool with_skeleton, const std::string* title);
 std::shared_ptr<Element> create_element(Realm& realm, Document& document, const std::string& local_name,
                                         ElementNamespace ns = ElementNamespace::HTML, bool synchronous_custom = true);
+
+// --- DomTraversalBindings.cpp -----------------------------------------------------
+void register_traversal_interfaces();
+/// The window's one Selection object.
+JsValue selection_object(Realm& realm);
+/// document.createRange(): a range collapsed at the start of `document`.
+JsValue create_range(Realm& realm, const std::shared_ptr<Node>& document);
+/// document.createTreeWalker() and createNodeIterator().
+JsValue create_traversal(Realm& realm, bool iterator, const std::shared_ptr<Node>& root, uint32_t what_to_show,
+                         const JsValue& filter);
 
 // --- DomHtmlBindings.cpp ----------------------------------------------------------
 void register_html_interfaces();

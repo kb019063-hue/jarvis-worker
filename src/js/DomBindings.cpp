@@ -42,6 +42,7 @@ void ensure_registered() {
         register_element_interfaces();
         register_style_interfaces();
         register_document_interfaces();
+        register_traversal_interfaces();
         register_html_interfaces();
         register_form_interfaces();
         register_observer_interfaces();

@@ -437,6 +437,22 @@ void setup_document(Iface& I) {
         return args[0];
     });
 
+    I.node_method(doc, "createRange", 0, [](Realm& r, Node& self, Args) {
+        return create_range(r, self.shared_from_this());
+    });
+    I.node_method(doc, "createTreeWalker", 1, [](Realm& r, Node&, Args args) {
+        require_args(args, 1, "Document.createTreeWalker");
+        Node& root = node_argument(args, 0, "Document.createTreeWalker");
+        const uint32_t show = js_arg(args, 1).is_undefined() ? 0xFFFFFFFFu : to_ulong(args[1]);
+        return create_traversal(r, false, root.shared_from_this(), show, js_arg(args, 2));
+    });
+    I.node_method(doc, "createNodeIterator", 1, [](Realm& r, Node&, Args args) {
+        require_args(args, 1, "Document.createNodeIterator");
+        Node& root = node_argument(args, 0, "Document.createNodeIterator");
+        const uint32_t show = js_arg(args, 1).is_undefined() ? 0xFFFFFFFFu : to_ulong(args[1]);
+        return create_traversal(r, true, root.shared_from_this(), show, js_arg(args, 2));
+    });
+
     // --- Writing into the parser: there is no parser to write into any more -------
     for (const char* name : {"open", "close", "write", "writeln", "clear", "captureEvents", "releaseEvents"}) {
         I.node_method(doc, name, 0, [](Realm&, Node&, Args) { return undefined(); });
@@ -447,8 +463,7 @@ void setup_document(Iface& I) {
     I.node_method(doc, "elementFromPoint", 2, [](Realm&, Node&, Args) { return null(); });
     I.node_method(doc, "elementsFromPoint", 2, [](Realm&, Node&, Args) { return JsValue::make_array(); });
     I.node_method(doc, "getSelection", 0, [](Realm& r, Node& self, Args) {
-        if (&self != r.document.get() || !r.window.is_object()) return null();
-        return js_call(r.window.get_property("getSelection"), r.window, {});
+        return &self == r.document.get() ? selection_object(r) : null();
     });
 
     define_parent_node(I, doc);

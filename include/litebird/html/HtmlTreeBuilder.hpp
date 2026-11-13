@@ -29,6 +29,14 @@ public:
                                          const std::string& context_tag,
                                          ElementNamespace context_namespace = ElementNamespace::HTML);
 
+    /// The same for an element that is in a tree, which is what assigning
+    /// to its innerHTML does. Besides the name and the namespace two things
+    /// about the element change the result: the encoding attribute of a
+    /// MathML annotation-xml (whether its content is HTML), and whether the
+    /// element is a form or inside one (a <form> in the fragment is then
+    /// ignored, as a form inside a form is in a document).
+    std::shared_ptr<Node> parse_fragment(std::string_view html, const Element& context);
+
     /// The scripting flag, which changes <noscript> handling.
     void set_scripting(bool enabled) { m_scripting = enabled; }
 
@@ -49,6 +57,10 @@ public:
     static constexpr std::size_t kMaxTreeDepth = 512;
 
 private:
+    std::shared_ptr<Node> parse_fragment_in(std::string_view html,
+                                            std::shared_ptr<Element> context_element,
+                                            bool inside_form);
+
     enum class Mode {
         Initial,
         BeforeHtml,

@@ -196,11 +196,54 @@ std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
 std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
                                                       const std::string& context_tag,
                                                       ElementNamespace context_namespace) {
+    return parse_fragment_in(html, std::make_shared<Element>(context_tag, context_namespace), false);
+}
+
+namespace {
+/// Whether "form" occurs in the text, in upper or lower case. A start or
+/// end tag for a form cannot be written without those four letters.
+bool mentions_form(std::string_view html) {
+    static constexpr std::string_view word = "form";
+    for (std::size_t at = 0; at + word.size() <= html.size(); ++at) {
+        std::size_t matched = 0;
+        while (matched < word.size() &&
+               (static_cast<unsigned char>(html[at + matched]) | 0x20) == static_cast<unsigned char>(word[matched])) {
+            ++matched;
+        }
+        if (matched == word.size()) return true;
+    }
+    return false;
+}
+} // namespace
+
+std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html, const Element& context) {
+    // The parser works on a stand-in for the element, so that nothing it
+    // does can reach the tree the element is in.
+    auto stand_in = std::make_shared<Element>(context.tag_name(), context.element_namespace());
+    if (context.has_attribute("encoding")) stand_in->set_attribute("encoding", context.get_attribute("encoding"));
+
+    // A form above the element is looked for only when the markup can hold a
+    // <form> or a </form>, the two tokens that ask. The walk to the root
+    // costs the depth of the tree, and a script that nests by assigning to
+    // innerHTML level after level pays it at every level: 30,000 levels took
+    // 44 seconds with the walk made each time, and take 0.2 without.
+    bool inside_form = false;
+    if (mentions_form(html)) {
+        for (std::shared_ptr<Node> node = context.parent(); node && !inside_form; node = node->parent()) {
+            inside_form = node->is_element() && html_name(*static_cast<const Element*>(node.get())) == "form";
+        }
+    }
+    return parse_fragment_in(html, std::move(stand_in), inside_form);
+}
+
+std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment_in(std::string_view html,
+                                                         std::shared_ptr<Element> context_element,
+                                                         bool inside_form) {
     m_fragment_case = true;
     m_fragment_document = std::make_shared<Document>();
     m_document = m_fragment_document;
 
-    m_context_element = std::make_shared<Element>(context_tag, context_namespace);
+    m_context_element = std::move(context_element);
 
     auto root = std::make_shared<Element>("html");
     m_document->append_child(root);
@@ -236,7 +279,12 @@ std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
     // that ends this text: a </script> in the fragment of a script is text.
     m_tokenizer_pending_tag.clear();
 
-    if (tag == "form") {
+    // The form element pointer is the nearest form at or above the context
+    // element. Only two things are ever asked of it here: whether it is
+    // set, and whether the element is on the stack of open elements, which
+    // no element outside the fragment is. So the context element stands for
+    // a form above it as well.
+    if (tag == "form" || inside_form) {
         m_form_element = m_context_element;
     }
 

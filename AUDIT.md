@@ -44,7 +44,7 @@ The rest are documented with enough detail to act on.
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
-| 31 | The DOM a script sees: 61 of 557 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 557 of 557; URL data 1150 of 1188 |
+| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1150 of 1188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
 
 ---
 
@@ -1537,13 +1537,13 @@ being checked is worth less than one that was not:
 
 The language had a scoreboard since Phase 23 and passed 840 of 845 cases.
 The DOM had none, and Known gap 9 listed what was missing from memory. This
-finding is what a scoreboard said: `tests/dom-conformance/`, 557 pages with
+finding is what a scoreboard said: `tests/dom-conformance/`, 572 pages with
 a script each and what the script prints in jsdom 31, an independent
-implementation (ARCHITECTURE.md, Phase 27, section 9).
+implementation (ARCHITECTURE.md, Phase 27, section 11).
 
 | | `main` before | Now |
 | :--- | ---: | ---: |
-| All 557 cases | 61 | 557 |
+| All 572 cases | 61 | 572 |
 | `everyday.dat`: 68 snippets from *You Might Not Need jQuery*, written first and never edited | 13 | 68 |
 | URL parsing and setters, the web-platform-tests data (1,188 cases) | 2 | 1,150 |
 
@@ -1604,16 +1604,75 @@ old code is gone, not extended.
   those answers, and a unit test asserts the standard's
   (`tests/dom-conformance/README.md`).
 
+### What 557 of 557 hid
+
+The corpus first had 557 cases, and Litebird passed all of them while two
+things a page meets early were wrong. Nothing in the corpus asked, because
+the cases were written by the hand that wrote the code:
+
+| | At 557 of 557 | Now |
+| :--- | :--- | :--- |
+| `getComputedStyle(div).position`, `.opacity`, `.marginTop`, `.fontSize`, any property nobody declared | `""` | `static`, `1`, `0px`, `16px`: the inherited or initial value, from a table of 182 |
+| `#p { color: red } p { color: blue }` on `<p id=p>` | blue: the last rule that matched | red: specificity, then position |
+| `getComputedStyle(h1).fontSize`, `(b).fontWeight`, `(a).cursor` | `""` | `32px`, `700`, `pointer`: what HTML gives each element |
+| `color: red`, `margin: 1em`, `width: calc(1px + 2em)` read back | `red`, `1em`, the text | `rgb(255, 0, 0)`, `16px`, `33px` |
+| A range from 1 to 3 in a parent whose first child is removed | Still 1 to 3: one child too far | 0 to 2 |
+| `surroundContents()` on `bcd` of the text `abcdef` | `aef<em>bcd</em>` | `a<em>bcd</em>ef` |
+| A `NodeIterator` whose reference node is removed | Went on inside the removed subtree | Steps out of it |
+
+They were found by running pages that were not in the corpus through jsdom
+and Litebird side by side, which is now a tool:
+`python3 tools/conformance/compare_with_jsdom.py page.html script.js`. Of
+166 properties of a `<div>` nobody styled, three had an answer (`display`,
+`visibility`, `pointer-events`); 151 agree with jsdom now. Of the 15
+others, 12 are places where Litebird writes what browsers write and jsdom
+does not (`border` is `0px none rgb(0, 0, 0)`), two are the default font,
+where each engine has its own, and for `transform-origin` Litebird has no
+answer. Fifteen cases were added (`style.dat`, `ranges.dat`), which is how
+557 became 572.
+
+The lesson is about the method. A corpus recorded from another
+implementation cannot be bent, and it still only knows the questions its
+author thought of. The comparison tool asks without knowing the answer,
+and the next person to work on the DOM should start there, not at the
+score.
+
+### What is known to be wrong and is not fixed
+
+The same comparison, run over forms, ranges, inline style and a few more
+areas, found these. Each gives an answer, and the answer is wrong:
+
+- **`DOMParser` with an XML type parses HTML.** `parseFromString('<a><b/>
+  </a>', 'application/xml').documentElement.nodeName` is `HTML`. There is
+  no XML parser. A script that reads a feed or an SVG file this way gets a
+  tree, and not the one it asked for.
+- **Date and time inputs are text inputs.** `<input type="date"
+  value="2026-02-30">` keeps that value; `valueAsDate` is null and setting
+  it throws; `stepUp()` throws.
+- **`el.style.flex = '1'` leaves `el.style.flexGrow` empty.** Only margin,
+  padding and the border family are taken apart in `el.style` (the
+  computed style takes apart ten more). `url(a.png)` is not rewritten as
+  `url("a.png")`, nor `translate( 10px , 20px )` as `translate(10px,
+  20px)`.
+- **SVG elements have no SVG DOM**: `className` is a string, no `viewBox`.
+
+`tests/dom-conformance/open/` has a page and a script for each, to run
+through the tool.
+
 ### What the number does not say
 
-557 of 557 is everything the corpus asks, and the corpus asks what jsdom
+572 of 572 is everything the corpus asks, and the corpus asks what jsdom
 can answer. It has no layout, so no case reads a size or a position, and
 in the CLI those are zero while scripts run. It loads one page, so no case
 navigates. Nothing external is fetched. Style sheets are not objects
 (`sheet.cssRules`). The list of what is known to be absent is in
-ARCHITECTURE.md, Phase 27, section 10; it was made by asking for about
-170 names, not by reading pages, so it is not complete.
+ARCHITECTURE.md, Phase 27, section 12; it was made by asking for about
+170 names and by the comparisons above, not by reading pages, so it is not
+complete.
 
-The bindings are 12,400 new lines that take raw pointers into a tree a
+The bindings are 13,700 new lines that take raw pointers into a tree a
 script can take apart while they run. `make asan` runs the whole corpus in
-the sanitizer build for that reason. @@ASANLINE@@
+the sanitizer build for that reason: 572 of 572 there too, the 110 unit
+suites, the URL data, both fuzzers and the deep pages, with no report from
+either sanitizer. That is evidence about the paths the cases take. A page
+that takes another path has not been run.

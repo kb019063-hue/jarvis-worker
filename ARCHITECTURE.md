@@ -339,7 +339,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`, `make diff-strings`) |
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
-| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 557-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 557 of 557; URL data 2 → 1150 of 1188; 108/108 unit suites) |
+| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
 
 ---
 
@@ -1838,7 +1838,7 @@ src/dom/, include/litebird/dom/      the tree: Node, Element, Document, attribut
                                      selectors, form state, the serializer.
                                      Knows nothing about scripts.
 src/js/Dom*Bindings.cpp              the interfaces of the DOM and HTML standards,
-                                     over that tree. 12,400 lines, 14 files.
+                                     over that tree. 13,700 lines, 14 files.
 src/js/ (Heap, JsValue, JsOps)       the engine: what an object is.
 ```
 
@@ -1909,9 +1909,9 @@ object the derived class is building.
 | `DomHtmlBindings.cpp` | `HTMLElement` and the HTML element interfaces: reflected attributes, links, images, tables, templates, dialogs, canvas |
 | `DomFormBindings.cpp` | Form controls, `form.elements`, validation, submission and reset, `FormData`, focus |
 | `DomEventBindings.cpp` | `EventTarget`, `Event` and 27 subclasses, dispatch, `on*` handlers, `AbortController` |
-| `DomStyleBindings.cpp` | `CSSStyleDeclaration`: `el.style` as a live declaration block, and `getComputedStyle` |
+| `DomStyleBindings.cpp` | `CSSStyleDeclaration`: `el.style` as a live declaration block, and `getComputedStyle` with a cascade of its own (section 8) |
 | `DomDocumentBindings.cpp` | `Document`, `DOMImplementation`, `DOMParser`, `XMLSerializer`, cookies, named access |
-| `DomTraversalBindings.cpp` | `Range`, `Selection`, `TreeWalker`, `NodeIterator`, `NodeFilter` |
+| `DomTraversalBindings.cpp` | `Range` and `Selection`, which follow the tree (section 9), `TreeWalker`, `NodeIterator`, `NodeFilter` |
 | `DomObserverBindings.cpp` | `MutationObserver`, custom elements and their reactions |
 | `DomFileBindings.cpp` | `Blob`, `File`, `FileReader` |
 | `DomUrlBindings.cpp` | `URL`, `URLSearchParams` |
@@ -1970,7 +1970,67 @@ a link to a fragment, `location.href = '#x'`. Those change the address at
 once and fire `popstate` and `hashchange` from a task. Anything else would
 be loading another page, and does nothing.
 
-### 8. What it costs
+### 8. The computed style (`DomStyleBindings.cpp`)
+
+`getComputedStyle` has a cascade of its own. It is not the layout engine's
+(`StyleResolver`), which resolves into the typed values layout needs: a
+script wants text back, for every property there is, and wants it as the
+standards write it.
+
+For one element, `compute_block` collects the declarations that apply and
+orders them by weight: what the HTML standard's Rendering section gives the
+element (a heading is bold and `2em`, a list has `40px` of padding, a link
+is underlined), then the rules of the document's `<style>` elements by
+specificity and position (`SelectorList::matching_specificity`: ids,
+classes, types; `:is()` and `:not()` count as their most specific argument,
+`:where()` as nothing), then the style attribute, then the `!important`
+ones of the same three. Shorthands are taken apart on the way, so
+`overflow: hidden` answers for `overflowY` and `font: 12px/1.5 Arial` for
+`fontSize`.
+
+What a script reads is the computed value of that:
+
+- a property nobody declared has its inherited value or, from a table of
+  182, its initial one;
+- a colour is `rgb()` or `rgba()`: names, hex, `hsl()`, `currentcolor`;
+- a length is in px: `em` and `rem` through the font size, `pt`, `in`,
+  `cm`, `mm`, `pc`, `q`, and `calc()` of those. A font size is the chain of
+  its ancestors' (`2em` of `150%` of `larger` of `20px`), and so is
+  `bolder`;
+- a border or outline that is not drawn is `0px` wide, one that is drawn is
+  a whole number of pixels;
+- a shorthand is put together from the computed values of its parts.
+
+Everything that goes up the tree (inheritance, the font size, the weight) is
+a loop, and the root of the tree is found once for each question: asking
+about an element 20,000 levels down takes 100 ms and no stack.
+
+What it does not know is layout. `width: auto` and `50%` stay what they
+are, where a browser gives the used value in px. Section 12 has the rest.
+
+### 9. Ranges that follow the tree (`DomLive.hpp`)
+
+A `Range` is two boundary points, each a node and an offset. The standard
+says where each goes when the tree changes after the range was made: nodes
+inserted before a boundary push it on, a boundary inside something that is
+removed lands where that was, text that is edited or split takes its
+boundaries along. A `NodeIterator` whose reference node is removed steps
+out of what is going away. A selection is a range, so it follows too.
+
+The realm keeps a weak list of the ranges and iterators script can still
+reach. The places where the tree changes tell it: the `children_changed`
+hook of the tree, `replace_data()` behind `insertData`/`deleteData`/
+`replaceData`, `splitText()`, `normalize()`. With no range alive each of
+those is one lookup. With some, a change costs a walk up from each boundary
+(to learn whether it was inside what went away), which is why the list is
+cleared of ranges the collector has freed as soon as one is met: a page
+that made 100,000 ranges and kept one pays for the one.
+
+`insertNode()` and `surroundContents()` are the standard's steps on top of
+that: text is split at the boundary, and a node the range cuts through that
+is not text is an `InvalidStateError`.
+
+### 10. What it costs
 
 Measured against the binary of `main` on one machine, a page with an empty
 body and a script (milliseconds, the better of two runs):
@@ -1999,9 +2059,9 @@ namespace that is neither HTML, SVG nor MathML, a prefix). The binary is
 7.9 MB, from 3.7 MB: the bindings are templates over lambdas, one
 instantiation for each member.
 
-### 9. How this is verified
+### 11. How this is verified
 
-**The scoreboard.** `tests/dom-conformance/` is 20 files, 557 cases. A case
+**The scoreboard.** `tests/dom-conformance/` is 21 files, 572 cases. A case
 is a page (`#html`), a script (`#code`) and what the script prints
 (`#expect`). `tools/conformance/run_dom_conformance.py` loads the page with
 `litebird --run-script`, which runs the script after the page's own, fires
@@ -2012,35 +2072,81 @@ clock, without layout or painting. Every `#expect` was written by
 cannot be bent. `everyday.dat` was written first, from *You Might Not Need
 jQuery*, and is not edited.
 
-jsdom is the reference, not the authority. In five places it differs from
-the standards (the corpus README names them); those are not in the corpus
-and `dom_follows_the_standard_where_jsdom_does_not` asserts the standard's
-answer.
+jsdom is the reference, not the authority. Where it differs from the
+standards (the corpus README names the places), the answer is not in the
+corpus, and a unit test asserts the standard's:
+`dom_follows_the_standard_where_jsdom_does_not`,
+`computed_style_answers_for_every_property`, `ranges_follow_the_tree`.
+
+**What the scoreboard did not see.** The corpus was written by the hand
+that wrote the code, and a case nobody thought of protects nothing. At 557
+of 557:
+
+- `getComputedStyle(el).position` was `""`, and so was every other property
+  nobody had declared: no case read one. `#id { color: red }` lost to a
+  later `p { color: blue }`: no case had two rules for one element. A
+  heading had no font size.
+- A range kept its boundaries where they were put, whatever happened to the
+  tree afterwards, and `surroundContents()` inside one text node put the
+  wrapper after the text.
+
+Both were found by running pages that were *not* in the corpus through
+jsdom and Litebird side by side
+(`tools/conformance/compare_with_jsdom.py`), and each became cases: seven
+for the computed style, eight for ranges. The same comparison says what is
+still different, and that list is section 12. It is the list of what was
+looked at, not of what is wrong.
 
 | Check | Result |
 | :--- | :--- |
-| DOM corpus (`make dom-conformance`) | 557 / 557; 61 on `main`. The everyday probe 68 / 68; 13 on `main` |
-| The corpus in jsdom (`--reference`) | 557 / 557 |
+| DOM corpus (`make dom-conformance`) | 572 / 572; 61 on `main`. The everyday probe 68 / 68; 13 on `main` |
+| The corpus in jsdom (`--reference`) | 572 / 572 |
 | URL data of web-platform-tests (`make url-conformance`): 904 parsing cases, 284 setter cases | 873 and 277, 1150 of 1188; 0 and 2 on `main`, where a URL object had no `username`. The 38 left are host names outside ASCII |
-| Unit tests (`make test`) | 108 / 108; five are new (the URL parser, URLs in the DOM, page scripts, the five points where jsdom is not the standard, lookups by id), and five old ones asserted what no browser does and were corrected |
+| Unit tests (`make test`) | 110 / 110; seven are new (the URL parser, URLs in the DOM, page scripts, where jsdom is not the standard, lookups by id, the computed style, ranges), and five old ones asserted what no browser does and were corrected |
 | html5lib tree construction (`make conformance`) | 1781 / 1792, as before |
 | JavaScript corpus (`make js-conformance`) | 840 / 845, as before |
 | `make diff-trees` | 4 × 1,500 random pages against parse5 8.1.1, 0 differ, as before |
-| `make fuzz` | @@FUZZ@@ |
+| `make fuzz` (in the sanitizer build) | 400 parser mutations and 400 pipeline runs, 0 findings |
 | `make deep` | 1,292 runs over 445 pages at 200,000 levels, 0 failed. The slowest page takes as long as on `main` |
-| `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages | @@ASAN@@ |
+| `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages at 10,000 levels | 110 / 110; JavaScript 839 / 845, as before; DOM 572 / 572; URL 1150 / 1188; 400 + 400 runs; 842 runs over 295 pages, 0 failed. No report |
 
 The DOM corpus has a job of its own in CI (the reference check, the
-scoreboard with a floor of 557, the URL data with a floor of 1150), and
+scoreboard with a floor of 572, the URL data with a floor of 1150), and
 `make asan` runs both corpora in the sanitizer build.
 
-### 10. What is still open here
+### 12. What is still open here
 
 - **The corpus measures what jsdom does.** jsdom lays nothing out and loads
   no second page, so nothing checks geometry, scrolling or navigation. In
   the CLI the layout is made once, after the scripts, so
   `getBoundingClientRect()` and `offsetWidth` are zero while they run.
-  `getComputedStyle` knows what the cascade knows, not used values.
+- **The computed style is computed, not used.** `width: auto` and `50%`
+  stay; a browser gives px. A value of several parts is left as declared
+  (`box-shadow: 0 0 1em red` keeps its `em`), `var()` is not substituted,
+  and the shorthands that are not taken apart (`transition`, `animation`,
+  `grid`, `background` beyond its colour) leave their parts `""`: not
+  known, which is better than an initial value that would be wrong. The
+  defaults are the HTML standard's, and the layout engine paints with a
+  sheet of its own: a heading is `2em` to a script and 28px on the screen.
+- **`el.style` keeps most shorthands whole.** `style.flex = '1'` leaves
+  `style.flexGrow` empty; only margin, padding and the border family are
+  taken apart. `length` and `item()` count a shorthand once where a browser
+  lists its longhands. Values are not rewritten the way CSSOM writes them:
+  `url(a.png)` stays unquoted, `translate( 10px , 20px )` keeps its spaces,
+  `webkitTransform` is not `transform`.
+  `tests/dom-conformance/open/inline-style.js` shows each.
+- **`DOMParser` knows HTML only.** `parseFromString(text,
+  'application/xml')` or `'image/svg+xml'` parses the text as HTML: there
+  is no XML parser, so no XML document, no `parsererror`, no `responseXML`.
+  The answer is wrong and nothing says so.
+- **Date and time inputs are text inputs.** `type="date"`, `time`,
+  `month`, `week` and `datetime-local` keep whatever is assigned, and have
+  no `valueAsDate`, `valueAsNumber` or `stepUp()`. `number` and `range`
+  have all of it.
+- **SVG elements have no SVG DOM.** They are `SVGElement` with the members
+  of `Element`: `className` is a string, there is no `viewBox`, no
+  `getBBox()`. `tests/dom-conformance/open/dates-and-xml.js` shows these
+  three.
 - **Nothing is fetched.** A `<script src>` or a stylesheet link is not
   loaded (a script inserted with a `src` gets an `error` event).
   `document.write` does nothing.
@@ -2116,15 +2222,17 @@ scoreboard with a floor of 557, the URL data with a floor of 1150), and
    layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
    is under-sized rather than blurry.
 9. **The DOM a script sees is measured against jsdom, not against pages.**
-   It passes all 557 cases of its corpus (Phase 27), and the corpus can
-   only ask what jsdom can answer. No layout while scripts run
-   (`getBoundingClientRect()` is zero), no navigation to another page, no
-   external scripts or stylesheets, no `document.write`, no style sheet
-   objects (`sheet.cssRules`, `insertRule`). Absent: `TextEncoder`,
+   It passes all 572 cases of its corpus (Phase 27), and the corpus can
+   only ask what jsdom can answer and what somebody thought to ask. No
+   layout while scripts run (`getBoundingClientRect()` is zero), no
+   navigation to another page, no external scripts or stylesheets, no
+   `document.write`, no style sheet objects (`sheet.cssRules`), no XML
+   (`DOMParser` parses every type as HTML), date and time inputs without
+   their values, `el.style` shorthands kept whole. Absent: `TextEncoder`,
    `crypto`, `indexedDB`, `MessageChannel`, XPath, Web Animations,
    `ElementInternals`, and what needs typed arrays. A host name outside
    ASCII is not converted (38 of the 1,188 URL cases). The full list is in
-   Phase 27, section 10.
+   Phase 27, section 12.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10.

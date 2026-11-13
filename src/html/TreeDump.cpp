@@ -104,6 +104,8 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
             case NodeType::DocumentFragment:
                 open.push_back({&node, 0, depth});
                 break;
+            case NodeType::DocumentType:
+                break;      // never a child; the document's doctype is written below
         }
     };
 

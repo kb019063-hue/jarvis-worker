@@ -4,6 +4,7 @@
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/MutationObserver.hpp"
+#include "litebird/dom/FormState.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/TreeWalk.hpp"
@@ -606,9 +607,11 @@ void Element::set_attribute(const std::string& name, std::string value) {
     auto it = m_attributes.find(name);
     if (it != m_attributes.end()) old_val = it->second;
 
+    const bool had_old = it != m_attributes.end();
     m_attributes[name] = value;
     mark_needs_layout();
     bump_tree_version();
+    if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, had_old, old_val);
 
     MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
     CustomElementRegistry::default_registry().notify_attribute_changed(
@@ -623,6 +626,7 @@ void Element::remove_attribute(const std::string& name) {
     m_attributes.erase(it);
     mark_needs_layout();
     bump_tree_version();
+    if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, true, old_val);
 
     MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
     CustomElementRegistry::default_registry().notify_attribute_changed(

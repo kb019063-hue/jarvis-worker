@@ -6,6 +6,8 @@ ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/dom/Node.cpp \
+       src/dom/Selector.cpp \
+       src/dom/FormState.cpp \
        src/dom/Document.cpp \
        src/dom/Comment.cpp \
        src/dom/MutationObserver.cpp \

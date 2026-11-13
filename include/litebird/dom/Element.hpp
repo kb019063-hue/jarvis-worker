@@ -14,6 +14,18 @@ namespace litebird {
 
 class CanvasRenderingContext2D;
 class ShadowRoot;
+struct FormControlState;
+
+/// Where an element stands with custom elements.
+enum class CustomElementState : uint8_t {
+    /// An ordinary element, or one whose name could be a custom element's and
+    /// has no definition yet (see Element::is_defined).
+    Uncustomized,
+    /// Its constructor has run: it is an instance of the definition's class.
+    Custom,
+    /// Its constructor threw. It stays a plain element.
+    Failed
+};
 
 /// Namespace of an element, per the WHATWG DOM standard.
 enum class ElementNamespace {
@@ -87,6 +99,15 @@ public:
     // Custom Elements
     const JsValue& custom_element_instance() const { return m_custom_element_instance; }
     void set_custom_element_instance(JsValue inst) { m_custom_element_instance = std::move(inst); }
+    CustomElementState custom_state() const { return m_custom_state; }
+    void set_custom_state(CustomElementState state) { m_custom_state = state; }
+    /// What `:defined` asks: false only for an element whose name is a valid
+    /// custom element name and which has not been upgraded.
+    bool is_defined() const;
+
+    /// The state of a form control; see FormState.hpp. Null until needed.
+    FormControlState* form_state() const { return m_form_state.get(); }
+    FormControlState& ensure_form_state();
 
     std::string id() const {
         return get_attribute("id");
@@ -206,6 +227,8 @@ public:
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
     JsValue m_custom_element_instance;
+    CustomElementState m_custom_state{CustomElementState::Uncustomized};
+    std::shared_ptr<FormControlState> m_form_state;
     Rect m_bounding_box;
     bool m_is_hovered{false};
     bool m_is_focused{false};

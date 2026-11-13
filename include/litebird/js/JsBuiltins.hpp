@@ -27,6 +27,10 @@ double js_current_time_ms();
 /// lists the values `step` captured, so the collector keeps them alive.
 JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots = {});
 
+/// A date and time as `Date.parse` reads it: milliseconds since the epoch,
+/// NaN for text that is not a date.
+double js_parse_date_string(const std::string& text);
+
 // --- RegExp entry points used by String.prototype methods -----------------
 // The subject is passed as the string value's own text, so that a pattern
 // applied again and again to one long string (an exec() loop) does not copy

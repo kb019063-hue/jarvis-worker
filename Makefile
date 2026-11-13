@@ -6,9 +6,10 @@ ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/dom/Node.cpp \
+       src/dom/Selector.cpp \
+       src/dom/FormState.cpp \
        src/dom/Document.cpp \
        src/dom/Comment.cpp \
-       src/dom/MutationObserver.cpp \
        src/dom/ShadowRoot.cpp \
        src/dom/CustomElementRegistry.cpp \
        src/dom/IntersectionObserver.cpp \
@@ -56,9 +57,23 @@ SRCS = src/dom/Node.cpp \
        src/js/Storage.cpp \
        src/js/EventLoop.cpp \
        src/js/Worker.cpp \
+       src/js/DomBindings.cpp \
+       src/js/DomEventBindings.cpp \
+       src/js/DomNodeBindings.cpp \
+       src/js/DomCollectionBindings.cpp \
+       src/js/DomElementBindings.cpp \
+       src/js/DomStyleBindings.cpp \
+       src/js/DomDocumentBindings.cpp \
+       src/js/DomTraversalBindings.cpp \
+       src/js/DomHtmlBindings.cpp \
+       src/js/DomFormBindings.cpp \
+       src/js/DomFileBindings.cpp \
+       src/js/DomUrlBindings.cpp \
+       src/js/DomObserverBindings.cpp \
+       src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
-       src/net/URL.cpp \
+       src/net/UrlParser.cpp \
        src/net/Fetch.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
@@ -70,10 +85,17 @@ TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
+DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
+# URL cases that must pass (tests/url). The 38 that do not are host names
+# outside ASCII.
+URL_FLOOR ?= 1150
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.
 JS_ASAN_FLOOR ?= 833
+# The DOM corpus must pass whole in the sanitizer build: none of its cases
+# is about depth.
+DOM_ASAN_FLOOR ?= 572
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -92,7 +114,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -128,6 +150,18 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
+## Running it needs nothing but the binary. Checking or recording the
+## expectations (--reference, --record) needs Node.js and, the first time, npm
+## and the network: jsdom is installed into build/jsdom.
+dom-conformance: $(TARGET)
+	@$(DOM_CONFORMANCE)
+
+## URL scoreboard: the web-platform-tests URL data (tests/url), run through
+## `new URL()` and the setters of the object. Needs nothing but the binary.
+url-conformance: $(TARGET)
+	@python3 tools/conformance/run_url_conformance.py --min-pass $(URL_FLOOR)
 
 ## A grid of string expressions (subjects x methods, operators and regular
 ## expressions) evaluated by Litebird and by Node.js, results compared.
@@ -168,8 +202,8 @@ fuzz:
 deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
 
-## Address + UB sanitizer build, then the test suite, the JavaScript corpus, a
-## fuzz smoke run (asan-core) and the deep pages (asan-deep).
+## Address + UB sanitizer build, then the test suite, the JavaScript, DOM and
+## URL corpora, a fuzz smoke run (asan-core) and the deep pages (asan-deep).
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan: asan-core
@@ -182,6 +216,8 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_url_conformance.py --binary build-asan/litebird --timeout 600 --min-pass $(URL_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
@@ -217,4 +253,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

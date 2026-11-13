@@ -10,6 +10,15 @@ std::shared_ptr<Document> HtmlParser::parse(std::string_view html, bool scriptin
     return builder.parse(html);
 }
 
+void HtmlParser::parse_into(const std::shared_ptr<Document>& document, std::string_view html, bool scripting,
+                            HtmlTreeBuilder::ScriptHandler on_script) {
+    HtmlTreeBuilder builder;
+    builder.set_scripting(scripting);
+    builder.set_document(document);
+    builder.set_script_handler(std::move(on_script));
+    builder.parse(html);
+}
+
 std::shared_ptr<Node> HtmlParser::parse_fragment_with_context(std::string_view html,
                                                               const std::string& context_tag,
                                                               ElementNamespace context_namespace,

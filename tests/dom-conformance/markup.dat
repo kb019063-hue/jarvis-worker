@@ -1,0 +1,271 @@
+#fixture
+<html><head><title>Markup</title></head><body><div id="d"><p class="a">one</p><br><img src="x.png" alt=""><input type="text" value="v" disabled><!-- c --></div><div id="e"></div></body></html>
+
+#name innerHTML of void elements, comments and boolean attributes
+#code
+console.log(document.getElementById('d').innerHTML);
+#expect
+<p class="a">one</p><br><img src="x.png" alt=""><input type="text" value="v" disabled=""><!-- c -->
+
+#name outerHTML includes the element itself
+#code
+console.log(document.getElementById('d').outerHTML.length, document.querySelector('p').outerHTML, document.querySelector('br').outerHTML, document.getElementById('e').outerHTML);
+#expect
+117 <p class="a">one</p> <br> <div id="e"></div>
+
+#name text is escaped: & < > and the no-break space
+#code
+var e = document.getElementById('e');
+e.textContent = 'a < b > c & d "q" \'s\' \u00a0x';
+console.log(e.innerHTML);
+e.setAttribute('title', 'a < b > c & d "q" \'s\' \u00a0x');
+console.log(e.outerHTML.slice(0, e.outerHTML.indexOf('>a') + 1));
+#expect
+a &lt; b &gt; c &amp; d "q" 's' &nbsp;x
+<div id="e" title="a &lt; b &gt; c &amp; d &quot;q&quot; 's' &nbsp;x">
+
+#name the contents of script and style are not escaped
+#code
+var s = document.createElement('script'), st = document.createElement('style'), ta = document.createElement('textarea'), ti = document.createElement('title');
+[s, st, ta, ti].forEach(function (el) { el.textContent = 'a < b && c > d'; });
+console.log(s.outerHTML, st.outerHTML, ta.outerHTML, ti.outerHTML);
+#expect
+<script>a < b && c > d</script> <style>a < b && c > d</style> <textarea>a &lt; b &amp;&amp; c &gt; d</textarea> <title>a &lt; b &amp;&amp; c &gt; d</title>
+
+#name setting innerHTML parses markup
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<ul><li>a<li>b</ul><p>x<p>y';
+console.log(e.innerHTML, e.children.length, e.querySelectorAll('li').length);
+#expect
+<ul><li>a</li><li>b</li></ul><p>x</p><p>y</p> 3 2
+
+#name setting innerHTML decodes character references
+#code
+var e = document.getElementById('e');
+e.innerHTML = '&lt;b&gt; &amp; &copy; &#65; &#x42; &nbsp; &notanentity; &amp';
+console.log(e.textContent.length, e.textContent, e.childNodes.length, e.innerHTML);
+#expect
+26 <b> & © A B   ¬anentity; & 1 &lt;b&gt; &amp; © A B &nbsp; ¬anentity; &amp;
+
+#name innerHTML replaces what was there and detaches the old nodes
+#code
+var d = document.getElementById('d');
+var p = d.querySelector('p');
+d.innerHTML = '<span>new</span>';
+console.log(d.childNodes.length, p.parentNode, p.textContent, d.firstChild.tagName);
+d.innerHTML = '';
+console.log(d.childNodes.length, d.innerHTML === '');
+#expect
+1 null one SPAN
+0 true
+
+#name innerHTML = null is the empty string, a number is its digits
+#code
+var e = document.getElementById('e');
+e.innerHTML = 'x'; e.innerHTML = null;
+console.log(e.childNodes.length);
+e.innerHTML = 42;
+console.log(e.firstChild.data, e.firstChild.nodeType);
+e.innerHTML = undefined;
+console.log(e.innerHTML);
+#expect
+0
+42 3
+undefined
+
+#name table markup needs its context
+#code
+var t = document.createElement('table'), tr = document.createElement('tr'), d = document.createElement('div'), sel = document.createElement('select');
+t.innerHTML = '<tr><td>1</td></tr>';
+tr.innerHTML = '<td>a</td><td>b</td>';
+d.innerHTML = '<td>lost</td><tr><td>cell</td></tr>';
+sel.innerHTML = '<option>o</option><option>p';
+console.log(t.innerHTML, '|', tr.innerHTML, '|', d.innerHTML, '|', sel.innerHTML);
+#expect
+<tbody><tr><td>1</td></tr></tbody> | <td>a</td><td>b</td> | lostcell | <option>o</option><option>p</option>
+
+#name scripts set by innerHTML do not run
+#code
+window.ran = 0;
+var e = document.getElementById('e');
+e.innerHTML = '<script>window.ran = 1;<\/script><img src="x" onerror="window.ran = 2">';
+console.log(window.ran, e.querySelector('script').textContent);
+#expect
+0 window.ran = 1;
+
+#name a script element appended to the document runs
+#code
+window.ran = 0;
+var s = document.createElement('script');
+s.textContent = 'window.ran++; window.sawCurrent = document.currentScript !== null;';
+console.log(window.ran);
+document.body.appendChild(s);
+console.log(window.ran, window.sawCurrent, document.currentScript);
+document.body.appendChild(s);
+var copy = s.cloneNode(true);
+document.body.appendChild(copy);
+console.log(window.ran);
+#expect
+0
+1 true null
+1
+
+#name outerHTML = replaces the element
+#code
+var p = document.querySelector('p');
+var d = p.parentNode;
+p.outerHTML = '<h2>h</h2>text<h3>k</h3>';
+console.log(d.firstChild.tagName, d.childNodes[1].data, d.childNodes[2].tagName, p.parentNode, p.outerHTML);
+var loose = document.createElement('i');
+loose.outerHTML = '<b>ignored</b>';
+console.log(loose.outerHTML);
+try { document.documentElement.outerHTML = '<html></html>'; console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+H2 text H3 null <p class="a">one</p>
+<i></i>
+NoModificationAllowedError
+
+#name insertAdjacentHTML at each position
+#code
+var p = document.querySelector('p');
+p.insertAdjacentHTML('beforebegin', '<i>1</i>');
+p.insertAdjacentHTML('afterbegin', '<i>2</i>');
+p.insertAdjacentHTML('beforeend', '<i>3</i>');
+p.insertAdjacentHTML('afterend', '<i>4</i>text');
+console.log(p.outerHTML, p.previousSibling.textContent, p.nextSibling.textContent, p.nextSibling.nextSibling.data);
+try { p.insertAdjacentHTML('inside', 'x'); } catch (e) { console.log(e.name); }
+try { document.createElement('p').insertAdjacentHTML('beforebegin', 'x'); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+<p class="a"><i>2</i>one<i>3</i></p> 1 4 text
+SyntaxError
+NoModificationAllowedError
+
+#name the serialization of attributes
+#code
+var e = document.getElementById('e');
+e.setAttribute('data-a', ''); e.setAttribute('b', 'x y'); e.setAttribute('c', "it's"); e.setAttribute('d', '<>');
+console.log(e.outerHTML);
+#expect
+<div id="e" data-a="" b="x y" c="it's" d="&lt;&gt;"></div>
+
+#name the serialization of a nested tree
+#code
+var e = document.getElementById('e');
+var ul = document.createElement('ul');
+for (var i = 0; i < 3; i++) { var li = document.createElement('li'); li.textContent = 'item ' + i; li.className = i % 2 ? 'odd' : 'even'; ul.appendChild(li); }
+e.appendChild(ul); e.appendChild(document.createComment(' end ')); e.appendChild(document.createTextNode(' tail'));
+console.log(e.innerHTML);
+#expect
+<ul><li class="even">item 0</li><li class="odd">item 1</li><li class="even">item 2</li></ul><!-- end --> tail
+
+#name pre, textarea and listing: a leading newline
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<pre>\nline</pre><textarea>\n\nt</textarea>';
+console.log(JSON.stringify(e.firstChild.textContent), JSON.stringify(e.lastChild.value), JSON.stringify(e.innerHTML));
+#expect
+"line" "\nt" "<pre>line</pre><textarea>\nt</textarea>"
+
+#name markup with unclosed and misnested tags
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<b><i>x</b>y</i><p>a<div>b</div>c';
+console.log(e.innerHTML);
+e.innerHTML = '<a href="1">x<a href="2">y';
+console.log(e.innerHTML);
+#expect
+<b><i>x</i></b><i>y</i><p>a</p><div>b</div>c
+<a href="1">x</a><a href="2">y</a>
+
+#name SVG and MathML inside HTML markup
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<svg viewBox="0 0 1 1"><circle r="1"/><foreignObject><p>h</p></foreignObject></svg><math><mi>x</mi></math>';
+var svg = e.firstChild;
+console.log(svg.namespaceURI, svg.tagName, svg.getAttribute('viewBox'), svg.firstChild.tagName, svg.querySelector('p').namespaceURI, e.lastChild.namespaceURI);
+console.log(e.innerHTML);
+#expect
+http://www.w3.org/2000/svg svg 0 0 1 1 circle http://www.w3.org/1999/xhtml http://www.w3.org/1998/Math/MathML
+<svg viewBox="0 0 1 1"><circle r="1"></circle><foreignObject><p>h</p></foreignObject></svg><math><mi>x</mi></math>
+
+#name a template in markup keeps its children in content
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<template><p>t</p></template><p>live</p>';
+var t = e.firstChild;
+console.log(t.childNodes.length, t.content.firstChild.tagName, e.querySelectorAll('p').length, e.innerHTML, t.innerHTML);
+#expect
+0 P 1 <template><p>t</p></template><p>live</p> <p>t</p>
+
+#name DOMParser
+#code
+var doc = new DOMParser().parseFromString('<title>T</title><p id="x">hello<p>two', 'text/html');
+console.log(doc instanceof Document, doc !== document, doc.title, doc.body.children.length, doc.getElementById('x').textContent, doc.documentElement.outerHTML, doc.defaultView, document.getElementById('x'));
+try { new DOMParser().parseFromString('<p>', 'text/nonsense'); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+true true T 2 hello <html><head><title>T</title></head><body><p id="x">hello</p><p>two</p></body></html> null null
+TypeError
+
+#name XMLSerializer on an HTML element
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<br><p>x</p>';
+console.log(new XMLSerializer().serializeToString(e));
+#expect
+<div xmlns="http://www.w3.org/1999/xhtml" id="e"><br /><p>x</p></div>
+
+#name createContextualFragment and Range are optional; createRange exists
+#code
+var r = document.createRange();
+console.log(typeof r.selectNode, typeof r.createContextualFragment, r.collapsed, r.startContainer === document);
+var f = r.createContextualFragment('<i>a</i><b>b</b>');
+console.log(f.nodeType, f.childNodes.length, f.firstChild.tagName);
+#expect
+function function true true
+11 2 I
+
+#name innerHTML on a document fragment's child and on template content
+#code
+var t = document.createElement('template');
+t.innerHTML = '<tr><td>cell</td></tr>';
+console.log(t.content.firstChild.tagName, t.content.querySelector('td').textContent, t.innerHTML);
+var row = t.content.firstChild.cloneNode(true);
+var table = document.createElement('table');
+table.appendChild(row);
+console.log(table.outerHTML);
+#expect
+TR cell <tr><td>cell</td></tr>
+<table><tr><td>cell</td></tr></table>
+
+#name innerHTML is read back with the current state of the tree
+#code
+var e = document.getElementById('e');
+e.innerHTML = '<input type="checkbox"><input type="text" value="a"><option>x</option>';
+e.children[0].checked = true; e.children[1].value = 'typed';
+console.log(e.innerHTML);
+e.children[0].setAttribute('checked', ''); e.children[1].setAttribute('value', 'attr');
+console.log(e.innerHTML);
+#expect
+<input type="checkbox"><input type="text" value="a"><option>x</option>
+<input type="checkbox" checked=""><input type="text" value="attr"><option>x</option>
+
+#name large markup
+#code
+var e = document.getElementById('e');
+var parts = [];
+for (var i = 0; i < 500; i++) parts.push('<li class="r' + (i % 5) + '">row ' + i + '</li>');
+e.innerHTML = '<ul>' + parts.join('') + '</ul>';
+console.log(e.querySelectorAll('li').length, e.querySelectorAll('.r3').length, e.firstChild.lastChild.textContent, e.innerHTML.length);
+#expect
+500 100 row 499 13399
+
+#name head and body through innerHTML of the root
+#code
+document.body.innerHTML = '<main><h1>T</h1></main>';
+console.log(document.body.children.length, document.querySelector('main > h1').textContent, document.getElementById('d'));
+document.head.innerHTML = '<title>New</title><meta name="k" content="v">';
+console.log(document.title, document.querySelector('meta[name=k]').content, document.head.children.length);
+#expect
+1 T null
+New v 2

@@ -26,12 +26,13 @@
 #include "litebird/dom/Event.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/UrlParser.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/js/Worker.hpp"
 #include "litebird/net/WebSocket.hpp"
-#include "litebird/dom/MutationObserver.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/IntersectionObserver.hpp"
 #include "litebird/dom/ResizeObserver.hpp"
 #include "litebird/dom/History.hpp"
@@ -571,13 +572,15 @@ TEST(dom_event_target_and_bubbling) {
     assert(button_clicks == 2); // 1 from previous click + 1 from this click
     assert(container_clicks == 1); // Bubbling was stopped!
 
-    // 3. Test JS DOM Event binding
+    // 3. The same through the node's script object. The methods live on
+    // EventTarget.prototype, so they are called on the object, and what is
+    // dispatched is an Event, as in a browser.
     JsValue js_btn = JsValue::make_dom_node(button);
     auto add_listener_fn = js_btn.get_property("addEventListener");
     assert(add_listener_fn.type == JsType::NativeFunction);
 
     int js_event_fired = 0;
-    add_listener_fn.native_function()({
+    add_listener_fn.call_with_this(js_btn, {
         JsValue::make_string("custom"),
         JsValue::make_native_function([&](const std::vector<JsValue>& args) {
             assert(!args.empty());
@@ -589,7 +592,8 @@ TEST(dom_event_target_and_bubbling) {
 
     auto dispatch_fn = js_btn.get_property("dispatchEvent");
     assert(dispatch_fn.type == JsType::NativeFunction);
-    dispatch_fn.native_function()({JsValue::make_string("custom")});
+    JsValue custom_event = dom::current_realm().ctor("Event").construct({JsValue::make_string("custom")});
+    dispatch_fn.call_with_this(js_btn, {custom_event});
     assert(js_event_fired == 1);
 }
 
@@ -1356,10 +1360,23 @@ TEST(dom_3phase_events_and_form_controls) {
     input_el->add_event_listener("focus", [&focused](const std::shared_ptr<Event>&) { focused = true; });
     input_el->add_event_listener("blur", [&blurred](const std::shared_ptr<Event>&) { blurred = true; });
 
-    js_node.get_property("focus").call({});
-    assert(focused);
+    // As in a browser, focus() does nothing to a disabled control or to one
+    // that is not in a document.
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(!focused);
+    auto focus_doc = std::make_shared<Document>();
+    auto focus_body = std::make_shared<Element>("body");
+    focus_doc->append_child(focus_body);
+    focus_body->append_child(input_el);
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(!focused);
+    input_el->set_disabled(false);
 
-    js_node.get_property("blur").call({});
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(focused);
+    assert(focus_doc->focused_element() == input_el);
+
+    js_node.get_property("blur").call_with_this(js_node, {});
     assert(blurred);
 }
 
@@ -2702,7 +2719,10 @@ TEST(custom_elements_api) {
         });
 
         class FancyButton extends HTMLElement {
-            static observedAttributes() {
+            // A getter, as the standard reads it: define() takes the list
+            // from the property. (This test used to declare a method, which
+            // only the old registry accepted; a browser throws on it.)
+            static get observedAttributes() {
                 return ["label", "theme"];
             }
             connectedCallback() {
@@ -2948,8 +2968,11 @@ TEST(history_api_and_client_routing) {
     assert(popstate_state.to_string() == "state-2-revised");
     assert(history.current_url() == "/settings/profile");
 
-    // Test with JS interpreter
+    // Test with JS interpreter. The page needs an address of its own: one
+    // at about:blank has no paths to move between, and pushState("/js1")
+    // there is a SecurityError, as in a browser.
     auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/");
     JsInterpreter interp(doc);
     interp.eval(R"(
         var popCount = 0;
@@ -2963,10 +2986,696 @@ TEST(history_api_and_client_routing) {
         history.back();
     )");
 
+    // back() only asks for the move, as in a browser: the page is at the
+    // same entry when the call returns, and popstate comes in a later task.
+    assert(interp.eval("popCount").to_number() == 0.0);
+    assert(interp.eval("location.pathname").to_string() == "/js2");
+    EventLoop::default_loop().tick();
+
     auto pop_count = interp.eval("popCount");
     assert(pop_count.to_number() == 1.0);
+    assert(interp.eval("location.pathname").to_string() == "/js1");
     auto last_state = interp.eval("lastState");
     assert(last_state.to_string() == "js-page-1");
+}
+
+// A URL as text and back, for the tests below: the href `reference` makes
+// against `base`, or "(not a URL)".
+static std::string url_href(const std::string& reference, const std::string& base = "") {
+    litebird::Url url;
+    return litebird::Url::parse(reference, base, url) ? url.href() : std::string("(not a URL)");
+}
+
+TEST(url_parser_follows_the_url_standard) {
+    using namespace litebird;
+    const std::string page = "https://example.test/app/page.html?tab=2#top";
+
+    // Relative references: each keeps as much of the base as it does not replace.
+    assert(url_href("sub/file.html", page) == "https://example.test/app/sub/file.html");
+    assert(url_href("?q=1", page) == "https://example.test/app/page.html?q=1");
+    assert(url_href("#frag", page) == "https://example.test/app/page.html?tab=2#frag");
+    assert(url_href("", page) == "https://example.test/app/page.html?tab=2");
+    assert(url_href("//cdn.test/lib.js", page) == "https://cdn.test/lib.js");
+    assert(url_href("/send", page) == "https://example.test/send");
+    assert(url_href("../a/b?x=1&y=2#h", page) == "https://example.test/a/b?x=1&y=2#h");
+    assert(url_href("../../../up", page) == "https://example.test/up");
+    assert(url_href(".", page) == "https://example.test/app/");
+    assert(url_href("https:other.html", page) == "https://example.test/app/other.html");
+    assert(url_href("http://other.test", page) == "http://other.test/");
+
+    // What is not a URL.
+    assert(url_href("nope") == "(not a URL)");
+    assert(url_href("/path/only") == "(not a URL)");
+    assert(url_href("https://") == "(not a URL)");
+    assert(url_href("https://a.test:99999/") == "(not a URL)");
+    assert(url_href("https://a.test:8x/") == "(not a URL)");
+    assert(url_href("https://[::1/") == "(not a URL)");
+    assert(url_href("https://a b/") == "(not a URL)");
+    assert(url_href("https://1.2.3.4.5/") == "(not a URL)");
+    assert(url_href("x", "mailto:ann@x.test") == "(not a URL)");
+    assert(url_href("#only-this", "mailto:ann@x.test") == "mailto:ann@x.test#only-this");
+    assert(url_href("x", "not a base") == "(not a URL)");
+
+    // One spelling for each URL.
+    assert(url_href("HTTP://EXAMPLE.test:80/a/./b/../c") == "http://example.test/a/c");
+    assert(url_href("https://example.test:443") == "https://example.test/");
+    assert(url_href("https://example.test:8443") == "https://example.test:8443/");
+    assert(url_href("http:\\\\x.test\\a\\b") == "http://x.test/a/b");
+    assert(url_href("  https://a.test/x y?q= z#f g \n") == "https://a.test/x%20y?q=%20z#f%20g");
+    assert(url_href("https://a.test/a\tb\nc") == "https://a.test/abc");
+    assert(url_href("https://a.test/%7Efoo/%2e%2E/bar") == "https://a.test/bar");
+    assert(url_href("https://user:pa ss@a.test/") == "https://user:pa%20ss@a.test/");
+    assert(url_href("https://a.test/?q='x'") == "https://a.test/?q=%27x%27");
+    assert(url_href("custom://a.test/?q='x'") == "custom://a.test/?q='x'");
+    assert(url_href("https://a.test/\xC3\xA9?\xC3\xA9#\xC3\xA9") == "https://a.test/%C3%A9?%C3%A9#%C3%A9");
+
+    // Hosts that are numbers.
+    assert(url_href("http://0x7f.1/") == "http://127.0.0.1/");
+    assert(url_href("http://192.168.0.257/") == "(not a URL)");
+    assert(url_href("http://3232235521/") == "http://192.168.0.1/");
+    assert(url_href("http://[0:0:0:0:0:0:0:1]:8080/") == "http://[::1]:8080/");
+    assert(url_href("http://[2001:DB8:0:0:1:0:0:1]/") == "http://[2001:db8::1:0:0:1]/");
+    assert(url_href("http://[::ffff:192.168.0.1]/") == "http://[::ffff:c0a8:1]/");
+    assert(url_href("http://[1:2:3:4:5:6:7:8:9]/") == "(not a URL)");
+
+    // Addresses that are not places on a network have one opaque path.
+    Url mail;
+    assert(Url::parse("mailto:ann@x.test?subject=hi", nullptr, mail));
+    assert(mail.protocol() == "mailto:" && mail.pathname() == "ann@x.test" && mail.hostname().empty());
+    assert(mail.search() == "?subject=hi" && mail.origin() == "null" && mail.opaque_path);
+    assert(url_href("javascript:void(0)") == "javascript:void(0)");
+    assert(url_href("data:text/plain,a b#c d") == "data:text/plain,a b#c%20d");
+    assert(url_href("about:blank") == "about:blank");
+
+    // Files.
+    assert(url_href("file:///C|/dir/x.txt") == "file:///C:/dir/x.txt");
+    assert(url_href("file://localhost/etc/hosts") == "file:///etc/hosts");
+    assert(url_href("other.html", "file:///home/me/page.html") == "file:///home/me/other.html");
+    assert(url_href("/abs", "file:///C:/dir/page.html") == "file:///C:/abs");
+    assert(file_url_from_path("/home/a b/x#1%.html") == "file:///home/a%20b/x%231%25.html");
+    assert(url_href(file_url_from_path("/home/a b/x?y.html")) == "file:///home/a%20b/x%3Fy.html");
+
+    // Origins.
+    Url url;
+    assert(Url::parse("https://a.test:8443/x", nullptr, url) && url.origin() == "https://a.test:8443");
+    assert(Url::parse("blob:https://a.test/1234-5678", nullptr, url) && url.origin() == "https://a.test");
+    assert(Url::parse("file:///x", nullptr, url) && url.origin() == "null");
+
+    // Assigning to a part parses the value as that part, and changes nothing
+    // when it cannot be one.
+    assert(Url::parse("https://example.test/app/page.html?tab=2#top", nullptr, url));
+    url.set_pathname("/new path");
+    assert(url.pathname() == "/new%20path");
+    url.set_hash("");
+    assert(url.hash().empty() && url.href() == "https://example.test/new%20path?tab=2");
+    url.set_hash("a b");
+    assert(url.hash() == "#a%20b");
+    url.set_search("q=1 2");
+    assert(url.search() == "?q=1%202");
+    url.set_search("");
+    assert(!url.has_query && url.href() == "https://example.test/new%20path#a%20b");
+    url.set_port("8080");
+    assert(url.host_and_port() == "example.test:8080");
+    url.set_port("x");
+    assert(url.port_text() == "8080");
+    url.set_port("443");
+    assert(url.port_text().empty());
+    url.set_host("b.test:81");
+    assert(url.hostname() == "b.test" && url.port_text() == "81");
+    url.set_hostname("c.test:99");                      // a port is not part of a host name
+    assert(url.hostname() == "b.test");
+    url.set_hostname("");                               // a web address must have a host
+    assert(url.hostname() == "b.test");
+    url.set_protocol("mailto");                         // nor can it stop being a web address
+    assert(url.protocol() == "https:");
+    url.set_protocol("http");
+    assert(url.protocol() == "http:" && url.port_text() == "81");
+    url.set_username("ann");
+    url.set_password("p@ss");
+    assert(url.href() == "http://ann:p%40ss@b.test:81/new%20path#a%20b");
+    assert(Url::parse("mailto:ann@x.test", nullptr, url));
+    url.set_pathname("/x");
+    url.set_host("y.test");
+    assert(url.href() == "mailto:ann@x.test");
+
+    // Query strings as pairs, and back.
+    auto pairs = parse_urlencoded("a=1&b=x+y&c=%41%zz&&d&=e&f=%FF");
+    assert(pairs.size() == 6);
+    assert(pairs[0] == std::make_pair(std::string("a"), std::string("1")));
+    assert(pairs[1].second == "x y" && pairs[2].second == "A%zz");
+    assert(pairs[3] == std::make_pair(std::string("d"), std::string()));
+    assert(pairs[4] == std::make_pair(std::string(), std::string("e")));
+    assert(pairs[5].second == "\xEF\xBF\xBD");            // not UTF-8: U+FFFD
+    assert(serialize_urlencoded({{"a b", "c&d=e"}, {"\xC3\xA9", "*-._~!'()"}}) == "a+b=c%26d%3De&%C3%A9=*-._%7E%21%27%28%29");
+}
+
+TEST(url_objects_and_addresses_in_the_dom) {
+    using namespace litebird;
+    // The page's own address decides what every relative address means.
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><a id=plain>no href</a><a id=frag href='#frag'>frag</a>"
+        "<a id=mail href='mailto:ann@x.test'>mail</a><form id=f></form></body>");
+    doc->set_url("HTTPS://Example.test/app/page.html?tab=2#top");
+    JsInterpreter interp(doc);
+    JsValue failed = interp.eval(R"JS(
+        (function () {
+            var failed = [];
+            function check(name, actual, expected) {
+                if (actual !== expected) failed.push(name + ': ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(expected));
+            }
+            function throws(name, kind, fn) {
+                try { fn(); failed.push(name + ': no error'); } catch (e) { check(name, e.name, kind); }
+            }
+            var page = 'https://example.test/app/page.html?tab=2#top';
+            check('the address is normalised', location.href + ' ' + document.URL, page + ' ' + page);
+            check('location parts', [location.protocol, location.host, location.port, location.pathname, location.search, location.hash, location.origin].join(' '),
+                  'https: example.test  /app/page.html ?tab=2 #top https://example.test');
+
+            // URL objects.
+            var u = new URL('../a/b?x=1&y=2#h', page);
+            check('href', u.href, 'https://example.test/a/b?x=1&y=2#h');
+            check('instanceof', u instanceof URL && u.searchParams instanceof URLSearchParams, true);
+            check('searchParams is one object', u.searchParams === u.searchParams, true);
+            u.searchParams.append('z', 'a b');
+            check('the list changes the URL', u.search, '?x=1&y=2&z=a+b');
+            u.search = '?only=1';
+            check('the URL changes the list', u.searchParams.get('only') + ' ' + u.searchParams.has('x'), '1 false');
+            u.searchParams.delete('only');
+            check('an empty list leaves no question mark', u.href, 'https://example.test/a/b#h');
+            u.hash = '';
+            check('hash removed', u.href, 'https://example.test/a/b');
+            u.href = 'http://other.test:8080/p?q=2';
+            check('href replaces everything', [u.host, u.pathname, u.searchParams.get('q')].join(' '), 'other.test:8080 /p 2');
+            throws('href must be a URL', 'TypeError', function () { u.href = 'nope'; });
+            check('a failed assignment changes nothing', u.href, 'http://other.test:8080/p?q=2');
+            check('as text', String(u) + ' ' + JSON.stringify({u: u}), 'http://other.test:8080/p?q=2 {"u":"http://other.test:8080/p?q=2"}');
+            throws('not a URL', 'TypeError', function () { new URL('nope'); });
+            throws('no arguments', 'TypeError', function () { new URL(); });
+            throws('without new', 'TypeError', function () { URL('https://a.test'); });
+            check('canParse', [URL.canParse('https://a.test'), URL.canParse('nope'), URL.canParse('x', page)].join(' '), 'true false true');
+            check('parse', URL.parse('nope') + ' ' + URL.parse('x', page).href, 'null https://example.test/app/x');
+            check('members are on the prototype', Object.keys(u).length + ' ' + ('href' in URL.prototype), '0 true');
+            class Api extends URL { get first() { return this.pathname.split('/')[1]; } }
+            var api = new Api('https://api.test/v1/users');
+            check('a subclass', api.first + ' ' + (api instanceof Api) + ' ' + (api instanceof URL) + ' ' + api.host, 'v1 true true api.test');
+
+            // URLSearchParams.
+            var p = new URLSearchParams('?b=2&a=1&b=3&c=x+y%21');
+            check('from a string', p.getAll('b').join() + ' ' + p.get('c') + ' ' + p.get('none') + ' ' + p.size, '2,3 x y! null 4');
+            p.sort();
+            check('sort keeps equal names in order', p.toString(), 'a=1&b=2&b=3&c=x+y%21');
+            p.set('b', '9');
+            p.delete('c', 'no such value');
+            check('set, and delete by value', p.toString() + ' ' + p.has('b', '9') + ' ' + p.has('b', '2'), 'a=1&b=9&c=x+y%21 true false');
+            check('iteration', Array.from(p).join('|') + ' ' + Array.from(p.keys()).join() + ' ' + Array.from(p.values()).join(), 'a,1|b,9|c,x y! a,b,c 1,9,x y!');
+            var seen = [];
+            p.forEach(function (value, name, owner) { seen.push(name + '=' + value + (owner === p)); });
+            check('forEach', seen.join(), 'a=1true,b=9true,c=x y!true');
+            check('from pairs', new URLSearchParams([['a', '1'], ['a', '2']]).toString(), 'a=1&a=2');
+            check('from a record', new URLSearchParams({q: 'x y', n: 1}).toString(), 'q=x+y&n=1');
+            check('from a Map', new URLSearchParams(new Map([['k', 'v']])).toString(), 'k=v');
+            check('from another list', new URLSearchParams(p).toString(), p.toString());
+            throws('a pair of three', 'TypeError', function () { new URLSearchParams([['a', 'b', 'c']]); });
+            check('a list of its own changes no URL', new URLSearchParams('a=1').toString(), 'a=1');
+
+            // Links.
+            var a = document.createElement('a');
+            check('no href', JSON.stringify([a.href, a.protocol, a.host, a.pathname, a.origin]), '["",":","","",""]');
+            a.href = '#top';
+            check('fragment only', a.href, page);
+            a.href = '?q=1';
+            check('query only', a.href, 'https://example.test/app/page.html?q=1');
+            a.href = '//cdn.test/lib.js';
+            check('another host', a.href + ' ' + a.host + ' ' + a.getAttribute('href'), 'https://cdn.test/lib.js cdn.test //cdn.test/lib.js');
+            a.pathname = '/new path';
+            check('assigning a part rewrites the attribute', a.getAttribute('href') + ' ' + a.pathname, 'https://cdn.test/new%20path /new%20path');
+            a.hash = 'x';
+            a.search = 'y=1';
+            a.port = '8080';
+            check('more parts', a.href, 'https://cdn.test:8080/new%20path?y=1#x');
+            a.protocol = 'mailto';
+            check('a web address stays one', a.protocol, 'https:');
+            var mail = document.getElementById('mail');
+            check('mailto', [mail.protocol, mail.pathname, mail.host, mail.origin, mail.href].join(' '), 'mailto: ann@x.test  null mailto:ann@x.test');
+            a.setAttribute('href', 'https://exa mple.test/');
+            check('not a URL: the attribute as written', a.href + ' ' + a.protocol + ' ' + a.host, 'https://exa mple.test/ : ');
+
+            // The page's address.
+            check('form.action without an attribute', document.getElementById('f').action, page);
+            check('baseURI', document.baseURI + ' ' + document.body.baseURI, page + ' ' + page);
+            var base = document.createElement('base');
+            base.href = 'https://static.test/assets/';
+            document.head.appendChild(base);
+            a.setAttribute('href', 'logo.png');
+            check('a base element moves relative addresses', a.href + ' ' + document.baseURI, 'https://static.test/assets/logo.png https://static.test/assets/');
+            check('but not the page', location.href, page);
+            base.remove();
+
+            var before = history.length;
+            history.pushState({n: 1}, '', '');
+            check('pushState with an empty address stays', location.href + ' ' + (history.length - before), page + ' 1');
+            history.pushState(null, '', '/other?x=1');
+            check('pushState to another path', location.href, 'https://example.test/other?x=1');
+            throws('another site', 'SecurityError', function () { history.pushState(null, '', 'https://other.test/'); });
+            throws('another scheme', 'SecurityError', function () { history.replaceState(null, '', 'http://example.test/other'); });
+            throws('not a URL at all', 'SecurityError', function () { history.pushState(null, '', 'https://[bad'); });
+            check('a refused move changes nothing', location.href, 'https://example.test/other?x=1');
+            throws('location.href must be a URL', 'SyntaxError', function () { location.href = 'https://[bad'; });
+            return failed.join('\n');
+        })()
+    )JS");
+    if (!failed.to_string().empty()) std::cerr << failed.to_string() << "\n";
+    assert(failed.to_string().empty());
+
+    // A change of fragment moves within the page: the address changes at
+    // once, the events come later.
+    interp.eval(R"JS(
+        var log = [];
+        window.addEventListener('hashchange', function (e) { log.push('hashchange ' + e.oldURL.split('/').pop() + ' > ' + e.newURL.split('/').pop()); });
+        window.addEventListener('popstate', function () { log.push('popstate'); });
+        var entries = history.length;
+        location.hash = 'a b';
+    )JS");
+    assert(interp.eval("location.href").to_string() == "https://example.test/other?x=1#a%20b");
+    assert(interp.eval("log.length").to_number() == 0.0);
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() == "popstate,hashchange other?x=1 > other?x=1#a%20b");
+    // The same fragment again is no move; an empty one is: the address ends in "#".
+    interp.eval("log = []; location.hash = '#a b'; location.hash = '';");
+    assert(interp.eval("location.href + ' ' + JSON.stringify(location.hash)").to_string() == "https://example.test/other?x=1# \"\"");
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() == "popstate,hashchange other?x=1#a%20b > other?x=1#");
+    // A link to a fragment does the same when it is clicked; replace() does
+    // not add an entry.
+    interp.eval("log = []; entries = history.length; document.getElementById('frag').click();");
+    assert(interp.eval("location.hash + ' ' + (history.length - entries)").to_string() == "#frag 1");
+    interp.eval("location.replace('#second');");
+    assert(interp.eval("location.hash + ' ' + (history.length - entries)").to_string() == "#second 1");
+    EventLoop::default_loop().tick();
+    assert(interp.eval("log.join()").to_string() ==
+           "popstate,hashchange other?x=1# > other?x=1#frag,popstate,hashchange other?x=1#frag > other?x=1#second");
+    // Anywhere else would be another page: nothing happens.
+    interp.eval("location.href = '/elsewhere'; location.assign('https://other.test/#x');");
+    assert(interp.eval("location.href").to_string() == "https://example.test/other?x=1#second");
+
+    // A page that is a file may change its query and fragment, not its path.
+    auto file_doc = HtmlParser::parse("<!DOCTYPE html><body></body>");
+    file_doc->set_url(file_url_from_path("/home/me/my page.html"));
+    JsInterpreter file_interp(file_doc);
+    assert(file_interp.eval("location.href + ' ' + location.origin").to_string() == "file:///home/me/my%20page.html null");
+    assert(file_interp.eval("history.pushState(null, '', '?tab=2#x'); location.href").to_string() ==
+           "file:///home/me/my%20page.html?tab=2#x");
+    assert(file_interp.eval("try { history.pushState(null, '', 'other.html'); 'no error' } catch (e) { e.name }").to_string() ==
+           "SecurityError");
+
+    // A script with no page has URL and URLSearchParams too.
+    JsInterpreter alone;
+    assert(alone.eval("new URL('/a?b=c', 'https://x.test').searchParams.get('b') + ' ' + (new URL('https://x.test') instanceof URL)")
+               .to_string() == "c true");
+}
+
+TEST(page_scripts_run_by_the_rules_of_a_page_load) {
+    using namespace litebird;
+    // Which <script> elements are JavaScript to run, and when: each one as
+    // the parser reaches its end tag, seeing the page up to itself.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><head><title>T</title>"
+        "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState + ':' +"
+        "    document.scripts.length + ':' + document.body + ':' + document.getElementById('later') + ':' + document.title];</script>"
+        "</head><body><p id=early>early</p>"
+        "<script type='text/plain'>log.push('text/plain');</script>"
+        "<script type=' TEXT/JavaScript '>log.push('any case, spaces around');</script>"
+        "<script type='text/javascript; charset=utf-8'>log.push('with a parameter');</script>"
+        "<script language='JavaScript1.5'>log.push('language');</script>"
+        "<script language='vbscript'>log.push('vbscript');</script>"
+        "<script type='module'>log.push('module');</script>"
+        "<script type='application/json'>{\"not\": \"code\"}</script>"
+        "<script src='elsewhere.js'>log.push('has a src');</script>"
+        "<script type=''>log.push('empty type');</script>"
+        "<template><script>log.push('inside a template');</script></template>"
+        "<script>log.push('sees:' + document.getElementById('early').textContent + ':' + document.getElementById('later') + ':' +"
+        "    document.scripts.length); document.body.appendChild(document.createElement('hr')).id = 'added';</script>"
+        "<p id=later>later</p>"
+        "<script>var late = document.createElement('script'); late.textContent = \"log.push('inserted')\";"
+        "    document.body.appendChild(late);"
+        "    log.push('inserter:' + document.getElementById('added').previousElementSibling.tagName + ':' +"
+        "             document.getElementById('later').previousElementSibling.id);</script>"
+        "<script>document.addEventListener('readystatechange', function () { log.push('state:' + document.readyState); });"
+        "    document.addEventListener('DOMContentLoaded', function () { log.push('DOMContentLoaded:' + document.currentScript); });"
+        "    window.addEventListener('load', function () { log.push('load'); });</script>"
+        "</body>");
+    assert(js.eval("log.join()").to_string() ==
+           "first:first:loading:1:null:null:T,any case, spaces around,language,empty type,sees:early:null:11,"
+           "inserted,inserter:SCRIPT:added,state:interactive");
+    assert(js.eval("document.readyState").to_string() == "interactive");
+    js.notify_document_loaded();
+    assert(js.eval("log.slice(8).join()").to_string() == "DOMContentLoaded:null,state:complete,load");
+
+    // A script may take apart the tree the parser is working in. The parser
+    // goes on inserting into the elements it has open, wherever they are
+    // now, and into the page once they are closed.
+    auto doc2 = std::make_shared<Document>();
+    doc2->set_url("https://example.test/");
+    JsInterpreter js2(doc2);
+    js2.load_page(
+        "<!DOCTYPE html><body><div id=box><script>window.box = document.getElementById('box'); box.remove();</script>"
+        "<b id=inner>x</b></div><p id=after>after</p>"
+        "<table id=t><tr><td><script>document.getElementById('t').remove();</script>cell</td></tr></table><p id=last>last</p>"
+        "<script>document.body.innerHTML = '<i id=fresh>fresh</i>';</script><u id=tail>tail</u>"
+        "<script>window.seen = [document.getElementById('inner'), box.querySelector('#inner').textContent, box.isConnected,"
+        "    document.getElementById('after'), document.getElementById('fresh').textContent,"
+        "    document.getElementById('tail').previousElementSibling.id, document.body.children.length].join();</script>"
+        "</body>");
+    assert(js2.eval("seen").to_string() == ",x,false,,fresh,fresh,3");
+
+    // A custom element defined by a script is one from then on: the
+    // elements further down the page are made as that class, and told they
+    // are connected before their content is parsed.
+    auto doc3 = std::make_shared<Document>();
+    doc3->set_url("https://example.test/");
+    JsInterpreter js3(doc3);
+    js3.load_page(
+        "<!DOCTYPE html><body><x-tag id=before>b</x-tag>"
+        "<script>window.log = []; customElements.define('x-tag', class extends HTMLElement {"
+        "    connectedCallback() { log.push(this.id + ':' + this.childNodes.length); } });</script>"
+        "<x-tag id=one>text</x-tag>"
+        "<script>log.push(document.getElementById('one') instanceof customElements.get('x-tag'));</script>"
+        "<x-tag id=two></x-tag>"
+        "</body>");
+    assert(js3.eval("log.join()").to_string() == "before:1,one:0,true,two:0");
+
+    // A mutation observer hears of what the parser adds. Its callback runs
+    // when no script is running: before the next script, and at the end.
+    auto doc4 = std::make_shared<Document>();
+    doc4->set_url("https://example.test/");
+    JsInterpreter js4(doc4);
+    js4.load_page(
+        "<!DOCTYPE html><body><script>window.log = [];"
+        "    new MutationObserver(function (records) {"
+        "        log.push(records.map(function (r) { return r.addedNodes[0].nodeName; }).join('+')); })"
+        "        .observe(document.body, {childList: true});"
+        "    Promise.resolve().then(function () { log.push('promise'); });</script>"
+        "<p>one</p><div></div><script>log.push('script');</script><span></span></body>");
+    assert(js4.eval("log.join()").to_string() == "promise,P+DIV+SCRIPT,script,SPAN");
+
+    // The shell loads a page the same way, and the page knows its address.
+    BrowserShell shell(800.0f, 600.0f, 80, 24);
+    assert(shell.navigate_to("examples/hello.html"));
+    const std::string address = shell.document()->url();
+    assert(address.rfind("file:///", 0) == 0 && address.find("/examples/hello.html") != std::string::npos);
+    assert(shell.js_engine()->eval("location.href === document.URL && location.protocol === 'file:' && document.readyState")
+               .to_string() == "complete");
+    assert(shell.js_engine()->eval("var a = document.createElement('a'); a.href = 'card.html'; a.href").to_string() ==
+           address.substr(0, address.rfind('/') + 1) + "card.html");
+    assert(ResourceLoader::address_of("https://Example.test") == "https://example.test/");
+    assert(ResourceLoader::address_of("/tmp/a b.html") == "file:///tmp/a%20b.html");
+}
+
+TEST(get_element_by_id_answers_from_an_index) {
+    using namespace litebird;
+    // getElementById walked the whole document on every call. The second
+    // lookup with no change in between now builds an index
+    // (Document::get_element_by_id), so every question here is asked twice:
+    // once of the walk and once of the index, and after every kind of change
+    // that must make the index forget. jsdom prints the same line.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><body><p id=\"a\" class=\"first\">x</p><span id=\"dup\" class=\"one\"></span><div id=\"b\"></div>"
+        "<span id=\"dup\" class=\"two\"></span><em id=\"null\"></em><template><s id=\"intemplate\"></s></template></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var out = [];
+        function id(x) { var e = document.getElementById(x); return e ? e.tagName + (e.className ? '.' + e.className : '') : 'null'; }
+        out.push(id('a'), id('a'), id('b'), id('nope'), id(''));
+        var first = document.getElementById('dup'); out.push(id('dup'), id('dup'));
+        first.remove(); out.push(id('dup'), id('dup'));
+        document.body.insertBefore(first, document.body.firstChild); out.push(id('dup'), id('dup'));
+        var a = document.getElementById('a'); a.id = 'z'; out.push(id('a'), id('a'), id('z'), id('z'));
+        a.removeAttribute('id'); out.push(id('z'), id('z'));
+        a.setAttribute('id', ''); out.push(id(''), id(''));
+        var d = document.createElement('div'); d.id = 'new'; out.push(id('new'), id('new'));
+        document.body.appendChild(d); out.push(id('new'), id('new'));
+        d.innerHTML = '<i id="deep"><b id="deeper"></b></i>'; out.push(id('deeper'), id('deeper'));
+        d.textContent = ''; out.push(id('deeper'), id('deeper'), id('deep'));
+        var t = document.querySelector('template');
+        out.push(id('intemplate'), id('intemplate'), t.content.getElementById('intemplate').tagName);
+        var host = document.getElementById('b'); var root = host.attachShadow({mode: 'open'});
+        root.innerHTML = '<u id="shadowed"></u>';
+        out.push(id('shadowed'), id('shadowed'), root.getElementById('shadowed').tagName);
+        out.push(String(document.getElementById(null)), String(document.getElementById(undefined)), id('null'), id('null'));
+        var other = document.implementation.createHTMLDocument(''); other.body.innerHTML = '<p id="a2">x</p>';
+        out.push(id('a2'), id('a2'), other.getElementById('a2').tagName, other.getElementById('a2').tagName);
+        document.body.appendChild(other.getElementById('a2'));
+        out.push(id('a2'), id('a2'), String(other.getElementById('a2')), String(other.getElementById('a2')));
+    )JS");
+    assert(js.eval("out.join(' ')").to_string() ==
+           "P.first P.first DIV null null SPAN.one SPAN.one SPAN.two SPAN.two SPAN.one SPAN.one null null "
+           "P.first P.first null null null null null null DIV DIV B B null null null null null S null null U "
+           "[object HTMLElement] null EM EM null null P P P P null null");
+
+    // The reason for it: 20,000 lookups in a document of 20,000 elements took
+    // 5.6 seconds. No clock here: with the walk this is 200 million elements
+    // visited, and the suite would visibly stop.
+    js.eval(R"JS(
+        var holder = document.createElement('div'); document.body.appendChild(holder);
+        for (var i = 0; i < 20000; i++) { var el = document.createElement('i'); el.id = 'n' + i; holder.appendChild(el); }
+        var found = 0;
+        for (var i = 0; i < 20000; i++) if (document.getElementById('n' + i).id === 'n' + i) found++;
+    )JS");
+    assert(js.eval("found").to_number() == 20000);
+}
+
+TEST(computed_style_answers_for_every_property) {
+    using namespace litebird;
+    // getComputedStyle answered "" for a property nobody had declared and took
+    // the last rule that matched, whatever its specificity. Seven cases of the
+    // DOM corpus hold what it does now (tests/dom-conformance/style.dat:
+    // initial values, specificity, colours, lengths, the defaults of HTML
+    // elements, shorthands, inherit and initial). Here is what those cannot
+    // hold, because jsdom answers something else and CSS says this.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "#a { line-height: 200%; font-size: 20px; border: 0.6px solid; outline: 2px dotted green; word-spacing: 0.5em }"
+        "#b { line-height: 1.5; font-size: 10px; border-spacing: 2px; transition: opacity 1s; background: url(x.png) red }"
+        "#c { width: calc(100% - 2em); height: calc(2 * (1px + 1em)); font-size: 10px; margin-top: calc(1em + 10%);"
+        "     top: calc(100vh - 1px) }"
+        "#e { color: #11223380; border: 2.9px solid; border-left-width: 0.2px; outline: 1px solid; outline-width: 3.7px;"
+        "     font-size: calc(1em + 4px) }"
+        "</style></head><body><div id=a><span id=a1>x</span></div><div id=b><span id=b1 style='font-size: 30px'>y</span></div>"
+        "<div id=c>z</div><textarea id=t></textarea><div id=e>e</div></body></html>");
+    js.notify_document_loaded();
+    auto cs = [&](const char* id, const char* property) {
+        return js.eval(std::string("getComputedStyle(document.getElementById('") + id + "')).getPropertyValue('" +
+                       property + "')")
+            .to_string();
+    };
+
+    // The body has the margin every browser gives it (jsdom: 0px).
+    assert(js.eval("getComputedStyle(document.body).marginTop").to_string() == "8px");
+
+    // A percentage line-height is a length where it is declared and is
+    // inherited as that length (jsdom: "200%"). A number is inherited as a
+    // number, and multiplies the font size of whoever has it.
+    assert(cs("a", "line-height") == "40px" && cs("a1", "line-height") == "40px");
+    assert(cs("b", "line-height") == "15px" && cs("b1", "line-height") == "45px");
+
+    // A border or an outline that is drawn is a whole number of pixels wide
+    // and not less than one; one that is not drawn is 0px wide, whatever
+    // its width was declared to be (jsdom: 3px for an outline nobody drew).
+    assert(cs("a", "border-top-width") == "1px");
+    assert(cs("e", "border-top-width") == "2px" && cs("e", "border-left-width") == "1px");
+    assert(cs("e", "outline-width") == "3px" && cs("a", "outline-width") == "2px" && cs("b", "outline-width") == "0px");
+
+    // Shorthands are given whole, the way browsers write them (jsdom leaves
+    // the `none` and the `solid` out, and has `currentcolor none` for a
+    // box-shadow nobody declared).
+    assert(cs("a", "border-top") == "1px solid rgb(0, 0, 0)");
+    assert(cs("a", "border") == "1px solid rgb(0, 0, 0)" && cs("b", "border") == "0px none rgb(0, 0, 0)");
+    assert(cs("a", "outline") == "rgb(0, 128, 0) dotted 2px");
+    assert(cs("b", "text-decoration") == "none solid rgb(0, 0, 0)" && cs("b", "box-shadow") == "none");
+    assert(cs("b", "list-style") == "outside none disc" && cs("b", "flex-flow") == "row nowrap");
+    assert(cs("a", "word-spacing") == "10px" && cs("b", "word-spacing") == "0px");
+    assert(cs("b", "border-spacing") == "2px 2px" && cs("a", "border-spacing") == "0px 0px");
+    assert(cs("t", "display") == "inline-block");
+
+    // A shorthand nothing here takes apart keeps its text, and its parts are
+    // "" (not known) and not an initial value that would be wrong.
+    assert(cs("b", "transition") == "opacity 1s" && cs("b", "transition-duration") == "");
+    assert(cs("a", "transition") == "all" && cs("a", "transition-duration") == "0s");
+    assert(cs("b", "background") == "url(x.png) red" && cs("b", "background-color") == "rgb(255, 0, 0)");
+    assert(cs("b", "background-image") == "" && cs("a", "background-image") == "none");
+
+    // calc(): lengths are added up; a percentage needs layout and stays; a
+    // unit nothing here knows (the viewport's) leaves the value as declared.
+    assert(cs("c", "height") == "22px" && cs("e", "font-size") == "20px");
+    assert(cs("c", "width") == "calc(100% - 20px)" && cs("c", "margin-top") == "calc(10% + 10px)");
+    assert(cs("c", "top") == "calc(100vh - 1px)");
+    // Eight bits of alpha that two decimals give back exactly.
+    assert(cs("e", "color") == "rgba(17, 34, 51, 0.5)");
+
+    // No recursion anywhere: what is inherited, the font size and the weight
+    // are found by loops up the tree, and a calc() nested deeper than anyone
+    // writes is given back as text.
+    js.eval(R"JS(
+        var top = document.createElement('div');
+        top.style.fontSize = '10px'; top.style.color = 'red'; top.style.fontWeight = '100';
+        var at = top;
+        for (var i = 0; i < 20000; i++) { var next = document.createElement(i % 2 ? 'b' : 'span'); at.appendChild(next); at = next; }
+        document.body.appendChild(top);
+        var deep = getComputedStyle(at);
+        var answers = [deep.color, deep.fontSize, deep.fontWeight, deep.lineHeight, deep.display, deep.marginTop].join(' ');
+        at.style.fontSize = '2em'; at.style.textIndent = '1rem';
+        answers += ' ' + [deep.fontSize, deep.textIndent, deep.borderTopColor].join(' ');
+        top.remove();
+        var nested = 'calc(' + new Array(100001).join('(') + '1px' + new Array(100001).join(')') + ')';
+        document.getElementById('c').style.width = nested;
+        var kept = getComputedStyle(document.getElementById('c')).width === nested;
+        document.getElementById('c').style.width = 'calc(' + new Array(13).join('(') + '1px' + new Array(13).join(')') + ' + 1px)';
+        var summed = getComputedStyle(document.getElementById('c')).width;
+    )JS");
+    assert(js.eval("answers").to_string() == "rgb(255, 0, 0) 10px 900 normal inline 0px 20px 16px rgb(255, 0, 0)");
+    assert(js.eval("String(kept)").to_string() == "true");
+    assert(js.eval("summed").to_string() == "2px");
+}
+
+TEST(ranges_follow_the_tree) {
+    using namespace litebird;
+    // A Range kept its two points where they were put, whatever happened to
+    // the tree afterwards, and surroundContents() inside one text node put
+    // the wrapper after the text. Ranges are live now (DomLive.hpp); eight
+    // cases of the DOM corpus hold the rules (tests/dom-conformance/
+    // ranges.dat). Here: the two answers jsdom gets wrong, and trees and
+    // numbers of ranges no person writes.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><p id=p></p><div id=d><span>one</span><span>two</span></div></body>");
+    js.notify_document_loaded();
+
+    // normalize(): a boundary in a text node that is merged away moves into
+    // the node it was merged into, at the same character (jsdom leaves it on
+    // the parent).
+    js.eval(R"JS(
+        var p = document.getElementById('p');
+        p.append('ab', '', 'cd', document.createElement('i'), 'ef', 'gh');
+        var r = document.createRange();
+        r.setStart(p.childNodes[2], 1); r.setEnd(p.childNodes[5], 1);
+        p.normalize();
+        var merged = [p.childNodes.length, r.startContainer.data, r.startOffset, r.endContainer.data, r.endOffset, r.toString()].join(' ');
+    )JS");
+    assert(js.eval("merged").to_string() == "3 abcd 3 efgh 3 defg");
+
+    // containsNode(node, true): a node before the selection is not partly
+    // inside it (jsdom: true for anything that ends before the selection does).
+    js.eval(R"JS(
+        var sel = getSelection();
+        sel.selectAllChildren(document.getElementById('d'));
+        var partly = [sel.containsNode(p, true), sel.containsNode(document.getElementById('d'), true),
+                      sel.containsNode(document.getElementById('d').firstChild.firstChild, true),
+                      sel.containsNode(document.body, true), sel.containsNode(document.body, false)].join(' ');
+        sel.removeAllRanges();
+    )JS");
+    assert(js.eval("partly").to_string() == "false true true true false");
+
+    // A boundary 50,000 levels down, and its whole tree removed from the
+    // top: found by walking up, in a loop.
+    js.eval(R"JS(
+        var top = document.createElement('div'), at = top;
+        for (var i = 0; i < 50000; i++) { var next = document.createElement('div'); at.appendChild(next); at = next; }
+        at.textContent = 'bottom';
+        document.body.appendChild(top);
+        var deep = document.createRange();
+        deep.setStart(at.firstChild, 2); deep.setEnd(at.firstChild, 4);
+        var before = deep.toString();
+        top.remove();
+        var after = [deep.startContainer === document.body, deep.startOffset, deep.collapsed].join(' ');
+    )JS");
+    assert(js.eval("before").to_string() == "tt");
+    assert(js.eval("after").to_string() == "true 2 true");
+
+    // A hundred thousand ranges nobody keeps do not stay on the list: the
+    // collector frees them and the list is cleared out as it grows. The
+    // changes to the tree that follow would take minutes otherwise.
+    js.eval(R"JS(
+        var kept = document.createRange(); kept.selectNodeContents(document.getElementById('d'));
+        for (var i = 0; i < 100000; i++) { var gone = document.createRange(); gone.selectNode(p); }
+        gone = null;
+        gc();
+        var d = document.getElementById('d');
+        for (var i = 0; i < 20000; i++) d.appendChild(document.createElement('b'));
+        for (var i = 0; i < 20000; i++) d.removeChild(d.lastChild);
+        var still = [kept.startOffset, kept.endOffset, kept.toString()].join(' ');
+    )JS");
+    assert(js.eval("still").to_string() == "0 2 onetwo");
+}
+
+TEST(dom_follows_the_standard_where_jsdom_does_not) {
+    using namespace litebird;
+    // The DOM corpus records what jsdom prints. In these five places jsdom
+    // and the HTML and DOM standards differ, so the corpus stays away from
+    // them (tests/dom-conformance/README.md) and the standard's answer is
+    // asserted here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><body><div id=d tabindex='junk'></div><button id=b tabindex='junk'>b</button>"
+        "<a id=a href='#x' tabindex='junk'>a</a><span id=s></span>"
+        "<form id=f><input id=req name=req required><button id=plain>go</button>"
+        "<button id=skip formnovalidate>skip</button></form><select id=sel></select></body>");
+    js.notify_document_loaded();
+
+    // 1. A tabindex that is not a number is no tabindex: the element's own
+    //    default, -1 for a div and 0 for what takes focus anyway.
+    assert(js.eval("[d.tabIndex, b.tabIndex, a.tabIndex, s.tabIndex].join()").to_string() == "-1,0,0,-1");
+
+    // 2. A submit button with formnovalidate submits a form that is not
+    //    valid; any other button is stopped by the validation.
+    js.eval(R"JS(
+        var log = [];
+        f.addEventListener('submit', function (e) { log.push('submit:' + e.submitter.id); e.preventDefault(); });
+        req.addEventListener('invalid', function () { log.push('invalid'); });
+        plain.click();
+        skip.click();
+    )JS");
+    assert(js.eval("log.join()").to_string() == "invalid,submit:skip");
+
+    // 3. A form that is not in a document cannot be submitted: requestSubmit()
+    //    does nothing, not even fire the event.
+    js.eval(R"JS(
+        var loose = document.createElement('form'), fired = 0;
+        loose.addEventListener('submit', function (e) { fired++; e.preventDefault(); });
+        loose.requestSubmit();
+        var firedLoose = fired;
+        document.body.appendChild(loose);
+        loose.requestSubmit();
+    )JS");
+    assert(js.eval("firedLoose + ',' + fired").to_string() == "0,1");
+
+    // 4. A <select> keeps what is written inside it: the parser has no
+    //    special rules for its content any more.
+    js.eval("sel.innerHTML = '<option>a</option><p>no</p><div>d</div>';");
+    assert(js.eval("sel.innerHTML + ' ' + sel.children.length + ' ' + sel.options.length").to_string() ==
+           "<option>a</option><p>no</p><div>d</div> 3 1");
+
+    // 5. There is one microtask queue. A promise callback queued before a
+    //    mutation runs before the observer hears of the mutation.
+    js.eval(R"JS(
+        var order = [], target = document.createElement('div');
+        new MutationObserver(function () { order.push('observer'); }).observe(target, {childList: true});
+        Promise.resolve().then(function () { order.push('promise'); });
+        target.appendChild(document.createElement('i'));
+        Promise.resolve().then(function () { order.push('promise 2'); });
+    )JS");
+    assert(js.eval("order.join()").to_string() == "promise,observer,promise 2");
 }
 
 TEST(css_filters_and_canvas_blending) {
@@ -5009,7 +5718,7 @@ TEST(strict_equality_does_not_coerce) {
     assert(js.global_env()->get("zero_false").bool_val == false);
     assert(js.global_env()->get("not_strict").bool_val == true);
     assert(!js.last_eval_failed());
-    assert(js.global_env()->get("el").type == JsType::DomNode);
+    assert(js.global_env()->get("el").dom_node_value() != nullptr);
     assert(js.global_env()->get("same_shadow").bool_val == true);
     assert(js.global_env()->get("self_identity").bool_val == true);
 }
@@ -6446,6 +7155,13 @@ int main() {
     RUN_TEST(shadow_dom_and_slot_projection);
     RUN_TEST(intersection_and_resize_observers);
     RUN_TEST(history_api_and_client_routing);
+    RUN_TEST(url_parser_follows_the_url_standard);
+    RUN_TEST(url_objects_and_addresses_in_the_dom);
+    RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
+    RUN_TEST(get_element_by_id_answers_from_an_index);
+    RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
+    RUN_TEST(computed_style_answers_for_every_property);
+    RUN_TEST(ranges_follow_the_tree);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

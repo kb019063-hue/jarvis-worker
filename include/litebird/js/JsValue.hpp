@@ -46,7 +46,6 @@ enum class JsType {
     Object,
     Function,
     NativeFunction,
-    DomNode,
     Symbol
 };
 
@@ -219,6 +218,7 @@ public:
     bool function_is_async() const;
     bool function_is_generator() const;
     const NativeFn& native_function() const;
+    /// The node this value is the script object of; empty for anything else.
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;
     const std::shared_ptr<CanvasGradient>& canvas_gradient_value() const;
@@ -234,7 +234,6 @@ public:
     void set_function_async(bool value);
     void set_function_generator(bool value);
     void set_native_function(NativeFn value);
-    void set_dom_node_value(std::shared_ptr<Node> value);
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> value);
     void set_canvas_gradient_value(std::shared_ptr<CanvasGradient> value);
     void set_promise_value(std::shared_ptr<struct PromiseData> value);
@@ -280,6 +279,8 @@ public:
         v.set_native_function(std::move(fn));
         return v;
     }
+    /// The script object of `node`: see DomBindings.hpp. The same object every
+    /// time, so `===` on two of them compares the nodes.
     static JsValue make_dom_node(std::shared_ptr<Node> node);
     /// A symbol. `key` is the unique property key it stands for; `description`
     /// is what `Symbol(...)` was called with.
@@ -293,10 +294,9 @@ public:
     bool is_callable() const { return is_function(); }
     bool is_symbol() const { return type == JsType::Symbol; }
     bool is_nullish() const { return type == JsType::Undefined || type == JsType::Null; }
-    /// Objects, arrays, functions and DOM wrappers: anything with identity.
+    /// Objects, arrays and functions: anything with identity.
     bool is_object_like() const {
-        return type == JsType::Object || type == JsType::Function ||
-               type == JsType::NativeFunction || type == JsType::DomNode;
+        return type == JsType::Object || type == JsType::Function || type == JsType::NativeFunction;
     }
     /// Address that is equal for two values exactly when they are the same
     /// object or function. Null for primitives.
@@ -331,6 +331,13 @@ public:
     /// Invokes the function as a constructor (`new f(...)`). `this_val` is the
     /// freshly created instance for script functions; natives build their own.
     JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr) const;
+    /// `super(...args)` in a class whose parent is a native constructor.
+    /// `derived_this` is the object the `new` expression created, with the
+    /// subclass's prototype. A native that can turn an existing object into
+    /// what it constructs (see current_derived_this) does so, and then the
+    /// subclass instance and the native object are one; the others build
+    /// their own and the caller takes over its state.
+    JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const;
 
     // --- Call context ---------------------------------------------------------
     //
@@ -341,6 +348,9 @@ public:
     static const JsValue& current_this();
     /// True when the native function currently executing was invoked with `new`.
     static bool current_is_construct();
+    /// For a native constructor reached through `super()`: the subclass's
+    /// object, which should become the thing constructed. Null otherwise.
+    static const JsValue* current_derived_this();
     /// For script functions: consumes the pending call context. Returns false
     /// (and leaves `this_out` undefined) when the function was entered without
     /// going through call_with_this()/construct().

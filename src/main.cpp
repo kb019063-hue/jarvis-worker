@@ -10,9 +10,12 @@
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/Storage.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -46,6 +49,10 @@ void print_help(const char* prog) {
     std::cout << "  --render-terminal      Render web page to ANSI terminal (default)\n";
     std::cout << "  --render-bmp <file>    Render web page to 24-bit BMP image\n";
     std::cout << "  --run-js <code>        Execute JavaScript code directly\n";
+    std::cout << "  --run-script <file>    Load the page, run <file> in it as a deferred script,\n";
+    std::cout << "                         let the page finish loading and its timers run, and\n";
+    std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
+    std::cout << "  --url=URL              The address the page is said to come from\n";
     std::cout << "  --repl                 Start interactive JavaScript REPL\n";
     std::cout << "  --shell [file/url]     Launch interactive TUI Browser Shell\n";
     std::cout << "  --help, -h             Show this help message\n";
@@ -108,6 +115,9 @@ int main(int argc, char* argv[]) {
     int virtual_time_budget_ms = 16;
     std::string fragment_context;
     std::string input_file;
+    std::string run_script_file;
+    bool run_script = false;
+    std::string page_url;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -153,6 +163,16 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: --run-js requires code string\n";
                 return 1;
             }
+        } else if (arg == "--run-script") {
+            if (i + 1 < argc) {
+                run_script_file = argv[++i];
+                run_script = true;
+            } else {
+                std::cerr << "Error: --run-script requires a file name\n";
+                return 1;
+            }
+        } else if (arg.rfind("--url=", 0) == 0) {
+            page_url = arg.substr(std::string("--url=").size());
         } else if (arg == "--repl") {
             repl_mode = true;
         } else if (arg[0] != '-') {
@@ -166,6 +186,9 @@ int main(int argc, char* argv[]) {
     }
 
     if (shell_mode) {
+        // The browser a person uses keeps localStorage between sessions.
+        // Every other mode is one run of one page and starts empty.
+        litebird::Storage::local_storage().persist_to("/tmp/litebird_localstorage.db");
         litebird::BrowserShell shell;
         std::string start_url = input_file.empty() ? "examples/browser_portal.html" : input_file;
         shell.navigate_to(start_url);
@@ -230,39 +253,41 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    auto doc = litebird::HtmlParser::parse(html_content, scripting);
-
-    // 2. CSS Parsing & Style Resolution
-    litebird::StyleResolver resolver;
-
-    // Extract inline <style> from DOM
-    for (const auto& el : doc->get_elements_by_tag_name("style")) {
-        auto sheet = litebird::CssParser::parse(el->text_content());
-        resolver.add_stylesheet(sheet);
-    }
-
-    // 3. JavaScript Execution for <script> tags
-    //
     // A page is rendered once, so nobody is waiting for its timers: the event
     // loop jumps its clock to the next one instead of sleeping.
     auto& page_loop = litebird::EventLoop::default_loop();
     page_loop.set_time_skipping(true);
+
+    // 2. The page: its tree, and its scripts run as the parser reaches them.
+    // The document exists first, with the address scripts see as
+    // location.href and document.URL, and the script engine attached to it.
+    auto doc = std::make_shared<litebird::Document>();
+    doc->set_url(page_url.empty() ? litebird::ResourceLoader::address_of(input_file) : page_url);
     litebird::JsInterpreter js_engine(doc);
-    for (const auto& el : doc->get_elements_by_tag_name("script")) {
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            if (dump_bytecode) {
-                std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-                try {
-                    auto fn = js_engine.compile_to_bytecode(script);
-                    fn->chunk.disassemble(std::cout, "Inline <script>");
-                } catch (const std::exception& ex) {
-                    std::cout << "(not compiled: " << ex.what() << ")";
-                }
-                std::cout << "\n";
-            }
-            js_engine.eval_ast(script);
+    js_engine.load_page(html_content, scripting, [&](const std::string& script) {
+        if (!dump_bytecode) return;
+        std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
+        try {
+            auto fn = js_engine.compile_to_bytecode(script);
+            fn->chunk.disassemble(std::cout, "Inline <script>");
+        } catch (const std::exception& ex) {
+            std::cout << "(not compiled: " << ex.what() << ")";
         }
+        std::cout << "\n";
+    });
+
+    // --run-script: one more script, run the way a deferred script is: the
+    // tree is complete and the page has not been told so yet. Then the page
+    // finishes loading and its timers run to the end, on the loop's virtual
+    // clock. Nothing is laid out or drawn; what the script printed is the
+    // result.
+    if (run_script) {
+        std::string script;
+        if (!read_file(run_script_file, script)) return 1;
+        js_engine.eval_ast(script);
+        js_engine.notify_document_loaded();
+        page_loop.run_until_idle(std::chrono::seconds(60));
+        return litebird::js_uncaught_error_count() > 0 ? 1 : 0;
     }
 
     // The page has loaded. Then let it settle before the one picture is taken:
@@ -271,6 +296,14 @@ int main(int argc, char* argv[]) {
     // run here too. Timers further out than the budget stay pending.
     js_engine.notify_document_loaded();
     page_loop.run_until_idle(std::chrono::milliseconds(virtual_time_budget_ms));
+
+    // 3. CSS Parsing & Style Resolution: the <style> elements of the page as
+    // its scripts left it.
+    litebird::StyleResolver resolver;
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        auto sheet = litebird::CssParser::parse(el->text_content());
+        resolver.add_stylesheet(sheet);
+    }
 
     // 4. Layout Box Tree Construction
     float viewport_w = 800.0f;

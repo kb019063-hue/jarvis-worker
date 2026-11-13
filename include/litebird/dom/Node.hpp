@@ -20,7 +20,40 @@ enum class NodeType {
     Element,
     Text,
     Comment,
-    DocumentFragment
+    DocumentFragment,
+    /// `<!DOCTYPE html>` as a script sees it (`document.doctype`). Such a node
+    /// is never among anybody's children(): the document keeps the doctype in
+    /// a field, and the bindings show it between the right two children.
+    DocumentType
+};
+
+/// What the tree tells the script bindings. A member that is null is skipped,
+/// so a program with no scripting pays one test per event.
+struct DomHooks {
+    /// A node that has a script object was put under `parent`, which has
+    /// none. The bindings keep one rule about script objects (a node that has
+    /// one, its parent has one), and this is where it would break.
+    void (*wrapper_needs_parent)(Node& parent, const Node& child) = nullptr;
+    /// Native code dispatched `event` at `target`. True when the bindings ran
+    /// the dispatch (script listeners included); `result` is then what
+    /// dispatchEvent returns. False: do the native dispatch.
+    bool (*dispatch)(Node& target, const std::shared_ptr<Event>& event, bool& result) = nullptr;
+    /// Native code asked for a click, focus or blur. True when dealt with.
+    bool (*click)(Element& element) = nullptr;
+    bool (*focus)(Element& element, bool focus) = nullptr;
+
+    // What changed, for mutation observers and custom elements. Each is
+    // called after the change has been made.
+    void (*children_changed)(Node& parent, const std::vector<std::shared_ptr<Node>>& added,
+                             const std::vector<std::shared_ptr<Node>>& removed,
+                             const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next) = nullptr;
+    /// `old_value` is null for an attribute that was added, `new_value` for
+    /// one that was removed.
+    void (*attribute_changed)(Element& element, const std::string& name, const std::string* old_value,
+                              const std::string* new_value) = nullptr;
+    void (*character_data_changed)(Node& node, const std::string& old_value) = nullptr;
+    /// An element entered (true) or left (false) a document.
+    void (*connected)(Element& element, bool connected) = nullptr;
 };
 
 using EventListener = std::function<void(const std::shared_ptr<Event>&)>;
@@ -40,6 +73,36 @@ public:
     bool is_text() const { return m_type == NodeType::Text; }
     bool is_comment() const { return m_type == NodeType::Comment; }
     bool is_document_fragment() const { return m_type == NodeType::DocumentFragment; }
+    bool is_document_type() const { return m_type == NodeType::DocumentType; }
+
+    /// The document this node belongs to, connected or not: the one that
+    /// created it, or the one it was last inserted into. Empty for a node
+    /// nobody has told (a tree built by hand); the bindings then answer with
+    /// the page's document.
+    std::shared_ptr<Document> owner_document() const { return m_owner.lock(); }
+    /// Sets the owner of this node and of everything below it (and inside its
+    /// shadow tree). A node and its descendants always have one owner, so the
+    /// walk stops where the owner is already `owner`.
+    void set_owner_document(const std::shared_ptr<Document>& owner);
+
+    // --- Script object --------------------------------------------------------
+    //
+    // The object a script holds for this node, if one has been made: an opaque
+    // pointer to the heap cell and the number of the realm it belongs to. The
+    // cell owns the node (a shared_ptr); the node only points back, and the
+    // cell clears the pointer when the collector frees it. See DomBindings.hpp.
+    void* script_object() const { return m_script_object; }
+    uint64_t script_realm() const { return m_script_realm; }
+    void set_script_object(void* cell, uint64_t realm) { m_script_object = cell; m_script_realm = realm; }
+
+    static DomHooks& hooks();
+
+    /// A number that grows with every change to any tree: children added or
+    /// removed, an attribute set or removed, a form control's state changed.
+    /// Live collections remember the number they were computed at and compute
+    /// again when it has moved.
+    static uint64_t tree_version() { return s_tree_version; }
+    static void bump_tree_version() { ++s_tree_version; }
 
     std::shared_ptr<Node> parent() const { return m_parent.lock(); }
     void set_parent(std::shared_ptr<Node> p);
@@ -51,6 +114,9 @@ public:
     std::shared_ptr<Node> last_child() const { return m_children.empty() ? nullptr : m_children.back(); }
     std::shared_ptr<Node> previous_sibling() const;
     std::shared_ptr<Node> next_sibling() const;
+    /// This node's index among the children of `parent`; their number when
+    /// it is not one of them.
+    std::size_t index_in(const Node& parent) const;
 
     bool is_connected() const { return m_is_connected; }
 
@@ -116,14 +182,27 @@ public:
     void remove_event_listener(const std::string& type, const void* key, bool use_capture = false);
     void remove_event_listeners(const std::string& type);
     bool dispatch_event(const std::shared_ptr<Event>& event);
+    /// The dispatch without script: capture, target and bubble over the
+    /// listeners added with add_event_listener. What dispatch_event does when
+    /// no bindings are attached.
+    bool dispatch_event_natively(const std::shared_ptr<Event>& event);
+    /// Runs this node's own native listeners for `event`: at the target all of
+    /// them, otherwise those of the phase given. For the bindings' dispatch,
+    /// which decides the path and the phases itself.
+    void run_native_listeners(const std::shared_ptr<Event>& event, bool capture_phase, bool at_target);
+    bool has_native_listeners() const { return !m_listeners.empty(); }
     bool has_listeners(const std::string& type) const {
         auto it = m_listeners.find(type);
         return it != m_listeners.end() && !it->second.empty();
     }
 
-    /// The children of this node as markup: elements and text, in tree
-    /// order, written into one buffer by one walk. What innerHTML returns.
+    /// The children of this node as markup, written into one buffer by one
+    /// walk, by the HTML standard's serializing algorithm. What innerHTML
+    /// returns; for a <template> it is the template's contents.
     std::string inner_markup() const;
+    /// This node and what is below it as markup: outerHTML. With `xml`, the
+    /// way XMLSerializer writes an HTML tree.
+    std::string outer_markup(bool xml = false) const;
 
     /// The text of every Text node below this node, in tree order. A Text or
     /// Comment node answers with its own data.
@@ -160,6 +239,15 @@ protected:
     NodeType m_type;
     bool m_is_connected{false};
     std::weak_ptr<Node> m_parent;
+    std::weak_ptr<Document> m_owner;
+    void* m_script_object{nullptr};
+    uint64_t m_script_realm{0};
+    /// Where this node was among its parent's children the last time anybody
+    /// looked. Checked before it is used; it makes a walk along siblings
+    /// (`for (n = first; n; n = n.nextSibling)`) one step per node instead
+    /// of a search of the whole list per node.
+    mutable uint32_t m_sibling_hint{0};
+    static inline uint64_t s_tree_version = 1;
     std::vector<std::shared_ptr<Node>> m_children;
     std::unordered_map<std::string, std::vector<EventListenerEntry>> m_listeners;
     bool m_needs_layout{true};

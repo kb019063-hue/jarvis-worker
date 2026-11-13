@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -39,6 +40,23 @@ public:
 
     /// The scripting flag, which changes <noscript> handling.
     void set_scripting(bool enabled) { m_scripting = enabled; }
+
+    /// The document parse() fills, instead of a new one. It must be empty.
+    /// A page whose scripts run while it is parsed needs its document, and
+    /// the script engine attached to it, before the first tag is read.
+    void set_document(std::shared_ptr<Document> document) { m_document = std::move(document); }
+
+    /// Called for each HTML <script> element when its end tag has been read:
+    /// the element is complete and in the tree, and nothing after it has
+    /// been parsed. This is where a page's scripts run, so a script sees the
+    /// page up to itself and the parser carries on in the tree the script
+    /// left. The handler may change the tree in any way; the parser keeps
+    /// its own references to the elements that are open and goes on
+    /// inserting into them wherever they now are, as the standard says. A
+    /// script that is cut off by the end of the page is never reported, and
+    /// neither is one parsed as a fragment (innerHTML never runs scripts).
+    using ScriptHandler = std::function<void(const std::shared_ptr<Element>& script)>;
+    void set_script_handler(ScriptHandler handler) { m_script_handler = std::move(handler); }
 
     /// How deep the parser nests elements: <html> is at depth 1, and nothing
     /// the parser attaches is deeper than this. An element that would be is
@@ -315,6 +333,7 @@ private:
     bool m_frameset_ok{true};
     bool m_foster_parenting{false};
     bool m_scripting{true};
+    ScriptHandler m_script_handler;
     bool m_fragment_case{false};
     std::shared_ptr<Element> m_context_element;
     std::shared_ptr<Node> m_fragment_root;

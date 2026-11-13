@@ -16,6 +16,14 @@ class HtmlParser {
 public:
     static std::shared_ptr<Document> parse(std::string_view html, bool scripting = true);
 
+    /// Parses a page into `document`, which must be empty, and calls
+    /// `on_script` for each <script> when its end tag has been read, before
+    /// anything after it is parsed (see HtmlTreeBuilder::set_script_handler).
+    /// This is how a page with scripts is loaded:
+    /// JsInterpreter::load_page() is the caller.
+    static void parse_into(const std::shared_ptr<Document>& document, std::string_view html, bool scripting,
+                           HtmlTreeBuilder::ScriptHandler on_script);
+
     /// Fragment parsing with a context element given by name, returning a
     /// DocumentFragment. The corpus runner and the tests use this.
     static std::shared_ptr<Node> parse_fragment_with_context(

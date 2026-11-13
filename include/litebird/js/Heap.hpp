@@ -22,6 +22,42 @@ enum class ObjectClass : uint8_t {
     Boolean, Number, String, Symbol, Arguments, Promise, Generator, Iterator
 };
 
+/// What a host object does beyond storing properties.
+///
+/// An ordinary object is a table of properties and a prototype. A NodeList
+/// also answers `list[3]`, a dataset answers every name there is a `data-`
+/// attribute for, and the window answers the id of every element in the page.
+/// None of that can be stored: it is computed from the document each time it
+/// is asked for. An object that needs it carries one of these, and property
+/// access asks it at fixed points (see JsValue::get_property and friends).
+///
+/// It is also where a host object keeps its C++ state. Bindings recognise
+/// "is this an Event?" by the dynamic type of the exotic, so a script cannot
+/// forge one by setting a property.
+///
+/// Every hook gets the cell it is attached to. The default is to add nothing.
+class JsExotic {
+public:
+    virtual ~JsExotic() = default;
+    /// Asked before the object's own properties. True when the object computes
+    /// a property called `name`; `out` is its value.
+    virtual bool get(JsObject* self, const std::string& name, JsValue& out) { (void)self; (void)name; (void)out; return false; }
+    /// Asked last, when neither the object nor its prototypes have `name`.
+    virtual bool get_last(JsObject* self, const std::string& name, JsValue& out) { (void)self; (void)name; (void)out; return false; }
+    /// Offered every write first. True when the write was dealt with (stored
+    /// somewhere else, or refused).
+    virtual bool set(JsObject* self, const std::string& name, const JsValue& value) { (void)self; (void)name; (void)value; return false; }
+    /// True when `name` is a computed property: `name in obj`, hasOwnProperty.
+    virtual bool has(JsObject* self, const std::string& name) { (void)self; (void)name; return false; }
+    /// `delete obj[name]`. True when dealt with; `result` is what delete yields.
+    virtual bool remove(JsObject* self, const std::string& name, bool& result) { (void)self; (void)name; (void)result; return false; }
+    /// Appends the computed property names that enumerate, in order. They come
+    /// before the stored properties.
+    virtual void keys(JsObject* self, std::vector<std::string>& out) { (void)self; (void)out; }
+    /// Reports every value held outside the property table to the collector.
+    virtual void trace(Heap& heap) { (void)heap; }
+};
+
 class JsObject : public HeapObject {
 public:
     JsObject* prototype{nullptr};
@@ -51,10 +87,20 @@ public:
     /// value. Lets `window.x = 1` update a global variable named x.
     std::shared_ptr<std::function<bool(const std::string&, const JsValue&)>> assign_hook;
 
+    /// Host behaviour and state; see JsExotic. Null for ordinary objects.
+    std::shared_ptr<JsExotic> exotic;
+
     // Set when this JsObject is the script-visible identity of a DOM node.
     // Holding a strong reference here means the wrapper keeps its node alive, which
     // is what makes `document.body` stable across accesses and across collections.
     std::shared_ptr<Node> dom_node;
+
+    /// Set by the DOM bindings for objects that have a `dom_node`. The first
+    /// reports the objects of the nodes around it (see DomBindings.hpp); the
+    /// second runs when the object is freed, and clears the node's pointer
+    /// back to it.
+    static inline void (*trace_dom_node)(Heap&, JsObject&) = nullptr;
+    static inline void (*release_dom_node)(JsObject&) = nullptr;
 
     void trace(Heap& heap) override;
     void release_contents() override;

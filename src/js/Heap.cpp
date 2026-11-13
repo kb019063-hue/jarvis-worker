@@ -36,12 +36,15 @@ void JsObject::trace(Heap& heap) {
         heap.mark_value(elem);
     }
     if (trace_extra) trace_extra(heap);
+    if (exotic) exotic->trace(heap);
+    if (dom_node && trace_dom_node) trace_dom_node(heap, *this);
 }
 
 void JsObject::release_contents() {
     // Everything is moved out before anything is destroyed: destroying one
     // member can run code (a DOM node's destructor, a suspended function being
     // unwound) that must find this cell empty, not half torn down.
+    if (dom_node && release_dom_node) release_dom_node(*this);
     PropertyMap dropped_properties = std::move(properties);
     properties.clear();
     std::vector<JsValue> dropped_elements = std::move(array_elements);
@@ -51,6 +54,8 @@ void JsObject::release_contents() {
     auto dropped_fallback = std::move(lookup_fallback);
     auto dropped_hook = std::move(assign_hook);
     auto dropped_node = std::move(dom_node);
+    auto dropped_exotic = std::move(exotic);
+    exotic.reset();
     internal.reset();
     trace_extra = nullptr;
     lookup_fallback.reset();

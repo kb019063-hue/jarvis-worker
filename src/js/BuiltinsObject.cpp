@@ -211,7 +211,7 @@ std::string object_tag(const JsValue& value) {
 JsValue structured_clone(const JsValue& value, std::unordered_map<const void*, JsValue>& seen) {
     js_check_stack();
     if (!value.is_object_like()) return value;
-    if (value.is_function() || value.type == JsType::DomNode) {
+    if (value.is_function() || value.dom_node_value()) {
         js_throw_error(JsErrorKind::Error, "DataCloneError: value could not be cloned");
     }
     auto it = seen.find(value.identity());

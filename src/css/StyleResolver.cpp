@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include "litebird/css/CssParser.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
+#include "litebird/dom/FormState.hpp"
 #include <sstream>
 #include <cctype>
 #include <cmath>
@@ -252,9 +253,12 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
             } else if (name == "active") {
                 if (!element->is_active()) return false;
             } else if (name == "disabled") {
-                if (!element->disabled()) return false;
+                if (!forms::is_disabled(*element)) return false;
+            } else if (name == "enabled") {
+                if (!forms::can_be_disabled(*element) || forms::is_disabled(*element)) return false;
             } else if (name == "checked") {
-                if (!element->checked()) return false;
+                // The control's state now, not its `checked` attribute.
+                if (!forms::matches_checked(*element)) return false;
             } else if (name == "not") {
                 // Negation pseudo-class: if inner selector matches, then :not fails
                 SimpleSelector sub_sel;

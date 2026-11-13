@@ -1,0 +1,541 @@
+#fixture
+<html><head><title>Style</title><style>
+p { color: green; margin: 1px }
+.box { display: flex; color: blue }
+#main { display: block }
+.gone { display: none }
+span.hi { font-weight: bold }
+</style></head><body><div id="main" class="box" style="color: red; background-color: yellow"><p id="p" class="note">text <span class="hi" id="s">hi</span></p></div><i id="i"></i></body></html>
+
+#name reading declarations from the style attribute
+#code
+var s = document.getElementById('main').style;
+console.log(s.color, s.backgroundColor, s['background-color'], s.length, s[0], s[1], s[2], JSON.stringify(s.width), s.cssText);
+#expect
+red yellow yellow 2 color background-color undefined "" color: red; background-color: yellow;
+
+#name setting a property writes the attribute
+#code
+var d = document.getElementById('i');
+d.style.width = '10px';
+console.log(d.getAttribute('style'));
+d.style.marginLeft = '2em'; d.style['padding-top'] = '1px';
+console.log(d.getAttribute('style'), d.style.length);
+d.style.width = '';
+console.log(d.getAttribute('style'), d.style.length, JSON.stringify(d.style.width));
+#expect
+width: 10px;
+width: 10px; margin-left: 2em; padding-top: 1px; 3
+margin-left: 2em; padding-top: 1px; 2 ""
+
+#name a value that is not valid for the property is ignored
+#code
+var d = document.getElementById('i');
+d.style.width = '10px';
+d.style.width = 'banana'; d.style.width = '10'; d.style.width = 10;
+console.log(d.style.width);
+d.style.display = 'nonsense'; d.style.color = 'notacolour'; d.style.position = 'floating';
+console.log(JSON.stringify(d.style.display), JSON.stringify(d.style.color), JSON.stringify(d.style.position), d.getAttribute('style'));
+d.style.width = '0';
+console.log(d.style.width);
+#expect
+10px
+"" "" "" width: 10px;
+0px
+
+#name colours are given back as rgb()
+#code
+var d = document.getElementById('i');
+d.style.color = '#ff0000'; console.log(d.style.color);
+d.style.color = '#0f0'; console.log(d.style.color);
+d.style.color = 'rgb(1,2,3)'; console.log(d.style.color);
+d.style.color = 'rgba(1, 2, 3, 0.5)'; console.log(d.style.color);
+d.style.color = 'BLUE'; console.log(d.style.color);
+d.style.backgroundColor = 'transparent'; console.log(d.style.backgroundColor);
+#expect
+rgb(255, 0, 0)
+rgb(0, 255, 0)
+rgb(1, 2, 3)
+rgba(1, 2, 3, 0.5)
+blue
+transparent
+
+#name cssText get and set
+#code
+var d = document.getElementById('i');
+d.style.cssText = 'color:red;margin-top:3px;;  WIDTH : 5px ';
+console.log(d.style.cssText, d.style.length, d.style.color, d.style.width);
+d.style.cssText = '';
+console.log(JSON.stringify(d.style.cssText), d.style.length, JSON.stringify(d.getAttribute('style')));
+d.style.cssText = 'color: red; color: blue; nonsense: 1; width: junk';
+console.log(d.style.cssText);
+#expect
+color: red; margin-top: 3px; width: 5px; 3 red 5px
+"" 0 ""
+color: blue;
+
+#name setProperty, getPropertyValue and removeProperty
+#code
+var s = document.getElementById('i').style;
+s.setProperty('margin-top', '4px');
+s.setProperty('color', 'red', 'important');
+console.log(s.getPropertyValue('margin-top'), s.getPropertyValue('color'), s.getPropertyPriority('color'), JSON.stringify(s.getPropertyPriority('margin-top')), JSON.stringify(s.getPropertyValue('width')));
+console.log(s.cssText);
+console.log(s.removeProperty('color'), JSON.stringify(s.removeProperty('color')), s.cssText);
+s.setProperty('margin-top', '');
+console.log(s.length);
+#expect
+4px red important "" ""
+margin-top: 4px; color: red !important;
+red "" margin-top: 4px;
+0
+
+#name !important in the attribute
+#code
+var d = document.getElementById('i');
+d.setAttribute('style', 'color: red !important; width: 1px');
+console.log(d.style.color, d.style.getPropertyPriority('color'), d.style.cssText);
+d.style.color = 'blue';
+console.log(d.style.cssText);
+#expect
+red important color: red !important; width: 1px;
+color: blue; width: 1px;
+
+#name custom properties
+#code
+var s = document.getElementById('i').style;
+s.setProperty('--main-gap', ' 12px ');
+s.setProperty('--Theme', 'dark');
+console.log(JSON.stringify(s.getPropertyValue('--main-gap')), s.getPropertyValue('--Theme'), JSON.stringify(s.getPropertyValue('--theme')), s.length);
+s.removeProperty('--main-gap');
+console.log(s.cssText);
+#expect
+"12px" dark "" 2
+--Theme: dark;
+
+#name style is the same object and follows the attribute
+#code
+var d = document.getElementById('main');
+var s = d.style;
+d.setAttribute('style', 'top: 1px');
+console.log(s === d.style, s.top, JSON.stringify(s.color), s.length);
+d.removeAttribute('style');
+console.log(s.length, JSON.stringify(s.cssText));
+s.left = '2px';
+console.log(d.getAttribute('style'));
+#expect
+true 1px "" 1
+0 ""
+left: 2px;
+
+#name assigning a string to style sets cssText
+#code
+var d = document.getElementById('i');
+d.style = 'color: red; top: 0px';
+console.log(d.style.color, d.style.top, d.getAttribute('style'), typeof d.style);
+#expect
+red 0px color: red; top: 0px; object
+
+#name float is cssFloat
+#code
+var s = document.getElementById('i').style;
+s.cssFloat = 'left';
+console.log(s.cssFloat, s.getPropertyValue('float'), s.cssText);
+#expect
+left left float: left;
+
+#name shorthand margin and its sides
+#code
+var s = document.getElementById('i').style;
+s.margin = '1px 2px';
+console.log(s.marginTop, s.marginRight, s.marginBottom, s.marginLeft, s.margin);
+s.marginTop = '5px';
+console.log(s.margin, s.cssText);
+#expect
+1px 2px 1px 2px 1px 2px
+5px 2px 1px margin: 5px 2px 1px;
+
+#name property names in every spelling
+#code
+var s = document.getElementById('i').style;
+s.fontSize = '12px';
+console.log(s.fontSize, s['font-size'], s.getPropertyValue('font-size'), JSON.stringify(s.getPropertyValue('fontSize')), 'fontSize' in s, 'font-size' in s, 'nonsenseProp' in s);
+s.nonsenseProp = 'x';
+console.log(s.length, s.nonsenseProp);
+#expect
+12px 12px 12px "" true true false
+1 x
+
+#name the type of a style object
+#code
+var s = document.getElementById('i').style;
+console.log(s instanceof CSSStyleDeclaration, typeof s.setProperty, s.parentRule, s.item(0) === '', s[0]);
+#expect
+true function null true undefined
+
+#name getComputedStyle: the display of common elements
+#code
+function d(tag) { var e = document.createElement(tag); document.body.appendChild(e); return getComputedStyle(e).display; }
+console.log(['div', 'span', 'p', 'a', 'b', 'ul', 'li', 'h1', 'section', 'em', 'table', 'tr', 'td', 'script', 'style', 'head', 'title'].map(function (t) { return t + '=' + d(t); }).join(' '));
+#expect
+div=block span=inline p=block a=inline b=inline ul=block li=list-item h1=block section=block em=inline table=table tr=table-row td=table-cell script=none style=none head=none title=none
+
+#name getComputedStyle: rules from a style element
+#code
+var cs = getComputedStyle(document.getElementById('main'));
+console.log(cs.display, getComputedStyle(document.getElementById('p')).display);
+document.getElementById('p').className = 'gone';
+console.log(getComputedStyle(document.getElementById('p')).display, cs === getComputedStyle(document.getElementById('main')), cs instanceof CSSStyleDeclaration);
+#expect
+block block
+none false true
+
+#name getComputedStyle: the style attribute wins over a rule
+#code
+var p = document.getElementById('p');
+p.classList.add('gone');
+console.log(getComputedStyle(p).display);
+p.style.display = 'inline-block';
+console.log(getComputedStyle(p).display);
+p.style.display = '';
+console.log(getComputedStyle(p).display);
+#expect
+none
+inline-block
+none
+
+#name getComputedStyle is live
+#code
+var p = document.getElementById('p');
+var cs = getComputedStyle(p);
+var before = cs.display;
+p.style.display = 'none';
+console.log(before, cs.display);
+#expect
+block none
+
+#name getComputedStyle: visibility is inherited
+#code
+document.getElementById('main').style.visibility = 'hidden';
+console.log(getComputedStyle(document.getElementById('s')).visibility, getComputedStyle(document.getElementById('i')).visibility);
+#expect
+hidden visible
+
+#name getComputedStyle cannot be written to
+#code
+var cs = getComputedStyle(document.getElementById('p'));
+try { cs.display = 'none'; console.log('no error', cs.display); } catch (e) { console.log(e.name, cs.display); }
+#expect
+NoModificationAllowedError block
+
+#name hiding and showing with a class
+#code
+var p = document.getElementById('p');
+function visible(e) { return getComputedStyle(e).display !== 'none'; }
+console.log(visible(p)); p.classList.add('gone'); console.log(visible(p)); p.classList.remove('gone'); console.log(visible(p));
+#expect
+true
+false
+true
+
+#name a style element added by script takes effect
+#code
+var st = document.createElement('style');
+st.textContent = '#i { display: block }';
+console.log(getComputedStyle(document.getElementById('i')).display);
+document.head.appendChild(st);
+console.log(getComputedStyle(document.getElementById('i')).display);
+st.remove();
+console.log(getComputedStyle(document.getElementById('i')).display);
+#expect
+inline
+block
+inline
+
+#name style on an element that is not in the document
+#code
+var e = document.createElement('div');
+e.style.color = 'red'; e.style.top = '1px';
+console.log(e.outerHTML, e.style.length);
+var copy = e.cloneNode();
+copy.style.color = 'blue';
+console.log(e.style.color, copy.style.color, copy.style.top);
+#expect
+<div style="color: red; top: 1px;"></div> 2
+red blue 1px
+
+#name border and background shorthands
+#code
+var s = document.getElementById('i').style;
+s.border = '1px solid red';
+console.log(s.border, s.borderTopWidth, s.borderLeftStyle, s.borderBottomColor, s.borderWidth, s.cssText);
+s.cssText = '';
+s.background = 'red';
+console.log(s.background, s.backgroundColor, s.cssText);
+s.cssText = '';
+s.padding = '1px 2px 3px 4px';
+console.log(s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft, s.padding, s.cssText);
+#expect
+1px solid red 1px solid red 1px border: 1px solid red;
+red red background: red;
+1px 2px 3px 4px 1px 2px 3px 4px padding: 1px 2px 3px 4px;
+
+#name common properties scripts set
+#code
+var s = document.getElementById('i').style;
+s.display = 'none'; s.position = 'absolute'; s.top = '10px'; s.left = '-5px'; s.zIndex = 10; s.opacity = 0.5; s.width = '50%'; s.height = 'auto'; s.overflow = 'hidden'; s.visibility = 'hidden'; s.fontWeight = 'bold'; s.textAlign = 'center'; s.cursor = 'pointer'; s.transform = 'translateX(10px)'; s.transition = 'opacity 0.3s';
+console.log(s.cssText);
+console.log(s.zIndex, typeof s.zIndex, s.opacity, typeof s.opacity);
+#expect
+display: none; position: absolute; top: 10px; left: -5px; z-index: 10; opacity: 0.5; width: 50%; height: auto; overflow: hidden; visibility: hidden; font-weight: bold; text-align: center; cursor: pointer; transform: translateX(10px); transition: opacity 0.3s;
+10 string 0.5 string
+
+#name getComputedStyle: a property nobody declared has its initial value
+#html
+<!DOCTYPE html><html><head><title>t</title></head><body><div id="d">x</div><span id="s">y</span></body></html>
+#code
+var cs = getComputedStyle(document.getElementById('d'));
+function show(names) { console.log(names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; ')); }
+show('position float clear z-index box-sizing overflow overflow-x overflow-y visibility opacity cursor pointer-events');
+show('margin-top margin-right margin-bottom margin-left margin padding-top padding-left padding');
+show('border-top-width border-top-style border-top-color border-left-width border-width border-style');
+show('top right bottom left inset width height min-width min-height max-width max-height');
+show('color background-color background-image font-size font-weight font-style line-height letter-spacing');
+show('text-align text-indent text-transform white-space vertical-align text-decoration-line text-shadow direction');
+show('flex-direction flex-wrap flex-grow flex-shrink flex-basis flex justify-content align-items align-self order');
+show('row-gap column-gap gap grid-template-columns transform transition-duration transition-property animation-name');
+show('list-style-type table-layout border-collapse content filter mix-blend-mode isolation object-fit resize');
+show('border-top-left-radius border-radius outline-style user-select will-change text-overflow word-break tab-size');
+console.log(cs.position, cs.zIndex, cs.marginTop, cs.backgroundColor, cs.fontSize, cs.cssFloat, cs.display,
+    getComputedStyle(document.getElementById('s')).display, cs.getPropertyValue('no-such-property') === '');
+#expect
+position: static; float: none; clear: none; z-index: auto; box-sizing: content-box; overflow: visible; overflow-x: visible; overflow-y: visible; visibility: visible; opacity: 1; cursor: auto; pointer-events: auto
+margin-top: 0px; margin-right: 0px; margin-bottom: 0px; margin-left: 0px; margin: 0px; padding-top: 0px; padding-left: 0px; padding: 0px
+border-top-width: 0px; border-top-style: none; border-top-color: rgb(0, 0, 0); border-left-width: 0px; border-width: 0px; border-style: none
+top: auto; right: auto; bottom: auto; left: auto; inset: auto; width: auto; height: auto; min-width: auto; min-height: auto; max-width: none; max-height: none
+color: rgb(0, 0, 0); background-color: rgba(0, 0, 0, 0); background-image: none; font-size: 16px; font-weight: 400; font-style: normal; line-height: normal; letter-spacing: normal
+text-align: start; text-indent: 0px; text-transform: none; white-space: normal; vertical-align: baseline; text-decoration-line: none; text-shadow: none; direction: ltr
+flex-direction: row; flex-wrap: nowrap; flex-grow: 0; flex-shrink: 1; flex-basis: auto; flex: 0 1 auto; justify-content: normal; align-items: normal; align-self: auto; order: 0
+row-gap: normal; column-gap: normal; gap: normal; grid-template-columns: none; transform: none; transition-duration: 0s; transition-property: all; animation-name: none
+list-style-type: disc; table-layout: auto; border-collapse: separate; content: normal; filter: none; mix-blend-mode: normal; isolation: auto; object-fit: fill; resize: none
+border-top-left-radius: 0px; border-radius: 0px; outline-style: none; user-select: auto; will-change: auto; text-overflow: clip; word-break: normal; tab-size: 8
+static auto 0px rgba(0, 0, 0, 0) 16px none block inline true
+
+#name getComputedStyle: the most specific rule wins, then the later one
+#html
+<!DOCTYPE html><html><head><title>t</title><style>
+#p { color: rgb(1, 1, 1) } p { color: rgb(2, 2, 2) }
+.k.k { margin-top: 3px } .k { margin-top: 4px }
+p { padding-top: 5px !important } #p { padding-top: 6px }
+:where(#p) { top: 7px } p { top: 8px }
+:is(#p, i) { left: 9px } p.k { left: 10px }
+p:not(.none) { right: 11px } p { right: 12px }
+[id] { bottom: 13px } p { bottom: 14px }
+p { width: 15px } p { width: 16px }
+div p { height: 17px } p { height: 18px }
+body > p.k { min-width: 19px } p.k { min-width: 20px }
+p:first-child { max-width: 21px } p { max-width: 22px }
+.imp { margin-left: 23px !important; padding-left: 24px !important } #q { margin-left: 25px }
+* { text-indent: 26px } i { text-indent: 27px }
+</style></head><body><p id="p" class="k">x</p><div><p id="q" class="imp" style="margin-left: 28px; padding-left: 29px !important; margin-right: 30px">y</p><i id="i">z</i></div></body></html>
+#code
+var p = getComputedStyle(document.getElementById('p'));
+console.log(p.color, p.marginTop, p.paddingTop, p.top, p.left, p.right, p.bottom, p.width, p.height, p.minWidth, p.maxWidth);
+var q = getComputedStyle(document.getElementById('q'));
+console.log(q.height, q.marginLeft, q.paddingLeft, q.marginRight, q.textIndent, getComputedStyle(document.getElementById('i')).textIndent);
+#expect
+rgb(1, 1, 1) 3px 5px 8px 9px 11px 13px 16px 18px 19px 21px
+17px 23px 29px 30px 26px 27px
+
+#name getComputedStyle: a colour comes back as rgb()
+#html
+<!DOCTYPE html><html><head><title>t</title><style>
+#a { color: red; background-color: #0f0; border: 2px solid; outline-color: rebeccapurple }
+#b { color: hsl(120, 100%, 25%); background-color: transparent; border-top: 1px dashed currentcolor }
+#c { color: #11223380; background-color: rgba(10, 20, 30, 0.5); border-left: 3px solid navy }
+#d { color: currentcolor; background-color: papayawhip }
+</style></head><body><div id="a"><span id="a1">x</span><div id="b"><i id="b1">y</i></div></div><div id="c"><p id="d">z</p></div></body></html>
+#code
+function cs(id) { return getComputedStyle(document.getElementById(id)); }
+var a = cs('a');
+console.log(a.color, '|', a.backgroundColor, '|', a.borderTopColor, '|', a.borderColor, '|', a.outlineColor);
+console.log(cs('a1').color, '|', cs('a1').backgroundColor, '|', cs('a1').borderTopColor);
+var b = cs('b');
+console.log(b.color, '|', b.backgroundColor, '|', b.borderTopColor, '|', b.borderLeftColor, '|', cs('b1').color);
+var c = cs('c');
+console.log(c.color, '|', c.backgroundColor, '|', c.borderLeftColor, '|', c.borderRightColor);
+console.log(cs('d').color, '|', cs('d').backgroundColor, '|', cs('d').borderBottomColor);
+var el = document.getElementById('d');
+['Blue', 'ORANGE', 'gray', 'grey', 'lightgoldenrodyellow', 'white', 'black', 'tomato'].forEach(function (name) {
+    el.style.color = name;
+    console.log(name, getComputedStyle(el).color);
+});
+#expect
+rgb(255, 0, 0) | rgb(0, 255, 0) | rgb(255, 0, 0) | rgb(255, 0, 0) | rgb(102, 51, 153)
+rgb(255, 0, 0) | rgba(0, 0, 0, 0) | rgb(255, 0, 0)
+rgb(0, 128, 0) | rgba(0, 0, 0, 0) | rgb(0, 128, 0) | rgb(0, 128, 0) | rgb(0, 128, 0)
+rgba(17, 34, 51, 0.5) | rgba(10, 20, 30, 0.5) | rgb(0, 0, 128) | rgba(17, 34, 51, 0.5)
+rgba(17, 34, 51, 0.5) | rgb(255, 239, 213) | rgba(17, 34, 51, 0.5)
+Blue rgb(0, 0, 255)
+ORANGE rgb(255, 165, 0)
+gray rgb(128, 128, 128)
+grey rgb(128, 128, 128)
+lightgoldenrodyellow rgb(250, 250, 210)
+white rgb(255, 255, 255)
+black rgb(0, 0, 0)
+tomato rgb(255, 99, 71)
+
+#name getComputedStyle: a length comes back in px
+#html
+<!DOCTYPE html><html><head><title>t</title><style>
+html { font-size: 20px }
+body { font-size: 0.8em }
+#a { font-size: 150%; margin: 1em 2em; padding: 1rem 12pt 0.5in 1cm; text-indent: 2em; letter-spacing: 0.1em; width: 50%; height: auto }
+#b { font-size: larger; min-width: 3rem; border: 0.5em solid; max-width: none }
+#c { font-size: 2rem; margin-left: auto; top: 1mm; left: 4q; right: 1pc; bottom: 0 }
+#e { font-size: xx-large }
+#f { font-size: smaller; width: 10.50px; height: calc(1px + 2em) }
+</style></head><body><div id="a"><span id="a1">x</span><div id="b"><span id="b1">y</span></div></div><div id="c">c</div><div id="e"><b id="e1">w</b></div><div id="f">f</div></body></html>
+#code
+function show(id, names) {
+    var cs = getComputedStyle(document.getElementById(id));
+    console.log(id + ' ' + names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; '));
+}
+console.log(getComputedStyle(document.documentElement).fontSize, getComputedStyle(document.body).fontSize);
+show('a', 'font-size margin-top margin-right margin padding-top padding-right padding-bottom padding-left text-indent letter-spacing width height');
+show('a1', 'font-size text-indent letter-spacing margin-top width');
+show('b', 'font-size min-width border-top-width border-left-width max-width');
+show('b1', 'font-size border-top-width');
+show('c', 'font-size margin-left top left right bottom');
+show('e', 'font-size');
+show('e1', 'font-size');
+show('f', 'font-size width height');
+#expect
+20px 16px
+a font-size: 24px; margin-top: 24px; margin-right: 48px; margin: 24px 48px; padding-top: 20px; padding-right: 16px; padding-bottom: 48px; padding-left: 37.7953px; text-indent: 48px; letter-spacing: 2.4px; width: 50%; height: auto
+a1 font-size: 24px; text-indent: 48px; letter-spacing: 2.4px; margin-top: 0px; width: auto
+b font-size: 28.8px; min-width: 60px; border-top-width: 14px; border-left-width: 14px; max-width: none
+b1 font-size: 28.8px; border-top-width: 0px
+c font-size: 40px; margin-left: auto; top: 3.77953px; left: 3.77953px; right: 16px; bottom: 0px
+e font-size: 32px
+e1 font-size: 32px
+f font-size: 13.3333px; width: 10.5px; height: 27.6667px
+
+#name getComputedStyle: what HTML elements are by default
+#html
+<!DOCTYPE html><html><head><title>t</title></head><body><h1 id="h1">x</h1><h2 id="h2">x</h2><h3 id="h3">x</h3><h4 id="h4">x</h4><h5 id="h5">x</h5><h6 id="h6">x</h6><p id="p"><b id="b">b</b><strong id="st"><b id="bb">x</b></strong><i id="i">i</i><em id="em">e</em><a id="a" href="#x">a</a><a id="plain">a</a><small id="sm">s</small><sub id="sub">s</sub><code id="c">c</code><mark id="mk">m</mark><u id="un">u</u><s id="sk">s</s></p><ul id="ul"><li id="li">x</li><ul id="ul2"><li id="li2">y</li></ul></ul><ol id="ol"><li id="oli">x</li></ol><blockquote id="q">q</blockquote><table><tr id="tr"><th id="th">h</th><td id="td">d</td></tr></table><pre id="pre">x</pre><hr id="hr"><fieldset id="fs"><legend id="lg">l</legend></fieldset><dl><dd id="dd">d</dd></dl><address id="ad">a</address></body></html>
+#code
+function show(id, names) {
+    var cs = getComputedStyle(document.getElementById(id));
+    console.log(id + ' ' + names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; '));
+}
+show('h1', 'font-size font-weight margin-top margin-bottom margin-left');
+show('h2', 'font-size font-weight margin-top');
+show('h3', 'font-size margin-top');
+show('h4', 'font-size margin-top');
+show('h5', 'font-size margin-top');
+show('h6', 'font-size margin-top');
+show('p', 'margin-top margin-bottom margin');
+show('b', 'font-weight'); show('bb', 'font-weight'); show('i', 'font-style'); show('em', 'font-style'); show('ad', 'font-style');
+show('a', 'text-decoration-line cursor'); show('plain', 'color text-decoration-line cursor');
+show('sm', 'font-size'); show('sub', 'font-size vertical-align'); show('c', 'font-family'); show('mk', 'background-color color');
+show('un', 'text-decoration-line'); show('sk', 'text-decoration-line');
+show('ul', 'padding-left list-style-type margin-top margin-bottom'); show('ul2', 'margin-top margin-bottom list-style-type');
+show('li', 'list-style-type'); show('li2', 'list-style-type'); show('ol', 'list-style-type padding-left'); show('oli', 'list-style-type');
+show('q', 'margin-left margin-right margin-top'); show('th', 'font-weight padding-top padding-left vertical-align');
+show('td', 'padding-top font-weight'); show('pre', 'white-space font-family margin-top');
+show('hr', 'border-top-style border-top-width margin-top overflow-x'); show('fs', 'margin-left padding-top padding-left border-top-width border-top-style');
+show('lg', 'padding-left'); show('dd', 'margin-left');
+#expect
+h1 font-size: 32px; font-weight: 700; margin-top: 21.44px; margin-bottom: 21.44px; margin-left: 0px
+h2 font-size: 24px; font-weight: 700; margin-top: 19.92px
+h3 font-size: 18.72px; margin-top: 18.72px
+h4 font-size: 16px; margin-top: 21.28px
+h5 font-size: 13.28px; margin-top: 22.1776px
+h6 font-size: 10.72px; margin-top: 24.9776px
+p margin-top: 16px; margin-bottom: 16px; margin: 16px 0px
+b font-weight: 700
+bb font-weight: 900
+i font-style: italic
+em font-style: italic
+ad font-style: italic
+a text-decoration-line: underline; cursor: pointer
+plain color: rgb(0, 0, 0); text-decoration-line: none; cursor: auto
+sm font-size: 13.3333px
+sub font-size: 13.3333px; vertical-align: sub
+c font-family: monospace
+mk background-color: rgb(255, 255, 0); color: rgb(0, 0, 0)
+un text-decoration-line: underline
+sk text-decoration-line: line-through
+ul padding-left: 40px; list-style-type: disc; margin-top: 16px; margin-bottom: 16px
+ul2 margin-top: 0px; margin-bottom: 0px; list-style-type: circle
+li list-style-type: disc
+li2 list-style-type: circle
+ol list-style-type: decimal; padding-left: 40px
+oli list-style-type: decimal
+q margin-left: 40px; margin-right: 40px; margin-top: 16px
+th font-weight: 700; padding-top: 1px; padding-left: 1px; vertical-align: middle
+td padding-top: 1px; font-weight: 400
+pre white-space: pre; font-family: monospace; margin-top: 16px
+hr border-top-style: inset; border-top-width: 1px; margin-top: 8px; overflow-x: hidden
+fs margin-left: 2px; padding-top: 5.6px; padding-left: 12px; border-top-width: 2px; border-top-style: groove
+lg padding-left: 2px
+dd margin-left: 40px
+
+#name getComputedStyle: a shorthand in a rule answers for its parts
+#html
+<!DOCTYPE html><html><head><title>t</title><style>
+#d { font: italic bold 12px/30px Georgia, serif; overflow: hidden auto; flex: 2 1 10em; gap: 1em 2px; inset: 1px 2px 3px; border-radius: 1em 2px; list-style: square inside; text-decoration: underline dotted red; margin: 1px 2px; border: 3px double blue }
+#e { flex: none; overflow: scroll; flex-flow: column wrap; border-radius: 3px; font: 2em/1.5 monospace; gap: 4px; inset: 0; padding: 0 1px 2px 3px }
+#f { flex: 3; overflow-x: clip; border-top: 1px solid; font-size: 10px; font: 20px Arial; list-style: none; text-decoration: none }
+#g { flex: auto; flex-grow: 5; overflow: hidden; overflow-y: visible; border: 1px solid red; border-left-style: none }
+</style></head><body><div id="d"><b id="d1">z</b></div><div id="e">e</div><div id="f">f</div><div id="g">g</div></body></html>
+#code
+function show(id, names) {
+    var cs = getComputedStyle(document.getElementById(id));
+    console.log(id + ' ' + names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; '));
+}
+show('d', 'font-style font-weight font-size line-height font-family overflow-x overflow-y overflow flex-grow flex-shrink flex-basis flex');
+show('d', 'row-gap column-gap gap top right bottom left inset border-top-left-radius border-top-right-radius border-bottom-right-radius border-bottom-left-radius border-radius');
+show('d', 'list-style-type list-style-position text-decoration-line text-decoration-style text-decoration-color margin-top margin-left margin border-top-width border-left-style border-right-color');
+show('d1', 'font-style font-weight font-size line-height font-family list-style-type list-style-position text-decoration-line overflow-x');
+show('e', 'flex-grow flex-shrink flex-basis flex overflow-x overflow-y overflow flex-direction flex-wrap border-top-left-radius border-radius font-size line-height font-family font-style font-weight');
+show('e', 'row-gap column-gap gap top left inset padding-top padding-right padding-bottom padding-left padding');
+show('f', 'flex-grow flex-shrink flex-basis overflow-x overflow-y border-top-width border-top-style border-bottom-width font-size font-family line-height list-style-type text-decoration-line');
+show('g', 'flex-grow flex-shrink flex-basis overflow-x overflow-y border-top-width border-left-width border-left-style border-right-style border-width');
+#expect
+d font-style: italic; font-weight: 700; font-size: 12px; line-height: 30px; font-family: Georgia, serif; overflow-x: hidden; overflow-y: auto; overflow: hidden auto; flex-grow: 2; flex-shrink: 1; flex-basis: 120px; flex: 2 1 120px
+d row-gap: 12px; column-gap: 2px; gap: 12px 2px; top: 1px; right: 2px; bottom: 3px; left: 2px; inset: 1px 2px 3px; border-top-left-radius: 12px; border-top-right-radius: 2px; border-bottom-right-radius: 12px; border-bottom-left-radius: 2px; border-radius: 12px 2px
+d list-style-type: square; list-style-position: inside; text-decoration-line: underline; text-decoration-style: dotted; text-decoration-color: rgb(255, 0, 0); margin-top: 1px; margin-left: 2px; margin: 1px 2px; border-top-width: 3px; border-left-style: double; border-right-color: rgb(0, 0, 255)
+d1 font-style: italic; font-weight: 900; font-size: 12px; line-height: 30px; font-family: Georgia, serif; list-style-type: square; list-style-position: inside; text-decoration-line: none; overflow-x: visible
+e flex-grow: 0; flex-shrink: 0; flex-basis: auto; flex: 0 0 auto; overflow-x: scroll; overflow-y: scroll; overflow: scroll; flex-direction: column; flex-wrap: wrap; border-top-left-radius: 3px; border-radius: 3px; font-size: 32px; line-height: 48px; font-family: monospace; font-style: normal; font-weight: 400
+e row-gap: 4px; column-gap: 4px; gap: 4px; top: 0px; left: 0px; inset: 0px; padding-top: 0px; padding-right: 1px; padding-bottom: 2px; padding-left: 3px; padding: 0px 1px 2px 3px
+f flex-grow: 3; flex-shrink: 1; flex-basis: 0%; overflow-x: clip; overflow-y: visible; border-top-width: 1px; border-top-style: solid; border-bottom-width: 0px; font-size: 20px; font-family: Arial; line-height: normal; list-style-type: none; text-decoration-line: none
+g flex-grow: 5; flex-shrink: 1; flex-basis: auto; overflow-x: hidden; overflow-y: visible; border-top-width: 1px; border-left-width: 0px; border-left-style: none; border-right-style: solid; border-width: 1px 1px 1px 0px
+
+#name getComputedStyle: inherit, initial and unset
+#html
+<!DOCTYPE html><html><head><title>t</title><style>
+#a { color: rgb(1, 2, 3); margin-top: 7px; font-size: 30px; text-align: center; border-top: 2px solid; visibility: hidden; cursor: pointer }
+#b { margin-top: inherit; color: initial; font-size: unset; text-align: initial; border-top-width: inherit; border-top-style: inherit }
+#c { color: unset; margin-top: unset; visibility: initial; cursor: inherit; display: inherit; font-size: initial }
+#d { all: unset; --gap: 12px; --name: "Ann" }
+</style></head><body><div id="a"><p id="b">b<span id="b1">x</span></p><p id="c">c</p><p id="d"><i id="d1">d</i></p></div></body></html>
+#code
+function show(id, names) {
+    var cs = getComputedStyle(document.getElementById(id));
+    console.log(id + ' ' + names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; '));
+}
+show('a', 'color margin-top font-size text-align border-top-width visibility cursor');
+show('b', 'color margin-top font-size text-align border-top-width border-top-style visibility cursor');
+show('b1', 'color margin-top font-size text-align visibility cursor');
+show('c', 'color margin-top visibility cursor display font-size');
+show('d', '--gap --name --missing');
+show('d1', '--gap --name');
+#expect
+a color: rgb(1, 2, 3); margin-top: 7px; font-size: 30px; text-align: center; border-top-width: 2px; visibility: hidden; cursor: pointer
+b color: rgb(0, 0, 0); margin-top: 7px; font-size: 30px; text-align: start; border-top-width: 2px; border-top-style: solid; visibility: hidden; cursor: pointer
+b1 color: rgb(0, 0, 0); margin-top: 0px; font-size: 30px; text-align: start; visibility: hidden; cursor: pointer
+c color: rgb(1, 2, 3); margin-top: 0px; visibility: visible; cursor: pointer; display: block; font-size: 16px
+d --gap: 12px; --name: "Ann"; --missing: 
+d1 --gap: 12px; --name: "Ann"

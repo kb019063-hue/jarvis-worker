@@ -1,7 +1,7 @@
 #include "litebird/js/JsValue.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
-#include "litebird/js/Storage.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/Node.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
@@ -104,7 +104,8 @@ const JsValue::NativeFn& JsValue::native_function() const {
 }
 const std::shared_ptr<Node>& JsValue::dom_node_value() const {
     static const std::shared_ptr<Node> empty;
-    if (extra()) if (auto v = std::get_if<std::shared_ptr<Node>>(&extra()->payload)) return *v;
+    // The object of a node is an ordinary object that owns the node.
+    if (type == JsType::Object && object_val) return object_val->dom_node;
     return empty;
 }
 const std::shared_ptr<CanvasRenderingContext2D>& JsValue::canvas_context() const {
@@ -140,7 +141,6 @@ void JsValue::set_native_function(NativeFn v) {
     if (type == JsType::Function) mutable_function_data().native_fn = std::move(v);
     else mutable_extra().payload = std::move(v);
 }
-void JsValue::set_dom_node_value(std::shared_ptr<Node> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_gradient_value(std::shared_ptr<CanvasGradient> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_promise_value(std::shared_ptr<PromiseData> v) { mutable_extra().payload = std::move(v); }
@@ -220,6 +220,7 @@ namespace {
 struct CallContext {
     JsValue this_val;
     const JsValue* callee{nullptr};   // the function being called; valid for the call's duration
+    const JsValue* derived_this{nullptr};   // see JsValue::construct_as_super
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
 };
@@ -232,6 +233,7 @@ struct CallContextScope {
         : saved(std::move(t_call_context)) {
         t_call_context.this_val = this_val;
         t_call_context.callee = callee;
+        t_call_context.derived_this = nullptr;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
     }
@@ -296,6 +298,10 @@ const JsValue& JsValue::current_this() {
 
 bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
+}
+
+const JsValue* JsValue::current_derived_this() {
+    return t_call_context.derived_this;
 }
 
 bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out) {
@@ -371,6 +377,18 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
     return JsValue::make_undefined();
 }
 
+JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const {
+    static const JsValue undefined_this;
+    if (stack_is_exhausted()) throw JsStackOverflow();
+    const NativeFn& fn = native_function();
+    if (fn) {
+        CallContextScope scope(undefined_this, true, this);
+        t_call_context.derived_this = &derived_this;
+        return fn(args);
+    }
+    return construct(args, &derived_this);
+}
+
 JsValue JsValue::make_object(JsObject* obj) {
     JsValue v;
     v.type = JsType::Object;
@@ -400,7 +418,6 @@ const void* JsValue::identity() const {
         if (m_extra) return m_extra.get();
         return object_val;
     }
-    if (type == JsType::DomNode) return dom_node_value().get();
     return object_val;
 }
 
@@ -425,12 +442,6 @@ bool strict_equals(const JsValue& a, const JsValue& b) {
             return a.string_val == b.string_val;
         case JsType::Symbol:
             return a.string_val == b.string_val;   // the unique key is the identity
-        case JsType::DomNode:
-            // A DOM wrapper is minted fresh on every property access, so its
-            // JsObject address is NOT a stable identity. The node behind it is.
-            // Comparing nodes is what makes `document.body === document.body`
-            // and `el.shadowRoot === sr` behave the way script expects.
-            return a.dom_node_value() == b.dom_node_value();
         case JsType::Object:
             // Reference identity, never structural equality.
             return a.object_val == b.object_val;
@@ -456,7 +467,6 @@ bool JsValue::is_truthy() const {
         case JsType::Object:
         case JsType::Function:
         case JsType::NativeFunction:
-        case JsType::DomNode:
         case JsType::Symbol:
             return true;
     }
@@ -536,14 +546,6 @@ std::string JsValue::to_string() const {
             if (name.compare(0, 6, "bound ") == 0) name.clear();
             return "function " + name + "() { [native code] }";
         }
-        case JsType::DomNode: {
-            const auto& dom_node = dom_node_value();
-            if (dom_node && dom_node->is_element()) {
-                auto el = std::static_pointer_cast<Element>(dom_node);
-                return "[object HTML" + el->tag_name() + "Element]";
-            }
-            return "[object Node]";
-        }
     }
     return "undefined";
 }
@@ -612,6 +614,7 @@ bool JsValue::has_own_property(const std::string& name) const {
         return parse_array_index(name, index) && index < string_val.length();
     }
     if (JsObject* cell = property_cell()) {
+        if (cell->exotic && cell->exotic->has(cell, name)) return true;
         if (cell->is_array) {
             if (name == "length") return true;
             if (parse_array_index(name, index)) return index < cell->array_elements.size();
@@ -651,6 +654,10 @@ bool JsValue::has_property(const std::string& name) const {
 
 bool JsValue::delete_property(const std::string& name) {
     if (JsObject* cell = property_cell()) {
+        if (cell->exotic) {
+            bool result = true;
+            if (cell->exotic->remove(cell, name, result)) return result;
+        }
         if (cell->frozen || cell->sealed) {
             return !has_own_property(name);
         }
@@ -685,9 +692,9 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         if (include_non_enumerable) keys.emplace_back("length");
         return keys;
     }
-    if (type == JsType::DomNode) return keys;
 
     JsObject* cell = property_cell();
+    if (cell && cell->exotic) cell->exotic->keys(cell, keys);
     if (cell && cell->is_array) {
         for (size_t i = 0; i < cell->array_elements.size(); ++i) keys.push_back(std::to_string(i));
         if (include_non_enumerable) keys.emplace_back("length");
@@ -757,117 +764,6 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
 }
 
 // The EventTarget methods, for any node: elements, text nodes and the document.
-JsValue js_event_target_method(const std::shared_ptr<Node>& target, const std::string& name) {
-    if (!target) return JsValue::make_undefined();
-    if (name == "addEventListener") {
-        auto node = target;
-        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-            if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
-            std::string ev_type = args[0].to_string();
-            JsValue cb = args[1];
-            // The third argument is `useCapture` or an options object.
-            bool use_capture = false;
-            bool once = false;
-            if (args.size() > 2) {
-                if (args[2].is_object()) {
-                    use_capture = args[2].get_property("capture").is_truthy();
-                    once = args[2].get_property("once").is_truthy();
-                } else {
-                    use_capture = args[2].is_truthy();
-                }
-            }
-            const void* key = cb.identity();
-            std::weak_ptr<Node> weak_node = node;
-            node->add_event_listener(ev_type, [cb, weak_node, ev_type, key, use_capture, once](const std::shared_ptr<Event>& ev) mutable {
-                if (once) {
-                    if (auto target = weak_node.lock()) target->remove_event_listener(ev_type, key, use_capture);
-                }
-                JsValue ev_obj = JsValue::make_object();
-                ev_obj.set_property("type", JsValue::make_string(ev->type()));
-                ev_obj.set_property("eventPhase", JsValue::make_number(static_cast<int>(ev->event_phase())));
-                ev_obj.set_property("bubbles", JsValue::make_boolean(ev->bubbles()));
-                ev_obj.set_property("cancelable", JsValue::make_boolean(ev->cancelable()));
-                ev_obj.set_property("defaultPrevented", JsValue::make_boolean(ev->default_prevented()));
-                ev_obj.set_property("data", JsValue::make_string(ev->data));
-                ev_obj.set_property("key", JsValue::make_string(ev->key));
-
-                if (ev->target()) ev_obj.set_property("target", JsValue::make_dom_node(ev->target()));
-                if (ev->current_target()) ev_obj.set_property("currentTarget", JsValue::make_dom_node(ev->current_target()));
-
-                auto ev_ptr = ev;
-                ev_obj.set_property("stopPropagation", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
-                    ev_ptr->stop_propagation();
-                    return JsValue::make_undefined();
-                }));
-                ev_obj.set_property("preventDefault", JsValue::make_native_function([ev_ptr](const std::vector<JsValue>&) {
-                    ev_ptr->prevent_default();
-                    return JsValue::make_undefined();
-                }));
-
-                // A listener runs with `this` set to the node it was added to.
-                JsValue receiver;
-                if (auto current = ev->current_target()) {
-                    auto element = std::dynamic_pointer_cast<Element>(current);
-                    receiver = (element && !element->custom_element_instance().is_undefined())
-                                   ? element->custom_element_instance() : JsValue::make_dom_node(current);
-                }
-                cb.call_with_this(receiver, {ev_obj});
-            }, use_capture, key);
-            return JsValue::make_undefined();
-        });
-    }
-    if (name == "removeEventListener") {
-        auto node = target;
-        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-            if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
-            bool use_capture = false;
-            if (args.size() > 2) {
-                use_capture = args[2].is_object() ? args[2].get_property("capture").is_truthy() : args[2].is_truthy();
-            }
-            node->remove_event_listener(args[0].to_string(), args[1].identity(), use_capture);
-            return JsValue::make_undefined();
-        });
-    }
-    if (name == "dispatchEvent") {
-        auto node = target;
-        return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-            // Takes an event object ({type, bubbles, cancelable}) or, as a
-            // shorthand, just the type.
-            std::string ev_type = "custom";
-            bool bubbles = true;
-            bool cancelable = true;
-            if (!args.empty() && args[0].is_object()) {
-                ev_type = args[0].get_property("type").to_string();
-                JsValue b = args[0].get_property("bubbles");
-                JsValue c = args[0].get_property("cancelable");
-                if (!b.is_undefined()) bubbles = b.is_truthy();
-                if (!c.is_undefined()) cancelable = c.is_truthy();
-            } else if (!args.empty()) {
-                ev_type = args[0].to_string();
-            }
-            auto ev = std::make_shared<Event>(ev_type, bubbles, cancelable);
-            bool ok = node->dispatch_event(ev);
-            return JsValue::make_boolean(ok);
-        });
-    }
-    return JsValue::make_undefined();
-}
-
-// The DOM's pre-insertion check: a node may not be inserted into itself or
-// into anything it contains (its descendants, and what is in its shadow tree).
-// Throws what a browser throws; Node::append_child refuses the same cases on
-// its own, so this only decides what the script is told.
-static void require_insertable(const std::shared_ptr<Node>& parent, const std::shared_ptr<Node>& child,
-                               const char* method) {
-    if (!child->is_host_including_inclusive_ancestor_of(*parent)) return;
-    JsValue error = js_make_error(JsErrorKind::Error,
-        std::string("Failed to execute '") + method +
-        "' on 'Node': The new child element contains the parent.");
-    error.set_property("name", JsValue::make_string("HierarchyRequestError"));
-    error.set_property("code", JsValue::make_number(3));
-    js_throw(std::move(error));
-}
-
 JsValue JsValue::get_property(const std::string& name) const {
     // Primitives have no properties of their own; they borrow the methods of
     // their wrapper prototype (String.prototype and friends).
@@ -895,314 +791,6 @@ JsValue JsValue::get_property(const std::string& name) const {
     }
     if (type == JsType::Undefined || type == JsType::Null) return JsValue::make_undefined();
 
-    const auto dom_node = dom_node_value();
-    if (type == JsType::DomNode && dom_node) {
-        if (name == "addEventListener" || name == "removeEventListener" || name == "dispatchEvent") {
-            return js_event_target_method(dom_node, name);
-        }
-        if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
-            if (name == "tagName") return JsValue::make_string(el->tag_name());
-            if (name == "id") return JsValue::make_string(el->id());
-            if (name == "textContent" || name == "innerText") return JsValue::make_string(el->text_content());
-            if (name == "innerHTML") return JsValue::make_string(el->inner_html());
-            if (name == "outerHTML") return JsValue::make_string(el->outer_html());
-            if (name == "style") {
-                JsValue style_obj = JsValue::make_object();
-                style_obj.set_property("color", JsValue::make_string(el->get_attribute("style")));
-                return style_obj;
-            }
-            if (name == "value") return JsValue::make_string(el->value());
-            if (name == "disabled") return JsValue::make_boolean(el->disabled());
-            if (name == "checked") return JsValue::make_boolean(el->checked());
-            if (name == "type") return JsValue::make_string(el->input_type());
-            if (name == "shadowRoot") {
-                auto sr = el->shadow_root();
-                if (sr && sr->mode() == ShadowRootMode::Open) {
-                    return JsValue::make_dom_node(sr);
-                }
-                return JsValue::make_null();
-            }
-            if (name == "attachShadow") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    std::string mode = "open";
-                    if (!args.empty() && args[0].type == JsType::Object) {
-                        mode = args[0].get_property("mode").to_string();
-                    }
-                    auto sr = elem->attach_shadow(mode);
-                    if (!sr) return JsValue::make_null();
-                    return JsValue::make_dom_node(sr);
-                });
-            }
-            if (name == "getBoundingClientRect") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
-                    Rect r = elem->bounding_box();
-                    if (r.width <= 0.0f && r.height <= 0.0f) {
-                        r.width = 100.0f;
-                        r.height = 30.0f;
-                    }
-                    JsValue ro = JsValue::make_object();
-                    ro.set_property("x", JsValue::make_number(r.x));
-                    ro.set_property("y", JsValue::make_number(r.y));
-                    ro.set_property("width", JsValue::make_number(r.width));
-                    ro.set_property("height", JsValue::make_number(r.height));
-                    ro.set_property("top", JsValue::make_number(r.top()));
-                    ro.set_property("bottom", JsValue::make_number(r.bottom()));
-                    ro.set_property("left", JsValue::make_number(r.left()));
-                    ro.set_property("right", JsValue::make_number(r.right()));
-                    return ro;
-                });
-            }
-            if (name == "setAttribute") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    if (args.size() >= 2) {
-                        elem->set_attribute(args[0].to_string(), args[1].to_string());
-                    }
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "getAttribute") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_null();
-                    std::string attr = args[0].to_string();
-                    if (elem->has_attribute(attr)) {
-                        return JsValue::make_string(elem->get_attribute(attr));
-                    }
-                    return JsValue::make_null();
-                });
-            }
-            if (name == "hasAttribute") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_boolean(false);
-                    return JsValue::make_boolean(elem->has_attribute(args[0].to_string()));
-                });
-            }
-            if (name == "removeAttribute") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    if (!args.empty()) {
-                        elem->remove_attribute(args[0].to_string());
-                    }
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "assignedNodes") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
-                    auto nodes = ShadowRoot::assigned_nodes(elem);
-                    JsValue arr = JsValue::make_array();
-                    for (const auto& n : nodes) {
-                        arr.array_elements().push_back(JsValue::make_dom_node(n));
-                    }
-                    return arr;
-                });
-            }
-            if (name == "assignedElements") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
-                    auto elems = ShadowRoot::assigned_elements(elem);
-                    JsValue arr = JsValue::make_array();
-                    for (const auto& e : elems) {
-                        arr.array_elements().push_back(JsValue::make_dom_node(e));
-                    }
-                    return arr;
-                });
-            }
-            if (name == "querySelector") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_null();
-                    auto found = elem->query_selector(args[0].to_string());
-                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
-                });
-            }
-            if (name == "querySelectorAll") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>& args) {
-                    JsValue arr = JsValue::make_array();
-                    if (!args.empty()) {
-                        auto list = elem->query_selector_all(args[0].to_string());
-                        for (const auto& item : list) {
-                            arr.array_elements().push_back(JsValue::make_dom_node(item));
-                        }
-                    }
-                    return arr;
-                });
-            }
-            if (name == "focus") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
-                    elem->focus();
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "blur") {
-                auto elem = el;
-                return JsValue::make_native_function([elem](const std::vector<JsValue>&) {
-                    elem->blur();
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "click") {
-                auto node = dom_node;
-                return JsValue::make_native_function([node](const std::vector<JsValue>&) {
-                    if (auto elem = std::dynamic_pointer_cast<Element>(node)) {
-                        elem->click();
-                    }
-                    return JsValue::make_undefined();
-                });
-            }
-            if (name == "getContext") {
-                auto node = dom_node;
-                return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_null();
-                    std::string ctx_type = args[0].to_string();
-                    if (ctx_type == "2d" || ctx_type == "2D") {
-                        if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-                            auto ctx = el->get_or_create_canvas_context_2d();
-                            if (ctx) {
-                                return ctx->to_js_value(ctx);
-                            }
-                        }
-                    }
-                    return JsValue::make_null();
-                });
-            }
-            if (name == "width") {
-                if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
-                    if (el->tag_name() == "canvas") {
-                        auto ctx = el->get_or_create_canvas_context_2d();
-                        return JsValue::make_number(ctx->width());
-                    }
-                }
-            }
-            if (name == "height") {
-                if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
-                    if (el->tag_name() == "canvas") {
-                        auto ctx = el->get_or_create_canvas_context_2d();
-                        return JsValue::make_number(ctx->height());
-                    }
-                }
-            }
-        }
-
-        if (auto sr = std::dynamic_pointer_cast<ShadowRoot>(dom_node)) {
-            if (name == "host") {
-                auto h = sr->host();
-                return h ? JsValue::make_dom_node(h) : JsValue::make_null();
-            }
-            if (name == "mode") {
-                return JsValue::make_string(sr->mode_str());
-            }
-            if (name == "innerHTML") {
-                return JsValue::make_string(sr->inner_html());
-            }
-            if (name == "getElementById") {
-                auto sroot = sr;
-                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_null();
-                    auto found = sroot->get_element_by_id(args[0].to_string());
-                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
-                });
-            }
-            if (name == "querySelector") {
-                auto sroot = sr;
-                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
-                    if (args.empty()) return JsValue::make_null();
-                    auto found = sroot->query_selector(args[0].to_string());
-                    return found ? JsValue::make_dom_node(found) : JsValue::make_null();
-                });
-            }
-            if (name == "querySelectorAll") {
-                auto sroot = sr;
-                return JsValue::make_native_function([sroot](const std::vector<JsValue>& args) {
-                    JsValue arr = JsValue::make_array();
-                    if (!args.empty()) {
-                        auto list = sroot->query_selector_all(args[0].to_string());
-                        for (const auto& item : list) {
-                            arr.array_elements().push_back(JsValue::make_dom_node(item));
-                        }
-                    }
-                    return arr;
-                });
-            }
-        }
-
-        // Generic Node properties & methods
-        if (name == "appendChild") {
-            auto node = dom_node;
-            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
-                require_insertable(node, args[0].dom_node_value(), "appendChild");
-                node->append_child(args[0].dom_node_value());
-                return args[0];
-            });
-        }
-        if (name == "removeChild") {
-            auto node = dom_node;
-            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
-                node->remove_child(args[0].dom_node_value());
-                return args[0];
-            });
-        }
-        if (name == "insertBefore") {
-            auto node = dom_node;
-            return JsValue::make_native_function([node](const std::vector<JsValue>& args) {
-                if (args.empty() || !args[0].dom_node_value()) return JsValue::make_null();
-                auto new_ch = args[0].dom_node_value();
-                auto ref_ch = (args.size() > 1) ? args[1].dom_node_value() : nullptr;
-                require_insertable(node, new_ch, "insertBefore");
-                node->insert_before(new_ch, ref_ch);
-                return args[0];
-            });
-        }
-        if (name == "parentNode" || name == "parentElement") {
-            auto p = dom_node->parent();
-            return p ? JsValue::make_dom_node(p) : JsValue::make_null();
-        }
-        if (name == "firstChild") {
-            auto fc = dom_node->first_child();
-            return fc ? JsValue::make_dom_node(fc) : JsValue::make_null();
-        }
-        if (name == "lastChild") {
-            auto lc = dom_node->last_child();
-            return lc ? JsValue::make_dom_node(lc) : JsValue::make_null();
-        }
-        if (name == "previousSibling") {
-            auto ps = dom_node->previous_sibling();
-            return ps ? JsValue::make_dom_node(ps) : JsValue::make_null();
-        }
-        if (name == "nextSibling") {
-            auto ns = dom_node->next_sibling();
-            return ns ? JsValue::make_dom_node(ns) : JsValue::make_null();
-        }
-        if (name == "childNodes") {
-            JsValue arr = JsValue::make_array();
-            for (const auto& ch : dom_node->children()) {
-                arr.array_elements().push_back(JsValue::make_dom_node(ch));
-            }
-            return arr;
-        }
-        if (name == "children") {
-            JsValue arr = JsValue::make_array();
-            for (const auto& ch : dom_node->children()) {
-                if (ch->is_element()) {
-                    arr.array_elements().push_back(JsValue::make_dom_node(ch));
-                }
-            }
-            return arr;
-        }
-        if (name == "isConnected") {
-            return JsValue::make_boolean(dom_node->is_connected());
-        }
-    }
-
-
     // Script functions keep their properties in a cell created on demand; the
     // `prototype` of a constructor is what usually forces it into existence.
     JsObject* obj = property_cell();
@@ -1214,6 +802,12 @@ JsValue JsValue::get_property(const std::string& name) const {
         if (name == "__proto__") {
             if (obj->prototype) return JsValue::make_object(obj->prototype);
             return JsValue::make_null();
+        }
+
+        // Host objects first: what they compute comes before what is stored.
+        if (obj->exotic) {
+            JsValue computed;
+            if (obj->exotic->get(obj, name, computed)) return computed;
         }
 
         if (obj->is_array) {
@@ -1271,6 +865,7 @@ JsValue JsValue::get_property(const std::string& name) const {
         if (lookup_chain(obj->prototype, name, *this, found)) return found;
 
         if (obj->lookup_fallback && (*obj->lookup_fallback)(name, found)) return found;
+        if (obj->exotic && obj->exotic->get_last(obj, name, found)) return found;
     }
 
     if (canvas_context()) {
@@ -1284,10 +879,6 @@ JsValue JsValue::get_property(const std::string& name) const {
         }
         if (name == "lineWidth") return JsValue::make_number(canvas_context()->line_width);
         if (name == "globalCompositeOperation") return JsValue::make_string(canvas_context()->global_composite_operation);
-    }
-
-    if (name == "cookie" && type != JsType::Function && type != JsType::NativeFunction) {
-        return JsValue::make_string(CookieJar::default_jar().get_document_cookie());
     }
 
     if (const PropertyMap* map = loose_properties()) {
@@ -1311,7 +902,6 @@ JsValue JsValue::get_property(const std::string& name) const {
 }
 
 void JsValue::set_property(const std::string& name, JsValue val) {
-    const auto dom_node = dom_node_value();
     if (canvas_context()) {
         if (name == "fillStyle") {
             if (val.canvas_gradient_value()) {
@@ -1334,70 +924,12 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         }
     }
 
-    if (name == "cookie") {
-        CookieJar::default_jar().set_document_cookie(val.to_string());
-        if (object_val) object_val->properties[name] = JsValue::make_string(CookieJar::default_jar().get_document_cookie());
-        else if (properties) (*properties)[name] = JsValue::make_string(CookieJar::default_jar().get_document_cookie());
-        return;
-    }
-
-    if (type == JsType::DomNode && dom_node) {
-        if (name == "innerHTML") {
-            if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
-                el->set_inner_html(val.to_string());
-                return;
-            }
-            if (auto sr = std::dynamic_pointer_cast<ShadowRoot>(dom_node)) {
-                sr->set_inner_html(val.to_string());
-                return;
-            }
-        }
-        if (auto el = std::dynamic_pointer_cast<Element>(dom_node)) {
-            if (name == "textContent" || name == "innerText") {
-                // "String replace all": the old children are removed (they
-                // used to be dropped from the list with their parent pointers
-                // left behind, so a removed child still claimed this element
-                // as its parent), and a text node replaces them unless the
-                // string is empty.
-                std::vector<std::shared_ptr<Node>> nodes;
-                std::string text = val.to_string();
-                if (!text.empty()) nodes.push_back(std::make_shared<Text>(std::move(text)));
-                el->replace_children(nodes);
-                return;
-            }
-            if (name == "value") {
-                el->set_value(val.to_string());
-                return;
-            }
-            if (name == "disabled") {
-                el->set_disabled(val.is_truthy());
-                return;
-            }
-            if (name == "checked") {
-                el->set_checked(val.is_truthy());
-                return;
-            }
-            if ((name == "width" || name == "height") && el->tag_name() == "canvas") {
-                // Any number may be assigned; converting one that does not
-                // fit an int (1e12, NaN) is undefined, so it is brought into
-                // range as a double first. A size the canvas cannot have is
-                // kept as its size and leaves it blank (RasterBudget.hpp).
-                const double asked = val.to_number();
-                const int size = asked >= 1.0 ? static_cast<int>(std::min(asked, 2147483647.0)) : 1;
-                el->set_attribute(name, std::to_string(size));
-                auto ctx = el->get_or_create_canvas_context_2d();
-                if (name == "width") ctx->resize(size, ctx->height());
-                else ctx->resize(ctx->width(), size);
-                return;
-            }
-        }
-    }
-
     if (type == JsType::String || type == JsType::Number || type == JsType::Boolean || type == JsType::Symbol) {
         return;     // assigning to a primitive's property has no effect
     }
 
     if (JsObject* obj = property_cell(true)) {
+        if (obj->exotic && obj->exotic->set(obj, name, val)) return;
         if (obj->assign_hook && (*obj->assign_hook)(name, val)) return;
         if (name == "__proto__") {
             if (obj->frozen) return;
@@ -1496,13 +1028,10 @@ JsValue JsValue::make_array(const std::vector<JsValue>& elements) {
     return JsValue::make_object(obj);
 }
 
+// The script object of a node: the same one every time, for as long as a
+// script can reach the node. See DomBindings.hpp.
 JsValue JsValue::make_dom_node(std::shared_ptr<Node> node) {
-    JsValue v;
-    v.type = JsType::DomNode;
-    v.set_dom_node_value(std::move(node));
-    v.object_val = Heap::default_heap().allocate_object();
-    v.object_val->prototype = JsIntrinsics::get().object_proto;
-    return v;
+    return dom::wrap(dom::current_realm(), node);
 }
 
 } // namespace litebird

@@ -171,7 +171,7 @@ bool is_foreign_breakout_tag(const std::string& tag) {
 // ---------------------------------------------------------------------------
 
 std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
-    m_document = std::make_shared<Document>();
+    if (!m_document) m_document = std::make_shared<Document>();
     HtmlTokenizer tokenizer(html);
     m_tokenizer = &tokenizer;
 

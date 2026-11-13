@@ -1,0 +1,114 @@
+#fixture
+<html><head><title>dataset</title></head><body><div id="d" data-id="42" data-user-name="ann" data-x-y-z="deep" data-="empty" data-UPPER="up" title="t"></div></body></html>
+
+#name reading
+#code
+var s = document.getElementById('d').dataset;
+console.log(s.id, s.userName, s.xYZ, s.upper, s.title, s.nope, typeof s.id, s[''], s['user-name']);
+#expect
+42 ann deep up undefined undefined string empty undefined
+
+#name writing creates the attribute with dashes
+#code
+var d = document.getElementById('d');
+d.dataset.newKey = 'v'; d.dataset.plain = 1; d.dataset.aBC = true;
+console.log(d.getAttribute('data-new-key'), d.getAttribute('data-plain'), d.getAttribute('data-a-b-c'), d.dataset.newKey, typeof d.dataset.plain);
+d.dataset.id = null;
+console.log(d.getAttribute('data-id'), d.dataset.id);
+#expect
+v 1 true v string
+null null
+
+#name delete removes the attribute
+#code
+var d = document.getElementById('d');
+console.log(delete d.dataset.id, d.hasAttribute('data-id'), d.dataset.id, delete d.dataset.never);
+console.log(delete d.dataset.userName, d.hasAttribute('data-user-name'));
+#expect
+true false undefined true
+true false
+
+#name in and Object.keys
+#code
+var s = document.getElementById('d').dataset;
+console.log('id' in s, 'userName' in s, 'user-name' in s, 'title' in s, 'nope' in s);
+console.log(Object.keys(s).join(','), JSON.stringify(s), Object.entries(s).length);
+var names = []; for (var k in s) names.push(k); console.log(names.join(','));
+#expect
+true true false false false
+id,userName,xYZ,,upper {"id":"42","userName":"ann","xYZ":"deep","":"empty","upper":"up"} 5
+id,userName,xYZ,,upper
+
+#name the attribute and the dataset are one thing
+#code
+var d = document.getElementById('d');
+d.setAttribute('data-late', 'x');
+console.log(d.dataset.late);
+d.removeAttribute('data-id');
+console.log(d.dataset.id, 'id' in d.dataset);
+d.dataset.late = 'y';
+console.log(d.getAttribute('data-late'), d.dataset === d.dataset);
+#expect
+x
+undefined false
+y true
+
+#name names with digits and dashes
+#code
+var d = document.getElementById('d');
+d.setAttribute('data-a-1', 'one'); d.setAttribute('data-a--b', 'two'); d.setAttribute('data-1x', 'three'); d.setAttribute('data--lead', 'four');
+var s = d.dataset;
+console.log(s['a-1'], s['a-B'], s['1x'], s.Lead, Object.keys(s).slice(-4).join(','));
+s.b2C = 'five'; s.cD3 = 'six';
+console.log(d.getAttribute('data-b2-c'), d.getAttribute('data-c-d3'));
+#expect
+one two three four a-1,a-B,1x,Lead
+five six
+
+#name a name with a dash before a lowercase letter is a SyntaxError
+#code
+var s = document.getElementById('d').dataset;
+try { s['a-b'] = 'x'; console.log('no error'); } catch (e) { console.log(e.name, e.code); }
+try { s['-x'] = 'x'; console.log('no error'); } catch (e) { console.log(e.name); }
+s['a-B'] = 'fine'; s['a-'] = 'fine too';
+console.log(document.getElementById('d').getAttribute('data-a--b'), document.getElementById('d').getAttribute('data-a-'));
+#expect
+SyntaxError 12
+SyntaxError
+fine fine too
+
+#name the type of dataset
+#code
+var s = document.getElementById('d').dataset;
+console.log(s instanceof DOMStringMap, Object.prototype.toString.call(s), typeof s, s.hasOwnProperty('id'), s.hasOwnProperty('nope'), typeof s.toString);
+#expect
+true [object DOMStringMap] object true false function
+
+#name dataset of an element without data attributes
+#code
+var p = document.createElement('p');
+console.log(Object.keys(p.dataset).length, JSON.stringify(p.dataset), p.dataset.x);
+p.dataset.x = '';
+console.log(p.outerHTML, p.dataset.x === '');
+#expect
+0 {} undefined
+<p data-x=""></p> true
+
+#name values are strings
+#code
+var s = document.getElementById('d').dataset;
+s.n = 12; s.o = {a: 1}; s.u = undefined; s.arr = [1, 2];
+console.log(s.n + 1, s.o, s.u, s.arr, s.id * 2);
+#expect
+121 [object Object] undefined 1,2 84
+
+#name dataset drives attribute selectors
+#code
+var d = document.getElementById('d');
+d.dataset.state = 'open';
+console.log(document.querySelector('[data-state="open"]') === d, d.matches('[data-state]'), d.matches('[data-user-name^="a"]'));
+delete d.dataset.state;
+console.log(document.querySelector('[data-state]'));
+#expect
+true true true
+null

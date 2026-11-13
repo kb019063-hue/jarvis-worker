@@ -1,0 +1,351 @@
+#fixture
+<html lang="en"><head><title>Elements</title></head><body><div id="box" class="one two" title="Tip" data-k="v"><a id="link" href="/docs/page?x=1#frag" target="_blank" rel="noopener next">link</a><img id="pic" src="img/cat.png" alt="A cat"><input id="field" name="q"><button id="btn">Go</button><p id="para" hidden>hidden</p></div><table id="tab"><tr><td>1</td><td colspan="2">2</td></tr></table></body></html>
+
+#name tagName, localName, nodeName and namespaceURI
+#code
+var b = document.getElementById('box');
+console.log(b.tagName, b.localName, b.nodeName, b.namespaceURI, b.prefix);
+var made = document.createElement('SeCtIoN');
+console.log(made.tagName, made.localName);
+var svg = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
+console.log(svg.tagName, svg.localName, svg.namespaceURI, svg instanceof SVGElement, svg instanceof HTMLElement);
+#expect
+DIV div DIV http://www.w3.org/1999/xhtml null
+SECTION section
+linearGradient linearGradient http://www.w3.org/2000/svg true false
+
+#name id and className reflect their attributes
+#code
+var b = document.getElementById('box');
+console.log(b.id, b.className);
+b.id = 'crate'; b.className = 'x';
+console.log(b.getAttribute('id'), b.getAttribute('class'), document.getElementById('crate') === b, document.getElementById('box'));
+var n = document.createElement('div');
+console.log(JSON.stringify(n.id), JSON.stringify(n.className), n.hasAttribute('id'));
+n.id = '';
+console.log(n.hasAttribute('id'), n.getAttribute('id') === '');
+#expect
+box one two
+crate x true null
+"" "" false
+true true
+
+#name title, lang, dir and hidden
+#code
+var b = document.getElementById('box');
+console.log(b.title, JSON.stringify(b.lang), document.documentElement.lang, JSON.stringify(b.dir), b.hidden, document.getElementById('para').hidden);
+b.hidden = true; b.title = 'New'; b.dir = 'rtl'; b.lang = 'fr';
+console.log(b.hasAttribute('hidden'), b.getAttribute('title'), b.getAttribute('dir'), b.getAttribute('lang'));
+document.getElementById('para').hidden = false;
+console.log(document.getElementById('para').hasAttribute('hidden'));
+#expect
+Tip "" en "" false true
+true New rtl fr
+false
+
+#name tabIndex defaults depend on the element
+#code
+console.log(document.getElementById('box').tabIndex, document.getElementById('link').tabIndex, document.getElementById('field').tabIndex, document.getElementById('btn').tabIndex);
+var b = document.getElementById('box');
+b.tabIndex = 2;
+console.log(b.getAttribute('tabindex'), b.tabIndex);
+#expect
+-1 0 0 0
+2 2
+
+#name a link's href is resolved against the page
+#code
+var a = document.getElementById('link');
+console.log(a.href, a.getAttribute('href'));
+console.log(a.protocol, a.host, a.hostname, a.pathname, a.search, a.hash, a.origin, JSON.stringify(a.port));
+console.log(String(a), a.target, a.rel, a.relList.length, a.relList.contains('next'), a.text);
+#expect
+https://example.test/docs/page?x=1#frag /docs/page?x=1#frag
+https: example.test example.test /docs/page ?x=1 #frag https://example.test ""
+https://example.test/docs/page?x=1#frag _blank noopener next 2 true link
+
+#name changing parts of a link's URL
+#code
+var a = document.getElementById('link');
+a.hash = 'other'; a.search = '?y=2'; a.pathname = '/new path';
+console.log(a.href, a.getAttribute('href'));
+a.href = '../up.html';
+console.log(a.href, a.pathname);
+a.removeAttribute('href');
+console.log(JSON.stringify(a.href), JSON.stringify(a.pathname), JSON.stringify(a.protocol));
+#expect
+https://example.test/new%20path?y=2#other https://example.test/new%20path?y=2#other
+https://example.test/up.html /up.html
+"" "" ":"
+
+#name an image's src and alt
+#code
+var i = document.getElementById('pic');
+console.log(i.src, i.getAttribute('src'), i.alt, i instanceof HTMLImageElement, i.tagName);
+i.src = 'https://other.test/x.png'; i.alt = '';
+console.log(i.src, i.getAttribute('alt') === '', i.complete === true || i.complete === false);
+var made = new Image();
+console.log(made.tagName, made instanceof HTMLImageElement, JSON.stringify(made.src), made.parentNode);
+#expect
+https://example.test/app/img/cat.png img/cat.png A cat true IMG
+https://other.test/x.png true true
+IMG true "" null
+
+#name matches and closest
+#code
+var a = document.getElementById('link');
+console.log(a.matches('a'), a.matches('#box > a'), a.matches('div a[target]'), a.matches('p, a'), a.matches('body > a'));
+console.log(a.closest('div').id, a.closest('a') === a, a.closest('body') === document.body, a.closest('table'), a.closest('.one.two').id);
+try { a.matches('a['); console.log('no error'); } catch (e) { console.log(e.name, e instanceof DOMException); }
+try { a.closest(''); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+true true true true false
+box true true null box
+SyntaxError true
+SyntaxError
+
+#name querySelector and querySelectorAll start below the element
+#code
+var b = document.getElementById('box');
+console.log(b.querySelector('a').id, b.querySelector('div'), b.querySelectorAll('*').length, b.querySelectorAll('a, img').length, b.querySelector('body a').id, b.querySelector(':scope > img').id);
+console.log(document.getElementById('tab').querySelectorAll('td').length, document.getElementById('tab').querySelector('td[colspan]').textContent);
+#expect
+link null 5 2 link pic
+2 2
+
+#name getElementsByTagName and getElementsByClassName
+#code
+var b = document.getElementById('box');
+console.log(b.getElementsByTagName('a').length, b.getElementsByTagName('*').length, b.getElementsByTagName('A').length, document.getElementsByTagName('td').length);
+console.log(document.getElementsByClassName('one').length, document.getElementsByClassName('two one').length, document.getElementsByClassName('one three').length, b.getElementsByClassName('one').length);
+#expect
+1 5 1 2
+1 1 0 0
+
+#name insertAdjacentElement, insertAdjacentText and insertAdjacentHTML
+#code
+var b = document.getElementById('btn');
+var u = document.createElement('u');
+console.log(b.insertAdjacentElement('beforebegin', u) === u, b.previousSibling === u);
+b.insertAdjacentText('afterbegin', 'A');
+b.insertAdjacentText('beforeend', 'Z');
+b.insertAdjacentHTML('afterend', '<i>x</i><b>y</b>');
+console.log(b.textContent, b.nextSibling.tagName, b.nextSibling.nextSibling.tagName, b.childNodes.length);
+try { b.insertAdjacentElement('middle', document.createElement('s')); } catch (e) { console.log(e.name); }
+console.log(document.createElement('div').insertAdjacentElement('beforebegin', document.createElement('s')));
+#expect
+true true
+AGoZ I B 3
+SyntaxError
+null
+
+#name innerHTML and outerHTML of an element with attributes
+#code
+var b = document.getElementById('btn');
+console.log(b.outerHTML, b.innerHTML);
+var p = document.getElementById('para');
+console.log(p.outerHTML);
+p.innerHTML = '<em class="x">new</em> &amp; more';
+console.log(p.childNodes.length, p.firstChild.className, p.textContent, p.innerHTML);
+#expect
+<button id="btn">Go</button> Go
+<p id="para" hidden="">hidden</p>
+2 x new & more <em class="x">new</em> &amp; more
+
+#name remove and isConnected
+#code
+var a = document.getElementById('link');
+a.remove(); a.remove();
+console.log(a.parentNode, a.isConnected, document.getElementById('link'), document.getElementById('box').children.length);
+#expect
+null false null 4
+
+#name getBoundingClientRect and getClientRects of a detached element
+#code
+var d = document.createElement('div');
+var r = d.getBoundingClientRect();
+console.log(r.x, r.y, r.width, r.height, r.top, r.right, r.bottom, r.left, d.getClientRects().length);
+#expect
+0 0 0 0 0 0 0 0 0
+
+#name children is a live HTMLCollection and has the same identity
+#code
+var b = document.getElementById('box');
+var kids = b.children;
+var before = kids.length;
+b.appendChild(document.createElement('span'));
+console.log(before, kids.length, kids === b.children, kids instanceof HTMLCollection, kids[kids.length - 1].tagName, kids.item(0).id);
+#expect
+5 6 true true SPAN link
+
+#name a table's rows and cells
+#code
+var t = document.getElementById('tab');
+console.log(t.rows.length, t.rows[0].cells.length, t.rows[0].cells[1].colSpan, t.rows[0].cells[0].colSpan, t.tBodies.length, t.rows[0].rowIndex, t.rows[0].cells[1].cellIndex);
+var row = t.insertRow();
+var cell = row.insertCell();
+cell.textContent = 'new';
+console.log(t.rows.length, row.parentNode.tagName, cell.tagName, t.tBodies[0].rows.length);
+t.deleteRow(0);
+console.log(t.rows.length, t.rows[0].textContent);
+#expect
+1 2 2 1 1 0 1
+2 TBODY TD 2
+1 new
+
+#name table sections: caption, thead and tfoot
+#code
+var t = document.createElement('table');
+var head = t.createTHead(), foot = t.createTFoot(), cap = t.createCaption();
+cap.textContent = 'C';
+console.log(t.tHead === head, t.tFoot === foot, t.caption === cap, t.createTHead() === head, t.children.length);
+console.log(Array.from(t.children).map(function (c) { return c.tagName; }).join(' '));
+t.deleteTHead(); t.deleteCaption();
+console.log(t.tHead, t.caption, t.children.length);
+#expect
+true true true true 3
+CAPTION THEAD TFOOT
+null null 1
+
+#name which interface an element gets
+#code
+var names = ['div', 'span', 'p', 'a', 'ul', 'li', 'h1', 'h6', 'table', 'td', 'th', 'input', 'select', 'option', 'textarea', 'button', 'form', 'label', 'img', 'script', 'style', 'template', 'section', 'article', 'b', 'em', 'br', 'hr', 'pre', 'canvas', 'unknownthing', 'my-element'];
+console.log(names.map(function (n) { return Object.prototype.toString.call(document.createElement(n)).slice(8, -1); }).join(' '));
+#expect
+HTMLDivElement HTMLSpanElement HTMLParagraphElement HTMLAnchorElement HTMLUListElement HTMLLIElement HTMLHeadingElement HTMLHeadingElement HTMLTableElement HTMLTableCellElement HTMLTableCellElement HTMLInputElement HTMLSelectElement HTMLOptionElement HTMLTextAreaElement HTMLButtonElement HTMLFormElement HTMLLabelElement HTMLImageElement HTMLScriptElement HTMLStyleElement HTMLTemplateElement HTMLElement HTMLElement HTMLElement HTMLElement HTMLBRElement HTMLHRElement HTMLPreElement HTMLCanvasElement HTMLUnknownElement HTMLElement
+
+#name the element constructors cannot be called
+#code
+try { new HTMLDivElement(); console.log('no error'); } catch (e) { console.log(e.name); }
+try { HTMLElement(); console.log('no error'); } catch (e) { console.log(e.name); }
+try { new Node(); console.log('no error'); } catch (e) { console.log(e.name); }
+console.log(typeof HTMLDivElement, HTMLDivElement.name, HTMLDivElement.prototype.constructor === HTMLDivElement, document.createElement('div').constructor === HTMLDivElement);
+#expect
+TypeError
+TypeError
+TypeError
+function HTMLDivElement true true
+
+#name focus, blur and document.activeElement
+#code
+var f = document.getElementById('field'), b = document.getElementById('btn');
+console.log(document.activeElement === document.body);
+f.focus();
+console.log(document.activeElement === f, document.hasFocus() === true || document.hasFocus() === false);
+b.focus();
+console.log(document.activeElement === b);
+b.blur();
+console.log(document.activeElement === document.body);
+document.getElementById('box').focus();
+console.log(document.activeElement === document.body);
+#expect
+true
+true true
+true
+true
+true
+
+#name focus and blur events
+#code
+var f = document.getElementById('field'), b = document.getElementById('btn');
+var out = [];
+f.addEventListener('focus', function (e) { out.push('focus ' + e.bubbles + ' ' + (e.relatedTarget === null)); });
+f.addEventListener('blur', function (e) { out.push('blur ' + e.bubbles + ' ' + (e.relatedTarget === b)); });
+document.body.addEventListener('focusin', function (e) { out.push('focusin ' + e.target.id + ' ' + e.bubbles); });
+document.body.addEventListener('focusout', function (e) { out.push('focusout ' + e.target.id); });
+f.focus(); f.focus(); b.focus();
+console.log(out.sort().join(', '));
+#expect
+blur false true, focus false true, focusin btn true, focusin field true, focusout field
+
+#name click() on a disabled button does nothing
+#code
+var b = document.getElementById('btn');
+var n = 0;
+b.addEventListener('click', function () { n++; });
+b.click();
+b.disabled = true;
+b.click();
+b.disabled = false;
+b.click();
+console.log(n);
+#expect
+2
+
+#name toggleAttribute
+#code
+var b = document.getElementById('box');
+console.log(b.toggleAttribute('open'), b.hasAttribute('open'), b.getAttribute('open') === '', b.toggleAttribute('open'), b.hasAttribute('open'));
+console.log(b.toggleAttribute('x', true), b.toggleAttribute('x', true), b.toggleAttribute('y', false), b.hasAttribute('x'), b.hasAttribute('y'));
+#expect
+true true true false false
+true true false true false
+
+#name before/after/replaceWith with several nodes keep their order
+#code
+var b = document.getElementById('btn');
+b.replaceWith(document.createElement('i'), 'mid', document.createElement('u'));
+var kids = document.getElementById('box').childNodes;
+console.log(Array.from(kids).map(function (n) { return n.nodeName; }).join(' '));
+#expect
+A IMG INPUT I #text U P
+
+#name script element properties
+#code
+var s = document.createElement('script');
+console.log(JSON.stringify(s.src), JSON.stringify(s.type), s.async, s.defer, JSON.stringify(s.text));
+s.text = 'var fromScript = 1;';
+s.type = 'text/plain'; s.defer = true;
+console.log(s.textContent, s.getAttribute('type'), s.hasAttribute('defer'), s.childNodes.length);
+#expect
+"" "" true false ""
+var fromScript = 1; text/plain true 1
+
+#name canvas width and height reflect attributes with defaults
+#code
+var c = document.createElement('canvas');
+console.log(c.width, c.height);
+c.width = 40; c.setAttribute('height', '25');
+console.log(c.getAttribute('width'), c.height, c instanceof HTMLCanvasElement);
+#expect
+300 150
+40 25 true
+
+#name list elements
+#code
+var ol = document.createElement('ol');
+ol.innerHTML = '<li>a</li><li value="7">b</li>';
+console.log(ol.start, ol.reversed, ol.children[1].value, ol.children[0].value);
+ol.start = 3; ol.reversed = true;
+console.log(ol.getAttribute('start'), ol.hasAttribute('reversed'));
+#expect
+1 false 7 0
+3 true
+
+#name a template's content is a separate fragment
+#code
+var t = document.createElement('template');
+t.innerHTML = '<li>x</li><li>y</li>';
+console.log(t.childNodes.length, t.content.childNodes.length, t.content.nodeType, t.content === t.content, t.innerHTML);
+var copy = document.importNode(t.content, true);
+console.log(copy.childNodes.length, copy !== t.content, copy.firstChild.textContent, t.content.firstChild.ownerDocument === document);
+document.body.appendChild(copy);
+console.log(document.querySelectorAll('li').length, copy.childNodes.length, t.content.childNodes.length);
+#expect
+0 2 11 true <li>x</li><li>y</li>
+2 true x false
+2 0 2
+
+#name details, progress and meter reflect their attributes
+#code
+var d = document.createElement('details');
+console.log(d.open); d.open = true; console.log(d.hasAttribute('open'));
+var p = document.createElement('progress');
+console.log(p.max, p.value, p.position);
+p.max = 10; p.value = 4;
+console.log(p.getAttribute('max'), p.getAttribute('value'), p.position);
+#expect
+false
+true
+1 0 -1
+10 4 0.4

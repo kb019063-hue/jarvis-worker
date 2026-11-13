@@ -1,0 +1,270 @@
+#fixture
+<html><head><title>Window</title></head><body><div id="byid">by id</div><p id="p" name="named">p</p><form name="search" id="sform"></form><div id="location">shadowed</div><div id="two-words">dash</div></body></html>
+
+#name window, self, globalThis, this, top, parent, frames
+#code
+console.log(window === self, window === globalThis, window === this, window.window === window, window === top, window === parent, window === frames, window.frameElement, window.length, typeof window, window instanceof Window, window instanceof EventTarget);
+#expect
+true true true true true true true null 0 object true true
+
+#name global variables are window properties and back
+#code
+var declared = 1;
+window.assigned = 2;
+implicit = 3;
+function fn() { return 4; }
+console.log(window.declared, assigned, window.implicit, window.fn(), 'declared' in window, 'nosuch' in window, window.nosuch, typeof nosuch);
+try { nosuch; } catch (e) { console.log(e.name); }
+let lexical = 5; const fixed = 6;
+console.log(window.lexical, window.fixed, lexical + fixed);
+#expect
+1 2 3 4 true false undefined undefined
+ReferenceError
+undefined undefined 11
+
+#name deleting and redefining globals
+#code
+window.temp = 1;
+console.log(delete window.temp, typeof temp, 'temp' in window);
+window.temp = 2;
+console.log(temp);
+#expect
+true undefined false
+2
+
+#name elements with an id are globals unless something else has the name
+#code
+console.log(byid === document.getElementById('byid'), window.byid.textContent, typeof p, window['two-words'].textContent, location === window.location, typeof location.href, 'byid' in window);
+window.byid = 'now a variable';
+console.log(byid, window.byid, document.getElementById('byid').id);
+console.log(search === document.forms.search, window.sform === document.getElementById('sform'));
+#expect
+true by id object dash true string true
+now a variable now a variable byid
+true true
+
+#name an id global follows the tree
+#code
+var el = document.getElementById('byid');
+el.remove();
+console.log(typeof byid);
+el.id = 'renamed';
+document.body.appendChild(el);
+console.log(typeof byid, renamed === el);
+#expect
+undefined
+undefined true
+
+#name the viewport and the screen
+#code
+console.log(typeof innerWidth, innerWidth > 0, innerHeight > 0, typeof outerWidth, devicePixelRatio, typeof screen.width, typeof screen.availWidth, typeof screen.colorDepth, scrollX, scrollY, pageXOffset, pageYOffset, typeof screenX, document.documentElement.clientWidth === innerWidth || document.documentElement.clientWidth === 0);
+#expect
+number true true number 1 number number number 0 0 0 0 number true
+
+#name scrolling functions exist; a detached element has no size
+#code
+console.log(typeof scrollTo, typeof scroll, typeof scrollBy, scrollX, scrollY, document.documentElement.scrollTop, document.body.scrollTop, document.body.scrollLeft);
+var d = document.createElement('div');
+console.log(d.scrollTop, d.scrollHeight, d.clientWidth, d.clientHeight, d.offsetWidth, d.offsetHeight, d.offsetTop, d.offsetLeft, d.offsetParent);
+#expect
+function function function 0 0 0 0 0
+0 0 0 0 0 0 0 0 null
+
+#name location parts
+#code
+var l = location;
+console.log(l.href, l.protocol, l.host, l.hostname, JSON.stringify(l.port), l.pathname, l.search, l.hash, l.origin, String(l), l.toString() === l.href, l instanceof Location, typeof l.assign, typeof l.replace, typeof l.reload);
+#expect
+https://example.test/app/page.html?tab=2#top https: example.test example.test "" /app/page.html ?tab=2 #top https://example.test https://example.test/app/page.html?tab=2#top true true function function function
+
+#name setting location.hash changes the URL and fires hashchange later
+#code
+var out = [];
+window.addEventListener('hashchange', function (e) { out.push('event ' + e.oldURL.split('#')[1] + '>' + e.newURL.split('#')[1] + ' ' + e.bubbles + ' ' + e.cancelable + ' ' + (e.target === window)); console.log(out.join(', ')); });
+location.hash = 'second';
+out.push('after set ' + location.hash + ' ' + location.href.split('#')[1] + ' ' + document.URL.split('#')[1]);
+#expect
+after set #second second second, event top>second false false true
+
+#name onhashchange and several hash changes
+#code
+var n = 0;
+window.onhashchange = function (e) { n++; if (n === 2) console.log(n, location.hash, e.newURL.split('#')[1]); };
+location.hash = '#a';
+location.hash = 'b';
+location.hash = 'b';
+#expect
+2 #b b
+
+#name setting href to the same page with another hash is a hash change
+#code
+window.addEventListener('hashchange', function () { console.log('hashchange', location.hash, history.length); });
+var before = history.length;
+location.href = location.href.split('#')[0] + '#viahref';
+console.log(location.hash, history.length - before);
+#expect
+#viahref 1
+hashchange #viahref 2
+
+#name history.pushState and replaceState change the URL without events
+#code
+var events = 0;
+window.addEventListener('popstate', function () { events++; });
+window.addEventListener('hashchange', function () { events++; });
+var before = history.length;
+history.pushState({page: 1}, '', '/app/other?x=1');
+console.log(location.pathname, location.search, location.href, history.length - before, history.state.page, document.URL === location.href);
+history.replaceState({page: 2}, '', 'relative.html#h');
+console.log(location.href, history.length - before, history.state.page);
+history.pushState(null, '');
+console.log(location.href, history.state, history.length - before);
+setTimeout(function () { console.log(events); }, 10);
+#expect
+/app/other ?x=1 https://example.test/app/other?x=1 1 1 true
+https://example.test/app/relative.html#h 1 2
+https://example.test/app/relative.html#h null 2
+0
+
+#name pushState to another origin throws SecurityError
+#code
+try { history.pushState(null, '', 'https://other.test/'); console.log('no error'); } catch (e) { console.log(e.name, e.code, location.host); }
+try { history.pushState(); console.log('no error'); } catch (e) { console.log(e.name); }
+#expect
+SecurityError 18 example.test
+TypeError
+
+#name back, forward and go fire popstate later, with the state
+#code
+var out = [];
+window.addEventListener('popstate', function (e) {
+  out.push(location.pathname + ':' + JSON.stringify(e.state) + ':' + (e.state === history.state) + ':' + (e instanceof PopStateEvent));
+  if (out.length === 1) history.forward();
+  else if (out.length === 2) { history.go(-2); }
+  else console.log(out.join(' '));
+});
+history.pushState({n: 1}, '', '/one');
+history.pushState({n: 2}, '', '/two');
+history.back();
+out.length || console.log('nothing yet', location.pathname);
+#expect
+nothing yet /two
+/one:{"n":1}:true:true /two:{"n":2}:true:true /app/page.html:null:true:true
+
+#name history.length and going nowhere
+#code
+console.log(typeof history.length, history.length >= 1, history.state, history instanceof History);
+history.go(50); history.back();
+setTimeout(function () { console.log(location.href); }, 10);
+#expect
+number true null true
+https://example.test/app/page.html?tab=2#top
+
+#name navigator
+#code
+console.log(typeof navigator.userAgent, navigator.userAgent.length > 0, typeof navigator.language, Array.isArray(navigator.languages), typeof navigator.onLine, navigator.cookieEnabled, typeof navigator.platform, navigator.appName, typeof navigator.hardwareConcurrency, navigator instanceof Navigator);
+#expect
+string true string true boolean true string Netscape number true
+
+#name localStorage and sessionStorage
+#code
+localStorage.clear(); sessionStorage.clear();
+localStorage.setItem('a', '1'); localStorage.b = 2; localStorage['c d'] = {x: 1};
+console.log(localStorage.getItem('a'), localStorage.a, localStorage.getItem('b'), typeof localStorage.b, localStorage.getItem('c d'), localStorage.getItem('nope'), localStorage.nope, localStorage.length, localStorage.key(0), localStorage.key(9));
+localStorage.removeItem('a'); delete localStorage.b;
+console.log(localStorage.length, Object.keys(localStorage).join(','), 'c d' in localStorage, JSON.stringify(localStorage), localStorage instanceof Storage, sessionStorage !== localStorage, sessionStorage.length);
+localStorage.clear();
+console.log(localStorage.length, localStorage.getItem('c d'));
+#expect
+1 1 2 string [object Object] null undefined 3 a null
+1 c d true {"c d":"[object Object]"} true true 0
+0 null
+
+#name storage names that collide with methods
+#code
+localStorage.clear();
+localStorage.setItem('length', 'x'); localStorage.setItem('getItem', 'y'); localStorage.setItem('key', 'z');
+console.log(localStorage.length, typeof localStorage.getItem, localStorage.getItem('getItem'), localStorage.getItem('length'), typeof localStorage.key);
+localStorage.clear();
+#expect
+3 function y x function
+
+#name alert, confirm and prompt exist
+#code
+console.log(typeof alert, typeof confirm, typeof prompt, typeof print, typeof open, typeof close, typeof focus, typeof blur, typeof postMessage, typeof stop);
+#expect
+function function function function function function function function function function
+
+#name getComputedStyle and matchMedia are functions of window
+#code
+console.log(typeof window.getComputedStyle, window.getComputedStyle === getComputedStyle, typeof getComputedStyle(document.body).display, getComputedStyle(document.body).getPropertyValue('display'));
+#expect
+function true string block
+
+#name encoding helpers
+#code
+console.log(btoa('hello'), atob('aGVsbG8='), btoa(''), atob(btoa('\u00ff\u0001')).length);
+try { btoa('\u0100'); } catch (e) { console.log(e.name, e instanceof DOMException); }
+try { atob('!'); } catch (e) { console.log(e.name); }
+#expect
+aGVsbG8= hello  2
+InvalidCharacterError true
+InvalidCharacterError
+
+#name URL and URLSearchParams
+#code
+var u = new URL('../a/b?x=1&y=2#h', 'https://example.test/app/page.html');
+console.log(u.href, u.pathname, u.searchParams.get('y'), u.hash, u.origin);
+u.searchParams.append('z', 'a b'); u.hash = '';
+console.log(u.href, String(u), new URL(location.href).search, new URLSearchParams(location.search).get('tab'));
+try { new URL('nope'); } catch (e) { console.log(e.name); }
+console.log(URL.canParse ? URL.canParse('https://a.test') : true);
+#expect
+https://example.test/a/b?x=1&y=2#h /a/b 2 #h https://example.test
+https://example.test/a/b?x=1&y=2&z=a+b https://example.test/a/b?x=1&y=2&z=a+b ?tab=2 2
+TypeError
+true
+
+#name performance.now and Date.now move forward with timers
+#code
+var p0 = performance.now(), d0 = Date.now();
+setTimeout(function () { console.log(performance.now() - p0 >= 20, Date.now() - d0 >= 20, typeof performance.timeOrigin); }, 25);
+#expect
+true true number
+
+#name on-properties of window
+#code
+console.log(window.onload, window.onerror, window.onclick, window.onresize, window.onscroll, window.onhashchange, window.onpopstate, 'onload' in window);
+var n = 0;
+window.onresize = function (e) { n++; };
+window.dispatchEvent(new Event('resize'));
+window.onresize = null;
+window.dispatchEvent(new Event('resize'));
+console.log(n, window.onresize);
+#expect
+null null null null null null null true
+1 null
+
+#name the constructors are properties of window
+#code
+console.log(window.Node === Node, window.Element === Element, window.HTMLElement === HTMLElement, window.Event === Event, window.Document === Document, window.Array === Array, typeof window.XMLHttpRequest, typeof window.Promise, typeof window.MutationObserver, typeof window.customElements, typeof window.DOMParser, typeof window.FormData, typeof window.URL, typeof window.AbortController, typeof window.CustomEvent, typeof window.KeyboardEvent);
+#expect
+true true true true true true function function function object function function function function function function
+
+#name window as a string
+#code
+console.log(String(window), Object.prototype.toString.call(window), String(location) === location.href, Object.prototype.toString.call(history), Object.prototype.toString.call(navigator), Object.prototype.toString.call(localStorage), Object.prototype.toString.call(document.body.style) !== '[object Object]');
+#expect
+[object Window] [object Window] true [object History] [object Navigator] [object Storage] true
+
+#name console methods exist
+#code
+console.log(['log', 'info', 'warn', 'error', 'debug', 'trace', 'table', 'dir', 'group', 'groupCollapsed', 'groupEnd', 'time', 'timeEnd', 'timeLog', 'count', 'assert', 'clear'].map(function (m) { return typeof console[m]; }).join(' '));
+#expect
+function function function function function function function function function function function function function function function function function
+
+#name requestIdleCallback or a fallback
+#code
+var ric = window.requestIdleCallback || function (cb) { return setTimeout(function () { cb({didTimeout: false, timeRemaining: function () { return 1; }}); }, 1); };
+ric(function (deadline) { console.log(typeof deadline.timeRemaining(), deadline.didTimeout); });
+#expect
+number false

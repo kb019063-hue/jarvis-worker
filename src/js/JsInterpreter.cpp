@@ -3,15 +3,14 @@
 #include "litebird/dom/Event.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Text.hpp"
-#include "litebird/dom/MutationObserver.hpp"
-#include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/js/DomBindings.hpp"
+#include "litebird/html/HtmlParser.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/ResourceLoader.hpp"
-#include "litebird/net/URL.hpp"
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/WebSocket.hpp"
 #include "litebird/js/Worker.hpp"
@@ -115,6 +114,9 @@ JsInterpreter::~JsInterpreter() {
         }
     }
     m_generators.clear();
+    // The DOM side of the realm lets go of its objects; functions made for
+    // it stay callable and do nothing.
+    dom::shutdown_realm(*m_realm);
     Heap::default_heap().remove_root_provider(this);
 }
 
@@ -143,22 +145,52 @@ void JsInterpreter::notify_document_loaded() {
     m_load_notified = true;
     JsIntrinsics::set_current(m_realm.get());
 
-    JsValue document = m_global_env->get("document");
-    auto set_ready_state = [&](const char* state) {
-        if (document.is_object()) document.set_property("readyState", JsValue::make_string(state));
-    };
-
-    // The parser is done and every script has run: DOMContentLoaded, at the
-    // document, bubbling to the window.
-    set_ready_state("interactive");
-    if (m_document) m_document->dispatch_event(std::make_shared<Event>("DOMContentLoaded", true, false));
+    if (m_document) {
+        // DOMContentLoaded at the document, readystatechange, then load at
+        // the window: see fire_load_events.
+        JsScriptScope scope;
+        dom::fire_load_events(dom::realm_of(*m_realm));
+        return;
+    }
+    // No page: the bare window still hears that loading is over.
     fire_window_event("DOMContentLoaded");
-
-    // Nothing is fetched asynchronously while a page loads here (there are no
-    // external stylesheets, scripts or images still arriving), so the page is
-    // complete as soon as it is interactive.
-    set_ready_state("complete");
     fire_window_event("load");
+}
+
+void JsInterpreter::notify_document_interactive() {
+    if (!m_document || m_document->ready_state() != "loading") return;
+    JsIntrinsics::set_current(m_realm.get());
+    JsScriptScope scope;
+    dom::Realm& realm = dom::realm_of(*m_realm);
+    m_document->set_ready_state("interactive");
+    dom::fire(realm, *m_document, "readystatechange");
+}
+
+void JsInterpreter::load_page(std::string_view html, bool scripting,
+                              const std::function<void(const std::string& source)>& before) {
+    if (!m_document) return;
+    std::shared_ptr<Document> document = m_document;
+    HtmlParser::parse_into(document, html, scripting, [&](const std::shared_ptr<Element>& script) {
+        // Not in the page (inside a <template>, or an earlier script took
+        // its parent out), nothing to fetch, or not JavaScript.
+        if (!script->is_connected() || script->owner_document() != document) return;
+        if (script->has_attribute("src") || !dom::is_classic_script(*script)) return;
+        const std::string source = script->text_content();
+        if (source.empty()) return;
+        if (before) before(source);
+        {
+            // The JavaScript stack is empty, so what earlier scripts left
+            // for later runs first: promise jobs, and the records a mutation
+            // observer has of what the parser added since.
+            JsIntrinsics::set_current(m_realm.get());
+            JsScriptScope checkpoint;
+        }
+        auto previous = document->current_script();
+        document->set_current_script(script);
+        eval_ast(source);
+        document->set_current_script(previous);
+    });
+    notify_document_interactive();
 }
 
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {
@@ -290,117 +322,141 @@ void JsInterpreter::init_builtins() {
         }
         return JsValue::make_undefined();
     }));
+    // The rest of the console a page may call without checking. Groups are
+    // not indented and timers print nothing: neither can be the same on
+    // every run, and output that differs between runs cannot be tested.
+    console_obj.set_property("dir", console_obj.get_property("log"));
+    console_obj.set_property("group", console_obj.get_property("log"));
+    console_obj.set_property("groupCollapsed", console_obj.get_property("log"));
+    for (const char* name : {"groupEnd", "time", "timeEnd", "timeLog", "timeStamp", "clear", "profile", "profileEnd"}) {
+        console_obj.set_property(name, JsValue::make_native_function([](const std::vector<JsValue>&) {
+            return JsValue::make_undefined();
+        }));
+    }
+    auto counters = std::make_shared<std::unordered_map<std::string, int>>();
+    console_obj.set_property("count", JsValue::make_native_function([counters](const std::vector<JsValue>& args) {
+        const std::string label = args.empty() || args[0].is_undefined() ? std::string("default") : args[0].to_string();
+        std::cout << js_output_text(label) << ": " << ++(*counters)[label] << std::endl;
+        return JsValue::make_undefined();
+    }));
+    console_obj.set_property("countReset", JsValue::make_native_function([counters](const std::vector<JsValue>& args) {
+        const std::string label = args.empty() || args[0].is_undefined() ? std::string("default") : args[0].to_string();
+        (*counters)[label] = 0;
+        return JsValue::make_undefined();
+    }));
     m_global_env->define("console", console_obj);
 
-    // Web Storage API
-    JsValue local_store = Storage::local_storage().to_js_value();
-    JsValue session_store = Storage::session_storage().to_js_value();
-    m_global_env->define("localStorage", local_store);
-    m_global_env->define("sessionStorage", session_store);
-
     JsValue win_obj = JsValue::make_object();
-    win_obj.set_property("localStorage", local_store);
-    win_obj.set_property("sessionStorage", session_store);
 
-    // The window is an event target that is not a DOM node, so it keeps its
-    // own listener table.
-    m_window_listeners = std::make_shared<WindowListeners>();
-    auto window_listeners = m_window_listeners;
-    JsValue win_add_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
-        if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
-        auto& listeners = (*window_listeners)[args[0].to_string()];
-        // The same callback registered twice is one listener.
-        for (const auto& existing : listeners) {
-            if (existing.identity() == args[1].identity()) return JsValue::make_undefined();
-        }
-        listeners.push_back(args[1]);
-        return JsValue::make_undefined();
-    });
-    JsValue win_remove_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
-        if (args.size() < 2) return JsValue::make_undefined();
-        auto found = window_listeners->find(args[0].to_string());
-        if (found == window_listeners->end()) return JsValue::make_undefined();
-        auto& listeners = found->second;
-        for (auto it = listeners.begin(); it != listeners.end(); ++it) {
-            if (it->identity() == args[1].identity()) {
-                listeners.erase(it);
-                break;
-            }
-        }
-        return JsValue::make_undefined();
-    });
-    JsValue win_dispatch = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
-        if (args.empty()) return JsValue::make_boolean(false);
-        std::string type = args[0].is_object() ? args[0].get_property("type").to_string() : args[0].to_string();
-        auto it = window_listeners->find(type);
-        if (it != window_listeners->end()) {
-            // A listener may add or remove listeners; iterate over a copy.
-            const auto listeners = it->second;
-            for (const auto& cb : listeners) {
-                js_call_guarded(cb, JsValue(), args);
-            }
-        }
-        return JsValue::make_boolean(true);
-    });
-    win_obj.set_property("addEventListener", win_add_el);
-    win_obj.set_property("removeEventListener", win_remove_el);
-    win_obj.set_property("dispatchEvent", win_dispatch);
+    // With a page, the global object is a Window: everything a window has
+    // (events, location, history, storage, the document) comes from the DOM
+    // bindings, attached at the end of this function. Without one, as in a
+    // script run on its own, it is a bare object with the few members that
+    // need no page.
+    if (!m_document) {
+        JsValue local_store = Storage::local_storage().to_js_value();
+        JsValue session_store = Storage::session_storage().to_js_value();
+        m_global_env->define("localStorage", local_store);
+        m_global_env->define("sessionStorage", session_store);
+        win_obj.set_property("localStorage", local_store);
+        win_obj.set_property("sessionStorage", session_store);
 
-    if (!m_history) {
-        m_history = std::make_shared<History>();
+        m_window_listeners = std::make_shared<WindowListeners>();
+        auto window_listeners = m_window_listeners;
+        JsValue win_add_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+            if (args.size() < 2 || !args[1].is_function()) return JsValue::make_undefined();
+            auto& listeners = (*window_listeners)[args[0].to_string()];
+            // The same callback registered twice is one listener.
+            for (const auto& existing : listeners) {
+                if (existing.identity() == args[1].identity()) return JsValue::make_undefined();
+            }
+            listeners.push_back(args[1]);
+            return JsValue::make_undefined();
+        });
+        JsValue win_remove_el = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+            if (args.size() < 2) return JsValue::make_undefined();
+            auto found = window_listeners->find(args[0].to_string());
+            if (found == window_listeners->end()) return JsValue::make_undefined();
+            auto& listeners = found->second;
+            for (auto it = listeners.begin(); it != listeners.end(); ++it) {
+                if (it->identity() == args[1].identity()) {
+                    listeners.erase(it);
+                    break;
+                }
+            }
+            return JsValue::make_undefined();
+        });
+        JsValue win_dispatch = JsValue::make_native_function([window_listeners](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_boolean(false);
+            std::string type = args[0].is_object() ? args[0].get_property("type").to_string() : args[0].to_string();
+            auto it = window_listeners->find(type);
+            if (it != window_listeners->end()) {
+                // A listener may add or remove listeners; iterate over a copy.
+                const auto listeners = it->second;
+                for (const auto& cb : listeners) {
+                    js_call_guarded(cb, JsValue(), args);
+                }
+            }
+            return JsValue::make_boolean(true);
+        });
+        win_obj.set_property("addEventListener", win_add_el);
+        win_obj.set_property("removeEventListener", win_remove_el);
+        win_obj.set_property("dispatchEvent", win_dispatch);
+
+        if (!m_history) m_history = std::make_shared<History>();
+        JsValue history_obj = JsValue::make_object();
+        auto hist = m_history;
+        history_obj.set_property("pushState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+            JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
+            std::string title = args.size() > 1 ? args[1].to_string() : "";
+            std::string url = args.size() > 2 ? args[2].to_string() : "";
+            hist->push_state(state, title, url);
+            return JsValue::make_undefined();
+        }));
+        history_obj.set_property("replaceState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+            JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
+            std::string title = args.size() > 1 ? args[1].to_string() : "";
+            std::string url = args.size() > 2 ? args[2].to_string() : "";
+            hist->replace_state(state, title, url);
+            return JsValue::make_undefined();
+        }));
+        history_obj.set_property("back", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+            hist->back();
+            return JsValue::make_undefined();
+        }));
+        history_obj.set_property("forward", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+            hist->forward();
+            return JsValue::make_undefined();
+        }));
+        history_obj.set_property("go", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
+            int delta = args.empty() ? 0 : static_cast<int>(args[0].to_number());
+            hist->go(delta);
+            return JsValue::make_undefined();
+        }));
+        history_obj.set_property("__get_length__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+            return JsValue::make_number(hist->length());
+        }));
+        history_obj.set_property("__get_state__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
+            return hist->state();
+        }));
+        history_obj.set_property("length", JsValue::make_number(hist->length()));
+        history_obj.set_property("state", hist->state());
+
+        m_history->set_popstate_dispatcher([window_listeners](const JsValue& state) {
+            JsValue event = JsValue::make_object();
+            event.set_property("type", JsValue::make_string("popstate"));
+            event.set_property("state", state);
+            auto it = window_listeners->find("popstate");
+            if (it != window_listeners->end()) {
+                for (const auto& cb : it->second) {
+                    js_call_guarded(cb, JsValue(), {event});
+                }
+            }
+        });
+
+        m_global_env->define("history", history_obj);
+        win_obj.set_property("history", history_obj);
     }
-    JsValue history_obj = JsValue::make_object();
-    auto hist = m_history;
-    history_obj.set_property("pushState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
-        JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
-        std::string title = args.size() > 1 ? args[1].to_string() : "";
-        std::string url = args.size() > 2 ? args[2].to_string() : "";
-        hist->push_state(state, title, url);
-        return JsValue::make_undefined();
-    }));
-    history_obj.set_property("replaceState", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
-        JsValue state = args.size() > 0 ? args[0] : JsValue::make_undefined();
-        std::string title = args.size() > 1 ? args[1].to_string() : "";
-        std::string url = args.size() > 2 ? args[2].to_string() : "";
-        hist->replace_state(state, title, url);
-        return JsValue::make_undefined();
-    }));
-    history_obj.set_property("back", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
-        hist->back();
-        return JsValue::make_undefined();
-    }));
-    history_obj.set_property("forward", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
-        hist->forward();
-        return JsValue::make_undefined();
-    }));
-    history_obj.set_property("go", JsValue::make_native_function([hist](const std::vector<JsValue>& args) {
-        int delta = args.empty() ? 0 : static_cast<int>(args[0].to_number());
-        hist->go(delta);
-        return JsValue::make_undefined();
-    }));
-    history_obj.set_property("__get_length__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
-        return JsValue::make_number(hist->length());
-    }));
-    history_obj.set_property("__get_state__", JsValue::make_native_function([hist](const std::vector<JsValue>&) {
-        return hist->state();
-    }));
-    history_obj.set_property("length", JsValue::make_number(hist->length()));
-    history_obj.set_property("state", hist->state());
-
-    m_history->set_popstate_dispatcher([window_listeners](const JsValue& state) {
-        JsValue event = JsValue::make_object();
-        event.set_property("type", JsValue::make_string("popstate"));
-        event.set_property("state", state);
-        auto it = window_listeners->find("popstate");
-        if (it != window_listeners->end()) {
-            for (const auto& cb : it->second) {
-                js_call_guarded(cb, JsValue(), {event});
-            }
-        }
-    });
-
-    m_global_env->define("history", history_obj);
-    win_obj.set_property("history", history_obj);
 
     // requestAnimationFrame(callback): there is no compositor to synchronise
     // with, so a frame is a 16 ms timer. The callback receives the time since
@@ -436,131 +492,6 @@ void JsInterpreter::init_builtins() {
     m_global_env->define("performance", performance);
 
     m_global_env->define("window", win_obj);
-
-    // document object
-    if (m_document) {
-        JsValue doc_obj = JsValue::make_object();
-        doc_obj.set_property("title", JsValue::make_string(m_document->title()));
-        doc_obj.set_property("cookie", JsValue::make_string(CookieJar::default_jar().get_document_cookie()));
-        doc_obj.set_property("getElementById", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-            if (args.empty() || !m_document) return JsValue::make_null();
-            auto el = m_document->get_element_by_id(args[0].to_string());
-            if (el) {
-                return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
-            }
-            return JsValue::make_null();
-        }));
-        doc_obj.set_property("querySelector", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-            if (args.empty() || !m_document) return JsValue::make_null();
-            auto el = m_document->query_selector(args[0].to_string());
-            if (el) {
-                return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
-            }
-            return JsValue::make_null();
-        }));
-        doc_obj.set_property("querySelectorAll", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-            JsValue arr = JsValue::make_array();
-            if (!args.empty() && m_document) {
-                auto list = m_document->query_selector_all(args[0].to_string());
-                for (const auto& item : list) {
-                    arr.array_elements().push_back(item->custom_element_instance().is_undefined() ? JsValue::make_dom_node(item) : item->custom_element_instance());
-                }
-            }
-            return arr;
-        }));
-        doc_obj.set_property("createElement", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-            if (args.empty()) return JsValue::make_null();
-            std::string tag = args[0].to_string();
-            auto el = m_document ? m_document->create_element(tag) : std::make_shared<Element>(tag);
-            CustomElementRegistry::default_registry().upgrade_element(el);
-            return el->custom_element_instance().is_undefined() ? JsValue::make_dom_node(el) : el->custom_element_instance();
-        }));
-        doc_obj.set_property("createTextNode", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-            std::string txt = args.empty() ? "" : args[0].to_string();
-            auto node = m_document ? m_document->create_text_node(txt) : std::make_shared<Text>(txt);
-            return JsValue::make_dom_node(node);
-        }));
-        doc_obj.set_property("createDocumentFragment", JsValue::make_native_function([this](const std::vector<JsValue>&) {
-            auto frag = m_document ? m_document->create_document_fragment() : std::make_shared<Node>(NodeType::DocumentFragment);
-            return JsValue::make_dom_node(frag);
-        }));
-        doc_obj.set_property("__get_body__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
-            auto b = m_document ? m_document->body() : nullptr;
-            return b ? JsValue::make_dom_node(b) : JsValue::make_null();
-        }));
-        doc_obj.set_property("__get_head__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
-            auto h = m_document ? m_document->head() : nullptr;
-            return h ? JsValue::make_dom_node(h) : JsValue::make_null();
-        }));
-        doc_obj.set_property("__get_documentElement__", JsValue::make_native_function([this](const std::vector<JsValue>&) {
-            auto d = m_document ? m_document->document_element() : nullptr;
-            return d ? JsValue::make_dom_node(d) : JsValue::make_null();
-        }));
-        if (m_document->body()) doc_obj.set_property("body", JsValue::make_dom_node(m_document->body()));
-        if (m_document->head()) doc_obj.set_property("head", JsValue::make_dom_node(m_document->head()));
-        if (m_document->document_element()) doc_obj.set_property("documentElement", JsValue::make_dom_node(m_document->document_element()));
-
-        // The document is an event target. Listeners go on the Document node,
-        // which is the root of the tree, so events that bubble up from any
-        // element reach them.
-        for (const char* method : {"addEventListener", "removeEventListener", "dispatchEvent"}) {
-            doc_obj.set_property(method, js_event_target_method(m_document, method));
-        }
-        // "loading" while scripts run; notify_document_loaded() moves it on.
-        doc_obj.set_property("readyState", JsValue::make_string("loading"));
-
-        m_global_env->define("document", doc_obj);
-        win_obj.set_property("document", doc_obj);
-    }
-
-    // customElements registry
-    JsValue ce_obj = JsValue::make_object();
-    ce_obj.set_property("define", JsValue::make_native_function([this](const std::vector<JsValue>& args) {
-        if (args.size() < 2) return JsValue::make_undefined();
-        std::string name = args[0].to_string();
-        JsValue constructor = args[1];
-        bool ok = CustomElementRegistry::default_registry().define(name, constructor);
-        if (ok && m_document) {
-            CustomElementRegistry::default_registry().upgrade_tree(m_document);
-        }
-        return JsValue::make_boolean(ok);
-    }));
-    ce_obj.set_property("get", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) return JsValue::make_undefined();
-        return CustomElementRegistry::default_registry().get(args[0].to_string());
-    }));
-    ce_obj.set_property("whenDefined", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty()) return Promise::make_resolved(JsValue::make_undefined());
-        return CustomElementRegistry::default_registry().when_defined(args[0].to_string());
-    }));
-    ce_obj.set_property("upgrade", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].dom_node_value()) {
-            CustomElementRegistry::default_registry().upgrade_tree(args[0].dom_node_value());
-        }
-        return JsValue::make_undefined();
-    }));
-    m_global_env->define("customElements", ce_obj);
-    win_obj.set_property("customElements", ce_obj);
-
-    // HTMLElement constructor base
-    JsValue html_element_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {
-        return JsValue::make_undefined();
-    });
-    JsValue html_proto = JsValue::make_object();
-    html_element_ctor.set_property("prototype", html_proto);
-    m_global_env->define("HTMLElement", html_element_ctor);
-    win_obj.set_property("HTMLElement", html_element_ctor);
-
-    // MutationObserver
-    JsValue mo_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.empty() || !args[0].is_callable()) {
-            return JsValue::make_undefined();
-        }
-        auto obs = std::make_shared<MutationObserver>(args[0]);
-        return obs->to_js_value();
-    });
-    m_global_env->define("MutationObserver", mo_ctor);
-    win_obj.set_property("MutationObserver", mo_ctor);
 
     // queueMicrotask(callback)
     JsValue qm = js_make_native("queueMicrotask", 1, [](const std::vector<JsValue>& args) {
@@ -617,9 +548,14 @@ void JsInterpreter::init_builtins() {
     m_global_env->define("Response", ResponseObject::create_constructor());
     m_global_env->define("fetch", JsValue::make_native_function(FetchAPI::fetch));
 
-    // URL & URLSearchParams built-ins
-    m_global_env->define("URLSearchParams", URLSearchParamsObject::create_constructor());
-    m_global_env->define("URL", URLObject::create_constructor());
+    // URL and URLSearchParams. A window finds every interface by its name
+    // (see dom::attach_window); a worker, or a script run on its own, has
+    // only these two.
+    if (!m_document) {
+        dom::Realm& dom_realm = dom::realm_of(*m_realm);
+        m_global_env->define("URLSearchParams", dom_realm.ctor("URLSearchParams"));
+        m_global_env->define("URL", dom_realm.ctor("URL"));
+    }
 
     // Worker built-in
     m_global_env->define("Worker", WorkerObject::create_constructor());
@@ -632,7 +568,7 @@ void JsInterpreter::init_builtins() {
         auto ctrl = std::make_shared<AbortController>();
         return ctrl->to_js_value();
     });
-    m_global_env->define("AbortController", abort_ctrl_ctor);
+    if (!m_document) m_global_env->define("AbortController", abort_ctrl_ctor);
 
     JsValue abort_sig_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {
         return JsValue::make_undefined();
@@ -647,7 +583,9 @@ void JsInterpreter::init_builtins() {
         auto sig = AbortSignal::timeout(ms);
         return sig->to_js_value();
     }));
-    m_global_env->define("AbortSignal", abort_sig_ctor);
+    // With a page these are DOM interfaces, whose signals are real event
+    // targets (see DomEventBindings.cpp).
+    if (!m_document) m_global_env->define("AbortSignal", abort_sig_ctor);
 
     // IntersectionObserver
     JsValue intersection_obs_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {
@@ -689,6 +627,19 @@ void JsInterpreter::init_builtins() {
     m_global_env->define("ResizeObserver", resize_obs_ctor);
 
     init_language_builtins();
+
+    if (m_document) {
+        // The global object becomes the page's Window, and `document` its
+        // document's script object.
+        dom::Realm& realm = dom::realm_of(*m_realm);
+        m_document->set_ready_state("loading");
+        dom::attach_window(realm, m_global_object, m_document, m_global_env);
+        m_global_env->define("document", dom::wrap(realm, m_document));
+        std::shared_ptr<std::atomic<bool>> alive = m_alive;
+        dom::set_script_runner(realm, [this, alive](const std::string& source) {
+            if (alive->load()) eval_ast(source);
+        });
+    }
 }
 
 void JsInterpreter::init_language_builtins() {
@@ -748,28 +699,27 @@ void JsInterpreter::init_language_builtins() {
 
     // The global object does not own the global scope: it looks it up each
     // time, and finds nothing once the interpreter and its scope are gone.
+    // What `let`, `const` and `class` declare is not a property of it.
     std::weak_ptr<JsEnvironment> global_scope = m_global_env;
     m_global_object.object_val->lookup_fallback =
         std::make_shared<std::function<bool(const std::string&, JsValue&)>>(
             [global_scope](const std::string& name, JsValue& out) {
                 auto scope = global_scope.lock();
                 if (!scope) return false;
-                if (auto* binding = scope->find_own(name)) {
-                    out = binding->value;
-                    return true;
-                }
-                return false;
+                auto* binding = scope->find_own(name);
+                if (!binding || binding->is_lexical) return false;
+                out = binding->value;
+                return true;
             });
     m_global_object.object_val->assign_hook =
         std::make_shared<std::function<bool(const std::string&, const JsValue&)>>(
             [global_scope](const std::string& name, const JsValue& value) {
                 auto scope = global_scope.lock();
                 if (!scope) return false;
-                if (auto* binding = scope->find_own(name)) {
-                    if (!binding->is_const && !binding->is_readonly) binding->value = value;
-                    return true;
-                }
-                return false;
+                auto* binding = scope->find_own(name);
+                if (!binding || binding->is_lexical) return false;
+                if (!binding->is_const && !binding->is_readonly) binding->value = value;
+                return true;
             });
 
     // At the top level of a script `this` is the global object.

@@ -18,6 +18,7 @@ const char* namespace_prefix(ElementNamespace ns) {
         case ElementNamespace::SVG: return "svg ";
         case ElementNamespace::MathML: return "math ";
         case ElementNamespace::HTML: break;
+        case ElementNamespace::Other: break;
     }
     return "";
 }
@@ -104,6 +105,8 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
             case NodeType::DocumentFragment:
                 open.push_back({&node, 0, depth});
                 break;
+            case NodeType::DocumentType:
+                break;      // never a child; the document's doctype is written below
         }
     };
 

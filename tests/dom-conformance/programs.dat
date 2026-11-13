@@ -1,0 +1,422 @@
+#name a todo list: add, toggle, remove, count
+#html
+<body><form id="new"><input id="title" name="title"><button>Add</button></form><ul id="todos"></ul><p id="count"></p></body>
+#code
+var todos = [], nextId = 1;
+var list = document.getElementById('todos'), count = document.getElementById('count');
+function render() {
+  list.innerHTML = '';
+  todos.forEach(function (t) {
+    var li = document.createElement('li');
+    li.dataset.id = t.id;
+    li.className = t.done ? 'done' : '';
+    li.innerHTML = '<input type="checkbox"' + (t.done ? ' checked' : '') + '><span></span><button class="del">x</button>';
+    li.querySelector('span').textContent = t.title;
+    list.appendChild(li);
+  });
+  var left = todos.filter(function (t) { return !t.done; }).length;
+  count.textContent = left + ' of ' + todos.length + ' left';
+}
+document.getElementById('new').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var input = document.getElementById('title');
+  if (!input.value.trim()) return;
+  todos.push({id: nextId++, title: input.value.trim(), done: false});
+  input.value = '';
+  render();
+});
+list.addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (!li) return;
+  var id = Number(li.dataset.id);
+  if (e.target.matches('.del')) todos = todos.filter(function (t) { return t.id !== id; });
+  else if (e.target.matches('input')) todos.find(function (t) { return t.id === id; }).done = e.target.checked;
+  else return;
+  render();
+});
+function add(title) { document.getElementById('title').value = title; document.querySelector('#new button').click(); }
+add('milk'); add('  '); add('bread <b>'); add('eggs');
+console.log(count.textContent, list.children.length, list.children[1].querySelector('span').innerHTML);
+list.children[0].querySelector('input').click();
+console.log(count.textContent, list.children[0].className, list.querySelectorAll('input:checked').length);
+list.children[1].querySelector('.del').click();
+console.log(count.textContent, Array.from(list.querySelectorAll('span')).map(function (s) { return s.textContent; }).join(','), document.getElementById('title').value === '');
+#expect
+3 of 3 left 3 bread &lt;b&gt;
+2 of 3 left done 1
+1 of 2 left milk,eggs true
+
+#name tabs: one panel shown, aria attributes kept in step
+#html
+<body><div class="tabs"><button role="tab" data-target="a" aria-selected="true" class="active">A</button><button role="tab" data-target="b" aria-selected="false">B</button><button role="tab" data-target="c" aria-selected="false">C</button></div><section id="a">Panel A</section><section id="b" hidden>Panel B</section><section id="c" hidden>Panel C</section></body>
+#code
+var tabs = document.querySelectorAll('[role=tab]');
+tabs.forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    tabs.forEach(function (t) { t.classList.toggle('active', t === tab); t.setAttribute('aria-selected', String(t === tab)); });
+    document.querySelectorAll('section').forEach(function (p) { p.hidden = p.id !== tab.dataset.target; });
+  });
+});
+function state() { return Array.from(tabs).map(function (t) { return t.textContent + (t.classList.contains('active') ? '*' : '') + t.getAttribute('aria-selected')[0]; }).join(' ') + ' | ' + Array.from(document.querySelectorAll('section:not([hidden])')).map(function (p) { return p.id; }).join(','); }
+console.log(state());
+tabs[2].click(); console.log(state());
+tabs[1].click(); tabs[1].click(); console.log(state());
+#expect
+A*t Bf Cf | a
+Af Bf C*t | c
+Af B*t Cf | b
+
+#name a table sorted by clicking its headers
+#html
+<body><table id="t"><thead><tr><th data-key="name">Name</th><th data-key="age" data-type="number">Age</th></tr></thead><tbody><tr><td>Cy</td><td>30</td></tr><tr><td>Al</td><td>9</td></tr><tr><td>Bo</td><td>100</td></tr></tbody></table></body>
+#code
+var table = document.getElementById('t'), body = table.tBodies[0];
+table.tHead.addEventListener('click', function (e) {
+  var th = e.target.closest('th');
+  if (!th) return;
+  var index = th.cellIndex, numeric = th.dataset.type === 'number';
+  var dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+  table.querySelectorAll('th').forEach(function (h) { delete h.dataset.dir; });
+  th.dataset.dir = dir;
+  var rows = Array.from(body.rows);
+  rows.sort(function (a, b) {
+    var x = a.cells[index].textContent, y = b.cells[index].textContent;
+    var r = numeric ? Number(x) - Number(y) : x.localeCompare(y);
+    return dir === 'asc' ? r : -r;
+  });
+  rows.forEach(function (r) { body.appendChild(r); });
+});
+function names() { return Array.from(body.rows).map(function (r) { return r.cells[0].textContent; }).join(''); }
+var heads = table.querySelectorAll('th');
+heads[0].click(); console.log(names(), heads[0].dataset.dir);
+heads[0].click(); console.log(names(), heads[0].dataset.dir);
+heads[1].click(); console.log(names(), heads[1].dataset.dir, heads[0].hasAttribute('data-dir'), body.rows.length);
+#expect
+AlBoCy asc
+CyBoAl desc
+AlCyBo asc false 3
+
+#name form validation with messages next to the fields
+#html
+<body><form id="signup" novalidate><label>Email <input name="email" type="email" required></label><span class="err" data-for="email"></span><label>Age <input name="age" type="number" min="18"></label><span class="err" data-for="age"></span><button>Join</button></form><p id="result"></p></body>
+#code
+var form = document.getElementById('signup');
+function message(input) {
+  var v = input.validity;
+  if (v.valueMissing) return 'required';
+  if (v.typeMismatch) return 'not an address';
+  if (v.rangeUnderflow) return 'at least ' + input.min;
+  return '';
+}
+form.addEventListener('submit', function (e) {
+  e.preventDefault();
+  var ok = true;
+  Array.from(form.elements).forEach(function (input) {
+    if (!input.name) return;
+    var text = message(input);
+    form.querySelector('.err[data-for="' + input.name + '"]').textContent = text;
+    input.classList.toggle('invalid', text !== '');
+    if (text) ok = false;
+  });
+  document.getElementById('result').textContent = ok ? 'joined ' + new URLSearchParams(new FormData(form)) : 'fix ' + form.querySelectorAll('.invalid').length;
+});
+function attempt(email, age) { form.elements.email.value = email; form.elements.age.value = age; form.querySelector('button').click(); return document.getElementById('result').textContent + ' [' + Array.from(form.querySelectorAll('.err')).map(function (s) { return s.textContent; }).join('|') + ']'; }
+console.log(attempt('', ''));
+console.log(attempt('nope', '12'));
+console.log(attempt('a@b.test', '12'));
+console.log(attempt('a@b.test', '40'));
+#expect
+fix 1 [required|]
+fix 2 [not an address|at least 18]
+fix 1 [|at least 18]
+joined email=a%40b.test&age=40 [|]
+
+#name a modal dialog: open, trap Escape, close, restore focus
+#html
+<body><button id="open">Open</button><div id="modal" class="modal" hidden><div class="box"><input id="first"><button class="close">Close</button></div></div></body>
+#code
+var modal = document.getElementById('modal'), opener = document.getElementById('open'), last = null, log = [];
+function open() { last = document.activeElement; modal.hidden = false; document.body.classList.add('modal-open'); document.getElementById('first').focus(); document.addEventListener('keydown', onKey); log.push('open'); }
+function close() { modal.hidden = true; document.body.classList.remove('modal-open'); document.removeEventListener('keydown', onKey); if (last) last.focus(); log.push('close'); }
+function onKey(e) { if (e.key === 'Escape') close(); }
+opener.addEventListener('click', open);
+modal.addEventListener('click', function (e) { if (e.target === modal || e.target.matches('.close')) close(); });
+opener.focus(); opener.click();
+console.log(modal.hidden, document.body.className, document.activeElement.id);
+document.dispatchEvent(new KeyboardEvent('keydown', {key: 'a'}));
+document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+console.log(modal.hidden, JSON.stringify(document.body.className), document.activeElement.id);
+document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+opener.click(); modal.querySelector('.box').click(); modal.querySelector('.close').click();
+opener.click(); modal.click();
+console.log(log.join(' '));
+#expect
+false modal-open first
+true "" open
+open close open close open close
+
+#name a tiny template engine filling a list from data
+#html
+<body><template id="row"><li class="user"><strong class="name"></strong> <a class="mail"></a></li></template><ul id="users"></ul></body>
+#code
+var data = [{name: 'Ann', mail: 'ann@x.test'}, {name: 'Bob & Co', mail: 'bob@x.test'}, {name: '<Cy>', mail: ''}];
+var tpl = document.getElementById('row'), users = document.getElementById('users');
+var frag = document.createDocumentFragment();
+data.forEach(function (u, i) {
+  var node = tpl.content.cloneNode(true);
+  node.querySelector('.name').textContent = u.name;
+  var a = node.querySelector('.mail');
+  if (u.mail) { a.href = 'mailto:' + u.mail; a.textContent = u.mail; } else a.remove();
+  node.firstElementChild.dataset.index = i;
+  frag.appendChild(node);
+});
+users.appendChild(frag);
+console.log(users.children.length, users.innerHTML);
+console.log(tpl.content.querySelector('.name').textContent === '', users.querySelector('[data-index="1"] .mail').protocol, users.querySelectorAll('.mail').length);
+#expect
+3 <li class="user" data-index="0"><strong class="name">Ann</strong> <a class="mail" href="mailto:ann@x.test">ann@x.test</a></li><li class="user" data-index="1"><strong class="name">Bob &amp; Co</strong> <a class="mail" href="mailto:bob@x.test">bob@x.test</a></li><li class="user" data-index="2"><strong class="name">&lt;Cy&gt;</strong> </li>
+true mailto: 2
+
+#name an event bus between widgets with CustomEvent
+#html
+<body><div id="cart" data-count="0"></div><div id="shop"><button data-sku="a1" data-price="5">A</button><button data-sku="b2" data-price="7">B</button></div><output id="total">0</output></body>
+#code
+var cart = document.getElementById('cart'), items = {};
+document.getElementById('shop').addEventListener('click', function (e) {
+  var b = e.target.closest('button[data-sku]');
+  if (b) b.dispatchEvent(new CustomEvent('cart:add', {bubbles: true, detail: {sku: b.dataset.sku, price: Number(b.dataset.price)}}));
+});
+document.addEventListener('cart:add', function (e) {
+  var d = e.detail;
+  items[d.sku] = (items[d.sku] || 0) + 1;
+  cart.dataset.count = Object.values(items).reduce(function (a, b) { return a + b; }, 0);
+  document.dispatchEvent(new CustomEvent('cart:changed', {detail: {total: Number(document.getElementById('total').value) + d.price}}));
+});
+document.addEventListener('cart:changed', function (e) { document.getElementById('total').value = e.detail.total; });
+var buttons = document.querySelectorAll('#shop button');
+buttons[0].click(); buttons[1].click(); buttons[0].click();
+console.log(cart.dataset.count, cart.getAttribute('data-count'), document.getElementById('total').value, JSON.stringify(items));
+#expect
+3 3 17 {"a1":2,"b2":1}
+
+#name debounced search filtering a list
+#html
+<body><input id="q"><ul id="list"><li>Apple</li><li>Apricot</li><li>Banana</li><li>Cherry</li></ul><p id="status"></p></body>
+#code
+function debounce(fn, ms) { var id; return function () { var args = arguments, self = this; clearTimeout(id); id = setTimeout(function () { fn.apply(self, args); }, ms); }; }
+var runs = 0;
+var q = document.getElementById('q');
+q.addEventListener('input', debounce(function () {
+  runs++;
+  var term = q.value.toLowerCase(), shown = 0;
+  document.querySelectorAll('#list li').forEach(function (li) {
+    var match = li.textContent.toLowerCase().indexOf(term) >= 0;
+    li.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  document.getElementById('status').textContent = shown + ' shown';
+}, 20));
+function type(text) { q.value = text; q.dispatchEvent(new Event('input', {bubbles: true})); }
+type('a'); type('ap');
+setTimeout(function () { type('apr'); }, 5);
+setTimeout(function () {
+  console.log(runs, document.getElementById('status').textContent, Array.from(document.querySelectorAll('#list li')).map(function (li) { return li.style.display || 'shown'; }).join(','));
+  type('');
+  setTimeout(function () { console.log(runs, document.getElementById('status').textContent, document.querySelectorAll('#list li[style*="none"]').length); }, 40);
+}, 60);
+#expect
+1 1 shown none,shown,none,none
+2 4 shown 0
+
+#name an accordion driven by data attributes and a MutationObserver
+#html
+<body><div id="acc"><h3 data-toggle="p1">One</h3><div id="p1" class="panel">1</div><h3 data-toggle="p2">Two</h3><div id="p2" class="panel open">2</div></div><p id="summary"></p></body>
+#code
+var acc = document.getElementById('acc');
+var changes = 0;
+new MutationObserver(function (records) {
+  changes += records.length;
+  document.getElementById('summary').textContent = Array.from(acc.querySelectorAll('.panel.open')).map(function (p) { return p.id; }).join('+') || 'none';
+}).observe(acc, {attributes: true, attributeFilter: ['class'], subtree: true});
+acc.addEventListener('click', function (e) {
+  var id = e.target.dataset.toggle;
+  if (!id) return;
+  acc.querySelectorAll('.panel').forEach(function (p) { if (p.id === id) p.classList.toggle('open'); else p.classList.remove('open'); });
+});
+acc.querySelector('[data-toggle=p1]').click();
+Promise.resolve().then(function () {
+  console.log(document.getElementById('summary').textContent, changes);
+  acc.querySelector('[data-toggle=p1]').click();
+  setTimeout(function () { console.log(document.getElementById('summary').textContent, changes); }, 0);
+});
+#expect
+p1 2
+none 4
+
+#name a client-side router on the hash
+#html
+<body><nav><a href="#/">Home</a><a href="#/about">About</a><a href="#/user/7">User</a></nav><main id="view"></main></body>
+#code
+var routes = [
+  [/^#\/$/, function () { return 'home'; }],
+  [/^#\/about$/, function () { return 'about'; }],
+  [/^#\/user\/(\d+)$/, function (m) { return 'user ' + m[1]; }]
+];
+var seen = [];
+function route() {
+  var hash = location.hash || '#/';
+  var text = 'not found';
+  routes.some(function (r) { var m = r[0].exec(hash); if (m) { text = r[1](m); return true; } });
+  document.getElementById('view').textContent = text;
+  document.querySelectorAll('nav a').forEach(function (a) { a.classList.toggle('current', a.getAttribute('href') === hash); });
+  seen.push(text);
+}
+window.addEventListener('hashchange', route);
+route();
+var links = document.querySelectorAll('nav a');
+var step = 0;
+window.addEventListener('hashchange', function () {
+  step++;
+  if (step === 1) links[2].click();
+  else if (step === 2) location.hash = '#/missing';
+  else if (step === 3) history.back();
+  else console.log(seen.join(' > '), '|', document.querySelector('nav .current').textContent, location.hash);
+});
+links[1].click();
+#expect
+not found > about > user 7 > not found > user 7 | User #/user/7
+
+#name pushState routing with popstate
+#html
+<body><a class="nav" href="/app/list">List</a><a class="nav" href="/app/item/3?tab=info">Item</a><div id="view"></div></body>
+#code
+var seen = [];
+function show() { document.getElementById('view').textContent = location.pathname + location.search; seen.push(location.pathname.split('/').pop() + (history.state ? ':' + history.state.n : '')); }
+var n = 0;
+document.addEventListener('click', function (e) {
+  var a = e.target.closest('a.nav');
+  if (!a) return;
+  e.preventDefault();
+  history.pushState({n: ++n}, '', a.href);
+  show();
+});
+window.addEventListener('popstate', function () {
+  show();
+  if (seen.length === 4) history.back();
+  else if (seen.length === 5) history.forward();
+  else console.log(seen.join(' '), '|', document.getElementById('view').textContent);
+});
+show();
+document.querySelectorAll('a.nav')[0].click();
+document.querySelectorAll('a.nav')[1].click();
+history.back();
+#expect
+page.html list:1 3:2 list:1 page.html list:1 | /app/list
+
+#name saving form state to localStorage and restoring it
+#html
+<body><form id="prefs"><input name="nick" value=""><select name="theme"><option>light</option><option>dark</option></select><input type="checkbox" name="beta"></form></body>
+#code
+localStorage.clear();
+var form = document.getElementById('prefs');
+function save() {
+  var data = {};
+  Array.from(form.elements).forEach(function (el) { data[el.name] = el.type === 'checkbox' ? el.checked : el.value; });
+  localStorage.setItem('prefs', JSON.stringify(data));
+}
+function restore() {
+  var data = JSON.parse(localStorage.getItem('prefs') || '{}');
+  Object.keys(data).forEach(function (k) { var el = form.elements[k]; if (el.type === 'checkbox') el.checked = data[k]; else el.value = data[k]; });
+}
+form.addEventListener('change', save);
+form.elements.nick.value = 'zed'; form.elements.theme.value = 'dark';
+form.elements.beta.click();
+console.log(localStorage.getItem('prefs'));
+form.reset();
+console.log(form.elements.nick.value === '', form.elements.theme.value, form.elements.beta.checked);
+restore();
+console.log(form.elements.nick.value, form.elements.theme.value, form.elements.beta.checked, form.elements.theme.selectedIndex);
+localStorage.clear();
+#expect
+{"nick":"zed","theme":"dark","beta":true}
+true light false
+zed dark true 1
+
+#name a countdown with setInterval that updates the page and stops
+#html
+<body><span id="clock">3</span><button id="stop">Stop</button></body>
+#code
+var clock = document.getElementById('clock'), history_ = [];
+var id = setInterval(function () {
+  var n = Number(clock.textContent) - 1;
+  clock.textContent = n;
+  history_.push(n);
+  if (n === 0) { clearInterval(id); clock.classList.add('done'); console.log(history_.join(','), clock.className, clock.firstChild.nodeType, clock.childNodes.length); }
+}, 5);
+#expect
+2,1,0 done 3 1
+
+#name building a tree from nested data and reading it back
+#code
+var data = {tag: 'ul', kids: [{tag: 'li', text: 'a'}, {tag: 'li', kids: [{tag: 'ul', kids: [{tag: 'li', text: 'b'}, {tag: 'li', text: 'c', attrs: {class: 'deep'}}]}]}, {tag: 'li', text: 'd'}]};
+function build(d) {
+  var el = document.createElement(d.tag);
+  Object.keys(d.attrs || {}).forEach(function (k) { el.setAttribute(k, d.attrs[k]); });
+  if (d.text) el.textContent = d.text;
+  (d.kids || []).forEach(function (k) { el.appendChild(build(k)); });
+  return el;
+}
+function read(el) {
+  var o = {tag: el.localName};
+  if (el.children.length) o.kids = Array.from(el.children).map(read); else if (el.textContent) o.text = el.textContent;
+  return o;
+}
+function depth(el) { var d = 0; Array.from(el.children).forEach(function (c) { d = Math.max(d, depth(c)); }); return d + 1; }
+var root = build(data);
+document.body.appendChild(root);
+console.log(root.outerHTML);
+console.log(JSON.stringify(read(root)).length, depth(root), root.querySelectorAll('li').length, root.querySelector('.deep').closest('ul').parentNode.tagName, root.querySelector('li li:last-child').textContent);
+#expect
+<ul><li>a</li><li><ul><li>b</li><li class="deep">c</li></ul></li><li>d</li></ul>
+161 4 5 LI c
+
+#name drag-free reordering: move items up and down with buttons
+#html
+<body><ol id="order"><li data-id="1">one <button class="up">u</button><button class="down">d</button></li><li data-id="2">two <button class="up">u</button><button class="down">d</button></li><li data-id="3">three <button class="up">u</button><button class="down">d</button></li></ol></body>
+#code
+var order = document.getElementById('order');
+order.addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (e.target.matches('.up') && li.previousElementSibling) order.insertBefore(li, li.previousElementSibling);
+  if (e.target.matches('.down') && li.nextElementSibling) li.nextElementSibling.after(li);
+});
+function ids() { return Array.from(order.children).map(function (li) { return li.dataset.id; }).join(''); }
+order.children[2].querySelector('.up').click(); console.log(ids());
+order.children[0].querySelector('.up').click(); console.log(ids());
+order.children[0].querySelector('.down').click(); order.children[1].querySelector('.down').click(); console.log(ids());
+order.children[2].querySelector('.down').click(); console.log(ids(), order.children.length);
+#expect
+132
+132
+321
+321 3
+
+#name a small reactive store that re-renders on change
+#html
+<body><div id="app"></div></body>
+#code
+function store(initial, onChange) { var state = initial; return { get: function () { return state; }, set: function (patch) { state = Object.assign({}, state, patch); onChange(state); } }; }
+var renders = 0, scheduled = false, app = document.getElementById('app');
+function render(state) { renders++; app.innerHTML = '<h1>' + state.title + '</h1><ul>' + state.items.map(function (i) { return '<li>' + i + '</li>'; }).join('') + '</ul><p>' + state.items.length + '</p>'; }
+var s = store({title: 'List', items: []}, function (state) { if (scheduled) return; scheduled = true; queueMicrotask(function () { scheduled = false; render(s.get()); }); });
+s.set({items: ['a']}); s.set({items: ['a', 'b']}); s.set({title: 'Twice'});
+console.log(renders, app.childNodes.length);
+setTimeout(function () {
+  console.log(renders, app.querySelector('h1').textContent, app.querySelectorAll('li').length, app.lastChild.textContent);
+  s.set({items: []});
+  Promise.resolve().then(function () { console.log(renders, app.innerHTML); });
+}, 0);
+#expect
+0 0
+1 Twice 2 2
+2 <h1>Twice</h1><ul></ul><p>0</p>

@@ -138,7 +138,10 @@ JsValue js_value_from_exception(const std::exception& ex) {
     return js_make_error(JsErrorKind::Error, text);
 }
 
+bool (*js_uncaught_handler)(const JsValue& value) = nullptr;
+
 void js_report_uncaught(const JsValue& value) {
+    if (js_uncaught_handler && js_uncaught_handler(value)) return;
     g_uncaught_errors.fetch_add(1);
     std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
 }
@@ -149,6 +152,7 @@ void js_report_uncaught(const std::exception& ex) {
         return;
     }
     if (dynamic_cast<const JsSyntaxError*>(&ex)) {
+        if (js_uncaught_handler && js_uncaught_handler(js_make_error(JsErrorKind::SyntaxError, ex.what()))) return;
         g_uncaught_errors.fetch_add(1);
         std::cerr << "Uncaught SyntaxError: " << ex.what() << std::endl;
         return;
@@ -443,7 +447,6 @@ JsValue js_to_object(const JsValue& value) {
 
 JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint) {
     if (!value.is_object_like()) return value;
-    if (value.type == JsType::DomNode) return JsValue::make_string(value.to_string());
 
     // An object can take over its own conversion with Symbol.toPrimitive.
     JsValue exotic = value.get_property("@@toPrimitive");
@@ -556,8 +559,7 @@ const char* js_typeof(const JsValue& value) {
         case JsType::Symbol: return "symbol";
         case JsType::Function:
         case JsType::NativeFunction: return "function";
-        case JsType::Object:
-        case JsType::DomNode: return "object";
+        case JsType::Object: return "object";
     }
     return "undefined";
 }
@@ -585,8 +587,7 @@ JsValue js_typeof_value(const JsValue& value) {
         case JsType::Function:
         case JsType::NativeFunction: return answers->function_;
         case JsType::Null:
-        case JsType::Object:
-        case JsType::DomNode: return answers->object_;
+        case JsType::Object: return answers->object_;
     }
     return answers->undefined_;
 }

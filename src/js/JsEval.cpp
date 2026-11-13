@@ -806,8 +806,10 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         parent.construct(args, &this_val);
     } else {
         // A built-in parent (Error, Array, Map, ...) builds its own object;
-        // take over its state so `this` becomes that kind of object.
-        JsValue built = parent.construct(args, nullptr);
+        // take over its state so `this` becomes that kind of object. A host
+        // constructor (Event, HTMLElement) is handed `this` and makes it the
+        // object it constructs, and then there is nothing to take over.
+        JsValue built = parent.construct_as_super(args, this_val);
         if (built.object_val && this_val.object_val && built.object_val != this_val.object_val) {
             JsObject* from = built.object_val;
             JsObject* to = this_val.object_val;
@@ -821,6 +823,7 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             to->array_elements = from->array_elements;
             to->klass = from->klass;
             to->internal = from->internal;
+            to->exotic = from->exotic;
             to->trace_extra = from->trace_extra;
             to->has_accessors = to->has_accessors || from->has_accessors;
             to->has_legacy_getters = to->has_legacy_getters || from->has_legacy_getters;
@@ -850,6 +853,13 @@ JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& 
                                                 : JsValue::make_undefined();
             }
             return it->second;
+        }
+        // What the global object computes: the elements of the page by id.
+        if (global->exotic) {
+            JsValue computed;
+            if (global->exotic->get(global, name, computed) || global->exotic->get_last(global, name, computed)) {
+                return computed;
+            }
         }
     }
     js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
@@ -959,9 +969,11 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
             switch (mode) {
                 case BindMode::Let:
                     env->define(pattern.name, value);
+                    if (env == m_global_env) env->mark_lexical(pattern.name);
                     return;
                 case BindMode::Const:
                     env->define_const(pattern.name, value);
+                    if (env == m_global_env) env->mark_lexical(pattern.name);
                     return;
                 case BindMode::Var: {
                     // The binding was hoisted to the function scope on entry.
@@ -1150,6 +1162,7 @@ JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Fra
         case NodeKind::ClassDecl: {
             auto* decl = static_cast<const ClassDeclStmt*>(stmt);
             env->define(decl->cls->name, define_class(decl->cls, env));
+            if (env == m_global_env) env->mark_lexical(decl->cls->name);
             return Flow::Normal;
         }
         case NodeKind::FunctionDecl:    // hoisted when the enclosing block was entered

@@ -1,54 +1,27 @@
 #pragma once
 
-#include "litebird/dom/Element.hpp"
-#include "litebird/js/JsValue.hpp"
 #include <string>
-#include <vector>
-#include <unordered_map>
-#include <memory>
 
 namespace litebird {
 
-struct CustomElementDefinition {
-    std::string name;
-    JsValue constructor;
-    std::vector<std::string> observed_attributes;
-};
-
+/// What the tree itself needs to know about custom elements: which names
+/// can be one.
+///
+/// The definitions (`customElements.define`) are not here. They belong to a
+/// window, and live with the script bindings (js/DomObserverBindings.cpp),
+/// one registry per realm. There used to be one registry for the whole
+/// process: a second page in the same process saw the first one's elements,
+/// and every test had to clear it.
 class CustomElementRegistry {
 public:
-    static CustomElementRegistry& default_registry();
-
-    bool define(const std::string& name, JsValue constructor);
-    JsValue get(const std::string& name) const;
-    JsValue when_defined(const std::string& name);
-
-    bool is_defined(const std::string& name) const;
-    const CustomElementDefinition* get_definition(const std::string& name) const;
-
-    void upgrade_element(const std::shared_ptr<Element>& el);
-    void upgrade_tree(const std::shared_ptr<Node>& root);
-
-    // Lifecycle dispatch helpers
-    void notify_connected(const std::shared_ptr<Element>& el);
-    void notify_disconnected(const std::shared_ptr<Element>& el);
-    void notify_attribute_changed(
-        const std::shared_ptr<Element>& el,
-        const std::string& name,
-        const std::string& old_val,
-        const std::string& new_val
-    );
-
+    /// A valid custom element name: lower case, starts with a letter,
+    /// contains a hyphen, and is none of the reserved names.
     static bool is_valid_custom_element_name(const std::string& name);
 
-    void clear() {
-        m_definitions.clear();
-        m_when_defined_resolvers.clear();
-    }
-
-private:
-    std::unordered_map<std::string, CustomElementDefinition> m_definitions;
-    std::unordered_map<std::string, std::vector<JsValue>> m_when_defined_resolvers;
+    // For code written against the process-wide registry: there is nothing
+    // left to clear.
+    static CustomElementRegistry& default_registry();
+    void clear() {}
 };
 
 } // namespace litebird

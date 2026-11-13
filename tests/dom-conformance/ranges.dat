@@ -1,0 +1,252 @@
+#fixture
+<html><head><title>Ranges</title></head><body><p id="p">abcdef</p><div id="d"><span>one</span><span>two</span></div></body></html>
+
+#name a range inside one text node: extract, delete, insert
+#code
+function fresh() { var p = document.getElementById('p'); p.textContent = 'abcdef'; return p; }
+function pos(r) {
+    function n(x) { return x.nodeType === 3 ? '#text(' + x.data + ')' : x.nodeName; }
+    return n(r.startContainer) + ':' + r.startOffset + ' ' + n(r.endContainer) + ':' + r.endOffset + ' ' + r.collapsed;
+}
+var p = fresh(), r = document.createRange();
+r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 4);
+var f = r.extractContents();
+console.log('extract:', f.textContent, '|', p.innerHTML, '|', pos(r), '|', p.childNodes.length);
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 4); r.deleteContents();
+console.log('delete:', p.innerHTML, '|', pos(r));
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 2); r.collapse(true); r.insertNode(document.createElement('i'));
+console.log('insert in the middle:', p.innerHTML, '|', pos(r), '|', p.childNodes.length);
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 0); r.collapse(true); r.insertNode(document.createElement('i'));
+console.log('insert at the start:', p.innerHTML, '|', pos(r));
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 6); r.collapse(true); r.insertNode(document.createElement('i'));
+console.log('insert at the end:', p.innerHTML, '|', pos(r));
+p = fresh(); r = document.createRange(); r.setStart(p, 1); r.collapse(true); r.insertNode(document.createElement('i'));
+console.log('insert after the text:', p.innerHTML, '|', pos(r));
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 3); r.collapse(true); r.insertNode(document.createTextNode('XY'));
+console.log('insert text:', p.innerHTML, '|', pos(r), '|', p.childNodes.length);
+p = fresh(); r = document.createRange(); r.setStart(p.firstChild, 3); r.setEnd(p.firstChild, 5);
+var frag = document.createDocumentFragment(); frag.append('1', document.createElement('b'), '2'); r.insertNode(frag);
+console.log('insert a fragment:', p.innerHTML, '|', pos(r));
+#expect
+extract: bcd | aef | #text(aef):1 #text(aef):1 true | 1
+delete: aef | #text(aef):1 #text(aef):1 true
+insert in the middle: ab<i></i>cdef | #text(ab):2 P:2 false | 3
+insert at the start: <i></i>abcdef | #text():0 P:2 false
+insert at the end: abcdef<i></i> | #text(abcdef):6 P:2 false
+insert after the text: abcdef<i></i> | P:1 P:2 false
+insert text: abcXYdef | #text(abc):3 P:2 false | 3
+insert a fragment: abc1<b></b>2def | #text(abc):3 #text(def):2 false
+
+#name surroundContents wraps what the range holds
+#code
+function pos(r) {
+    function n(x) { return x.nodeType === 3 ? '#text(' + x.data + ')' : x.nodeName; }
+    return n(r.startContainer) + ':' + r.startOffset + ' ' + n(r.endContainer) + ':' + r.endOffset + ' ' + r.collapsed;
+}
+var p = document.getElementById('p'), r = document.createRange();
+r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 4);
+r.surroundContents(document.createElement('em'));
+console.log(p.innerHTML, '|', pos(r), '|', r.toString());
+p.innerHTML = 'ab<b>cd</b>ef';
+r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.querySelector('b').firstChild, 1);
+try { r.surroundContents(document.createElement('em')); console.log('no error'); } catch (e) { console.log(e.name, e instanceof DOMException, p.innerHTML); }
+r = document.createRange(); r.setStart(p, 1); r.setEnd(p, 2);
+var wrapper = document.createElement('u'); wrapper.textContent = 'old';
+r.surroundContents(wrapper);
+console.log(p.innerHTML, '|', pos(r));
+r = document.createRange(); r.selectNodeContents(p);
+try { r.surroundContents(document); } catch (e) { console.log(e.name); }
+try { r.surroundContents(document.createDocumentFragment()); } catch (e) { console.log(e.name); }
+#expect
+a<em>bcd</em>ef | P:1 P:2 false | bcd
+InvalidStateError true ab<b>cd</b>ef
+ab<u><b>cd</b></u>ef | P:1 P:2 false
+InvalidNodeTypeError
+InvalidNodeTypeError
+
+#name a range follows nodes that are inserted and removed
+#code
+function pos(r) {
+    function n(x) { return x.nodeType === 3 ? '#text(' + x.data + ')' : x.nodeName; }
+    return n(r.startContainer) + ':' + r.startOffset + ' ' + n(r.endContainer) + ':' + r.endOffset + ' ' + r.collapsed;
+}
+var p = document.getElementById('p');
+p.innerHTML = '<a></a><b></b><c></c>';
+var r = document.createRange(); r.setStart(p, 1); r.setEnd(p, 3);
+p.removeChild(p.firstChild); console.log('first removed:', pos(r));
+p.insertBefore(document.createElement('z'), p.firstChild); console.log('one inserted first:', pos(r));
+p.appendChild(document.createElement('y')); console.log('one appended:', pos(r));
+p.lastChild.remove(); p.lastChild.remove(); console.log('two removed at the end:', pos(r));
+p.textContent = ''; console.log('emptied:', pos(r));
+p.innerHTML = '<a><i>deep</i></a><b>x</b>';
+r.setStart(p.querySelector('i').firstChild, 2); r.setEnd(p.querySelector('b').firstChild, 1);
+console.log('across:', pos(r), '|', r.toString());
+p.querySelector('a').remove(); console.log('start removed:', pos(r), '|', r.toString());
+p.replaceChildren('new'); console.log('all replaced:', pos(r));
+var d = document.getElementById('d'), q = document.createRange();
+q.selectNode(d.lastChild); console.log('selected:', pos(q));
+d.prepend('t'); console.log('prepended:', pos(q));
+d.lastChild.replaceWith('a', 'b'); console.log('replaced by two:', pos(q));
+d.innerHTML = '<span>one</span>'; console.log('innerHTML set:', pos(q));
+var detached = document.createElement('div'); detached.appendChild(document.createElement('s'));
+var k = document.createRange(); k.selectNodeContents(detached.firstChild); detached.firstChild.remove();
+console.log('in a detached tree:', pos(k));
+#expect
+first removed: P:0 P:2 false
+one inserted first: P:0 P:3 false
+one appended: P:0 P:3 false
+two removed at the end: P:0 P:2 false
+emptied: P:0 P:0 true
+across: #text(deep):2 #text(x):1 false | epx
+start removed: P:0 #text(x):1 false | x
+all replaced: P:0 P:0 true
+selected: DIV:1 DIV:2 false
+prepended: DIV:2 DIV:3 false
+replaced by two: DIV:2 DIV:2 true
+innerHTML set: DIV:0 DIV:0 true
+in a detached tree: DIV:0 DIV:0 true
+
+#name a range follows edits of the text it is in
+#code
+function pos(r) {
+    function n(x) { return x.nodeType === 3 ? '#text(' + x.data + ')' : x.nodeName; }
+    return n(r.startContainer) + ':' + r.startOffset + ' ' + n(r.endContainer) + ':' + r.endOffset + ' ' + r.collapsed;
+}
+var p = document.getElementById('p'), t = p.firstChild;
+var r = document.createRange(); r.setStart(t, 2); r.setEnd(t, 5);
+t.deleteData(0, 1); console.log('deleted before:', pos(r));
+t.insertData(0, 'ZZ'); console.log('inserted before:', pos(r));
+t.insertData(4, '--'); console.log('inserted inside:', pos(r));
+t.appendData('!'); console.log('appended:', pos(r));
+t.replaceData(1, 3, 'q'); console.log('replaced over the start:', pos(r));
+t.deleteData(2, 100); console.log('deleted to the end:', pos(r));
+t.data = 'fresh text'; console.log('data set:', pos(r));
+r.setStart(t, 1); r.setEnd(t, 8);
+var tail = t.splitText(4); console.log('split:', pos(r), '|', tail.data, '|', p.childNodes.length);
+r.setStart(p, 1); r.setEnd(p, 2);
+t.splitText(2); console.log('split before the range:', pos(r), '|', p.childNodes.length);
+t.textContent = 'x'; console.log('textContent set:', pos(r));
+p.textContent = 'whole'; console.log('parent textContent set:', pos(r));
+#expect
+deleted before: #text(bcdef):1 #text(bcdef):4 false
+inserted before: #text(ZZbcdef):3 #text(ZZbcdef):6 false
+inserted inside: #text(ZZbc--def):3 #text(ZZbc--def):8 false
+appended: #text(ZZbc--def!):3 #text(ZZbc--def!):8 false
+replaced over the start: #text(Zq--def!):1 #text(Zq--def!):6 false
+deleted to the end: #text(Zq):1 #text(Zq):2 false
+data set: #text(fresh text):0 #text(fresh text):0 true
+split: #text(fres):1 #text(h text):4 false | h text | 2
+split before the range: P:2 P:3 false | 3
+textContent set: P:2 P:3 false
+parent textContent set: P:0 P:0 true
+
+#name extractContents and cloneContents across elements
+#code
+function pos(r) {
+    function n(x) { return x.nodeType === 3 ? '#text(' + x.data + ')' : x.nodeName; }
+    return n(r.startContainer) + ':' + r.startOffset + ' ' + n(r.endContainer) + ':' + r.endOffset + ' ' + r.collapsed;
+}
+var p = document.getElementById('p');
+p.innerHTML = 'ab<b>cd</b><i>ef</i>gh';
+var r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.querySelector('i').firstChild, 1);
+var box = document.createElement('div'); box.appendChild(r.cloneContents());
+console.log('clone:', box.innerHTML, '|', p.innerHTML, '|', r.toString(), '|', pos(r));
+box = document.createElement('div'); box.appendChild(r.extractContents());
+console.log('extract:', box.innerHTML, '|', p.innerHTML, '|', pos(r));
+p.innerHTML = '<ul><li>1</li><li>2</li><li>3</li></ul>';
+r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 3); r.deleteContents();
+console.log('delete children:', p.innerHTML, '|', pos(r));
+var other = document.createRange(); other.selectNodeContents(p.firstChild.firstChild);
+r.selectNode(p.firstChild.firstChild); r.deleteContents();
+console.log('delete under another range:', p.innerHTML, '|', pos(other));
+#expect
+clone: b<b>cd</b><i>e</i> | ab<b>cd</b><i>ef</i>gh | bcde | #text(ab):1 #text(ef):1 false
+extract: b<b>cd</b><i>e</i> | a<i>f</i>gh | P:1 P:1 true
+delete children: <ul><li>1</li></ul> | UL:1 UL:1 true
+delete under another range: <ul></ul> | UL:0 UL:0 true
+
+#name comparing boundary points
+#code
+var p = document.getElementById('p'), d = document.getElementById('d');
+var r = document.createRange(); r.setStart(p.firstChild, 1); r.setEnd(p.firstChild, 4);
+var q = document.createRange(); q.selectNodeContents(p);
+console.log(r.compareBoundaryPoints(Range.START_TO_START, q), r.compareBoundaryPoints(Range.END_TO_END, q),
+    r.compareBoundaryPoints(Range.START_TO_END, q), r.compareBoundaryPoints(Range.END_TO_START, q));
+console.log(r.comparePoint(p.firstChild, 0), r.comparePoint(p.firstChild, 2), r.comparePoint(p.firstChild, 5),
+    r.isPointInRange(p.firstChild, 4), r.isPointInRange(p.firstChild, 5), r.isPointInRange(d, 0));
+console.log(r.intersectsNode(p), r.intersectsNode(d), q.intersectsNode(p.firstChild), q.toString(), r.toString());
+console.log(r.commonAncestorContainer.nodeName, q.commonAncestorContainer.nodeName, r.cloneRange().toString(), r.cloneRange() === r);
+try { r.compareBoundaryPoints(9, q); } catch (e) { console.log(e.name); }
+try { r.comparePoint(p.firstChild, 99); } catch (e) { console.log(e.name); }
+var elsewhere = document.createRange(); elsewhere.selectNodeContents(document.createElement('div'));
+try { r.compareBoundaryPoints(Range.START_TO_START, elsewhere); } catch (e) { console.log(e.name); }
+#expect
+1 -1 1 -1
+-1 0 1 true false false
+true false true abcdef bcd
+#text P bcd false
+NotSupportedError
+IndexSizeError
+WrongDocumentError
+
+#name a NodeIterator steps out of what is removed
+#code
+var p = document.getElementById('p');
+p.innerHTML = '<a></a><b><c></c></b><d></d>';
+var it = document.createNodeIterator(p, NodeFilter.SHOW_ELEMENT);
+it.nextNode(); it.nextNode(); it.nextNode();
+console.log(it.referenceNode.nodeName, it.pointerBeforeReferenceNode);
+p.querySelector('b').remove();
+console.log(it.referenceNode.nodeName, it.pointerBeforeReferenceNode);
+console.log(it.nextNode().nodeName, it.referenceNode.nodeName, it.pointerBeforeReferenceNode);
+it.previousNode();
+console.log(it.referenceNode.nodeName, it.pointerBeforeReferenceNode);
+p.querySelector('d').remove();
+console.log(it.referenceNode.nodeName, it.pointerBeforeReferenceNode, String(it.nextNode()));
+p.innerHTML = '<a></a><b></b>';
+var forward = document.createNodeIterator(p, NodeFilter.SHOW_ELEMENT);
+console.log(forward.nextNode().nodeName, forward.referenceNode.nodeName, forward.pointerBeforeReferenceNode);
+forward.nextNode();
+p.firstChild.remove();
+console.log(forward.referenceNode.nodeName, forward.pointerBeforeReferenceNode, forward.nextNode().nodeName, String(forward.nextNode()));
+var outside = document.createNodeIterator(p.firstChild, NodeFilter.SHOW_ALL);
+p.remove();
+console.log(outside.referenceNode.nodeName, outside.pointerBeforeReferenceNode);
+#expect
+B false
+A false
+D D false
+D true
+A false null
+P P false
+P false B null
+B true
+
+#name the selection is a range that follows the tree
+#code
+var p = document.getElementById('p'), sel = getSelection();
+console.log(sel.rangeCount, sel.type, sel.isCollapsed, JSON.stringify(String(sel)));
+var r = document.createRange(); r.selectNodeContents(p);
+sel.removeAllRanges(); sel.addRange(r);
+console.log(sel.rangeCount, sel.type, String(sel), sel.anchorNode.id, sel.anchorOffset, sel.focusOffset, sel.getRangeAt(0) === r);
+p.firstChild.splitText(3);
+console.log(sel.focusOffset, String(sel), p.childNodes.length);
+p.lastChild.remove();
+console.log(sel.focusOffset, String(sel));
+sel.collapseToEnd();
+console.log(sel.isCollapsed, sel.type, sel.anchorOffset, sel.rangeCount);
+sel.selectAllChildren(document.getElementById('d'));
+console.log(String(sel), sel.containsNode(document.getElementById('d').firstChild, false), sel.containsNode(p, false));
+document.getElementById('d').remove();
+console.log(sel.anchorNode.nodeName, sel.anchorOffset, sel.isCollapsed, sel.rangeCount);
+sel.removeAllRanges();
+console.log(sel.rangeCount, sel.type, sel.anchorNode);
+#expect
+0 None true ""
+1 Range abcdef p 0 1 true
+2 abcdef 2
+1 abc
+true Caret 1 1
+onetwo true false
+BODY 1 true 1
+0 None null

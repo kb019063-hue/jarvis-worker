@@ -60,6 +60,10 @@ std::string js_describe_thrown(const JsValue& value);
 /// count to decide its exit status.
 void js_report_uncaught(const JsValue& value);
 void js_report_uncaught(const std::exception& ex);
+/// Asked first about every uncaught exception. True when the host dealt with
+/// it (a page's `error` listener cancelled the event): it is then neither
+/// printed nor counted. Null when no host is listening.
+extern bool (*js_uncaught_handler)(const JsValue& value);
 int js_uncaught_error_count();
 
 /// Reports a promise that was rejected with nothing listening.
@@ -97,11 +101,6 @@ void js_run_guarded(Body&& body) {
         js_report_uncaught(ex);
     }
 }
-
-/// addEventListener, removeEventListener or dispatchEvent bound to `target`;
-/// undefined for any other name. Shared by every kind of DOM node and by the
-/// `document` object.
-JsValue js_event_target_method(const std::shared_ptr<class Node>& target, const std::string& name);
 
 /// Calls a script callback from host code; see js_run_guarded.
 JsValue js_call_guarded(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args);
@@ -259,6 +258,10 @@ struct JsIntrinsics {
 
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;
+
+    /// The DOM side of the realm (a dom::Realm), made the first time a DOM
+    /// object is needed; see DomBindings.hpp. Null until then.
+    void* dom_realm{nullptr};
 
     /// Allocates the prototype objects. The library itself is added by install().
     JsIntrinsics();

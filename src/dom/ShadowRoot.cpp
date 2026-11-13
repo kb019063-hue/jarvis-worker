@@ -13,22 +13,11 @@ ShadowRoot::ShadowRoot(std::shared_ptr<Element> host, ShadowRootMode mode)
 }
 
 std::string ShadowRoot::inner_html() const {
-    std::string res;
-    for (const auto& ch : m_children) {
-        if (ch->is_element()) {
-            res += ch->as_element()->outer_html();
-        } else if (ch->is_text()) {
-            res += ch->as_text()->text();
-        }
-    }
-    return res;
+    return inner_markup();
 }
 
 void ShadowRoot::set_inner_html(const std::string& html) {
-    auto children_copy = m_children;
-    for (const auto& ch : children_copy) {
-        remove_child(ch);
-    }
+    take_children();
     m_stylesheets.clear();
     m_parsed_stylesheets.clear();
 
@@ -51,61 +40,20 @@ void ShadowRoot::add_stylesheet(std::string css) {
     m_stylesheets.push_back(std::move(css));
 }
 
-static std::shared_ptr<Element> find_by_id_recursive(const std::shared_ptr<Node>& node, const std::string& id) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        if (el->id() == id) return el;
-    }
-    for (const auto& ch : node->children()) {
-        auto found = find_by_id_recursive(ch, id);
-        if (found) return found;
-    }
-    return nullptr;
-}
-
 std::shared_ptr<Element> ShadowRoot::get_element_by_id(const std::string& id) const {
-    for (const auto& ch : m_children) {
-        auto found = find_by_id_recursive(ch, id);
-        if (found) return found;
-    }
-    return nullptr;
-}
-
-static void query_selector_all_recursive(const std::shared_ptr<Node>& node, const std::string& sel, std::vector<std::shared_ptr<Element>>& out) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        bool match = false;
-        if (sel.starts_with("#")) {
-            match = (el->id() == sel.substr(1));
-        } else if (sel.starts_with(".")) {
-            match = el->has_class(sel.substr(1));
-        } else {
-            match = (sel == "*" || el->tag_name() == sel);
-        }
-        if (match) out.push_back(el);
-    }
-    for (const auto& ch : node->children()) {
-        query_selector_all_recursive(ch, sel, out);
-    }
+    return descendant_with_id(id);
 }
 
 std::vector<std::shared_ptr<Element>> ShadowRoot::query_selector_all(const std::string& selector) const {
-    std::vector<std::shared_ptr<Element>> res;
-    for (const auto& ch : m_children) {
-        query_selector_all_recursive(ch, selector, res);
-    }
-    return res;
+    return descendants_matching(selector);
 }
 
 std::shared_ptr<Element> ShadowRoot::query_selector(const std::string& selector) const {
-    auto all = query_selector_all(selector);
-    return all.empty() ? nullptr : all.front();
+    return first_descendant_matching(selector);
 }
 
-void ShadowRoot::dump(std::ostream& os, int indent) const {
-    std::string spaces(indent * 2, ' ');
-    os << spaces << "#shadow-root (" << mode_str() << ")\n";
-    for (const auto& ch : m_children) {
-        ch->dump(os, indent + 1);
-    }
+void ShadowRoot::dump_open(std::ostream& os, const std::string& indent, bool) const {
+    os << indent << "#shadow-root (" << mode_str() << ")\n";
 }
 
 std::vector<std::shared_ptr<Node>> ShadowRoot::assigned_nodes(const std::shared_ptr<Element>& slot_el) {

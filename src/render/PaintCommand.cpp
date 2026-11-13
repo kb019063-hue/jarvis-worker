@@ -1,4 +1,5 @@
 #include "litebird/render/PaintCommand.hpp"
+#include "litebird/common/StackLimit.hpp"
 #include <algorithm>
 
 namespace litebird {
@@ -13,6 +14,9 @@ DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
 
 void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
     if (!box) return;
+    // The box tree is only as deep as the stack allowed when it was built, but
+    // a level of painting is not a level of building: ask again.
+    if (stack_is_exhausted()) return;
 
     bool has_t = box->style.has_transform && !box->style.transform_matrix.is_identity();
     if (has_t) {

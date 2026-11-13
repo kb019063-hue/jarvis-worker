@@ -34,11 +34,12 @@ public:
     const std::vector<StyleSheet>& parsed_stylesheets() const { return m_parsed_stylesheets; }
     void add_stylesheet(std::string css);
 
-    void dump(std::ostream& os, int indent = 0) const override;
-
     // Slot distribution helpers
     static std::vector<std::shared_ptr<Node>> assigned_nodes(const std::shared_ptr<Element>& slot_el);
     static std::vector<std::shared_ptr<Element>> assigned_elements(const std::shared_ptr<Element>& slot_el);
+
+protected:
+    void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
 
 private:
     std::weak_ptr<Element> m_host;

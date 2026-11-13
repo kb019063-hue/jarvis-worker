@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/common/Color.hpp"
+#include "litebird/render/RasterBudget.hpp"
 #include <vector>
 #include <string>
 #include <memory>
@@ -12,6 +13,9 @@ struct ImageData {
     int width{0};
     int height{0};
     std::vector<uint32_t> pixels; // Format: 0xAARRGGBB
+    /// What this bitmap holds of the budget for canvas and SVG bitmaps
+    /// (RasterBudget.hpp). Nothing, for an image decoded from a file.
+    RasterReservation budget;
 
     bool is_valid() const {
         return width > 0 && height > 0 && pixels.size() >= static_cast<size_t>(width * height);

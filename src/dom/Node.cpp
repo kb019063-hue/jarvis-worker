@@ -6,12 +6,49 @@
 #include "litebird/dom/MutationObserver.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
+#include "litebird/dom/TreeWalk.hpp"
+#include "litebird/common/ReleaseQueue.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include <iomanip>
 #include <unordered_set>
 
 namespace litebird {
+
+// Destruction.
+//
+// A node owns its children, so the compiler-generated destructor destroys a
+// tree the way a recursive walk visits it: the root's destructor releases its
+// children, whose destructors release theirs, one set of native frames per
+// level. For a tree a script built two hundred thousand levels deep that is a
+// stack overflow, at the moment the script lets go of it -- an assignment, the
+// end of a function -- and a destructor has no way to stop early or to report
+// anything.
+//
+// So a dying node does not destroy its children in place. The first node to
+// die on a thread opens a queue; it and every node that dies while the queue
+// is open hand their child lists to it, and the first node empties the queue
+// in a loop before it returns. However deep the tree, the native stack holds
+// one destructor for the node that started it and one for the node currently
+// being destroyed. (See ReleaseQueue.hpp: the same scheme frees chains of
+// closures, promises and syntax trees.)
+//
+// The other things a node can own that are nodes themselves -- an element's
+// shadow root and a <template>'s contents -- need nothing extra: each is a
+// Node, so its own children go through here.
+Node::~Node() {
+    if (m_children.empty()) return;
+    using Pending = ReleaseQueue<std::vector<std::shared_ptr<Node>>>;
+    if (Pending::busy()) {
+        Pending::defer(std::move(m_children));
+        return;
+    }
+    Pending::Drain drain;
+    // Destroyed before `drain` (declared after it): each child that dies here
+    // finds the queue open and defers its own children, and `drain` then works
+    // through them one list at a time.
+    std::vector<std::shared_ptr<Node>> children = std::move(m_children);
+}
 
 std::shared_ptr<Node> Node::previous_sibling() const {
     auto p = parent();
@@ -60,28 +97,48 @@ void Node::set_connected_state_subtree(bool connected) {
     }
 }
 
-// True when making `child` a child of `parent` would make a node its own
-// ancestor: `child` is `parent` itself, or contains it. Shadow trees count:
-// a host contains everything in its shadow tree.
-//
 // Every walk over the tree (textContent, serialisation, selectors, layout,
 // and the destructor) assumes there are no loops. With one, they never
-// return. The DOM standard forbids such an insertion (HierarchyRequestError);
-// the script bindings throw that, and append_child/insert_before refuse the
-// insertion for every other caller.
-static bool would_contain_itself(const Node* parent, const Node* child) {
-    if (child == parent) return true;
+// return. The DOM standard forbids an insertion that would make a node its
+// own ancestor (HierarchyRequestError); the script bindings throw that, and
+// append_child/insert_before refuse the insertion for every other caller.
+bool Node::is_host_including_inclusive_ancestor_of(const Node& other) const {
+    if (this == &other) return true;
     // A node with no children and no shadow tree is nobody's ancestor. That is
-    // every node the HTML parser appends, so parsing pays nothing for this.
-    bool can_be_ancestor = !child->children().empty();
-    if (!can_be_ancestor && child->is_element()) {
-        can_be_ancestor = static_cast<const Element*>(child)->shadow_root() != nullptr;
+    // every node the HTML parser appends and every node a script appends right
+    // after creating it, so building a tree pays nothing for this check. (It
+    // used to walk to the root for each appendChild from script, which made
+    // building a chain of N nodes cost N*N steps.)
+    bool can_be_ancestor = !m_children.empty();
+    if (!can_be_ancestor && is_element()) {
+        can_be_ancestor = static_cast<const Element*>(this)->m_shadow_root != nullptr;
     }
     if (!can_be_ancestor) return false;
 
+    // Two searches for the same answer take turns, one step each: up from
+    // `other`, looking for this node, and down through this node's subtree,
+    // looking for `other`. The first to finish decides. Alone, the walk up
+    // costs the depth of `other` and the search down costs the size of this
+    // subtree; together they cost twice the smaller of the two. So a script
+    // that appends small pieces to the bottom of a deep tree (a fragment with
+    // one element in it, two hundred thousand times) pays for the pieces, not
+    // for the depth, and a script that hangs a large tree under a new node
+    // pays one step.
+    //
+    // Both follow the same links in opposite directions: child and parent,
+    // shadow root and host.
+    struct Frame {
+        const Node* node;
+        std::size_t next;       // index of the next child to look at
+        bool shadow_seen;       // the node's shadow root has been looked at
+    };
+    std::vector<Frame> open;
+    open.push_back({this, 0, false});
+
     std::shared_ptr<Node> keep;             // keeps the node `at` points to alive
-    const Node* at = parent;
+    const Node* at = &other;
     for (;;) {
+        // One step up.
         std::shared_ptr<Node> up = at->parent();
         if (!up) {
             auto* shadow = dynamic_cast<const ShadowRoot*>(at);
@@ -89,47 +146,76 @@ static bool would_contain_itself(const Node* parent, const Node* child) {
             up = shadow->host();
             if (!up) return false;
         }
-        if (up.get() == child) return true;
+        if (up.get() == this) return true;
         keep = std::move(up);
         at = keep.get();
+
+        // One step down.
+        if (open.empty()) return false;     // everything below this node has been seen
+        Frame& top = open.back();
+        const Node* found = nullptr;
+        if (!top.shadow_seen) {
+            top.shadow_seen = true;
+            if (top.node->is_element()) {
+                found = static_cast<const Element*>(top.node)->m_shadow_root.get();
+            }
+        }
+        if (!found) {
+            if (top.next >= top.node->m_children.size()) {
+                open.pop_back();
+                continue;
+            }
+            found = top.node->m_children[top.next++].get();
+            if (!found) continue;
+        }
+        if (found == &other) return true;
+        // `top` is not used after this: push_back may move the frames.
+        open.push_back({found, 0, false});
     }
 }
 
-static void trigger_connected_recursive(const std::shared_ptr<Node>& node) {
-    if (!node) return;
-    if (node->is_element()) {
-        auto el = std::static_pointer_cast<Element>(node);
-        CustomElementRegistry::default_registry().notify_connected(el);
-    }
-    for (const auto& ch : node->children()) {
-        trigger_connected_recursive(ch);
-    }
+std::vector<std::shared_ptr<Element>> subtree_elements(const std::shared_ptr<Node>& root) {
+    std::vector<std::shared_ptr<Element>> elements;
+    if (!root) return elements;
+    if (root->is_element()) elements.push_back(std::static_pointer_cast<Element>(root));
+    for_each_descendant(*root, [&](Node& node) {
+        if (node.is_element()) elements.push_back(std::static_pointer_cast<Element>(node.shared_from_this()));
+        return true;
+    });
+    return elements;
 }
 
-static void trigger_disconnected_recursive(const std::shared_ptr<Node>& node) {
+// Custom element reactions for a subtree that entered or left a document.
+//
+// The elements are listed before the first callback runs. A callback is
+// script: it can append to, empty or move the subtree it is being told about,
+// and a walk that reads the live child lists while that happens reads freed
+// memory. The DOM standard has the same shape for the same reason: the nodes
+// are determined at insertion, and their reactions are queued.
+static void notify_subtree_connected(const std::shared_ptr<Node>& node, bool connected) {
     if (!node) return;
-    if (node->is_element()) {
-        auto el = std::static_pointer_cast<Element>(node);
-        CustomElementRegistry::default_registry().notify_disconnected(el);
+    auto& registry = CustomElementRegistry::default_registry();
+    auto notify = [&](const std::shared_ptr<Element>& element) {
+        if (connected) registry.notify_connected(element);
+        else registry.notify_disconnected(element);
+    };
+    if (node->children().empty()) {
+        // One node, nothing to list: every insertion the HTML parser makes.
+        if (node->is_element()) notify(std::static_pointer_cast<Element>(node));
+        return;
     }
-    for (const auto& ch : node->children()) {
-        trigger_disconnected_recursive(ch);
-    }
+    for (const auto& element : subtree_elements(node)) notify(element);
 }
 
 void Node::append_child(std::shared_ptr<Node> child) {
     if (!child) return;
 
+    if (child->is_host_including_inclusive_ancestor_of(*this)) return;
+
     if (child->is_document_fragment()) {
-        auto frag_children = child->children();
-        for (const auto& ch : frag_children) {
-            append_child(ch);
-        }
-        child->children().clear();
+        for (const auto& node : child->take_children()) append_child(node);
         return;
     }
-
-    if (would_contain_itself(this, child.get())) return;
 
     if (auto old_p = child->parent()) {
         old_p->remove_child(child);
@@ -143,7 +229,7 @@ void Node::append_child(std::shared_ptr<Node> child) {
     MutationObserver::notify_child_list(shared_from_this(), {child}, {}, prev, nullptr);
 
     if (is_connected()) {
-        trigger_connected_recursive(child);
+        notify_subtree_connected(child, true);
     }
 }
 
@@ -154,16 +240,12 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
         return;
     }
 
+    if (new_child->is_host_including_inclusive_ancestor_of(*this)) return;
+
     if (new_child->is_document_fragment()) {
-        auto frag_children = new_child->children();
-        for (const auto& ch : frag_children) {
-            insert_before(ch, ref_child);
-        }
-        new_child->children().clear();
+        for (const auto& node : new_child->take_children()) insert_before(node, ref_child);
         return;
     }
-
-    if (would_contain_itself(this, new_child.get())) return;
 
     if (auto old_p = new_child->parent()) {
         old_p->remove_child(new_child);
@@ -183,7 +265,7 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
     MutationObserver::notify_child_list(shared_from_this(), {new_child}, {}, prev, ref_child);
 
     if (is_connected()) {
-        trigger_connected_recursive(new_child);
+        notify_subtree_connected(new_child, true);
     }
 }
 
@@ -199,8 +281,30 @@ void Node::remove_child(std::shared_ptr<Node> child) {
 
         MutationObserver::notify_child_list(shared_from_this(), {}, {removed}, prev, next);
 
-        trigger_disconnected_recursive(removed);
+        // disconnectedCallback is for a node that leaves a document. Taking a
+        // node out of a tree that was never in one is not that.
+        if (is_connected()) notify_subtree_connected(removed, false);
     }
+}
+
+std::vector<std::shared_ptr<Node>> Node::take_children() {
+    std::vector<std::shared_ptr<Node>> removed;
+    removed.swap(m_children);
+    if (removed.empty()) return removed;
+    for (const auto& child : removed) child->set_parent(nullptr);
+    mark_needs_layout();
+
+    MutationObserver::notify_child_list(shared_from_this(), {}, removed, nullptr, nullptr);
+
+    if (is_connected()) {
+        for (const auto& child : removed) notify_subtree_connected(child, false);
+    }
+    return removed;
+}
+
+void Node::replace_children(const std::vector<std::shared_ptr<Node>>& nodes) {
+    take_children();
+    for (const auto& node : nodes) append_child(node);
 }
 
 void Node::add_event_listener(const std::string& type, EventListener listener, bool use_capture,
@@ -307,33 +411,97 @@ bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
     return !event->default_prevented();
 }
 
-// Appends into one buffer instead of returning a fresh string per subtree.
-// The old form was O(n^2) in depth: every level copied all of its descendants'
-// text again, so reading textContent on a deeply nested document copied the
-// whole document once per level.
-static void append_text_content(const Node& node, std::string& out) {
-    if (node.type() == NodeType::Text) {
-        if (const auto* text = node.as_text()) {
-            out += text->text();
-        }
-        return;
-    }
-    for (const auto& ch : node.children()) {
-        if (ch) append_text_content(*ch, out);
-    }
+// One buffer, filled by one walk. The first version returned a fresh string
+// per subtree, which copied all of a node's text once per ancestor; the second
+// appended into one buffer but called itself once per level, which a deep
+// tree turns into a stack overflow.
+//
+// Only Text nodes count. Comment data is not part of an element's text (an
+// earlier override in Element included it).
+std::string Node::text_content() const {
+    std::string text;
+    for_each_descendant(*this, [&](Node& node) {
+        if (node.type() == NodeType::Text) text += static_cast<const Text&>(node).text();
+        return true;
+    });
+    return text;
 }
 
-std::string Node::text_content() const {
-    std::string res;
-    append_text_content(*this, res);
-    return res;
+// --- dump -------------------------------------------------------------------
+
+void Node::dump_open(std::ostream& os, const std::string& indent, bool) const {
+    os << indent << "[Node type=" << static_cast<int>(m_type) << "]\n";
 }
+
+void Node::dump_close(std::ostream&, const std::string&) const {}
+
+namespace {
+
+// What dump() shows inside a node: an element's shadow root first, then the
+// children.
+const Node* dump_child_at(const Node& node, std::size_t index) {
+    if (node.is_element()) {
+        if (const auto& shadow = static_cast<const Element&>(node).m_shadow_root) {
+            if (index == 0) return shadow.get();
+            --index;
+        }
+    }
+    const auto& children = node.children();
+    return index < children.size() ? children[index].get() : nullptr;
+}
+
+} // namespace
 
 void Node::dump(std::ostream& os, int indent) const {
-    std::string spaces(indent * 2, ' ');
-    os << spaces << "[Node type=" << static_cast<int>(m_type) << "]\n";
-    for (const auto& ch : m_children) {
-        ch->dump(os, indent + 1);
+    struct Frame {
+        const Node* node;
+        std::size_t next;
+    };
+    // open.size() - 1 is the depth, below this node, of the node on top.
+    std::vector<Frame> open;
+    std::string pad(static_cast<std::size_t>(std::max(indent, 0)) * 2, ' ');
+    const std::size_t base = pad.size();
+    auto pad_for = [&](std::size_t depth) -> const std::string& {
+        pad.resize(base + depth * 2, ' ');
+        return pad;
+    };
+
+    // Below kMaxDumpDepth nothing is written; the walk goes on only to count.
+    const std::size_t max_depth = static_cast<std::size_t>(kMaxDumpDepth);
+    std::size_t hidden_nodes = 0;
+    std::size_t hidden_levels = 0;
+
+    dump_open(os, pad_for(0), dump_child_at(*this, 0) != nullptr);
+    open.push_back({this, 0});
+    while (!open.empty()) {
+        Frame& top = open.back();
+        const Node* child = dump_child_at(*top.node, top.next);
+        if (!child) {
+            const Node* done = top.node;
+            const std::size_t depth = open.size() - 1;
+            const bool had_content = top.next > 0;
+            open.pop_back();
+            if (depth > max_depth) continue;
+            if (depth == max_depth && hidden_nodes > 0) {
+                os << pad_for(depth + 1) << "... " << hidden_nodes
+                   << (hidden_nodes == 1 ? " node" : " nodes") << " not shown, nested up to "
+                   << hidden_levels << (hidden_levels == 1 ? " level" : " levels") << " deeper\n";
+                hidden_nodes = 0;
+                hidden_levels = 0;
+            }
+            if (had_content) done->dump_close(os, pad_for(depth));
+            continue;
+        }
+        ++top.next;
+        const std::size_t depth = open.size();          // of `child`
+        if (depth > max_depth) {
+            ++hidden_nodes;
+            hidden_levels = std::max(hidden_levels, depth - max_depth);
+        } else {
+            child->dump_open(os, pad_for(depth), dump_child_at(*child, 0) != nullptr);
+        }
+        // `top` is not used after this: push_back may move the frames.
+        if (dump_child_at(*child, 0)) open.push_back({child, 0});
     }
 }
 
@@ -388,74 +556,163 @@ void Element::remove_attribute(const std::string& name) {
     );
 }
 
-std::string Element::inner_html() const {
-    std::string res;
-    for (const auto& ch : m_children) {
-        if (ch->is_element()) {
-            res += ch->as_element()->outer_html();
-        } else if (ch->is_text()) {
-            res += ch->as_text()->text();
-        }
-    }
-    return res;
-}
+// --- serialization ------------------------------------------------------------
 
-std::string Element::outer_html() const {
-    std::string res = "<" + m_tag_name;
-    for (const auto& [k, v] : m_attributes) {
-        res += " " + k + "=\"" + v + "\"";
-    }
+namespace {
+
+bool is_void_tag(const std::string& tag) {
     static const std::unordered_set<std::string> VOID_TAGS = {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
         "link", "meta", "param", "source", "track", "wbr"
     };
-    if (VOID_TAGS.count(m_tag_name)) {
-        res += " />";
-        return res;
-    }
-    res += ">";
-    res += inner_html();
-    res += "</" + m_tag_name + ">";
-    return res;
+    return VOID_TAGS.count(tag) != 0;
 }
 
-static void element_query_selector_all_recursive(const std::shared_ptr<Node>& node, const std::string& sel, std::vector<std::shared_ptr<Element>>& out) {
-    if (auto el = std::dynamic_pointer_cast<Element>(node)) {
-        bool match = false;
-        if (sel.starts_with("#")) {
-            match = (el->id() == sel.substr(1));
-        } else if (sel.starts_with(".")) {
-            match = el->has_class(sel.substr(1));
-        } else {
-            match = (sel == "*" || el->tag_name() == sel);
+void append_start_tag(const Element& element, std::string& out) {
+    out += '<';
+    out += element.tag_name();
+    for (const auto& [name, value] : element.attributes()) {
+        out += ' ';
+        out += name;
+        out += "=\"";
+        out += value;
+        out += '"';
+    }
+}
+
+// Writes `root` (when `with_root`) and everything below it as markup into one
+// buffer, in one walk. Elements and text are written; other nodes are not.
+//
+// innerHTML used to be two functions calling each other, each returning its
+// subtree as a new string: one pair of frames per level, and every level
+// copied all the markup below it again. Reading it from the top of a chain of
+// N elements cost N*N bytes of copying and, past some tens of thousands of
+// levels, the stack.
+void append_markup(const Node& root, bool with_root, std::string& out) {
+    struct Frame {
+        const Node* node;
+        std::size_t next;
+    };
+    std::vector<Frame> open;
+
+    // Writes what comes before a node's children. Returns whether the node
+    // has an end to write after them, that is, whether to go into it.
+    auto enter = [&](const Node& node) {
+        if (node.is_text()) {
+            out += static_cast<const Text&>(node).text();
+            return false;
         }
-        if (match) out.push_back(el);
+        if (!node.is_element()) return false;
+        const auto& element = static_cast<const Element&>(node);
+        append_start_tag(element, out);
+        if (is_void_tag(element.tag_name())) {
+            out += " />";
+            return false;
+        }
+        out += '>';
+        return true;
+    };
+    auto leave = [&](const Node& node) {
+        out += "</";
+        out += static_cast<const Element&>(node).tag_name();
+        out += '>';
+    };
+
+    if (with_root) {
+        if (!enter(root)) return;
     }
-    for (const auto& ch : node->children()) {
-        element_query_selector_all_recursive(ch, sel, out);
+    open.push_back({&root, 0});
+    while (!open.empty()) {
+        Frame& top = open.back();
+        const auto& children = top.node->children();
+        if (top.next >= children.size()) {
+            const Node* done = top.node;
+            open.pop_back();
+            if (with_root || !open.empty()) leave(*done);
+            continue;
+        }
+        const Node* child = children[top.next++].get();
+        // `top` is not used after this: push_back may move the frames.
+        if (child && enter(*child)) open.push_back({child, 0});
     }
+}
+
+bool matches_simple_selector(const Element& element, const std::string& selector) {
+    if (selector.starts_with("#")) return element.id() == selector.substr(1);
+    if (selector.starts_with(".")) return element.has_class(selector.substr(1));
+    return selector == "*" || element.tag_name() == selector;
+}
+
+// The elements below `root` for which `wanted` holds, in tree order; only the
+// first one when `first_only`.
+template <typename Wanted>
+std::vector<std::shared_ptr<Element>> collect_descendants(const Node& root, bool first_only, Wanted&& wanted) {
+    std::vector<std::shared_ptr<Element>> found;
+    for_each_descendant(root, [&](Node& node) {
+        if (!node.is_element()) return true;
+        auto& element = static_cast<Element&>(node);
+        if (!wanted(element)) return true;
+        found.push_back(std::static_pointer_cast<Element>(element.shared_from_this()));
+        return !first_only;
+    });
+    return found;
+}
+
+} // namespace
+
+std::string Node::inner_markup() const {
+    std::string out;
+    append_markup(*this, false, out);
+    return out;
+}
+
+std::string Element::inner_html() const {
+    return inner_markup();
+}
+
+std::string Element::outer_html() const {
+    std::string out;
+    append_markup(*this, true, out);
+    return out;
+}
+
+// --- searches -----------------------------------------------------------------
+
+std::shared_ptr<Element> Node::descendant_with_id(const std::string& id) const {
+    auto found = collect_descendants(*this, true, [&](const Element& element) { return element.id() == id; });
+    return found.empty() ? nullptr : found.front();
+}
+
+std::vector<std::shared_ptr<Element>> Node::descendants_with_tag(const std::string& tag) const {
+    return collect_descendants(*this, false, [&](const Element& element) {
+        return tag == "*" || element.tag_name() == tag;
+    });
+}
+
+std::vector<std::shared_ptr<Element>> Node::descendants_matching(const std::string& simple_selector) const {
+    return collect_descendants(*this, false, [&](const Element& element) {
+        return matches_simple_selector(element, simple_selector);
+    });
+}
+
+std::shared_ptr<Element> Node::first_descendant_matching(const std::string& simple_selector) const {
+    auto found = collect_descendants(*this, true, [&](const Element& element) {
+        return matches_simple_selector(element, simple_selector);
+    });
+    return found.empty() ? nullptr : found.front();
 }
 
 std::vector<std::shared_ptr<Element>> Element::query_selector_all(const std::string& selector) const {
-    std::vector<std::shared_ptr<Element>> res;
-    for (const auto& ch : m_children) {
-        element_query_selector_all_recursive(ch, selector, res);
-    }
-    return res;
+    return descendants_matching(selector);
 }
 
 std::shared_ptr<Element> Element::query_selector(const std::string& selector) const {
-    auto all = query_selector_all(selector);
-    return all.empty() ? nullptr : all.front();
+    return first_descendant_matching(selector);
 }
 
 void Element::set_inner_html(const std::string& html) {
-    auto children_copy = m_children;
-    for (const auto& ch : children_copy) {
-        remove_child(ch);
-    }
-    auto parsed = HtmlParser::parse_fragment(html);
-    for (const auto& ch : parsed) {
+    take_children();
+    for (const auto& ch : HtmlParser::parse_fragment(html)) {
         append_child(ch);
     }
     mark_needs_layout();
@@ -469,29 +726,20 @@ std::shared_ptr<ShadowRoot> Element::attach_shadow(const std::string& mode_str) 
     return m_shadow_root;
 }
 
-void Element::dump(std::ostream& os, int indent) const {
-    std::string spaces(indent * 2, ' ');
-    os << spaces << "<" << m_tag_name;
+void Element::dump_open(std::ostream& os, const std::string& indent, bool has_content) const {
+    os << indent << "<" << m_tag_name;
     for (const auto& [k, v] : m_attributes) {
         os << " " << k << "=\"" << v << "\"";
     }
-    if (m_children.empty() && !m_shadow_root) {
-        os << " />\n";
-    } else {
-        os << ">\n";
-        if (m_shadow_root) {
-            m_shadow_root->dump(os, indent + 1);
-        }
-        for (const auto& ch : m_children) {
-            ch->dump(os, indent + 1);
-        }
-        os << spaces << "</" << m_tag_name << ">\n";
-    }
+    os << (has_content ? ">\n" : " />\n");
 }
 
-void Text::dump(std::ostream& os, int indent) const {
-    std::string spaces(indent * 2, ' ');
-    os << spaces << "#text: \"";
+void Element::dump_close(std::ostream& os, const std::string& indent) const {
+    os << indent << "</" << m_tag_name << ">\n";
+}
+
+void Text::dump_open(std::ostream& os, const std::string& indent, bool) const {
+    os << indent << "#text: \"";
     for (char c : m_text) {
         if (c == '\n') os << "\\n";
         else if (c == '\t') os << "\\t";

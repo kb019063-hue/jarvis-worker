@@ -1,6 +1,7 @@
 #include "litebird/dom/CustomElementRegistry.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
+#include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Heap.hpp"
 #include <algorithm>
@@ -151,12 +152,11 @@ void CustomElementRegistry::upgrade_element(const std::shared_ptr<Element>& el) 
 }
 
 void CustomElementRegistry::upgrade_tree(const std::shared_ptr<Node>& root) {
-    if (!root) return;
-    if (root->is_element()) {
-        upgrade_element(std::static_pointer_cast<Element>(root));
-    }
-    for (const auto& ch : root->children()) {
-        upgrade_tree(ch);
+    // Upgrading runs a constructor, which is script and may change the tree,
+    // so the elements are listed first; and the list is built without
+    // recursion, so the depth of the tree does not matter.
+    for (const auto& element : subtree_elements(root)) {
+        upgrade_element(element);
     }
 }
 

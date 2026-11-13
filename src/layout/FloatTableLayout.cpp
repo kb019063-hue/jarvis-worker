@@ -1,4 +1,5 @@
 #include "litebird/layout/LayoutBox.hpp"
+#include "litebird/common/StackLimit.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -66,19 +67,8 @@ void LayoutBox::band_at(const std::vector<FloatBand>& bands, float y, float& lef
     }
 }
 
-float LayoutBox::clearance_y(const std::vector<FloatBand>& bands, ClearType clear) {
-    if (clear == ClearType::None) return -1.0f;
-    float lowest = -1.0f;
-    for (const auto& band : bands) {
-        const bool relevant = (clear == ClearType::Both) ||
-                              (clear == ClearType::Left && band.left > 0.0f) ||
-                              (clear == ClearType::Right && band.right > 0.0f);
-        if (relevant) lowest = std::max(lowest, band.bottom);
-    }
-    return lowest;
-}
-
 float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
+    if (stack_is_exhausted()) return fallback;
     if (box.box_type == BoxType::TextNode) {
         return longest_word_width(box.text, box.style);
     }

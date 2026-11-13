@@ -17,20 +17,24 @@ scoreboard cannot see at all.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1770 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
+| **DOM tree-construction conformance** | **1771 / 1792 (98.8%)** | html5lib/WPT derivation suite run by `make conformance` |
+| Trees for random pages | 1,489 of 1,500 equal to the ones parse5 builds; the 11 others are known | `make diff-trees` (needs Node.js; not in CI) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 88 suites, all passing | `make test` |
+| Engine unit tests | 95 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
+| Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
-make test            # 88 engine suites
-make asan            # sanitizer build, tests, the JavaScript corpus and a fuzz run
+make test            # 95 engine suites
+make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
+make asan            # sanitizer build, tests, the JavaScript corpus, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
+make diff-trees      # 1,500 random pages parsed here and by parse5; fails if more than the known 11 trees differ
 ```
 
 ### The JavaScript scoreboard
@@ -73,10 +77,54 @@ passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
-1.2% is **22 cases**: the `selectedcontent` cloning behaviour of the 2025
+1.2% is **21 cases**: the `selectedcontent` cloning behaviour of the 2025
 customizable-`<select>` work (6 cases), plus a handful of adoption-agency,
 `innerHTML` and character-reference edge cases. They are catalogued in
 `ARCHITECTURE.md` rather than papered over.
+
+### Pages nobody wrote
+
+The corpus is 1,792 inputs somebody thought of. `make diff-trees`
+(`tools/conformance/diff_trees.py`) makes pages nobody did, a few dozen tags
+in random order and most of them misnested, and compares the tree Litebird
+builds with the one parse5 builds, an independent parser written from the
+same standard. Of 6,000 such pages, 5,948 get the same tree. The other 52
+come down to five bugs: the commonest are an end tag that meets an open SVG
+or MathML element (`<a><svg></a>`) and `</button>` with an element still open
+inside it (`<button><p>a</button>x` puts the "x" in the paragraph). Three of
+the five are also behind one of the 21 failing corpus cases each. A failing
+case says a bug exists; the random pages say how often a page meets it, and
+cut it down to a few tags. They are in AUDIT.md, finding 29, and are not
+fixed. The check needs Node.js and, the first time, the npm registry, so CI
+does not run it.
+
+### Pages that are hostile by size
+
+A conformance corpus is made of small pages, and so is what a mutation fuzzer
+starts from. Neither finds the oldest way to end a browser from a web page:
+nest something deeper than the stack is long, or repeat it until work that
+grows with the square of its count never finishes. A file of 300,000 nested
+`<div>` (3.3 MB, no script) used to end Litebird with a `SIGSEGV`.
+
+`make deep` generates those pages (`tools/fuzz/deep_pages.py`) and runs each
+in a child process with an 8 MB stack, 2 GB of memory and 60 seconds:
+
+| | Before Phase 25 | Now |
+| :--- | :--- | :--- |
+| Runs that fail, of 392 over 145 pages | 264 | 0 |
+| 300,000 nested `<div>` | `SIGSEGV` | renders in 4 s |
+| A script that nests 200,000 elements with `appendChild`, reads `textContent` and `innerHTML`, and drops the tree | `SIGSEGV` at 20,000 | 0.7 s |
+| One paragraph of 100,000 images | 35 s | 1.3 s |
+| `<svg width="100000" height="100000">` | abort (`std::bad_alloc`) | blank box |
+
+Three rules do it. The HTML parser attaches nothing deeper than 512 levels,
+the limit Blink and WebKit use: an element that would be deeper becomes a
+sibling instead, and none is dropped. A tree built by script may be as deep as
+the script likes, so nothing that walks the DOM recurses. Layout and painting
+still recurse and stop when the stack is nearly used up. What this does not
+cover is listed in AUDIT.md, finding 28: among others, 10,000 floats with a
+size in one box still take 46 s, and a block inside an inline box is not laid
+out.
 
 ### What the scoreboard measured wrong
 
@@ -153,6 +201,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - Tree navigation (`parent()`, `children()`, `append_child()`, `remove_child()`).
 - DOM query methods: `getElementById()`, `getElementsByTagName()`, `querySelector()`, `querySelectorAll()`.
 - Interactive tree printer (`dumpTree()`).
+- **No recursion over the tree:** the destructor, `textContent`, `innerHTML`, the selector and tag searches and the dumps are loops (`include/litebird/dom/TreeWalk.hpp`), so a tree a script nested 200,000 levels deep can be built, queried and released.
 - **W3C 3-Phase DOM Event Dispatch:** Standard capture, target, and bubbling phases (`Event`, `addEventListener(type, listener, useCapture)`, `dispatchEvent()`, `stopPropagation()`, `preventDefault()`).
 - **HTML Form Controls:** Native DOM state and change event dispatch for `<input type="text|checkbox">`, `<textarea>`, `<button>`, and `<select>`.
 - **MutationObserver API:** Observation of DOM mutations (`childList`, `attributes`, `attributeOldValue`, `subtree`, `attributeFilter`), microtask batching, and `takeRecords()`.
@@ -171,6 +220,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Spec-complete tokenizer:** all tag, attribute, comment, bogus-comment, doctype and CDATA states, RCDATA/RAWTEXT/plaintext content models, CRLF normalisation, the complete 2231-entry named character reference table, and the full **script-data state machine** including the escaped and double-escaped runs (`<!--<script </script>-->` stays text, as it should).
 - **`eof-in-tag`, `eof-before-tag-name` and NUL handling** match the spec: a tag cut off by EOF is discarded, `</` at EOF is text, and a NUL in a comment becomes U+FFFD.
 - **Fragment parsing with a context element**, which is what makes `innerHTML` (and `<tbody>` vs `<div>` contexts) behave correctly.
+- **A nesting limit of 512** (`HtmlTreeBuilder::kMaxTreeDepth`, the number Blink and WebKit use): an element that would be deeper is attached beside the element it was written in. The stack of open elements is not shortened, so the parser's state is what the standard says at any depth, and every per-token question about that stack is answered from an index.
 - Legacy helpers: `HtmlParser::parse()`, `HtmlParser::parse_fragment_with_context()`.
 
 ### 3. HTML Parser helpers (`include/litebird/html/`)
@@ -359,7 +409,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 88 engine test suites
+# Run the 95 engine test suites
 make test
 ```
 
@@ -420,14 +470,14 @@ make test
 make test
 ```
 
-Output (88 suites; the first and last lines shown):
+Output (95 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 88 engine test suites passed successfully!
+All 95 engine test suites passed successfully!
 ```
 
 ```bash

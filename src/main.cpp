@@ -216,10 +216,13 @@ int main(int argc, char* argv[]) {
             if (tag.rfind("svg ", 0) == 0) { ns = litebird::ElementNamespace::SVG; tag = tag.substr(4); }
             else if (tag.rfind("math ", 0) == 0) { ns = litebird::ElementNamespace::MathML; tag = tag.substr(5); }
             auto fragment = litebird::HtmlParser::parse_fragment_with_context(html_content, tag, ns, scripting);
-            std::cout << litebird::dump_tree_webplatform(*fragment);
+            litebird::dump_tree_webplatform(std::cout, *fragment);
         } else {
             auto document = litebird::HtmlParser::parse(html_content, scripting);
-            std::cout << litebird::dump_tree_webplatform(*document);
+            // Written as it is produced. Building the dump as one string
+            // first took two copies of it: 2 GB for a page whose dump is
+            // 900 MB (800,000 nodes at the nesting limit).
+            litebird::dump_tree_webplatform(std::cout, *document);
         }
         return 0;
     }

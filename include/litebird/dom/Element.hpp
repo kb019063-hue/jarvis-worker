@@ -176,14 +176,6 @@ public:
     bool is_active() const { return m_is_active; }
     void set_active(bool a) { m_is_active = a; }
 
-    std::string text_content() const override {
-        std::string result;
-        for (const auto& child : m_children) {
-            result += child->text_content();
-        }
-        return result;
-    }
-
     bool click() {
         auto ev = std::make_shared<Event>("click", true, true);
         return dispatch_event(ev);
@@ -193,7 +185,9 @@ public:
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> ctx) { m_canvas_context = std::move(ctx); }
     std::shared_ptr<CanvasRenderingContext2D> get_or_create_canvas_context_2d();
 
-    void dump(std::ostream& os, int indent = 0) const override;
+protected:
+    void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
+    void dump_close(std::ostream& os, const std::string& indent) const override;
 
 private:
     /// HTML treats class as a space-separated token list; only ASCII whitespace

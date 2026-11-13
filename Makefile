@@ -85,7 +85,19 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 # some case mappings, part of \p{L}); lower this as that data arrives.
 STRING_DIFF_CEILING ?= 95
 
-.PHONY: all clean test run conformance js-conformance diff-strings fuzz asan tsan bench help
+# How many of the 1,500 random pages may get another tree here than in parse5.
+# The eleven are three of the five bugs in AUDIT.md, finding 29 (`--reduce`
+# cuts each page down to a few tags); lower this as they are fixed.
+TREE_DIFF_CEILING ?= 11
+
+# Random pages at the parser's nesting limit, on top of the fixed deep pages:
+# how many `make deep` runs, and how many the sanitizer build runs. The
+# sanitizer build also nests its pages less deep (see asan-deep).
+DEEP_RANDOM ?= 300
+DEEP_ASAN_RANDOM ?= 150
+DEEP_ASAN_DEPTH ?= 10000
+
+.PHONY: all clean test run conformance js-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -128,22 +140,58 @@ js-conformance: $(TARGET)
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
+## 1,500 random pages, a few dozen misnested tags each, parsed by Litebird and
+## by parse5 (an independent HTML parser), trees compared. Needs Node.js and,
+## the first time, npm and the network: parse5 is installed into build/parse5.
+## Not part of CI for that reason.
+diff-trees: $(TARGET)
+	@python3 tools/conformance/diff_trees.py --show 3 --max-differ $(TREE_DIFF_CEILING)
+
 ## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
 fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
 	@python3 tools/fuzz/fuzz_pipeline.py
 
-## Address + UB sanitizer build, then the test suite, the JavaScript corpus and
-## a fuzz smoke run. The corpus is run for what the sanitizers see while the
-## scripts execute, not for its score: a sanitizer report makes a case fail, and
-## --min-pass turns a batch of those into a failed build.
+## Pages that are hostile by size, not by content: one construct nested
+## 200,000 levels (markup of every kind, trees built by script, CSS values),
+## bitmaps of absurd dimensions, and 100,000 tokens after 200,000 elements
+## left open. The mutation fuzzers above start from small pages and never get
+## near any of this. Each run is a child process with an 8 MB stack, 2 GB of
+## memory and 60 seconds; it fails on a signal, on a limit, or when the text
+## after the deep part is missing from the tree, the layout or the paint list.
+## Then random pages that keep the parser at its nesting limit. About ten
+## minutes on two cores.
+deep: $(TARGET)
+	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
+
+## Address + UB sanitizer build, then the test suite, the JavaScript corpus, a
+## fuzz smoke run (asan-core) and the deep pages (asan-deep).
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
-asan:
+asan: asan-core
+	$(MAKE) asan-deep
+
+## The corpus is run for what the sanitizers see while the scripts execute, not
+## for its score: a sanitizer report makes a case fail, and --min-pass turns a
+## batch of those into a failed build.
+asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
+
+## The deep pages in the sanitizer build made by asan-core. This run is for
+## memory errors on those pages, not for recursion: that is found at full
+## depth by `make deep`, and by a unit test that walks a chain of a million
+## nodes. So the pages are a twentieth as deep here, which keeps a build that
+## is several times slower to a few minutes. The stack is a quarter of the
+## usual one, because what a sanitizer build can still get wrong is a walk
+## with a fixed limit: its frames are ten times the size. For the same reason
+## layout is not required to reach the bottom of a nest: it stops when the
+## stack is nearly used up.
+asan-deep:
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/deep_pages.py --binary build-asan/litebird --quiet \
+		--depth $(DEEP_ASAN_DEPTH) --stack-mb 2 --no-layout-check --timeout 300 --random $(DEEP_ASAN_RANDOM)
 
 ## The JavaScript string type under ThreadSanitizer, then under AddressSanitizer
 ## with leak checking on. Strings are shared between threads without locks
@@ -165,4 +213,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, fuzz, asan, tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

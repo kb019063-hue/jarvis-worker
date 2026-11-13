@@ -72,7 +72,7 @@ Rows that share files should not be in work at the same time.
 
 | Task | Files | Described in | Note |
 | :--- | :--- | :--- | :--- |
-| **The DOM a script sees**: `innerHTML` read back, selectors in `querySelector`, the properties that are missing | `src/js/JsValue.cpp` (the DOM bindings are its second half), `src/js/JsInterpreter.cpp`, `src/dom/` | ARCHITECTURE.md, Known gaps, 9 | **In work** on `arena/0b31a2c1-jarvis-worker`, Phase 27, finding 31 |
+| **The DOM a script sees**: `innerHTML` read back, selectors in `querySelector`, the properties that are missing | `src/js/JsValue.cpp` (the DOM bindings are its second half), `src/js/JsInterpreter.cpp`, `src/js/JsEval.cpp`, `src/js/JsOps.cpp`, `src/js/Heap.cpp`, `src/js/BuiltinsObject.cpp`, `src/dom/`, `include/litebird/dom/`, `src/html/TreeDump.cpp`, `src/main.cpp` | ARCHITECTURE.md, Known gaps, 9 | **In work** on `arena/22089316-jarvis-worker`, Phase 27, finding 31 |
 | **A block inside an inline box is not laid out**: `<a href="#">x<p>y</p></a>` shows "x" and no "y" | `src/layout/` | AUDIT.md, finding 28 | The open bug a real page is most likely to meet |
 | **Floats**: 10,000 with a size in one box take 46 s, and past the first 1,024 they are placed outside the box | `src/layout/FloatTableLayout.cpp` | AUDIT.md, finding 28 | Same files as the row above |
 | **Table spans and collapsed borders** (`rowspan`, `colspan`, `border-collapse`) | `src/layout/` | Known gaps, 1 | Pull request #16 (8 November) has an implementation that was never merged and is behind `main`. Same files as the two rows above |
@@ -84,4 +84,4 @@ Rows that share files should not be in work at the same time.
 | **`<select>` content as the standard now has it**: the 11 corpus cases that fail | `src/html/HtmlTreeBuilder.cpp`, `src/html/HtmlTreeBuilderModes.cpp` | AUDIT.md, finding 30 | parse5 has the older rules too, so it cannot be the reference |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 pass): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Same files as the row above. A new node type needs a line in the markup serializer, which the first row is rewriting |
 | **One element with 50,000 attributes takes 4.5 s** | `src/html/HtmlTokenizer.cpp` | AUDIT.md, finding 28 | Small |
-| **External scripts and stylesheets are not loaded** (`<script src>`, `<link rel=stylesheet>`) | `src/net/`, `src/js/JsInterpreter.cpp`, `src/main.cpp` | Known gaps, 9 | |
+| **External scripts and stylesheets are not loaded** (`<script src>`, `<link rel=stylesheet>`) | `src/net/`, `src/js/JsInterpreter.cpp`, `src/main.cpp` | Known gaps, 9 | Not while the first row is in work: it changes both of the last two files |

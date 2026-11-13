@@ -320,6 +320,14 @@ public:
     /// `document.readyState` becomes "interactive". What comes next is
     /// notify_document_loaded(). Deferred scripts run between the two.
     void notify_document_interactive();
+    /// Runs the scripts written in the page: every classic <script> without
+    /// a src that is in the document, in document order, each one as
+    /// document.currentScript. The list is fixed first: a script may add
+    /// scripts (those run when they are inserted) or remove ones that have
+    /// not run yet (those never do). Then the document is "interactive".
+    /// `before` is called with each script's text just before it runs.
+    /// Follow it with notify_document_loaded().
+    void run_document_scripts(const std::function<void(const std::string& source)>& before = nullptr);
 
 private:
     using EnvPtr = std::shared_ptr<JsEnvironment>;

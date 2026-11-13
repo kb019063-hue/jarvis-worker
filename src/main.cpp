@@ -11,13 +11,12 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Storage.hpp"
-#include "litebird/net/UrlParser.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include "litebird/shell/BrowserShell.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <filesystem>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -61,26 +60,6 @@ void print_help(const char* prog) {
 
 /// False when the file cannot be opened. An empty file is a file: it is the
 /// page with nothing in it, and it has a tree like any other.
-/// True for a <script> whose content is JavaScript to run: no type, or one
-/// of the JavaScript types. A module, JSON data or a template is not.
-bool is_classic_script(const litebird::Element& script) {
-    if (script.has_attribute("src")) return false;      // nothing is fetched
-    std::string type = script.get_attribute("type");
-    for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    const auto start = type.find_first_not_of(" \t\n\r\f");
-    const auto end = type.find_last_not_of(" \t\n\r\f");
-    type = start == std::string::npos ? std::string() : type.substr(start, end - start + 1);
-    const auto semicolon = type.find(';');
-    if (semicolon != std::string::npos) type = type.substr(0, semicolon);
-    static const char* const kTypes[] = {"", "text/javascript", "application/javascript", "text/ecmascript",
-                                         "application/ecmascript", "application/x-javascript", "text/jscript",
-                                         "text/x-javascript", "text/javascript1.5"};
-    for (const char* known : kTypes) {
-        if (type == known) return true;
-    }
-    return false;
-}
-
 bool read_file(const std::string& path, std::string& content) {
     std::ifstream in(path);
     if (!in) {
@@ -295,34 +274,21 @@ int main(int argc, char* argv[]) {
     if (!page_url.empty()) {
         doc->set_url(page_url);
     } else {
-        std::error_code ignored;
-        const auto absolute = std::filesystem::absolute(input_file, ignored);
-        doc->set_url(litebird::file_url_from_path(ignored ? input_file : absolute.string()));
+        doc->set_url(litebird::ResourceLoader::address_of(input_file));
     }
     litebird::JsInterpreter js_engine(doc);
-    // The scripts of the page, in document order. The list is fixed first: a
-    // script may add scripts (those run when they are inserted) or remove
-    // ones that have not run yet (those never do).
-    for (const auto& el : doc->get_elements_by_tag_name("script")) {
-        if (!el->is_connected() || !is_classic_script(*el)) continue;
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            if (dump_bytecode) {
-                std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-                try {
-                    auto fn = js_engine.compile_to_bytecode(script);
-                    fn->chunk.disassemble(std::cout, "Inline <script>");
-                } catch (const std::exception& ex) {
-                    std::cout << "(not compiled: " << ex.what() << ")";
-                }
-                std::cout << "\n";
-            }
-            doc->set_current_script(el);
-            js_engine.eval_ast(script);
-            doc->set_current_script(nullptr);
+    // The scripts of the page, in document order.
+    js_engine.run_document_scripts([&](const std::string& script) {
+        if (!dump_bytecode) return;
+        std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
+        try {
+            auto fn = js_engine.compile_to_bytecode(script);
+            fn->chunk.disassemble(std::cout, "Inline <script>");
+        } catch (const std::exception& ex) {
+            std::cout << "(not compiled: " << ex.what() << ")";
         }
-    }
-    js_engine.notify_document_interactive();
+        std::cout << "\n";
+    });
 
     // --run-script: one more script, run the way a deferred script is: the
     // tree is complete and the page has not been told so yet. Then the page

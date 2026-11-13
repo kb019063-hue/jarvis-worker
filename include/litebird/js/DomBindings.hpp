@@ -794,6 +794,11 @@ JsValue window_of(Realm& realm);
 /// Runs a <script> element a script has just inserted.
 void run_inserted_script(Realm& realm, Element& script);
 /// Set by the interpreter: evaluates source text in the global scope.
+/// True for a <script> whose content is JavaScript to run as a classic
+/// script: no type (and no language), or one of the JavaScript types. A
+/// module, JSON data or a template is not. The type is compared whole:
+/// "text/javascript; charset=utf-8" is not a JavaScript type.
+bool is_classic_script(const Element& script);
 using ScriptRunner = std::function<void(const std::string& source)>;
 void set_script_runner(Realm& realm, ScriptRunner runner);
 

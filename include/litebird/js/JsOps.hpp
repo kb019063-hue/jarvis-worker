@@ -102,11 +102,6 @@ void js_run_guarded(Body&& body) {
     }
 }
 
-/// addEventListener, removeEventListener or dispatchEvent bound to `target`;
-/// undefined for any other name. Shared by every kind of DOM node and by the
-/// `document` object.
-JsValue js_event_target_method(const std::shared_ptr<class Node>& target, const std::string& name);
-
 /// Calls a script callback from host code; see js_run_guarded.
 JsValue js_call_guarded(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args);
 

@@ -961,17 +961,29 @@ void navigate_to(Realm& r, const JsValue& value, bool replace) {
     navigate(r, target, replace);
 }
 
+bool is_classic_script(const Element& script) {
+    const std::string* type = script.attribute("type");
+    const std::string* language = script.attribute("language");
+    std::string name;
+    if (type) name = type->empty() ? "text/javascript" : ascii_lower(strip_ascii_space(*type));
+    else if (language && !language->empty()) name = "text/" + ascii_lower(*language);
+    else name = "text/javascript";
+    static const char* const kTypes[] = {
+        "application/ecmascript", "application/javascript", "application/x-ecmascript", "application/x-javascript",
+        "text/ecmascript", "text/javascript", "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+        "text/javascript1.3", "text/javascript1.4", "text/javascript1.5", "text/jscript", "text/livescript",
+        "text/x-ecmascript", "text/x-javascript"};
+    for (const char* known : kTypes) {
+        if (name == known) return true;
+    }
+    return false;
+}
+
 void run_inserted_script(Realm& realm, Element& script) {
     if (!script.script_object() || !realm.document) return;
     JsValue object = wrap(realm, script);
     if (!slot(object, "runnable")) return;          // from markup, or it has run already
-    const std::string type = ascii_lower(strip_ascii_space(script.get_attribute("type")));
-    static const char* const kScriptTypes[] = {"", "text/javascript", "application/javascript", "text/ecmascript",
-                                               "application/ecmascript", "application/x-javascript", "text/jscript",
-                                               "text/livescript", "text/x-javascript", "text/javascript1.5"};
-    bool classic = false;
-    for (const char* known : kScriptTypes) classic = classic || type == known;
-    if (!classic) return;
+    if (!is_classic_script(script)) return;
     if (script.has_attribute("src")) {
         // Nothing is fetched, so an external script never arrives.
         clear_slot(object, "runnable");

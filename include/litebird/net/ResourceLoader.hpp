@@ -23,6 +23,10 @@ public:
     static constexpr std::size_t MaxHttpHeaderBytes = 64u * 1024u;
 
     static std::string resolve_url(std::string_view base_url, std::string_view relative_url);
+    /// The address a page loaded from `location` has, as its scripts see it
+    /// (location.href): the URL itself when it is one, and the file: URL of
+    /// the absolute path when it is a path on disk.
+    static std::string address_of(const std::string& location);
     static ResourceResponse load(
         const std::string& url,
         const std::string& method = "GET",

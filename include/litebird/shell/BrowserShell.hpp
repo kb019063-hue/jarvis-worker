@@ -86,6 +86,7 @@ public:
     void run_interactive();
 
 private:
+    void show_page(const std::string& html);
     void rebuild_layout();
     void scan_interactive_elements();
     Rect compute_element_bounds(const std::shared_ptr<Element>& el, const std::shared_ptr<LayoutBox>& box) const;

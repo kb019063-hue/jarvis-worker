@@ -1,4 +1,6 @@
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/UrlParser.hpp"
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -83,6 +85,17 @@ std::string ResourceLoader::detect_mime_type(std::string_view path_or_url) {
     if (ext_lower == ".txt") return "text/plain";
     if (ext_lower == ".bmp") return "image/bmp";
     return "application/octet-stream";
+}
+
+std::string ResourceLoader::address_of(const std::string& location) {
+    for (const char* scheme : {"http://", "https://", "file://", "data:", "about:"}) {
+        if (location.rfind(scheme, 0) != 0) continue;
+        Url url;
+        return Url::parse(location, nullptr, url) ? url.href() : location;
+    }
+    std::error_code failed;
+    const auto absolute = std::filesystem::absolute(location, failed);
+    return file_url_from_path(failed ? location : absolute.lexically_normal().string());
 }
 
 std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_view relative_url) {

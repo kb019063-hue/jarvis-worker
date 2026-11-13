@@ -3294,6 +3294,51 @@ TEST(url_objects_and_addresses_in_the_dom) {
                .to_string() == "c true");
 }
 
+TEST(page_scripts_run_by_the_rules_of_a_page_load) {
+    using namespace litebird;
+    // Which <script> elements are JavaScript to run, and how they are run.
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body>"
+        "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState];</script>"
+        "<script type='text/plain'>log.push('text/plain');</script>"
+        "<script type=' TEXT/JavaScript '>log.push('any case, spaces around');</script>"
+        "<script type='text/javascript; charset=utf-8'>log.push('with a parameter');</script>"
+        "<script language='JavaScript1.5'>log.push('language');</script>"
+        "<script language='vbscript'>log.push('vbscript');</script>"
+        "<script type='module'>log.push('module');</script>"
+        "<script type='application/json'>{\"not\": \"code\"}</script>"
+        "<script src='elsewhere.js'>log.push('has a src');</script>"
+        "<script type=''>log.push('empty type');</script>"
+        "<script>document.getElementById('removed').remove(); log.push('remover');</script>"
+        "<script id=removed>log.push('removed before its turn');</script>"
+        "<script>var late = document.createElement('script'); late.textContent = \"log.push('inserted')\";"
+        "        document.body.appendChild(late); log.push('inserter');</script>"
+        "<script>document.addEventListener('readystatechange', function () { log.push('state:' + document.readyState); });"
+        "        document.addEventListener('DOMContentLoaded', function () { log.push('DOMContentLoaded:' + document.currentScript); });"
+        "        window.addEventListener('load', function () { log.push('load'); });</script>"
+        "</body>");
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.run_document_scripts();
+    assert(js.eval("log.join()").to_string() ==
+           "first:first:loading,any case, spaces around,language,empty type,remover,inserted,inserter,state:interactive");
+    assert(js.eval("document.readyState").to_string() == "interactive");
+    js.notify_document_loaded();
+    assert(js.eval("log.slice(8).join()").to_string() == "DOMContentLoaded:null,state:complete,load");
+
+    // The shell loads a page the same way, and the page knows its address.
+    BrowserShell shell(800.0f, 600.0f, 80, 24);
+    assert(shell.navigate_to("examples/hello.html"));
+    const std::string address = shell.document()->url();
+    assert(address.rfind("file:///", 0) == 0 && address.find("/examples/hello.html") != std::string::npos);
+    assert(shell.js_engine()->eval("location.href === document.URL && location.protocol === 'file:' && document.readyState")
+               .to_string() == "complete");
+    assert(shell.js_engine()->eval("var a = document.createElement('a'); a.href = 'card.html'; a.href").to_string() ==
+           address.substr(0, address.rfind('/') + 1) + "card.html");
+    assert(ResourceLoader::address_of("https://Example.test") == "https://example.test/");
+    assert(ResourceLoader::address_of("/tmp/a b.html") == "file:///tmp/a%20b.html");
+}
+
 TEST(css_filters_and_canvas_blending) {
     using namespace litebird;
     // 1. ImageFilter algorithms
@@ -6773,6 +6818,7 @@ int main() {
     RUN_TEST(history_api_and_client_routing);
     RUN_TEST(url_parser_follows_the_url_standard);
     RUN_TEST(url_objects_and_addresses_in_the_dom);
+    RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

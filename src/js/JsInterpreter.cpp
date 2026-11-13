@@ -165,6 +165,21 @@ void JsInterpreter::notify_document_interactive() {
     dom::fire(realm, *m_document, "readystatechange");
 }
 
+void JsInterpreter::run_document_scripts(const std::function<void(const std::string& source)>& before) {
+    if (!m_document) return;
+    for (const auto& element : m_document->get_elements_by_tag_name("script")) {
+        // Nothing is fetched, so a script with a src has nothing to run.
+        if (!element->is_connected() || element->has_attribute("src") || !dom::is_classic_script(*element)) continue;
+        const std::string source = element->text_content();
+        if (source.empty()) continue;
+        if (before) before(source);
+        m_document->set_current_script(element);
+        eval_ast(source);
+        m_document->set_current_script(nullptr);
+    }
+    notify_document_interactive();
+}
+
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {
     m_document = std::move(doc);
     m_vm.set_document(m_document);

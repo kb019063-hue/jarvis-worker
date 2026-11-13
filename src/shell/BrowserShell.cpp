@@ -56,6 +56,28 @@ bool BrowserShell::can_go_forward() const {
     return !m_history.empty() && m_history_index + 1 < m_history.size();
 }
 
+// Shows the page whose markup is `html`, loaded from m_current_url: the
+// tree, its style sheets, and its scripts run the way a page load runs them
+// (see JsInterpreter::run_document_scripts). The page's address is set
+// first: it is what its scripts see as location.href and what its relative
+// links are relative to.
+void BrowserShell::show_page(const std::string& html) {
+    // The old page goes first, so that there is never a moment with two.
+    m_js_engine.reset();
+    m_document = HtmlParser::parse(html);
+    m_document->set_url(ResourceLoader::address_of(m_current_url));
+
+    m_resolver = StyleResolver();
+    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
+        auto sheet = CssParser::parse(el->text_content());
+        m_resolver.add_stylesheet(sheet);
+    }
+
+    m_js_engine = std::make_unique<JsInterpreter>(m_document);
+    m_js_engine->run_document_scripts();
+    m_js_engine->notify_document_loaded();
+}
+
 bool BrowserShell::back() {
     if (!can_go_back()) return false;
     m_history_index--;
@@ -69,22 +91,7 @@ bool BrowserShell::back() {
     }
 
     m_current_url = prev_url;
-    m_document = HtmlParser::parse(resp.body);
-
-    m_resolver = StyleResolver();
-    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
-        auto sheet = CssParser::parse(el->text_content());
-        m_resolver.add_stylesheet(sheet);
-    }
-
-    m_js_engine = std::make_unique<JsInterpreter>(m_document);
-    for (const auto& el : m_document->get_elements_by_tag_name("script")) {
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            m_js_engine->eval_ast(script);
-        }
-    }
-    m_js_engine->notify_document_loaded();
+    show_page(resp.body);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -106,22 +113,7 @@ bool BrowserShell::forward() {
     }
 
     m_current_url = next_url;
-    m_document = HtmlParser::parse(resp.body);
-
-    m_resolver = StyleResolver();
-    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
-        auto sheet = CssParser::parse(el->text_content());
-        m_resolver.add_stylesheet(sheet);
-    }
-
-    m_js_engine = std::make_unique<JsInterpreter>(m_document);
-    for (const auto& el : m_document->get_elements_by_tag_name("script")) {
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            m_js_engine->eval_ast(script);
-        }
-    }
-    m_js_engine->notify_document_loaded();
+    show_page(resp.body);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -139,21 +131,7 @@ bool BrowserShell::reload() {
         return false;
     }
 
-    m_document = HtmlParser::parse(resp.body);
-    m_resolver = StyleResolver();
-    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
-        auto sheet = CssParser::parse(el->text_content());
-        m_resolver.add_stylesheet(sheet);
-    }
-
-    m_js_engine = std::make_unique<JsInterpreter>(m_document);
-    for (const auto& el : m_document->get_elements_by_tag_name("script")) {
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            m_js_engine->eval_ast(script);
-        }
-    }
-    m_js_engine->notify_document_loaded();
+    show_page(resp.body);
 
     rebuild_layout();
     m_status_message = "Reloaded " + m_current_url;
@@ -168,6 +146,7 @@ bool BrowserShell::navigate_to(const std::string& url) {
         std::string error_html = "<html><head><title>Error</title><style>body{font-size:16px;color:#ef4444;background-color:#0f172a;margin:20px;}h1{color:#f87171;}</style></head><body><h1>Navigation Error</h1><p>" + resp.error_message + "</p></body></html>";
         m_document = HtmlParser::parse(error_html);
         m_resolver = StyleResolver();
+        m_js_engine.reset();
         m_js_engine = std::make_unique<JsInterpreter>(m_document);
         rebuild_layout();
         m_dirty = true;
@@ -182,25 +161,7 @@ bool BrowserShell::navigate_to(const std::string& url) {
     m_history_index = m_history.size() - 1;
     m_current_url = url;
 
-    // Parse HTML
-    m_document = HtmlParser::parse(resp.body);
-
-    // CSS Styling
-    m_resolver = StyleResolver();
-    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
-        auto sheet = CssParser::parse(el->text_content());
-        m_resolver.add_stylesheet(sheet);
-    }
-
-    // JS Engine & Scripts
-    m_js_engine = std::make_unique<JsInterpreter>(m_document);
-    for (const auto& el : m_document->get_elements_by_tag_name("script")) {
-        std::string script = el->text_content();
-        if (!script.empty()) {
-            m_js_engine->eval_ast(script);
-        }
-    }
-    m_js_engine->notify_document_loaded();
+    show_page(resp.body);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;

@@ -261,10 +261,20 @@ void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, 
         reference = index < parent.children().size() ? parent.children()[index] : nullptr;
     }
     NodeVector inserted;
-    if (node->is_document_fragment()) inserted = node->children();
-    else inserted.push_back(node);
-    if (reference) parent.insert_before(node, reference);
-    else parent.append_child(node);
+    if (node->is_document_fragment()) {
+        // The children of a fragment arrive as one change: one record.
+        inserted = node->children();
+        if (inserted.empty()) return;
+        auto previous = reference ? reference->previous_sibling() : parent.last_child();
+        ChildListBatch batch(realm, parent);
+        if (reference) parent.insert_before(node, reference);
+        else parent.append_child(node);
+        batch.commit(inserted, {}, previous, reference);
+    } else {
+        inserted.push_back(node);
+        if (reference) parent.insert_before(node, reference);
+        else parent.append_child(node);
+    }
     after_insertion(realm, inserted);
 }
 

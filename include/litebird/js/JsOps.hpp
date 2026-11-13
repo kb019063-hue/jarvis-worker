@@ -60,6 +60,10 @@ std::string js_describe_thrown(const JsValue& value);
 /// count to decide its exit status.
 void js_report_uncaught(const JsValue& value);
 void js_report_uncaught(const std::exception& ex);
+/// Asked first about every uncaught exception. True when the host dealt with
+/// it (a page's `error` listener cancelled the event): it is then neither
+/// printed nor counted. Null when no host is listening.
+extern bool (*js_uncaught_handler)(const JsValue& value);
 int js_uncaught_error_count();
 
 /// Reports a promise that was rejected with nothing listening.

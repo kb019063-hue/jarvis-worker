@@ -157,6 +157,9 @@ Realm* find_realm(uint64_t id);
 /// The realm whose objects `node` and its tree belong to: the one that made
 /// its script object, else its document's, else the current one.
 Realm& realm_for_node(const Node& node);
+/// The same without the last resort: null for a node that belongs to no
+/// realm. What the tree's hooks use, which must never make a realm.
+Realm* realm_if_any(const Node& node);
 /// Ends a realm: called when its interpreter is destroyed.
 void shutdown_realm(JsIntrinsics& intrinsics);
 
@@ -586,8 +589,11 @@ bool on_abort(const JsValue& signal, std::function<void()> algorithm, bool& abor
 /// Milliseconds since the realm's time origin.
 double time_now(Realm& realm);
 /// Dispatches `event` at `target` (a node object, the window or any other
-/// EventTarget). Returns false when the event was cancelled.
-bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool trusted = false);
+/// EventTarget). Returns false when the event was cancelled. `shown_target`
+/// is what listeners see as `event.target` when that is not `target` itself
+/// (the window's load event shows the document).
+bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool trusted = false,
+              const JsValue* shown_target = nullptr);
 /// Makes a plain Event and dispatches it.
 bool fire(Realm& realm, const JsValue& target, const std::string& type, bool bubbles = false, bool cancelable = false);
 bool fire(Realm& realm, Node& target, const std::string& type, bool bubbles = false, bool cancelable = false);
@@ -720,6 +726,8 @@ private:
     Realm& m_realm;
     Node* m_previous;
 };
+/// `window.customElements`.
+JsValue custom_elements_object(Realm& realm);
 /// Upgrades `element` if a definition for its name exists.
 void try_upgrade(Realm& realm, Element& element);
 void upgrade_subtree(Realm& realm, Node& root);

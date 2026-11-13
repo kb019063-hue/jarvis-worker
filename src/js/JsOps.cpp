@@ -138,7 +138,10 @@ JsValue js_value_from_exception(const std::exception& ex) {
     return js_make_error(JsErrorKind::Error, text);
 }
 
+bool (*js_uncaught_handler)(const JsValue& value) = nullptr;
+
 void js_report_uncaught(const JsValue& value) {
+    if (js_uncaught_handler && js_uncaught_handler(value)) return;
     g_uncaught_errors.fetch_add(1);
     std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
 }
@@ -149,6 +152,7 @@ void js_report_uncaught(const std::exception& ex) {
         return;
     }
     if (dynamic_cast<const JsSyntaxError*>(&ex)) {
+        if (js_uncaught_handler && js_uncaught_handler(js_make_error(JsErrorKind::SyntaxError, ex.what()))) return;
         g_uncaught_errors.fetch_add(1);
         std::cerr << "Uncaught SyntaxError: " << ex.what() << std::endl;
         return;

@@ -830,7 +830,7 @@ void invoke_listeners(Realm& realm, EventState& state, const JsValue& event, con
 
 } // namespace
 
-bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool trusted) {
+bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool trusted, const JsValue* shown_target) {
     EventState* found = state_of<EventState>(event);
     if (!found || !target.is_object()) return true;
     // The state is shared with the object; a listener cannot make it go away
@@ -881,13 +881,13 @@ bool dispatch(Realm& realm, const JsValue& target, const JsValue& event, bool tr
     } else {
         PathEntry entry;
         entry.object = target;
-        entry.target = target;
+        entry.target = shown_target ? *shown_target : target;
         entry.at_target = true;
         path.push_back(entry);
     }
     state.path.clear();
     for (const auto& entry : path) state.path.push_back(entry.object);
-    state.target = target;
+    state.target = shown_target ? *shown_target : target;
 
     // What a click does: a checkbox changes before its listeners run.
     Activation activation;

@@ -135,9 +135,6 @@ Realm* find_realm(uint64_t id) {
     return it->second;
 }
 
-namespace {
-
-/// The realm a node's tree belongs to, without making one.
 Realm* realm_if_any(const Node& node) {
     if (node.script_object()) {
         if (Realm* realm = find_realm(node.script_realm())) return realm;
@@ -148,8 +145,6 @@ Realm* realm_if_any(const Node& node) {
     }
     return nullptr;
 }
-
-} // namespace
 
 Realm& realm_for_node(const Node& node) {
     if (Realm* realm = realm_if_any(node)) return *realm;

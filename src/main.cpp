@@ -46,6 +46,10 @@ void print_help(const char* prog) {
     std::cout << "  --render-terminal      Render web page to ANSI terminal (default)\n";
     std::cout << "  --render-bmp <file>    Render web page to 24-bit BMP image\n";
     std::cout << "  --run-js <code>        Execute JavaScript code directly\n";
+    std::cout << "  --run-script <file>    Load the page, run <file> in it as a deferred script,\n";
+    std::cout << "                         let the page finish loading and its timers run, and\n";
+    std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
+    std::cout << "  --url=URL              The address the page is said to come from\n";
     std::cout << "  --repl                 Start interactive JavaScript REPL\n";
     std::cout << "  --shell [file/url]     Launch interactive TUI Browser Shell\n";
     std::cout << "  --help, -h             Show this help message\n";
@@ -108,6 +112,9 @@ int main(int argc, char* argv[]) {
     int virtual_time_budget_ms = 16;
     std::string fragment_context;
     std::string input_file;
+    std::string run_script_file;
+    bool run_script = false;
+    std::string page_url;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -153,6 +160,16 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: --run-js requires code string\n";
                 return 1;
             }
+        } else if (arg == "--run-script") {
+            if (i + 1 < argc) {
+                run_script_file = argv[++i];
+                run_script = true;
+            } else {
+                std::cerr << "Error: --run-script requires a file name\n";
+                return 1;
+            }
+        } else if (arg.rfind("--url=", 0) == 0) {
+            page_url = arg.substr(std::string("--url=").size());
         } else if (arg == "--repl") {
             repl_mode = true;
         } else if (arg[0] != '-') {
@@ -263,6 +280,20 @@ int main(int argc, char* argv[]) {
             }
             js_engine.eval_ast(script);
         }
+    }
+
+    // --run-script: one more script, run the way a deferred script is: the
+    // tree is complete and the page has not been told so yet. Then the page
+    // finishes loading and its timers run to the end, on the loop's virtual
+    // clock. Nothing is laid out or drawn; what the script printed is the
+    // result.
+    if (run_script) {
+        std::string script;
+        if (!read_file(run_script_file, script)) return 1;
+        js_engine.eval_ast(script);
+        js_engine.notify_document_loaded();
+        page_loop.run_until_idle(std::chrono::seconds(60));
+        return litebird::js_uncaught_error_count() > 0 ? 1 : 0;
     }
 
     // The page has loaded. Then let it settle before the one picture is taken:

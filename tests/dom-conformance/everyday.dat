@@ -1,0 +1,696 @@
+#fixture
+<html><head><title>Everyday</title><style>.hide { display: none } .box { margin: 4px }</style></head>
+<body>
+<div id="main" class="box wide">
+  <h1 class="title">Hello</h1>
+  <ul id="list"><li class="item first">One</li><li class="item">Two</li><li class="item last" tabindex="3">Three</li></ul>
+  <p class="text">Some <b>bold</b> text</p>
+  <form id="form"><input type="text" name="user" value="ann"><input type="checkbox" name="ok" value="yes" checked><select name="pick"><option value="a">A</option><option value="b" selected>B</option></select><select name="many" multiple><option value="x" selected>X</option><option value="y">Y</option><option value="z" selected>Z</option></select></form>
+</div>
+<div id="other"><span class="item">Span</span></div>
+</body></html>
+
+#name effects/fade_in: classList.replace
+#code
+var el = document.querySelector('.title');
+el.classList.add('hide');
+el.classList.replace('hide', 'show');
+console.log(el.className);
+#expect
+title show
+
+#name effects/fade_out: classList.replace back
+#code
+var el = document.querySelector('.title');
+el.classList.add('show');
+console.log(el.classList.replace('show', 'hide'), el.classList.replace('gone', 'x'), el.className);
+#expect
+true false title hide
+
+#name effects/hide: style.display = 'none'
+#code
+var el = document.querySelector('.title');
+el.style.display = 'none';
+console.log(el.style.display, el.getAttribute('style'));
+#expect
+none display: none;
+
+#name effects/show: style.display = ''
+#code
+var el = document.querySelector('.title');
+el.style.display = 'none';
+el.style.display = '';
+console.log(JSON.stringify(el.style.display), JSON.stringify(el.getAttribute('style')));
+#expect
+"" ""
+
+#name effects/toggle: style.display twice
+#code
+function toggle(el) {
+  if (el.style.display == 'none') {
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+var el = document.querySelector('.title');
+toggle(el); console.log(JSON.stringify(el.style.display));
+toggle(el); console.log(JSON.stringify(el.style.display));
+#expect
+"none"
+""
+
+#name elements/add_class: classList.add
+#code
+var el = document.querySelector('.title');
+el.classList.add('big');
+el.classList.add('big', 'red');
+console.log(el.className, el.classList.length);
+#expect
+title big red 3
+
+#name elements/after
+#code
+var target = document.querySelector('.title');
+var element = document.createElement('hr');
+target.after(element);
+console.log(target.nextSibling === element, element.parentNode.id, element.previousElementSibling.className);
+#expect
+true main title
+
+#name elements/append
+#code
+var parent = document.getElementById('list');
+var el = document.createElement('li');
+el.textContent = 'Four';
+parent.append(el);
+console.log(parent.children.length, parent.lastChild === el, parent.lastElementChild.textContent);
+#expect
+4 true Four
+
+#name elements/append_to: append text and nodes
+#code
+var parent = document.getElementById('other');
+var el = document.createElement('i');
+parent.append('plain', el, 'more');
+console.log(parent.childNodes.length, parent.lastChild.nodeType, parent.textContent);
+#expect
+4 3 Spanplainmore
+
+#name elements/before
+#code
+var target = document.querySelector('.text');
+var el = document.createElement('hr');
+target.before(el);
+console.log(target.previousSibling === el, el.nextSibling === target);
+#expect
+true true
+
+#name elements/children
+#code
+var el = document.getElementById('list');
+console.log(el.children.length, el.children[0].textContent, el.children[2].className, el.childNodes.length);
+#expect
+3 One item last 3
+
+#name elements/clone: cloneNode(true)
+#code
+var el = document.getElementById('list');
+var copy = el.cloneNode(true);
+console.log(copy !== el, copy.id, copy.children.length, copy.parentNode, copy.firstChild.textContent, el.cloneNode(false).childNodes.length);
+#expect
+true list 3 null One 0
+
+#name elements/closest
+#code
+var el = document.querySelector('b');
+console.log(el.closest('p').className, el.closest('div').id, el.closest('b') === el, el.closest('ul'));
+#expect
+text main true null
+
+#name elements/contains
+#code
+var node = document.getElementById('main');
+var anotherNode = document.querySelector('b');
+console.log(node.contains(anotherNode), anotherNode.contains(node), node.contains(node), node.contains(null));
+#expect
+true false true false
+
+#name elements/contains_selector: filter by text
+#code
+var found = [...document.querySelectorAll('div')].filter((el) =>
+  el.textContent.includes('Span')
+);
+console.log(found.length, found[0].id);
+#expect
+1 other
+
+#name elements/contents: childNodes
+#code
+var el = document.querySelector('.text');
+console.log(el.childNodes.length, el.childNodes[0].nodeType, el.childNodes[1].nodeName, el.childNodes[2].data);
+#expect
+3 3 B  text
+
+#name elements/create_elements: template content
+#code
+function generateElements(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html.trim();
+  return template.content.children;
+}
+var made = generateElements(' <div>Hello World!</div><p>two</p> ');
+console.log(made.length, made[0].tagName, made[0].textContent, made[1].parentNode.nodeType);
+#expect
+2 DIV Hello World! 11
+
+#name elements/each: querySelectorAll forEach
+#code
+var out = [];
+document.querySelectorAll('.item').forEach((el, i) => { out.push(i + ':' + el.tagName); });
+console.log(out.join(' '));
+#expect
+0:LI 1:LI 2:LI 3:SPAN
+
+#name elements/empty: replaceChildren()
+#code
+var el = document.getElementById('list');
+var first = el.firstChild;
+el.replaceChildren();
+console.log(el.childNodes.length, JSON.stringify(el.innerHTML), first.parentNode);
+#expect
+0 "" null
+
+#name elements/filter
+#code
+var odd = [...document.querySelectorAll('li')].filter((el, i) => i % 2 === 0);
+console.log(odd.map((el) => el.textContent).join(','));
+#expect
+One,Three
+
+#name elements/find_children: :scope
+#code
+var el = document.getElementById('main');
+console.log(el.querySelectorAll(':scope > p').length, el.querySelectorAll(':scope li').length, el.querySelectorAll(':scope > li').length);
+#expect
+1 3 0
+
+#name elements/find_elements: descendant selector
+#code
+console.log(document.querySelectorAll('#main .item').length, document.querySelectorAll('.box #list li.last').length, document.querySelectorAll('.my #awesome selector').length);
+#expect
+3 1 0
+
+#name elements/find_selector: querySelector as a test
+#code
+var el = document.getElementById('main');
+console.log(!!el.querySelector('b'), !!el.querySelector('span'), !!el.querySelector('.item.last'));
+#expect
+true false true
+
+#name elements/first
+#code
+console.log(document.querySelector('.item').textContent, document.querySelector('li.none'));
+#expect
+One null
+
+#name elements/get_attributes
+#code
+var el = document.querySelector('.last');
+console.log(el.getAttribute('tabindex'), typeof el.getAttribute('tabindex'), el.getAttribute('missing'), el.tabIndex);
+#expect
+3 string null 3
+
+#name elements/get_height: a detached element has no box
+#code
+var el = document.createElement('div');
+var r = el.getBoundingClientRect();
+console.log(r.height, r.width, typeof r.top);
+#expect
+0 0 number
+
+#name elements/get_html
+#code
+console.log(document.querySelector('.text').innerHTML);
+console.log(document.getElementById('other').innerHTML);
+#expect
+Some <b>bold</b> text
+<span class="item">Span</span>
+
+#name elements/get_outer_html
+#code
+console.log(document.querySelector('.text').outerHTML);
+console.log(document.querySelector('.last').outerHTML);
+#expect
+<p class="text">Some <b>bold</b> text</p>
+<li class="item last" tabindex="3">Three</li>
+
+#name elements/get_style: getComputedStyle
+#code
+var el = document.querySelector('.title');
+el.classList.add('hide');
+console.log(getComputedStyle(el)['display'], getComputedStyle(document.getElementById('main')).display, getComputedStyle(document.querySelector('b')).display);
+#expect
+none block inline
+
+#name elements/get_text
+#code
+console.log(document.querySelector('.text').textContent, '|', document.getElementById('list').textContent);
+#expect
+Some bold text | OneTwoThree
+
+#name elements/has_class
+#code
+var el = document.getElementById('main');
+console.log(el.classList.contains('box'), el.classList.contains('bo'), el.classList.contains('wide'));
+#expect
+true false true
+
+#name elements/index
+#code
+var el = document.querySelector('.last');
+console.log([...el.parentNode.children].indexOf(el), Array.prototype.indexOf.call(el.parentNode.children, el));
+#expect
+2 2
+
+#name elements/inner_height: a number is not a length
+#code
+function innerHeight(el, value) {
+  if (value === undefined) {
+    return el.clientHeight;
+  } else {
+    el.style.height = value;
+  }
+}
+var el = document.createElement('div');
+innerHeight(el, 150);
+console.log(JSON.stringify(el.style.height));
+innerHeight(el, '150px');
+console.log(el.style.height, el.getAttribute('style'));
+#expect
+""
+150px height: 150px;
+
+#name elements/is_hidden: a detached element
+#code
+function isHidden(el) {
+  return !(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+console.log(isHidden(document.createElement('div')));
+#expect
+true
+
+#name elements/last
+#code
+console.log([...document.querySelectorAll('.item')].at(-1).textContent);
+#expect
+Span
+
+#name elements/matches: identity
+#code
+var el = document.querySelector('.first');
+var otherEl = document.getElementById('list').firstChild;
+console.log(el === otherEl, el === document.querySelector('.last'), document.body === document.body);
+#expect
+true false true
+
+#name elements/matches_selector
+#code
+var el = document.querySelector('.last');
+console.log(el.matches('.item'), el.matches('ul > .last'), el.matches('div .item:last-child'), el.matches('.first'), el.matches('li[tabindex="3"]'));
+#expect
+true true true false true
+
+#name elements/next
+#code
+function next(el, selector) {
+  const nextEl = el.nextElementSibling;
+  if (!selector || (nextEl && nextEl.matches(selector))) {
+    return nextEl;
+  }
+  return null;
+}
+var el = document.querySelector('.first');
+console.log(next(el).textContent, next(el, '.last'), next(el, '.item').textContent, next(document.querySelector('.last')));
+#expect
+Two null Two null
+
+#name elements/offset_parent: detached
+#code
+var el = document.createElement('div');
+console.log((el.offsetParent || el) === el);
+#expect
+true
+
+#name elements/parent
+#code
+var el = document.querySelector('.first');
+console.log(el.parentNode.id, el.parentNode.parentNode.id, document.documentElement.parentNode === document, document.parentNode);
+#expect
+list main true null
+
+#name elements/parents
+#code
+function parents(el, selector) {
+  const parents = [];
+  while ((el = el.parentNode) && el !== document) {
+    if (!selector || el.matches(selector)) parents.push(el);
+  }
+  return parents;
+}
+var el = document.querySelector('b');
+console.log(parents(el).map((p) => p.tagName).join(' '), parents(el, 'div').length, parents(el, '.text')[0].tagName);
+#expect
+P DIV BODY HTML 1 P
+
+#name elements/prepend
+#code
+var parent = document.getElementById('list');
+var el = document.createElement('li');
+parent.prepend(el, 'x');
+console.log(parent.firstChild === el, parent.childNodes[1].nodeValue, parent.children.length);
+#expect
+true x 4
+
+#name elements/prev
+#code
+function prev(el, selector) {
+  const prevEl = el.previousElementSibling;
+  if (!selector || (prevEl && prevEl.matches(selector))) {
+    return prevEl;
+  }
+  return null;
+}
+var el = document.querySelector('.last');
+console.log(prev(el).textContent, prev(el, '.first'), prev(document.querySelector('.first')));
+#expect
+Two null null
+
+#name elements/remove
+#code
+var el = document.querySelector('.title');
+el.remove();
+console.log(el.parentNode, document.querySelector('.title'), el.isConnected);
+for (const el of document.querySelectorAll('.item')) {
+  el.remove();
+}
+console.log(document.querySelectorAll('.item').length, document.getElementById('list').children.length);
+#expect
+null null false
+0 0
+
+#name elements/remove_attributes
+#code
+var el = document.querySelector('.last');
+el.removeAttribute('tabindex');
+el.removeAttribute('never-there');
+console.log(el.hasAttribute('tabindex'), el.getAttribute('tabindex'), el.attributes.length);
+#expect
+false null 1
+
+#name elements/remove_class
+#code
+var el = document.getElementById('main');
+el.classList.remove('box');
+el.classList.remove('absent');
+console.log(el.className, el.classList.length);
+el.classList.remove('wide');
+console.log(JSON.stringify(el.className), el.hasAttribute('class'));
+#expect
+wide 1
+"" true
+
+#name elements/replace_from_html: outerHTML =
+#code
+var el = document.querySelector('.title');
+var parent = el.parentNode;
+el.outerHTML = '<h2 id="new">New</h2><hr>';
+console.log(el.parentNode, document.getElementById('new').textContent, document.getElementById('new').nextSibling.tagName, parent.querySelector('h1'));
+#expect
+null New HR null
+
+#name elements/scroll_top: read
+#code
+function scrollTop(el, value) {
+  var win;
+  if (el.window === el) {
+    win = el;
+  } else if (el.nodeType === 9) {
+    win = el.defaultView;
+  }
+  if (value === undefined) {
+    return win ? win.pageYOffset : el.scrollTop;
+  }
+}
+console.log(scrollTop(window), scrollTop(document), scrollTop(document.body));
+#expect
+0 0 0
+
+#name elements/serialize: FormData to a query string
+#code
+var formElement = document.getElementById('form');
+console.log(new URLSearchParams(new FormData(formElement)).toString());
+#expect
+user=ann&ok=yes&pick=b&many=x&many=z
+
+#name elements/set_attributes
+#code
+var el = document.querySelector('.first');
+el.setAttribute('tabindex', 3);
+console.log(el.getAttribute('tabindex'), typeof el.getAttribute('tabindex'), el.tabIndex, el.outerHTML);
+#expect
+3 string 3 <li class="item first" tabindex="3">One</li>
+
+#name elements/set_height
+#code
+function setHeight(el, val) {
+  if (typeof val === 'function') val = val();
+  if (typeof val === 'string') el.style.height = val;
+  else el.style.height = val + 'px';
+}
+var el = document.querySelector('.title');
+setHeight(el, 20); console.log(el.style.height);
+setHeight(el, '3em'); console.log(el.style.height);
+setHeight(el, function () { return 7; }); console.log(el.style.height, el.getAttribute('style'));
+#expect
+20px
+3em
+7px height: 7px;
+
+#name elements/set_html
+#code
+var el = document.getElementById('other');
+el.innerHTML = '<p>one</p>two<!--c--><br>';
+console.log(el.childNodes.length, el.firstChild.tagName, el.childNodes[1].data, el.childNodes[2].nodeType, el.innerHTML);
+#expect
+4 P two 8 <p>one</p>two<!--c--><br>
+
+#name elements/set_style
+#code
+var el = document.querySelector('.title');
+el.style.borderWidth = '20px';
+console.log(el.style.borderWidth, el.style.getPropertyValue('border-width'), el.style.cssText);
+#expect
+20px 20px border-width: 20px;
+
+#name elements/set_text
+#code
+var el = document.querySelector('.text');
+el.textContent = 'a < b & c';
+console.log(el.childNodes.length, el.firstChild.nodeType, el.textContent, el.innerHTML);
+#expect
+1 3 a < b & c a &lt; b &amp; c
+
+#name elements/siblings
+#code
+var el = document.querySelector('.first');
+var sibs = [...el.parentNode.children].filter((child) => child !== el);
+console.log(sibs.length, sibs.map((s) => s.textContent).join(','));
+#expect
+2 Two,Three
+
+#name elements/toggle_class
+#code
+var el = document.querySelector('.title');
+console.log(el.classList.toggle('on'), el.className);
+console.log(el.classList.toggle('on'), el.className);
+console.log(el.classList.toggle('on', true), el.classList.toggle('on', true), el.classList.toggle('off', false), el.className);
+#expect
+true title on
+false title
+true true false title on
+
+#name elements/unwrap: replaceWith(...childNodes)
+#code
+var el = document.querySelector('.text');
+var parent = el.parentNode;
+el.replaceWith(...el.childNodes);
+console.log(el.parentNode, el.childNodes.length, parent.querySelector('b').parentNode === parent, parent.querySelector('.text'));
+#expect
+null 0 true null
+
+#name elements/val: single and multiple select
+#code
+function val(el) {
+  if (el.options && el.multiple) {
+    return [...el.options]
+      .filter((option) => option.selected)
+      .map((option) => option.value);
+  } else {
+    return el.value;
+  }
+}
+var form = document.getElementById('form');
+console.log(val(form.elements.user), val(form.elements.pick), val(form.elements.many).join('+'));
+#expect
+ann b x+z
+
+#name elements/wrap
+#code
+function wrap(el) {
+  const wrappingElement = document.createElement('div');
+  el.replaceWith(wrappingElement);
+  wrappingElement.appendChild(el);
+}
+var el = document.querySelector('.title');
+wrap(el);
+console.log(el.parentNode.tagName, el.parentNode.parentNode.id, document.getElementById('main').firstElementChild.tagName);
+#expect
+DIV main DIV
+
+#name events/click
+#code
+var el = document.querySelector('.title');
+var n = 0;
+el.addEventListener('click', () => { n++; });
+el.click();
+el.click();
+console.log(n);
+#expect
+2
+
+#name events/delegate
+#code
+var out = [];
+document.addEventListener('click', (event) => {
+  if (event.target.closest('#list')) {
+    out.push(event.target.textContent + '@' + event.currentTarget.nodeType);
+  }
+});
+document.querySelector('.last').click();
+document.querySelector('.title').click();
+document.querySelector('.first').click();
+console.log(out.join(' '));
+#expect
+Three@9 One@9
+
+#name events/off: removeEventListener
+#code
+var el = document.querySelector('.title');
+var n = 0;
+function eventHandler() { n++; }
+el.addEventListener('click', eventHandler);
+el.click();
+el.removeEventListener('click', eventHandler);
+el.click();
+console.log(n);
+#expect
+1
+
+#name events/on: direct and delegated
+#code
+function addEventListener(el, eventName, eventHandler, selector) {
+  if (selector) {
+    const wrappedHandler = (e) => {
+      if (!e.target) return;
+      const el = e.target.closest(selector);
+      if (el) {
+        eventHandler.call(el, e);
+      }
+    };
+    el.addEventListener(eventName, wrappedHandler);
+    return wrappedHandler;
+  } else {
+    const wrappedHandler = (e) => {
+      eventHandler.call(el, e);
+    };
+    el.addEventListener(eventName, wrappedHandler);
+    return wrappedHandler;
+  }
+}
+var out = [];
+var main = document.getElementById('main');
+addEventListener(main, 'click', function (e) { out.push('direct:' + this.id + ':' + e.target.tagName); });
+addEventListener(main, 'click', function (e) { out.push('delegated:' + this.tagName); }, 'li');
+document.querySelector('.first').click();
+document.querySelector('b').click();
+console.log(out.join(' '));
+#expect
+direct:main:LI delegated:LI direct:main:B
+
+#name events/ready
+#code
+function ready(fn) {
+  if (document.readyState !== 'loading') {
+    fn();
+  } else {
+    document.addEventListener('DOMContentLoaded', fn);
+  }
+}
+ready(function () { console.log('ready', document.readyState !== 'loading', document.body !== null); });
+#expect
+ready true true
+
+#name events/trigger_custom: CustomEvent
+#code
+var el = document.querySelector('.title');
+el.addEventListener('my-event', (e) => { console.log(e.type, e.detail.some, e.bubbles, e instanceof CustomEvent, e.target === el); });
+const event = new CustomEvent('my-event', {detail: {some: 'data'}});
+console.log(el.dispatchEvent(event));
+#expect
+my-event data false true true
+true
+
+#name events/trigger_native
+#code
+function trigger(el, eventType) {
+  if (typeof eventType === 'string' && typeof el[eventType] === 'function') {
+    el[eventType]();
+  } else {
+    const event =
+      typeof eventType === 'string'
+        ? new Event(eventType, {bubbles: true})
+        : eventType;
+    el.dispatchEvent(event);
+  }
+}
+var out = [];
+var el = document.querySelector('input[name=user]');
+el.addEventListener('focus', (e) => out.push('focus:' + (document.activeElement === el)));
+el.addEventListener('change', (e) => out.push('change:' + e.bubbles));
+el.addEventListener('pointerover', (e) => out.push(e.type + ':' + (e instanceof PointerEvent)));
+trigger(el, 'focus');
+trigger(el, 'change');
+trigger(el, new PointerEvent('pointerover'));
+console.log(out.join(' '));
+#expect
+focus:true change:true pointerover:true
+
+#name utils/parse_html: createHTMLDocument
+#code
+function parseHTML(str) {
+  const tmp = document.implementation.createHTMLDocument('');
+  tmp.body.innerHTML = str;
+  return [...tmp.body.childNodes];
+}
+var nodes = parseHTML('<p>a</p>text<span>b</span>');
+console.log(nodes.length, nodes[0].tagName, nodes[1].nodeType, nodes[2].ownerDocument !== document, nodes[0].ownerDocument.defaultView);
+#expect
+3 P 3 true null
+
+#name utils/to_array
+#code
+const array = [...document.querySelectorAll('.item')];
+console.log(Array.isArray(array), array.length, array[3].tagName, Array.from(document.querySelectorAll('li')).length);
+#expect
+true 4 SPAN 3

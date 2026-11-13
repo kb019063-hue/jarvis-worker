@@ -3546,6 +3546,77 @@ TEST(computed_style_answers_for_every_property) {
     assert(js.eval("summed").to_string() == "2px");
 }
 
+TEST(ranges_follow_the_tree) {
+    using namespace litebird;
+    // A Range kept its two points where they were put, whatever happened to
+    // the tree afterwards, and surroundContents() inside one text node put
+    // the wrapper after the text. Ranges are live now (DomLive.hpp); eight
+    // cases of the DOM corpus hold the rules (tests/dom-conformance/
+    // ranges.dat). Here: the two answers jsdom gets wrong, and trees and
+    // numbers of ranges no person writes.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><p id=p></p><div id=d><span>one</span><span>two</span></div></body>");
+    js.notify_document_loaded();
+
+    // normalize(): a boundary in a text node that is merged away moves into
+    // the node it was merged into, at the same character (jsdom leaves it on
+    // the parent).
+    js.eval(R"JS(
+        var p = document.getElementById('p');
+        p.append('ab', '', 'cd', document.createElement('i'), 'ef', 'gh');
+        var r = document.createRange();
+        r.setStart(p.childNodes[2], 1); r.setEnd(p.childNodes[5], 1);
+        p.normalize();
+        var merged = [p.childNodes.length, r.startContainer.data, r.startOffset, r.endContainer.data, r.endOffset, r.toString()].join(' ');
+    )JS");
+    assert(js.eval("merged").to_string() == "3 abcd 3 efgh 3 defg");
+
+    // containsNode(node, true): a node before the selection is not partly
+    // inside it (jsdom: true for anything that ends before the selection does).
+    js.eval(R"JS(
+        var sel = getSelection();
+        sel.selectAllChildren(document.getElementById('d'));
+        var partly = [sel.containsNode(p, true), sel.containsNode(document.getElementById('d'), true),
+                      sel.containsNode(document.getElementById('d').firstChild.firstChild, true),
+                      sel.containsNode(document.body, true), sel.containsNode(document.body, false)].join(' ');
+        sel.removeAllRanges();
+    )JS");
+    assert(js.eval("partly").to_string() == "false true true true false");
+
+    // A boundary 50,000 levels down, and its whole tree removed from the
+    // top: found by walking up, in a loop.
+    js.eval(R"JS(
+        var top = document.createElement('div'), at = top;
+        for (var i = 0; i < 50000; i++) { var next = document.createElement('div'); at.appendChild(next); at = next; }
+        at.textContent = 'bottom';
+        document.body.appendChild(top);
+        var deep = document.createRange();
+        deep.setStart(at.firstChild, 2); deep.setEnd(at.firstChild, 4);
+        var before = deep.toString();
+        top.remove();
+        var after = [deep.startContainer === document.body, deep.startOffset, deep.collapsed].join(' ');
+    )JS");
+    assert(js.eval("before").to_string() == "tt");
+    assert(js.eval("after").to_string() == "true 2 true");
+
+    // A hundred thousand ranges nobody keeps do not stay on the list: the
+    // collector frees them and the list is cleared out as it grows. The
+    // changes to the tree that follow would take minutes otherwise.
+    js.eval(R"JS(
+        var kept = document.createRange(); kept.selectNodeContents(document.getElementById('d'));
+        for (var i = 0; i < 100000; i++) { var gone = document.createRange(); gone.selectNode(p); }
+        gone = null;
+        gc();
+        var d = document.getElementById('d');
+        for (var i = 0; i < 20000; i++) d.appendChild(document.createElement('b'));
+        for (var i = 0; i < 20000; i++) d.removeChild(d.lastChild);
+        var still = [kept.startOffset, kept.endOffset, kept.toString()].join(' ');
+    )JS");
+    assert(js.eval("still").to_string() == "0 2 onetwo");
+}
+
 TEST(dom_follows_the_standard_where_jsdom_does_not) {
     using namespace litebird;
     // The DOM corpus records what jsdom prints. In these five places jsdom
@@ -7090,6 +7161,7 @@ int main() {
     RUN_TEST(get_element_by_id_answers_from_an_index);
     RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(computed_style_answers_for_every_property);
+    RUN_TEST(ranges_follow_the_tree);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

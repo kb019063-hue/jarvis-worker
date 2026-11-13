@@ -2,7 +2,10 @@
 // NodeIterator, Range and Selection.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomLive.hpp"
 #include "litebird/dom/TreeWalk.hpp"
+
+#include <algorithm>
 
 namespace litebird {
 namespace dom {
@@ -350,11 +353,34 @@ RangeState& this_range() {
     return this_state<RangeState>("Range");
 }
 
+// The ranges and iterators of a realm that script can still reach; see
+// DomLive.hpp. Weak, so that a range lives as long as script holds it and no
+// longer; what the collector has freed is cleared out as the lists grow.
+struct LivePart : RealmPart {
+    std::vector<std::weak_ptr<RangeState>> ranges;
+    std::vector<std::weak_ptr<TraversalState>> iterators;
+    std::size_t tidy_at{32};
+
+    template <typename T> static void tidy(std::vector<std::weak_ptr<T>>& list) {
+        list.erase(std::remove_if(list.begin(), list.end(), [](const std::weak_ptr<T>& entry) { return entry.expired(); }),
+                   list.end());
+    }
+    void before_adding() {
+        if (ranges.size() + iterators.size() < tidy_at) return;
+        tidy(ranges);
+        tidy(iterators);
+        tidy_at = std::max<std::size_t>(32, (ranges.size() + iterators.size()) * 2);
+    }
+};
+
 JsValue new_range(Realm& realm, const Boundary& start, const Boundary& end, const JsValue* derived = nullptr) {
     auto state = std::make_shared<RangeState>();
     state->realm = &realm;
     state->start = start;
     state->end = end;
+    LivePart& live = realm.part<LivePart>();
+    live.before_adding();
+    live.ranges.push_back(state);
     return realm.make("Range", state, derived);
 }
 
@@ -412,7 +438,8 @@ std::shared_ptr<Node> process_contents(Realm& r, Boundary start, Boundary end, C
         if (change) {
             std::u16string rest = data;
             rest.erase(from, to - from);
-            set_character_data(*node, js_utf16_to_utf8(rest));
+            live_note_data_replaced(*node, from, to - from, 0);
+            store_character_data(*node, js_utf16_to_utf8(rest));
         }
     };
 
@@ -522,6 +549,36 @@ JsValue construct_range(Realm& realm, const InterfaceDef&, Args, const JsValue* 
     return new_range(realm, {document, 0}, {document, 0}, derived);
 }
 
+// A point a script names must exist: comparePoint() and isPointInRange().
+void check_point(Realm& r, const Boundary& point) {
+    if (point.node->is_document_type()) throw_dom(r, "InvalidNodeTypeError", "The node provided is a doctype.");
+    if (point.offset > node_length(*point.node)) {
+        throw_dom(r, "IndexSizeError", "The offset " + std::to_string(point.offset) + " is larger than the node's length (" +
+                                       std::to_string(node_length(*point.node)) + ").");
+    }
+}
+
+// Range.insertNode(): `node` goes in at the start of the range. A range that
+// starts inside text splits the text there.
+void insert_into_range(Realm& r, RangeState& state, const std::shared_ptr<Node>& node) {
+    const std::shared_ptr<Node> start = state.start.node;
+    if (start->is_comment() || (start->is_text() && !start->parent()) || start == node) {
+        throw_dom(r, "HierarchyRequestError", "The node cannot be inserted at the start of this range.");
+    }
+    std::shared_ptr<Node> reference;
+    if (start->is_text()) reference = start;
+    else if (state.start.offset < start->children().size()) reference = start->children()[state.start.offset];
+    const std::shared_ptr<Node> parent = reference ? reference->parent() : start;
+    ensure_pre_insert_validity(r, *parent, *node, reference.get());
+    if (start->is_text()) reference = split_text_node(r, *start, state.start.offset);
+    if (node == reference) reference = reference->next_sibling();
+    if (node->parent()) remove_node(r, *node);
+    std::size_t offset = reference ? reference->index_in(*parent) : node_length(*parent);
+    offset += node->is_document_fragment() ? node_length(*node) : 1;
+    pre_insert(r, *parent, node, reference.get());
+    if (state.collapsed()) state.end = {parent, offset};
+}
+
 void setup_range(Iface& I) {
     I.constant("START_TO_START", 0);
     I.constant("START_TO_END", 1);
@@ -603,16 +660,18 @@ void setup_range(Iface& I) {
         auto node = range_node_argument(args, 0, "Range.comparePoint");
         if (root_of(node) != root_of(state.start.node)) throw_dom(r, "WrongDocumentError", "The node is in a different tree.");
         const Boundary point{node, to_ulong(args[1])};
+        check_point(r, point);
         if (compare_points(point, state.start) < 0) return num(-1);
         if (compare_points(point, state.end) > 0) return num(1);
         return num(0);
     });
-    I.method("isPointInRange", 2, [](Realm&, Args args) {
+    I.method("isPointInRange", 2, [](Realm& r, Args args) {
         require_args(args, 2, "Range.isPointInRange");
         RangeState& state = this_range();
         auto node = range_node_argument(args, 0, "Range.isPointInRange");
         if (root_of(node) != root_of(state.start.node)) return boolean(false);
         const Boundary point{node, to_ulong(args[1])};
+        check_point(r, point);
         return boolean(compare_points(point, state.start) >= 0 && compare_points(point, state.end) <= 0);
     });
     I.method("intersectsNode", 1, [](Realm&, Args args) {
@@ -655,53 +714,32 @@ void setup_range(Iface& I) {
     I.method("insertNode", 1, [](Realm& r, Args args) {
         require_args(args, 1, "Range.insertNode");
         RangeState& state = this_range();
-        auto node = range_node_argument(args, 0, "Range.insertNode");
-        std::shared_ptr<Node> start = state.start.node;
-        if (start->is_comment() || (start->is_text() && !start->parent()) || start == node) {
-            throw_dom(r, "HierarchyRequestError", "The node cannot be inserted at the start of this range.");
-        }
-        std::shared_ptr<Node> reference;
-        std::shared_ptr<Node> parent;
-        if (start->is_text()) {
-            // Split the text at the range's start; the new node goes between the halves.
-            const std::u16string data = units_of(*start);
-            const std::size_t offset = std::min(state.start.offset, data.size());
-            auto tail = std::make_shared<Text>(js_utf16_to_utf8(std::u16string_view(data).substr(offset)));
-            if (auto document = document_of(r, *start)) tail->set_owner_document(document);
-            parent = start->parent();
-            auto next = start->next_sibling();
-            if (next) parent->insert_before(tail, next);
-            else parent->append_child(tail);
-            set_character_data(*start, js_utf16_to_utf8(std::u16string_view(data).substr(0, offset)));
-            reference = tail;
-        } else {
-            parent = start;
-            reference = state.start.offset < start->children().size() ? start->children()[state.start.offset] : nullptr;
-        }
-        const bool was_collapsed = state.collapsed();
-        pre_insert(r, *parent, node, reference.get());
-        if (was_collapsed) {
-            state.end = {parent, reference ? reference->index_in(*parent) : parent->children().size()};
-        }
+        insert_into_range(r, state, range_node_argument(args, 0, "Range.insertNode"));
         return undefined();
     });
     I.method("surroundContents", 1, [](Realm& r, Args args) {
         require_args(args, 1, "Range.surroundContents");
         RangeState& state = this_range();
         auto parent = range_node_argument(args, 0, "Range.surroundContents");
-        Boundary after = state.start;
-        auto fragment = process_contents(r, state.start, state.end, ContentsMode::Extract, &after);
+        // A node the range cuts through cannot be moved into the new parent
+        // in one piece, unless it is text, which is split.
+        const Boundary start = state.start, end = state.end;
+        std::shared_ptr<Node> common = start.node;
+        while (common && !is_inclusive_ancestor(*common, *end.node)) common = common->parent();
+        for (const Boundary* side : {&start, &end}) {
+            for (std::shared_ptr<Node> at = side->node; at && at != common; at = at->parent()) {
+                if (!at->is_text()) throw_dom(r, "InvalidStateError", "The Range has partially selected a non-Text node.");
+            }
+        }
+        if (parent->is_document() || parent->is_document_type() || parent->is_document_fragment()) {
+            throw_dom(r, "InvalidNodeTypeError", "The node provided cannot be the parent of what a range holds.");
+        }
+        Boundary after = start;
+        auto fragment = process_contents(r, start, end, ContentsMode::Extract, &after);
         state.start = state.end = after;
         replace_all_children(r, *parent, {});
-        std::shared_ptr<Node> container = after.node;
-        std::shared_ptr<Node> reference = !is_character_data(*container) && after.offset < container->children().size()
-            ? container->children()[after.offset] : nullptr;
-        if (is_character_data(*container)) {
-            reference = container->next_sibling();
-            container = container->parent();
-        }
-        if (container) pre_insert(r, *container, parent, reference.get());
-        parent->append_child(fragment);
+        insert_into_range(r, state, parent);
+        pre_insert(r, *parent, fragment, nullptr);
         if (auto holder = parent->parent()) {
             const std::size_t index = parent->index_in(*holder);
             state.start = {holder, index};
@@ -850,7 +888,13 @@ void setup_selection(Iface& I) {
         require_args(args, 1, "Selection.containsNode");
         RangeState* range = this_selection().state();
         if (!range) return boolean(false);
-        return boolean(contained(*range, range_node_argument(args, 0, "Selection.containsNode")));
+        auto node = range_node_argument(args, 0, "Selection.containsNode");
+        if (root_of(node) != root_of(range->start.node)) return boolean(false);
+        if (!to_bool(js_arg(args, 1))) return boolean(contained(*range, node));
+        // Partly inside: the selection starts before the node ends and ends
+        // after it starts.
+        return boolean(compare_points(range->start, {node, node_length(*node)}) <= 0 &&
+                       compare_points(range->end, {node, 0}) >= 0);
     });
     I.method("deleteFromDocument", 0, [](Realm& r, Args) {
         if (RangeState* range = this_selection().state()) {
@@ -888,7 +932,187 @@ JsValue create_traversal(Realm& realm, bool iterator, const std::shared_ptr<Node
     state->current = root;
     state->reference = root;
     state->is_iterator = iterator;
+    if (iterator) {
+        LivePart& live = realm.part<LivePart>();
+        live.before_adding();
+        live.iterators.push_back(state);
+    }
     return realm.make(iterator ? "NodeIterator" : "TreeWalker", state);
+}
+
+// ---------------------------------------------------------------------------
+// Following the tree (DomLive.hpp)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LivePart* live_part_for(const Node& node) {
+    Realm* realm = realm_if_any(node);
+    if (!realm || !realm->alive) return nullptr;
+    LivePart* live = realm->find_part<LivePart>();
+    return live && !(live->ranges.empty() && live->iterators.empty()) ? live : nullptr;
+}
+
+// Every boundary of every range that is still alive. Ranges the collector
+// has freed since the last time are dropped from the list here, so that a
+// page that made a hundred thousand of them pays for that once and not at
+// every change to the tree afterwards.
+template <typename Fn> void each_boundary(LivePart& live, Fn&& fn) {
+    bool freed = false;
+    for (const auto& entry : live.ranges) {
+        if (auto range = entry.lock()) {
+            fn(range->start);
+            fn(range->end);
+        } else {
+            freed = true;
+        }
+    }
+    if (freed) LivePart::tidy(live.ranges);
+}
+
+// The top of the tree `node` is in. After a removal that is the removed node
+// for everything that was under it, which is how "was this inside what went
+// away" is asked with one walk up and no walk down.
+const Node* top_of(const Node& node) {
+    const Node* top = &node;
+    std::shared_ptr<Node> hold;
+    while (auto parent = top->parent()) {
+        hold = parent;
+        top = hold.get();
+    }
+    return top;
+}
+
+bool one_of(const NodeVector& nodes, const Node* node) {
+    for (const auto& candidate : nodes) {
+        if (candidate.get() == node) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+void live_note_children_changed(Node& parent, const NodeVector& added, const NodeVector& removed,
+                                const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next) {
+    LivePart* live = live_part_for(parent);
+    if (!live) return;
+    const std::shared_ptr<Node> self = parent.shared_from_this();
+    // The index where it happened. Found only when something asks: it is a
+    // search among the siblings, and most changes concern no range at all.
+    std::size_t index = 0;
+    bool have_index = false;
+    auto where = [&]() {
+        if (!have_index) index = previous ? previous->index_in(parent) + 1 : 0;
+        have_index = true;
+        return index;
+    };
+
+    if (!removed.empty()) {
+        each_boundary(*live, [&](Boundary& boundary) {
+            if (boundary.node.get() == &parent) {
+                // A step back for each child removed before it, and never
+                // further back than where they were.
+                if (boundary.offset > 0 && boundary.offset > where()) {
+                    const std::size_t stepped = boundary.offset > removed.size() ? boundary.offset - removed.size() : 0;
+                    boundary.offset = std::max(where(), stepped);
+                }
+            } else if (one_of(removed, top_of(*boundary.node))) {
+                boundary = Boundary{self, where()};
+            }
+        });
+        bool freed = false;
+        for (const auto& entry : live->iterators) {
+            auto iterator = entry.lock();
+            if (!iterator) freed = true;
+            if (!iterator || !iterator->reference || !iterator->root) continue;
+            if (!one_of(removed, top_of(*iterator->reference))) continue;
+            // Only what was removed from inside the iterator's root concerns it.
+            if (!is_inclusive_ancestor(*iterator->root, parent)) continue;
+            if (iterator->before_reference) {
+                // On to the first node after what was removed, if the root has one.
+                std::shared_ptr<Node> following = next;
+                for (std::shared_ptr<Node> at = self; !following && at && at != iterator->root; at = at->parent()) {
+                    following = at->next_sibling();
+                }
+                if (following) {
+                    iterator->reference = following;
+                    continue;
+                }
+                iterator->before_reference = false;
+            }
+            // Back to the last node before it.
+            std::shared_ptr<Node> last = previous;
+            while (last && !last->children().empty()) last = last->children().back();
+            iterator->reference = last ? last : self;
+        }
+        if (freed) LivePart::tidy(live->iterators);
+    }
+    if (!added.empty()) {
+        each_boundary(*live, [&](Boundary& boundary) {
+            if (boundary.node.get() == &parent && boundary.offset > 0 && boundary.offset > where()) {
+                boundary.offset += added.size();
+            }
+        });
+    }
+}
+
+void live_note_data_replaced(Node& node, std::size_t offset, std::size_t count, std::size_t added) {
+    LivePart* live = live_part_for(node);
+    if (!live) return;
+    each_boundary(*live, [&](Boundary& boundary) {
+        if (boundary.node.get() != &node || boundary.offset <= offset) return;
+        // Inside what is replaced: to its start. After it: moved by the difference.
+        if (boundary.offset <= offset + count) boundary.offset = offset;
+        else boundary.offset = boundary.offset - count + added;
+    });
+}
+
+void live_note_data_set(Node& node) {
+    LivePart* live = live_part_for(node);
+    if (!live) return;
+    each_boundary(*live, [&](Boundary& boundary) {
+        if (boundary.node.get() == &node) boundary.offset = 0;
+    });
+}
+
+void live_note_text_split(Node& node, std::size_t offset, const std::shared_ptr<Node>& tail) {
+    LivePart* live = live_part_for(node);
+    if (!live) return;
+    const std::shared_ptr<Node> parent = node.parent();
+    std::size_t after = 0;
+    bool have_after = false;
+    each_boundary(*live, [&](Boundary& boundary) {
+        if (boundary.node.get() == &node) {
+            if (boundary.offset > offset) {
+                boundary.node = tail;
+                boundary.offset -= offset;
+            }
+        } else if (parent && boundary.node == parent) {
+            // Just after the node that was split is now after both halves.
+            // (Inserting the second half moved the boundaries further on.)
+            if (!have_after) after = node.index_in(*parent) + 1;
+            have_after = true;
+            if (boundary.offset == after) ++boundary.offset;
+        }
+    });
+}
+
+void live_note_text_merged(Node& gone, const std::shared_ptr<Node>& into, std::size_t length) {
+    LivePart* live = live_part_for(gone);
+    if (!live) return;
+    const std::shared_ptr<Node> parent = gone.parent();
+    std::size_t index = 0;
+    bool have_index = false;
+    each_boundary(*live, [&](Boundary& boundary) {
+        if (boundary.node.get() == &gone) {
+            boundary.node = into;
+            boundary.offset += length;
+        } else if (parent && boundary.node == parent) {
+            if (!have_index) index = gone.index_in(*parent);
+            have_index = true;
+            if (boundary.offset == index) boundary = Boundary{into, length};
+        }
+    });
 }
 
 void register_traversal_interfaces() {

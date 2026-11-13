@@ -3,6 +3,7 @@
 // DomBindings.hpp for the design.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomLive.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
 
 #include <cmath>
@@ -355,6 +356,7 @@ void hook_wrapper_needs_parent(Node& parent, const Node& child) {
 
 void hook_children_changed(Node& parent, const NodeVector& added, const NodeVector& removed,
                            const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next) {
+    live_note_children_changed(parent, added, removed, previous, next);
     note_children_changed(parent, added, removed, previous, next);
 }
 

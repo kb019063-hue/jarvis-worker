@@ -3,6 +3,7 @@
 // the tree operations with the checks the DOM standard puts in front of them.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomLive.hpp"
 #include "litebird/dom/FormState.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 
@@ -198,7 +199,9 @@ void normalize_subtree(Node& root) {
                 run = child;
                 continue;
             }
-            set_character_data(*run, character_data(*run) + data);
+            // Boundaries in the node that goes move into the one that stays.
+            live_note_text_merged(*child, run, utf16_length(character_data(*run)));
+            store_character_data(*run, character_data(*run) + data);
             parent->remove_child(child);
         }
     }
@@ -313,6 +316,11 @@ const std::string& character_data(const Node& node) {
 }
 
 void set_character_data(Node& node, const std::string& data) {
+    live_note_data_set(node);
+    store_character_data(node, data);
+}
+
+void store_character_data(Node& node, const std::string& data) {
     std::string old;
     if (node.is_text()) {
         auto& text = static_cast<Text&>(node);
@@ -917,9 +925,32 @@ void replace_data(Realm& realm, Node& node, std::size_t offset, std::size_t coun
                                            std::to_string(text.size()) + ").");
     }
     if (count > text.size() - offset) count = text.size() - offset;
-    text.replace(offset, count, units(data));
-    set_character_data(node, utf8(text));
+    const std::u16string replacement = units(data);
+    live_note_data_replaced(node, offset, count, replacement.size());
+    text.replace(offset, count, replacement);
+    store_character_data(node, utf8(text));
 }
+
+} // namespace
+
+std::shared_ptr<Node> split_text_node(Realm& realm, Node& node, std::size_t offset) {
+    const std::u16string data = units(character_data(node));
+    if (offset > data.size()) {
+        throw_dom(realm, "IndexSizeError", "The offset " + std::to_string(offset) + " is larger than the Text node's length.");
+    }
+    auto tail = std::make_shared<Text>(utf8(std::u16string_view(data).substr(offset)));
+    if (auto document = document_of(realm, node)) tail->set_owner_document(document);
+    if (auto parent = node.parent()) {
+        auto next = node.next_sibling();
+        if (next) parent->insert_before(tail, next);
+        else parent->append_child(tail);
+    }
+    live_note_text_split(node, offset, tail);
+    store_character_data(node, utf8(std::u16string_view(data).substr(0, offset)));
+    return tail;
+}
+
+namespace {
 
 void setup_character_data(Iface& I) {
     const auto cd = &is_character_data;
@@ -943,7 +974,8 @@ void setup_character_data(Iface& I) {
     });
     I.node_method(cd, "appendData", 1, [](Realm&, Node& self, Args args) {
         require_args(args, 1, "CharacterData.appendData");
-        set_character_data(self, character_data(self) + to_str(args[0]));
+        // Nothing a range points at moves when text is added at the end.
+        store_character_data(self, character_data(self) + to_str(args[0]));
         return undefined();
     });
     I.node_method(cd, "insertData", 2, [](Realm& r, Node& self, Args args) {
@@ -987,20 +1019,7 @@ void setup_text(Iface& I) {
     const auto text = &is_text_node;
     I.node_method(text, "splitText", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Text.splitText");
-        const std::u16string data = units(character_data(self));
-        const std::size_t offset = to_ulong(args[0]);
-        if (offset > data.size()) {
-            throw_dom(r, "IndexSizeError", "The offset " + std::to_string(offset) + " is larger than the Text node's length.");
-        }
-        auto tail = std::make_shared<Text>(utf8(std::u16string_view(data).substr(offset)));
-        if (auto document = document_of(r, self)) tail->set_owner_document(document);
-        if (auto parent = self.parent()) {
-            auto next = self.next_sibling();
-            if (next) parent->insert_before(tail, next);
-            else parent->append_child(tail);
-        }
-        set_character_data(self, utf8(std::u16string_view(data).substr(0, offset)));
-        return wrap(r, tail);
+        return wrap(r, split_text_node(r, self, to_ulong(args[0])));
     });
     I.node_getter(text, "wholeText", [](Realm&, Node& self) {
         std::shared_ptr<Node> first = self.shared_from_this();

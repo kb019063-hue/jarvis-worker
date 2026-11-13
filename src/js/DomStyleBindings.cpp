@@ -208,9 +208,28 @@ bool normalize_length(const std::string& text, std::string& out) {
         return true;
     }
     if (!is_length_unit(unit)) return false;
-    out = lower.substr(0, at) + unit;
-    if (!out.empty() && out[0] == '+') out.erase(0, 1);
+    // The number the way a number is written: 1.50px is 1.5px, .5em is
+    // 0.5em, 2e1px is 20px.
+    out = format_number(number) + unit;
     return true;
+}
+
+// A length that cannot be less than nothing. A calc() is taken on trust.
+bool is_negative_length(const std::string& normalized) {
+    std::size_t at = 0;
+    double number = 0;
+    return parse_css_number(normalized, at, number) && number < 0;
+}
+
+bool may_be_negative(const std::string& property) {
+    static const std::unordered_set<std::string> s_never = {
+        "width", "height", "min-width", "min-height", "max-width", "max-height", "block-size", "inline-size",
+        "padding-top", "padding-right", "padding-bottom", "padding-left", "font-size", "line-height", "flex-basis",
+        "row-gap", "column-gap", "outline-width", "border-top-width", "border-right-width", "border-bottom-width",
+        "border-left-width", "border-top-left-radius", "border-top-right-radius", "border-bottom-right-radius",
+        "border-bottom-left-radius", "column-width", "column-rule-width",
+    };
+    return s_never.count(property) == 0;
 }
 
 const std::unordered_set<std::string>& named_colors() {
@@ -430,7 +449,7 @@ bool normalize_border_width(const std::string& text, std::string& out) {
         out = lower;
         return true;
     }
-    return normalize_length(text, out) && out.back() != '%';
+    return normalize_length(text, out) && out.back() != '%' && !is_negative_length(out);
 }
 
 enum class ValueKind { Any, Length, LengthOrAuto, LengthOrNone, Color, BorderWidth, BorderStyle, Keyword, Number, Integer, FontSize, LineHeight };
@@ -536,15 +555,16 @@ bool normalize_value(const std::string& property, const std::string& text, std::
         case ValueKind::LengthOrAuto:
         case ValueKind::LengthOrNone:
         case ValueKind::FontSize:
-            return normalize_length(value, out);
+            return normalize_length(value, out) && (may_be_negative(property) || !is_negative_length(out));
         case ValueKind::LineHeight: {
             std::size_t at = 0;
             double number = 0;
             if (parse_css_number(lower, at, number) && at == lower.size()) {
-                out = lower;
+                if (number < 0) return false;
+                out = format_number(number);
                 return true;
             }
-            return normalize_length(value, out);
+            return normalize_length(value, out) && !is_negative_length(out);
         }
         case ValueKind::Color:
             return normalize_color(value, out);

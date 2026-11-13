@@ -389,9 +389,11 @@ bool is_focusable(const Element& element) {
     return element.has_attribute("tabindex");
 }
 
-void focus_element(Realm& realm, Element* element) {
+void focus_element(Realm& realm, Element* element, const std::shared_ptr<Document>& blur_in) {
     if (element && !is_focusable(*element)) return;
-    std::shared_ptr<Document> document = element ? document_of(realm, *element) : realm.document;
+    // With no element this is a blur: of the given document, or the window's.
+    std::shared_ptr<Document> document = element ? document_of(realm, *element)
+                                                 : (blur_in ? blur_in : realm.document);
     if (!document) return;
     auto old_focus = document->focused_element();
     if (old_focus && !old_focus->is_connected()) old_focus.reset();

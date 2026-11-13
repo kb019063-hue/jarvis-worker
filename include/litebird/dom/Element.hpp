@@ -148,33 +148,23 @@ public:
         return false;
     }
 
-    // Form Controls
-    std::string value() const {
-        if (has_attribute("value")) return get_attribute("value");
-        if (m_tag_name == "textarea") return text_content();
-        return "";
-    }
+    // Form controls. A control has a state of its own next to its
+    // attributes: `value` and `checked` here are what the control holds now
+    // (what the user typed, what a script set), which is what a script reads
+    // and what `:checked` matches. The attributes give the defaults. The
+    // rules are in FormState.hpp; these are shorthands for them.
+    std::string value() const;
+    void set_value(std::string val);
+    bool checked() const;
+    void set_checked(bool c);
 
-    void set_value(std::string val) {
-        set_attribute("value", std::move(val));
-    }
-
-    bool disabled() const {
-        return has_attribute("disabled");
-    }
+    /// The control cannot be used: its own `disabled` attribute, or a
+    /// disabled fieldset around it.
+    bool disabled() const;
 
     void set_disabled(bool d) {
         if (d) set_attribute("disabled", "");
         else remove_attribute("disabled");
-    }
-
-    bool checked() const {
-        return has_attribute("checked");
-    }
-
-    void set_checked(bool c) {
-        if (c) set_attribute("checked", "");
-        else remove_attribute("checked");
     }
 
     std::string input_type() const {

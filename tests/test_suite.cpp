@@ -29,9 +29,9 @@
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/js/Worker.hpp"
 #include "litebird/net/WebSocket.hpp"
-#include "litebird/dom/MutationObserver.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/IntersectionObserver.hpp"
 #include "litebird/dom/ResizeObserver.hpp"
 #include "litebird/dom/History.hpp"
@@ -571,13 +571,15 @@ TEST(dom_event_target_and_bubbling) {
     assert(button_clicks == 2); // 1 from previous click + 1 from this click
     assert(container_clicks == 1); // Bubbling was stopped!
 
-    // 3. Test JS DOM Event binding
+    // 3. The same through the node's script object. The methods live on
+    // EventTarget.prototype, so they are called on the object, and what is
+    // dispatched is an Event, as in a browser.
     JsValue js_btn = JsValue::make_dom_node(button);
     auto add_listener_fn = js_btn.get_property("addEventListener");
     assert(add_listener_fn.type == JsType::NativeFunction);
 
     int js_event_fired = 0;
-    add_listener_fn.native_function()({
+    add_listener_fn.call_with_this(js_btn, {
         JsValue::make_string("custom"),
         JsValue::make_native_function([&](const std::vector<JsValue>& args) {
             assert(!args.empty());
@@ -589,7 +591,8 @@ TEST(dom_event_target_and_bubbling) {
 
     auto dispatch_fn = js_btn.get_property("dispatchEvent");
     assert(dispatch_fn.type == JsType::NativeFunction);
-    dispatch_fn.native_function()({JsValue::make_string("custom")});
+    JsValue custom_event = dom::current_realm().ctor("Event").construct({JsValue::make_string("custom")});
+    dispatch_fn.call_with_this(js_btn, {custom_event});
     assert(js_event_fired == 1);
 }
 
@@ -1356,10 +1359,23 @@ TEST(dom_3phase_events_and_form_controls) {
     input_el->add_event_listener("focus", [&focused](const std::shared_ptr<Event>&) { focused = true; });
     input_el->add_event_listener("blur", [&blurred](const std::shared_ptr<Event>&) { blurred = true; });
 
-    js_node.get_property("focus").call({});
-    assert(focused);
+    // As in a browser, focus() does nothing to a disabled control or to one
+    // that is not in a document.
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(!focused);
+    auto focus_doc = std::make_shared<Document>();
+    auto focus_body = std::make_shared<Element>("body");
+    focus_doc->append_child(focus_body);
+    focus_body->append_child(input_el);
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(!focused);
+    input_el->set_disabled(false);
 
-    js_node.get_property("blur").call({});
+    js_node.get_property("focus").call_with_this(js_node, {});
+    assert(focused);
+    assert(focus_doc->focused_element() == input_el);
+
+    js_node.get_property("blur").call_with_this(js_node, {});
     assert(blurred);
 }
 
@@ -2702,7 +2718,10 @@ TEST(custom_elements_api) {
         });
 
         class FancyButton extends HTMLElement {
-            static observedAttributes() {
+            // A getter, as the standard reads it: define() takes the list
+            // from the property. (This test used to declare a method, which
+            // only the old registry accepted; a browser throws on it.)
+            static get observedAttributes() {
                 return ["label", "theme"];
             }
             connectedCallback() {
@@ -2963,8 +2982,15 @@ TEST(history_api_and_client_routing) {
         history.back();
     )");
 
+    // back() only asks for the move, as in a browser: the page is at the
+    // same entry when the call returns, and popstate comes in a later task.
+    assert(interp.eval("popCount").to_number() == 0.0);
+    assert(interp.eval("location.pathname").to_string() == "/js2");
+    EventLoop::default_loop().tick();
+
     auto pop_count = interp.eval("popCount");
     assert(pop_count.to_number() == 1.0);
+    assert(interp.eval("location.pathname").to_string() == "/js1");
     auto last_state = interp.eval("lastState");
     assert(last_state.to_string() == "js-page-1");
 }
@@ -5009,7 +5035,7 @@ TEST(strict_equality_does_not_coerce) {
     assert(js.global_env()->get("zero_false").bool_val == false);
     assert(js.global_env()->get("not_strict").bool_val == true);
     assert(!js.last_eval_failed());
-    assert(js.global_env()->get("el").type == JsType::DomNode);
+    assert(js.global_env()->get("el").dom_node_value() != nullptr);
     assert(js.global_env()->get("same_shadow").bool_val == true);
     assert(js.global_env()->get("self_identity").bool_val == true);
 }

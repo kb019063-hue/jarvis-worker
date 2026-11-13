@@ -1144,4 +1144,15 @@ void attribute_changed(Element& element, const std::string& name, bool had_old, 
 }
 
 } // namespace forms
+
+// --- The shorthands on Element ---------------------------------------------------
+
+std::string Element::value() const { return forms::value(*this); }
+void Element::set_value(std::string val) { forms::set_value(*this, val); }
+bool Element::checked() const {
+    return m_tag_name == "option" ? forms::option_selected(*this) : forms::checked(*this);
+}
+void Element::set_checked(bool c) { forms::set_checked(*this, c); }
+bool Element::disabled() const { return forms::is_disabled(*this); }
+
 } // namespace litebird

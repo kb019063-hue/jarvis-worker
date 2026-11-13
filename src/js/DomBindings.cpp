@@ -381,7 +381,7 @@ bool hook_focus(Element& element, bool focus) {
         focus_element(*realm, &element);
     } else {
         auto document = element.owner_document();
-        if (document && document->focused_element().get() == &element) focus_element(*realm, nullptr);
+        if (document && document->focused_element().get() == &element) focus_element(*realm, nullptr, document);
     }
     return true;
 }

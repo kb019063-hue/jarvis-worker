@@ -133,7 +133,7 @@ void define_common_element_members(Iface& I, bool (*accepts)(const Node&)) {
     });
     I.node_method(accepts, "blur", 0, [](Realm& r, Node& self, Args) {
         auto document = document_of(r, self);
-        if (document && document->focused_element().get() == &self) focus_element(r, nullptr);
+        if (document && document->focused_element().get() == &self) focus_element(r, nullptr, document);
         return undefined();
     });
     I.node_accessor(accepts, "nonce",

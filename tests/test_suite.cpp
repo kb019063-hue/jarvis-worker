@@ -3450,6 +3450,102 @@ TEST(get_element_by_id_answers_from_an_index) {
     assert(js.eval("found").to_number() == 20000);
 }
 
+TEST(computed_style_answers_for_every_property) {
+    using namespace litebird;
+    // getComputedStyle answered "" for a property nobody had declared and took
+    // the last rule that matched, whatever its specificity. Seven cases of the
+    // DOM corpus hold what it does now (tests/dom-conformance/style.dat:
+    // initial values, specificity, colours, lengths, the defaults of HTML
+    // elements, shorthands, inherit and initial). Here is what those cannot
+    // hold, because jsdom answers something else and CSS says this.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "#a { line-height: 200%; font-size: 20px; border: 0.6px solid; outline: 2px dotted green; word-spacing: 0.5em }"
+        "#b { line-height: 1.5; font-size: 10px; border-spacing: 2px; transition: opacity 1s; background: url(x.png) red }"
+        "#c { width: calc(100% - 2em); height: calc(2 * (1px + 1em)); font-size: 10px; margin-top: calc(1em + 10%);"
+        "     top: calc(100vh - 1px) }"
+        "#e { color: #11223380; border: 2.9px solid; border-left-width: 0.2px; outline: 1px solid; outline-width: 3.7px;"
+        "     font-size: calc(1em + 4px) }"
+        "</style></head><body><div id=a><span id=a1>x</span></div><div id=b><span id=b1 style='font-size: 30px'>y</span></div>"
+        "<div id=c>z</div><textarea id=t></textarea><div id=e>e</div></body></html>");
+    js.notify_document_loaded();
+    auto cs = [&](const char* id, const char* property) {
+        return js.eval(std::string("getComputedStyle(document.getElementById('") + id + "')).getPropertyValue('" +
+                       property + "')")
+            .to_string();
+    };
+
+    // The body has the margin every browser gives it (jsdom: 0px).
+    assert(js.eval("getComputedStyle(document.body).marginTop").to_string() == "8px");
+
+    // A percentage line-height is a length where it is declared and is
+    // inherited as that length (jsdom: "200%"). A number is inherited as a
+    // number, and multiplies the font size of whoever has it.
+    assert(cs("a", "line-height") == "40px" && cs("a1", "line-height") == "40px");
+    assert(cs("b", "line-height") == "15px" && cs("b1", "line-height") == "45px");
+
+    // A border or an outline that is drawn is a whole number of pixels wide
+    // and not less than one; one that is not drawn is 0px wide, whatever
+    // its width was declared to be (jsdom: 3px for an outline nobody drew).
+    assert(cs("a", "border-top-width") == "1px");
+    assert(cs("e", "border-top-width") == "2px" && cs("e", "border-left-width") == "1px");
+    assert(cs("e", "outline-width") == "3px" && cs("a", "outline-width") == "2px" && cs("b", "outline-width") == "0px");
+
+    // Shorthands are given whole, the way browsers write them (jsdom leaves
+    // the `none` and the `solid` out, and has `currentcolor none` for a
+    // box-shadow nobody declared).
+    assert(cs("a", "border-top") == "1px solid rgb(0, 0, 0)");
+    assert(cs("a", "border") == "1px solid rgb(0, 0, 0)" && cs("b", "border") == "0px none rgb(0, 0, 0)");
+    assert(cs("a", "outline") == "rgb(0, 128, 0) dotted 2px");
+    assert(cs("b", "text-decoration") == "none solid rgb(0, 0, 0)" && cs("b", "box-shadow") == "none");
+    assert(cs("b", "list-style") == "outside none disc" && cs("b", "flex-flow") == "row nowrap");
+    assert(cs("a", "word-spacing") == "10px" && cs("b", "word-spacing") == "0px");
+    assert(cs("b", "border-spacing") == "2px 2px" && cs("a", "border-spacing") == "0px 0px");
+    assert(cs("t", "display") == "inline-block");
+
+    // A shorthand nothing here takes apart keeps its text, and its parts are
+    // "" (not known) and not an initial value that would be wrong.
+    assert(cs("b", "transition") == "opacity 1s" && cs("b", "transition-duration") == "");
+    assert(cs("a", "transition") == "all" && cs("a", "transition-duration") == "0s");
+    assert(cs("b", "background") == "url(x.png) red" && cs("b", "background-color") == "rgb(255, 0, 0)");
+    assert(cs("b", "background-image") == "" && cs("a", "background-image") == "none");
+
+    // calc(): lengths are added up; a percentage needs layout and stays; a
+    // unit nothing here knows (the viewport's) leaves the value as declared.
+    assert(cs("c", "height") == "22px" && cs("e", "font-size") == "20px");
+    assert(cs("c", "width") == "calc(100% - 20px)" && cs("c", "margin-top") == "calc(10% + 10px)");
+    assert(cs("c", "top") == "calc(100vh - 1px)");
+    // Eight bits of alpha that two decimals give back exactly.
+    assert(cs("e", "color") == "rgba(17, 34, 51, 0.5)");
+
+    // No recursion anywhere: what is inherited, the font size and the weight
+    // are found by loops up the tree, and a calc() nested deeper than anyone
+    // writes is given back as text.
+    js.eval(R"JS(
+        var top = document.createElement('div');
+        top.style.fontSize = '10px'; top.style.color = 'red'; top.style.fontWeight = '100';
+        var at = top;
+        for (var i = 0; i < 20000; i++) { var next = document.createElement(i % 2 ? 'b' : 'span'); at.appendChild(next); at = next; }
+        document.body.appendChild(top);
+        var deep = getComputedStyle(at);
+        var answers = [deep.color, deep.fontSize, deep.fontWeight, deep.lineHeight, deep.display, deep.marginTop].join(' ');
+        at.style.fontSize = '2em'; at.style.textIndent = '1rem';
+        answers += ' ' + [deep.fontSize, deep.textIndent, deep.borderTopColor].join(' ');
+        top.remove();
+        var nested = 'calc(' + new Array(100001).join('(') + '1px' + new Array(100001).join(')') + ')';
+        document.getElementById('c').style.width = nested;
+        var kept = getComputedStyle(document.getElementById('c')).width === nested;
+        document.getElementById('c').style.width = 'calc(' + new Array(13).join('(') + '1px' + new Array(13).join(')') + ' + 1px)';
+        var summed = getComputedStyle(document.getElementById('c')).width;
+    )JS");
+    assert(js.eval("answers").to_string() == "rgb(255, 0, 0) 10px 900 normal inline 0px 20px 16px rgb(255, 0, 0)");
+    assert(js.eval("String(kept)").to_string() == "true");
+    assert(js.eval("summed").to_string() == "2px");
+}
+
 TEST(dom_follows_the_standard_where_jsdom_does_not) {
     using namespace litebird;
     // The DOM corpus records what jsdom prints. In these five places jsdom
@@ -6993,6 +7089,7 @@ int main() {
     RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
     RUN_TEST(get_element_by_id_answers_from_an_index);
     RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
+    RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(css_filters_and_canvas_blending);
     RUN_TEST(js_generators_iterators_and_for_of);
     RUN_TEST(abort_controller_and_fetch_cancellation);

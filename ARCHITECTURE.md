@@ -339,7 +339,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`, `make diff-strings`) |
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
-| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 557-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 557 of 557; URL data 2 → 1150 of 1188; 107/107 unit suites) |
+| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 557-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 557 of 557; URL data 2 → 1150 of 1188; 108/108 unit suites) |
 
 ---
 
@@ -1972,7 +1972,27 @@ be loading another page, and does nothing.
 
 ### 8. What it costs
 
-@@SPEED@@
+Measured against the binary of `main` on one machine, a page with an empty
+body and a script (milliseconds, the better of two runs):
+
+| | `main` | Phase 27 |
+| :--- | ---: | ---: |
+| Create 20,000 elements, give each an id and text, append them | 70 | 66 |
+| `getElementById` for each of the 20,000 | 5,640 | 16 |
+| `textContent` of each of the 20,000 children | 15 | 14 |
+| `getAttribute` 200,000 times | 122 | 100 |
+| 20,000 clicks on an element with one listener | 102 | 155 |
+| Remove the 20,000 children, last first | 97 | 84 |
+
+A click is slower: it now builds an event object with a prototype, computes
+the path, and runs the default action. A lookup by id was a walk over the
+whole document; these bindings were slower still (7.4 s), which is how it
+was noticed. `Document::get_element_by_id` now answers from an index, built
+on the second lookup after the tree last changed and thrown away when it
+changes again. The first lookup after a change still walks, so a script that
+changes the page between lookups pays what it always did. Nothing else was
+measured: there is no benchmark of the DOM in the repository, and these six
+lines are not one.
 
 `Element` grew by one pointer (`m_rare`, for what few elements have: a
 namespace that is neither HTML, SVG nor MathML, a prefix). The binary is
@@ -2002,12 +2022,12 @@ answer.
 | DOM corpus (`make dom-conformance`) | 557 / 557; 61 on `main`. The everyday probe 68 / 68; 13 on `main` |
 | The corpus in jsdom (`--reference`) | 557 / 557 |
 | URL data of web-platform-tests (`make url-conformance`): 904 parsing cases, 284 setter cases | 873 and 277, 1150 of 1188; 0 and 2 on `main`, where a URL object had no `username`. The 38 left are host names outside ASCII |
-| Unit tests (`make test`) | 107 / 107; four are new (the URL parser, URLs in the DOM, page scripts, the five points where jsdom is not the standard), and five old ones asserted what no browser does and were corrected |
+| Unit tests (`make test`) | 108 / 108; five are new (the URL parser, URLs in the DOM, page scripts, the five points where jsdom is not the standard, lookups by id), and five old ones asserted what no browser does and were corrected |
 | html5lib tree construction (`make conformance`) | 1781 / 1792, as before |
 | JavaScript corpus (`make js-conformance`) | 840 / 845, as before |
-| `make diff-trees` | @@DIFFTREES@@ |
+| `make diff-trees` | 4 × 1,500 random pages against parse5 8.1.1, 0 differ, as before |
 | `make fuzz` | @@FUZZ@@ |
-| `make deep` | @@DEEP@@ |
+| `make deep` | 1,292 runs over 445 pages at 200,000 levels, 0 failed. The slowest page takes as long as on `main` |
 | `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages | @@ASAN@@ |
 
 The DOM corpus has a job of its own in CI (the reference check, the

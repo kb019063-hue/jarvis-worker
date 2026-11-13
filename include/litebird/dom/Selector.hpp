@@ -57,6 +57,7 @@ struct PseudoPart {
     int a{0};                   // an+b
     int b{0};
     std::shared_ptr<SelectorList> list;     // :not, :is, :where, :has, and `of S`
+    bool no_specificity{false};             // :where(): matches like :is(), counts for nothing
 };
 
 struct Compound {
@@ -93,6 +94,12 @@ public:
     /// `:scope` matches the root element, like `:root`.
     bool matches(const Element& element, const Node* scope = nullptr) const;
 
+    /// For the cascade: the specificity of the most specific selector of the
+    /// list that `element` matches, as ids * 1,000,000 + classes * 1,000 +
+    /// types (attribute selectors and pseudo-classes count as classes), or -1
+    /// when it matches none.
+    long matching_specificity(const Element& element, const Node* scope = nullptr) const;
+
     /// The descendants of `root` that match, in tree order; `root` itself is
     /// never among them. `first_only` stops at the first.
     std::vector<std::shared_ptr<Element>> select(const Node& root, bool first_only) const;
@@ -102,6 +109,7 @@ public:
 private:
     friend struct SelectorParser;
     friend struct SelectorMatcher;
+    friend struct SelectorSpecificity;
     std::vector<selector_detail::Complex> m_selectors;
     bool m_relative{false};     // the list of a :has()
 };

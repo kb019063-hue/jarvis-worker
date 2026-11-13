@@ -350,6 +350,7 @@ struct SelectorParser {
         }
         if (name == "not" || name == "is" || name == "where" || name == "matches" || name == "has") {
             out.kind = name == "not" ? Pseudo::Not : name == "has" ? Pseudo::Has : Pseudo::Is;
+            out.no_specificity = name == "where";
             out.list = std::make_shared<SelectorList>();
             return parse_list(*out.list, out.kind == Pseudo::Has, ')');
         }
@@ -688,6 +689,46 @@ struct SelectorMatcher {
 
 bool SelectorList::matches(const Element& element, const Node* scope) const {
     return SelectorMatcher{scope}.match_list(*this, element);
+}
+
+// Specificity (Selectors 4, section 17). :is(), :not() and :has() count as
+// the most specific selector in their argument, whichever one matched;
+// :where() as nothing; `:nth-child(n of S)` as a pseudo-class plus S.
+struct SelectorSpecificity {
+    static long of_list(const SelectorList& list) {
+        long most = 0;
+        for (const auto& complex : list.m_selectors) most = std::max(most, of_complex(complex));
+        return most;
+    }
+    static long of_complex(const Complex& complex) {
+        long ids = 0, classes = 0, types = 0;
+        for (const auto& compound : complex.compounds) {
+            ids += static_cast<long>(compound.ids.size());
+            classes += static_cast<long>(compound.classes.size() + compound.attributes.size());
+            if (!compound.any_type) ++types;
+            for (const auto& pseudo : compound.pseudos) {
+                long inner = 0;
+                if (pseudo.list && !pseudo.no_specificity) inner = of_list(*pseudo.list);
+                const bool only_its_argument =
+                    pseudo.kind == Pseudo::Is || pseudo.kind == Pseudo::Not || pseudo.kind == Pseudo::Has;
+                if (!only_its_argument) ++classes;
+                ids += inner / 1000000;
+                classes += inner / 1000 % 1000;
+                types += inner % 1000;
+            }
+        }
+        return std::min(ids, 999L) * 1000000 + std::min(classes, 999L) * 1000 + std::min(types, 999L);
+    }
+};
+
+long SelectorList::matching_specificity(const Element& element, const Node* scope) const {
+    SelectorMatcher matcher{scope};
+    long most = -1;
+    for (const auto& complex : m_selectors) {
+        if (!matcher.match_complex(complex, complex.compounds.size() - 1, element, nullptr)) continue;
+        most = std::max(most, SelectorSpecificity::of_complex(complex));
+    }
+    return most;
 }
 
 std::vector<std::shared_ptr<Element>> SelectorList::select(const Node& root, bool first_only) const {

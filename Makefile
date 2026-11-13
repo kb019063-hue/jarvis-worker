@@ -10,7 +10,6 @@ SRCS = src/dom/Node.cpp \
        src/dom/FormState.cpp \
        src/dom/Document.cpp \
        src/dom/Comment.cpp \
-       src/dom/MutationObserver.cpp \
        src/dom/ShadowRoot.cpp \
        src/dom/CustomElementRegistry.cpp \
        src/dom/IntersectionObserver.cpp \
@@ -58,6 +57,18 @@ SRCS = src/dom/Node.cpp \
        src/js/Storage.cpp \
        src/js/EventLoop.cpp \
        src/js/Worker.cpp \
+       src/js/DomBindings.cpp \
+       src/js/DomEventBindings.cpp \
+       src/js/DomNodeBindings.cpp \
+       src/js/DomCollectionBindings.cpp \
+       src/js/DomElementBindings.cpp \
+       src/js/DomStyleBindings.cpp \
+       src/js/DomDocumentBindings.cpp \
+       src/js/DomTraversalBindings.cpp \
+       src/js/DomHtmlBindings.cpp \
+       src/js/DomFormBindings.cpp \
+       src/js/DomObserverBindings.cpp \
+       src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
        src/net/URL.cpp \

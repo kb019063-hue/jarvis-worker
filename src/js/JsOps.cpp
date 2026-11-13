@@ -447,7 +447,6 @@ JsValue js_to_object(const JsValue& value) {
 
 JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint) {
     if (!value.is_object_like()) return value;
-    if (value.type == JsType::DomNode) return JsValue::make_string(value.to_string());
 
     // An object can take over its own conversion with Symbol.toPrimitive.
     JsValue exotic = value.get_property("@@toPrimitive");
@@ -560,8 +559,7 @@ const char* js_typeof(const JsValue& value) {
         case JsType::Symbol: return "symbol";
         case JsType::Function:
         case JsType::NativeFunction: return "function";
-        case JsType::Object:
-        case JsType::DomNode: return "object";
+        case JsType::Object: return "object";
     }
     return "undefined";
 }
@@ -589,8 +587,7 @@ JsValue js_typeof_value(const JsValue& value) {
         case JsType::Function:
         case JsType::NativeFunction: return answers->function_;
         case JsType::Null:
-        case JsType::Object:
-        case JsType::DomNode: return answers->object_;
+        case JsType::Object: return answers->object_;
     }
     return answers->undefined_;
 }

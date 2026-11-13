@@ -3,9 +3,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
-#include "litebird/dom/MutationObserver.hpp"
 #include "litebird/dom/FormState.hpp"
-#include "litebird/dom/CustomElementRegistry.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/common/ReleaseQueue.hpp"
@@ -250,11 +248,9 @@ std::vector<std::shared_ptr<Element>> subtree_elements(const std::shared_ptr<Nod
 // are determined at insertion, and their reactions are queued.
 static void notify_subtree_connected(const std::shared_ptr<Node>& node, bool connected) {
     if (!node) return;
-    auto& registry = CustomElementRegistry::default_registry();
-    auto notify = [&](const std::shared_ptr<Element>& element) {
-        if (connected) registry.notify_connected(element);
-        else registry.notify_disconnected(element);
-    };
+    const auto hook = Node::hooks().connected;
+    if (!hook) return;
+    auto notify = [&](const std::shared_ptr<Element>& element) { hook(*element, connected); };
     if (node->children().empty()) {
         // One node, nothing to list: every insertion the HTML parser makes.
         if (node->is_element()) notify(std::static_pointer_cast<Element>(node));
@@ -285,7 +281,7 @@ void Node::append_child(std::shared_ptr<Node> child) {
     bump_tree_version();
     keep_wrapper_rule(*this, *child);
 
-    MutationObserver::notify_child_list(shared_from_this(), {child}, {}, prev, nullptr);
+    if (auto hook = hooks().children_changed) hook(*this, {child}, {}, prev, nullptr);
 
     if (is_connected()) {
         notify_subtree_connected(child, true);
@@ -324,7 +320,7 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
     bump_tree_version();
     keep_wrapper_rule(*this, *new_child);
 
-    MutationObserver::notify_child_list(shared_from_this(), {new_child}, {}, prev, ref_child);
+    if (auto hook = hooks().children_changed) hook(*this, {new_child}, {}, prev, ref_child);
 
     if (is_connected()) {
         notify_subtree_connected(new_child, true);
@@ -342,7 +338,7 @@ void Node::remove_child(std::shared_ptr<Node> child) {
         mark_needs_layout();
         bump_tree_version();
 
-        MutationObserver::notify_child_list(shared_from_this(), {}, {removed}, prev, next);
+        if (auto hook = hooks().children_changed) hook(*this, {}, {removed}, prev, next);
 
         // disconnectedCallback is for a node that leaves a document. Taking a
         // node out of a tree that was never in one is not that.
@@ -358,7 +354,7 @@ std::vector<std::shared_ptr<Node>> Node::take_children() {
     mark_needs_layout();
     bump_tree_version();
 
-    MutationObserver::notify_child_list(shared_from_this(), {}, removed, nullptr, nullptr);
+    if (auto hook = hooks().children_changed) hook(*this, {}, removed, nullptr, nullptr);
 
     if (is_connected()) {
         for (const auto& child : removed) notify_subtree_connected(child, false);
@@ -625,10 +621,11 @@ void Element::set_attribute(const std::string& name, std::string value) {
     bump_tree_version();
     if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, had_old, old_val);
 
-    MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
-    CustomElementRegistry::default_registry().notify_attribute_changed(
-        std::static_pointer_cast<Element>(shared_from_this()), name, old_val, value
-    );
+    if (auto hook = hooks().attribute_changed) {
+        // The element may be changed again by what the hook runs.
+        auto keep = shared_from_this();
+        hook(*this, name, had_old ? &old_val : nullptr, &value);
+    }
 }
 
 void Element::remove_attribute(const std::string& name) {
@@ -640,10 +637,10 @@ void Element::remove_attribute(const std::string& name) {
     bump_tree_version();
     if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, true, old_val);
 
-    MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
-    CustomElementRegistry::default_registry().notify_attribute_changed(
-        std::static_pointer_cast<Element>(shared_from_this()), name, old_val, ""
-    );
+    if (auto hook = hooks().attribute_changed) {
+        auto keep = shared_from_this();
+        hook(*this, name, &old_val, nullptr);
+    }
 }
 
 void Element::focus() {

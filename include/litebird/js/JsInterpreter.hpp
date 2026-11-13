@@ -306,6 +306,11 @@ public:
     /// window. Later calls do nothing.
     void notify_document_loaded();
 
+    /// The page's markup has all been parsed and its scripts have run:
+    /// `document.readyState` becomes "interactive". What comes next is
+    /// notify_document_loaded(). Deferred scripts run between the two.
+    void notify_document_interactive();
+
 private:
     using EnvPtr = std::shared_ptr<JsEnvironment>;
 

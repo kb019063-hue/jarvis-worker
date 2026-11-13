@@ -96,9 +96,8 @@ public:
     std::shared_ptr<ShadowRoot> shadow_root() const { return m_shadow_root; }
     std::shared_ptr<ShadowRoot> attach_shadow(const std::string& mode);
 
-    // Custom Elements
-    const JsValue& custom_element_instance() const { return m_custom_element_instance; }
-    void set_custom_element_instance(JsValue inst) { m_custom_element_instance = std::move(inst); }
+    // Custom elements. The instance of the custom element's class is the
+    // element's own script object, so there is nothing else to keep here.
     CustomElementState custom_state() const { return m_custom_state; }
     void set_custom_state(CustomElementState state) { m_custom_state = state; }
     /// What `:defined` asks: false only for an element whose name is a valid
@@ -226,7 +225,6 @@ public:
     AttributeList m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
-    JsValue m_custom_element_instance;
     CustomElementState m_custom_state{CustomElementState::Uncustomized};
     std::shared_ptr<FormControlState> m_form_state;
     Rect m_bounding_box;

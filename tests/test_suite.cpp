@@ -3296,10 +3296,16 @@ TEST(url_objects_and_addresses_in_the_dom) {
 
 TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     using namespace litebird;
-    // Which <script> elements are JavaScript to run, and how they are run.
-    auto doc = HtmlParser::parse(
-        "<!DOCTYPE html><body>"
-        "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState];</script>"
+    // Which <script> elements are JavaScript to run, and when: each one as
+    // the parser reaches its end tag, seeing the page up to itself.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><head><title>T</title>"
+        "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState + ':' +"
+        "    document.scripts.length + ':' + document.body + ':' + document.getElementById('later') + ':' + document.title];</script>"
+        "</head><body><p id=early>early</p>"
         "<script type='text/plain'>log.push('text/plain');</script>"
         "<script type=' TEXT/JavaScript '>log.push('any case, spaces around');</script>"
         "<script type='text/javascript; charset=utf-8'>log.push('with a parameter');</script>"
@@ -3309,22 +3315,71 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
         "<script type='application/json'>{\"not\": \"code\"}</script>"
         "<script src='elsewhere.js'>log.push('has a src');</script>"
         "<script type=''>log.push('empty type');</script>"
-        "<script>document.getElementById('removed').remove(); log.push('remover');</script>"
-        "<script id=removed>log.push('removed before its turn');</script>"
+        "<template><script>log.push('inside a template');</script></template>"
+        "<script>log.push('sees:' + document.getElementById('early').textContent + ':' + document.getElementById('later') + ':' +"
+        "    document.scripts.length); document.body.appendChild(document.createElement('hr')).id = 'added';</script>"
+        "<p id=later>later</p>"
         "<script>var late = document.createElement('script'); late.textContent = \"log.push('inserted')\";"
-        "        document.body.appendChild(late); log.push('inserter');</script>"
+        "    document.body.appendChild(late);"
+        "    log.push('inserter:' + document.getElementById('added').previousElementSibling.tagName + ':' +"
+        "             document.getElementById('later').previousElementSibling.id);</script>"
         "<script>document.addEventListener('readystatechange', function () { log.push('state:' + document.readyState); });"
-        "        document.addEventListener('DOMContentLoaded', function () { log.push('DOMContentLoaded:' + document.currentScript); });"
-        "        window.addEventListener('load', function () { log.push('load'); });</script>"
+        "    document.addEventListener('DOMContentLoaded', function () { log.push('DOMContentLoaded:' + document.currentScript); });"
+        "    window.addEventListener('load', function () { log.push('load'); });</script>"
         "</body>");
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.run_document_scripts();
     assert(js.eval("log.join()").to_string() ==
-           "first:first:loading,any case, spaces around,language,empty type,remover,inserted,inserter,state:interactive");
+           "first:first:loading:1:null:null:T,any case, spaces around,language,empty type,sees:early:null:11,"
+           "inserted,inserter:SCRIPT:added,state:interactive");
     assert(js.eval("document.readyState").to_string() == "interactive");
     js.notify_document_loaded();
     assert(js.eval("log.slice(8).join()").to_string() == "DOMContentLoaded:null,state:complete,load");
+
+    // A script may take apart the tree the parser is working in. The parser
+    // goes on inserting into the elements it has open, wherever they are
+    // now, and into the page once they are closed.
+    auto doc2 = std::make_shared<Document>();
+    doc2->set_url("https://example.test/");
+    JsInterpreter js2(doc2);
+    js2.load_page(
+        "<!DOCTYPE html><body><div id=box><script>window.box = document.getElementById('box'); box.remove();</script>"
+        "<b id=inner>x</b></div><p id=after>after</p>"
+        "<table id=t><tr><td><script>document.getElementById('t').remove();</script>cell</td></tr></table><p id=last>last</p>"
+        "<script>document.body.innerHTML = '<i id=fresh>fresh</i>';</script><u id=tail>tail</u>"
+        "<script>window.seen = [document.getElementById('inner'), box.querySelector('#inner').textContent, box.isConnected,"
+        "    document.getElementById('after'), document.getElementById('fresh').textContent,"
+        "    document.getElementById('tail').previousElementSibling.id, document.body.children.length].join();</script>"
+        "</body>");
+    assert(js2.eval("seen").to_string() == ",x,false,,fresh,fresh,3");
+
+    // A custom element defined by a script is one from then on: the
+    // elements further down the page are made as that class, and told they
+    // are connected before their content is parsed.
+    auto doc3 = std::make_shared<Document>();
+    doc3->set_url("https://example.test/");
+    JsInterpreter js3(doc3);
+    js3.load_page(
+        "<!DOCTYPE html><body><x-tag id=before>b</x-tag>"
+        "<script>window.log = []; customElements.define('x-tag', class extends HTMLElement {"
+        "    connectedCallback() { log.push(this.id + ':' + this.childNodes.length); } });</script>"
+        "<x-tag id=one>text</x-tag>"
+        "<script>log.push(document.getElementById('one') instanceof customElements.get('x-tag'));</script>"
+        "<x-tag id=two></x-tag>"
+        "</body>");
+    assert(js3.eval("log.join()").to_string() == "before:1,one:0,true,two:0");
+
+    // A mutation observer hears of what the parser adds. Its callback runs
+    // when no script is running: before the next script, and at the end.
+    auto doc4 = std::make_shared<Document>();
+    doc4->set_url("https://example.test/");
+    JsInterpreter js4(doc4);
+    js4.load_page(
+        "<!DOCTYPE html><body><script>window.log = [];"
+        "    new MutationObserver(function (records) {"
+        "        log.push(records.map(function (r) { return r.addedNodes[0].nodeName; }).join('+')); })"
+        "        .observe(document.body, {childList: true});"
+        "    Promise.resolve().then(function () { log.push('promise'); });</script>"
+        "<p>one</p><div></div><script>log.push('script');</script><span></span></body>");
+    assert(js4.eval("log.join()").to_string() == "promise,P+DIV+SCRIPT,script,SPAN");
 
     // The shell loads a page the same way, and the page knows its address.
     BrowserShell shell(800.0f, 600.0f, 80, 24);

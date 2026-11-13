@@ -375,10 +375,21 @@ void HtmlTreeBuilder::process_text(const HtmlToken& token) {
             m_mode = m_original_mode;
             process_token(token);
             return;
-        case HtmlTokenType::EndTag:
+        case HtmlTokenType::EndTag: {
+            // The end of a script is where it runs. The parser is back in
+            // the mode it was in first, so whatever the script does to the
+            // tree, the next token is handled as if the script had done it
+            // before the parse began.
+            std::shared_ptr<Element> script;
+            if (m_script_handler) {
+                auto node = current_node();
+                if (node && !node->is_foreign() && node->tag_name() == "script") script = node;
+            }
             pop_current_node();
             m_mode = m_original_mode;
+            if (script) m_script_handler(script);
             return;
+        }
         default:
             return;
     }

@@ -4,6 +4,7 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/html/HtmlParser.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Json.hpp"
@@ -165,18 +166,30 @@ void JsInterpreter::notify_document_interactive() {
     dom::fire(realm, *m_document, "readystatechange");
 }
 
-void JsInterpreter::run_document_scripts(const std::function<void(const std::string& source)>& before) {
+void JsInterpreter::load_page(std::string_view html, bool scripting,
+                              const std::function<void(const std::string& source)>& before) {
     if (!m_document) return;
-    for (const auto& element : m_document->get_elements_by_tag_name("script")) {
-        // Nothing is fetched, so a script with a src has nothing to run.
-        if (!element->is_connected() || element->has_attribute("src") || !dom::is_classic_script(*element)) continue;
-        const std::string source = element->text_content();
-        if (source.empty()) continue;
+    std::shared_ptr<Document> document = m_document;
+    HtmlParser::parse_into(document, html, scripting, [&](const std::shared_ptr<Element>& script) {
+        // Not in the page (inside a <template>, or an earlier script took
+        // its parent out), nothing to fetch, or not JavaScript.
+        if (!script->is_connected() || script->owner_document() != document) return;
+        if (script->has_attribute("src") || !dom::is_classic_script(*script)) return;
+        const std::string source = script->text_content();
+        if (source.empty()) return;
         if (before) before(source);
-        m_document->set_current_script(element);
+        {
+            // The JavaScript stack is empty, so what earlier scripts left
+            // for later runs first: promise jobs, and the records a mutation
+            // observer has of what the parser added since.
+            JsIntrinsics::set_current(m_realm.get());
+            JsScriptScope checkpoint;
+        }
+        auto previous = document->current_script();
+        document->set_current_script(script);
         eval_ast(source);
-        m_document->set_current_script(nullptr);
-    }
+        document->set_current_script(previous);
+    });
     notify_document_interactive();
 }
 

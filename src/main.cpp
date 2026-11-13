@@ -253,32 +253,18 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    auto doc = litebird::HtmlParser::parse(html_content, scripting);
-
-    // 2. CSS Parsing & Style Resolution
-    litebird::StyleResolver resolver;
-
-    // Extract inline <style> from DOM
-    for (const auto& el : doc->get_elements_by_tag_name("style")) {
-        auto sheet = litebird::CssParser::parse(el->text_content());
-        resolver.add_stylesheet(sheet);
-    }
-
-    // 3. JavaScript Execution for <script> tags
-    //
     // A page is rendered once, so nobody is waiting for its timers: the event
     // loop jumps its clock to the next one instead of sleeping.
     auto& page_loop = litebird::EventLoop::default_loop();
     page_loop.set_time_skipping(true);
-    // The address scripts see as location.href and document.URL.
-    if (!page_url.empty()) {
-        doc->set_url(page_url);
-    } else {
-        doc->set_url(litebird::ResourceLoader::address_of(input_file));
-    }
+
+    // 2. The page: its tree, and its scripts run as the parser reaches them.
+    // The document exists first, with the address scripts see as
+    // location.href and document.URL, and the script engine attached to it.
+    auto doc = std::make_shared<litebird::Document>();
+    doc->set_url(page_url.empty() ? litebird::ResourceLoader::address_of(input_file) : page_url);
     litebird::JsInterpreter js_engine(doc);
-    // The scripts of the page, in document order.
-    js_engine.run_document_scripts([&](const std::string& script) {
+    js_engine.load_page(html_content, scripting, [&](const std::string& script) {
         if (!dump_bytecode) return;
         std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
         try {
@@ -310,6 +296,14 @@ int main(int argc, char* argv[]) {
     // run here too. Timers further out than the budget stay pending.
     js_engine.notify_document_loaded();
     page_loop.run_until_idle(std::chrono::milliseconds(virtual_time_budget_ms));
+
+    // 3. CSS Parsing & Style Resolution: the <style> elements of the page as
+    // its scripts left it.
+    litebird::StyleResolver resolver;
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        auto sheet = litebird::CssParser::parse(el->text_content());
+        resolver.add_stylesheet(sheet);
+    }
 
     // 4. Layout Box Tree Construction
     float viewport_w = 800.0f;

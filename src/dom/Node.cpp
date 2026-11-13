@@ -50,6 +50,49 @@ Node::~Node() {
     std::vector<std::shared_ptr<Node>> children = std::move(m_children);
 }
 
+DomHooks& Node::hooks() {
+    static DomHooks s_hooks;
+    return s_hooks;
+}
+
+void Node::set_owner_document(const std::shared_ptr<Document>& owner) {
+    auto same = [&](const Node& node) {
+        return !node.m_owner.owner_before(owner) && !owner.owner_before(node.m_owner);
+    };
+    if (same(*this)) return;
+    // No recursion: a detached subtree can be as deep as memory allows.
+    std::vector<Node*> pending{this};
+    while (!pending.empty()) {
+        Node* node = pending.back();
+        pending.pop_back();
+        if (same(*node)) continue;
+        node->m_owner = owner;
+        for (const auto& child : node->m_children) pending.push_back(child.get());
+        if (node->is_element()) {
+            if (const auto& shadow = static_cast<Element*>(node)->m_shadow_root) pending.push_back(shadow.get());
+        }
+    }
+}
+
+namespace {
+
+// A node belongs to the document it is inserted into. `parent` knows its
+// owner unless it is part of a tree nobody has told (see owner_document()).
+void adopt_child(Node& parent, Node& child) {
+    std::shared_ptr<Document> owner = parent.is_document()
+        ? std::static_pointer_cast<Document>(parent.shared_from_this()) : parent.owner_document();
+    if (owner) child.set_owner_document(owner);
+}
+
+// One rule the script bindings rely on; see DomHooks::wrapper_needs_parent.
+inline void keep_wrapper_rule(Node& parent, const Node& child) {
+    if (child.script_object() && !parent.script_object()) {
+        if (auto hook = Node::hooks().wrapper_needs_parent) hook(parent);
+    }
+}
+
+} // namespace
+
 std::shared_ptr<Node> Node::previous_sibling() const {
     auto p = parent();
     if (!p) return nullptr;
@@ -222,9 +265,12 @@ void Node::append_child(std::shared_ptr<Node> child) {
     }
 
     auto prev = m_children.empty() ? nullptr : m_children.back();
+    adopt_child(*this, *child);
     child->set_parent(shared_from_this());
     m_children.push_back(child);
     mark_needs_layout();
+    bump_tree_version();
+    keep_wrapper_rule(*this, *child);
 
     MutationObserver::notify_child_list(shared_from_this(), {child}, {}, prev, nullptr);
 
@@ -258,9 +304,12 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
     }
 
     auto prev = (it == m_children.begin()) ? nullptr : *(it - 1);
+    adopt_child(*this, *new_child);
     new_child->set_parent(shared_from_this());
     m_children.insert(it, new_child);
     mark_needs_layout();
+    bump_tree_version();
+    keep_wrapper_rule(*this, *new_child);
 
     MutationObserver::notify_child_list(shared_from_this(), {new_child}, {}, prev, ref_child);
 
@@ -278,6 +327,7 @@ void Node::remove_child(std::shared_ptr<Node> child) {
         removed->set_parent(nullptr);
         m_children.erase(it);
         mark_needs_layout();
+        bump_tree_version();
 
         MutationObserver::notify_child_list(shared_from_this(), {}, {removed}, prev, next);
 
@@ -293,6 +343,7 @@ std::vector<std::shared_ptr<Node>> Node::take_children() {
     if (removed.empty()) return removed;
     for (const auto& child : removed) child->set_parent(nullptr);
     mark_needs_layout();
+    bump_tree_version();
 
     MutationObserver::notify_child_list(shared_from_this(), {}, removed, nullptr, nullptr);
 
@@ -350,6 +401,27 @@ void Node::remove_event_listeners(const std::string& type) {
 bool Node::dispatch_event(const std::shared_ptr<Event>& event) {
     if (!event) return false;
 
+    // With script bindings attached there is one dispatch for everybody: it
+    // runs the script listeners and the native ones below, in one pass.
+    if (auto hook = hooks().dispatch) {
+        bool result = true;
+        if (hook(*this, event, result)) return result;
+    }
+    return dispatch_event_natively(event);
+}
+
+void Node::run_native_listeners(const std::shared_ptr<Event>& event, bool capture_phase, bool at_target) {
+    auto it = m_listeners.find(event->type());
+    if (it == m_listeners.end()) return;
+    auto copy = it->second;
+    for (const auto& entry : copy) {
+        if (!at_target && entry.use_capture != capture_phase) continue;
+        js_run_guarded([&] { entry.listener(event); });
+        if (event->propagation_stopped()) return;
+    }
+}
+
+bool Node::dispatch_event_natively(const std::shared_ptr<Event>& event) {
     event->set_target(shared_from_this());
 
     // Build ancestor list from root down to target's parent
@@ -536,6 +608,7 @@ void Element::set_attribute(const std::string& name, std::string value) {
 
     m_attributes[name] = value;
     mark_needs_layout();
+    bump_tree_version();
 
     MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
     CustomElementRegistry::default_registry().notify_attribute_changed(
@@ -549,11 +622,35 @@ void Element::remove_attribute(const std::string& name) {
     std::string old_val = it->second;
     m_attributes.erase(it);
     mark_needs_layout();
+    bump_tree_version();
 
     MutationObserver::notify_attributes(std::static_pointer_cast<Element>(shared_from_this()), name, old_val);
     CustomElementRegistry::default_registry().notify_attribute_changed(
         std::static_pointer_cast<Element>(shared_from_this()), name, old_val, ""
     );
+}
+
+void Element::focus() {
+    if (auto hook = hooks().focus) {
+        if (hook(*this, true)) return;
+    }
+    m_is_focused = true;
+    dispatch_event(std::make_shared<Event>("focus", false, false));
+}
+
+void Element::blur() {
+    if (auto hook = hooks().focus) {
+        if (hook(*this, false)) return;
+    }
+    m_is_focused = false;
+    dispatch_event(std::make_shared<Event>("blur", false, false));
+}
+
+bool Element::click() {
+    if (auto hook = hooks().click) {
+        if (hook(*this)) return true;
+    }
+    return dispatch_event(std::make_shared<Event>("click", true, true));
 }
 
 // --- serialization ------------------------------------------------------------
@@ -562,69 +659,147 @@ namespace {
 
 bool is_void_tag(const std::string& tag) {
     static const std::unordered_set<std::string> VOID_TAGS = {
-        "area", "base", "br", "col", "embed", "hr", "img", "input",
-        "link", "meta", "param", "source", "track", "wbr"
+        "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input",
+        "keygen", "link", "meta", "param", "source", "track", "wbr"
     };
     return VOID_TAGS.count(tag) != 0;
 }
 
-void append_start_tag(const Element& element, std::string& out) {
+// Elements whose text is written as it is: the parser reads it back raw.
+bool is_raw_text_tag(const std::string& tag) {
+    static const std::unordered_set<std::string> RAW = {
+        "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript"
+    };
+    return RAW.count(tag) != 0;
+}
+
+// "Escaping a string" from the HTML standard. U+00A0 is two bytes in UTF-8.
+void append_escaped(const std::string& text, bool attribute_mode, std::string& out) {
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '&') out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else if (c == '"' && attribute_mode) out += "&quot;";
+        else if (static_cast<unsigned char>(c) == 0xC2 && i + 1 < text.size() &&
+                 static_cast<unsigned char>(text[i + 1]) == 0xA0) {
+            out += "&nbsp;";
+            ++i;
+        } else {
+            out += c;
+        }
+    }
+}
+
+void append_start_tag(const Element& element, bool xml, bool declare_namespace, std::string& out) {
     out += '<';
     out += element.tag_name();
+    if (declare_namespace) {
+        out += " xmlns=\"";
+        out += element.element_namespace() == ElementNamespace::SVG ? "http://www.w3.org/2000/svg"
+             : element.element_namespace() == ElementNamespace::MathML ? "http://www.w3.org/1998/Math/MathML"
+             : "http://www.w3.org/1999/xhtml";
+        out += '"';
+    }
     for (const auto& [name, value] : element.attributes()) {
         out += ' ';
         out += name;
         out += "=\"";
-        out += value;
+        append_escaped(value, true, out);
         out += '"';
     }
+    (void)xml;
 }
 
 // Writes `root` (when `with_root`) and everything below it as markup into one
-// buffer, in one walk. Elements and text are written; other nodes are not.
+// buffer, in one walk: the HTML standard's fragment serializing algorithm.
+// Attributes come in their own order, text and attribute values are escaped,
+// a void element has no end tag, a <template> is written with its contents,
+// and comments and the doctype are written too.
+//
+// (It used to write `<br />`, leave `&` and `<` in text as they were, drop
+// comments and list attributes in hash order, so what innerHTML returned did
+// not parse back to the same tree.)
+//
+// `xml` is XMLSerializer's variant for an HTML tree: the namespace is declared
+// on the root and an element without children is written `<br />`.
 //
 // innerHTML used to be two functions calling each other, each returning its
 // subtree as a new string: one pair of frames per level, and every level
 // copied all the markup below it again. Reading it from the top of a chain of
 // N elements cost N*N bytes of copying and, past some tens of thousands of
 // levels, the stack.
-void append_markup(const Node& root, bool with_root, std::string& out) {
+void append_markup(const Node& root, bool with_root, bool xml, std::string& out) {
     struct Frame {
-        const Node* node;
+        const Node* node;       // the element to close when the children are done
+        const Node* source;     // where the children are: the node, or a template's contents
         std::size_t next;
+        bool raw_text;          // children that are text are written unescaped
     };
     std::vector<Frame> open;
 
+    auto children_of = [](const Node& node) -> const Node* {
+        if (node.is_element()) {
+            const auto& element = static_cast<const Element&>(node);
+            if (element.template_contents() && element.tag_name() == "template" && !element.is_foreign()) {
+                return element.template_contents().get();
+            }
+        }
+        return &node;
+    };
+
     // Writes what comes before a node's children. Returns whether the node
     // has an end to write after them, that is, whether to go into it.
-    auto enter = [&](const Node& node) {
-        if (node.is_text()) {
-            out += static_cast<const Text&>(node).text();
-            return false;
+    auto enter = [&](const Node& node, bool raw_parent, bool is_root) {
+        switch (node.type()) {
+            case NodeType::Text:
+                if (raw_parent && !xml) out += static_cast<const Text&>(node).text();
+                else append_escaped(static_cast<const Text&>(node).text(), false, out);
+                return false;
+            case NodeType::Comment:
+                out += "<!--";
+                out += node.text_content();
+                out += "-->";
+                return false;
+            case NodeType::DocumentType:
+                out += "<!DOCTYPE ";
+                out += static_cast<const DocumentTypeNode&>(node).name();
+                out += '>';
+                return false;
+            case NodeType::Element: {
+                const auto& element = static_cast<const Element&>(node);
+                append_start_tag(element, xml, xml && is_root, out);
+                const bool empty = children_of(element)->children().empty();
+                if (xml) {
+                    if (empty) { out += " />"; return false; }
+                } else if (!element.is_foreign() && is_void_tag(element.tag_name())) {
+                    out += '>';
+                    return false;
+                }
+                out += '>';
+                return true;
+            }
+            default:
+                return false;
         }
-        if (!node.is_element()) return false;
-        const auto& element = static_cast<const Element&>(node);
-        append_start_tag(element, out);
-        if (is_void_tag(element.tag_name())) {
-            out += " />";
-            return false;
-        }
-        out += '>';
-        return true;
     };
     auto leave = [&](const Node& node) {
         out += "</";
         out += static_cast<const Element&>(node).tag_name();
         out += '>';
     };
+    auto raw_inside = [](const Node& node) {
+        return node.is_element() && !static_cast<const Element&>(node).is_foreign() &&
+               is_raw_text_tag(static_cast<const Element&>(node).tag_name());
+    };
 
     if (with_root) {
-        if (!enter(root)) return;
+        if (!enter(root, false, true)) return;
     }
-    open.push_back({&root, 0});
+    open.push_back({&root, children_of(root), 0, raw_inside(root)});
     while (!open.empty()) {
         Frame& top = open.back();
-        const auto& children = top.node->children();
+        const auto& children = top.source->children();
         if (top.next >= children.size()) {
             const Node* done = top.node;
             open.pop_back();
@@ -633,7 +808,9 @@ void append_markup(const Node& root, bool with_root, std::string& out) {
         }
         const Node* child = children[top.next++].get();
         // `top` is not used after this: push_back may move the frames.
-        if (child && enter(*child)) open.push_back({child, 0});
+        if (child && enter(*child, top.raw_text, false)) {
+            open.push_back({child, children_of(*child), 0, raw_inside(*child)});
+        }
     }
 }
 
@@ -662,7 +839,22 @@ std::vector<std::shared_ptr<Element>> collect_descendants(const Node& root, bool
 
 std::string Node::inner_markup() const {
     std::string out;
-    append_markup(*this, false, out);
+    append_markup(*this, false, false, out);
+    return out;
+}
+
+std::string Node::outer_markup(bool xml) const {
+    std::string out;
+    if (m_type == NodeType::Document || m_type == NodeType::DocumentFragment) {
+        // No tag of its own. A document's doctype is not among its children.
+        if (m_type == NodeType::Document) {
+            const auto& doctype = static_cast<const Document*>(this)->doctype();
+            if (doctype.present) out += "<!DOCTYPE " + doctype.name + ">";
+        }
+        for (const auto& child : m_children) append_markup(*child, true, xml, out);
+        return out;
+    }
+    append_markup(*this, true, xml, out);
     return out;
 }
 
@@ -671,9 +863,7 @@ std::string Element::inner_html() const {
 }
 
 std::string Element::outer_html() const {
-    std::string out;
-    append_markup(*this, true, out);
-    return out;
+    return outer_markup();
 }
 
 // --- searches -----------------------------------------------------------------

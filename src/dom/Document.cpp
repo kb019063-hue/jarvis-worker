@@ -71,15 +71,46 @@ std::shared_ptr<Element> Document::query_selector(const std::string& selector) c
 
 std::shared_ptr<Element> Document::create_element(const std::string& tag_name) {
     auto el = std::make_shared<Element>(tag_name);
+    el->set_owner_document(std::static_pointer_cast<Document>(shared_from_this()));
     return el;
 }
 
 std::shared_ptr<Text> Document::create_text_node(const std::string& text) {
-    return std::make_shared<Text>(text);
+    auto node = std::make_shared<Text>(text);
+    node->set_owner_document(std::static_pointer_cast<Document>(shared_from_this()));
+    return node;
 }
 
 std::shared_ptr<Node> Document::create_document_fragment() {
-    return std::make_shared<Node>(NodeType::DocumentFragment);
+    auto node = std::make_shared<Node>(NodeType::DocumentFragment);
+    node->set_owner_document(std::static_pointer_cast<Document>(shared_from_this()));
+    return node;
+}
+
+std::shared_ptr<DocumentTypeNode> Document::doctype_node() {
+    if (!m_doctype.present) return nullptr;
+    if (!m_doctype_node) {
+        auto self = std::static_pointer_cast<Document>(shared_from_this());
+        m_doctype_node = std::make_shared<DocumentTypeNode>(m_doctype.name, m_doctype.public_id, m_doctype.system_id);
+        m_doctype_node->set_document(self);
+        m_doctype_node->set_owner_document(self);
+    }
+    return m_doctype_node;
+}
+
+void Document::remove_doctype() {
+    if (m_doctype_node) m_doctype_node->set_document(nullptr);
+    m_doctype_node.reset();
+    m_doctype = Doctype{};
+    bump_tree_version();
+}
+
+std::shared_ptr<Document> Document::template_document() {
+    if (!m_template_document) {
+        m_template_document = std::make_shared<Document>();
+        m_template_document->set_quirks_mode(m_quirks_mode);
+    }
+    return m_template_document;
 }
 
 void Document::dump_open(std::ostream& os, const std::string& indent, bool) const {

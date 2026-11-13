@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/dom/Node.hpp"
+#include "litebird/dom/AttributeList.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
 #include <string>
@@ -58,10 +59,17 @@ public:
         return it != m_attributes.end() ? it->second : "";
     }
 
+    /// The value of `name`, or null when the element has no such attribute.
+    const std::string* attribute(const std::string& name) const {
+        auto it = m_attributes.find(name);
+        return it != m_attributes.end() ? &it->second : nullptr;
+    }
+
     void set_attribute(const std::string& name, std::string value);
     void remove_attribute(const std::string& name);
 
-    const std::unordered_map<std::string, std::string>& attributes() const {
+    /// In the order they were added; see AttributeList.hpp.
+    const AttributeList& attributes() const {
         return m_attributes;
     }
 
@@ -137,8 +145,7 @@ public:
 
     void set_disabled(bool d) {
         if (d) set_attribute("disabled", "");
-        else m_attributes.erase("disabled");
-        mark_needs_layout();
+        else remove_attribute("disabled");
     }
 
     bool checked() const {
@@ -147,7 +154,7 @@ public:
 
     void set_checked(bool c) {
         if (c) set_attribute("checked", "");
-        else m_attributes.erase("checked");
+        else remove_attribute("checked");
     }
 
     std::string input_type() const {
@@ -155,17 +162,12 @@ public:
         return t.empty() ? "text" : t;
     }
 
-    void focus() {
-        m_is_focused = true;
-        auto ev = std::make_shared<Event>("focus", false, false);
-        dispatch_event(ev);
-    }
-
-    void blur() {
-        m_is_focused = false;
-        auto ev = std::make_shared<Event>("blur", false, false);
-        dispatch_event(ev);
-    }
+    /// With script bindings attached these do what the script methods of the
+    /// same names do (only a focusable element in a document takes focus; the
+    /// element that had it is blurred; focusin and focusout are fired).
+    /// Without them: the flag, and one event.
+    void focus();
+    void blur();
 
     bool is_hovered() const { return m_is_hovered; }
     void set_hovered(bool h) { m_is_hovered = h; }
@@ -176,10 +178,10 @@ public:
     bool is_active() const { return m_is_active; }
     void set_active(bool a) { m_is_active = a; }
 
-    bool click() {
-        auto ev = std::make_shared<Event>("click", true, true);
-        return dispatch_event(ev);
-    }
+    /// With script bindings attached this is `element.click()`: the listeners
+    /// run and then what the click does (a checkbox toggles, a submit button
+    /// submits). Without them: one click event.
+    bool click();
 
     std::shared_ptr<CanvasRenderingContext2D> canvas_context() const { return m_canvas_context; }
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> ctx) { m_canvas_context = std::move(ctx); }
@@ -200,7 +202,7 @@ public:
     std::string m_tag_name;
     ElementNamespace m_namespace{ElementNamespace::HTML};
     std::shared_ptr<Node> m_template_contents;
-    std::unordered_map<std::string, std::string> m_attributes;
+    AttributeList m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
     JsValue m_custom_element_instance;

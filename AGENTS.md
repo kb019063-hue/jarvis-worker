@@ -1,8 +1,11 @@
 # Working in this repository
 
 Litebird is written by AI agents, at times more than one at once. Each agent
-has a branch of its own and sees the others only through GitHub. This file is
-what they have to agree on so that two pieces of work do not collide.
+has a branch of its own. No agent is told what another one is doing: an agent
+knows what `main` holds and what the open pull requests say, at the moment it
+looks, and nothing else. Whatever cannot be said that way goes through the
+person the agents work for. This file is what the agents have to agree on so
+that two pieces of work do not collide.
 
 ## Before starting
 
@@ -11,8 +14,8 @@ what they have to agree on so that two pieces of work do not collide.
    pull request nobody has pushed to for days is not a claim; ask in a comment
    on it before taking its task.)
 2. **Claim before doing the work.** Pick a row of the table below that nobody
-   has, push a first commit (an empty one will do) and open a *draft* pull
-   request whose text begins:
+   has, push a first commit (an empty one will do) and open a pull request
+   whose title begins with `WIP:` and whose text begins:
 
    ```
    Task: <the row of the table>
@@ -25,9 +28,10 @@ what they have to agree on so that two pieces of work do not collide.
    (AUDIT.md, plus the open pull requests). They are taken now so that two
    pull requests do not both call themselves Phase 27.
 3. **One task at a time, inside its files.** If the work turns out to need a
-   file that an open pull request names, say so in a comment there before
-   changing it. A bug found outside the task becomes a new row of the table;
-   it is not fixed in passing.
+   file that another open pull request names, stop before changing it and
+   tell the person you work for: the other agent will not see a comment
+   unless it happens to look. A bug found outside the task becomes a new row
+   of the table; it is not fixed in passing.
 
 ## The files every pull request changes
 
@@ -48,7 +52,9 @@ the same time will both have changed them. So:
 
 - The checks: `make test`, `make conformance`, `make js-conformance`,
   `make diff-trees`, `make fuzz`, `make deep`, `make asan`. The last two take
-  about eight minutes each. CI runs all of them.
+  about eight minutes each. CI runs all of them, and one CI run is about 28
+  minutes of runner time: run the checks here first and push when they pass,
+  not to find out whether they do.
 - A floor in CI is not lowered to let a pull request pass.
   `tests/js-conformance/everyday-*.dat` is not edited.
 - The three documents are updated: what was wrong, what changed, how it was
@@ -56,8 +62,9 @@ the same time will both have changed them. So:
   still open. AUDIT.md says what is not fixed as plainly as what is.
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
-- Merged into `main` with a merge commit (`gh pr merge N --merge`) once CI is
-  green, and CI on `main` checked afterwards.
+- The `WIP:` comes off the title. Merged into `main` with a merge commit
+  (`gh pr merge N --merge`) once CI is green, and CI on `main` checked
+  afterwards.
 
 ## Open tasks
 

@@ -1,6 +1,8 @@
 #include "litebird/net/URL.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/JsOps.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -187,6 +189,55 @@ JsValue URLSearchParamsObject::wrap_existing(std::shared_ptr<URLSearchParamsObje
         return JsValue::make_string(self->to_string());
     }));
 
+    // Iteration: `for (const [name, value] of params)`, entries(), keys(),
+    // values(), forEach(). The iterators read the list as it is when each
+    // step is taken, so a pair appended during a loop is visited.
+    enum class Part { Entry, Key, Value };
+    auto make_iterator = [self](Part part) {
+        return JsValue::make_native_function([self, part](const std::vector<JsValue>&) {
+            auto index = std::make_shared<size_t>(0);
+            return js_make_iterator([self, part, index](JsValue& value) {
+                if (*index >= self->entries.size()) return false;
+                const auto& entry = self->entries[(*index)++];
+                if (part == Part::Key) value = JsValue::make_string(entry.first);
+                else if (part == Part::Value) value = JsValue::make_string(entry.second);
+                else value = JsValue::make_array({JsValue::make_string(entry.first), JsValue::make_string(entry.second)});
+                return true;
+            });
+        });
+    };
+    JsValue entries_fn = make_iterator(Part::Entry);
+    inst.set_property("entries", entries_fn);
+    inst.set_property("keys", make_iterator(Part::Key));
+    inst.set_property("values", make_iterator(Part::Value));
+    inst.set_property(kIteratorKey, entries_fn);
+    inst.set_property("forEach", JsValue::make_native_function([self, inst_cell = inst.object_val](const std::vector<JsValue>& args) {
+        if (args.empty() || !args[0].is_function()) {
+            js_throw_error(JsErrorKind::TypeError, "URLSearchParams.forEach: the callback is not a function");
+        }
+        const JsValue this_arg = args.size() > 1 ? args[1] : JsValue::make_undefined();
+        for (size_t i = 0; i < self->entries.size(); ++i) {
+            const auto entry = self->entries[i];
+            args[0].call_with_this(this_arg, {JsValue::make_string(entry.second), JsValue::make_string(entry.first),
+                                              JsValue::make_object(inst_cell)});
+        }
+        return JsValue::make_undefined();
+    }));
+    inst.set_property("sort", JsValue::make_native_function([self](const std::vector<JsValue>&) {
+        std::stable_sort(self->entries.begin(), self->entries.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (self->on_change) self->on_change();
+        return JsValue::make_undefined();
+    }));
+    // None of these show up when the object's properties are listed.
+    for (const char* name : {"get", "getAll", "set", "append", "has", "delete", "toString", "entries", "keys",
+                             "values", "forEach", "sort", kIteratorKey}) {
+        inst.object_val->properties.entry(name).flags = PropertyMap::Hidden;
+    }
+    js_define_getter(inst.object_val, "size", [self](const std::vector<JsValue>&) {
+        return JsValue::make_number(static_cast<double>(self->entries.size()));
+    });
+
     return inst;
 }
 
@@ -202,8 +253,40 @@ JsValue URLSearchParamsObject::create_js_instance(
 
 JsValue URLSearchParamsObject::create_constructor() {
     return JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        std::string init = !args.empty() ? args[0].to_string() : "";
-        return URLSearchParamsObject::create_js_instance(init);
+        auto self = std::make_shared<URLSearchParamsObject>();
+        if (args.empty() || args[0].is_undefined()) return wrap_existing(self);
+        const JsValue& init = args[0];
+        if (!init.is_object_like() || init.is_function()) {
+            // A query string, with or without its question mark.
+            self->parse(init.to_string());
+            return wrap_existing(self);
+        }
+        JsValue iterator = init.get_property(kIteratorKey);
+        if (iterator.is_function()) {
+            // Anything that yields pairs: an array of arrays, a Map, a
+            // FormData, another URLSearchParams.
+            js_iterate(init, [&](const JsValue& pair) {
+                std::vector<std::string> parts;
+                if (pair.is_object_like()) {
+                    js_iterate(pair, [&](const JsValue& part) {
+                        parts.push_back(js_to_string(part));
+                        return parts.size() <= 2;
+                    });
+                }
+                if (parts.size() != 2) {
+                    js_throw_error(JsErrorKind::TypeError,
+                                   "URLSearchParams: each pair must be an iterable of exactly two items");
+                }
+                self->entries.emplace_back(std::move(parts[0]), std::move(parts[1]));
+                return true;
+            });
+            return wrap_existing(self);
+        }
+        // A record: the object's own enumerable properties.
+        for (const std::string& key : init.own_keys()) {
+            self->entries.emplace_back(key, js_to_string(init.get_property(key)));
+        }
+        return wrap_existing(self);
     });
 }
 

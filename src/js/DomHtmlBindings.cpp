@@ -313,11 +313,7 @@ void setup_hyperlink(Iface& I) {
     define_link_part(I, "hash", &URLObject::hash);
     L.getter("username", [](Realm&, Element&) { return str(""); });
     L.getter("password", [](Realm&, Element&) { return str(""); });
-    L.getter("relList", [](Realm& r, Element& el) {
-        return cached(wrap(r, el), "relList", [&]() {
-            return make_token_list(r, el, "rel", {"noreferrer", "noopener", "opener"});
-        });
-    });
+    L.token_list("relList", "rel", {"noreferrer", "noopener", "opener"});
     reflect(I, "s:target s:download s:ping s:rel s:hreflang s:type s:referrerPolicy:referrerpolicy s:name s:rev "
                "s:charset s:coords s:shape s:alt b:noHref:nohref");
     L.accessor("text",
@@ -932,13 +928,8 @@ void setup_link_element(Iface& I) {
     setup_reflecting(I);
     Html H(I);
     H.getter("sheet", [](Realm&, Element&) { return null(); });
-    H.getter("relList", [](Realm& r, Element& el) {
-        return cached(wrap(r, el), "relList", [&]() {
-            return make_token_list(r, el, "rel", {"alternate", "dns-prefetch", "icon", "manifest", "modulepreload",
-                                                  "next", "pingback", "preconnect", "prefetch", "preload",
-                                                  "search", "stylesheet"});
-        });
-    });
+    H.token_list("relList", "rel", {"alternate", "dns-prefetch", "icon", "manifest", "modulepreload", "next",
+                                    "pingback", "preconnect", "prefetch", "preload", "search", "stylesheet"});
 }
 
 } // namespace

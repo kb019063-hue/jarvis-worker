@@ -277,7 +277,11 @@ JsObject* create_object(Realm& realm, const std::shared_ptr<Node>& node) {
     if (node->is_element()) {
         auto& element = static_cast<Element&>(*node);
         if (element.custom_state() == CustomElementState::Custom) {
-            prototype = custom_element_prototype(realm, element.tag_name());
+            prototype = custom_element_prototype(realm, element);
+        } else if (element.custom_state() == CustomElementState::Failed && !element.is_foreign() &&
+                   CustomElementRegistry::is_valid_custom_element_name(element.tag_name())) {
+            // What createElement gives when the constructor threw.
+            prototype = realm.proto("HTMLUnknownElement");
         }
         exotic = element_exotic(realm, element);
     }

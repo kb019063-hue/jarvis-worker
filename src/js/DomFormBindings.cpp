@@ -32,10 +32,6 @@ LITEBIRD_DOM_TAG(is_datalist, "datalist")
 LITEBIRD_DOM_TAG(is_progress, "progress")
 LITEBIRD_DOM_TAG(is_meter, "meter")
 
-bool is_html_node(const Node& node) {
-    return node.is_element() && !static_cast<const Element&>(node).is_foreign();
-}
-
 NodeVector to_nodes(const std::vector<std::shared_ptr<Element>>& elements) {
     return NodeVector(elements.begin(), elements.end());
 }
@@ -1105,9 +1101,7 @@ void setup_output(Iface& I) {
     ElementMembers<&is_output> M(I);
     reflect_attributes(I, "s:name");
     M.getter("type", [](Realm&, Element&) { return str("output"); });
-    M.getter("htmlFor", [](Realm& r, Element& el) {
-        return cached(wrap(r, el), "htmlFor", [&]() { return make_token_list(r, el, "for"); });
-    });
+    M.token_list("htmlFor", "for");
     M.accessor("value",
         [](Realm&, Element& el) { return str(el.text_content()); },
         [](Realm& r, Element& el, const JsValue& value) {
@@ -1246,9 +1240,7 @@ void setup_form(Iface& I) {
             return str(resolve_url(r, el, action ? *action : std::string()));
         },
         [](Realm&, Element& el, const JsValue& value) { el.set_attribute("action", to_str(value)); });
-    M.getter("relList", [](Realm& r, Element& el) {
-        return cached(wrap(r, el), "relList", [&]() { return make_token_list(r, el, "rel", {"noreferrer", "noopener", "opener"}); });
-    });
+    M.token_list("relList", "rel", {"noreferrer", "noopener", "opener"});
     M.method("submit", 0, [](Realm& r, Element& el, Args) {
         submit_form(r, el, nullptr, false);
         return undefined();

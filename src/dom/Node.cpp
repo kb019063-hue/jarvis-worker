@@ -721,6 +721,13 @@ void append_start_tag(const Element& element, bool xml, bool declare_namespace, 
         append_escaped(value, true, out);
         out += '"';
     }
+    // An element made by createElement(tag, {is}) has no `is` attribute, and
+    // is written with one, so that the markup parses back to the same thing.
+    if (!element.is_value().empty() && !element.has_attribute("is")) {
+        out += " is=\"";
+        append_escaped(element.is_value(), true, out);
+        out += '"';
+    }
     (void)xml;
 }
 

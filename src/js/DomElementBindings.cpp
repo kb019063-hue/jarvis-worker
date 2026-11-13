@@ -229,9 +229,7 @@ void setup_element(Iface& I) {
     E.string("id");
     E.string("className", "class");
     E.string("slot");
-    E.getter("classList", [](Realm& r, Element& el) {
-        return cached(wrap(r, el), "classList", [&]() { return make_token_list(r, el, "class"); });
-    });
+    E.token_list("classList", "class");
     E.getter("attributes", [](Realm& r, Element& el) {
         return cached(wrap(r, el), "attributes", [&]() { return make_attribute_map(r, el); });
     });
@@ -579,6 +577,9 @@ std::shared_ptr<Node> parse_fragment(Realm& realm, Element& context, const std::
     auto document = document_of(realm, context);
     if (document) fragment->set_owner_document(document);
     for (const auto& node : HtmlParser::parse_inner_html(context, markup)) fragment->append_child(node);
+    // Elements made from markup become instances of their definitions when
+    // the call that parsed the markup returns, in the document or not.
+    upgrade_subtree(realm, *fragment);
     return fragment;
 }
 
@@ -592,6 +593,7 @@ void set_inner_markup(Realm& realm, Node& node, const std::string& markup) {
             for (const auto& child : node.children()) child->set_owner_document(document);
         }
         batch.commit(node.children(), removed, nullptr, nullptr);
+        upgrade_subtree(realm, node);
         return;
     }
     if (!node.is_element()) return;
@@ -605,6 +607,7 @@ void set_inner_markup(Realm& realm, Node& node, const std::string& markup) {
         }
     }
     replace_all_children(realm, target, parsed);
+    upgrade_subtree(realm, target);
     element.mark_needs_layout();
 }
 

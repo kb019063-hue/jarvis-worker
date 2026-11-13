@@ -120,6 +120,13 @@ struct Realm {
     JsValue window;
     /// The document the window shows.
     std::shared_ptr<Document> document;
+
+    /// Custom element reactions (connectedCallback and the others) do not
+    /// run in the middle of the operation that causes them: they wait until
+    /// the DOM method or setter the script called returns. `api_depth`
+    /// counts those calls in progress, `reactions_queued` what waits.
+    int api_depth{0};
+    std::size_t reactions_queued{0};
     std::weak_ptr<JsEnvironment> global_scope;
 
     /// The prototype of `name`, built on first use together with those it
@@ -283,11 +290,39 @@ template <typename T> T& this_state(const char* iface) {
 inline constexpr uint8_t kMemberFlags = PropertyMap::Enumerable | PropertyMap::Writable | PropertyMap::Configurable;
 
 /// A native function for `realm`. It does nothing once the realm has ended.
+/// Runs the custom element reactions queued since `mark`
+/// (DomObserverBindings.cpp).
+void run_reactions(Realm& realm, std::size_t mark);
+
+/// One call from script into the DOM, for the reactions it causes: see
+/// Realm::api_depth. A reaction's callback is script and calls the DOM
+/// again; those calls are scopes of their own, and what they cause runs
+/// when they return.
+struct ReactionScope {
+    Realm& realm;
+    std::size_t mark;
+    explicit ReactionScope(Realm& r) : realm(r), mark(r.reactions_queued) { ++realm.api_depth; }
+    /// Called once, when the call is over, however it ended.
+    void finish() {
+        if (realm.reactions_queued > mark) run_reactions(realm, mark);
+        --realm.api_depth;
+    }
+};
+
 template <typename Fn> JsValue make_function(Realm& realm, const char* name, int length, Fn fn) {
     Realm* r = &realm;
     return js_make_native(name, length, [r, fn](Args args) -> JsValue {
         if (!r->alive) return JsValue::make_undefined();
-        return fn(*r, args);
+        ReactionScope reactions(*r);
+        try {
+            JsValue result = fn(*r, args);
+            reactions.finish();
+            return result;
+        } catch (...) {
+            // The call failed; what it had already done still happened.
+            reactions.finish();
+            throw;
+        }
     });
 }
 
@@ -365,6 +400,10 @@ public:
     }
 };
 
+/// `element.classList` and friends: a DOMTokenList over `attribute`.
+JsValue make_token_list(Realm& realm, Element& element, const std::string& attribute,
+                        std::vector<std::string> supported = {});
+
 /// Members of element interfaces: the receiver is an Element accepted by
 /// `Accepts::test` (see the helpers in DomElementBindings.cpp).
 template <bool (*Accepts)(const Node&)>
@@ -394,6 +433,17 @@ struct ElementMembers {
         const std::string attr = attribute ? attribute : ascii_lower(name);
         accessor(name,
             [attr](Realm&, Element& el) { return str(el.get_attribute(attr)); },
+            [attr](Realm&, Element& el, const JsValue& value) { el.set_attribute(attr, to_str(value)); });
+    }
+    /// A DOMTokenList over an attribute (`classList`, `relList`). Assigning
+    /// to the property assigns to the list's `value`, which is the attribute.
+    void token_list(const char* name, const char* attribute, std::vector<std::string> supported = {}) {
+        const std::string key = name;
+        const std::string attr = attribute;
+        accessor(name,
+            [key, attr, supported](Realm& r, Element& el) {
+                return cached(wrap(r, el), key, [&]() { return make_token_list(r, el, attr, supported); });
+            },
             [attr](Realm&, Element& el, const JsValue& value) { el.set_attribute(attr, to_str(value)); });
     }
     /// boolean: whether the attribute is present.
@@ -531,6 +581,9 @@ void define_element_siblings(Iface& I, bool (*accepts)(const Node&));
 int compare_document_position(const Node& self, const Node& other);
 /// Takes `node` out of its parent, if it has one.
 void remove_node(Realm& realm, Node& node);
+/// Moves `node`, with everything below it, to the document `to`: out of its
+/// parent, and its custom elements are told (adoptedCallback).
+void adopt_node(Realm& realm, Node& node, const std::shared_ptr<Document>& to);
 /// Replaces every child of `parent` by `nodes`, as one change: observers get
 /// one record.
 void replace_all_children(Realm& realm, Node& parent, const NodeVector& nodes);
@@ -551,9 +604,6 @@ bool list_nodes(const JsValue& list, NodeVector& out);
 /// radio button called "size", not the first).
 using NamedGetter = std::function<bool(const NodeVector& items, const std::string& name, JsValue& out)>;
 void set_list_named_getter(const JsValue& list, NamedGetter getter);
-/// `element.classList` and friends: a DOMTokenList over `attribute`.
-JsValue make_token_list(Realm& realm, Element& element, const std::string& attribute,
-                        std::vector<std::string> supported = {});
 JsValue make_dataset(Realm& realm, Element& element);
 JsValue make_attribute_map(Realm& realm, Element& element);
 /// The Attr object for an attribute of `element`, the same one every time
@@ -642,8 +692,12 @@ void set_inline_css_text(Realm& realm, Element& element, const std::string& text
 void register_document_interfaces();
 /// A new document that has no window: createHTMLDocument, DOMParser.
 std::shared_ptr<Document> make_document(Realm& realm, bool with_skeleton, const std::string* title);
+/// A new element of `document`. For a defined custom element name the
+/// definition's constructor runs (`synchronous_custom`); `is` names the
+/// definition of a customized built-in element.
 std::shared_ptr<Element> create_element(Realm& realm, Document& document, const std::string& local_name,
-                                        ElementNamespace ns = ElementNamespace::HTML, bool synchronous_custom = true);
+                                        ElementNamespace ns = ElementNamespace::HTML, bool synchronous_custom = true,
+                                        const std::string& is = std::string());
 
 // --- DomTraversalBindings.cpp -----------------------------------------------------
 void register_traversal_interfaces();
@@ -730,9 +784,20 @@ private:
 };
 /// `window.customElements`.
 JsValue custom_elements_object(Realm& realm);
-/// Upgrades `element` if a definition for its name exists.
+/// Asks for `element` to be upgraded if a definition for it exists. Like
+/// every custom element reaction, that happens when the DOM call in
+/// progress returns.
 void try_upgrade(Realm& realm, Element& element);
 void upgrade_subtree(Realm& realm, Node& root);
+/// `document.createElement` for a name that may be defined: runs the
+/// definition's constructor now and returns its element. Null when there is
+/// no definition; null with `failed` set when the constructor threw (the
+/// error has been reported, and the caller makes a plain element instead).
+std::shared_ptr<Element> create_custom_element(Realm& realm, Document& document, const std::string& local_name,
+                                               const std::string& is, bool& failed);
+/// Tells a custom element that it has moved to another document.
+void note_adopted(Realm& realm, Element& element, const std::shared_ptr<Document>& from,
+                  const std::shared_ptr<Document>& to);
 /// The constructor of HTMLElement and of every HTML element interface.
 /// Called directly it is an "Illegal constructor"; reached through
 /// `super()` from a class given to customElements.define it makes `derived`
@@ -740,9 +805,9 @@ void upgrade_subtree(Realm& realm, Node& root);
 JsValue construct_custom_element(Realm& realm, const InterfaceDef& def, Args args, const JsValue* derived);
 /// True when `name` has been given to customElements.define in `realm`.
 bool custom_element_defined(Realm& realm, const std::string& name);
-/// The prototype an element of this name gets when it is created, when it
-/// is a defined custom element. Null otherwise.
-JsObject* custom_element_prototype(Realm& realm, const std::string& name);
+/// The prototype of the definition `element` is an instance of. Null when
+/// it has none.
+JsObject* custom_element_prototype(Realm& realm, const Element& element);
 
 } // namespace dom
 } // namespace litebird

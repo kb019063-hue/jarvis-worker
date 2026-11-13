@@ -18,7 +18,6 @@ bool is_character_data(const Node& node) { return node.is_text() || node.is_comm
 namespace {
 
 bool is_text_node(const Node& node) { return node.is_text(); }
-bool is_comment_node(const Node& node) { return node.is_comment(); }
 bool is_fragment_node(const Node& node) { return node.is_document_fragment(); }
 bool is_doctype_node(const Node& node) { return node.is_document_type(); }
 
@@ -260,6 +259,11 @@ void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, 
         const std::size_t index = document.doctype().preceding_children;
         reference = index < parent.children().size() ? parent.children()[index] : nullptr;
     }
+    // A node from another document belongs to this one from now on.
+    if (auto to = document_of(realm, parent)) {
+        auto from = node->owner_document();
+        if (from && from != to) adopt_node(realm, *node, to);
+    }
     NodeVector inserted;
     if (node->is_document_fragment()) {
         // The children of a fragment arrive as one change: one record.
@@ -360,6 +364,27 @@ void remove_node(Realm&, Node& node) {
         return;
     }
     if (auto parent = node.parent()) parent->remove_child(node.shared_from_this());
+}
+
+void adopt_node(Realm& realm, Node& node, const std::shared_ptr<Document>& to) {
+    auto keep = node.shared_from_this();
+    const auto from = node.owner_document();
+    remove_node(realm, node);
+    if (!to || from == to) return;
+    // Its custom elements, found before they change hands.
+    std::vector<std::shared_ptr<Element>> custom;
+    auto consider = [&](Node& candidate) {
+        if (!candidate.is_element()) return;
+        auto& element = static_cast<Element&>(candidate);
+        if (element.custom_state() == CustomElementState::Custom) custom.push_back(shared(element));
+    };
+    consider(node);
+    for_each_descendant(node, [&](Node& inner) {
+        consider(inner);
+        return true;
+    });
+    node.set_owner_document(to);
+    for (const auto& element : custom) note_adopted(realm, *element, from, to);
 }
 
 Node& node_argument(Args args, std::size_t index, const char* what) {
@@ -466,7 +491,12 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
                     if (owner) contents->set_owner_document(owner);
                     element->set_template_contents(contents);
                 }
-                if (!from.is_foreign() && custom_element_defined(realm, from.tag_name())) custom.push_back(element);
+                if (!from.is_value().empty()) element->set_is_value(from.is_value());
+                // A copy is a new element: if its name is defined, it is
+                // upgraded like one that was just created.
+                if (!from.is_foreign() && (from.tag_name().find('-') != std::string::npos || !from.is_value().empty())) {
+                    custom.push_back(element);
+                }
                 copy = element;
                 break;
             }

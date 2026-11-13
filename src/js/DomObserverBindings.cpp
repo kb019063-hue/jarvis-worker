@@ -302,6 +302,9 @@ void setup_mutation_observer(Iface& I) {
 
 struct Definition {
     std::string name;
+    /// The element name its instances have: `name` itself, or the built-in
+    /// element it extends (`{extends: 'button'}`).
+    std::string local_name;
     JsValue constructor;
     JsValue prototype;
     std::vector<std::string> observed;
@@ -311,10 +314,23 @@ struct Definition {
     JsValue attribute_changed;
 };
 
+/// Something a custom element is to be told, or its upgrade.
+struct Reaction {
+    std::shared_ptr<Element> element;
+    std::shared_ptr<Definition> definition;
+    bool upgrade{false};
+    bool done{false};
+    JsValue callback;
+    std::vector<JsValue> args;
+};
+
 struct CustomPart : RealmPart {
     std::vector<std::shared_ptr<Definition>> definitions;
     std::unordered_map<std::string, std::shared_ptr<PromiseData>> waiting;
     bool defining{false};
+    /// Reactions waiting for the DOM call that caused them to return. Each
+    /// call owns the part of the queue from its mark on (see ReactionScope).
+    std::vector<Reaction> queue;
 
     std::shared_ptr<Definition> find(const std::string& name) const {
         for (const auto& definition : definitions) {
@@ -324,40 +340,119 @@ struct CustomPart : RealmPart {
     }
 };
 
+/// The definition `element` is an instance of, or would be upgraded with.
 std::shared_ptr<Definition> definition_for(Realm& realm, const Element& element) {
     if (element.is_foreign()) return nullptr;
     CustomPart* part = realm.find_part<CustomPart>();
-    return part ? part->find(element.tag_name()) : nullptr;
+    if (!part || part->definitions.empty()) return nullptr;
+    // Custom elements exist in the window's own document. A document made
+    // by a script, and the one that holds the contents of templates, has no
+    // window and no definitions: what is in a <template> stays inert.
+    if (auto owner = element.owner_document()) {
+        if (owner != realm.document) return nullptr;
+    }
+    const std::string& is = element.is_value();
+    if (!is.empty()) {
+        auto definition = part->find(is);
+        if (definition && definition->local_name == element.tag_name() && definition->name != definition->local_name) {
+            return definition;
+        }
+        return nullptr;
+    }
+    auto definition = part->find(element.tag_name());
+    return definition && definition->local_name == definition->name ? definition : nullptr;
 }
 
+void enqueue(Realm& realm, CustomPart& part, Reaction reaction) {
+    part.queue.push_back(std::move(reaction));
+    realm.reactions_queued = part.queue.size();
+    // Nobody to wait for: the tree was changed by the host, not by a script
+    // calling in.
+    if (realm.api_depth == 0) {
+        ++realm.api_depth;
+        run_reactions(realm, part.queue.size() - 1);
+        --realm.api_depth;
+    }
+}
+
+void enqueue_callback(Realm& realm, Element& element, const std::shared_ptr<Definition>& definition,
+                      const JsValue& callback, std::vector<JsValue> args) {
+    if (!callback.is_function()) return;
+    Reaction reaction;
+    reaction.element = shared(element);
+    reaction.definition = definition;
+    reaction.callback = callback;
+    reaction.args = std::move(args);
+    enqueue(realm, realm.part<CustomPart>(), std::move(reaction));
+}
+
+bool observes(const Definition& definition, const std::string& name) {
+    return definition.attribute_changed.is_function() &&
+           std::find(definition.observed.begin(), definition.observed.end(), name) != definition.observed.end();
+}
+
+/// Makes an existing element an instance of the definition's class: the
+/// element's own object gets the class's prototype and the constructor runs
+/// on it.
 void run_upgrade(Realm& realm, Element& element, const std::shared_ptr<Definition>& definition) {
+    if (element.custom_state() != CustomElementState::Uncustomized) return;
     auto keep = shared(element);
+    CustomPart& part = realm.part<CustomPart>();
     JsValue object = wrap(realm, element);
-    // The element's own object becomes an instance of the class: it gets the
-    // class's prototype, and then the constructor runs on it.
+    // "Failed" until the constructor has returned: what the constructor does
+    // to its own element is not reported back to it.
+    element.set_custom_state(CustomElementState::Failed);
+
+    // What it will be told once it is constructed: its attributes as they
+    // are now, and that it is in the document. These run right after the
+    // constructor, before any other element's reactions.
+    const std::size_t first = part.queue.size();
+    {
+        // Not through enqueue(): nothing here may run before the constructor.
+        auto add = [&](const JsValue& callback, std::vector<JsValue> args) {
+            Reaction reaction;
+            reaction.element = keep;
+            reaction.definition = definition;
+            reaction.callback = callback;
+            reaction.args = std::move(args);
+            part.queue.push_back(std::move(reaction));
+        };
+        if (definition->attribute_changed.is_function()) {
+            for (const auto& [name, value] : element.attributes()) {
+                if (observes(*definition, name)) add(definition->attribute_changed, {str(name), null(), str(value), null()});
+            }
+        }
+        if (element.is_connected() && definition->connected.is_function()) add(definition->connected, {});
+        realm.reactions_queued = part.queue.size();
+    }
+
     if (definition->prototype.is_object()) object.object_val->prototype = definition->prototype.object_val;
     JsValue thrown;
     const bool ok = js_capture_throw([&] {
         JsScriptScope scope;
-        definition->constructor.construct({}, &object);
+        JsValue result = definition->constructor.construct({}, &object);
+        if (result.is_object_like() && !strict_equals(result, object)) {
+            js_throw_type_error("The custom element constructor returned a different object.");
+        }
     }, thrown);
     if (!ok) {
-        element.set_custom_state(CustomElementState::Failed);
+        // It stays a plain element, and is told nothing.
+        for (std::size_t i = first; i < part.queue.size(); ++i) {
+            if (part.queue[i].element == keep) part.queue[i].done = true;
+        }
         js_report_uncaught(thrown);
         return;
     }
     element.set_custom_state(CustomElementState::Custom);
-    Node::bump_tree_version();
-    if (definition->attribute_changed.is_function()) {
-        const AttributeList attributes = element.attributes();
-        for (const auto& [name, value] : attributes) {
-            if (std::find(definition->observed.begin(), definition->observed.end(), name) == definition->observed.end()) continue;
-            call_reporting(realm, definition->attribute_changed, object, {str(name), null(), str(value), null()});
-        }
-    }
-    if (element.is_connected() && definition->connected.is_function()) {
-        call_reporting(realm, definition->connected, object, {});
-    }
+    Node::bump_tree_version();          // `:defined` matches it now
+}
+
+void enqueue_upgrade(Realm& realm, Element& element, const std::shared_ptr<Definition>& definition) {
+    Reaction reaction;
+    reaction.element = shared(element);
+    reaction.definition = definition;
+    reaction.upgrade = true;
+    enqueue(realm, realm.part<CustomPart>(), std::move(reaction));
 }
 
 JsValue callback_of(const JsValue& prototype, const char* name) {
@@ -395,8 +490,17 @@ void setup_registry(Iface& I) {
                 throw_dom(r, "NotSupportedError", "this constructor has already been used with this registry.");
             }
         }
-        if (!member(js_arg(args, 2), "extends").is_undefined()) {
-            throw_dom(r, "NotSupportedError", "Customized built-in elements are not supported.");
+        // {extends: 'button'}: a customized built-in element.
+        std::string local_name = name;
+        const JsValue extends = member(js_arg(args, 2), "extends");
+        if (!extends.is_undefined()) {
+            local_name = to_str(extends);
+            if (CustomElementRegistry::is_valid_custom_element_name(local_name)) {
+                throw_dom(r, "NotSupportedError", "\"" + local_name + "\" is a custom element name and cannot be extended.");
+            }
+            if (std::string(html_interface_for_tag(local_name)) == "HTMLUnknownElement") {
+                throw_dom(r, "NotSupportedError", "\"" + local_name + "\" is not an element that can be extended.");
+            }
         }
         if (part.defining) throw_dom(r, "NotSupportedError", "A definition is already being made.");
         part.defining = true;
@@ -407,6 +511,7 @@ void setup_registry(Iface& I) {
 
         auto definition = std::make_shared<Definition>();
         definition->name = name;
+        definition->local_name = local_name;
         definition->constructor = constructor;
         definition->prototype = constructor.get_property("prototype");
         if (!definition->prototype.is_object()) {
@@ -489,16 +594,42 @@ bool custom_element_defined(Realm& realm, const std::string& name) {
     return part && part->find(name) != nullptr;
 }
 
-JsObject* custom_element_prototype(Realm& realm, const std::string& name) {
-    CustomPart* part = realm.find_part<CustomPart>();
-    auto definition = part ? part->find(name) : nullptr;
+JsObject* custom_element_prototype(Realm& realm, const Element& element) {
+    auto definition = definition_for(realm, element);
     return definition && definition->prototype.is_object() ? definition->prototype.object_val.get() : nullptr;
+}
+
+void run_reactions(Realm& realm, std::size_t mark) {
+    CustomPart* part = realm.find_part<CustomPart>();
+    if (!part) {
+        realm.reactions_queued = 0;
+        return;
+    }
+    // Element by element, in the order the elements first came up: all that
+    // one element is to be told, then the next. By index throughout: a
+    // callback is script, and what it does can add to the queue.
+    for (std::size_t i = mark; i < part->queue.size(); ++i) {
+        if (part->queue[i].done) continue;
+        const std::shared_ptr<Element> element = part->queue[i].element;
+        for (std::size_t j = i; j < part->queue.size(); ++j) {
+            if (part->queue[j].done || part->queue[j].element != element) continue;
+            part->queue[j].done = true;
+            const Reaction reaction = part->queue[j];
+            if (!realm.alive) continue;
+            if (reaction.upgrade) {
+                run_upgrade(realm, *reaction.element, reaction.definition);
+            } else {
+                call_reporting(realm, reaction.callback, wrap(realm, reaction.element), reaction.args);
+            }
+        }
+    }
+    if (part->queue.size() > mark) part->queue.erase(part->queue.begin() + static_cast<std::ptrdiff_t>(mark), part->queue.end());
+    realm.reactions_queued = part->queue.size();
 }
 
 void try_upgrade(Realm& realm, Element& element) {
     if (element.custom_state() != CustomElementState::Uncustomized) return;
-    auto definition = definition_for(realm, element);
-    if (definition) run_upgrade(realm, element, definition);
+    if (auto definition = definition_for(realm, element)) enqueue_upgrade(realm, element, definition);
 }
 
 void upgrade_subtree(Realm& realm, Node& root) {
@@ -509,10 +640,9 @@ void upgrade_subtree(Realm& realm, Node& root) {
     auto consider = [&](Node& node) {
         if (!node.is_element()) return;
         auto& element = static_cast<Element&>(node);
-        if (element.custom_state() == CustomElementState::Uncustomized && !element.is_foreign() &&
-            element.tag_name().find('-') != std::string::npos && part->find(element.tag_name())) {
-            candidates.push_back(shared(element));
-        }
+        if (element.custom_state() != CustomElementState::Uncustomized || element.is_foreign()) return;
+        if (element.tag_name().find('-') == std::string::npos && element.is_value().empty()) return;
+        if (definition_for(realm, element)) candidates.push_back(shared(element));
     };
     consider(root);
     for_each_descendant(root, [&](Node& node) {
@@ -522,7 +652,51 @@ void upgrade_subtree(Realm& realm, Node& root) {
     for (const auto& element : candidates) try_upgrade(realm, *element);
 }
 
-JsValue construct_custom_element(Realm& realm, const InterfaceDef&, Args, const JsValue* derived) {
+std::shared_ptr<Element> create_custom_element(Realm& realm, Document& document, const std::string& local_name,
+                                               const std::string& is, bool& failed) {
+    failed = false;
+    CustomPart* part = realm.find_part<CustomPart>();
+    if (!part || part->definitions.empty() || realm.document.get() != &document) return nullptr;
+    std::shared_ptr<Definition> definition;
+    if (!is.empty()) {
+        definition = part->find(is);
+        if (definition && (definition->local_name != local_name || definition->name == definition->local_name)) definition = nullptr;
+    } else {
+        definition = part->find(local_name);
+        if (definition && definition->local_name != definition->name) definition = nullptr;
+    }
+    if (!definition) return nullptr;
+
+    std::shared_ptr<Element> made;
+    JsValue thrown;
+    const bool ok = js_capture_throw([&] {
+        JsScriptScope scope;
+        JsValue result = js_construct(definition->constructor, {});
+        Node* node = node_ptr(result);
+        if (!node || !node->is_element() || static_cast<Element*>(node)->is_foreign()) {
+            js_throw_type_error("The custom element constructor did not produce an HTML element.");
+        }
+        auto& element = static_cast<Element&>(*node);
+        // createElement returns a new, empty element; a constructor that
+        // gives its element attributes or children is at fault.
+        const char* problem = !element.attributes().empty() ? "must not have attributes"
+                            : !element.children().empty() ? "must not have children"
+                            : element.parent() ? "must not have a parent"
+                            : (element.owner_document() && element.owner_document().get() != &document) ? "must be in the same document"
+                            : element.tag_name() != definition->local_name ? "must have the defined name"
+                            : nullptr;
+        if (problem) throw_dom(realm, "NotSupportedError", std::string("The result of the custom element constructor ") + problem + ".");
+        made = shared(element);
+    }, thrown);
+    if (!ok) {
+        js_report_uncaught(thrown);
+        failed = true;
+        return nullptr;
+    }
+    return made;
+}
+
+JsValue construct_custom_element(Realm& realm, const InterfaceDef& def, Args, const JsValue* derived) {
     if (!derived || derived->type != JsType::Object || !derived->object_val) js_throw_type_error("Illegal constructor");
     // Reached through super() during an upgrade: `this` is the element's object already.
     if (node_ptr(*derived)) return *derived;
@@ -543,14 +717,41 @@ JsValue construct_custom_element(Realm& realm, const InterfaceDef&, Args, const 
         }
     }
     if (!definition) js_throw_type_error("Illegal constructor");
+    // The class must extend the interface of the element it defines:
+    // HTMLElement for a name of its own, the built-in's interface otherwise.
+    const std::string expected = definition->local_name == definition->name
+        ? std::string("HTMLElement") : html_interface_for_tag(definition->local_name);
+    if (expected != def.name) js_throw_type_error("Illegal constructor");
 
-    auto element = std::make_shared<Element>(definition->name);
+    auto element = std::make_shared<Element>(definition->local_name);
     if (realm.document) element->set_owner_document(realm.document);
+    if (definition->local_name != definition->name) element->set_is_value(definition->name);
     element->set_custom_state(CustomElementState::Custom);
     JsObject* cell = derived->object_val;
     cell->dom_node = element;
+    cell->exotic = element_exotic(realm, *element);
     element->set_script_object(cell, realm.id);
     return *derived;
+}
+
+void note_adopted(Realm& realm, Element& element, const std::shared_ptr<Document>& from,
+                  const std::shared_ptr<Document>& to) {
+    if (element.custom_state() != CustomElementState::Custom || from == to) return;
+    // The definition is the one it was made with; it no longer answers to
+    // its new document, so it is found by its class.
+    CustomPart* part = realm.find_part<CustomPart>();
+    if (!part) return;
+    JsObject* cell = static_cast<JsObject*>(element.script_object());
+    if (!cell) return;
+    int guard = 0;
+    for (JsObject* proto = cell->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
+        for (const auto& candidate : part->definitions) {
+            if (candidate->prototype.object_val.get() != proto) continue;
+            enqueue_callback(realm, element, candidate, candidate->adopted,
+                             {from ? wrap(realm, from) : null(), to ? wrap(realm, to) : null()});
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,10 +811,9 @@ void note_attribute_changed(Element& element, const std::string& name, const std
     if (!new_value && old_value) detach_attr_object(*realm, element, name, *old_value);
     if (element.custom_state() == CustomElementState::Custom) {
         auto definition = definition_for(*realm, element);
-        if (definition && definition->attribute_changed.is_function() &&
-            std::find(definition->observed.begin(), definition->observed.end(), name) != definition->observed.end()) {
-            call_reporting(*realm, definition->attribute_changed, wrap(*realm, element),
-                           {str(name), nullable_str(old_value), nullable_str(new_value), null()});
+        if (definition && observes(*definition, name)) {
+            enqueue_callback(*realm, element, definition, definition->attribute_changed,
+                             {str(name), nullable_str(old_value), nullable_str(new_value), null()});
         }
     }
 }
@@ -631,7 +831,7 @@ void note_character_data_changed(Node& node, const std::string& old_value) {
 void note_connected(Element& element, bool connected) {
     // Nearly every element is neither a custom element nor about to be one.
     if (element.custom_state() != CustomElementState::Custom &&
-        (element.is_foreign() || element.tag_name().find('-') == std::string::npos)) {
+        (element.is_foreign() || (element.tag_name().find('-') == std::string::npos && element.is_value().empty()))) {
         return;
     }
     Realm* realm = realm_if_any(element);
@@ -639,12 +839,12 @@ void note_connected(Element& element, bool connected) {
     auto definition = definition_for(*realm, element);
     if (!definition) return;
     if (element.custom_state() == CustomElementState::Uncustomized) {
-        if (connected) run_upgrade(*realm, element, definition);       // which also tells it that it is connected
+        // Upgrading it also tells it that it is connected.
+        if (connected) enqueue_upgrade(*realm, element, definition);
         return;
     }
     if (element.custom_state() != CustomElementState::Custom) return;
-    const JsValue& callback = connected ? definition->connected : definition->disconnected;
-    if (callback.is_function()) call_reporting(*realm, callback, wrap(*realm, element), {});
+    enqueue_callback(*realm, element, definition, connected ? definition->connected : definition->disconnected, {});
 }
 
 void register_observer_interfaces() {

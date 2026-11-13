@@ -100,6 +100,17 @@ public:
     // element's own script object, so there is nothing else to keep here.
     CustomElementState custom_state() const { return m_custom_state; }
     void set_custom_state(CustomElementState state) { m_custom_state = state; }
+    /// For a customized built-in element (`<button is="fancy-button">`), the
+    /// name of the definition it is an instance of or waits for. It is fixed
+    /// when the element is created: by `createElement(tag, {is})`, or from
+    /// the `is` attribute the element was parsed with.
+    const std::string& is_value() const {
+        if (!m_is_value.empty()) return m_is_value;
+        static const std::string none;
+        auto attribute = m_attributes.find("is");
+        return attribute == m_attributes.end() ? none : attribute->second;
+    }
+    void set_is_value(std::string value) { m_is_value = std::move(value); }
     /// What `:defined` asks: false only for an element whose name is a valid
     /// custom element name and which has not been upgraded.
     bool is_defined() const;
@@ -216,6 +227,7 @@ public:
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
     std::shared_ptr<ShadowRoot> m_shadow_root;
     CustomElementState m_custom_state{CustomElementState::Uncustomized};
+    std::string m_is_value;
     std::shared_ptr<FormControlState> m_form_state;
     Rect m_bounding_box;
     bool m_is_hovered{false};

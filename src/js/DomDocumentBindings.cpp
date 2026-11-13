@@ -357,7 +357,13 @@ void setup_document(Iface& I) {
         require_args(args, 1, "Document.createElement");
         const std::string name = to_str(args[0]);
         validate_name(r, name);
-        auto element = create_element(r, as_document(self), ascii_lower(name));
+        // createElement('button', {is: 'fancy-button'})
+        std::string is;
+        if (args.size() > 1 && args[1].is_object_like()) {
+            const JsValue value = member(args[1], "is");
+            if (!value.is_undefined()) is = to_str(value);
+        }
+        auto element = create_element(r, as_document(self), ascii_lower(name), ElementNamespace::HTML, true, is);
         JsValue object = wrap(r, element);
         // A script made by a script runs when it is put into the document;
         // one that came from markup assigned to innerHTML never does.
@@ -432,8 +438,7 @@ void setup_document(Iface& I) {
         if (node.is_document()) throw_dom(r, "NotSupportedError", "The node provided is of type '#document', which may not be adopted.");
         if (dynamic_cast<ShadowRoot*>(&node)) throw_dom(r, "HierarchyRequestError", "The node provided is a shadow root, which may not be adopted.");
         auto keep = node.shared_from_this();
-        remove_node(r, node);
-        node.set_owner_document(shared_document(self));
+        adopt_node(r, node, shared_document(self));
         return args[0];
     });
 
@@ -552,7 +557,12 @@ std::shared_ptr<Document> make_document(Realm& realm, bool with_skeleton, const 
 }
 
 std::shared_ptr<Element> create_element(Realm& realm, Document& document, const std::string& local_name,
-                                        ElementNamespace ns, bool synchronous_custom) {
+                                        ElementNamespace ns, bool synchronous_custom, const std::string& is) {
+    bool failed = false;
+    if (ns == ElementNamespace::HTML && synchronous_custom) {
+        // A defined custom element is made by its own constructor.
+        if (auto made = create_custom_element(realm, document, local_name, is, failed)) return made;
+    }
     auto element = std::make_shared<Element>(local_name, ns);
     auto owner = std::static_pointer_cast<Document>(document.shared_from_this());
     element->set_owner_document(owner);
@@ -562,7 +572,9 @@ std::shared_ptr<Element> create_element(Realm& realm, Document& document, const 
             contents->set_owner_document(owner->template_document());
             element->set_template_contents(contents);
         }
-        if (synchronous_custom && custom_element_defined(realm, element->tag_name())) try_upgrade(realm, *element);
+        if (!is.empty()) element->set_is_value(is);
+        // The constructor threw: a plain element that will not be tried again.
+        if (failed) element->set_custom_state(CustomElementState::Failed);
     }
     return element;
 }

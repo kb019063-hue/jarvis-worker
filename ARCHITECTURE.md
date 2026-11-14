@@ -2222,15 +2222,16 @@ is. It does not validate, and it reads nothing but the text it was given.
   (3.3.3: anything but `CDATA` is trimmed and collapsed) and a declared
   default is added to an element that does not have the attribute, before
   namespaces are resolved, because a default can be an `xmlns`. Element
-  types, notations and conditional sections are checked for form and then
-  not used: nothing is validated.
+  types and notations are checked for form and then not used: nothing is
+  validated.
 - **Nothing outside the document is read.** An external entity, an external
   subset and a parameter entity that points at a file are never fetched: no
-  code path opens anything. What the standard lets a non-validating parser do
-  follows from that: after a reference to an external subset or to a
-  parameter entity, later declarations are not read (they could have been
-  changed by what was not read), and an entity that is not declared is then
-  no longer an error of form (4.1); it stands for nothing.
+  code path opens anything. What the standard asks of a parser that does
+  not read them follows from that: declarations that come after a reference
+  to an external parameter entity are not used (what was not read could
+  have changed them), and in a document that has an external subset or
+  refers to a parameter entity, an entity that is not declared is no error
+  of form (4.1); it stands for nothing. `standalone="yes"` takes both back.
 - **`&nbsp;` in XHTML.** The HTML standard asks a browser to treat eleven
   public identifiers (the XHTML and MathML DTDs) as declaring the entity
   names of HTML. A DOCTYPE with one of them does; any other document has the
@@ -2297,9 +2298,11 @@ parent, which they did not, and `document.doctype` is the doctype that is
 there now, not the one the parser saw.
 
 **Names are checked by the DOM standard's own rules**, which since 2025 are
-not XML's: `createElement('a<b')` throws, `createElement('a:b:c')` does not,
-and `setAttribute('0', '')` is allowed. `createElementNS` and
-`createDocument` validate and split a qualified name and refuse a prefix
+not XML's: a name is what the HTML parser could have made. So
+`createElement('a<b')` gives an element and `createElement('a b')` throws;
+`setAttribute('<', '')` is allowed and `setAttribute('a=b', '')` is not. The
+target of a processing instruction is still an XML name. `createElementNS`
+and `createDocument` validate and split a qualified name and refuse a prefix
 without a namespace, `xml` and `xmlns` with the wrong one.
 
 **Not well formed** gives what browsers give: a document whose root is
@@ -2388,17 +2391,17 @@ are a well-formed document, and null otherwise; there is no `parsererror`
 document here. The document has the response's type and address, and no
 script in it runs. An HTML response is a document only when the script asks
 for one (`responseType = 'document'`), and is parsed with scripting off, as
-`DOMParser` parses. The response arrives in a task after `send()` returns
-(`loadstart`, the states, `progress`, `load`, `loadend`), or before it
-returns for a synchronous request, which fires no `loadstart` and no
-`progress`.
+`DOMParser` parses. `send()` fires `loadstart` and returns; the response
+arrives in a task after that (the states, `progress`, `load`, `loadend`). A
+synchronous request has it before `send()` returns, and fires no `loadstart`
+and no `progress`.
 
 `DataUrl.cpp` does no input or output: it turns a string into a type and
 bytes. The request code calls nothing that opens a file or a socket, and the
 unit suite asserts it from outside: a `file:` address, a path, a relative
 address that climbs to one, `http:`, `https:`, `blob:`, `about:` and
-`javascript:` all end in `error` with status 0 and an empty response, with a
-file of that name lying on the disk.
+`javascript:` all end in `error` with status 0 and an empty response. For
+the first three the file is there to be read.
 
 ### 7. Four references, and where each is not the truth
 
@@ -2430,9 +2433,9 @@ one fails that is not listed and when a listed one passes.
 
 **jsdom** recorded 57 cases (`xml.dat`, `xhr.dat`). Its XML serializer
 follows the text of before September 2026 and makes up a prefix where an
-attribute has one; its `XMLHttpRequest` reads every XML response as UTF-8
-whatever the response declares, puts U+FFFD where the bytes are not text and
-gives a document, where XML says there is none (4.3.3); it calls every
+attribute has one; its `XMLHttpRequest` reads an XML response as UTF-8
+whatever the document in it declares, puts U+FFFD where the bytes are not
+text and gives a document, where XML says there is none (4.3.3); it calls every
 response document `application/xml`, keeps the fragment in `responseURL`,
 fires a `progress` event on a synchronous request and one after `abort()`,
 and parses an HTML response with scripting on. The corpus stays away from

@@ -221,7 +221,8 @@ Five things about these numbers:
   subtests assert a text of the serializer's standard that has since
   changed, or a fault filed against it, and following them writes documents
   that read back as another tree (265 of the 3,000 above, with one of
-  them). jsdom reads every XML response as UTF-8. Where two references
+  them). jsdom reads an XML response as UTF-8 whatever the document in it
+  declares. Where two references
   disagree the standard was read, and the documents say which way it went
   (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
 - **552 web-platform-tests subtests fail**, and 495 of them for one reason:
@@ -235,7 +236,6 @@ Five things about these numbers:
   over the network are open, and so is something found on the way:
   `fetch()`, which is older code, reads files of this machine for any page
   that asks (`AGENTS.md`).
-
 - **The normal build passed everything while reading freed memory.** The
   first commit CI ran failed in the sanitizer job and nowhere else:
   `XMLHttpRequest` read the charset of a response's type through a pointer

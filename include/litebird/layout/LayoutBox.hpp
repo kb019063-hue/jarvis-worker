@@ -125,6 +125,17 @@ public:
     /// it contains its own floats (CSS 2.1 section 9.4.1).
     bool establishes_bfc() const;
 
+    /// Table cells in a collapsed-border table share their borders with their
+    /// neighbours, so each one only paints half. Layout scales the used border
+    /// width by this factor (always recomputed from the style, so relayout is
+    /// idempotent).
+    float border_scale{1.0f};
+
+    /// A table cell resolves percentage lengths against the *table's* width,
+    /// not against the column width it happens to be laid out with (CSS 2.1
+    /// 17.5.2). Negative means "use the containing block".
+    float width_basis_override{-1.0f};
+
     // --- float context -----------------------------------------------------
     // Floats declared inside this box, in this box's content coordinates.
     // A float of no height covers no position and has no band here.
@@ -169,6 +180,12 @@ private:
     /// block. The percentage fields are kept, so a relayout at a different
     /// size recomputes them instead of reusing a stale pixel value.
     void resolve_percentages(float containing_width, float containing_height);
+
+    /// Copies margin/padding/border from the computed style onto the used
+    /// dimensions, scaling the border by `border_scale` (collapsed table
+    /// cells). Idempotent. Only `layout()` paths used to do this, which is
+    /// why a float or a table cell laid out directly lost its edges.
+    void apply_style_edges();
 
     void layout_block(float containing_width);
     void layout_table(float containing_width);

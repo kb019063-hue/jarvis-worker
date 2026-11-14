@@ -75,6 +75,7 @@ public:
 
     /// Built-in state that is not a property: a Date's time value, a RegExp's
     /// compiled program, a Map's storage. The owner knows the concrete type.
+    /// In the cell of a function it is the function: see function_value().
     std::shared_ptr<void> internal;
 
     /// Marks values this object keeps alive outside its property table, such
@@ -92,18 +93,6 @@ public:
     /// Host behaviour and state; see JsExotic. Null for ordinary objects.
     std::shared_ptr<JsExotic> exotic;
 
-    /// Set when this cell is a function's cell and stands for the function in
-    /// a prototype chain: the function itself. A function is a value (a
-    /// payload shared by its copies), not a cell, and a prototype link is a
-    /// pointer to a cell. This is the way back, so that
-    /// `Object.getPrototypeOf(Derived)` is `Base` and can be called. It is
-    /// set by JsValue::as_prototype() and read by JsValue::make_object().
-    ///
-    /// The cell owns a copy of the function and the function's payload owns a
-    /// handle to the cell: a cycle, which only the collector takes apart.
-    /// That is why it is not set for every function that has a cell.
-    std::unique_ptr<JsValue> function_value;
-
     // Set when this JsObject is the script-visible identity of a DOM node.
     // Holding a strong reference here means the wrapper keeps its node alive, which
     // is what makes `document.body` stable across accesses and across collections.
@@ -115,6 +104,24 @@ public:
     /// back to it.
     static inline void (*trace_dom_node)(Heap&, JsObject&) = nullptr;
     static inline void (*release_dom_node)(JsObject&) = nullptr;
+
+    /// For a function's cell that stands for the function in a prototype
+    /// chain: the function itself. Null for every other cell.
+    ///
+    /// A function is a value (a payload its copies share), not a cell, and a
+    /// prototype link is a pointer to a cell. This is the way back, so that
+    /// `Object.getPrototypeOf(Derived)` is `Base` and can be called. It is
+    /// set by JsValue::as_prototype() and read by JsValue::make_object().
+    ///
+    /// The cell then owns a copy of the function, and the function's payload
+    /// owns a handle to the cell: a cycle, which only the collector takes
+    /// apart. That is why a function's cell is not given one until the
+    /// function becomes a prototype. The copy is kept in `internal`, which a
+    /// function's cell has no other use for, so no object grows for it.
+    const JsValue* function_value() const {
+        return klass == ObjectClass::Function ? static_cast<const JsValue*>(internal.get()) : nullptr;
+    }
+    void set_function_value(const JsValue& function);
 
     void trace(Heap& heap) override;
     void release_contents() override;
@@ -171,6 +178,9 @@ public:
     /// Reports a value that several holders may share through a shared_ptr
     /// (an accessor's setter).
     void mark_shared_value(const std::shared_ptr<JsValue>& value);
+    /// The same for a value kept behind a pointer of another type; `holders`
+    /// is that pointer's use count.
+    void mark_held_value(const JsValue& value, long holders);
 
     /// For trace functions that walk storage several cells may share (a
     /// collection's entries after `class X extends Map`): true the first time

@@ -330,7 +330,9 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
             out = read_entry(*it, receiver);
             return true;
         }
-        if (obj->function_value && function_implicit_property(*obj->function_value, obj, name, out)) return true;
+        if (const JsValue* function = obj->function_value()) {
+            if (function_implicit_property(*function, obj, name, out)) return true;
+        }
     }
     return false;
 }
@@ -411,7 +413,7 @@ JsObject* JsValue::as_prototype() const {
     if (object_val) return object_val;
     if (!is_function()) return nullptr;
     JsObject* cell = function_cell();
-    if (cell && !cell->function_value) cell->function_value = std::make_unique<JsValue>(*this);
+    if (cell && !cell->function_value()) cell->set_function_value(*this);
     return cell;
 }
 
@@ -478,7 +480,7 @@ JsValue JsValue::make_object(JsObject* obj) {
     v.type = JsType::Object;
     if (obj) {
         // A function's cell, reached through a prototype link: the function.
-        if (obj->function_value) return *obj->function_value;
+        if (const JsValue* function = obj->function_value()) return *function;
         v.object_val = obj;
     } else {
         v.object_val = Heap::default_heap().allocate_object();
@@ -722,8 +724,9 @@ bool JsValue::has_own_property(const std::string& name) const {
     if (const PropertyMap* map = loose_properties()) {
         if (map->find(name) != map->end()) return true;
     }
-    if (is_function() && (name == "name" || name == "length")) return function_data() != nullptr;
-    return false;
+    // What a script function has without storing it, the `prototype` of a
+    // constructor included: it is there before it is first read.
+    return function_has_implicit_property(*this, name);
 }
 
 bool JsValue::has_property(const std::string& name) const {
@@ -741,7 +744,9 @@ bool JsValue::has_property(const std::string& name) const {
     int guard = 0;
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
-        if (obj->function_value && function_has_implicit_property(*obj->function_value, name)) return true;
+        if (const JsValue* function = obj->function_value()) {
+            if (function_has_implicit_property(*function, name)) return true;
+        }
     }
     if (object_val && object_val->lookup_fallback) {
         JsValue ignored;
@@ -751,6 +756,8 @@ bool JsValue::has_property(const std::string& name) const {
 }
 
 bool JsValue::delete_property(const std::string& name) {
+    // A constructor's `prototype` cannot be deleted, whether it has been made yet or not.
+    if (name == "prototype" && function_has_implicit_property(*this, name)) return false;
     if (JsObject* cell = property_cell()) {
         if (cell->exotic) {
             bool result = true;
@@ -1061,6 +1068,19 @@ void JsValue::set_property(const std::string& name, JsValue val) {
             }
             if (obj->frozen || !(it->flags & PropertyMap::Writable)) return;
             it->second = std::move(val);
+            return;
+        }
+
+        // `F.prototype = {...}` before anything has read F.prototype. The
+        // property is there already as far as a script can tell (see
+        // function_implicit_property), writable and nothing else, so the
+        // assignment must not make an enumerable, deletable one: a loop that
+        // copies the static members of F would copy `prototype` with them.
+        if (name == "prototype" && function_has_implicit_property(*this, name)) {
+            if (obj->frozen) return;
+            auto& slot = obj->properties.entry(name);
+            slot.second = std::move(val);
+            slot.flags = PropertyMap::Writable;
             return;
         }
 

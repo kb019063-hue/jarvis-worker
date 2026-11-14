@@ -60,6 +60,9 @@ PropertyMap* own_table(const JsValue& value, bool create) {
 }
 
 JsValue descriptor_for(const JsValue& object, const std::string& key) {
+    // The `prototype` of a constructor function is made on first use, and
+    // describing it is a use.
+    if (object.type == JsType::Function && key == "prototype") (void)object.get_property(key);
     JsObject* cell = object.property_cell();
     const bool frozen = cell && cell->frozen;
     const bool sealed = cell && (cell->sealed || cell->frozen);
@@ -110,65 +113,131 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     return JsValue::make_undefined();
 }
 
-void define_from_descriptor(JsValue object, const std::string& key, const JsValue& descriptor) {
+/// `Object.defineProperty(object, key, descriptor)`. Returns false, or throws
+/// when `should_throw` is set, where the property that is there does not
+/// allow the change (`Reflect.defineProperty` reports, the others throw).
+bool define_from_descriptor(JsValue object, const std::string& key, const JsValue& descriptor,
+                            bool should_throw = true) {
     if (!descriptor.is_object_like()) js_throw_type_error("Property description must be an object");
-    JsObject* cell = object.property_cell(true);
 
-    const bool has_get = descriptor.has_property("get");
-    const bool has_set = descriptor.has_property("set");
-    const bool has_value = descriptor.has_property("value");
-    if ((has_get || has_set) && (has_value || descriptor.has_property("writable"))) {
+    // The descriptor is read first, field by field: reading one can run a
+    // getter, and nothing of the object is held across that.
+    struct Field {
+        bool present{false};
+        JsValue value;
+    };
+    auto read = [&](const char* name) {
+        Field field;
+        field.present = descriptor.has_property(name);
+        if (field.present) field.value = descriptor.get_property(name);
+        return field;
+    };
+    const Field enumerable = read("enumerable");
+    const Field configurable = read("configurable");
+    const Field value = read("value");
+    const Field writable = read("writable");
+    const Field get = read("get");
+    const Field set = read("set");
+    const bool wants_accessor = get.present || set.present;
+    const bool wants_data = value.present || writable.present;
+    if (wants_accessor && wants_data) {
         js_throw_type_error("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
     }
+    if (get.present && !get.value.is_undefined() && !get.value.is_function()) js_throw_type_error("Getter must be a function");
+    if (set.present && !set.value.is_undefined() && !set.value.is_function()) js_throw_type_error("Setter must be a function");
+
+    // The `prototype` of a constructor function is there before anybody has
+    // read it, though it is only made on first use: make it now, or this
+    // would define a second, empty one in its place.
+    if (object.type == JsType::Function && key == "prototype") (void)object.get_property(key);
+    JsObject* cell = object.property_cell(true);
 
     // Array elements are stored densely; attributes on them are not tracked.
     size_t index = 0;
-    if (cell && cell->is_array && !has_get && !has_set && (parse_index(key, index) || key == "length")) {
-        if (has_value) object.set_property(key, descriptor.get_property("value"));
-        return;
+    if (cell && cell->is_array && !wants_accessor && (parse_index(key, index) || key == "length")) {
+        if (value.present) object.set_property(key, value.value);
+        return true;
     }
+
+    auto refuse = [&](const std::string& message) {
+        if (should_throw) js_throw_type_error(message);
+        return false;
+    };
 
     PropertyMap* table = own_table(object, true);
     if (!table) js_throw_type_error("Object.defineProperty called on non-object");
     auto existing = table->find(key);
     const bool exists = existing != table->end();
-    if (exists && !(existing->flags & PropertyMap::Configurable)) {
-        // Only a plain value change on a writable property is still allowed.
-        const bool value_only = has_value && !has_get && !has_set && (existing->flags & PropertyMap::Writable) &&
-                                !descriptor.has_property("enumerable") && !descriptor.has_property("configurable");
-        if (!value_only) js_throw_type_error("Cannot redefine property: " + key);
-    }
     if (!exists && cell && !cell->extensible) {
-        js_throw_type_error("Cannot define property " + key + ", object is not extensible");
+        return refuse("Cannot define property " + key + ", object is not extensible");
+    }
+    if (exists) {
+        // What a property that cannot be configured still allows (the
+        // standard's ValidateAndApplyPropertyDescriptor): a descriptor that
+        // changes nothing, a new value while it is writable, and writable
+        // going from true to false. Compiled classes rely on the last one:
+        // `Object.defineProperty(Constructor, "prototype", { writable: false })`.
+        // A sealed or frozen object makes every property of it such a one.
+        const bool is_accessor = existing->flags & PropertyMap::Accessor;
+        const bool can_configure = (existing->flags & PropertyMap::Configurable) && !(cell && (cell->sealed || cell->frozen));
+        const bool can_write = !is_accessor && (existing->flags & PropertyMap::Writable) && !(cell && cell->frozen);
+        if (!can_configure) {
+            bool allowed = true;
+            if (configurable.present && configurable.value.is_truthy()) allowed = false;
+            if (enumerable.present && enumerable.value.is_truthy() != static_cast<bool>(existing->flags & PropertyMap::Enumerable)) {
+                allowed = false;
+            }
+            if (is_accessor) {
+                const JsValue current_get = existing->second.is_function() ? existing->second : JsValue::make_undefined();
+                const JsValue current_set = existing->setter && existing->setter->is_function() ? *existing->setter
+                                                                                                 : JsValue::make_undefined();
+                if (wants_data) allowed = false;
+                if (get.present && !js_same_value(get.value, current_get)) allowed = false;
+                if (set.present && !js_same_value(set.value, current_set)) allowed = false;
+            } else {
+                if (wants_accessor) allowed = false;
+                if (!can_write) {
+                    if (writable.present && writable.value.is_truthy()) allowed = false;
+                    if (value.present && !js_same_value(value.value, existing->second)) allowed = false;
+                }
+            }
+            if (!allowed) return refuse("Cannot redefine property: " + key);
+        }
     }
 
     uint8_t flags = exists ? existing->flags : 0;
-    auto apply = [&](const char* name, uint8_t bit) {
-        if (!descriptor.has_property(name)) return;
-        if (descriptor.get_property(name).is_truthy()) flags = static_cast<uint8_t>(flags | bit);
+    auto apply = [&](const Field& field, uint8_t bit) {
+        if (!field.present) return;
+        if (field.value.is_truthy()) flags = static_cast<uint8_t>(flags | bit);
         else flags = static_cast<uint8_t>(flags & ~bit);
     };
-    apply("enumerable", PropertyMap::Enumerable);
-    apply("configurable", PropertyMap::Configurable);
+    apply(enumerable, PropertyMap::Enumerable);
+    apply(configurable, PropertyMap::Configurable);
 
-    if (has_get || has_set) {
-        JsValue getter = has_get ? descriptor.get_property("get") : JsValue::make_undefined();
-        JsValue setter = has_set ? descriptor.get_property("set") : JsValue::make_undefined();
+    if (wants_accessor) {
+        JsValue getter = get.present ? get.value : JsValue::make_undefined();
+        JsValue setter = set.present ? set.value : JsValue::make_undefined();
         if (exists && (existing->flags & PropertyMap::Accessor)) {
-            if (!has_get) getter = existing->second;
-            if (!has_set && existing->setter) setter = *existing->setter;
+            if (!get.present) getter = existing->second;
+            if (!set.present && existing->setter) setter = *existing->setter;
         }
-        if (!getter.is_undefined() && !getter.is_function()) js_throw_type_error("Getter must be a function");
-        if (!setter.is_undefined() && !setter.is_function()) js_throw_type_error("Setter must be a function");
         object.define_accessor(key, getter, setter, flags);
-        return;
+        return true;
     }
 
-    apply("writable", PropertyMap::Writable);
-    JsValue value = has_value ? descriptor.get_property("value")
-                  : (exists && !(existing->flags & PropertyMap::Accessor)) ? existing->second
-                  : JsValue::make_undefined();
-    object.define_property(key, value, flags);
+    // A descriptor with nothing but `enumerable` or `configurable` leaves an
+    // accessor an accessor.
+    if (exists && (existing->flags & PropertyMap::Accessor) && !wants_data) {
+        existing->flags = static_cast<uint8_t>((flags | PropertyMap::Accessor) & ~PropertyMap::Writable);
+        return true;
+    }
+
+    apply(writable, PropertyMap::Writable);
+    JsValue new_value = value.present ? value.value
+                      : (exists && !(existing->flags & PropertyMap::Accessor)) ? existing->second
+                      : JsValue::make_undefined();
+    object.define_property(key, new_value, flags);
+    return true;
 }
 
 std::string object_tag(const JsValue& value) {
@@ -623,9 +692,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         return proto ? JsValue::make_object(proto) : JsValue::make_null();
     });
     js_define_method(reflect, "defineProperty", 3, [](Args args) {
-        define_from_descriptor(require_object(js_arg(args, 0), "Reflect.defineProperty"),
-                               js_to_property_key(js_arg(args, 1)), js_arg(args, 2));
-        return JsValue::make_boolean(true);
+        // Reports a refusal where Object.defineProperty throws.
+        return JsValue::make_boolean(define_from_descriptor(require_object(js_arg(args, 0), "Reflect.defineProperty"),
+                                                            js_to_property_key(js_arg(args, 1)), js_arg(args, 2), false));
     });
     js_define_method(reflect, "apply", 3, [](Args args) {
         return js_call(js_arg(args, 0), js_arg(args, 1), array_like_to_vector(js_arg(args, 2)));

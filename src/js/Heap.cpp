@@ -38,10 +38,15 @@ void JsObject::trace(Heap& heap) {
     if (trace_extra) trace_extra(heap);
     if (exotic) exotic->trace(heap);
     if (dom_node && trace_dom_node) trace_dom_node(heap, *this);
-    // The function this cell stands for. Only this cell owns the copy, so it
-    // is counted like a property; what makes the pair collectable is that
-    // the copy's payload holds the one handle to this cell (count_value).
-    if (function_value) heap.mark_value(*function_value);
+    // The function this cell stands for. The copy is counted like a
+    // property, and its payload holds the one handle to this cell
+    // (count_value): that is what lets the pair be collected together.
+    if (const JsValue* function = function_value()) heap.mark_held_value(*function, internal.use_count());
+}
+
+void JsObject::set_function_value(const JsValue& function) {
+    klass = ObjectClass::Function;
+    internal = std::make_shared<JsValue>(function);
 }
 
 void JsObject::release_contents() {
@@ -59,9 +64,7 @@ void JsObject::release_contents() {
     auto dropped_hook = std::move(assign_hook);
     auto dropped_node = std::move(dom_node);
     auto dropped_exotic = std::move(exotic);
-    auto dropped_function = std::move(function_value);
     exotic.reset();
-    function_value.reset();
     internal.reset();
     trace_extra = nullptr;
     lookup_fallback.reset();
@@ -147,14 +150,17 @@ void Heap::mark_value(const JsValue& val) {
 }
 
 void Heap::mark_shared_value(const std::shared_ptr<JsValue>& value) {
-    if (!value) return;
+    if (value) mark_held_value(*value, value.use_count());
+}
+
+void Heap::mark_held_value(const JsValue& value, long holders) {
     if (m_counting) {
         // Counted only when this is the one holder: a second holder may be
         // native code, which would keep the value alive without us knowing.
-        if (value.use_count() == 1) count_value(*value);
+        if (holders == 1) count_value(value);
         return;
     }
-    mark_value(*value);
+    mark_value(value);
 }
 
 // Counting pass: `val` is stored somewhere the collector can enumerate (a

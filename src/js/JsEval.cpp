@@ -677,8 +677,11 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     proto.define_property("constructor", ctor, PropertyMap::Hidden);
     // The parent is the prototype of the class itself: static members are
     // found along that link, `Object.getPrototypeOf(Derived)` is `Base`, and
-    // `super(...)` calls whatever is there when the constructor runs.
-    if (has_parent) js_set_prototype(ctor.function_cell(), parent.as_prototype());
+    // `super(...)` calls whatever is there when the constructor runs. The
+    // class was made a moment ago, so it cannot be in its parent's chain and
+    // there is no loop to look for (which would cost the length of the chain
+    // for every class of a long one).
+    if (has_parent) ctor.function_cell()->prototype = parent.as_prototype();
     ctor.define_property("%home", proto, PropertyMap::Hidden);
 
     if (!cls->name.empty()) class_env->define_const(cls->name, ctor);

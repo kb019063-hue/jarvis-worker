@@ -1916,7 +1916,7 @@ merged tree, in the sandbox.
 - `make dom-conformance`: `629/629` in 23 files, and the same from jsdom
   with `--reference`. The binary of `main` passes 572: none of the 57 new
   cases.
-- `make test`: `All 126 engine test suites passed successfully!`, twelve of
+- `make test`: `All 129 engine test suites passed successfully!`, twelve of
   them new.
 - `make conformance` 1781 of 1792, `make js-conformance` 840 of 845,
   `make url-conformance` 1150 of 1188, `make diff-trees` 0 of 6,000 trees
@@ -1924,7 +1924,7 @@ merged tree, in the sandbox.
   attributes under their names and namespaces.
 - `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0
   failed; slowest 22.8 s (table [dumps])`; 20 of the pages are XML.
-- `make asan`: 126 of 126 suites; JavaScript 839 of 845 as before; DOM 629
+- `make asan`: 129 of 129 suites; JavaScript 839 of 845 as before; DOM 629
   of 629; URL 1150 of 1188; XML 1702 of 1702; web-platform-tests 4640 of
   5192; 1,000 generated documents and 1,000 round trips; `fuzz: 400
   mutations, 0 finding(s)`, `pipeline fuzz: 400 runs … 0 finding(s)`, `fuzz

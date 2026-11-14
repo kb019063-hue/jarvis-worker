@@ -19,14 +19,19 @@ parser on pages nobody wrote, which found what the corpus has no case for
 the way (see "Pages nobody wrote"). Phase 27 did for the DOM a script sees
 what Phase 23 did for the language: a corpus recorded from another
 implementation first, then new bindings written against it (see "The DOM
-scoreboard").
+scoreboard"). Phase 28 wrote the XML parser the DOM lacked, against the W3C's
+suite and two other parsers, and brought in the tests browsers share (see
+"XML").
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **572 / 572**; 61 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **DOM corpus** (what a script sees) | **629 / 629**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4640 / 5192 subtests**; the 552 others listed with a reason, 495 of them frames | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
+| XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 113 suites, all passing | `make test` |
@@ -38,9 +43,12 @@ make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
 make dom-conformance # the DOM a script sees: per-file pass rate
 make url-conformance # URL parsing and setters (web-platform-tests data)
+make xml-conformance # the XML parser: the W3C suite, downloaded the first time
+make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
+make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
 make test            # 113 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
-make asan            # sanitizer build, tests, the JavaScript, DOM and URL corpora, a fuzz run and the deep pages
+make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
@@ -94,7 +102,7 @@ catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 572 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 629 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -110,12 +118,13 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | | Passed |
 | :--- | ---: |
 | Before Phase 27 (`main` at `6f08a70`) | 61 / 572; the everyday probe 13 / 68 |
-| Now | 572 / 572; the everyday probe 68 / 68 |
+| Phase 27 | 572 / 572; the everyday probe 68 / 68 |
+| Now, with the 57 cases of Phase 28 (`xml.dat`, `xhr.dat`) | 629 / 629 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
 which is what plain DOM code on real pages looks like. It was written before
-any of the new code and is never edited. The other 20 files go through the
+any of the new code and is never edited. The 20 other files of Phase 27 go through the
 DOM by area: nodes, elements, attributes, `classList`, `dataset`, collections,
 selectors, markup (`innerHTML` and friends), text, style, ranges, events,
 forms, mutation observers, custom elements and shadow trees, the document,
@@ -144,9 +153,9 @@ Four things about the number:
 - **It is 100% of what the corpus asks, not of the DOM.** jsdom does no layout
   and loads no other page, so nothing here checks `getBoundingClientRect()`
   (zero while scripts run), scrolling or navigation. What is known to be
-  missing or wrong is listed in ARCHITECTURE.md (Phase 27, section 12):
-  `DOMParser` parses XML as HTML, date and time inputs are text inputs,
-  `el.style` keeps most shorthands whole, and more.
+  missing or wrong is listed in ARCHITECTURE.md (Phase 27, section 12, and
+  Phase 28, section 10): date and time inputs are text inputs, `el.style`
+  keeps most shorthands whole, and more.
 - **jsdom is the reference, not the authority.** Where it differs from the
   standards, the corpus stays away and a unit test asserts the standard's
   answer (`tests/dom-conformance/README.md` names the places).
@@ -154,6 +163,80 @@ Four things about the number:
   `tests/url/` is `urltestdata.json` and `setters_tests.json` from
   web-platform-tests, 1,188 cases, of which 1,150 pass. The 38 others are
   host names outside ASCII, which need Unicode's IDNA tables.
+
+### XML
+
+Until Phase 28 `new DOMParser().parseFromString(text, 'application/xml')`
+gave an HTML document. There was no XML parser: a CDATA section became a
+comment, text that was not well formed gave a tree like any other, and
+`XMLHttpRequest` failed every request, so `responseXML` was always null.
+
+| A script on a page | Before | Now |
+| :--- | :--- | :--- |
+| `d = parseFromString('<a xmlns="urn:x"><b id="k">t</b><![CDATA[<c>]]></a>', 'application/xml')`, then `d.documentElement.nodeName`, `.namespaceURI`, `d.contentType` | `HTML`, `http://www.w3.org/1999/xhtml`, `text/html` | `a`, `urn:x`, `application/xml` |
+| `new XMLSerializer().serializeToString(d)` | `<html xmlns="http://www.w3.org/1999/xhtml"><head /><body><a xmlns="urn:x"><b id="k">t</b><!--[CDATA[<c-->]]&gt;</a></body></html>` | The text that went in |
+| `parseFromString('<a><b></a>', 'application/xml').documentElement.nodeName` | `HTML` | `parsererror` |
+| `x.open('GET', 'data:text/xml,<a><b>t</b></a>'); x.send()` | `error`, `loadend`; status 0; `responseXML` is null | `loadstart`, `load`, `loadend`; status 200; `responseXML.querySelector('b').textContent` is `t` |
+
+The parser (`src/xml/XmlParser.cpp`) is XML 1.0, Fifth Edition, with
+namespaces, and it is what a browser's is: it does not validate, it reads
+nothing outside the text it is given, and it bounds what entities and
+attribute defaults may expand to. On top of it: XML documents in the DOM
+(namespaces on elements and attributes, attributes in the order they were
+added, CDATA sections, processing instructions, the `parsererror` document),
+the standard's XML serializer for `XMLSerializer` and for `innerHTML` in an
+XML document, and `XMLHttpRequest` for `data:` URLs.
+
+It was written against references, and each has a command:
+
+| Reference | Result | Command |
+| :--- | :--- | :--- |
+| The W3C XML Conformance Test Suite | 1702 / 1702 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
+| Expat 2.5.0 and libxml2 2.14.6, on 4,000 generated documents, half of them damaged | 3,958 read as both read them, 13 on which the two disagree, 29 with a version number outside the grammar (refused), 0 that differ | `make diff-xml` |
+| Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
+| web-platform-tests, `dom/nodes` and `domparsing` (76 files, with `testharness.js`) | 4640 / 5192 subtests; each of the 552 others is listed with a reason | `make wpt` |
+| jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
+
+```bash
+python3 tools/conformance/run_xml_conformance.py --show 20      # the failures, if there were any
+python3 tools/conformance/run_xml_conformance.py --reference    # Expat and libxml2 on the same suite: 1,404 and 1,697 of 1,718
+python3 tools/conformance/run_wpt.py --filter XMLSerializer --show 20
+python3 tools/fuzz/diff_xml.py --count 20000 --seed 1
+./build/litebird --xml-canonical file.xml                       # exit 0 well formed, 1 not, 3 an encoding it cannot read
+```
+
+Four things about these numbers:
+
+- **1,702 is what applies, and the rest is said.** Not counted: 310
+  documents whose answer changed with the Fifth Edition, 274 for XML 1.1, 247
+  that need an external entity read, 27 where a parser may report an error
+  or not, 16 in encodings this build cannot read, 9 that are not
+  namespace-well-formed on purpose (`tests/xml/README.md`). The suite is
+  downloaded and checked against a pinned SHA-256; it is not in the
+  repository, because its licence does not allow passing it on in another
+  form.
+- **No reference is the truth everywhere.** Expat does not check a version
+  number and libxml2 accepts `version="1."`. Five web-platform-tests
+  subtests assert a text of the serializer's standard that has since
+  changed, or a fault filed against it, and following them writes documents
+  that read back as another tree (265 of the 3,000 above, with one of
+  them). jsdom reads every XML response as UTF-8. Where two references
+  disagree the standard was read, and the documents say which way it went
+  (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
+- **552 web-platform-tests subtests fail**, and 495 of them for one reason:
+  the test loads an XML document into a frame, and Litebird has neither
+  frames with documents nor a way to load a page as XML. 18 fail on a fault
+  of the JavaScript engine (a function cannot have a function as its
+  prototype), 33 on what an `Attr` and a `NamedNodeMap` are here, 1 on the
+  page's encoding, and 5 are the ones above.
+- **`XMLHttpRequest` answers `data:` URLs and nothing else.** No request
+  leaves the process or reads a file, and a unit test asserts it. Requests
+  over the network are open, and so is something found on the way:
+  `fetch()`, which is older code, reads files of this machine for any page
+  that asks (`AGENTS.md`).
+
+ARCHITECTURE.md, Phase 28, has the design, what a hostile document costs,
+and what is still open.
 
 ### Pages nobody wrote
 
@@ -328,7 +411,7 @@ Litebird implements the complete modern browser rendering pipeline:
 
 #### The DOM a script sees (Phase 27, `src/js/Dom*Bindings.cpp`)
 - **Interfaces with prototypes:** about 170 (`Node`, `Element`, `HTMLElement` and the HTML element interfaces, `Document`, `Event` and its kinds, `DOMTokenList`, `HTMLCollection`, `NodeList`, `Range`, `MutationObserver`, `FormData`, `URL`, ...). Members live on the prototype and check what they are called on (`Illegal invocation`), constructors can be subclassed, and one node has one object.
-- **Nodes and trees:** `append`/`prepend`/`before`/`after`/`replaceWith`/`replaceChildren`, `insertAdjacentHTML/Element/Text`, `cloneNode`, `contains`, `compareDocumentPosition`, `isEqualNode`, `normalize`, `DocumentFragment`, `<template>.content`, `TreeWalker`, `NodeIterator`, `DOMParser` (HTML only), `XMLSerializer`, and the hierarchy checks with the `DOMException` each one names.
+- **Nodes and trees:** `append`/`prepend`/`before`/`after`/`replaceWith`/`replaceChildren`, `insertAdjacentHTML/Element/Text`, `cloneNode`, `contains`, `compareDocumentPosition`, `isEqualNode`, `normalize`, `DocumentFragment`, `<template>.content`, `TreeWalker`, `NodeIterator`, `DOMParser`, `XMLSerializer`, and the hierarchy checks with the `DOMException` each one names.
 - **Ranges and the selection** (`include/litebird/js/DomLive.hpp`): `Range` with `extractContents`, `cloneContents`, `deleteContents`, `insertNode`, `surroundContents`, `createContextualFragment` and the comparisons; `getSelection()`. Ranges are live: their boundaries follow nodes that are inserted and removed, text that is edited or split, and `normalize()`.
 - **Selectors** (`src/dom/Selector.cpp`): compound and complex selectors with all four combinators, attribute selectors with every operator and the `i` flag, `:is()`, `:where()`, `:not()`, `:has()`, the `:nth-*` family with `of`, and the state pseudo-classes of forms; `querySelector(All)`, `matches`, `closest`. An invalid selector is a `SyntaxError`.
 - **Markup:** `innerHTML`/`outerHTML` written by the standard's serializer (escaped text and attributes, void elements, namespaces) and read by the parser for the element it is assigned to.
@@ -339,6 +422,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Observers and components:** `MutationObserver` with every option, custom elements (autonomous and customized built-ins, upgrades, all reactions, in the order the standard queues them), shadow trees and slots.
 - **The window:** `location` and `history` (`pushState`, `hashchange`, `popstate`), `URL`/`URLSearchParams` on the URL Standard's parser, timers, `localStorage`, cookies, `matchMedia`, `XMLHttpRequest`, `Blob`/`File`/`FileReader`, `window.onerror` and `unhandledrejection`, named access (`window.myId`, `document.forms.search`).
 - **Loading:** scripts run as the parser reaches them (`document.currentScript`, `document.readyState`), then `DOMContentLoaded` and `load`.
+- **XML** (Phase 28, `src/xml/`): `DOMParser` for `application/xml`, `text/xml`, `application/xhtml+xml` and `image/svg+xml`, with the `parsererror` document for text that is not well formed; `document.implementation.createDocument()`; `createElementNS`, `setAttributeNS` and their relatives, `lookupNamespaceURI`, `lookupPrefix`, `isDefaultNamespace`; `CDATASection` and `ProcessingInstruction`; attributes in the order they were added; `XMLSerializer` and `innerHTML` in an XML document by *DOM Parsing and Serialization*; the namespace bar in selectors (`*|a`, `|a`, `[*|href]`). `XMLHttpRequest` for `data:` URLs: `responseXML`, `responseText`, `response` with `responseType` (`text`, `document`, `json`, `blob`), `overrideMimeType`, the states and progress events, synchronous requests, `abort()`.
 
 ### 2. HTML5 Parser: spec tree construction (`include/litebird/html/`)
 - **Full WHATWG tree-construction algorithm** (`HtmlTreeBuilder`): 23 insertion modes (`initial` through `after after frameset`), including `in table`, `in table body`, `in row`, `in cell`, `in caption`, `in column group`, `in select`, `in template` and `text`.

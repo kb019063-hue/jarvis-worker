@@ -9137,6 +9137,22 @@ TEST(js_a_function_is_the_prototype_of_a_function) {
            "TypeError");
     assert(text("Reflect.setPrototypeOf(Proto, child)") == "false");
     assert(text("Object.getPrototypeOf(Base) === Function.prototype") == "true");
+
+    // The bytecode VM has an Object of its own with these three functions
+    // (a VM that no interpreter gave its globals to). The same answers.
+    auto on_vm = [](const char* source) {
+        JsInterpreter compiler;
+        VM vm;
+        return vm.interpret(compiler.compile_to_bytecode(source)).to_string();
+    };
+    assert(on_vm("function F() { return 7; } let c = Object.create(F); Object.getPrototypeOf(c) === F;") == "true");
+    assert(on_vm("function F() { return 7; } let c = Object.create(F); Object.getPrototypeOf(c)();") == "7");
+    assert(on_vm("function F() {} function G() {} Object.setPrototypeOf(F, G); Object.getPrototypeOf(F) === G;") == "true");
+    assert(on_vm("let o = {}; function G() {} Object.setPrototypeOf(o, G); Object.getPrototypeOf(o) === G;") == "true");
+    assert(on_vm("function F() {} Object.getPrototypeOf(F) === null;") == "false");
+    // A loop is refused there too.
+    assert(on_vm("function F() {} function G() {} Object.setPrototypeOf(F, G); Object.setPrototypeOf(G, F);"
+                 "Object.getPrototypeOf(G) === F;") == "false");
 }
 
 TEST(js_classes_and_their_parents_are_collected) {
@@ -9302,6 +9318,62 @@ TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
     // The interface objects themselves keep working once they have a cell.
     assert(text("Event.name + ':' + (new Event('y').type) + ':' + (document.createElement('div') instanceof HTMLElement)") ==
            "Event:y:true");
+
+    // The interface objects are linked the same way: each has its parent's
+    // as prototype, as Web IDL says. Until Phase 34 a hidden property named
+    // the parent, and nothing but `class X extends` read it.
+    assert(text("var names = [], c = HTMLDivElement;"
+                "while (typeof c === 'function' && c.name) { names.push(c.name); c = Object.getPrototypeOf(c); }"
+                "names.join(' < ')") == "HTMLDivElement < HTMLElement < Element < Node < EventTarget");
+    assert(text("Object.getPrototypeOf(EventTarget) === Function.prototype && Object.getPrototypeOf(Event) === Function.prototype") ==
+           "true");
+    assert(text("Object.getPrototypeOf(MouseEvent) === UIEvent && Object.getPrototypeOf(UIEvent) === Event") == "true");
+    assert(text("Object.getPrototypeOf(DOMException) === Function.prototype && HTMLDivElement instanceof Function") == "true");
+    // Constants are inherited, and are own properties where they are defined.
+    assert(text("[HTMLElement.ELEMENT_NODE, Text.COMMENT_NODE, Card.TEXT_NODE, MouseEvent.AT_TARGET].join()") == "1,8,3,2");
+    assert(text("[Node.hasOwnProperty('ELEMENT_NODE'), HTMLElement.hasOwnProperty('ELEMENT_NODE'), 'ELEMENT_NODE' in HTMLElement,"
+                " 'ELEMENT_NODE' in Event].join()") == "true,false,true,false");
+    // No property stands in for the link any more.
+    assert(text("('%super' in HTMLElement) + ':' + Object.getOwnPropertyNames(HTMLElement).indexOf('%super')") == "false:-1");
+    // The link is the script's to change, like any other.
+    assert(text("function Old() {} Object.setPrototypeOf(Old, HTMLElement); var a = Old.ELEMENT_NODE;"
+                "Object.setPrototypeOf(Old, Function.prototype); a + ':' + typeof Old.ELEMENT_NODE") == "1:undefined");
+}
+
+TEST(js_interface_objects_are_collected_with_their_page) {
+    using namespace litebird;
+
+    // An interface object that is a prototype and its cell keep each other
+    // alive, like a parent class and its cell. When the page goes, the
+    // collector has to take them: a browser makes a realm per page.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    for (int round = 0; round < 3; ++round) {
+        {
+            auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='a'><p>x</p></div></body>");
+            JsInterpreter js(doc);
+            js.eval_ast(R"(
+                var o = HTMLDivElement, depth = 0;
+                while (o) { o = Object.getPrototypeOf(o); depth++; }
+                class Card extends HTMLElement { constructor() { super(); this.made = true; } }
+                customElements.define('x-card', Card);
+                var card = document.createElement('x-card');
+                document.body.appendChild(card);
+                class MyEvent extends Event {}
+                class Bus extends EventTarget {}
+                new Bus().dispatchEvent(new MyEvent('x'));
+                var constants = [Card.ELEMENT_NODE, MyEvent.AT_TARGET, Text.TEXT_NODE];
+            )");
+            assert(js.eval("depth + ':' + card.made + ':' + constants.join()").to_string() == "7:true:1,2,3");
+            Heap::default_heap().collect_garbage();
+            assert(js.eval("Object.getPrototypeOf(Object.getPrototypeOf(Card)) === Element && card instanceof Card").to_string() == "true");
+        }
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+    }
 }
 
 int main() {
@@ -9449,6 +9521,7 @@ int main() {
     RUN_TEST(js_classes_and_their_parents_are_collected);
     RUN_TEST(js_classes_compiled_to_es5_run);
     RUN_TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype);
+    RUN_TEST(js_interface_objects_are_collected_with_their_page);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

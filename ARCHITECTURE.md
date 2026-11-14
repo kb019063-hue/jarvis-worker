@@ -2454,8 +2454,8 @@ each of these and the unit suites
 | `make diff-trees` | 4 × 1,500 random pages against parse5, 0 differ, as before: the HTML parser now stores foreign attributes with their namespaces |
 | JavaScript corpus, URL data | 840 / 845 and 1150 / 1188, as before |
 | `make deep` | DEEP_RESULT |
-| `make asan` (ASan + UBSan) | ASAN_RESULT |
-| Mutated documents (`tools/fuzz/fuzz_xml.py`, in `make fuzz` and so in `make asan`) | FUZZ_RESULT |
+| `make asan` (ASan + UBSan): unit tests, the corpora, the XML suite, web-platform-tests, generated documents, the fuzzers, the deep pages at 10,000 levels | 126 / 126; JavaScript 839 / 845, as before; DOM 629 / 629; URL 1150 / 1188; XML 1702 / 1702; web-platform-tests 4640 / 5192; 1,000 generated documents and 1,000 round trips, none differ; 400 + 400 fuzz runs, 0 findings; 882 runs over 315 deep pages, 0 failed. No report from either sanitizer |
+| Mutated documents (`tools/fuzz/fuzz_xml.py`, in `make fuzz` and so in `make asan`) | 600 mutants of the W3C suite's documents, 38 of them still documents, and 1,927 of its documents as they are, 1,551 of them documents to this parser: no signal, no report, no timeout, and each document the same tree after it is written and read. Three other seeds by hand, 1,800 mutants: the same |
 
 CI has a job for the XML suite, the differential run and the
 web-platform-tests, and the sanitizer job runs all three in the sanitizer

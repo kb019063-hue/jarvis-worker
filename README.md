@@ -35,7 +35,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 126 suites, all passing | `make test` |
-| Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
+| Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
@@ -196,6 +196,7 @@ It was written against references, and each has a command:
 | Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
 | web-platform-tests, `dom/nodes` and `domparsing` (76 files, with `testharness.js`) | 4640 / 5192 subtests; each of the 552 others is listed with a reason | `make wpt` |
 | jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
+| Nothing: the W3C suite's documents with bytes changed, cut short and pasted over, in the sanitizer build | 600 mutants and 1,927 documents as they are: no crash, no sanitizer report, and every document the same tree after it is written and read | `make asan` (`tools/fuzz/fuzz_xml.py`) |
 
 ```bash
 python3 tools/conformance/run_xml_conformance.py --show 20      # the failures, if there were any
@@ -205,7 +206,7 @@ python3 tools/fuzz/diff_xml.py --count 20000 --seed 1
 ./build/litebird --xml-canonical file.xml                       # exit 0 well formed, 1 not, 3 an encoding it cannot read
 ```
 
-Four things about these numbers:
+Five things about these numbers:
 
 - **1,702 is what applies, and the rest is said.** Not counted: 310
   documents whose answer changed with the Fifth Edition, 274 for XML 1.1, 247
@@ -234,6 +235,14 @@ Four things about these numbers:
   over the network are open, and so is something found on the way:
   `fetch()`, which is older code, reads files of this machine for any page
   that asks (`AGENTS.md`).
+
+- **The normal build passed everything while reading freed memory.** The
+  first commit CI ran failed in the sanitizer job and nowhere else:
+  `XMLHttpRequest` read the charset of a response's type through a pointer
+  into a temporary. All unit suites and all 629 cases had passed. It is
+  fixed, the line no longer compiles, and the mutation fuzzer in the table
+  was written because of it. `make asan` is not the slow twin of
+  `make test`.
 
 ARCHITECTURE.md, Phase 28, has the design, what a hostile document costs,
 and what is still open.

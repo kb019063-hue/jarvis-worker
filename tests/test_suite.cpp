@@ -46,6 +46,12 @@
 #include "litebird/net/AbortController.hpp"
 #include "js_string_stress.hpp"
 
+#if defined(__SANITIZE_ADDRESS__)
+// From the sanitizer's runtime (sanitizer/allocator_interface.h, which not
+// every compiler installs). Weak: a runtime without it links all the same.
+extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
+#endif
+
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -68,10 +74,36 @@
 // real number of suites whenever a test was added.
 static int g_tests_run = 0;
 
+/// Called after every suite. In the sanitizer build it gives memory back;
+/// in the normal build it does nothing.
+///
+/// The suites run in one process and nothing in the engine collects
+/// unasked, so what the scripts of a suite made stays until the process
+/// ends. AddressSanitizer adds to that: every block that is freed is kept
+/// for a while (256 MB of quarantine), and the pages behind freed blocks
+/// are not handed back. One suite that nests 100,000 arrays leaves 1.4 GB
+/// behind that way, and by the last of the large suites the process had
+/// 3.8 GB and was killed on a machine with 4 GB (the sandbox these checks
+/// are run in; CI's runners have 16 GB and did not notice).
+///
+/// So after each suite, when its interpreters are gone: collect what their
+/// scripts made, and tell the sanitizer's allocator to return what it holds.
+/// A block freed in one suite and used in a later one would no longer be
+/// reported; within a suite nothing changes.
+#if defined(__SANITIZE_ADDRESS__)
+static void give_memory_back() {
+    litebird::Heap::default_heap().collect_garbage();
+    if (__sanitizer_purge_allocator) __sanitizer_purge_allocator();
+}
+#else
+static void give_memory_back() {}
+#endif
+
 #define RUN_TEST(name) do { \
     ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
+    give_memory_back(); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
 

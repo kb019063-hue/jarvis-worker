@@ -25,8 +25,12 @@ struct MimeType {
     /// The essence and every parameter; a value that is not a token is
     /// written in quotes.
     std::string serialize() const;
-    /// The value of the parameter `name` (lower case), or null.
-    const std::string* parameter(std::string_view name) const;
+    /// The value of the parameter `name` (lower case), or null. The pointer
+    /// is into this object, so it cannot be asked of a temporary: the first
+    /// version of XMLHttpRequest's "get a final encoding" did, and read the
+    /// charset of a type that was gone (found by the sanitizer build).
+    const std::string* parameter(std::string_view name) const&;
+    const std::string* parameter(std::string_view name) const&& = delete;
 
     /// `text/xml`, `application/xml` and every subtype ending in `+xml`.
     bool is_xml() const;

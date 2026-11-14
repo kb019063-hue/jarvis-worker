@@ -700,7 +700,9 @@ MimeType final_mime(const RequestState& state) {
 // is none, and when it names no encoding this build reads.
 std::string final_charset(const RequestState& state) {
     std::string label;
-    if (const std::string* charset = response_mime(state).parameter("charset")) label = *charset;
+    // The type is kept in a name: parameter() gives a pointer into it.
+    const MimeType response = response_mime(state);
+    if (const std::string* charset = response.parameter("charset")) label = *charset;
     if (state.has_override) {
         if (const std::string* charset = state.override_type.parameter("charset")) label = *charset;
     }

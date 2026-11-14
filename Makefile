@@ -231,10 +231,14 @@ diff-trees: $(TARGET)
 	@$(DIFF_TREES) --extras --fragments
 	@$(DIFF_TREES) --extras --fragments --no-scripting
 
-## Parser, layout, bitmap-renderer, and image-header mutation fuzzing.
+## Parser, layout, bitmap-renderer, and image-header mutation fuzzing, and
+## the same for XML: documents of the W3C suite (when `make xml-conformance`
+## has downloaded it) with bytes changed, cut short and pasted over, read as
+## bytes and through XMLHttpRequest, DOMParser and XMLSerializer.
 fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
 	@python3 tools/fuzz/fuzz_pipeline.py
+	@python3 tools/fuzz/fuzz_xml.py
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),

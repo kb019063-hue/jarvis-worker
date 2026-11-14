@@ -371,7 +371,7 @@ std::string MimeType::serialize() const {
     return out;
 }
 
-const std::string* MimeType::parameter(std::string_view name) const {
+const std::string* MimeType::parameter(std::string_view name) const& {
     for (const auto& entry : parameters) {
         if (entry.first == name) return &entry.second;
     }

@@ -1,4 +1,5 @@
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/DataUrl.hpp"
 #include "litebird/net/UrlParser.hpp"
 #include <filesystem>
 #include <fstream>
@@ -16,19 +17,6 @@
 
 namespace litebird {
 namespace {
-
-bool is_http_token(std::string_view value) {
-    if (value.empty()) return false;
-    for (unsigned char c : value) {
-        const bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-        const bool digit = c >= '0' && c <= '9';
-        const bool punctuation = c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
-            c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' ||
-            c == '_' || c == '`' || c == '|' || c == '~';
-        if (!alpha && !digit && !punctuation) return false;
-    }
-    return true;
-}
 
 bool is_safe_header_value(std::string_view value) {
     for (unsigned char c : value) {
@@ -65,6 +53,54 @@ std::string ascii_lower(std::string_view value) {
         if (ch >= 'A' && ch <= 'Z') c = static_cast<char>(ch + ('a' - 'A'));
     }
     return result;
+}
+
+bool has_url_scheme(std::string_view value) {
+    if (value.empty()) return false;
+    const auto alpha = [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    };
+    if (!alpha(value.front())) return false;
+    for (std::size_t i = 1; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == ':') return true;
+        const bool scheme_char = alpha(c) || (c >= '0' && c <= '9') ||
+                                 c == '+' || c == '-' || c == '.';
+        if (!scheme_char) return false;
+    }
+    return false;
+}
+
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string percent_decode_path(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '%' && i + 2 < text.size()) {
+            const int hi = hex_digit(text[i + 1]);
+            const int lo = hex_digit(text[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(text[i]);
+    }
+    return out;
+}
+
+std::string file_path_from_url(const Url& url) {
+    if (url.scheme != "file" || !url.host.empty()) return {};
+    std::string path = percent_decode_path(url.pathname());
+    if (path.empty() || path.find('\0') != std::string::npos) return {};
+    return path;
 }
 
 } // namespace
@@ -180,70 +216,142 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
     return res.empty() ? "." : res;
 }
 
-ResourceResponse ResourceLoader::load(
+ResourceResponse ResourceLoader::load_for_page(
     const std::string& url,
+    const ResourceRequestContext& context,
     const std::string& method,
     const std::unordered_map<std::string, std::string>& headers,
     const std::string& body
 ) {
-    if (url.rfind("data:", 0) == 0) {
-        ResourceResponse resp;
-        resp.status_code = 200;
-        resp.success = true;
-        auto comma_pos = url.find(',');
-        if (comma_pos != std::string::npos) {
-            std::string header = url.substr(5, comma_pos - 5);
-            std::string payload = url.substr(comma_pos + 1);
-            bool is_base64 = false;
-            if (auto semi = header.find(';'); semi != std::string::npos) {
-                if (header.substr(semi + 1) == "base64") {
-                    is_base64 = true;
-                    header = header.substr(0, semi);
-                }
-            }
-            resp.content_type = header.empty() ? "text/plain" : header;
-            if (is_base64) {
-                const std::string_view BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                std::vector<int> T(256, -1);
-                for (int i = 0; i < 64; i++) T[static_cast<unsigned char>(BASE64_CHARS[i])] = i;
+    ResourceResponse denied;
+    denied.error_message = "Blocked by resource origin policy";
 
-                int val = 0, valb = -8;
-                std::string decoded;
-                for (char c : payload) {
-                    if (T[static_cast<unsigned char>(c)] == -1) {
-                        if (c == '=') break;
-                        continue;
-                    }
-                    val = (val << 6) + T[static_cast<unsigned char>(c)];
-                    valb += 6;
-                    if (valb >= 0) {
-                        decoded.push_back(static_cast<char>((val >> valb) & 0xFF));
-                        valb -= 8;
-                    }
-                }
-                resp.body = decoded;
-            } else {
-                resp.body = payload;
-            }
+    Url document;
+    const bool have_document = !context.document_url.empty() &&
+                               Url::parse(context.document_url, nullptr, document);
+
+    // The base URL resolves references; it never decides what the document
+    // may read. A <base href="file:///..."> in a web page is still a web page.
+    Url base;
+    bool have_base = false;
+    if (!context.base_url.empty()) have_base = Url::parse(context.base_url, nullptr, base);
+    if (!have_base && have_document) {
+        base = document;
+        have_base = true;
+    }
+
+    Url target;
+    if (!Url::parse(url, have_base ? &base : nullptr, target)) {
+        denied.error_message = "Invalid request URL";
+        return denied;
+    }
+    const std::string address = target.href(true);
+
+    // data: holds its own bytes and needs neither disk nor network.
+    if (target.scheme == "data") {
+        MimeType type;
+        std::string decoded;
+        if (!process_data_url(address, type, decoded)) {
+            denied.error_message = "Invalid data: URL";
+            return denied;
         }
+        ResourceResponse resp;
+        resp.success = true;
+        resp.status_code = 200;
+        resp.url = address;
+        resp.body = std::move(decoded);
+        resp.content_type = type.serialize();
         resp.headers["content-type"] = resp.content_type;
         resp.headers["content-length"] = std::to_string(resp.body.size());
         return resp;
     }
 
-    if (url.rfind("http://", 0) == 0) {
-        return load_http(url, method, headers, body);
+    if (!have_document) {
+        denied.error_message = "Request has no document origin";
+        return denied;
     }
 
-    std::string path = url;
-    if (path.rfind("file://", 0) == 0) {
-        path = path.substr(7);
+    const bool web_document = document.scheme == "http" || document.scheme == "https";
+    const bool file_document = document.scheme == "file";
+
+    if (target.scheme == "file") {
+        if (!file_document) {
+            denied.error_message = "Web pages may not read local files";
+            return denied;
+        }
+        const std::string path = file_path_from_url(target);
+        if (path.empty()) {
+            denied.error_message = "Unsupported file: URL host or path";
+            return denied;
+        }
+        ResourceResponse resp = load_file(path);
+        if (resp.success) resp.url = address;
+        return resp;
     }
-    return load_file(path);
+
+    if (target.scheme == "http") {
+        if (!web_document && !file_document) {
+            denied.error_message = "Opaque documents may not make network requests";
+            return denied;
+        }
+        ResourceResponse resp = load_http(address, method, headers, body);
+        if (resp.success) resp.url = address;
+        return resp;
+    }
+
+    if (target.scheme == "https") {
+        denied.error_message = "Unsupported protocol: https:// is not implemented";
+        return denied;
+    }
+
+    denied.error_message = "Unsupported protocol: " + target.scheme + ":";
+    return denied;
+}
+
+ResourceResponse ResourceLoader::load_navigation(const std::string& url) {
+    Url target;
+    if (Url::parse(url, nullptr, target)) {
+        const std::string address = target.href(true);
+        if (target.scheme == "data") {
+            ResourceRequestContext context;
+            return load_for_page(address, context);
+        }
+        if (target.scheme == "http") return load_http(address);
+        if (target.scheme == "file") {
+            const std::string path = file_path_from_url(target);
+            if (path.empty()) {
+                ResourceResponse resp;
+                resp.error_message = "Unsupported file: URL host or path";
+                return resp;
+            }
+            ResourceResponse resp = load_file(path);
+            if (resp.success) resp.url = address;
+            return resp;
+        }
+        ResourceResponse resp;
+        resp.error_message = "Unsupported protocol: " + target.scheme + ":";
+        return resp;
+    }
+
+    // A bare path is an embedder navigation, not a page request. Anything
+    // that looks like a scheme but did not parse is refused, not opened as
+    // a file with a strange name.
+    if (has_url_scheme(url)) {
+        ResourceResponse resp;
+        resp.error_message = "Invalid navigation URL";
+        return resp;
+    }
+    ResourceResponse resp = load_file(url);
+    if (resp.success) resp.url = file_url_from_path(std::filesystem::absolute(url).lexically_normal().string());
+    return resp;
 }
 
 ResourceResponse ResourceLoader::load_file(const std::string& file_path) {
     ResourceResponse resp;
+    if (file_path.empty() || file_path.find('\0') != std::string::npos) {
+        resp.error_message = "Invalid file path";
+        return resp;
+    }
     std::ifstream file(file_path, std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         resp.success = false;

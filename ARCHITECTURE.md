@@ -345,6 +345,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
 | **Phase 31** | **CSS whitespace trimming is linear:** the parser and resolver scan outer whitespace once and shift the surviving text at most once; `nth-child` no longer copies and lowercases padding per child. 300,000 spaces in the measured `:nth-child`, grid, filter, duration and transform paths went from seconds to tens or hundreds of milliseconds with the same layout/paint. | ✅ Completed (117/117 unit suites; `make bench-css` compares 20 padded runs with compact pages) |
 | **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
+| **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 
 ---
 
@@ -2895,6 +2896,92 @@ unchanged.
   historical call-site values; `Color::parse()` no longer uses them.
 - A malformed `#` value with fewer than three hexadecimal digits returns black,
   as before.
+---
+
+## Phase 33 Architecture: Page Resource Loads Are Origin-Aware
+
+### 1. What was wrong
+
+`ResourceLoader::load` treated any URL that did not begin with `data:` or
+`http://` as a path on this machine. `FetchAPI::fetch` called it with the
+script's string and no document context, so a page loaded from
+`https://example.test/` could read `/home/user/notes.txt`, `file:///…`, or a
+relative path that happened to name a local file. `WorkerObject` had the same
+loader and, when loading failed, returned the URL/path itself as script source.
+The loader was not told where the page came from.
+
+### 2. The boundary
+
+`ResourceLoader.hpp` now has two entry points:
+
+- `load_for_page(url, context, …)` is the only page-initiated path. The
+  `ResourceRequestContext` carries `document_url` (the capability) and
+  `base_url` (relative resolution only). A `<base href>` may change the base,
+  but it cannot change the document's origin. The URL is parsed with the
+  WHATWG parser before dispatch; there is no string-prefix fallback to disk.
+- `load_navigation(url)` is embedder-only (CLI/TUI address bar, history,
+  reload). A bare path is a local file there. It is not exposed to script.
+
+Policy in `load_for_page`:
+
+| Document address | Request | Result |
+| :--- | :--- | :--- |
+| `http:` / `https:` | `data:` | allowed; self-contained |
+| `http:` / `https:` | resolved `http:` | network loader (HTTPS target is not implemented) |
+| `http:` / `https:` | `file:`, local path, other scheme | refused before disk/network |
+| `file:` | `file:` / relative file | allowed; local CLI/TUI capability |
+| `about:blank`, empty/invalid | `data:` only | opaque context |
+
+`data:` goes through the Fetch Standard processor already used by
+`XMLHttpRequest` (`process_data_url`), so percent-encoding and forgiving
+base64 are shared. `ResourceResponse::url` records the resolved address
+without a fragment, and `fetch()` reports it as `Response.url`.
+
+### 3. Callers
+
+`JsInterpreter` installs `fetch` and `Worker` with a context provider read at
+call time: the current document URL and the first valid `<base href>`. An
+alive guard keeps a retained native closure from touching a destroyed realm.
+The bytecode `VM` uses its document address as the context. A worker inherits
+the creator's capability; a classic worker's base URL becomes its loaded
+script URL, while a `data:` worker keeps the creator's base. A failed worker
+load posts an error event instead of executing the refused path as source.
+`BrowserShell` navigation/history/reload use `load_navigation`.
+
+### 4. Verification
+
+`make test` passes 132 suites. The three new suites are
+`resource_loader_page_requests_are_origin_aware`,
+`fetch_and_workers_use_the_document_origin`, and
+`fetch_relative_requests_use_the_document_base_url` (a loopback server proves
+`../secret.txt` from a web document goes to the resolved HTTP path, not disk).
+`make security-fetch` writes a marker file and runs the CLI against generated
+pages: web document, web document with a `file:` base, and local `file:`
+document. It prints `3 checks; 0 failure(s).`
+
+Repro:
+
+```bash
+printf 'LOCAL_SECRET\n' > /tmp/secret.txt
+printf '<script>fetch("/tmp/secret.txt").then(r=>r.text()).then(console.log, e=>console.log("ERR:"+e));</script>' > /tmp/page.html
+./build/litebird /tmp/page.html --url=https://example.test/page.html
+make security-fetch
+```
+
+Before the change the web page printed `LOCAL_SECRET`; after it the request is
+refused/resolved as a web URL and the marker is not printed.
+
+### 5. What is still open
+
+This is the local-file disclosure boundary, not a complete Fetch/XHR network
+stack. CORS and same-origin network policy for `XMLHttpRequest` remain the next
+AGENTS row; `https:` is still unsupported; `blob:`, `about:`, and custom
+schemes are not fetched; cross-origin HTTP `fetch()` is not CORS-checked. A
+`file:` document is treated as a local embedder context and can read local
+files, so opening untrusted local HTML is still a trust decision. Worker
+script MIME checks, module workers, and external `<script src>`/`<link>`
+loading are unchanged/open.
+
 ---
 
 ## Known gaps (the honest list)

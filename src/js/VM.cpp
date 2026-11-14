@@ -258,17 +258,28 @@ void VM::init_builtins() {
     }));
     set_global("JSON", json_obj);
 
-    // fetch, Headers, Response built-ins
+    // fetch, Headers, Response built-ins. The bytecode VM has no window of
+    // its own; its document address is the origin, and there is no <base>.
+    auto document = m_document;
+    auto request_context = [document]() -> ResourceRequestContext {
+        ResourceRequestContext context;
+        context.document_url = document ? document->url() : "about:blank";
+        context.base_url = context.document_url;
+        return context;
+    };
     set_global("Headers", HeadersObject::create_constructor());
     set_global("Response", ResponseObject::create_constructor());
-    set_global("fetch", JsValue::make_native_function(FetchAPI::fetch));
+    set_global("fetch", JsValue::make_native_function(
+        [request_context](const std::vector<JsValue>& args) {
+            return FetchAPI::fetch(args, request_context());
+        }));
 
     // URL & URLSearchParams built-ins
     set_global("URLSearchParams", dom::current_realm().ctor("URLSearchParams"));
     set_global("URL", dom::current_realm().ctor("URL"));
 
     // Worker built-in
-    set_global("Worker", WorkerObject::create_constructor());
+    set_global("Worker", WorkerObject::create_constructor(request_context));
 
     // WebSocket built-in
     set_global("WebSocket", WebSocketObject::create_constructor());

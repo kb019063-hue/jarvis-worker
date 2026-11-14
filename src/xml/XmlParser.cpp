@@ -296,6 +296,15 @@ private:
         return name;
     }
 
+    // A name in a declaration of the DTD that names an element or an
+    // attribute: a qualified name there too (Namespaces, section 5).
+    std::string parse_declared_name(Text& s, std::size_t& p, const char* what) {
+        const std::size_t at = p;
+        std::string name = parse_name(s, p, what);
+        if (!is_xml_qname(name)) fail(s, at, "'" + name + "' is not a name with a namespace prefix");
+        return name;
+    }
+
     // [7] Nmtoken: name characters, with no rule for the first.
     void skip_nmtoken(Text& s, std::size_t& p) {
         const std::size_t start = p;
@@ -651,7 +660,7 @@ private:
     void parse_element_declaration(Text& s, std::size_t& p) {
         p += 9;
         require_space(s, p, "after '<!ELEMENT'");
-        parse_name(s, p, "an element declaration");
+        parse_declared_name(s, p, "an element declaration");
         require_space(s, p, "before the content model");
         if (looking_at(s, p, "EMPTY")) p += 5;
         else if (looking_at(s, p, "ANY")) p += 3;
@@ -680,7 +689,7 @@ private:
                 }
                 expect(s, p, '|', "in mixed content");
                 skip_space(s, p);
-                parse_name(s, p, "mixed content");
+                parse_declared_name(s, p, "mixed content");
                 names = true;
             }
             if (p < s.size() && s[p] == '*') ++p;
@@ -699,7 +708,7 @@ private:
                     ++p;
                     continue;
                 }
-                parse_name(s, p, "a content model");
+                parse_declared_name(s, p, "a content model");
                 skip_occurrence(s, p);
                 want_particle = false;
                 continue;
@@ -724,7 +733,7 @@ private:
     void parse_attlist_declaration(Text& s, std::size_t& p) {
         p += 9;
         require_space(s, p, "after '<!ATTLIST'");
-        const std::string element = parse_name(s, p, "an attribute list");
+        const std::string element = parse_declared_name(s, p, "an attribute list");
         for (;;) {
             const bool spaced = skip_space(s, p);
             if (p < s.size() && s[p] == '>') {
@@ -733,7 +742,7 @@ private:
             }
             if (!spaced) fail(s, p, "white space is required in an attribute list");
             AttributeDecl declaration;
-            declaration.name = parse_name(s, p, "an attribute declaration");
+            declaration.name = parse_declared_name(s, p, "an attribute declaration");
             require_space(s, p, "after the name of an attribute");
             // [54] AttType
             static const char* const kTokenized[] = {"IDREFS", "IDREF", "ID", "ENTITY", "ENTITIES", "NMTOKENS", "NMTOKEN"};
@@ -1358,7 +1367,8 @@ const char* encoding_name(Encoding encoding) {
 
 // The name in `encoding="..."` of an XML declaration at the start of `ascii`.
 std::string declared_encoding(const std::string& ascii) {
-    if (ascii.compare(0, 5, "<?xml") != 0) return std::string();
+    // "<?xml " and not "<?xml-stylesheet".
+    if (ascii.compare(0, 5, "<?xml") != 0 || ascii.size() < 6 || !is_space(ascii[5])) return std::string();
     const auto end = ascii.find("?>");
     const std::string head = ascii.substr(0, end == std::string::npos ? ascii.size() : end);
     auto at = head.find("encoding");

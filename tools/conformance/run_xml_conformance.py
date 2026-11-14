@@ -145,7 +145,9 @@ def run_litebird(binary, test, timeout):
 
 
 def run_expat(test):
-    parser = expat.ParserCreate(namespace_separator=" ")
+    # The separator is a character no XML text can hold: Expat refuses a
+    # namespace name with the separator in it.
+    parser = expat.ParserCreate(namespace_separator="\x01")
     parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_ALWAYS)
     parser.ExternalEntityRefHandler = lambda *a: 1      # nothing is fetched, as in a browser
     try:

@@ -306,6 +306,93 @@ def chain(n: int, tag: str = "div", style: str = "") -> str:
             f"at.appendChild(document.createTextNode('{BOTTOM}'));")
 
 
+def xml_pages(n: int, page) -> list[Page]:
+    """XML handed to DOMParser, innerHTML of an XML document and XMLSerializer.
+
+    The XML parser is a second parser and the XML serializer a second walk
+    over a tree, each with every way to go wrong the HTML ones had: recursion
+    per level, a search of all attributes per attribute, a copy of the
+    namespace scope per element. And XML brings one of its own: entities
+    that expand to entities.
+    """
+    wide = min(n, 50000)            # attributes, or declarations, on one element
+    parse = "function xml(t) { return new DOMParser().parseFromString(t, 'application/xml'); }"
+    write = "function text(node) { return new XMLSerializer().serializeToString(node); }"
+    nested = f"var src = '<a>'.repeat({n}) + '{BOTTOM}' + '</a>'.repeat({n}); var d = xml(src);"
+    depth = "var depth = 0; for (var e = d.documentElement; e && e.nodeType === 1; e = e.firstChild) depth++;"
+    laughs = ("var dtd = '<!DOCTYPE l [<!ENTITY a \"aaaaaaaaaa\">', names = 'abcdefghij';"
+              "for (var i = 1; i < 10; i++) { var r = ''; for (var k = 0; k < 10; k++) r += '&' + names[i - 1] + ';';"
+              " dtd += '<!ENTITY ' + names[i] + ' \"' + r + '\">'; }")
+    return [
+        page("xml: a deep document parsed and written back", parse + write + nested + depth,
+             ["depth", "text(d) === src", "d.getElementsByTagName('a').length", "d.documentElement.textContent"],
+             f"{n} true {n} {BOTTOM}"),
+        page("xml: a deep document dropped", parse + nested + "d = null; if (typeof gc === 'function') gc();", ["'dropped'"], "dropped"),
+        page("xml: a deep document cloned, compared and imported",
+             parse + nested + "var copy = d.cloneNode(true), mine = document.importNode(d.documentElement, true);",
+             ["copy.isEqualNode(d)", "copy.documentElement !== d.documentElement", "mine.ownerDocument === document",
+              "mine.isEqualNode(d.documentElement)"], "true true true true"),
+        page("xml: a deep document left open", parse + f"var d = xml('<a>'.repeat({n}) + '{BOTTOM}');",
+             ["d.documentElement.nodeName", "d.getElementsByTagName('a').length", "d.childNodes.length"], "parsererror 0 1"),
+        page("xml: a deep tree built by script, written and read back",
+             parse + write +
+             "var X = document.implementation.createDocument(null, 'r'), at = X.documentElement;"
+             f"for (var i = 1; i < {n}; i++) {{ var c = X.createElementNS(i % 2 ? 'urn:a' : 'urn:b', 'p:e'); at.appendChild(c); at = c; }}"
+             f"at.textContent = '{BOTTOM}'; var d = xml(text(X)), same = true, i = 0;"
+             "for (var e = d.documentElement; e && e.nodeType === 1; e = e.firstChild, i++) {"
+             " if (i > 0 && e.namespaceURI !== (i % 2 ? 'urn:a' : 'urn:b')) same = false; }",
+             ["i", "same", "d.documentElement.textContent", "X.documentElement.innerHTML.length > " + str(n)],
+             f"{n} true {BOTTOM} true"),
+        page("xml: one prefix declared again at every level",
+             parse + write +
+             f"var src = ''; for (var i = 0; i < {n}; i++) src += '<p:a xmlns:p=\"urn:' + (i % 2) + '\">';"
+             f"src += '{BOTTOM}' + '</p:a>'.repeat({n}); var d = xml(src), same = true, i = 0;"
+             "for (var e = d.documentElement; e && e.nodeType === 1; e = e.firstChild, i++) { if (e.namespaceURI !== 'urn:' + (i % 2)) same = false; }",
+             ["i", "same", "text(d) === src"], f"{n} true true"),
+        page("xml: innerHTML of an XML document set to a deep nest",
+             parse + f"var d = xml('<r xmlns=\"urn:d\"/>'), r = d.documentElement; r.innerHTML = '<a>'.repeat({n}) + '{BOTTOM}' + '</a>'.repeat({n});"
+             "var depth = 0; for (var e = r.firstChild; e && e.nodeType === 1; e = e.firstChild) depth++;",
+             ["depth", "r.innerHTML.length", "r.firstChild.namespaceURI", "r.textContent"],
+             f"{n} {17 + 3 * (n - 1) + len(BOTTOM) + 4 * n} urn:d {BOTTOM}"),
+        page("xml: namespaces looked up from the bottom",
+             parse + f"var d = xml('<r xmlns:p=\"urn:p\" xmlns=\"urn:d\">' + '<a>'.repeat({n}) + '<p:b/>' + '</a>'.repeat({n}) + '</r>');"
+             "var at = d.documentElement; while (at.firstChild) at = at.firstChild;",
+             ["at.lookupNamespaceURI('p')", "at.lookupNamespaceURI(null)", "at.lookupPrefix('urn:p')", "at.isDefaultNamespace('urn:d')",
+              "d.querySelectorAll('a').length", "d.querySelector('*|b') === at", "at.closest('r') === d.documentElement"],
+             f"urn:p urn:d p true {n} true true"),
+        page("xml: one element with very many attributes",
+             parse + write +
+             f"var src = '<a'; for (var i = 0; i < {wide}; i++) src += ' a' + i + '=\"v\"'; src += '/>'; var d = xml(src), e = d.documentElement;"
+             "var twice = xml(src.slice(0, -2) + ' a0=\"again\"/>');",
+             ["e.attributes.length", "text(d) === src", f"e.getAttribute('a{wide - 1}')", "twice.documentElement.nodeName"],
+             f"{wide} true v parsererror"),
+        page("xml: very many namespace declarations, each used once",
+             parse + write +
+             f"var src = '<r'; for (var i = 0; i < {wide}; i++) src += ' xmlns:p' + i + '=\"urn:n' + i + '\"'; src += '>';"
+             f"for (var i = 0; i < {wide}; i++) src += '<p' + i + ':c/>'; src += '</r>'; var d = xml(src), r = d.documentElement;",
+             ["r.childNodes.length", "r.lastChild.namespaceURI", "text(d) === src"], f"{wide} urn:n{wide - 1} true"),
+        page("xml: very many attributes with namespaces set by script",
+             write +
+             "var X = document.implementation.createDocument(null, 'r'), r = X.documentElement;"
+             f"for (var i = 0; i < {wide}; i++) r.setAttributeNS('urn:n' + (i % 50), 'p' + (i % 50) + ':a' + i, i);"
+             f"var found = 0; for (var i = 0; i < {wide}; i++) if (r.getAttributeNS('urn:n' + (i % 50), 'a' + i) === String(i)) found++;",
+             ["found", "r.attributes.length", "text(X).length > " + str(wide * 10)], f"{wide} {wide} true"),
+        page("xml: a long run of comments, instructions and CDATA",
+             parse + write +
+             f"var src = '<r>' + ('<' + '!--c--><?p d?><![CDATA[x]]><e/>').repeat({n // 4}) + '</r>'; var d = xml(src);",
+             ["d.documentElement.childNodes.length", "text(d) === src"], f"{4 * (n // 4)} true"),
+        page("xml: entities that expand to entities",
+             parse + laughs +
+             "var inText = xml(dtd + ']><l>&j;</l>'), inValue = xml(dtd + ']><l b=\"&j;\"/>');"
+             f"var long = xml('<!DOCTYPE q [<!ENTITY e \"' + 'x'.repeat(50000) + '\">]><q>' + '&e;'.repeat(50000) + '</q>');",
+             ["inText.documentElement.nodeName", "inValue.documentElement.nodeName", "long.documentElement.nodeName"],
+             "parsererror parsererror parsererror"),
+        page("xml: a short entity used very many times",
+             parse + f"var d = xml('<!DOCTYPE q [<!ENTITY e \"xxxxxxxxxx\">]><q>' + '&e;'.repeat({n}) + '</q>');",
+             ["d.documentElement.nodeName", "d.documentElement.textContent.length"], f"q {10 * n}"),
+    ]
+
+
 def scripted_pages(n: int) -> list[Page]:
     def page(name: str, build: str, values: list[str], expect: str) -> Page:
         return Page(name, document(script(build) + script(report(*values))), expect=expect)
@@ -463,6 +550,7 @@ def scripted_pages(n: int) -> list[Page]:
                       f"var top = document.createElement('svg'), at = top;"
                       f"for (var i = 0; i < {n}; i++) {{ var g = document.createElement('g'); at.appendChild(g); at = g; }}"
                       "at.appendChild(document.createElement('rect')); document.body.appendChild(top);", ["at.isConnected"], "true"))
+    pages.extend(xml_pages(n, page))
     return pages
 
 

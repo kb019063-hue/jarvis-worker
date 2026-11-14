@@ -1833,8 +1833,12 @@ costs are also not fixed here and remain open tasks.
 
 **How verified.** `make test` passes 117 suites, including the helper model,
 selector/value equivalence and long-run suites. `make bench-css` passes 20
-padded runs with identical compact/paged layout and paint. The HTML, JS, DOM
-and URL scoreboards are unchanged.
+padded runs with identical compact/paged layout and paint. The scoreboards are
+unchanged: HTML 1781/1792, JS 840/845, DOM 572/572, URL 1150/1188.
+`make diff-trees` has 0 differing pages; `make deep` has 0 failures in 1,292
+runs; `make fuzz` has 0 findings in 800 runs; `make asan` reports no sanitizer
+finding (ASan JS 839/845, ASan deep 842 runs, 0 failed); `make tsan`,
+`make bench` and `make diff-strings` pass.
 
 ---
 

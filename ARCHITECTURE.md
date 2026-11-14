@@ -2449,7 +2449,12 @@ fails on a crash, timeout, sanitizer report, different dump or slow case.
 Three appended unit suites cover the helper against the old character model
 (including empty input, embedded NUL, high bytes and VT), parsed selector
 fields and resolved values across every changed path, and 300,000-space
-inputs. `make test` passes 117 suites. The conformance corpora are unchanged.
+inputs. `make test` passes 117 suites. The conformance corpora are unchanged
+(HTML 1781/1792, JS 840/845, DOM 572/572, URL 1150/1188). `make diff-trees`
+has 0 differing pages, `make deep` 0 failures in 1,292 runs, `make fuzz`
+0 findings in 800 runs, and `make asan` no sanitizer finding (ASan JS
+839/845, ASan deep 842 runs, 0 failed). `make tsan`, `make bench` and
+`make diff-strings` also pass.
 This phase does not make the CSS parser spec-complete, does not change CSS
 whitespace recognition, and does not address the separate layout, tokenizer
 attribute-count or style-object tasks. The `:nth-child(2n + 1)` sign-space

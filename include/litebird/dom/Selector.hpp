@@ -41,6 +41,10 @@ struct AttributePart {
     char op{0};                 // 0 presence, '=' exact, '~' word, '|' prefix-dash, '^', '$', '*'
     std::string value;
     bool ignore_case{false};
+    /// `[*|name]`: an attribute with this local name in any namespace, or
+    /// in none. Without it (`[name]` and `[|name]`) only an attribute in no
+    /// namespace: `[xlink\:href]` is not the xlink:href of an SVG element.
+    bool any_namespace{false};
 };
 
 enum class Pseudo {
@@ -64,6 +68,9 @@ struct Compound {
     bool any_type{true};
     std::string type;           // as written
     std::string type_lower;
+    /// `|E` and `|*`: only an element in no namespace. (`*|E` is any
+    /// namespace, which is what `E` means where no default is declared.)
+    bool no_namespace{false};
     std::vector<std::string> ids;
     std::vector<std::string> classes;
     std::vector<AttributePart> attributes;

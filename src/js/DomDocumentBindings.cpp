@@ -148,7 +148,9 @@ void setup_implementation(Iface& I) {
         const std::string uri = args[0].is_nullish() ? std::string() : to_str(args[0]);
         document->set_content_type(uri == xml::kXhtmlNamespace ? "application/xhtml+xml"
                                    : uri == xml::kSvgNamespace ? "image/svg+xml" : "application/xml");
-        const std::string name = args[1].is_nullish() ? std::string() : to_str(args[1]);
+        // [LegacyNullToEmptyString]: null is no root element, and undefined
+        // is a root element named "undefined".
+        const std::string name = to_str_null_empty(args[1]);
         std::shared_ptr<Element> root;
         if (!name.empty()) root = create_element_ns(r, *document, args[0], name);
         if (args.size() > 2 && !args[2].is_nullish()) {
@@ -199,6 +201,14 @@ void setup_document(Iface& I) {
     I.node_getter(doc, "contentType", [](Realm&, Node& self) { return str(as_document(self).content_type()); });
     I.node_getter(doc, "doctype", [](Realm& r, Node& self) { return wrap(r, as_document(self).doctype_node()); });
     I.node_getter(doc, "documentElement", [](Realm& r, Node& self) { return wrap(r, as_document(self).document_element()); });
+    // SVG 2: the root element when it is an <svg> of SVG.
+    I.node_getter(doc, "rootElement", [](Realm& r, Node& self) {
+        auto root = as_document(self).document_element();
+        if (!root || !root->is_element()) return null();
+        const auto& element = static_cast<const Element&>(*root);
+        if (element.element_namespace() != ElementNamespace::SVG || element.tag_name() != "svg") return null();
+        return wrap(r, root);
+    });
     I.node_getter(doc, "head", [](Realm& r, Node& self) { return wrap(r, head_element(as_document(self))); });
     I.node_accessor(doc, "body",
         [](Realm& r, Node& self) { return wrap(r, body_element(as_document(self))); },
@@ -594,7 +604,7 @@ void setup_dom_parser(Iface& I) {
     I.method("parseFromString", 2, [](Realm& r, Args args) {
         require_brand("DOMParser");
         require_args(args, 2, "DOMParser.parseFromString");
-        const std::string markup = to_str(args[0]);
+        const JsString text = js_to_js_string(args[0]);
         const std::string type = to_str(args[1]);
         static const char* const kTypes[] = {"text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"};
         bool known = false;
@@ -606,7 +616,7 @@ void setup_dom_parser(Iface& I) {
         // Scripts in a document made this way never run.
         const std::string url = r.document ? r.document->url() : std::string("about:blank");
         if (type == "text/html") {
-            auto document = HtmlParser::parse(markup, false);
+            auto document = HtmlParser::parse(text.str(), false);
             document->set_url(url);
             document->set_ready_state("complete");
             set_owner_of_tree(document);
@@ -616,6 +626,10 @@ void setup_dom_parser(Iface& I) {
         document->set_content_type(type);
         document->set_url(url);
         document->set_ready_state("complete");
+        // XML has no place for half of a surrogate pair, which a string of
+        // JavaScript can hold: U+FFFD stands in for it, as in the browsers.
+        // (The HTML parser keeps one; it is a character of its input.)
+        const std::string markup = text.is_well_formed() ? text.str() : text.to_well_formed().str();
         xml::XmlError error;
         if (!xml::parse_xml_document(document, markup, error)) {
             // XML has no error recovery: what was read is thrown away, and

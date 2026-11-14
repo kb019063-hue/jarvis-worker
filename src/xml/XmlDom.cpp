@@ -69,10 +69,14 @@ const Element* element_for_lookup(const Node& node, std::shared_ptr<Node>& hold)
 } // namespace
 
 std::string locate_namespace(const Node& node, const std::string& prefix) {
-    if (prefix == "xml") return kXmlNamespace;
-    if (prefix == "xmlns") return kXmlnsNamespace;
     std::shared_ptr<Node> hold;
     const Element* element = element_for_lookup(node, hold);
+    // "xml" and "xmlns" mean what they always mean, at an element: a
+    // fragment, a doctype, a document with no root and a text node outside
+    // any element have no namespaces at all.
+    if (!element) return std::string();
+    if (prefix == "xml") return kXmlNamespace;
+    if (prefix == "xmlns") return kXmlnsNamespace;
     const std::string declaration = prefix.empty() ? std::string("xmlns") : "xmlns:" + prefix;
     while (element) {
         const std::string& own = element_namespace_uri(*element);
@@ -621,14 +625,15 @@ private:
         bool ignore_default_declaration = false;
 
         m_out += '<';
+        // Every prefix written in this start tag: one of them cannot be
+        // given another meaning further along the same tag.
+        std::unordered_set<std::string> used;
+
         if (*inherited == ns) {
-            // The element is in the default namespace in force. A default
-            // declaration of its own that says so is written as it stands,
-            // which is what the three browsers do (the standard drops it;
-            // Chrome did for a month in 2019 and went back because pages
-            // broke). One that says anything else is dropped: the element
-            // would move.
-            if (local_default && *local_default != ns) ignore_default_declaration = true;
+            // The element is in the default namespace in force: no prefix
+            // (even if it has one), and a default declaration of its own is
+            // left out, whatever it says.
+            if (local_default) ignore_default_declaration = true;
             if (ns == kXmlNamespace) qualified = "xml:";
             qualified += local;
             m_out += qualified;
@@ -642,6 +647,7 @@ private:
                 has_candidate = true;
             }
             if (has_candidate) {
+                used.insert(candidate);
                 qualified = candidate + ":" + local;
                 m_out += qualified;
                 if (local_default && *local_default != kXmlNamespace) inherited = local_default;
@@ -654,9 +660,8 @@ private:
                 } else {
                     m_scope.add(prefix, ns);
                 }
-                // Not in the standard: with this recorded, a later attribute
-                // cannot take the same prefix for another namespace.
                 declared[prefix] = ns;
+                used.insert(prefix);
                 qualified = prefix + ":" + local;
                 m_out += qualified;
                 append_declaration(prefix, ns);
@@ -734,11 +739,14 @@ private:
                 has_candidate = prefix == "xmlns";
                 if (has_candidate) candidate = "xmlns";
             } else if (!has_candidate) {
-                // The attribute keeps its prefix when the prefix is free.
-                // (The standard asks only that this element does not declare
-                // it. Declared by an ancestor, it may be the prefix this
-                // element's own name was just written with.)
-                if (!prefix.empty() && !m_scope.bound(prefix)) {
+                // No prefix stands for the namespace. The attribute keeps
+                // its own, declared here, unless this element declares that
+                // prefix to be something else; a prefix an ancestor declared
+                // is declared again. (The standard stops there. A prefix
+                // already written in this tag with the ancestor's meaning,
+                // the element's own name say, is not taken either: declared
+                // again, it would change what was written.)
+                if (!prefix.empty() && !declared.count(prefix) && !used.count(prefix)) {
                     candidate = prefix;
                     m_scope.add(candidate, uri);
                 } else {
@@ -750,6 +758,7 @@ private:
             }
             m_out += ' ';
             if (has_candidate) {
+                used.insert(candidate);
                 m_out += candidate;
                 m_out += ':';
             }

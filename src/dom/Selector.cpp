@@ -220,6 +220,20 @@ struct SelectorParser {
 
     bool parse_compound(Compound& out) {
         bool any = false;
+        // A namespace before the type: `*|` for any and `|` for none. A
+        // named prefix would have to be declared, and a selector given to a
+        // script has nowhere to declare one, so `svg|a` is an error (it
+        // stops at the bar, below).
+        bool prefixed = false;
+        if (peek() == '*' && peek(1) == '|' && peek(2) != '=' && peek(2) != '|') {
+            pos += 2;
+            prefixed = true;
+        } else if (peek() == '|' && peek(1) != '=' && peek(1) != '|') {
+            ++pos;
+            prefixed = true;
+            out.no_namespace = true;
+        }
+        if (prefixed && peek() != '*' && !starts_identifier()) return false;
         if (peek() == '*') {
             ++pos;
             any = true;
@@ -261,6 +275,12 @@ struct SelectorParser {
 
     bool parse_attribute(AttributePart& out) {
         skip_space();
+        if (peek() == '*' && peek(1) == '|' && peek(2) != '=') {
+            pos += 2;
+            out.any_namespace = true;
+        } else if (peek() == '|' && peek(1) != '=') {
+            ++pos;
+        }
         if (!read_identifier(out.name)) return false;
         out.name_lower = ascii_lower(out.name);
         skip_space();
@@ -425,12 +445,31 @@ bool names_ignore_case(const Element& element) {
     return !owner || owner->is_html_document();
 }
 
+bool match_attribute_value(const AttributePart& part, const std::string& found);
+
 bool match_attribute(const Element& element, const AttributePart& part) {
     const bool same = part.name == part.name_lower;
-    const std::string* found = element.attribute(same || !names_ignore_case(element) ? part.name : part.name_lower);
-    if (!found) return false;
+    const std::string& wanted = same || !names_ignore_case(element) ? part.name : part.name_lower;
+    if (part.any_namespace) {
+        // Any attribute with this local name: what is after the prefix when
+        // the attribute has a namespace, and the whole name when it has none.
+        for (const auto& [name, value] : element.attributes()) {
+            const bool namespaced = !element.attribute_namespace(name).empty();
+            const auto colon = namespaced ? name.find(':') : std::string::npos;
+            const bool same_name = colon == std::string::npos ? name == wanted
+                                                              : name.compare(colon + 1, std::string::npos, wanted) == 0;
+            if (same_name && match_attribute_value(part, value)) return true;
+        }
+        return false;
+    }
+    const std::string* found = element.attribute(wanted);
+    if (!found || !element.attribute_namespace(wanted).empty()) return false;
+    return match_attribute_value(part, *found);
+}
+
+bool match_attribute_value(const AttributePart& part, const std::string& found) {
     if (part.op == 0) return true;
-    std::string value = *found;
+    std::string value = found;
     std::string wanted = part.value;
     if (part.ignore_case) {
         value = ascii_lower(value);
@@ -533,6 +572,10 @@ struct SelectorMatcher {
     }
 
     bool match_compound(const Compound& compound, const Element& element) const {
+        if (compound.no_namespace &&
+            (element.element_namespace() != ElementNamespace::Other || !element.other_namespace_uri().empty())) {
+            return false;
+        }
         if (!compound.any_type) {
             const bool same = compound.type == compound.type_lower;
             if (element.tag_name() != (same || !names_ignore_case(element) ? compound.type : compound.type_lower)) {

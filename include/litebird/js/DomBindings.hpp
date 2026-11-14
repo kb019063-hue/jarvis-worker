@@ -262,6 +262,11 @@ inline std::string to_str(const JsValue& value) { return js_to_string(value); }
 inline std::string to_str_null_empty(const JsValue& value) {
     return value.type == JsType::Null ? std::string() : js_to_string(value);
 }
+/// `DOMString?`: null and undefined are both null, which is the empty
+/// string wherever the standard then says "if null, the empty string".
+inline std::string to_str_nullable(const JsValue& value) {
+    return value.is_nullish() ? std::string() : js_to_string(value);
+}
 /// `long` and `unsigned long` as WebIDL converts them.
 int32_t to_long(const JsValue& value);
 uint32_t to_ulong(const JsValue& value);

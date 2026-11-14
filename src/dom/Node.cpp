@@ -11,6 +11,7 @@
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include <iomanip>
+#include <mutex>
 #include <unordered_set>
 
 namespace litebird {
@@ -316,6 +317,9 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
     auto prev = (it == m_children.begin()) ? nullptr : *(it - 1);
     adopt_child(*this, *new_child);
     new_child->set_parent(shared_from_this());
+    if (m_type == NodeType::Document) {
+        static_cast<Document*>(this)->note_child_inserted(static_cast<std::size_t>(it - m_children.begin()));
+    }
     m_children.insert(it, new_child);
     mark_needs_layout();
     bump_tree_version();
@@ -335,6 +339,9 @@ void Node::remove_child(std::shared_ptr<Node> child) {
         auto next = (it + 1 == m_children.end()) ? nullptr : *(it + 1);
         auto removed = *it;
         removed->set_parent(nullptr);
+        if (m_type == NodeType::Document) {
+            static_cast<Document*>(this)->note_child_removed(static_cast<std::size_t>(it - m_children.begin()));
+        }
         m_children.erase(it);
         mark_needs_layout();
         bump_tree_version();
@@ -350,6 +357,7 @@ void Node::remove_child(std::shared_ptr<Node> child) {
 std::vector<std::shared_ptr<Node>> Node::take_children() {
     std::vector<std::shared_ptr<Node>> removed;
     removed.swap(m_children);
+    if (m_type == NodeType::Document) static_cast<Document*>(this)->note_children_taken();
     if (removed.empty()) return removed;
     for (const auto& child : removed) child->set_parent(nullptr);
     mark_needs_layout();
@@ -649,29 +657,18 @@ void Element::remove_attribute(const std::string& name) {
 }
 
 const std::string* AttributeNamespaces::intern(const std::string& uri) {
-    // A node-based set: the strings stay where they are as it grows.
+    // A node-based set: the strings stay where they are as it grows, and
+    // are never changed, so a pointer to one can be read from any thread.
+    // Adding one is what the lock is for (a worker is a thread).
+    static std::mutex lock;
     static std::unordered_set<std::string> names;
+    const std::lock_guard<std::mutex> guard(lock);
     return &*names.insert(uri).first;
 }
 
 const std::string& Element::attribute_namespace(const std::string& qualified_name) const {
     if (m_rare && !m_rare->attribute_namespaces.empty()) {
         if (const std::string* uri = m_rare->attribute_namespaces.find(qualified_name)) return *uri;
-    }
-    // What the HTML parser gives an element of SVG or MathML ("adjust
-    // foreign attributes"): it stores the names and records nothing.
-    if (m_namespace == ElementNamespace::SVG || m_namespace == ElementNamespace::MathML) {
-        static const std::string kXLink = "http://www.w3.org/1999/xlink";
-        static const std::string kXml = "http://www.w3.org/XML/1998/namespace";
-        static const std::string kXmlns = "http://www.w3.org/2000/xmlns/";
-        if (qualified_name == "xmlns" || qualified_name == "xmlns:xlink") return kXmlns;
-        if (qualified_name == "xml:lang" || qualified_name == "xml:space") return kXml;
-        if (qualified_name.compare(0, 6, "xlink:") == 0) {
-            static const char* const kLocal[] = {"actuate", "arcrole", "href", "role", "show", "title", "type"};
-            for (const char* local : kLocal) {
-                if (qualified_name.compare(6, std::string::npos, local) == 0) return kXLink;
-            }
-        }
     }
     return empty_string();
 }
@@ -695,14 +692,6 @@ const std::string* Element::find_attribute_ns(const std::string& namespace_uri, 
     if (m_rare && !m_rare->attribute_namespaces.empty()) {
         if (const std::string* qualified = m_rare->attribute_namespaces.find_expanded(namespace_uri, local_name)) {
             if (const std::string* name = stored(*qualified)) return name;
-        }
-    }
-    // What the HTML parser put on an element of SVG or MathML has its
-    // namespace by its name alone (see attribute_namespace).
-    if (m_namespace == ElementNamespace::SVG || m_namespace == ElementNamespace::MathML) {
-        for (const char* prefix : {"xlink:", "xml:", "xmlns:", ""}) {
-            const std::string* name = stored(prefix + local_name);
-            if (name && attribute_namespace(*name) == namespace_uri) return name;
         }
     }
     return nullptr;
@@ -796,7 +785,29 @@ void append_start_tag(const Element& element, bool xml, bool declare_namespace, 
     }
     for (const auto& [name, value] : element.attributes()) {
         out += ' ';
-        out += name;
+        // "The attribute's serialized name": the local name, with xml:,
+        // xmlns: or xlink: before it for those three namespaces whatever
+        // prefix the attribute has, and the qualified name for any other.
+        const std::string& uri = element.attribute_namespace(name);
+        if (uri.empty()) {
+            out += name;
+        } else {
+            const auto colon = name.find(':');
+            const std::string_view local = colon == std::string::npos ? std::string_view(name)
+                                                                      : std::string_view(name).substr(colon + 1);
+            if (uri == "http://www.w3.org/XML/1998/namespace") {
+                out += "xml:";
+                out += local;
+            } else if (uri == "http://www.w3.org/2000/xmlns/") {
+                out += local == "xmlns" ? "xmlns" : "xmlns:";
+                if (local != "xmlns") out += local;
+            } else if (uri == "http://www.w3.org/1999/xlink") {
+                out += "xlink:";
+                out += local;
+            } else {
+                out += name;
+            }
+        }
         out += "=\"";
         append_escaped(value, true, out);
         out += '"';

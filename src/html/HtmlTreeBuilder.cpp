@@ -87,23 +87,24 @@ const char* adjust_svg_tag_name(const std::string& lower) {
     return it == names.end() ? nullptr : it->second;
 }
 
-/// Attributes that must be written with an explicit namespace prefix when
-/// dumped (the tree dump uses "prefix localname" spelling).
-std::string adjust_foreign_attribute_name(const std::string& name, ElementNamespace ns) {
-    static const std::unordered_map<std::string, const char*> xlink = {
-        {"xlink:actuate", "xlink actuate"}, {"xlink:arcrole", "xlink arcrole"},
-        {"xlink:href", "xlink href"}, {"xlink:role", "xlink role"},
-        {"xlink:show", "xlink show"}, {"xlink:title", "xlink title"},
-        {"xlink:type", "xlink type"}};
-    static const std::unordered_map<std::string, const char*> xml = {
-        {"xml:lang", "xml lang"}, {"xml:space", "xml space"}};
+/// "Adjust foreign attributes": the namespace the standard gives the few
+/// attribute names it lists, for an element of SVG or MathML. Null for every
+/// other name: `xmlns:foo` is an attribute in no namespace whose name has a
+/// colon in it.
+const char* foreign_attribute_namespace(const std::string& name) {
+    static const std::unordered_map<std::string, const char*> known = {
+        {"xlink:actuate", "http://www.w3.org/1999/xlink"}, {"xlink:arcrole", "http://www.w3.org/1999/xlink"},
+        {"xlink:href", "http://www.w3.org/1999/xlink"},    {"xlink:role", "http://www.w3.org/1999/xlink"},
+        {"xlink:show", "http://www.w3.org/1999/xlink"},    {"xlink:title", "http://www.w3.org/1999/xlink"},
+        {"xlink:type", "http://www.w3.org/1999/xlink"},
+        {"xml:lang", "http://www.w3.org/XML/1998/namespace"}, {"xml:space", "http://www.w3.org/XML/1998/namespace"},
+        {"xmlns", "http://www.w3.org/2000/xmlns/"},           {"xmlns:xlink", "http://www.w3.org/2000/xmlns/"}};
+    const auto found = known.find(name);
+    return found == known.end() ? nullptr : found->second;
+}
 
-    if (name == "xmlns") return "xmlns xmlns";
-    if (name.rfind("xmlns:", 0) == 0) return "xmlns " + name.substr(6);
-    auto x = xlink.find(name);
-    if (x != xlink.end()) return x->second;
-    auto m = xml.find(name);
-    if (m != xml.end()) return m->second;
+/// "Adjust MathML attributes" and "adjust SVG attributes": the spelling.
+std::string adjust_foreign_attribute_name(const std::string& name, ElementNamespace ns) {
     if (ns == ElementNamespace::MathML && name == "definitionurl") return "definitionURL";
 
     // "Adjust SVG attributes": the tokenizer lowercases attribute names, but
@@ -686,9 +687,20 @@ std::shared_ptr<Element> HtmlTreeBuilder::create_element_for_token(const HtmlTok
     }
     auto element = std::make_shared<Element>(name, ns);
     for (const auto& [key, value] : token.attributes) {
-        const std::string attr_name =
-            (ns == ElementNamespace::HTML) ? key : adjust_foreign_attribute_name(key, ns);
-        if (!element->has_attribute(attr_name)) element->set_attribute(attr_name, value);
+        if (ns == ElementNamespace::HTML) {
+            if (!element->has_attribute(key)) element->set_attribute(key, value);
+            continue;
+        }
+        // The attribute keeps the name it was written with ("xlink:href"),
+        // which is what getAttribute and a serializer use; its namespace is
+        // recorded next to it.
+        const std::string attr_name = adjust_foreign_attribute_name(key, ns);
+        if (element->has_attribute(attr_name)) continue;
+        if (const char* attribute_namespace = foreign_attribute_namespace(key)) {
+            element->set_attribute_ns(attribute_namespace, attr_name, value);
+        } else {
+            element->set_attribute(attr_name, value);
+        }
     }
     if (ns == ElementNamespace::HTML && token.name == "template") {
         auto contents = std::make_shared<Node>(NodeType::DocumentFragment);

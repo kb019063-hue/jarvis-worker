@@ -69,6 +69,24 @@ public:
     DocumentTypeNode* existing_doctype_node() const { return m_doctype_node.get(); }
     /// Takes the doctype out of the document (`doctype.remove()`).
     void remove_doctype();
+    /// Makes `node`, which a script made, the doctype: `document.doctype`
+    /// is that same object from now on. `preceding` is how many of the
+    /// children stand before it.
+    void adopt_doctype_node(const std::shared_ptr<DocumentTypeNode>& node, std::size_t preceding);
+    /// The doctype's place among the children moves with what is put in
+    /// and taken out before it. Called by Node for every such change.
+    void note_child_inserted(std::size_t index) {
+        if (m_doctype.present && index < m_doctype.preceding_children) ++m_doctype.preceding_children;
+    }
+    void note_child_removed(std::size_t index) {
+        if (m_doctype.present && index < m_doctype.preceding_children) --m_doctype.preceding_children;
+    }
+    void note_children_taken() { m_doctype.preceding_children = 0; }
+    /// For a node inserted "before the doctype": it went in where the
+    /// doctype stood, and the doctype now stands after it.
+    void move_doctype_after(std::size_t more_children) {
+        if (m_doctype.present) m_doctype.preceding_children += more_children;
+    }
 
     // --- What a script asks a document besides its tree ------------------------
     /// The address the document was loaded from; "about:blank" for one a

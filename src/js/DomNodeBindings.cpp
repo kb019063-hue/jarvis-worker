@@ -159,9 +159,20 @@ bool nodes_equal(const Node& a, const Node& b) {
                 const auto& ey = static_cast<const Element&>(*y);
                 if (ex.element_namespace() != ey.element_namespace() || ex.tag_name() != ey.tag_name()) return false;
                 if (ex.other_namespace_uri() != ey.other_namespace_uri() || ex.prefix() != ey.prefix()) return false;
-                if (!(ex.attributes() == ey.attributes())) return false;
+                // Attributes are the same by namespace, local name and
+                // value: the prefix is not part of it.
+                if (ex.attributes().size() != ey.attributes().size()) return false;
                 for (const auto& [name, value] : ex.attributes()) {
-                    if (ex.attribute_namespace(name) != ey.attribute_namespace(name)) return false;
+                    const std::string& uri = ex.attribute_namespace(name);
+                    const std::string* other = nullptr;
+                    if (uri.empty()) {
+                        other = ey.attribute_namespace(name).empty() ? ey.attribute(name) : nullptr;
+                    } else {
+                        const auto colon = name.find(':');
+                        const std::string local = colon == std::string::npos ? name : name.substr(colon + 1);
+                        if (const std::string* stored = ey.find_attribute_ns(uri, local)) other = ey.attribute(*stored);
+                    }
+                    if (!other || *other != value) return false;
                 }
                 break;
             }
@@ -236,11 +247,73 @@ std::shared_ptr<Node> text_node_for(Realm& realm, Node& context, const std::stri
     return text;
 }
 
-bool document_has_element_child(const Node& document, const Node* except) {
-    for (const auto& child : document.children()) {
-        if (child->is_element() && child.get() != except) return true;
+// A document has at most one doctype and one element, the doctype first.
+// Where they stand next to `child`: the node an insertion goes before, or
+// the node a replacement takes out. The doctype is not among children();
+// its place is a count of the children before it.
+struct DocumentShape {
+    bool has_doctype{false};
+    /// An element child; when replacing, one other than `child`.
+    bool has_element{false};
+    /// "A doctype is following child."
+    bool doctype_follows_child{false};
+    /// "An element is preceding child."
+    bool element_precedes_child{false};
+};
+
+DocumentShape document_shape(const Node& parent, const Node* child, bool replacing) {
+    const auto& document = static_cast<const Document&>(parent);
+    const auto& children = parent.children();
+    DocumentShape shape;
+    shape.has_doctype = document.has_doctype();
+    const std::size_t doctype_at = std::min(document.doctype().preceding_children, children.size());
+    const bool child_is_doctype = child && child->is_document_type();
+    bool seen_child = false;
+    for (std::size_t i = 0; i < children.size(); ++i) {
+        const Node* node = children[i].get();
+        if (node == child) {
+            seen_child = true;
+            if (shape.has_doctype && i < doctype_at) shape.doctype_follows_child = true;
+            if (replacing) continue;
+        }
+        if (!node->is_element()) continue;
+        shape.has_element = true;
+        if (node == child) continue;
+        if (child_is_doctype ? i < doctype_at : (child && !seen_child)) shape.element_precedes_child = true;
     }
-    return false;
+    return shape;
+}
+
+// Whether `node` may go into the document `parent`: before `child` (null for
+// the end), or in place of `child` when replacing.
+void ensure_document_shape(Realm& realm, const Node& parent, const Node& node, const Node* child, bool replacing) {
+    std::size_t elements = 0;
+    if (node.is_document_fragment()) {
+        for (const auto& inner : node.children()) {
+            if (inner->is_text()) throw_dom(realm, "HierarchyRequestError", "A document cannot have text as a child.");
+            if (inner->is_element()) ++elements;
+        }
+        if (elements > 1) throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
+        if (elements == 0) return;
+    } else if (node.is_element()) {
+        elements = 1;
+    } else if (!node.is_document_type()) {
+        return;         // a comment or a processing instruction goes anywhere
+    }
+    const DocumentShape shape = document_shape(parent, child, replacing);
+    if (elements == 1) {
+        if (shape.has_element) throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
+        if ((!replacing && child && child->is_document_type()) || shape.doctype_follows_child) {
+            throw_dom(realm, "HierarchyRequestError", "An element cannot come before the doctype.");
+        }
+        return;
+    }
+    if (shape.has_doctype && !(replacing && child && child->is_document_type())) {
+        throw_dom(realm, "HierarchyRequestError", "Only one doctype on document allowed.");
+    }
+    if (shape.element_precedes_child || (!replacing && !child && shape.has_element)) {
+        throw_dom(realm, "HierarchyRequestError", "A doctype cannot come after the document element.");
+    }
 }
 
 // Runs the scripts among the nodes that have just been connected.
@@ -266,25 +339,31 @@ void after_insertion(Realm& realm, const NodeVector& inserted) {
 // The insertion itself, after the checks.
 void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, std::shared_ptr<Node> reference) {
     if (node->is_document_type()) {
-        // A doctype is not kept among the children; the document records it.
+        // A doctype is not kept among the children; the document records
+        // it, with its place among them, and the node the script holds is
+        // the one document.doctype gives back.
         if (auto* document = parent.as_document()) {
-            auto& type = static_cast<DocumentTypeNode&>(*node);
-            Doctype record;
-            record.present = true;
-            record.name = type.name();
-            record.public_id = type.public_id();
-            record.system_id = type.system_id();
-            record.preceding_children = 0;
-            document->set_doctype(record);
+            auto type = std::static_pointer_cast<DocumentTypeNode>(node);
+            if (auto old = type->document()) old->remove_doctype();
+            const auto& children = parent.children();
+            std::size_t before = children.size();
+            if (reference) {
+                const auto at = std::find(children.begin(), children.end(), reference);
+                if (at != children.end()) before = static_cast<std::size_t>(at - children.begin());
+            }
+            document->adopt_doctype_node(type, before);
         }
         return;
     }
-    if (reference && reference->is_document_type()) {
-        // "Before the doctype" is before the child that follows it.
+    const bool before_doctype = reference && reference->is_document_type();
+    if (before_doctype) {
+        // "Before the doctype" is where the child that follows it stands;
+        // the doctype is moved past what goes in, below.
         const auto& document = static_cast<const Document&>(parent);
-        const std::size_t index = document.doctype().preceding_children;
+        const std::size_t index = std::min(document.doctype().preceding_children, parent.children().size());
         reference = index < parent.children().size() ? parent.children()[index] : nullptr;
     }
+    const std::size_t children_before = parent.children().size();
     // A node from another document belongs to this one from now on.
     if (auto to = document_of(realm, parent)) {
         auto from = node->owner_document();
@@ -304,6 +383,9 @@ void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, 
         inserted.push_back(node);
         if (reference) parent.insert_before(node, reference);
         else parent.append_child(node);
+    }
+    if (before_doctype && parent.children().size() > children_before) {
+        static_cast<Document&>(parent).move_doctype_after(parent.children().size() - children_before);
     }
     after_insertion(realm, inserted);
 }
@@ -452,32 +534,7 @@ void ensure_pre_insert_validity(Realm& realm, Node& parent, Node& node, Node* ch
     if (node.is_document_type() && !parent.is_document()) {
         throw_dom(realm, "HierarchyRequestError", "A doctype may only be a child of a document.");
     }
-    if (!parent.is_document()) return;
-
-    // A document has at most one element and one doctype, the doctype first.
-    const auto& document = static_cast<const Document&>(parent);
-    if (node.is_document_fragment()) {
-        std::size_t elements = 0;
-        for (const auto& inner : node.children()) {
-            if (inner->is_text()) throw_dom(realm, "HierarchyRequestError", "A document cannot have text as a child.");
-            if (inner->is_element()) ++elements;
-        }
-        if (elements > 1 || (elements == 1 && document_has_element_child(parent, nullptr))) {
-            throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
-        }
-    } else if (node.is_element()) {
-        if (document_has_element_child(parent, nullptr)) {
-            throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
-        }
-        if (child && child->is_document_type()) {
-            throw_dom(realm, "HierarchyRequestError", "An element cannot come before the doctype.");
-        }
-    } else if (node.is_document_type()) {
-        if (document.has_doctype()) throw_dom(realm, "HierarchyRequestError", "Only one doctype on document allowed.");
-        if (document_has_element_child(parent, nullptr) && !child) {
-            throw_dom(realm, "HierarchyRequestError", "A doctype cannot come after the document element.");
-        }
-    }
+    if (parent.is_document()) ensure_document_shape(realm, parent, node, child, false);
 }
 
 void pre_insert(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, Node* child) {
@@ -816,14 +873,14 @@ void setup_node(Iface& I) {
     I.node_accessor(any, "nodeValue",
         [](Realm&, Node& self) { return is_character_data(self) ? str(character_data(self)) : null(); },
         [](Realm&, Node& self, const JsValue& value) {
-            if (is_character_data(self)) set_character_data(self, to_str_null_empty(value));
+            if (is_character_data(self)) set_character_data(self, to_str_nullable(value));
         });
     I.node_accessor(any, "textContent",
         [](Realm&, Node& self) {
             if (self.is_document() || self.is_document_type()) return null();
             return str(self.text_content());
         },
-        [](Realm&, Node& self, const JsValue& value) { set_text_content(self, to_str_null_empty(value)); });
+        [](Realm&, Node& self, const JsValue& value) { set_text_content(self, to_str_nullable(value)); });
     I.node_method(any, "normalize", 0, [](Realm&, Node& self, Args) {
         normalize_subtree(self);
         return undefined();
@@ -913,26 +970,18 @@ void setup_node(Iface& I) {
             (node.is_document_type() && !self.is_document())) {
             throw_dom(r, "HierarchyRequestError", "This node cannot be inserted here.");
         }
-        if (self.is_document()) {
-            if (node.is_element() && document_has_element_child(self, &child)) {
-                throw_dom(r, "HierarchyRequestError", "Only one element on document allowed.");
-            }
-            if (node.is_document_fragment()) {
-                std::size_t elements = 0;
-                for (const auto& inner : node.children()) {
-                    if (inner->is_text()) throw_dom(r, "HierarchyRequestError", "A document cannot have text as a child.");
-                    if (inner->is_element()) ++elements;
-                }
-                if (elements > 1 || (elements == 1 && document_has_element_child(self, &child))) {
-                    throw_dom(r, "HierarchyRequestError", "Only one element on document allowed.");
-                }
-            }
-        }
+        if (self.is_document()) ensure_document_shape(r, self, node, &child, true);
         auto keep_node = node.shared_from_this();
         auto keep_child = child.shared_from_this();
-        if (child.is_document_type()) {
-            remove_node(r, child);
-            insert_node(r, self, keep_node, nullptr);
+        if (child.is_document_type() || node.is_document_type()) {
+            // A doctype is not among the children: one goes out and the
+            // other goes in where it stood.
+            if (&node != &child) {
+                std::shared_ptr<Node> after = script_sibling(child, +1);
+                if (after == keep_node) after = script_sibling(node, +1);
+                remove_node(r, child);
+                insert_node(r, self, keep_node, after);
+            }
             return args[1];
         }
         std::shared_ptr<Node> reference = child.next_sibling();

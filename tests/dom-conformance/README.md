@@ -16,7 +16,7 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside 
 629 cases in 23 files, and Litebird passes all of them. Of the 572 that
 Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
 57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
-XML_BEFORE.
+none.
 
 ## Where the expectations come from
 

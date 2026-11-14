@@ -29,14 +29,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **629 / 629**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4640 / 5192 subtests**; the 552 others listed with a reason, 495 of them frames | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4640 / 5192 subtests**; the 552 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 126 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
-| Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
+| Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
@@ -182,8 +182,8 @@ The parser (`src/xml/XmlParser.cpp`) is XML 1.0, Fifth Edition, with
 namespaces, and it is what a browser's is: it does not validate, it reads
 nothing outside the text it is given, and it bounds what entities and
 attribute defaults may expand to. On top of it: XML documents in the DOM
-(namespaces on elements and attributes, attributes in the order they were
-added, CDATA sections, processing instructions, the `parsererror` document),
+(namespaces on elements and attributes, CDATA sections, processing
+instructions, the `parsererror` document),
 the standard's XML serializer for `XMLSerializer` and for `innerHTML` in an
 XML document, and `XMLHttpRequest` for `data:` URLs.
 
@@ -431,7 +431,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Observers and components:** `MutationObserver` with every option, custom elements (autonomous and customized built-ins, upgrades, all reactions, in the order the standard queues them), shadow trees and slots.
 - **The window:** `location` and `history` (`pushState`, `hashchange`, `popstate`), `URL`/`URLSearchParams` on the URL Standard's parser, timers, `localStorage`, cookies, `matchMedia`, `XMLHttpRequest`, `Blob`/`File`/`FileReader`, `window.onerror` and `unhandledrejection`, named access (`window.myId`, `document.forms.search`).
 - **Loading:** scripts run as the parser reaches them (`document.currentScript`, `document.readyState`), then `DOMContentLoaded` and `load`.
-- **XML** (Phase 28, `src/xml/`): `DOMParser` for `application/xml`, `text/xml`, `application/xhtml+xml` and `image/svg+xml`, with the `parsererror` document for text that is not well formed; `document.implementation.createDocument()`; `createElementNS`, `setAttributeNS` and their relatives, `lookupNamespaceURI`, `lookupPrefix`, `isDefaultNamespace`; `CDATASection` and `ProcessingInstruction`; attributes in the order they were added; `XMLSerializer` and `innerHTML` in an XML document by *DOM Parsing and Serialization*; the namespace bar in selectors (`*|a`, `|a`, `[*|href]`). `XMLHttpRequest` for `data:` URLs: `responseXML`, `responseText`, `response` with `responseType` (`text`, `document`, `json`, `blob`), `overrideMimeType`, the states and progress events, synchronous requests, `abort()`.
+- **XML** (Phase 28, `src/xml/`): `DOMParser` for `application/xml`, `text/xml`, `application/xhtml+xml` and `image/svg+xml`, with the `parsererror` document for text that is not well formed; `document.implementation.createDocument()`; `createElementNS`, `setAttributeNS` and their relatives, `lookupNamespaceURI`, `lookupPrefix`, `isDefaultNamespace`; `CDATASection` and `ProcessingInstruction`; `XMLSerializer` and `innerHTML` in an XML document by *DOM Parsing and Serialization*; the namespace bar in selectors (`*|a`, `|a`, `[*|href]`). `XMLHttpRequest` for `data:` URLs: `responseXML`, `responseText`, `response` with `responseType` (`text`, `document`, `json`, `blob`), `overrideMimeType`, the states and progress events, synchronous requests, `abort()`.
 
 ### 2. HTML5 Parser: spec tree construction (`include/litebird/html/`)
 - **Full WHATWG tree-construction algorithm** (`HtmlTreeBuilder`): 23 insertion modes (`initial` through `after after frameset`), including `in table`, `in table body`, `in row`, `in cell`, `in caption`, `in column group`, `in select`, `in template` and `text`.

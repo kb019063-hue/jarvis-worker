@@ -1814,13 +1814,13 @@ and not fixed.
 | `parseFromString('<a><b></a>', 'application/xml').documentElement.nodeName` | `HTML` | `parsererror` |
 | `parseFromString('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>', 'image/svg+xml')`: root, its first child, the type | `HTML`, `HEAD`, `text/html` | `svg`, `path`, `image/svg+xml` |
 | `x.open('GET', 'data:text/xml,<a><b>t</b></a>'); x.send()` | `error`, `loadend`; status 0; `responseXML` null | `loadstart`, `load`, `loadend`; status 200; `responseXML.querySelector('b').textContent` is `t` |
-| `el.getAttributeNS('http://www.w3.org/1999/xlink', 'href')` on a `<use xlink:href="#a">` in a page | `null` | `#a` |
-| `el.attributes[0].name`, `el.outerHTML` for `<p id="a" class="b" title="c">` | Whichever the hash table put first | `id`: the order they were written in |
+| `el.getAttribute('xlink:href')` and `el.getAttributeNS('http://www.w3.org/1999/xlink', 'href')` on a `<use xlink:href="#a">` in a page | `null`, `null` | `#a`, `#a` |
+| `for (i = 0; i < 50000; i++) el.setAttribute('a' + i, i)` | 6.3 s: every call searched the list | 49 ms |
 
 **The fix.** An XML 1.0 (Fifth Edition) parser with namespaces
 (`src/xml/XmlParser.cpp`), which does not validate and reads nothing outside
 the text it is given; documents that know whether they are HTML; namespaces
-on elements and attributes, and an attribute list that keeps its order;
+on elements and attributes, and an index for an attribute list that is long;
 CDATA sections and processing instructions as nodes; the XML serializer of
 *DOM Parsing and Serialization* for `XMLSerializer` and for `innerHTML` in an
 XML document; and `XMLHttpRequest` for `data:` URLs. ARCHITECTURE.md, Phase
@@ -1834,7 +1834,7 @@ of them by reading the code.
 
 | Found by | What |
 | :--- | :--- |
-| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing half of 50,000 attributes took 88 s with the first index written to fix the first. All are 0.2 s or less now, the last 3.4 s (finding still open below) |
+| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front is still the square (below) |
 | The same question asked of the DOCTYPE | 50,000 attributes declared for one element took 4.5 s. And one attribute default of a megabyte with 100,000 empty tags made 100 GB of attribute values from a 1.4 MB document: entity expansion was bounded and defaults were not. Both bounded now, and both are deep pages |
 | Expat and libxml2 on generated documents (`tools/fuzz/diff_xml.py`) | No fault of Litebird's in 64,000 documents, and one in the references: three runs of 20,000 reported 10 differences, and all ten were `version="1."`, which Expat and libxml2 accept and the grammar does not (`'1.' [0-9]+`). A document whose version is outside the grammar is now judged by the grammar |
 | web-platform-tests, on their first run | Three faults that were not about XML: attributes of inline `<svg>` had no namespace (the row with `xlink:href` above), a doctype a script inserted was not `document.doctype`, and `lookupNamespaceURI('xml')` answered for a node that has no namespaces. 607 jsdom-recorded cases had passed over all three |
@@ -1868,8 +1868,8 @@ of them by reading the code.
 - **An `Attr` is not a `Node`**, two attributes of one element cannot share
   a qualified name in two namespaces, and collections do not list their
   names as own properties: 33 subtests.
-- **Removing all 50,000 attributes of an element from the front takes 7.3 s**;
-  from the back, 17 ms.
+- **Removing all 50,000 attributes of an element from the front takes 9 s**,
+  as it did before; from the back, 22 ms of 25,000.
 - **The HTML tokenizer still searches for a repeated attribute name**: one
   element with 50,000 attributes takes 2.9 s in the HTML parser (10.4 s
   before the attribute list had an index).
@@ -1896,7 +1896,42 @@ and each bound was added after a page was found that needed it; the list is
 of what was thought of. The mutation fuzzer starts from the W3C's documents
 and is not guided by coverage.
 
-**How verified.** VERIFIED_BLOCK
+**How verified.** Every line is a command and what it printed on the
+merged tree, in the sandbox.
+
+- `make xml-conformance`: `XML conformance (W3C suite): 1702/1702 (100.0%)
+  [261 canonical forms compared, 2585 documents run, 0 crashes, 0
+  timeouts]`. With `--reference`: Expat 1404 and libxml2 1697 of the 1718
+  they can be asked.
+- `make diff-xml`: `4000 documents (seed 20261114, half of them damaged),
+  Litebird accepts 2245; 3958 agree with both, 0 DIFFER, 13 where Expat and
+  libxml2 disagree (Litebird is with Expat on 12, with libxml2 on 1, with
+  neither on 0); 29 with a version number outside the grammar, all refused`,
+  and `XML round trip: 3000 trees, 3000 come back the same from Litebird and
+  from Expat, 0 do not`.
+- `make wpt`: `Web Platform Tests: 4640/5192 subtests pass in 76 files; 552
+  fail as listed, 0 fail and are not listed`. The binary of `main` passes
+  1,127 of the 2,257 subtests it gets as far as reporting.
+- `make dom-conformance`: `629/629` in 23 files, and the same from jsdom
+  with `--reference`. The binary of `main` passes 572: none of the 57 new
+  cases.
+- `make test`: `All 126 engine test suites passed successfully!`, twelve of
+  them new.
+- `make conformance` 1781 of 1792, `make js-conformance` 840 of 845,
+  `make url-conformance` 1150 of 1188, `make diff-trees` 0 of 6,000 trees
+  differ: all as on `main`, with the HTML parser now storing foreign
+  attributes under their names and namespaces.
+- `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0
+  failed; slowest 22.8 s (table [dumps])`; 20 of the pages are XML.
+- `make asan`: 126 of 126 suites; JavaScript 839 of 845 as before; DOM 629
+  of 629; URL 1150 of 1188; XML 1702 of 1702; web-platform-tests 4640 of
+  5192; 1,000 generated documents and 1,000 round trips; `fuzz: 400
+  mutations, 0 finding(s)`, `pipeline fuzz: 400 runs … 0 finding(s)`, `fuzz
+  xml: 600 mutations of 3074 documents (3061 of the W3C suite), 38 of them
+  well formed, 0 finding(s)` and `1927 documents as they are, 1551 of them
+  documents to this parser: each the same tree after it is written and
+  read`; `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0
+  failed`. No report from either sanitizer. It takes 23 minutes here.
 
 ---
 

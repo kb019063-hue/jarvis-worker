@@ -183,7 +183,10 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor);
 /// Calls `fn` with `this`. Throws TypeError when `fn` is not callable.
 JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args);
 /// `new ctor(...args)`. Throws TypeError when `ctor` is not a constructor.
-JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args);
+/// `new_target` is the third argument of `Reflect.construct`, when there is
+/// one: the object that is made gets the `prototype` of that function, not
+/// `ctor`'s. (Inside `ctor`, `new.target` is still `ctor`.)
+JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target = nullptr);
 /// A function that calls `fn` with `this` fixed to `receiver`.
 JsValue js_bind_this(const JsValue& fn, const JsValue& receiver);
 

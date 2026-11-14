@@ -92,6 +92,18 @@ public:
     /// Host behaviour and state; see JsExotic. Null for ordinary objects.
     std::shared_ptr<JsExotic> exotic;
 
+    /// Set when this cell is a function's cell and stands for the function in
+    /// a prototype chain: the function itself. A function is a value (a
+    /// payload shared by its copies), not a cell, and a prototype link is a
+    /// pointer to a cell. This is the way back, so that
+    /// `Object.getPrototypeOf(Derived)` is `Base` and can be called. It is
+    /// set by JsValue::as_prototype() and read by JsValue::make_object().
+    ///
+    /// The cell owns a copy of the function and the function's payload owns a
+    /// handle to the cell: a cycle, which only the collector takes apart.
+    /// That is why it is not set for every function that has a cell.
+    std::unique_ptr<JsValue> function_value;
+
     // Set when this JsObject is the script-visible identity of a DOM node.
     // Holding a strong reference here means the wrapper keeps its node alive, which
     // is what makes `document.body` stable across accesses and across collections.
@@ -218,6 +230,7 @@ private:
         long owners{0};             // copies that exist in total
         const JsValue::FunctionData* function{nullptr};
         const PropertyMap* properties{nullptr};
+        JsObject* cell{nullptr};    // the function's cell, which the payload holds a handle to
     };
     struct ScopeInfo {
         long seen{0};               // closures and child scopes found inside the heap

@@ -683,10 +683,13 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor) {
     if (!constructor.is_function()) js_throw_type_error("Right-hand side of 'instanceof' is not callable");
     if (!value.is_object_like()) return false;
     JsValue proto = constructor.get_property("prototype");
-    if (!proto.object_val) return false;
+    // The cell of an object, or of a function (`C.prototype = someFunction`).
+    // A function with no cell is in nobody's chain.
+    const JsObject* target = proto.property_cell();
+    if (!target) return false;
     int guard = 0;
     for (JsObject* obj = value.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
-        if (obj == proto.object_val) return true;
+        if (obj == target) return true;
     }
     return false;
 }
@@ -700,20 +703,36 @@ JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<Js
     return fn.call_with_this(this_val, args);
 }
 
-JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args) {
+JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target) {
     if (!ctor.is_function()) js_throw_type_error(js_describe_thrown(ctor) + " is not a constructor");
+    if (new_target) {
+        if (!new_target->is_function()) js_throw_type_error(js_describe_thrown(*new_target) + " is not a constructor");
+        if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
+    }
     const JsValue::FunctionData* fd = ctor.function_data();
     if (fd && fd->node) {
         if (!fd->is_constructor) {
             js_throw_type_error((fd->name.empty() ? std::string("function") : fd->name) + " is not a constructor");
         }
         JsValue instance = JsValue::make_object();
-        JsValue proto = ctor.get_property("prototype");
-        if (proto.object_val && proto.is_object_like()) instance.object_val->prototype = proto.object_val;
+        JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) instance.object_val->prototype = target;
+        }
         JsValue result = ctor.construct(args, &instance);
         return result.is_object_like() ? result : instance;
     }
-    return ctor.construct(args, nullptr);
+    // A built-in constructor makes its own object. With another function as
+    // new.target that object is what the built-in makes (an array, an error)
+    // with the other function's prototype.
+    JsValue result = ctor.construct(args, nullptr);
+    if (new_target && result.type == JsType::Object && result.object_val) {
+        JsValue proto = new_target->get_property("prototype");
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) js_set_prototype(result.object_val, target);
+        }
+    }
+    return result;
 }
 
 JsValue js_bind_this(const JsValue& fn, const JsValue& receiver) {

@@ -261,10 +261,12 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(op, "isPrototypeOf", 1, [](Args args) {
         JsValue me = self();
         const JsValue& candidate = js_arg(args, 0);
-        if (!candidate.is_object_like() || !me.object_val) return JsValue::make_boolean(false);
+        // `Base.isPrototypeOf(Derived)`: a function is in a chain as its cell.
+        const JsObject* mine = me.property_cell();
+        if (!candidate.is_object_like() || !mine) return JsValue::make_boolean(false);
         int guard = 0;
         for (JsObject* obj = candidate.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
-            if (obj == me.object_val) return JsValue::make_boolean(true);
+            if (obj == mine) return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
     });
@@ -395,8 +397,10 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!proto.is_object_like() && proto.type != JsType::Null) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
-        if (JsObject* cell = object.property_cell(object.is_function())) {
-            JsObject* target = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+        // A function of either kind gets a cell here: that is where its
+        // prototype is kept once it is not Function.prototype.
+        if (JsObject* cell = object.is_function() ? object.function_cell() : object.property_cell()) {
+            JsObject* target = proto.type == JsType::Null ? nullptr : proto.as_prototype();
             if (!js_set_prototype(cell, target)) js_throw_type_error("Cyclic __proto__ value");
         }
         return object;
@@ -407,7 +411,7 @@ void install_object_builtins(JsIntrinsics& realm) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
         JsValue object = JsValue::make_object();
-        object.object_val->prototype = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+        object.object_val->prototype = proto.type == JsType::Null ? nullptr : proto.as_prototype();
         const JsValue& props = js_arg(args, 1);
         if (props.is_object_like()) {
             for (const auto& key : props.own_keys()) define_from_descriptor(object, key, props.get_property(key));
@@ -501,6 +505,10 @@ void install_object_builtins(JsIntrinsics& realm) {
         bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
                               PropertyMap::Configurable);
         bound.define_property("length", JsValue::make_number(std::max(0.0, length)), PropertyMap::Configurable);
+        // A bound function has the prototype of its target: a bound class
+        // still finds the static members of the class's parent.
+        JsObject* target_proto = target.prototype_object();
+        if (target_proto != JsIntrinsics::get().function_proto) bound.function_cell()->prototype = target_proto;
         return bound;
     });
     js_define_method(fp, "toString", 0, [](Args) {
@@ -604,9 +612,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!proto.is_object_like() && proto.type != JsType::Null) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
-        JsObject* cell = object.property_cell(object.is_function());
+        JsObject* cell = object.is_function() ? object.function_cell() : object.property_cell();
         if (!cell || cell->frozen) return JsValue::make_boolean(false);
-        JsObject* target = proto.type == JsType::Null ? nullptr : proto.property_cell(true);
+        JsObject* target = proto.type == JsType::Null ? nullptr : proto.as_prototype();
         // Unlike Object.setPrototypeOf, a refused change is reported, not thrown.
         return JsValue::make_boolean(js_set_prototype(cell, target));
     });
@@ -623,7 +631,11 @@ void install_object_builtins(JsIntrinsics& realm) {
         return js_call(js_arg(args, 0), js_arg(args, 1), array_like_to_vector(js_arg(args, 2)));
     });
     js_define_method(reflect, "construct", 2, [](Args args) {
-        return js_construct(js_arg(args, 0), array_like_to_vector(js_arg(args, 1)));
+        // The third argument is new.target: whose `prototype` the new object
+        // gets. Compiled classes are built on it (Babel's `_createSuper`
+        // calls `Reflect.construct(Super, arguments, NewTarget)`).
+        return js_construct(js_arg(args, 0), array_like_to_vector(js_arg(args, 1)),
+                            args.size() > 2 ? &args[2] : nullptr);
     });
     realm.add_global("Reflect", reflect);
 
@@ -639,6 +651,7 @@ void install_object_builtins(JsIntrinsics& realm) {
 // ---------------------------------------------------------------------------
 
 void install_error_builtins(JsIntrinsics& realm) {
+    JsValue error_ctor;     // `Error`, the prototype of the other six constructors
     for (int i = 0; i < 7; ++i) {
         const JsErrorKind kind = static_cast<JsErrorKind>(i);
         JsObject* proto = realm.error_protos[i];
@@ -680,6 +693,12 @@ void install_error_builtins(JsIntrinsics& realm) {
                 return JsValue::make_undefined();
             });
         }
+        // `Object.getPrototypeOf(TypeError) === Error`. Code that asks whether
+        // a constructor is an error type walks this chain (the
+        // assert_throws_js of web-platform-tests does), and so does a lookup
+        // of `TypeError.captureStackTrace`.
+        if (i == 0) error_ctor = ctor;
+        else js_set_prototype(ctor.function_cell(), error_ctor.as_prototype());
         realm.add_global(name, ctor);
     }
 }

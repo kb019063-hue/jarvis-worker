@@ -177,11 +177,6 @@ public:
         bool is_arrow{false};
         bool is_class_constructor{false};
         bool is_constructor{true};     // false for arrows, methods and async/generator functions
-
-        /// Heap cell holding the function's own properties (`prototype`,
-        /// statics, expandos). Created on first need: most closures never have
-        /// a property set on them, and a cell is only reclaimed by the collector.
-        mutable CellRef cell;
     };
     struct Extra {
         Extra() = default;
@@ -195,6 +190,15 @@ public:
         /// functions). Lives here, not in the value, so every copy of the
         /// function sees a property set through any other copy.
         std::shared_ptr<PropertyMap> props;
+        /// The heap cell of a function, once it has one: its own properties
+        /// (`prototype`, statics, expandos) and its prototype link. A script
+        /// function gets it when a property is first set on it. A native
+        /// function gets it only when something needs it to be an object in
+        /// its own right: when its prototype is set, or when it becomes the
+        /// prototype of something else (see JsValue::function_cell). Most
+        /// functions never have one, and a cell is only reclaimed by the
+        /// collector.
+        CellRef cell;
         using Payload = std::variant<std::monostate, FunctionData, NativeFn,
                                      std::shared_ptr<Node>,
                                      std::shared_ptr<CanvasRenderingContext2D>,
@@ -273,6 +277,9 @@ public:
         v.string_val = std::move(s);
         return v;
     }
+    /// A new empty object, or the value of the cell `obj`. A cell that
+    /// stands for a function in a prototype chain gives the function back:
+    /// see as_prototype().
     static JsValue make_object(JsObject* obj = nullptr);
     static JsValue make_array(const std::vector<JsValue>& elements = {});
     static JsValue make_native_function(NativeFn fn) {
@@ -363,8 +370,24 @@ public:
 
     /// The heap cell that stores this value's own properties: `object_val` for
     /// objects, the lazily created cell for script functions. Null when there
-    /// is none and `create` is false.
+    /// is none and `create` is false. A native function is never given one
+    /// here (it keeps its few properties in a table, see loose_properties);
+    /// function_cell() gives it one.
     JsObject* property_cell(bool create = false) const;
+    /// The cell of a function of either kind, made if it has none. For a
+    /// native function this moves its property table into the cell, and from
+    /// then on it is stored the way a script function is. Null for anything
+    /// that is not a function. This is what a function needs before its
+    /// prototype can be anything but Function.prototype.
+    JsObject* function_cell() const;
+    /// The cell that stands for this value in a prototype chain, for
+    /// `Object.create(value)`, `Object.setPrototypeOf(x, value)`, `class X
+    /// extends value`. For an object, its cell. For a function, its cell,
+    /// which from now on knows the function it belongs to: a chain is made of
+    /// cells, and `Object.getPrototypeOf` has to give back the function, not
+    /// an object with the function's properties (see JsObject::function_value
+    /// and make_object). Null for primitives.
+    JsObject* as_prototype() const;
     /// The property table of a value that has no cell: native functions and
     /// the few legacy values that carry `properties` directly.
     PropertyMap* loose_properties(bool create = false) const;
@@ -375,6 +398,8 @@ public:
     // collector compares how many copies exist with how many it can find.
     const void* payload_identity() const { return m_extra.get(); }
     long payload_owners() const { return m_extra.use_count(); }
+    /// The cell a function's payload holds a handle to, if it has one.
+    JsObject* payload_cell() const { return m_extra ? m_extra->cell.get() : nullptr; }
     /// The payload's own property table when this payload is its only owner.
     const PropertyMap* payload_properties() const {
         return (m_extra && m_extra->props && m_extra->props.use_count() == 1) ? m_extra->props.get() : nullptr;
@@ -464,6 +489,13 @@ inline constexpr int kMaxPrototypeChain = 1 << 30;
 /// would make the prototype chain circular. Every walk up a chain relies on
 /// this: chains are finite because nothing else lets script close a loop.
 bool js_set_prototype(JsObject* cell, JsObject* proto);
+
+/// Reads `name` from `start` or the first cell behind it that has it, running
+/// a getter with `receiver` as `this`. Undefined when no cell has it. This is
+/// the lookup `super.name` does: it starts one step up from where the method
+/// lives. Where the chain runs through a function it finds the function's
+/// `name`, `length` and `prototype` as well, which are not stored.
+JsValue js_get_from_chain(JsObject* start, const std::string& name, const JsValue& receiver);
 
 /// The source text of a script function or class (a FunctionNode or ClassNode),
 /// or an empty string when the node has none. Defined in JsParser.cpp.

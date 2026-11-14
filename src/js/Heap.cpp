@@ -38,6 +38,10 @@ void JsObject::trace(Heap& heap) {
     if (trace_extra) trace_extra(heap);
     if (exotic) exotic->trace(heap);
     if (dom_node && trace_dom_node) trace_dom_node(heap, *this);
+    // The function this cell stands for. Only this cell owns the copy, so it
+    // is counted like a property; what makes the pair collectable is that
+    // the copy's payload holds the one handle to this cell (count_value).
+    if (function_value) heap.mark_value(*function_value);
 }
 
 void JsObject::release_contents() {
@@ -55,7 +59,9 @@ void JsObject::release_contents() {
     auto dropped_hook = std::move(assign_hook);
     auto dropped_node = std::move(dom_node);
     auto dropped_exotic = std::move(exotic);
+    auto dropped_function = std::move(function_value);
     exotic.reset();
+    function_value.reset();
     internal.reset();
     trace_extra = nullptr;
     lookup_fallback.reset();
@@ -127,14 +133,16 @@ void Heap::mark_value(const JsValue& val) {
     if (val.object_val) {
         mark_object(val.object_val);
     }
+    // A function keeps its own-property cell, if it has one, and the scopes
+    // it closed over.
+    if (JsObject* cell = val.payload_cell()) mark_object(cell);
     if (val.type == JsType::Function) {
-        // A function keeps its own-property cell and the scopes it closed over.
         if (const auto* fd = val.function_data()) {
-            if (fd->cell) mark_object(fd->cell);
             if (fd->closure) mark_environment(fd->closure.get());
         }
     }
-    // Native functions keep their properties in a shared table, not a cell.
+    // A native function keeps its properties in a shared table until it is
+    // given a cell.
     if (const PropertyMap* map = val.loose_properties()) mark_property_map(map);
 }
 
@@ -166,8 +174,9 @@ void Heap::count_value(const JsValue& val) {
     info.owners = val.payload_owners();
     info.function = val.function_data();
     info.properties = val.payload_properties();
+    info.cell = val.payload_cell();
+    if (info.cell) ++info.cell->gc_seen;
     if (info.function) {
-        if (JsObject* cell = info.function->cell) ++cell->gc_seen;
         if (info.function->closure) {
             auto scope = m_scopes.find(info.function->closure.get());
             if (scope != m_scopes.end()) ++scope->second.seen;
@@ -178,8 +187,8 @@ void Heap::count_value(const JsValue& val) {
 
 // A payload native code holds a copy of: what it refers to is alive.
 void Heap::mark_payload(const PayloadInfo& info) {
+    if (info.cell) mark_object(info.cell);
     if (info.function) {
-        if (info.function->cell) mark_object(info.function->cell);
         if (info.function->closure) mark_environment(info.function->closure.get());
     }
     if (info.properties) mark_property_map(info.properties);

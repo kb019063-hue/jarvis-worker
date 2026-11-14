@@ -288,7 +288,40 @@ JsValue read_entry(const PropertyMap::Entry& entry, const JsValue& receiver) {
     return entry.second;
 }
 
-/// Looks `name` up on `start` and then along its prototype chain.
+/// What a script function has without storing it: `name`, `length`, and for a
+/// constructor the `prototype` object, which is made when it is first asked
+/// for and kept in `cell` (the function's own cell; null when it has none and
+/// only `name` and `length` can be answered).
+bool function_implicit_property(const JsValue& fn, JsObject* cell, const std::string& name, JsValue& out) {
+    if (fn.type != JsType::Function) return false;
+    const JsValue::FunctionData* fd = fn.function_data();
+    if (!fd) return false;
+    if (name == "name") { out = JsValue::make_string(fd->name); return true; }
+    if (name == "length") { out = JsValue::make_number(fd->length); return true; }
+    if (cell && name == "prototype" && fd->node && fd->is_constructor) {
+        // Created on first use: most functions are never constructors.
+        JsValue proto = JsValue::make_object();
+        proto.define_property("constructor", fn, PropertyMap::Hidden);
+        auto& slot = cell->properties.entry(name);
+        slot.second = proto;
+        slot.flags = PropertyMap::Writable;
+        out = proto;
+        return true;
+    }
+    return false;
+}
+
+/// True when function_implicit_property would answer `name` for `fn`.
+bool function_has_implicit_property(const JsValue& fn, const std::string& name) {
+    if (fn.type != JsType::Function) return false;
+    const JsValue::FunctionData* fd = fn.function_data();
+    if (!fd) return false;
+    return name == "name" || name == "length" || (name == "prototype" && fd->node && fd->is_constructor);
+}
+
+/// Looks `name` up on `start` and then along its prototype chain. A chain
+/// can run through a function (`class B extends A` puts A's cell behind B's),
+/// and there the properties a function does not store are asked for too.
 bool lookup_chain(JsObject* start, const std::string& name, const JsValue& receiver, JsValue& out) {
     int guard = 0;
     for (JsObject* obj = start; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
@@ -297,6 +330,7 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
             out = read_entry(*it, receiver);
             return true;
         }
+        if (obj->function_value && function_implicit_property(*obj->function_value, obj, name, out)) return true;
     }
     return false;
 }
@@ -333,15 +367,52 @@ bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsVal
 
 JsObject* JsValue::property_cell(bool create) const {
     if (object_val) return object_val;
-    if (type != JsType::Function) return nullptr;
+    if (!is_function() || !m_extra) return nullptr;
+    if (m_extra->cell) return m_extra->cell;
+    if (!create) return nullptr;
+    // Only a script function gets a cell for the asking. A native function
+    // keeps its properties in a table until function_cell() is called on it.
     const FunctionData* fd = function_data();
-    if (!fd || !fd->node) return nullptr;
-    if (!fd->cell && create) {
-        fd->cell = Heap::default_heap().allocate_object();
-        fd->cell->prototype = JsIntrinsics::get().function_proto;
-        fd->cell->klass = ObjectClass::Function;
+    if (type != JsType::Function || !fd || !fd->node) return nullptr;
+    m_extra->cell = Heap::default_heap().allocate_object();
+    m_extra->cell->prototype = JsIntrinsics::get().function_proto;
+    m_extra->cell->klass = ObjectClass::Function;
+    return m_extra->cell;
+}
+
+JsObject* JsValue::function_cell() const {
+    if (!is_function()) return nullptr;
+    if (JsObject* cell = property_cell(true)) return cell;
+    if (!m_extra) return nullptr;
+
+    // A native function. What it had in its table is copied entry by entry:
+    // the table can be shared with another payload (a function value that was
+    // changed while it was being built), and a PropertyMap's index points
+    // into its own list.
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = JsIntrinsics::get().function_proto;
+    cell->klass = ObjectClass::Function;
+    if (m_extra->props) {
+        for (const auto& entry : *m_extra->props) {
+            auto& slot = cell->properties.entry(entry.first);
+            slot.second = entry.second;
+            slot.setter = entry.setter;
+            slot.flags = entry.flags;
+            if (entry.flags & PropertyMap::Accessor) cell->has_accessors = true;
+            if (is_legacy_getter_key(entry.first)) cell->has_legacy_getters = true;
+        }
+        m_extra->props.reset();
     }
-    return fd->cell;
+    m_extra->cell = cell;
+    return cell;
+}
+
+JsObject* JsValue::as_prototype() const {
+    if (object_val) return object_val;
+    if (!is_function()) return nullptr;
+    JsObject* cell = function_cell();
+    if (cell && !cell->function_value) cell->function_value = std::make_unique<JsValue>(*this);
+    return cell;
 }
 
 PropertyMap* JsValue::loose_properties(bool create) const {
@@ -406,6 +477,8 @@ JsValue JsValue::make_object(JsObject* obj) {
     JsValue v;
     v.type = JsType::Object;
     if (obj) {
+        // A function's cell, reached through a prototype link: the function.
+        if (obj->function_value) return *obj->function_value;
         v.object_val = obj;
     } else {
         v.object_val = Heap::default_heap().allocate_object();
@@ -551,9 +624,14 @@ std::string JsValue::to_string() const {
                 if (!text.empty()) return text;
                 name = fd->name;
             }
-            else if (const PropertyMap* map = loose_properties()) {
-                auto it = map->find("name");
-                if (it != map->end()) name = it->second.string_val.str();
+            else {
+                // In the function's cell once it has one, in its table before.
+                const JsObject* cell = property_cell();
+                const PropertyMap* map = cell ? &cell->properties : loose_properties();
+                if (map) {
+                    auto it = map->find("name");
+                    if (it != map->end()) name = it->second.string_val.str();
+                }
             }
             // Bound functions print without a name, as V8 prints them.
             if (name.compare(0, 6, "bound ") == 0) name.clear();
@@ -599,6 +677,12 @@ JsObject* JsValue::prototype_object() const {
     if (JsObject* cell = property_cell()) return cell->prototype;
     if (is_function()) return JsIntrinsics::get().function_proto;
     return nullptr;
+}
+
+JsValue js_get_from_chain(JsObject* start, const std::string& name, const JsValue& receiver) {
+    JsValue found;
+    if (lookup_chain(start, name, receiver, found)) return found;
+    return JsValue::make_undefined();
 }
 
 bool js_set_prototype(JsObject* cell, JsObject* proto) {
@@ -657,6 +741,7 @@ bool JsValue::has_property(const std::string& name) const {
     int guard = 0;
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
+        if (obj->function_value && function_has_implicit_property(*obj->function_value, name)) return true;
     }
     if (object_val && object_val->lookup_fallback) {
         JsValue ignored;
@@ -852,29 +937,11 @@ JsValue JsValue::get_property(const std::string& name) const {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) return read_entry(*it, *this);
 
-        if (type == JsType::Function) {
-            if (const FunctionData* fd = function_data()) {
-                if (name == "name") return JsValue::make_string(fd->name);
-                if (name == "length") return JsValue::make_number(fd->length);
-                if (name == "prototype" && fd->node && fd->is_constructor) {
-                    // Created on first use: most functions are never constructors.
-                    JsValue proto = JsValue::make_object();
-                    proto.define_property("constructor", *this, PropertyMap::Hidden);
-                    auto& slot = obj->properties.entry(name);
-                    slot.second = proto;
-                    slot.flags = PropertyMap::Writable;
-                    return proto;
-                }
-            }
-            // Static members are inherited from the parent class.
-            auto parent = obj->properties.find("%super");
-            if (parent != obj->properties.end() && parent->second.is_function()) {
-                if (parent->second.has_property(name)) return parent->second.get_property(name);
-            }
-        }
-
-        // Prototype chain delegation
+        // Prototype chain delegation. For a class with a parent the chain
+        // starts at the parent's cell, which is how static members are
+        // inherited, with this function as the receiver of a static getter.
         JsValue found;
+        if (type == JsType::Function && function_implicit_property(*this, obj, name, found)) return found;
         if (lookup_chain(obj->prototype, name, *this, found)) return found;
 
         if (obj->lookup_fallback && (*obj->lookup_fallback)(name, found)) return found;
@@ -904,11 +971,11 @@ JsValue JsValue::get_property(const std::string& name) const {
     }
 
     if (is_function() && !obj) {
-        if (const FunctionData* fd = function_data()) {
-            if (name == "name") return JsValue::make_string(fd->name);
-            if (name == "length") return JsValue::make_number(fd->length);
-        }
+        // No cell: nothing has set this function's prototype, so it is
+        // Function.prototype.
         JsValue found;
+        if (name == "__proto__") return JsValue::make_object(JsIntrinsics::get().function_proto);
+        if (function_implicit_property(*this, nullptr, name, found)) return found;
         if (lookup_chain(JsIntrinsics::get().function_proto, name, *this, found)) return found;
     }
     return JsValue::make_undefined();
@@ -941,13 +1008,18 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         return;     // assigning to a primitive's property has no effect
     }
 
-    if (JsObject* obj = property_cell(true)) {
+    // `fn.__proto__ = x` needs the function to have a cell, whatever kind of
+    // function it is: a native one would otherwise store a property by that name.
+    const bool sets_prototype = name == "__proto__";
+    if (JsObject* obj = (sets_prototype && is_function()) ? function_cell() : property_cell(true)) {
         if (obj->exotic && obj->exotic->set(obj, name, val)) return;
         if (obj->assign_hook && (*obj->assign_hook)(name, val)) return;
-        if (name == "__proto__") {
+        if (sets_prototype) {
             if (obj->frozen) return;
-            if (val.object_val && val.is_object_like()) {
-                if (!js_set_prototype(obj, val.object_val)) js_throw_error(JsErrorKind::TypeError, "Cyclic __proto__ value");
+            if (val.is_object_like()) {
+                if (JsObject* target = val.as_prototype()) {
+                    if (!js_set_prototype(obj, target)) js_throw_error(JsErrorKind::TypeError, "Cyclic __proto__ value");
+                }
             } else if (val.type == JsType::Null) {
                 obj->prototype = nullptr;
             }

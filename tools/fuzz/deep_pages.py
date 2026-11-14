@@ -307,7 +307,8 @@ def chain(n: int, tag: str = "div", style: str = "") -> str:
 
 
 def xml_pages(n: int, page) -> list[Page]:
-    """XML handed to DOMParser, innerHTML of an XML document and XMLSerializer.
+    """XML handed to DOMParser, innerHTML of an XML document, XMLSerializer
+    and XMLHttpRequest.
 
     The XML parser is a second parser and the XML serializer a second walk
     over a tree, each with every way to go wrong the HTML ones had: recursion
@@ -319,6 +320,7 @@ def xml_pages(n: int, page) -> list[Page]:
     parse = "function xml(t) { return new DOMParser().parseFromString(t, 'application/xml'); }"
     write = "function text(node) { return new XMLSerializer().serializeToString(node); }"
     nested = f"var src = '<a>'.repeat({n}) + '{BOTTOM}' + '</a>'.repeat({n}); var d = xml(src);"
+    get = "function get(url) { var x = new XMLHttpRequest(); x.open('GET', url, false); x.send(); return x; }"
     depth = "var depth = 0; for (var e = d.documentElement; e && e.nodeType === 1; e = e.firstChild) depth++;"
     laughs = ("var dtd = '<!DOCTYPE l [<!ENTITY a \"aaaaaaaaaa\">', names = 'abcdefghij';"
               "for (var i = 1; i < 10; i++) { var r = ''; for (var k = 0; k < 10; k++) r += '&' + names[i - 1] + ';';"
@@ -390,6 +392,30 @@ def xml_pages(n: int, page) -> list[Page]:
         page("xml: a short entity used very many times",
              parse + f"var d = xml('<!DOCTYPE q [<!ENTITY e \"xxxxxxxxxx\">]><q>' + '&e;'.repeat({n}) + '</q>');",
              ["d.documentElement.nodeName", "d.documentElement.textContent.length"], f"q {10 * n}"),
+        # The same parser behind XMLHttpRequest.responseXML, and in front of
+        # it the code that turns a data: URL into bytes and bytes into text.
+        page("xml: a deep document as the response of a request",
+             get + f"var src = '<a>'.repeat({n}) + '{BOTTOM}' + '</a>'.repeat({n}); var x = get('data:text/xml,' + src), d = x.responseXML;" + depth,
+             ["depth", "x.responseText === src", "d.documentElement.textContent", "x.status"], f"{n} true {BOTTOM} 200"),
+        page("xml: a long response that is not well formed, and one that expands",
+             get + laughs +
+             f"var open = get('data:application/xml,' + '<a>'.repeat({n}));"
+             "var bomb = get('data:application/xml,' + encodeURIComponent(dtd + ']><l>&j;</l>'));",
+             ["open.responseXML", "open.responseText.length", "bomb.responseXML", "bomb.status"], f"null {3 * n} null 200"),
+        page("xml: a long response in base64, and one with every byte escaped",
+             get +
+             f"var body = '<r>' + 'abcdefghij'.repeat({n}) + '</r>', packed = get('data:text/xml;base64,' + btoa(body));"
+             f"var escaped = get('data:text/xml,%3Cr%3E' + '%C3%A9'.repeat({n}) + '%3C/r%3E');",
+             ["packed.responseText === body", "packed.responseXML.documentElement.textContent.length",
+              "escaped.responseText.length", "escaped.responseXML.documentElement.firstChild.length"],
+             f"true {10 * n} {n + 7} {n}"),
+        page("xml: a response in UTF-16, and one whose every byte is an error",
+             get +
+             f"var wide = get('data:text/xml;charset=utf-16le,' + '%3C%00r%00%3E%00' + 'x%00'.repeat({n}) + '%3C%00/%00r%00%3E%00');"
+             f"var broken = get('data:text/plain,' + '%FF'.repeat({n}));",
+             ["wide.responseXML.documentElement.textContent.length", "wide.responseText.length",
+              "broken.responseText.length", "broken.responseText.charCodeAt(0)"],
+             f"{n} {n + 7} {n} 65533"),
     ]
 
 

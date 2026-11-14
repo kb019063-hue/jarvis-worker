@@ -54,6 +54,12 @@ void print_help(const char* prog) {
     std::cout << "                         let the page finish loading and its timers run, and\n";
     std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
     std::cout << "  --url=URL              The address the page is said to come from\n";
+    std::cout << "  --xml-canonical <file> Read <file> as XML and print its canonical form (the\n";
+    std::cout << "                         one the XML conformance suite compares). Exits 0 for\n";
+    std::cout << "                         a well-formed document, 1 for one that is not, 3 for\n";
+    std::cout << "                         an encoding this build cannot read\n";
+    std::cout << "  --xml-events <file>    Read <file> as XML and print what the parser reports,\n";
+    std::cout << "                         one line an event. The same exit statuses\n";
     std::cout << "  --repl                 Start interactive JavaScript REPL\n";
     std::cout << "  --shell [file/url]     Launch interactive TUI Browser Shell\n";
     std::cout << "  --help, -h             Show this help message\n";

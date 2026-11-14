@@ -32,8 +32,9 @@ enum class ElementNamespace {
     HTML,
     SVG,
     MathML,
-    /// Any other namespace, or none at all. The parser never makes such an
-    /// element; `createElementNS` does. Its URI is other_namespace_uri().
+    /// Any other namespace, or none at all. The HTML parser never makes such
+    /// an element; the XML parser and `createElementNS` do. Its URI is
+    /// other_namespace_uri().
     Other
 };
 

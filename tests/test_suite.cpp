@@ -4689,6 +4689,62 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         assert(decode_text(std::string("a\0b", 3), "utf-16le") == "a\xEF\xBF\xBD");
         assert(utf8_decode("\xEF\xBB\xBF" "a") == "a");
         assert(utf8_decode("\xFF\xFE" "a") == "\xEF\xBF\xBD\xEF\xBF\xBD" "a");   // UTF-8 whatever the bytes say
+
+        // The names of the four encodings, as the Encoding Standard lists them.
+        assert(encoding_name_for_label(" UTF8 ") == "UTF-8" && encoding_name_for_label("unicode-1-1-utf-8") == "UTF-8");
+        assert(encoding_name_for_label("utf-16") == "UTF-16LE" && encoding_name_for_label("UCS-2") == "UTF-16LE");
+        assert(encoding_name_for_label("utf-16be") == "UTF-16BE");
+        assert(encoding_name_for_label("ascii") == "windows-1252" && encoding_name_for_label("ISO-8859-1") == "windows-1252" &&
+               encoding_name_for_label("cp819") == "windows-1252");
+        // Any other name is no name: one the standard has and this build
+        // cannot read, like one nobody has.
+        assert(encoding_name_for_label("").empty() && encoding_name_for_label("bogus").empty() &&
+               encoding_name_for_label("shift_jis").empty() && encoding_name_for_label("utf-32").empty() &&
+               encoding_name_for_label("\"utf-8\"").empty());
+    }
+
+    // --- The encoding of an XML entity (XML 1.0, 4.3.3 and appendix F) ------
+    {
+        using litebird::xml::decode_xml;
+        using litebird::xml::xml_encoding;
+        using litebird::xml::XmlError;
+        const auto encoding_of = [](std::string_view bytes, std::string_view transport = {}) {
+            std::string name;
+            XmlError error;
+            if (!xml_encoding(bytes, name, error, transport)) return std::string(error.unsupported_encoding ? "unsupported" : "error");
+            return name;
+        };
+        const auto decoded = [](std::string_view bytes, std::string_view transport = {}) {
+            std::string utf8, name;
+            XmlError error;
+            if (!decode_xml(bytes, utf8, name, error, transport)) return std::string("error");
+            return utf8;
+        };
+        const std::string latin1 = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>\xE9</a>";
+        const std::string le = std::string("<\0a\0/\0>\0", 8), be = std::string("\0<\0a\0/\0>", 8);
+        // With nothing from outside: a mark, then the declaration, then UTF-8.
+        assert(encoding_of("<a/>") == "UTF-8" && encoding_of(latin1) == "windows-1252");
+        assert(encoding_of("\xEF\xBB\xBF<a/>") == "UTF-8" && encoding_of("\xFF\xFE" + le) == "UTF-16LE" && encoding_of("\xFE\xFF" + be) == "UTF-16BE");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "unsupported");
+        //   A declaration that the bytes contradict is an error of form.
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>") == "error");
+        assert(encoding_of("\xEF\xBB\xBF" + latin1) == "error");
+        //   UTF-16 with no mark and no declaration cannot be told: it is read as UTF-8.
+        assert(encoding_of(le) == "UTF-8");
+        // What the transport says outranks all but a mark, and then the
+        // declaration has no say (it is not even an error to contradict it).
+        assert(encoding_of(le, "UTF-16LE") == "UTF-16LE" && encoding_of(be, "UTF-16BE") == "UTF-16BE");
+        assert(decoded(le, "UTF-16LE") == "<a/>" && decoded(be, "UTF-16BE") == "<a/>" && decoded(le, "utf-16") == "<a/>");
+        assert(encoding_of(latin1, "UTF-8") == "UTF-8" && encoding_of("<a/>", "windows-1252") == "windows-1252");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>", "UTF-8") == "UTF-8");
+        assert(encoding_of("\xEF\xBB\xBF<a/>", "windows-1252") == "UTF-8" && encoding_of("\xFF\xFE" + le, "UTF-8") == "UTF-16LE");
+        assert(encoding_of("\xEF\xBB\xBF" + latin1, "UTF-8") == "UTF-8");
+        //   A name this build does not know is no word from the transport.
+        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "shift_jis") == "UTF-8");
+        // Bytes that are no text in the encoding: no document (4.3.3).
+        assert(decoded(std::string("<\0a\0>\0\x3D\xD8<\0/\0a\0>\0", 16), "UTF-16LE") == "error");
+        assert(decoded(std::string("<\0a\0/\0>", 7), "UTF-16LE") == "error");
+        assert(decoded("<a>\xE9</a>", "windows-1252") == "<a>\xC3\xA9</a>");
     }
 
     // --- The object ---------------------------------------------------------
@@ -4768,6 +4824,27 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("var x = get('data:text/xml,%FF%FE%3C%00a%00/%00%3E%00'); x.responseXML.documentElement.nodeName + ' ' + x.responseText") == "a <a/>");
     //    An encoding this build cannot read: no document, and the text as UTF-8.
     assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EUC-JP\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 43");
+    //    Bytes that are no text in the document's encoding: XML calls that
+    //    fatal (4.3.3), so there is no document; jsdom puts U+FFFD in their
+    //    place and gives one. responseText has the U+FFFD in both.
+    assert(S("var x = get('data:text/xml,%3Ca%3E%E9%3C/a%3E'); String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    assert(S("var x = get('data:text/xml,%3Ca%3E%ED%A0%80%3C/a%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 10");
+    assert(S("var x = get('data:text/xml;charset=utf-16le,%3C%00a%00%3E%00%3D%D8%3C%00/%00a%00%3E%00'); String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    //    A declaration the bytes contradict: no document either; jsdom does
+    //    not look at the declaration.
+    assert(S("String(get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"UTF-16\"?%3E%3Ca/%3E').responseXML)") == "null");
+    //    A charset nobody knows is no charset, and then the declaration
+    //    decides; jsdom reads UTF-8.
+    assert(S("var x = get('data:text/xml;charset=bogus,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%E9%3C/a%3E');"
+             "x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText.charCodeAt(x.responseText.length - 5)") == "233 233");
+    //    The charset of an overriding type replaces the response's even
+    //    when it names nothing ("get a final encoding": the label is taken
+    //    first and looked up afterwards); jsdom then goes back to the
+    //    response's.
+    assert(S("var x = get('data:text/xml;charset=windows-1252,%3Ca%3E%E9%3C/a%3E', function (x) { x.overrideMimeType('text/xml;charset=bogus'); });"
+             "String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    //    UTF-16 named by the type, with no byte order mark.
+    assert(S("var x = get('data:text/xml;charset=utf-16be,%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'); x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText") == "233 <a>\xC3\xA9</a>");
 
     // 5. A synchronous request fires no progress event, and no total is
     //    known; jsdom fires one with a total.

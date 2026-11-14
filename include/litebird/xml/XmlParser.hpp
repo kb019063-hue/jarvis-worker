@@ -121,12 +121,20 @@ bool parse_xml(std::string_view text, XmlHandler& handler, XmlError& error, cons
 
 /// The bytes of an XML entity as UTF-8, by appendix F of XML 1.0: a byte
 /// order mark decides, then the encoding declaration, then UTF-8.
-/// `transport_charset` is the charset of a Content-Type header, which
-/// overrides the declaration. `encoding` receives the name that was used.
-/// False for an encoding this build cannot read, or one that contradicts
-/// the bytes.
+/// `transport_charset` is the charset of a Content-Type header: it outranks
+/// everything but a byte order mark, and where there is one the declaration
+/// is not looked at (4.3.3); a name this build cannot read counts as none.
+/// `encoding` receives the name that was used: "UTF-8", "UTF-16LE",
+/// "UTF-16BE" or "windows-1252". False when the document declares an
+/// encoding this build cannot read or one that contradicts its bytes, and
+/// when the bytes are not text in the encoding (UTF-16 with half a pair).
 bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding, XmlError& error,
                 std::string_view transport_charset = {});
+
+/// The first half of decode_xml(): which encoding, without reading the
+/// text in it.
+bool xml_encoding(std::string_view bytes, std::string& encoding, XmlError& error,
+                  std::string_view transport_charset = {});
 
 /// Whether `name` matches the Name production (the names of elements,
 /// attributes, processing instruction targets), and the stricter QName of

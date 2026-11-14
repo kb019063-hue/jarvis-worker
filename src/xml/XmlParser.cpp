@@ -1398,13 +1398,25 @@ bool parse_xml(std::string_view text, XmlHandler& handler, XmlError& error, cons
     return parser.run(text, error);
 }
 
-bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding, XmlError& error,
-                std::string_view transport_charset) {
+namespace {
+
+// Which encoding the bytes of an entity are in, and how many bytes of byte
+// order mark stand in front. In this order:
+//   1. a byte order mark;
+//   2. what the transport said, when it named an encoding this build reads;
+//   3. what the first bytes look like, and the encoding declaration;
+//   4. UTF-8.
+// Without a transport the declaration must agree with what the bytes turned
+// out to be (4.3.3: a fatal error otherwise). With one it has no say: that
+// sentence of 4.3.3 begins "In the absence of information provided by an
+// external transport protocol".
+bool find_encoding(std::string_view bytes, std::string_view transport_charset, Encoding& found, std::size_t& skip,
+                   XmlError& error) {
     const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    Encoding found = Encoding::Utf8;
+    found = Encoding::Utf8;
+    skip = 0;
     bool wide = false;          // the bytes are 16-bit code units
     bool from_mark = false;     // a byte order mark said so
-    std::size_t skip = 0;
     if (bytes.size() >= 3 && byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) {
         from_mark = true;
         skip = 3;
@@ -1424,6 +1436,17 @@ bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding
         wide = true;
     }
 
+    {
+        Encoding named = Encoding::Utf8;
+        bool generic = false;
+        if (!transport_charset.empty() && encoding_from_label(transport_charset, named, generic)) {
+            // "UTF-16" with no mark is little-endian on the web (the
+            // Encoding Standard), which is what `named` holds for it.
+            if (!from_mark) found = named;
+            return true;
+        }
+    }
+
     // The start of the text as ASCII, enough to read an XML declaration.
     std::string head;
     const std::size_t step = wide ? 2 : 1;
@@ -1432,41 +1455,48 @@ bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding
         head += static_cast<char>(byte(i + offset) < 0x80 ? byte(i + offset) : '?');
     }
     const std::string declared = declared_encoding(head);
-    const std::string label = !transport_charset.empty() && !from_mark ? std::string(transport_charset) : declared;
+    if (declared.empty()) return true;
 
-    if (!label.empty() && !from_mark) {
-        Encoding named = Encoding::Utf8;
-        bool generic = false;
-        if (!encoding_from_label(label, named, generic)) {
-            error.message = "the encoding '" + label + "' is not supported";
-            error.unsupported_encoding = true;
-            return false;
-        }
-        const bool named_wide = named == Encoding::Utf16LE || named == Encoding::Utf16BE;
-        if (named_wide != wide) {
-            // The declaration could be read as one kind of text and names the other.
-            error.message = "the encoding declaration '" + label + "' contradicts the bytes of the document";
-            return false;
-        }
-        if (!wide) found = named;
-        else if (!generic && named != found) {
-            error.message = "the encoding declaration '" + label + "' contradicts the bytes of the document";
-            return false;
-        }
-    } else if (from_mark && !declared.empty()) {
-        Encoding named = Encoding::Utf8;
-        bool generic = false;
-        if (!encoding_from_label(declared, named, generic)) {
-            error.message = "the encoding '" + declared + "' is not supported";
-            error.unsupported_encoding = true;
-            return false;
-        }
-        const bool named_wide = named == Encoding::Utf16LE || named == Encoding::Utf16BE;
+    Encoding named = Encoding::Utf8;
+    bool generic = false;
+    if (!encoding_from_label(declared, named, generic)) {
+        error.message = "the encoding '" + declared + "' is not supported";
+        error.unsupported_encoding = true;
+        return false;
+    }
+    const bool named_wide = named == Encoding::Utf16LE || named == Encoding::Utf16BE;
+    if (from_mark) {
         if (named_wide != wide || (!wide && named != Encoding::Utf8) || (wide && !generic && named != found)) {
             error.message = "the encoding declaration '" + declared + "' contradicts the byte order mark";
             return false;
         }
+        return true;
     }
+    // The declaration could be read as one kind of text and names the other.
+    if (named_wide != wide || (wide && !generic && named != found)) {
+        error.message = "the encoding declaration '" + declared + "' contradicts the bytes of the document";
+        return false;
+    }
+    if (!wide) found = named;
+    return true;
+}
+
+} // namespace
+
+bool xml_encoding(std::string_view bytes, std::string& encoding, XmlError& error, std::string_view transport_charset) {
+    Encoding found = Encoding::Utf8;
+    std::size_t skip = 0;
+    if (!find_encoding(bytes, transport_charset, found, skip, error)) return false;
+    encoding = encoding_name(found);
+    return true;
+}
+
+bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding, XmlError& error,
+                std::string_view transport_charset) {
+    const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
+    Encoding found = Encoding::Utf8;
+    std::size_t skip = 0;
+    if (!find_encoding(bytes, transport_charset, found, skip, error)) return false;
 
     encoding = encoding_name(found);
     utf8.clear();

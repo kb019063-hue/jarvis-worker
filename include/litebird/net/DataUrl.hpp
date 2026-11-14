@@ -57,4 +57,11 @@ std::string utf8_decode(std::string_view bytes);
 /// result is always UTF-8 that is well formed.
 std::string decode_text(std::string_view bytes, std::string_view label);
 
+/// The encoding `label` names (the Encoding Standard's "get an encoding"),
+/// when it is one of the four this build reads: "UTF-8", "UTF-16LE",
+/// "UTF-16BE" or "windows-1252". Empty for every other label, whether the
+/// standard knows it (`shift_jis`) or not (`bogus`): the two cannot be told
+/// apart here, and both are then treated as no label at all.
+std::string encoding_name_for_label(std::string_view label);
+
 } // namespace litebird

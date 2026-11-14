@@ -695,34 +695,32 @@ MimeType final_mime(const RequestState& state) {
     return state.has_override ? state.override_type : response_mime(state);
 }
 
-// "Get a final encoding", as the label it was given by: the charset of the
-// response's type, or of the type the script put in its place. Empty for none.
+// "Get a final encoding": the charset of the response's type, or of the type
+// the script put in its place, as the name of an encoding. Empty when there
+// is none, and when it names no encoding this build reads.
 std::string final_charset(const RequestState& state) {
     std::string label;
     if (const std::string* charset = response_mime(state).parameter("charset")) label = *charset;
     if (state.has_override) {
         if (const std::string* charset = state.override_type.parameter("charset")) label = *charset;
     }
-    return label;
+    return encoding_name_for_label(label);
 }
 
+// "Get a text response".
 const std::string& text_response(RequestState& state) {
     if (state.has_text) return state.text;
-    const std::string label = final_charset(state);
-    bool decoded = false;
-    if (state.response_type.empty() && label.empty() && final_mime(state).is_xml()) {
+    std::string charset = final_charset(state);
+    if (state.response_type.empty() && charset.empty() && final_mime(state).is_xml()) {
         // An XML document says what it is encoded in, and responseText
-        // listens to it (responseType "text" does not).
-        std::string utf8, encoding;
+        // listens to it (responseType "text" does not). When what it says
+        // cannot be followed, the text is read as UTF-8.
+        std::string encoding;
         xml::XmlError error;
-        if (xml::decode_xml(state.response.bytes, utf8, encoding, error)) {
-            // decode_xml() passes UTF-8 through as it came; decode_text()
-            // also turns what is not UTF-8 into U+FFFD.
-            state.text = encoding == "UTF-8" ? decode_text(state.response.bytes, "utf-8") : std::move(utf8);
-            decoded = true;
-        }
+        if (xml::xml_encoding(state.response.bytes, encoding, error)) charset = encoding;
     }
-    if (!decoded) state.text = decode_text(state.response.bytes, label);
+    // Whatever the encoding, bytes that are no text in it become U+FFFD.
+    state.text = decode_text(state.response.bytes, charset);
     state.has_text = true;
     return state.text;
 }
@@ -735,16 +733,18 @@ JsValue document_response(Realm& r, const RequestState& state) {
     const bool html = type.is_html();
     if (!html && !type.is_xml()) return null();
     if (html && state.response_type.empty()) return null();
-    const std::string label = final_charset(state);
+    const std::string charset = final_charset(state);
     std::shared_ptr<Document> document;
     if (html) {
-        // Scripts in a document made this way never run.
-        document = HtmlParser::parse(decode_text(state.response.bytes, label), false);
+        // Scripts in a document made this way never run. The encoding is
+        // the type's, or UTF-8: a <meta charset> is not looked for, here as
+        // for a page.
+        document = HtmlParser::parse(decode_text(state.response.bytes, charset), false);
         for (const auto& child : document->children()) child->set_owner_document(document);
     } else {
         std::string utf8, encoding;
         xml::XmlError error;
-        if (!xml::decode_xml(state.response.bytes, utf8, encoding, error, label)) return null();
+        if (!xml::decode_xml(state.response.bytes, utf8, encoding, error, charset)) return null();
         document = std::make_shared<Document>();
         document->set_content_type(type.essence());
         if (!xml::parse_xml_document(document, utf8, error)) return null();

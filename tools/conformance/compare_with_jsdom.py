@@ -45,16 +45,20 @@ def main():
     args = parser.parse_args()
     if (args.page is None) == (args.html is None):
         parser.error("give a page file or --html, not both and not neither")
-    html = args.html if args.html is not None else open(args.page, encoding="utf-8").read()
-    code = open(args.script, encoding="utf-8").read()
+    # newline="" everywhere, and Litebird's output read as bytes: a carriage
+    # return in the page, in the script or in an answer is what the question
+    # is about often enough (XML turns it into a line feed, a serializer
+    # writes it), and text mode would turn every one into a line feed.
+    html = args.html if args.html is not None else open(args.page, encoding="utf-8", newline="").read()
+    code = open(args.script, encoding="utf-8", newline="").read()
 
     request = json.dumps({"url": PAGE_URL, "max_ms": 5000, "cases": [{"html": html, "code": code}]})
     runner = os.path.join(REPO, "tools", "conformance", "jsdom_run.mjs")
-    reference = subprocess.run(["node", runner, args.jsdom_dir], input=request, capture_output=True, text=True)
+    reference = subprocess.run(["node", runner, args.jsdom_dir], input=request.encode("utf-8"), capture_output=True)
     try:
-        answer = json.loads(reference.stdout)[0]
+        answer = json.loads(reference.stdout.decode("utf-8"))[0]
     except (ValueError, IndexError):
-        sys.exit("jsdom did not run: " + (reference.stderr.strip() or reference.stdout.strip())[:400])
+        sys.exit("jsdom did not run: " + (reference.stderr or reference.stdout).decode("utf-8", "replace").strip()[:400])
     if answer.get("error"):
         print("jsdom:    ", answer["error"])
     theirs = answer["output"].rstrip("\n").split("\n")
@@ -62,15 +66,16 @@ def main():
     with tempfile.TemporaryDirectory() as scratch:
         page = os.path.join(scratch, "page.html")
         script = os.path.join(scratch, "script.js")
-        with open(page, "w", encoding="utf-8") as out:
+        with open(page, "w", encoding="utf-8", newline="") as out:
             out.write(html)
-        with open(script, "w", encoding="utf-8") as out:
+        with open(script, "w", encoding="utf-8", newline="") as out:
             out.write(code)
         run = subprocess.run([args.binary, "--url=" + PAGE_URL, "--run-script", script, page],
-                             capture_output=True, text=True, timeout=args.timeout)
-    if run.returncode or run.stderr.strip():
-        print("litebird: exit %d %s" % (run.returncode, run.stderr.strip()[:400]))
-    ours = run.stdout.rstrip("\n").split("\n")
+                             capture_output=True, timeout=args.timeout)
+    complaint = run.stderr.decode("utf-8", "replace").strip()
+    if run.returncode or complaint:
+        print("litebird: exit %d %s" % (run.returncode, complaint[:400]))
+    ours = run.stdout.decode("utf-8", "replace").rstrip("\n").split("\n")
 
     same = 0
     total = max(len(theirs), len(ours))
@@ -80,8 +85,9 @@ def main():
         if expected == actual:
             same += 1
             continue
-        print("  jsdom     " + expected[:args.width])
-        print("  litebird  " + actual[:args.width])
+        # repr: a carriage return or another control character is seen.
+        print("  jsdom     " + repr(expected[:args.width])[1:-1])
+        print("  litebird  " + repr(actual[:args.width])[1:-1])
     print("%d lines, %d the same" % (total, same))
     return 0 if same == total else 1
 

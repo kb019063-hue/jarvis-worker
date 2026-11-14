@@ -593,6 +593,8 @@ make test
 | `--run-script <file>` | Load the page, run the file as one more script, then the page's load events and timers. Nothing is drawn. Exits 1 if anything was left uncaught |
 | `--url=<URL>` | The address the page is said to come from (`location.href`); by default the `file:` URL of the file |
 | `--virtual-time-budget=<ms>` | How much timer time a page gets to settle before it is rendered (default 16, one frame) |
+| `--xml-canonical <file>` | Read the file as XML and print its canonical form, the one the XML conformance suite compares. Exits 0 for a well-formed document, 1 for one that is not (the reason on standard error), 3 for an encoding this build cannot read |
+| `--xml-events <file>` | Read the file as XML and print what the parser reports, one line an event (`tools/fuzz/diff_xml.py` compares these with Expat and libxml2). The same exit statuses |
 | `--repl` | Launch the interactive JavaScript & DOM REPL |
 
 ---

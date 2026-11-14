@@ -291,6 +291,59 @@ e9
 fffd fffd fffd 
 fffd 
 
+#name an XML response says its encoding four ways, in this order: a byte order mark, the type, its declaration, UTF-8
+#code
+var declared = '%3C?xml version="1.0" encoding="ISO-8859-1"?%3E', declaredUtf8 = '%3C?xml version="1.0" encoding="UTF-8"?%3E';
+var requests = [
+    ['the type over the declaration', 'data:text/xml;charset=utf-8,' + declared + '%3Ca%3E%C3%A9%3C/a%3E'],
+    ['the type over the declaration, the other way', 'data:text/xml;charset=iso-8859-1,' + declaredUtf8 + '%3Ca%3E%E9%3C/a%3E'],
+    ['a name nobody knows, and UTF-8', 'data:text/xml;charset=bogus,%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark', 'data:text/xml,%EF%BB%BF%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark over the type', 'data:text/xml;charset=latin1,%EF%BB%BF%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark and a declaration', 'data:text/xml,%EF%BB%BF' + declaredUtf8 + '%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-16 mark over the type', 'data:text/xml;charset=utf-8,%FF%FE%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a UTF-16 mark, the other order', 'data:text/xml,%FE%FF%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'],
+    ['UTF-16 by the type, no mark', 'data:text/xml;charset=utf-16le,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['UTF-16 by the type, the other order', 'data:text/xml;charset=utf-16be,%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'],
+    ['UTF-16 with no word on the order', 'data:text/xml;charset=utf-16,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['another name of UTF-16', 'data:application/xml;charset=ucs-2,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a name in quotes and capitals', 'data:text/xml;charset="ISO-8859-1",%3Ca%3E%E9%3C/a%3E'],
+    ['the charset of the type put in its place', 'data:text/xml,%3Ca%3E%E9%3C/a%3E', 'text/xml;charset=windows-1252'],
+    ['a type put in its place that names none', 'data:text/xml;charset=windows-1252,%3Ca%3E%E9%3C/a%3E', 'application/xml'],
+    ['UTF-16 with nothing to say so', 'data:text/xml,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a character XML does not have', 'data:text/xml,%3Ca%3E%EF%BF%BE%3C/a%3E'],
+    ['a zero byte', 'data:text/xml,%3Ca%3E%00%3C/a%3E']
+];
+requests.forEach(function (request) {
+    var x = new XMLHttpRequest();
+    x.open('GET', request[1], false);
+    if (request[2]) x.overrideMimeType(request[2]);
+    x.send();
+    var text = x.responseText, d = x.responseXML, odd = [];
+    for (var k = 0; k < text.length; k++) { var c = text.charCodeAt(k); if (c < 32 || c > 126) odd.push(c.toString(16)); }
+    console.log(request[0] + ': ' + text.length + ' [' + odd.join(' ') + '] ' +
+                (d ? d.documentElement.nodeName + ' ' + d.documentElement.textContent.charCodeAt(0).toString(16) : 'no document'));
+});
+#expect
+the type over the declaration: 51 [e9] a e9
+the type over the declaration, the other way: 46 [e9] a e9
+a name nobody knows, and UTF-8: 8 [e9] a e9
+a UTF-8 mark: 8 [e9] a e9
+a UTF-8 mark over the type: 8 [e9] a e9
+a UTF-8 mark and a declaration: 46 [e9] a e9
+a UTF-16 mark over the type: 8 [e9] a e9
+a UTF-16 mark, the other order: 8 [e9] a e9
+UTF-16 by the type, no mark: 8 [e9] a e9
+UTF-16 by the type, the other order: 8 [e9] a e9
+UTF-16 with no word on the order: 8 [e9] a e9
+another name of UTF-16: 8 [e9] a e9
+a name in quotes and capitals: 8 [e9] a e9
+the charset of the type put in its place: 8 [e9] a e9
+a type put in its place that names none: 8 [e9] a e9
+UTF-16 with nothing to say so: 16 [0 0 0 fffd 0 0 0 0 0] no document
+a character XML does not have: 8 [fffe] no document
+a zero byte: 8 [0] no document
+
 #name open() checks the method and the address
 #code
 function attempt(method, url) {

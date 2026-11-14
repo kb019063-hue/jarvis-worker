@@ -252,27 +252,32 @@ std::string decode_windows_1252(std::string_view bytes) {
 enum class TextEncoding { Utf8, Utf16LE, Utf16BE, Windows1252 };
 
 // The labels of the Encoding Standard for the four encodings read here.
-TextEncoding encoding_of_label(std::string_view label) {
+// False for any other label, one of the standard's or not.
+bool encoding_of_label(std::string_view label, TextEncoding& out) {
     std::size_t start = 0, end = label.size();
     while (start < end && is_ascii_whitespace(label[start])) ++start;
     while (end > start && is_ascii_whitespace(label[end - 1])) --end;
     const std::string name = lowered(label.substr(start, end - start));
+    static const char* const kUtf8[] = {"utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "x-unicode20utf8"};
     static const char* const kUtf16LE[] = {"utf-16le", "utf-16", "ucs-2", "unicode", "csunicode", "iso-10646-ucs-2", "unicodefeff"};
     static const char* const kUtf16BE[] = {"utf-16be", "unicodefffe"};
     static const char* const kWindows1252[] = {
         "ansi_x3.4-1968", "ascii", "cp1252", "cp819", "csisolatin1", "ibm819", "iso-8859-1", "iso-ir-100", "iso8859-1",
         "iso88591", "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii", "windows-1252", "x-cp1252",
     };
+    for (const char* candidate : kUtf8) {
+        if (name == candidate) { out = TextEncoding::Utf8; return true; }
+    }
     for (const char* candidate : kUtf16LE) {
-        if (name == candidate) return TextEncoding::Utf16LE;
+        if (name == candidate) { out = TextEncoding::Utf16LE; return true; }
     }
     for (const char* candidate : kUtf16BE) {
-        if (name == candidate) return TextEncoding::Utf16BE;
+        if (name == candidate) { out = TextEncoding::Utf16BE; return true; }
     }
     for (const char* candidate : kWindows1252) {
-        if (name == candidate) return TextEncoding::Windows1252;
+        if (name == candidate) { out = TextEncoding::Windows1252; return true; }
     }
-    return TextEncoding::Utf8;
+    return false;
 }
 
 } // namespace
@@ -428,13 +433,27 @@ std::string decode_text(std::string_view bytes, std::string_view label) {
     if (bytes.size() >= 3 && byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) return decode_utf8(bytes.substr(3));
     if (bytes.size() >= 2 && byte(0) == 0xFE && byte(1) == 0xFF) return decode_utf16(bytes.substr(2), true);
     if (bytes.size() >= 2 && byte(0) == 0xFF && byte(1) == 0xFE) return decode_utf16(bytes.substr(2), false);
-    switch (encoding_of_label(label)) {
+    TextEncoding encoding = TextEncoding::Utf8;
+    if (!encoding_of_label(label, encoding)) encoding = TextEncoding::Utf8;
+    switch (encoding) {
         case TextEncoding::Utf16LE: return decode_utf16(bytes, false);
         case TextEncoding::Utf16BE: return decode_utf16(bytes, true);
         case TextEncoding::Windows1252: return decode_windows_1252(bytes);
         case TextEncoding::Utf8: break;
     }
     return decode_utf8(bytes);
+}
+
+std::string encoding_name_for_label(std::string_view label) {
+    TextEncoding encoding = TextEncoding::Utf8;
+    if (!encoding_of_label(label, encoding)) return std::string();
+    switch (encoding) {
+        case TextEncoding::Utf16LE: return "UTF-16LE";
+        case TextEncoding::Utf16BE: return "UTF-16BE";
+        case TextEncoding::Windows1252: return "windows-1252";
+        case TextEncoding::Utf8: break;
+    }
+    return "UTF-8";
 }
 
 } // namespace litebird

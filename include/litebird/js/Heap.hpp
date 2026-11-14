@@ -2,6 +2,7 @@
 
 #include "litebird/js/JsValue.hpp"
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -62,7 +63,8 @@ class JsObject : public HeapObject {
 public:
     JsObject* prototype{nullptr};
     PropertyMap properties;
-    std::vector<JsValue> array_elements;
+    // Deque-backed, so shift() and splice() at the front are not a memmove of the whole array.
+    std::deque<JsValue> array_elements;
     bool is_array{false};
     bool extensible{true};          // false after Object.preventExtensions/seal/freeze
     bool frozen{false};             // Object.freeze: no writes at all

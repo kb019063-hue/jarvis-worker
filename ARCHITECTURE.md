@@ -340,7 +340,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
 | **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
-| **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. Phase 28 is the XML parser, in flight in PR #30. | ✅ Completed (html5lib 1781 of 1792 unchanged; 112/112 unit suites) |
+| **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. Phase 28 is the XML parser, in flight in PR #30. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
+| **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
 
 ---
 
@@ -1198,17 +1199,16 @@ JIT, and this one is no exception.
 **Where it was worse than that.** A string was stored inside the value that
 held it, so reading a string variable copied the string, and `length` and
 indexing scanned it. A loop over 200,000 characters took 76 s where Node takes
-35 ms. That is fixed: see Phase 24 below. Two containers still have the same
+35 ms. That is fixed: see Phase 24 below. Two containers had the same
 shape:
 
-| Script | Litebird | Node |
+| Script | Litebird before Phase 30 | Node |
 | :--- | :--- | :--- |
 | `delete` of 50,000 keys from one object | over 120 s | 91 ms |
 | `shift()` until a 50,000-element array is empty | 5.3 s | 0.2 s |
 
-The property map rebuilds its index on every `delete`, and arrays are plain
-vectors. Small objects and short arrays, which is most of what pages handle,
-are not affected.
+The property map rebuilt its index on every `delete`, and arrays were plain
+vectors. Phase 30 removed both.
 
 ### 10. What is still approximate
 
@@ -1400,9 +1400,11 @@ is, as corpus cases and as assertions in `tests/js_string_stress.hpp`.
   12,000 times ends in a `RangeError`, and a match is abandoned after 30
   million steps. Both are in AUDIT.md, finding 26; the first needs the matcher
   to keep its backtracking state on the heap.
-- **`delete` and `shift()`** are quadratic in the size of the object or array
-  (Phase 23, section 9). They were found by the same timing run and are not
-  string problems.
+- **`delete` and `shift()`** were quadratic in the size of the object or
+  array (Phase 23, section 9). Phase 30 makes both linear: the property map
+  keeps insertion order in a list with a stable hash index, and arrays are
+  deques. They were found by the same timing run and are not string
+  problems.
 - **`repeat`, `padStart` and `padEnd`** build their result in a temporary and
   copy it into a block: twice the memory for a moment, on a very long result.
 - **Short strings have no inline form.** Every string except the empty one and
@@ -2263,6 +2265,112 @@ make conformance       # html5lib tree-construction: 1781 / 1792 (unchanged;
 
 ---
 
+## Phase 30 Architecture: Deletion and Front Edits Are Linear
+
+Phase 23 measured two containers that went quadratic with their input. A
+large object's property map rebuilt its hash index on every `delete`; an array
+was a `std::vector<JsValue>`, so `shift()` copied the whole tail each call.
+This phase changes the storage, not the public semantics.
+
+### 1. The property map
+
+An insertion-ordered table still has to be an insertion-ordered walk for
+`Object.keys`, `for...in` and `JSON.stringify`. `PropertyMap` now holds:
+
+- an `std::list<Entry>` with the properties in insertion order; and
+- an optional `std::unordered_map<std::string, std::list<Entry>::iterator>`.
+
+Up to twelve entries, `find` and `entry` are a linear list walk, exactly as
+they were for small vectors. The first time a map grows past twelve entries,
+the index is built once. Every later insertion and deletion keeps the list and
+the index in step: an erase removes one list node and one hash entry, and no
+surviving iterator moves. If the map later drops to six entries or fewer, its
+bucket array is released and the map becomes linear again until it crosses the
+threshold once more. `clear()` resets both structures. The enumeration loops
+in `src/js/JsValue.cpp`, `src/js/JsEval.cpp` and the property-order users
+elsewhere are unchanged: they see a list iterator with the same dereference
+shape as the vector they saw before.
+
+This is O(1) erase and O(1) lookup for a large map, at the cost of one list
+node per property (the same order of overhead a hash entry already had) and
+the inability to use raw index arithmetic. That trade is confined to dynamic
+JavaScript objects; no parser, DOM or layout table uses `PropertyMap`.
+
+### 2. Arrays
+
+`JsObject::array_elements` is now a `std::deque<JsValue>`. The ends are the
+hot paths a page meets early:
+
+- `shift()` and `unshift()` move only a deque chunk boundary, not every
+  surviving element;
+- `push()` remains amortized O(1);
+- reading by position still re-computes from the deque's block map, not by
+  shifting elements when the front is removed;
+- cloning into a vector (`js_iterable_to_vector`, JSON and `structuredClone`)
+  copies through an explicit range; and
+- `splice(0, n)` takes the front of a deque instead of memmoving the tail.
+
+Middle `splice()` is still linear in the number of elements moved, because a
+deque is not a random-access gap buffer; that is the same order as before and
+is not what the phase set out to solve. Deleting an array element with
+`delete a[i]` still creates a hole.
+
+### 3. Compatibility
+
+The change touches storage only. `Object.keys`, `for...in`, `JSON.stringify`,
+`Object.assign`, cloning, DOM bindings and array builtins all retain their
+order rules. `tests/test_suite.cpp` adds one suite,
+`js_property_maps_and_arrays_keep_their_order_through_front_edits`, covering
+order after `delete` and reassignment, a 2,000-property workload, identity
+through `shift()`/`unshift()`, `splice(0, n)` and a full array consumed from
+the front.
+
+### 4. Measured
+
+The Phase 23 scripts, run on the same machine before and after this phase:
+
+| Script | Before | After |
+| :--- | ---: | ---: |
+| `delete` of the 50,000 keys of one object | 131,423 ms | 25–29 ms |
+| `shift()` until a 50,000-element array is empty | 8,228 ms | 9–10 ms |
+
+`tools/bench/bench_delete_shift.py` compares the two cases and the adjacent
+front paths against Node and exits nonzero on a wrong result, a timeout or a
+case over `--max-ms`. One verification run printed:
+
+```
+python3 tools/bench/bench_delete_shift.py --reps 3 --max-ms 2500
+case                                           litebird  reference  result
+delete: 50k keys                                   58ms       59ms  0
+delete: reinsert after erase                       49ms       61ms  last
+shift: until an array is empty                     30ms      189ms  1249975000
+unshift: 20k times                                  9ms       50ms  19999 20000
+splice: remove the first half                      20ms       25ms  25000 25000
+enumerate: order after delete and insert            4ms       23ms  a,c,d,b
+```
+
+`make test` passes all 113 suites (the new one included). `make js-conformance`
+is unchanged at 840 of 845 (everyday probe 90 of 90; 839 of 845 in the ASan
+build, the same one deep-nesting case the sanitizer cannot fit); `make
+dom-conformance` is 572 of 572, `make url-conformance` is 1150 of 1188, and
+`make conformance` is 1781 of 1792, unchanged — the parser was not touched.
+`make fuzz` reports 0 findings in 400 parser mutations and 400 layout/render
+and image cases; `make deep` reports 0 failures in 1,292 runs over 445 pages;
+`make asan` builds the engine with ASan and UBSan, reports no sanitizer
+finding, and its ASan deep run covers 842 executions.
+
+### 5. What is still approximate
+
+- Property maps below twelve entries keep the linear scan; that is deliberate.
+- A map that grew large keeps its bucket array until it falls to six entries
+  or is cleared/destroyed. The bucket array is not shrunk incrementally.
+- `splice()` from the middle is linear in the elements moved.
+- Holes from `delete a[i]` are still holes in the array, not `undefined`
+  tombstones that traversal can distinguish; this is recorded elsewhere as a
+  missing feature, not changed here.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -2277,12 +2385,11 @@ make conformance       # html5lib tree-construction: 1781 / 1792 (unchanged;
    rounded-corner clipping. A block inside an inline box (`<a>x<p>y</p></a>`)
    is not laid out at all: the "y" is missing. The DOM is trustworthy; the
    box tree is plausible.
-2. **JavaScript is interpreted, and two containers are quadratic.** Scripts
-   run on a tree-walking interpreter: 50 to 100 times slower than V8 on loops
-   and calls. Long strings are no longer part of this (Phase 24), but deleting
-   many keys from one object and emptying a long array with `shift()` still
-   cost the square of the size: 50,000 deletes take over two minutes.
-   Measurements are in Phase 23, section 9. In regular expressions, a group
+2. **JavaScript is interpreted, and one regular-expression limit remains.**
+   Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
+   on loops and calls. Long strings are no longer quadratic (Phase 24), and
+   neither are deleting many keys from one object or emptying a long array
+   with `shift()` (Phase 30). In regular expressions, a group
    repeated more than about 12,000 times (`(?:a|b)*` over a long string) ends
    in a `RangeError` where V8 answers, because the matcher recurses; a single
    character or class under `*` has no such limit (AUDIT.md, finding 26).

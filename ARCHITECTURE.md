@@ -2418,16 +2418,16 @@ two-core verification machine; they are not microbenchmarks of trim alone.
 
 | 300,000 spaces per placeholder | Before | After |
 | :--- | ---: | ---: |
-| `:nth-child` formula | 13,591 | 76 |
-| attribute name and quoted value | 4,508 | 91 |
-| attribute presence | 2,269 | 47 |
-| keyframe selector | 46 | 46 |
-| grid `minmax(...)` | 9,010 | 192 |
-| grid `repeat(...)` | 21,293 | 188 |
-| filter name/argument/colour | 6,752 | 160 |
-| shorthand tokens | 173 | 176 |
-| durations and `grid-area` | 5,444 | 266 |
-| transform functions/arguments | 11,685 | 305 |
+| `:nth-child` formula | 14,627 | 111 |
+| attribute name and quoted value | 4,687 | 90 |
+| attribute presence | 2,331 | 58 |
+| keyframe selector | 47 | 55 |
+| grid `minmax(...)` | 9,786 | 199 |
+| grid `repeat(...)` | 22,545 | 188 |
+| filter name/argument/colour | 7,191 | 156 |
+| shorthand tokens | 181 | 171 |
+| durations and `grid-area` | 5,791 | 283 |
+| transform functions/arguments | 11,694 | 304 |
 
 The keyframe and shorthand cases were already cheap in this pipeline because
 other whitespace consumption happens before the trim; they are kept as

@@ -635,8 +635,8 @@ time. `make bench-css` runs ten compact/padded page pairs through parsing,
 style, layout and paint at 30,000 and 300,000 spaces per placeholder. The
 dumps must match, and each padded run must finish within three seconds.
 On the verification machine the 300,000-space `:nth-child` case went from
-13.6 s to 76 ms; `repeat(...)`, `minmax(...)` and `translate(...)` went from
-9–21 s to 0.19–0.31 s. The command and full table are in `ARCHITECTURE.md`,
+14.6 s to 111 ms; `repeat(...)`, `minmax(...)` and `translate(...)` went from
+9.8–22.5 s to 0.19–0.30 s. The command and full table are in `ARCHITECTURE.md`,
 Phase 31. This is a cost fix, not a claim of broader CSS conformance. The
 separate `:nth-child(2n + 1)` sign-space parsing bug is still open and is
 recorded with a repro in `AUDIT.md`, finding 35.

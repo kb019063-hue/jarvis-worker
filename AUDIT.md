@@ -1802,7 +1802,7 @@ Node 22 on the same machine.
 **The hole.** The CSS parser and resolver trimmed leading whitespace with
 `erase(begin())` in a loop. Each space shifted the entire remaining value.
 Finding 28 measured 300,000 spaces inside `:nth-child( )` at 8.8 s; the
-reproducible page-pipeline baseline for this phase measured 13.6 s on its
+reproducible page-pipeline baseline for this phase measured 14.6 s on its
 machine. The same shape appeared in attribute selectors, grid track
 arguments, filters, shorthands, durations, grid areas and transforms.
 
@@ -1815,9 +1815,9 @@ are preserved; this is not a CSS tokenizer conformance change.
 **Measured.** `python3 tools/bench/bench_css_whitespace.py --sizes
 30000,300000 --reps 3 --max-ms 3000 --baseline BUILD` compares every padded
 page with its compact form and with the baseline binary. At 300,000 spaces:
-nth-child 13,591 → 76 ms; attribute value 4,508 → 91 ms; grid minmax
-9,010 → 192 ms; grid repeat 21,293 → 188 ms; filters 6,752 → 160 ms;
-durations/grid-area 5,444 → 266 ms; transforms 11,685 → 305 ms. The full
+nth-child 14,627 → 111 ms; attribute value 4,687 → 90 ms; grid minmax
+9,786 → 199 ms; grid repeat 22,545 → 188 ms; filters 7,191 → 156 ms;
+durations/grid-area 5,791 → 283 ms; transforms 11,694 → 304 ms. The full
 table and protocol are in ARCHITECTURE.md, Phase 31. Keyframe and shorthand
 cases were already cheap in this pipeline and stayed cheap.
 

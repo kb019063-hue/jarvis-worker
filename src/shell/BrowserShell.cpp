@@ -83,7 +83,7 @@ bool BrowserShell::back() {
     std::string prev_url = m_history[m_history_index];
 
     // Load without altering history vector
-    auto resp = ResourceLoader::load(prev_url);
+    auto resp = ResourceLoader::load_navigation(prev_url);
     if (!resp.success) {
         m_status_message = "Failed to load: " + resp.error_message;
         return false;
@@ -105,7 +105,7 @@ bool BrowserShell::forward() {
     m_history_index++;
     std::string next_url = m_history[m_history_index];
 
-    auto resp = ResourceLoader::load(next_url);
+    auto resp = ResourceLoader::load_navigation(next_url);
     if (!resp.success) {
         m_status_message = "Failed to load: " + resp.error_message;
         return false;
@@ -124,7 +124,7 @@ bool BrowserShell::forward() {
 
 bool BrowserShell::reload() {
     if (m_current_url.empty()) return false;
-    auto resp = ResourceLoader::load(m_current_url);
+    auto resp = ResourceLoader::load_navigation(m_current_url);
     if (!resp.success) {
         m_status_message = "Reload failed: " + resp.error_message;
         return false;
@@ -139,7 +139,7 @@ bool BrowserShell::reload() {
 }
 
 bool BrowserShell::navigate_to(const std::string& url) {
-    auto resp = ResourceLoader::load(url);
+    auto resp = ResourceLoader::load_navigation(url);
     if (!resp.success) {
         m_status_message = "Error loading " + url + ": " + resp.error_message;
         std::string error_html = "<html><head><title>Error</title><style>body{font-size:16px;color:#ef4444;background-color:#0f172a;margin:20px;}h1{color:#f87171;}</style></head><body><h1>Navigation Error</h1><p>" + resp.error_message + "</p></body></html>";

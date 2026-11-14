@@ -1,6 +1,8 @@
 #pragma once
 
 #include "litebird/js/JsValue.hpp"
+#include "litebird/net/ResourceLoader.hpp"
+#include <functional>
 #include <string>
 #include <string_view>
 #include <memory>
@@ -15,7 +17,7 @@ namespace litebird {
 
 class WorkerObject : public std::enable_shared_from_this<WorkerObject> {
 public:
-    explicit WorkerObject(std::string script_url);
+    WorkerObject(std::string script_url, ResourceRequestContext context);
     ~WorkerObject();
 
     void start();
@@ -24,8 +26,10 @@ public:
 
     bool is_running() const { return m_running; }
 
-    static JsValue create_constructor();
-    static JsValue create_js_instance(std::string_view script_url);
+    using ContextProvider = std::function<ResourceRequestContext()>;
+    static JsValue create_constructor(ContextProvider context_provider);
+    static JsValue create_js_instance(std::string_view script_url,
+                                      ResourceRequestContext context);
 
     void set_onmessage(JsValue handler) { m_onmessage = handler; }
     JsValue onmessage() const { return m_onmessage; }
@@ -37,8 +41,10 @@ public:
 
 private:
     void worker_thread_main(std::string script_source);
+    void post_error(const std::string& message);
 
     std::string m_script_url;
+    ResourceRequestContext m_context;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_terminated{false};

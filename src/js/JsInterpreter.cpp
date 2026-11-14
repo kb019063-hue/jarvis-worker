@@ -11,6 +11,7 @@
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/UrlParser.hpp"
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/WebSocket.hpp"
 #include "litebird/js/Worker.hpp"
@@ -543,10 +544,32 @@ void JsInterpreter::init_builtins() {
     // Promise built-in
     m_global_env->define("Promise", Promise::create_constructor());
 
-    // fetch, Headers, Response built-ins
+    // fetch, Headers, Response built-ins. The request context is read when
+    // the script calls fetch/new Worker, not when the global is installed:
+    // the document address and <base href> may have changed since parsing
+    // began. The alive guard keeps a retained native closure from touching
+    // a destroyed interpreter's realm.
+    auto alive = m_alive;
+    auto* realm = m_realm.get();
+    auto document = m_document;
+    auto request_context = [alive, realm, document]() -> ResourceRequestContext {
+        ResourceRequestContext context;
+        if (!alive->load()) return context;
+        context.document_url = document ? document->url() : "about:blank";
+        context.base_url = context.document_url;
+        if (document) {
+            Url base;
+            if (dom::document_base_url(dom::realm_of(*realm), *document, base))
+                context.base_url = base.href();
+        }
+        return context;
+    };
     m_global_env->define("Headers", HeadersObject::create_constructor());
     m_global_env->define("Response", ResponseObject::create_constructor());
-    m_global_env->define("fetch", JsValue::make_native_function(FetchAPI::fetch));
+    m_global_env->define("fetch", JsValue::make_native_function(
+        [request_context](const std::vector<JsValue>& args) {
+            return FetchAPI::fetch(args, request_context());
+        }));
 
     // URL and URLSearchParams. A window finds every interface by its name
     // (see dom::attach_window); a worker, or a script run on its own, has
@@ -558,7 +581,7 @@ void JsInterpreter::init_builtins() {
     }
 
     // Worker built-in
-    m_global_env->define("Worker", WorkerObject::create_constructor());
+    m_global_env->define("Worker", WorkerObject::create_constructor(request_context));
 
     // WebSocket built-in
     m_global_env->define("WebSocket", WebSocketObject::create_constructor());

@@ -5,33 +5,34 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/net/Fetch.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <optional>
 
 namespace litebird {
 
-static std::string load_worker_script(std::string_view url_or_path) {
-    std::string str(url_or_path);
-    if (url_or_path.starts_with("data:")) {
-        auto resp = ResourceLoader::load(str);
-        if (resp.success) return resp.body;
+static std::optional<std::string> load_worker_script(
+    std::string_view url_or_path,
+    const ResourceRequestContext& context,
+    std::string& error,
+    std::string& loaded_url
+) {
+    // A worker script is a page-initiated load. The old fallback returned the
+    // URL/path itself as source when loading failed, which could turn a
+    // refused local file into inline script; a failed load is an error now.
+    auto resp = ResourceLoader::load_for_page(std::string(url_or_path), context);
+    if (resp.success) {
+        loaded_url = resp.url;
+        return resp.body;
     }
-    // Try file directly
-    std::ifstream file{str};
-    if (file.is_open()) {
-        std::stringstream ss;
-        ss << file.rdbuf();
-        return ss.str();
-    }
-    // Try via ResourceLoader
-    auto resp = ResourceLoader::load(str);
-    if (resp.success) return resp.body;
-    return str;
+    error = resp.error_message.empty() ? "Failed to load worker script" : resp.error_message;
+    return std::nullopt;
 }
 
-WorkerObject::WorkerObject(std::string script_url)
-    : m_script_url(std::move(script_url)) {
+WorkerObject::WorkerObject(std::string script_url, ResourceRequestContext context)
+    : m_script_url(std::move(script_url)), m_context(std::move(context)) {
 }
 
 WorkerObject::~WorkerObject() {
@@ -39,13 +40,43 @@ WorkerObject::~WorkerObject() {
 }
 
 void WorkerObject::start() {
+    m_owner_loop = &EventLoop::default_loop();
+    std::string load_error;
+    std::string loaded_url;
+    auto script_source = load_worker_script(m_script_url, m_context, load_error, loaded_url);
+    if (!script_source) {
+        m_running = false;
+        m_terminated = false;
+        post_error(load_error);
+        return;
+    }
+
+    // A classic worker's relative references resolve against its script URL.
+    // The capability still comes from the creator's document, not from a
+    // <base> element the script URL happened to contain.
+    if (!loaded_url.empty() && loaded_url.rfind("data:", 0) != 0)
+        m_context.base_url = loaded_url;
+
     m_running = true;
     m_terminated = false;
-    m_owner_loop = &EventLoop::default_loop();
-    std::string script_source = load_worker_script(m_script_url);
-
-    m_thread = std::thread([this, script = std::move(script_source)]() {
+    m_thread = std::thread([this, script = std::move(*script_source)]() {
         worker_thread_main(script);
+    });
+}
+
+void WorkerObject::post_error(const std::string& message) {
+    if (!m_owner_loop) return;
+    m_owner_loop->post_task([weak_self = weak_from_this(), err = message]() {
+        auto worker = weak_self.lock();
+        if (!worker || worker->m_terminated) return;
+        if (worker->m_onerror.is_function()) {
+            JsValue err_event = JsValue::make_object(Heap::default_heap().allocate_object());
+            err_event.set_property("message", JsValue::make_string(err));
+            err_event.set_property("type", JsValue::make_string("error"));
+            js_call_guarded(worker->m_onerror, JsValue::make_undefined(), {err_event});
+        } else {
+            std::cerr << "Uncaught (in worker) " << err << std::endl;
+        }
     });
 }
 
@@ -86,25 +117,24 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     Heap::enter_new_agent();
     EventLoop worker_loop;
     EventLoop::set_current(&worker_loop);
-    EventLoop* owner_loop = m_owner_loop;
 
     JsInterpreter worker_js(nullptr);
     auto env = worker_js.global_env();
 
+    // The worker inherits the creator's resource capability. Its own fetch
+    // and nested Worker constructors must not fall back to the interpreter's
+    // default about:blank context.
+    ResourceRequestContext worker_context = m_context;
+    env->define("fetch", JsValue::make_native_function(
+        [worker_context](const std::vector<JsValue>& args) {
+            return FetchAPI::fetch(args, worker_context);
+        }));
+    env->define("Worker", WorkerObject::create_constructor(
+        [worker_context]() { return worker_context; }));
+
     // An error nothing in the worker caught goes to the page's worker.onerror.
-    auto report_error = [this, owner_loop](std::string message) {
-        owner_loop->post_task([weak_self = weak_from_this(), err = std::move(message)]() {
-            auto worker = weak_self.lock();
-            if (!worker || worker->m_terminated) return;
-            if (worker->m_onerror.is_function()) {
-                JsValue err_event = JsValue::make_object(Heap::default_heap().allocate_object());
-                err_event.set_property("message", JsValue::make_string(err));
-                err_event.set_property("type", JsValue::make_string("error"));
-                js_call_guarded(worker->m_onerror, JsValue::make_undefined(), {err_event});
-            } else {
-                std::cerr << "Uncaught (in worker) " << err << std::endl;
-            }
-        });
+    auto report_error = [this](std::string message) {
+        post_error(message);
     };
     // Runs worker script and returns false, after reporting, if it threw.
     auto run_script = [&report_error](const std::function<void()>& body) {
@@ -256,8 +286,9 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     }
 }
 
-JsValue WorkerObject::create_js_instance(std::string_view script_url) {
-    auto worker = std::make_shared<WorkerObject>(std::string(script_url));
+JsValue WorkerObject::create_js_instance(std::string_view script_url,
+                                         ResourceRequestContext context) {
+    auto worker = std::make_shared<WorkerObject>(std::string(script_url), std::move(context));
     worker->start();
 
     JsValue inst = JsValue::make_object(Heap::default_heap().allocate_object());
@@ -314,13 +345,13 @@ JsValue WorkerObject::create_js_instance(std::string_view script_url) {
     return inst;
 }
 
-JsValue WorkerObject::create_constructor() {
-    return JsValue::make_native_function([](const std::vector<JsValue>& args) {
+JsValue WorkerObject::create_constructor(ContextProvider context_provider) {
+    return JsValue::make_native_function([context_provider = std::move(context_provider)](const std::vector<JsValue>& args) {
         if (args.empty()) {
             throw std::runtime_error("TypeError: Worker constructor requires at least 1 argument");
         }
         std::string script_url = args[0].to_string();
-        auto worker = std::make_shared<WorkerObject>(script_url);
+        auto worker = std::make_shared<WorkerObject>(script_url, context_provider());
         worker->start();
 
         JsValue inst = JsValue::make_object(Heap::default_heap().allocate_object());

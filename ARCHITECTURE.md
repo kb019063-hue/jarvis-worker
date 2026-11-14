@@ -2350,6 +2350,20 @@ writes each, reads the text with `DOMParser` and with Expat, and compares.
 With the published algorithm 265 of 3,000 such trees do not come back; with
 issue 45 left in, 498.
 
+"The same tree" means every node, and every element and attribute with its
+namespace and local name. Two things are not kept, by the standard's choice,
+and Litebird and jsdom both follow it there:
+
+- A namespace declaration that says what is so already is not written: one
+  for the `xml` prefix, or one that repeats an ancestor's. The names it was
+  for are unchanged; the `xmlns:` attribute is gone from the element.
+- `innerHTML` writes each child without its surroundings. A child in no
+  namespace is written `<c/>`, and when that text is assigned to an element
+  with a default namespace the child lands in it. So `el.innerHTML =
+  el.innerHTML` is not always the identity in an XML document. Done a second
+  time it changes nothing more, and the mutation fuzzer (section 8) checks
+  that.
+
 ### 6. `XMLHttpRequest`
 
 A request is answered when its address is a `data:` URL, and only then. That
@@ -2441,10 +2455,34 @@ each of these and the unit suites
 | JavaScript corpus, URL data | 840 / 845 and 1150 / 1188, as before |
 | `make deep` | DEEP_RESULT |
 | `make asan` (ASan + UBSan) | ASAN_RESULT |
+| Mutated documents (`tools/fuzz/fuzz_xml.py`, in `make fuzz` and so in `make asan`) | FUZZ_RESULT |
 
 CI has a job for the XML suite, the differential run and the
 web-platform-tests, and the sanitizer job runs all three in the sanitizer
 build.
+
+**What the sanitizer build found.** The first commit of this phase that CI
+ran failed there, and only there. `XMLHttpRequest`'s "get a final encoding"
+read the charset through `response_mime(state).parameter("charset")`: a
+pointer into a `MimeType` that was a temporary, used one statement after the
+temporary was gone. Every request for a type with a charset read freed
+memory; the normal build passed every suite and every case, because the
+bytes were still there. The fix is a name for the temporary, and the rvalue
+overload of `MimeType::parameter()` is deleted, so the same line no longer
+compiles.
+
+Two things followed. The sandbox the checks are run in could not show the
+failure, because the unit tests of the sanitizer build were killed there for
+lack of memory: nothing in the engine collects unasked, AddressSanitizer
+keeps what is freed, and 125 suites in one process had reached 3.8 GB of
+the machine's 3.9. After each suite the sanitizer build now collects and
+hands the allocator's pages back (`give_memory_back()` in
+`tests/test_suite.cpp`); the run peaks at 2.6 GB and takes two minutes. And
+a parser of hostile text that had only ever been given documents somebody
+understood now has a mutation fuzzer: `fuzz_xml.py` takes the W3C suite's
+documents, changes bytes, cuts them short and pastes over them, and gives
+each to the parser as bytes and to `XMLHttpRequest`, `DOMParser`,
+`XMLSerializer` and `innerHTML` through a page.
 
 ### 9. What it costs
 

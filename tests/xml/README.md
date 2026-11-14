@@ -58,3 +58,19 @@ Edition, so:
 
 Every one of the 2,585 is run, counted or not: none may crash the parser or
 run out of time.
+## Beyond the suite
+
+The suite is 2,585 documents somebody thought of. Four tools make the ones
+nobody did, and each has found something the suite had passed over
+(AUDIT.md, finding 34):
+
+| Tool | What it makes | What must hold |
+| :--- | :--- | :--- |
+| `tools/fuzz/diff_xml.py` (`make diff-xml`, needs `pip install lxml`) | Documents from a grammar, half of them damaged in one place | Litebird reads each as Expat and libxml2 read it, wherever those two agree |
+| `tools/fuzz/xml_roundtrip.py` (`make diff-xml`) | Trees a script builds to break a serializer: one prefix for two namespaces, declarations that contradict the names beside them | Written by `XMLSerializer` and read back, by Litebird and by Expat, each is the tree that was written |
+| `tools/fuzz/fuzz_xml.py` (`make fuzz`, which `make asan` runs in the sanitizer build) | This suite's documents with bytes changed, cut short and pasted over; then the documents as they are | No signal, no sanitizer report, no timeout; the parser and a page agree on which bytes are a document; a document is the same tree after it is written and read |
+| `tools/fuzz/deep_pages.py` (`make deep`) | 20 pages of XML that are large and not wrong: 200,000 levels, 50,000 attributes, entities that expand to entities, a megabyte of attribute default | Each is finished within its time and its memory |
+
+`fuzz_xml.py` takes its documents from `build/xml-conformance/`, where the
+runner unpacks the suite. Without the download it has the thirteen written
+in the script and says so.

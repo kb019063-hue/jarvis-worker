@@ -343,6 +343,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 28** | **XML:** an XML 1.0 (Fifth Edition) parser with namespaces, written against the W3C XML Conformance Test Suite (`make xml-conformance`) and compared with Expat and libxml2 on generated documents (`make diff-xml`). It reads nothing outside the document and bounds what entities and attribute defaults may expand to. `DOMParser` with an XML type gives an XML document, or a `parsererror` document; it gave an HTML one. A document knows whether it is HTML, elements and attributes have namespaces, attributes keep their order, CDATA sections and processing instructions are nodes. `XMLSerializer` and `innerHTML` in an XML document follow *DOM Parsing and Serialization* and are checked by writing trees made to break them and reading them back. `XMLHttpRequest` answers `data:` URLs, so `responseXML` exists. The web-platform-tests for `dom/nodes` and `domparsing` run with their own harness (`make wpt`). | ✅ Completed (W3C XML suite 1702 of 1702 counted; web-platform-tests 4640 of 5192 subtests, the others listed with reasons; DOM corpus 572 → 629 of 629; UNIT_SUITES/UNIT_SUITES unit suites) |
 | **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
 | **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
+| **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
 
 ---
 
@@ -2694,6 +2695,72 @@ finding, and its ASan deep run covers 842 executions.
 - Holes from `delete a[i]` are still holes in the array, not `undefined`
   tombstones that traversal can distinguish; this is recorded elsewhere as a
   missing feature, not changed here.
+
+---
+
+## Phase 32 Architecture: The CSS Color Keywords, Once
+
+Phase 27 found that a red box and a `getComputedStyle(el).color ===
+'rgb(255, 0, 0)'` did not agree. The bindings knew the answer; the renderer
+had a separate table of its own. There is now one table.
+
+### 1. One source of truth
+
+`Color::named_color_value(lower, out)` in
+`include/litebird/common/Color.hpp` is the 148 CSS Color 4 keyword table that
+used to live as `named_color_value()` in `DomStyleBindings.cpp`. Both sides of
+the engine call it:
+
+- `Color::parse()` converts `red`, `green`, `tomato`, `rebeccapurple`, the
+  `grey`/`gray` aliases and the rest of the keywords to the specification's
+  bytes; `transparent` returns alpha 0.
+- The computed style returns the same bytes as `rgb(...)` text, and the
+  declaration normalizer accepts the same 148 names before storage.
+
+There is no longer a Bootstrap-looking 19-name table with a different red, and
+no copies of the 148-name list in JavaScript DOM bindings and the common
+color helper. The common table is the one both callers use.
+
+### 2. What did not change
+
+An unknown keyword still parses to opaque black; Phase 32 is about giving a
+name the wrong answer is not, not about rejecting unknown CSS. `currentcolor`
+is still context-dependent (handled by the computed style path, not by a
+standalone renderer color), and `rgb()`, hex parsing and percentage or
+parenthesis-separated `rgba()` values keep their existing behavior.
+
+### 3. Verification
+
+`css_color_keywords_match_the_css_specification` checks every one of the 148
+keywords through `Color::named_color_value` and `Color::parse`, plus case-folded
+and whitespace-surrounded input, several aliased spellings
+(`aqua`/`cyan`, `fuchsia`/`magenta` and the `gray`/`grey` family), `transparent`, two of the
+formerly missing names (`tomato`, `silver`) and an unknown name. The old
+`color_parsing` expectation for `blue` was corrected to CSS's
+`rgb(0, 0, 255)`. `make test` prints `All 114 engine test suites passed
+successfully!`. The first DOM conformance rerun caught a 571/572 regression:
+the declaration normalizer had accepted `transparent` and `currentcolor`, which
+the raw 148-entry value table does not contain, and the shared table alone
+would have dropped both. The normalizer now stores either keyword explicitly;
+the rerun is 572/572. `make conformance` is 1781/1792,
+`make js-conformance` is 840/845, `make dom-conformance` is 572/572,
+`make url-conformance` is 1150/1188, `make diff-trees` has 0 differing pages,
+and `make asan` reports no sanitizer finding (ASan JS corpus 839/845; its
+ASan deep run covers 842 executions). The HTML and JS floors are
+unchanged.
+
+### 4. What is still approximate
+
+- `Color::parse()` does not implement `rgba()`, `hsl()`/`hsla()`, or CSS Color
+  4's `hwb()`/`lab()` syntax. It is a keyword, hex and integer-`rgb()` parser;
+  that was its scope before this phase and remains the row of the known gaps.
+- `Color::parse("currentcolor")` is opaque black outside the computed-style
+  cascade, because it has no inherited color to resolve against. Canvas and
+  SVG strings that literally say `currentcolor` do not get a useful color.
+- The legacy `dark_gray()` and `light_gray()` helper functions retain their
+  historical call-site values; `Color::parse()` no longer uses them.
+- A malformed `#` value with fewer than three hexadecimal digits returns black,
+  as before.
 
 ---
 

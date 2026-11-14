@@ -34,7 +34,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 113 suites, all passing | `make test` |
+| Engine unit tests | 114 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -46,7 +46,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 113 engine suites
+make test            # 114 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
@@ -624,7 +624,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 113 engine test suites
+# Run the 114 engine test suites
 make test
 ```
 
@@ -689,14 +689,14 @@ make test
 make test
 ```
 
-Output (113 suites; the first and last lines shown):
+Output (114 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 113 engine test suites passed successfully!
+All 114 engine test suites passed successfully!
 ```
 
 ```bash

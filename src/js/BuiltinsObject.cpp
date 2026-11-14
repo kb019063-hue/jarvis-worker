@@ -463,6 +463,9 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "setPrototypeOf", 2, [](Args args) {
         JsValue object = js_arg(args, 0);
         const JsValue& proto = js_arg(args, 1);
+        if (object.type == JsType::Undefined || object.type == JsType::Null) {
+            js_throw_type_error("Object.setPrototypeOf called on null or undefined");
+        }
         if (!proto.is_object_like() && proto.type != JsType::Null) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
@@ -470,7 +473,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         // prototype is kept once it is not Function.prototype.
         if (JsObject* cell = object.is_function() ? object.function_cell() : object.property_cell()) {
             JsObject* target = proto.type == JsType::Null ? nullptr : proto.as_prototype();
-            if (!js_set_prototype(cell, target)) js_throw_type_error("Cyclic __proto__ value");
+            if (!js_set_prototype(cell, target)) {
+                js_throw_type_error(cell->extensible ? "Cyclic __proto__ value" : "Object is not extensible");
+            }
         }
         return object;
     });
@@ -682,9 +687,10 @@ void install_object_builtins(JsIntrinsics& realm) {
             js_throw_type_error("Object prototype may only be an Object or null");
         }
         JsObject* cell = object.is_function() ? object.function_cell() : object.property_cell();
-        if (!cell || cell->frozen) return JsValue::make_boolean(false);
+        if (!cell) return JsValue::make_boolean(false);
         JsObject* target = proto.type == JsType::Null ? nullptr : proto.as_prototype();
-        // Unlike Object.setPrototypeOf, a refused change is reported, not thrown.
+        // Unlike Object.setPrototypeOf, a refused change (a loop, an object
+        // that is not extensible) is reported, not thrown.
         return JsValue::make_boolean(js_set_prototype(cell, target));
     });
     js_define_method(reflect, "getPrototypeOf", 1, [](Args args) {

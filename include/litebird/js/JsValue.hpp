@@ -486,8 +486,10 @@ private:
 inline constexpr int kMaxPrototypeChain = 1 << 30;
 
 /// Sets the prototype of `cell`. Returns false, changing nothing, when that
-/// would make the prototype chain circular. Every walk up a chain relies on
-/// this: chains are finite because nothing else lets script close a loop.
+/// would make the prototype chain circular, and when the object is no longer
+/// extensible (setting the prototype it already has is always allowed). Every
+/// walk up a chain relies on the first: chains are finite because nothing
+/// else lets script close a loop.
 bool js_set_prototype(JsObject* cell, JsObject* proto);
 
 /// Reads `name` from `start` or the first cell behind it that has it, running

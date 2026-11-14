@@ -640,7 +640,10 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     if (cls->super_class) {
         parent = evaluate(cls->super_class.get(), env);
         if (parent.type != JsType::Null) {
-            if (!parent.is_function()) {
+            // An arrow function, a method, an async or a generator function
+            // cannot be constructed, so it cannot be a parent either.
+            const auto* parent_fd = parent.function_data();
+            if (!parent.is_function() || (parent_fd && parent_fd->node && !parent_fd->is_constructor)) {
                 js_throw_type_error("Class extends value " + js_describe_thrown(parent) +
                                     " is not a constructor or null");
             }
@@ -799,10 +802,12 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     // there, which is not a function.
     JsValue parent;
     if (JsObject* link = ctor.prototype_object()) parent = JsValue::make_object(link);
-    if (!parent.is_function()) js_throw_type_error("Super constructor is not a constructor");
+    const auto* parent_fd = parent.function_data();
+    if (!parent.is_function() || (parent_fd && parent_fd->node && !parent_fd->is_constructor)) {
+        js_throw_type_error("Super constructor is not a constructor");
+    }
 
     std::vector<JsValue> args = eval_arguments(expr->args, env);
-    const auto* parent_fd = parent.function_data();
     if (parent_fd && parent_fd->node) {
         // A script parent initialises the same `this` object.
         parent.construct(args, &this_val);

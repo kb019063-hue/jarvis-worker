@@ -706,7 +706,12 @@ JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<Js
 JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target) {
     if (!ctor.is_function()) js_throw_type_error(js_describe_thrown(ctor) + " is not a constructor");
     if (new_target) {
-        if (!new_target->is_function()) js_throw_type_error(js_describe_thrown(*new_target) + " is not a constructor");
+        // It has to be something `new` could be used on: a function, and not
+        // an arrow function, a method, an async or a generator function.
+        const JsValue::FunctionData* target_fd = new_target->function_data();
+        if (!new_target->is_function() || (target_fd && target_fd->node && !target_fd->is_constructor)) {
+            js_throw_type_error(js_describe_thrown(*new_target) + " is not a constructor");
+        }
         if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
     }
     const JsValue::FunctionData* fd = ctor.function_data();

@@ -689,6 +689,8 @@ JsValue js_get_from_chain(JsObject* start, const std::string& name, const JsValu
 
 bool js_set_prototype(JsObject* cell, JsObject* proto) {
     if (!cell) return true;
+    if (cell->prototype == proto) return true;       // nothing changes, so nothing can refuse it
+    if (!cell->extensible) return false;             // Object.preventExtensions, seal, freeze
     for (JsObject* p = proto; p; p = p->prototype) {
         if (p == cell) return false;
     }
@@ -1022,13 +1024,13 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         if (obj->exotic && obj->exotic->set(obj, name, val)) return;
         if (obj->assign_hook && (*obj->assign_hook)(name, val)) return;
         if (sets_prototype) {
-            if (obj->frozen) return;
-            if (val.is_object_like()) {
-                if (JsObject* target = val.as_prototype()) {
-                    if (!js_set_prototype(obj, target)) js_throw_error(JsErrorKind::TypeError, "Cyclic __proto__ value");
-                }
-            } else if (val.type == JsType::Null) {
-                obj->prototype = nullptr;
+            // Anything but an object or null is ignored, as the setter on
+            // Object.prototype does. A change that is refused throws.
+            if (!val.is_object_like() && val.type != JsType::Null) return;
+            JsObject* target = val.type == JsType::Null ? nullptr : val.as_prototype();
+            if (!js_set_prototype(obj, target)) {
+                js_throw_error(JsErrorKind::TypeError,
+                               obj->extensible ? "Cyclic __proto__ value" : "Object is not extensible");
             }
             return;
         }

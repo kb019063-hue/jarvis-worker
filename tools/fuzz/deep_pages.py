@@ -392,6 +392,24 @@ def xml_pages(n: int, page) -> list[Page]:
         page("xml: a short entity used very many times",
              parse + f"var d = xml('<!DOCTYPE q [<!ENTITY e \"xxxxxxxxxx\">]><q>' + '&e;'.repeat({n}) + '</q>');",
              ["d.documentElement.nodeName", "d.documentElement.textContent.length"], f"q {10 * n}"),
+        page("xml: a DOCTYPE with very many declarations",
+             parse +
+             f"var list = '<!DOCTYPE a [<!ATTLIST a'; for (var i = 0; i < {wide}; i++) list += ' a' + i + ' CDATA \"v\"';"
+             "var declared = xml(list + '>]><a/>');"
+             f"var again = '<!DOCTYPE a ['; for (var i = 0; i < {wide}; i++) again += '<!ATTLIST a x CDATA \"v' + i + '\">';"
+             "var first = xml(again + ']><a/>');"
+             f"var model = xml('<!DOCTYPE a [<!ELEMENT a ' + '('.repeat({n}) + 'b' + ')'.repeat({n}) + '>]><a/>');"
+             f"var chain = '<!DOCTYPE a [<!ENTITY e0 \"x\">'; for (var i = 1; i < {wide}; i++) chain += '<!ENTITY e' + i + ' \"&e' + (i - 1) + ';\">';"
+             f"var linked = xml(chain + ']><a>&e{wide - 1};</a>');",
+             ["declared.documentElement.attributes.length", "first.documentElement.getAttribute('x')",
+              "model.documentElement.nodeName", "linked.documentElement.textContent"],
+             f"{wide} v0 a x"),
+        page("xml: attribute defaults on very many elements",
+             parse +
+             f"var long = xml('<!DOCTYPE a [<!ATTLIST e x CDATA \"' + 'v'.repeat(1000000) + '\">]><a>' + '<e/>'.repeat({n}) + '</a>');"
+             f"var small = xml('<!DOCTYPE a [<!ATTLIST e x CDATA \"v\">]><a>' + '<e/>'.repeat({n}) + '</a>');",
+             ["long.documentElement.nodeName", "small.documentElement.childNodes.length", "small.documentElement.lastChild.getAttribute('x')"],
+             f"parsererror {n} v"),
         # The same parser behind XMLHttpRequest.responseXML, and in front of
         # it the code that turns a data: URL into bytes and bytes into text.
         page("xml: a deep document as the response of a request",

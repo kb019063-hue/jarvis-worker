@@ -207,7 +207,7 @@ jobs:
       - name: Build
         run: make -j"$(nproc)"
       - name: Pages nested 200,000 deep, oversized bitmaps, long runs of one thing
-        # 163 generated pages, each nesting or repeating one construct far past
+        # 165 generated pages, each nesting or repeating one construct far past
         # what a recursive walk or a quadratic loop survives, then 300 random
         # pages that keep the parser at its nesting limit. Every run is a child
         # process with an 8 MB stack, 2 GB of memory and 60 seconds. The

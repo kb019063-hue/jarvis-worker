@@ -383,16 +383,16 @@ private:
         fail(s, at, "the entity '" + name + "' is not declared");
     }
 
-    // Counts what entity references add to the document. Each reference is
-    // legal by itself; ten levels of ten references each are ten thousand
-    // million characters from a few hundred.
+    // Counts what entity references and attribute defaults add to the
+    // document. Each reference is legal by itself; ten levels of ten
+    // references each are ten thousand million characters from a few hundred.
     void account_expansion(Text& s, std::size_t at, std::size_t bytes) {
         m_expanded += bytes;
         if (m_expanded <= m_options.expansion_threshold) return;
         const std::size_t direct = std::max<std::size_t>(m_doc.size(), 1);
         if ((m_expanded + direct) / direct > m_options.expansion_factor) {
-            fail(s, at, "entity references expand to more than " + std::to_string(m_options.expansion_factor) +
-                        " times the size of the document");
+            fail(s, at, "entity references and attribute defaults expand to more than " +
+                        std::to_string(m_options.expansion_factor) + " times the size of the document");
         }
     }
 
@@ -792,11 +792,13 @@ private:
                 declaration.has_default = true;
             }
             if (!m_keep_declarations) continue;
-            // The first declaration of an attribute is the one that counts (3.3).
-            auto& list = m_attlists[element];
-            const bool known = std::any_of(list.begin(), list.end(),
-                                           [&](const AttributeDecl& other) { return other.name == declaration.name; });
-            if (!known) list.push_back(std::move(declaration));
+            // The first declaration of an attribute is the one that counts
+            // (3.3). Asked of a set: a DOCTYPE can declare 50,000 attributes
+            // for one element, and a search of the list for each of them is
+            // the square of that. No name holds a space, so the key is one
+            // string for the pair.
+            if (!m_declared_attributes.insert(element + ' ' + declaration.name).second) continue;
+            m_attlists[element].push_back(std::move(declaration));
         }
     }
 
@@ -1090,7 +1092,7 @@ private:
                 }
             }
         }
-        apply_attribute_declarations(name.qualified, attributes);
+        apply_attribute_declarations(s, start, name.qualified, attributes);
 
         // Namespaces: the declarations of this tag first, then every name.
         const std::size_t mark = m_declared.size();
@@ -1164,7 +1166,8 @@ private:
 
     // Attribute defaults of the internal subset (3.3.2), and the trimming
     // of values whose declared type is not CDATA (3.3.3).
-    void apply_attribute_declarations(const std::string& element, std::vector<XmlAttribute>& attributes) {
+    void apply_attribute_declarations(Text& s, std::size_t start, const std::string& element,
+                                      std::vector<XmlAttribute>& attributes) {
         if (m_attlists.empty()) return;
         auto found = m_attlists.find(element);
         if (found == m_attlists.end()) return;
@@ -1192,6 +1195,10 @@ private:
             if (at < given) {
                 if (!declaration.cdata) collapse_spaces(attributes[at].value);
             } else if (declaration.has_default) {
+                // A default is text the document did not write here: one
+                // declaration and 100,000 empty tags are 100,000 copies of
+                // it. Counted with what entities add, under the same limit.
+                account_expansion(s, start, declaration.name.size() + declaration.default_value.size());
                 XmlAttribute attribute;
                 attribute.name.qualified = declaration.name;
                 attribute.value = declaration.default_value;
@@ -1324,6 +1331,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Entity>> m_entities;
     std::unordered_map<std::string, std::unique_ptr<Entity>> m_parameter_entities;
     std::unordered_map<std::string, std::vector<AttributeDecl>> m_attlists;
+    std::unordered_set<std::string> m_declared_attributes;
     bool m_standalone{false};
     bool m_has_external_subset{false};
     /// The DTD refers to something that was not read, so a name that is not

@@ -3918,6 +3918,81 @@ TEST(xml_parser_bounds_what_a_hostile_document_costs) {
         assert(second.elements == 50001);
         assert(seconds_since(start) < 60.0);
     }
+
+    // 6. The DOCTYPE is text from the same hand. 50,000 attributes declared
+    //    for one element (each must be looked up: the first declaration of
+    //    a name is the one that counts), the same one declared 50,000 times,
+    //    a content model 200,000 parentheses deep, one naming 50,000
+    //    elements, an entity that is a chain of 50,000.
+    {
+        const auto start = std::chrono::steady_clock::now();
+        xml::XmlError error;
+        std::string list = "<!DOCTYPE a [<!ATTLIST a";
+        for (int i = 0; i < 50000; ++i) list += " a" + std::to_string(i) + " CDATA \"v\"";
+        list += ">]><a/>";
+        Counter declared;
+        assert(xml::parse_xml(list, declared, error));
+        assert(declared.attributes == 50000);
+
+        std::string again = "<!DOCTYPE a [";
+        for (int i = 0; i < 50000; ++i) again += "<!ATTLIST a x CDATA \"v" + std::to_string(i) + "\">";
+        again += "]><a/>";
+        struct First : xml::XmlHandler {
+            std::string value;
+            void start_element(const xml::XmlName&, std::vector<xml::XmlAttribute>& attributes) override {
+                assert(attributes.size() == 1 && !attributes[0].specified);
+                value = attributes[0].value;
+            }
+        } first;
+        assert(xml::parse_xml(again, first, error));
+        assert(first.value == "v0");
+
+        Counter model;
+        assert(xml::parse_xml("<!DOCTYPE a [<!ELEMENT a " + std::string(200000, '(') + "b" + std::string(200000, ')') + ">]><a/>", model, error));
+        assert(!xml::parse_xml("<!DOCTYPE a [<!ELEMENT a " + std::string(200000, '(') + "b" + std::string(199999, ')') + ">]><a/>", model, error));
+        std::string mixed = "<!DOCTYPE a [<!ELEMENT a (#PCDATA";
+        for (int i = 0; i < 50000; ++i) mixed += "|e" + std::to_string(i);
+        assert(xml::parse_xml(mixed + ")*>]><a/>", model, error));
+
+        std::string chain = "<!DOCTYPE a [<!ENTITY e0 \"x\">";
+        for (int i = 1; i < 50000; ++i) chain += "<!ENTITY e" + std::to_string(i) + " \"&e" + std::to_string(i - 1) + ";\">";
+        Counter linked;
+        assert(xml::parse_xml(chain + "]><a b=\"&e49999;\">&e49999;</a>", linked, error));
+        assert(linked.text == 1);
+        //    And the chain closed into a ring is an entity that contains
+        //    itself: refused, not followed.
+        assert(!xml::parse_xml(chain + "<!ENTITY ring \"&last;\"><!ENTITY last \"&ring;\">]><a>&ring;</a>", linked, error));
+        assert(seconds_since(start) < 60.0);
+    }
+
+    // 7. An attribute default is text the document did not write where it
+    //    appears. One default of a megabyte and 100,000 empty tags are 100
+    //    GB of attribute values from 1.4 MB: counted with what entities
+    //    add, and refused under the same limit.
+    {
+        const auto start = std::chrono::steady_clock::now();
+        xml::XmlError error;
+        std::string empty_tags;
+        for (int i = 0; i < 100000; ++i) empty_tags += "<e/>";
+        Counter counter;
+        assert(!xml::parse_xml("<!DOCTYPE a [<!ATTLIST e x CDATA \"" + std::string(1000000, 'v') + "\">]><a>" + empty_tags + "</a>", counter, error));
+        assert(error.message.find("expand") != std::string::npos);
+        assert(counter.elements < 1000);
+        //    A hundred defaults on each of 10,000 elements: 12 MB from 43 kB.
+        std::string hundred = "<!DOCTYPE a [<!ATTLIST e";
+        for (int i = 0; i < 100; ++i) hundred += " a" + std::to_string(i) + " CDATA \"0123456789\"";
+        Counter many;
+        assert(!xml::parse_xml(hundred + ">]><a>" + empty_tags.substr(0, 40000) + "</a>", many, error));
+        //    The same on ten elements is a document like any other, and so
+        //    is one small default on 100,000.
+        Counter few;
+        assert(xml::parse_xml(hundred + ">]><a>" + empty_tags.substr(0, 40) + "</a>", few, error));
+        assert(few.attributes == 1000);
+        Counter small;
+        assert(xml::parse_xml("<!DOCTYPE a [<!ATTLIST e x CDATA \"v\">]><a>" + empty_tags + "</a>", small, error));
+        assert(small.attributes == 100000);
+        assert(seconds_since(start) < 60.0);
+    }
 }
 
 TEST(xml_documents_in_the_dom) {

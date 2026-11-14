@@ -340,7 +340,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
 | **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
-| **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. Phase 28 is the XML parser, in flight in PR #30. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
+| **Phase 28** | **XML:** an XML 1.0 (Fifth Edition) parser with namespaces, written against the W3C XML Conformance Test Suite (`make xml-conformance`) and compared with Expat and libxml2 on generated documents (`make diff-xml`). It reads nothing outside the document and bounds what entities and attribute defaults may expand to. `DOMParser` with an XML type gives an XML document, or a `parsererror` document; it gave an HTML one. A document knows whether it is HTML, elements and attributes have namespaces, attributes keep their order, CDATA sections and processing instructions are nodes. `XMLSerializer` and `innerHTML` in an XML document follow *DOM Parsing and Serialization* and are checked by writing trees made to break them and reading them back. `XMLHttpRequest` answers `data:` URLs, so `responseXML` exists. The web-platform-tests for `dom/nodes` and `domparsing` run with their own harness (`make wpt`). | ✅ Completed (W3C XML suite 1702 of 1702 counted; web-platform-tests 4640 of 5192 subtests, the others listed with reasons; DOM corpus 572 → 629 of 629; UNIT_SUITES/UNIT_SUITES unit suites) |
+| **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
 | **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
 
 ---
@@ -2172,6 +2173,331 @@ scoreboard with a floor of 572, the URL data with a floor of 1150), and
   than in a browser.
 - **A worker has no DOM**, as in a browser, but its `window`-less global
   still comes from the code that was there before this phase.
+
+---
+
+## Phase 28 Architecture: XML
+
+### 1. Why this phase existed
+
+`new DOMParser().parseFromString(text, 'application/xml')` gave back an HTML
+document: `documentElement.nodeName` was `HTML` whatever the text held, a
+CDATA section became a comment, and text that was not well formed gave a tree
+like any other. There was no XML parser. `XMLHttpRequest` was a stub whose
+every request ended in `error`, so `responseXML` could only be null. Phase 27
+listed the first under "known to be wrong" (AUDIT.md, finding 31): a wrong
+answer, not a missing one, and nothing told the script.
+
+XML is a small language with a hard edge. A parser must refuse what is not
+well formed, with no recovery, so every one of its rules can be tested from
+outside: a document is accepted or it is not. That made it possible to start
+with the references and write the parser against them:
+
+| Reference | What it judges |
+| :--- | :--- |
+| The W3C XML Conformance Test Suite (2,585 documents) | Accepting and refusing, and the canonical form of what is accepted |
+| Expat 2.5.0 and libxml2 2.14.6, on documents nobody wrote | The same, where the suite has no document |
+| web-platform-tests, `domparsing/` and `dom/nodes/` (76 files) | The DOM an XML document has, and the serializer |
+| jsdom 31.0.0 (57 recorded cases) | The same, and `XMLHttpRequest` |
+
+No two of them agree everywhere, and section 7 says where each is not the
+truth.
+
+### 2. The parser (`src/xml/XmlParser.cpp`)
+
+XML 1.0, Fifth Edition, with Namespaces in XML 1.0: what a browser's parser
+is. It does not validate, and it reads nothing but the text it was given.
+
+- **It knows nothing of the DOM.** `parse_xml(text, handler, error, options)`
+  reports to an `XmlHandler`: `doctype`, `start_element` (the name and the
+  attributes with their namespaces resolved), `end_element`, `characters`,
+  `cdata_section`, `comment`, `processing_instruction`. One handler builds a
+  tree (section 4); two others write the canonical form the conformance
+  suite compares and the event dump the differential run compares
+  (`XmlTools.cpp`, `--xml-canonical` and `--xml-events` on the command
+  line).
+- **The internal subset is read, and used.** Entities declared there are
+  expanded; an attribute's declared type decides how its value is normalized
+  (3.3.3: anything but `CDATA` is trimmed and collapsed) and a declared
+  default is added to an element that does not have the attribute, before
+  namespaces are resolved, because a default can be an `xmlns`. Element
+  types, notations and conditional sections are checked for form and then
+  not used: nothing is validated.
+- **Nothing outside the document is read.** An external entity, an external
+  subset and a parameter entity that points at a file are never fetched: no
+  code path opens anything. What the standard lets a non-validating parser do
+  follows from that: after a reference to an external subset or to a
+  parameter entity, later declarations are not read (they could have been
+  changed by what was not read), and an entity that is not declared is then
+  no longer an error of form (4.1); it stands for nothing.
+- **`&nbsp;` in XHTML.** The HTML standard asks a browser to treat eleven
+  public identifiers (the XHTML and MathML DTDs) as declaring the entity
+  names of HTML. A DOCTYPE with one of them does; any other document has the
+  five entities of XML and its own.
+- **Errors end the parse.** The first one is reported with its line and
+  column, and the handler's tree is thrown away by the caller. There is one
+  place where "not well formed" is a judgement: a version number.
+  `version="1.7"` is accepted, as the Fifth Edition says; `version="2.0"`
+  and `version="1."` are not (the grammar is `'1.' [0-9]+`).
+- **The encoding** of bytes is found by `decode_xml()`: a byte order mark,
+  then the charset of the transport, then the first bytes and the encoding
+  declaration, then UTF-8 (appendix F). It reads UTF-8, UTF-16 in both
+  orders and windows-1252 under its names (`ISO-8859-1`, `US-ASCII`); a
+  document that declares another encoding is not read at all. `DOMParser`
+  never gets here: it is handed a string.
+
+### 3. What a hostile document costs
+
+A browser's XML parser is handed text by a page, so the page chooses the
+worst case.
+
+| Document | What bounds it | Time |
+| :--- | :--- | ---: |
+| Nested 200,000 deep | Nothing recurses: open elements are a vector, the namespace scope is a stack of the declarations made (not a copy a level), an entity inside an entity value is expanded from a vector of sources, and a content model's parentheses are counted | 130 ms |
+| Entities that expand to entities (a "billion laughs"), in text or in an attribute value | Expansion is counted. Past 8 MB a document may expand to 100 times its own size and no more; then it is not well formed. The figures are Expat's | refused in 83 ms |
+| An entity that contains itself, directly or through 50,000 others | Refused where it is used (4.1, "No Recursion"); the chain without the ring is followed in a loop | 0.1 s |
+| One attribute default and 100,000 empty tags that get it | A default is text the document did not write where it appears: one of a megabyte made 100 GB of attribute values from 1.4 MB. Counted with what entities add, under the same limit | refused in 0.1 s |
+| One element with 50,000 attributes | A name given twice is found with a set, and the element's own list has an index (section 4) | 40 ms; 7.1 s before the index |
+| 50,000 namespace declarations on one element, each used by one child | A prefix is looked up in a map of stacks, not by walking the declarations | 148 ms; over two minutes as first written |
+| 50,000 attributes declared for one element in the DOCTYPE | The first declaration of a name counts, so each is looked up: in a set | 0.1 s; 4.5 s as first written |
+
+The attribute and namespace rows were found by pages
+`tools/fuzz/deep_pages.py` generates, the two about the DOCTYPE by asking the
+same questions of declarations while this section was written. All of them
+are pages there now (20 for XML), and the unit suite
+`xml_parser_bounds_what_a_hostile_document_costs` has each with a time limit.
+
+### 4. XML in the DOM
+
+**A document knows what it is.** `Document` has a content type and is an HTML
+document or it is not; a `DOMParser` document, `createDocument()`,
+`new Document()` and a response document are not. In such a document names
+keep their case (`createElement('P').nodeName` is `P`), `createElement` makes
+an element in no namespace (the XHTML one when the type is
+`application/xhtml+xml`), `createCDATASection` works and `document.write`
+throws, and `innerHTML` is XML in both directions: assigning text that is
+not well formed is a `SyntaxError`, where HTML would make something of it.
+
+**Every element has a namespace, a prefix and a local name**, and so has
+every attribute. An element in the XHTML namespace gets its HTML interface
+wherever it was made (`<p xmlns="http://www.w3.org/1999/xhtml">` in a feed is
+an `HTMLParagraphElement`); one in another namespace, or none, is an
+`Element`. Selectors learned the namespace bar (`*|b`, `|b`) and match a type
+by local name, case kept outside HTML.
+
+**Two new kinds of node**: `ProcessingInstruction` and `CDATASection` (a
+`Text`). Both are in the node bindings, the cloning, the comparisons and both
+serializers; the HTML one writes `<?target data>`.
+
+**A document keeps to its shape.** One element, one doctype, the doctype
+first: `appendChild`, `insertBefore`, `replaceChild`, `append`, `before` and
+their relatives check "ensure pre-insert validity" for a document as the
+parent, which they did not, and `document.doctype` is the doctype that is
+there now, not the one the parser saw.
+
+**Names are checked by the DOM standard's own rules**, which since 2025 are
+not XML's: `createElement('a<b')` throws, `createElement('a:b:c')` does not,
+and `setAttribute('0', '')` is allowed. `createElementNS` and
+`createDocument` validate and split a qualified name and refuse a prefix
+without a namespace, `xml` and `xmlns` with the wrong one.
+
+**Not well formed** gives what browsers give: a document whose root is
+`parsererror` in the namespace
+`http://www.mozilla.org/newlayout/xml/parsererror.xml`, holding the message.
+A script tests for it with `getElementsByTagName('parsererror')`.
+
+**The attribute list** (`include/litebird/dom/AttributeList.hpp`). An
+element's attributes were an `unordered_map`: `attributes[0]` and `outerHTML`
+gave them in the order of the hash. They are now a vector in the order they
+were added, as the standard has it, with an index that is built the first
+time an element with many of them is searched. Namespaces are kept beside
+the list, for the few attributes that have one. The HTML parser now gives
+the attributes of inline SVG and MathML their namespaces ("adjust foreign
+attributes"): `getAttributeNS('http://www.w3.org/1999/xlink', 'href')` was
+null on every `<use xlink:href>` a page held.
+
+### 5. The serializer (`src/xml/XmlDom.cpp`)
+
+`XMLSerializer.serializeToString()` and `innerHTML` of an XML document are
+the algorithm of *DOM Parsing and Serialization*, which decides for every
+element and attribute whether its prefix can be written as it is, whether a
+declaration must be added, and when a prefix has to be made up (`ns1`). It
+is a loop with a stack of scopes, each holding only what its element
+declared.
+
+The algorithm as published has faults that are filed against it, and tests
+that assert them. Litebird follows the text except where following it writes
+a document that reads back as another tree, or as none:
+
+- a made-up `nsN` passes over a prefix that is already declared on the
+  element (issue 44: the text writes `xmlns:ns1` twice);
+- a prefix that a nearer element has given another namespace is not used for
+  the old one (issues 45 and 75);
+- an attribute named `xmlns` in no namespace is written as an attribute and
+  never taken for a declaration (issue 83).
+
+And it follows the change of 1 September 2026: an attribute keeps its prefix
+where it can. `tests/wpt/README.md` has each case, what the test expects and
+what Litebird writes.
+
+What decides is not a reading of the text. **A tree that is written and read
+again must be the same tree**, and that can be checked with no reference at
+all: `tools/fuzz/xml_roundtrip.py` builds trees made to break it (one prefix
+for two namespaces on an element and its parent, `xmlns` attributes that
+contradict the names beside them, the prefixes the serializer makes up),
+writes each, reads the text with `DOMParser` and with Expat, and compares.
+With the published algorithm 265 of 3,000 such trees do not come back; with
+issue 45 left in, 498.
+
+### 6. `XMLHttpRequest`
+
+A request is answered when its address is a `data:` URL, and only then. That
+is enough for `responseXML` to exist and be tested, and it is all that could
+be done without deciding what a request over a network may reach
+(section 10).
+
+What is there follows the standards step by step, and four of them meet in
+it:
+
+| Standard | What | Where |
+| :--- | :--- | :--- |
+| Fetch | The `data:` URL processor: the type before the comma, percent escapes, `;base64` and what counts as base64 | `src/net/DataUrl.cpp` |
+| MIME Sniffing | Reading and writing a MIME type; which types are XML (`text/xml`, `application/xml`, anything `+xml`) | the same |
+| Encoding | Bytes into text: a byte order mark first, then the label, errors as U+FFFD | the same |
+| XMLHttpRequest | `open`, `send`, `abort`, the states and events, `responseType`, `overrideMimeType`, the final MIME type and encoding, the text, document, JSON and blob responses | `src/js/DomWindowBindings.cpp` |
+
+`responseXML` is a document when the final type is an XML one and the bytes
+are a well-formed document, and null otherwise; there is no `parsererror`
+document here. The document has the response's type and address, and no
+script in it runs. An HTML response is a document only when the script asks
+for one (`responseType = 'document'`), and is parsed with scripting off, as
+`DOMParser` parses. The response arrives in a task after `send()` returns
+(`loadstart`, the states, `progress`, `load`, `loadend`), or before it
+returns for a synchronous request, which fires no `loadstart` and no
+`progress`.
+
+`DataUrl.cpp` does no input or output: it turns a string into a type and
+bytes. The request code calls nothing that opens a file or a socket, and the
+unit suite asserts it from outside: a `file:` address, a path, a relative
+address that climbs to one, `http:`, `https:`, `blob:`, `about:` and
+`javascript:` all end in `error` with status 0 and an empty response, with a
+file of that name lying on the disk.
+
+### 7. Four references, and where each is not the truth
+
+**The W3C suite** judges 1,702 of its 2,585 documents for this parser. The
+rest ask for something a browser's parser does not do (validate, read an
+external entity, XML 1.1) or were answered differently before the Fifth
+Edition; `tests/xml/README.md` has the count for each reason. All 2,585 are
+run, counted or not, so that none can crash the parser. The suite is
+downloaded and checked against a pinned SHA-256, not kept in the repository:
+the archive has no licence for the whole, and one of its parts forbids
+passing it on in any other form than its own.
+
+**Expat and libxml2** read documents `tools/fuzz/diff_xml.py` generates, half
+of them damaged in one place. The rule is: what the two read alike, Litebird
+must read alike. They disagree with each other on 13 documents in 4,000,
+and both are wrong about one thing: Expat does not check a version number
+and libxml2 accepts `version="1."`, so a document whose version is outside
+the grammar is judged by the grammar. On the W3C suite Expat gives the
+expected answer for 1,404 of 1,718 documents and libxml2 for 1,697, which is
+why neither is the reference alone.
+
+**web-platform-tests** are the tests browsers share, run with their own
+harness (`tests/wpt/`, 76 test files, 5,192 subtests). Five subtests of the
+serializer's file assert a text the standard has since changed, or a fault
+that is filed against it (section 5). 495 load a document into a frame,
+which Litebird does not have. Every failing subtest is listed with a word
+for its reason in `tests/wpt/expected-failures.txt`; the runner fails when
+one fails that is not listed and when a listed one passes.
+
+**jsdom** recorded 57 cases (`xml.dat`, `xhr.dat`). Its XML serializer
+follows the text of before September 2026 and makes up a prefix where an
+attribute has one; its `XMLHttpRequest` reads every XML response as UTF-8
+whatever the response declares, puts U+FFFD where the bytes are not text and
+gives a document, where XML says there is none (4.3.3); it calls every
+response document `application/xml`, keeps the fragment in `responseURL`,
+fires a `progress` event on a synchronous request and one after `abort()`,
+and parses an HTML response with scripting on. The corpus stays away from
+each of these and the unit suites
+`xml_dom_follows_the_standard_where_jsdom_does_not` and
+`xml_http_request_answers_data_urls_and_nothing_else` assert the standard;
+`tests/dom-conformance/README.md` has the table.
+
+### 8. How this is verified
+
+| Check | Result |
+| :--- | :--- |
+| W3C XML suite (`make xml-conformance`) | 1702 / 1702 counted, 261 canonical forms the same, 2,585 documents run, 0 crashes, 0 timeouts. `main` has no XML parser |
+| Generated documents against Expat and libxml2 (`make diff-xml`) | 4,000 documents, half of them damaged: 3,958 read as both read them, 13 where the two disagree, 29 with a version number outside the grammar and all refused, 0 differ |
+| Round trip (`make diff-xml`) | 3,000 trees written by `XMLSerializer`: 3,000 come back the same from Litebird and from Expat |
+| web-platform-tests (`make wpt`) | 4640 / 5192 subtests in 76 files; the 552 others are listed with a reason, 495 of them frames |
+| DOM corpus (`make dom-conformance`) | 629 / 629 in 23 files: the 572 of Phase 27, 38 in `xml.dat`, 19 in `xhr.dat` |
+| The corpus in jsdom (`--reference`) | 629 / 629 |
+| Unit tests (`make test`) | UNIT_SUITES / UNIT_SUITES; twelve are new (the parser, what a hostile document costs, XML documents in the DOM, the serializer, `innerHTML` in XML, names, the shape of a document, foreign attributes, where jsdom is not the standard, selectors with namespaces, the attribute list, `XMLHttpRequest`) |
+| html5lib tree construction (`make conformance`) | 1781 / 1792, as before |
+| `make diff-trees` | 4 × 1,500 random pages against parse5, 0 differ, as before: the HTML parser now stores foreign attributes with their namespaces |
+| JavaScript corpus, URL data | 840 / 845 and 1150 / 1188, as before |
+| `make deep` | DEEP_RESULT |
+| `make asan` (ASan + UBSan) | ASAN_RESULT |
+
+CI has a job for the XML suite, the differential run and the
+web-platform-tests, and the sanitizer job runs all three in the sanitizer
+build.
+
+### 9. What it costs
+
+Release build, one run each, on the machine the checks ran on.
+
+| | Before | Now |
+| :--- | ---: | ---: |
+| `setAttribute` 50,000 times on one element | 7.0 s | 42 ms |
+| `setAttributeNS` 20,000 times on one element | 12.8 s | 30 ms |
+| The HTML parser, one element with 50,000 attributes | 10.4 s | 2.9 s (the tokenizer's search for a repeated name is what is left) |
+| `removeAttribute` of 25,000 of 50,000, from the back | | 17 ms |
+| `removeAttribute` of all 50,000, from the front | | 7.3 s: each one moves the rest of a vector |
+| An XML document 200,000 deep: parsed, serialized | | 130 ms, 37 ms |
+| An XML element with 50,000 attributes: parsed, serialized | | 40 ms, 4 ms |
+
+"Before" is `main`, built and run on the same machine.
+
+### 10. What is still open here
+
+- **`XMLHttpRequest` answers `data:` only.** `http:`, `https:`, `file:` and
+  relative addresses end in `error`. `fetch()` is older code with a loader
+  of its own (`src/net/ResourceLoader.cpp`), and that loader takes whatever
+  is not `data:` or `http://` for a path on this machine: a page at
+  `https://example.test/` that calls `fetch('/home/user/notes.txt')` gets
+  the file. Requests were not put on that loader, and the hole is a row in
+  AGENTS.md.
+- **Four encodings**: UTF-8, UTF-16 in both orders, windows-1252. A label
+  for any other is taken for no label; an XML document that declares another
+  is not read. A page is read as UTF-8 whatever it declares, `<meta
+  charset>` is not looked for (in a page or in an HTML response), and
+  `document.characterSet` is `UTF-8` for every document.
+- **The command line loads every file as HTML.** XML documents exist
+  through `DOMParser`, `createDocument()` and `XMLHttpRequest`, not by
+  opening `feed.xml` or `drawing.svg`. That, and frames with documents in
+  them, is what 495 of the 552 failing web-platform-tests subtests need.
+- **An `Attr` is not a `Node`** (10 subtests), **two attributes of one
+  element cannot share a qualified name** in different namespaces (14: only
+  a script can make such a pair), and a `NamedNodeMap` or an
+  `HTMLCollection` does not list its names as own properties (8).
+- **A function cannot have a function as its prototype** in the JavaScript
+  engine: `Object.getPrototypeOf(TypeError) !== Error`, and for a class,
+  `Object.getPrototypeOf(Derived) !== Base`. 18 subtests fail on it, each an
+  `assert_throws_js`. Not a DOM fault.
+- **Removing attributes from the front** of a very long list costs the
+  square of its length (the table above).
+- **`responseType = 'arraybuffer'`** gives null: the engine has no
+  `ArrayBuffer`.
+- **SVG elements still have no SVG DOM** (`className.baseVal`, `viewBox`),
+  in an XML document as in an HTML one.
+- **The HTML parser does not make processing instructions yet.** The
+  standard now does and the node type is here; the tokenizer and the tree
+  builder are not changed.
+- **Not planned, as in browsers:** XML 1.1, validation, external entities.
+  **Absent:** XPath (`document.evaluate`), XSLT.
 
 ---
 

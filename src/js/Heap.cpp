@@ -47,7 +47,7 @@ void JsObject::release_contents() {
     if (dom_node && release_dom_node) release_dom_node(*this);
     PropertyMap dropped_properties = std::move(properties);
     properties.clear();
-    std::vector<JsValue> dropped_elements = std::move(array_elements);
+    std::deque<JsValue> dropped_elements = std::move(array_elements);
     array_elements.clear();
     auto dropped_internal = std::move(internal);
     auto dropped_trace = std::move(trace_extra);

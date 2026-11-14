@@ -40,7 +40,7 @@ JsValue receiver(const char* method, bool mutates = false) {
     return JsValue::make_array(elements);
 }
 
-std::vector<JsValue>& elements_of(const JsValue& array) {
+std::deque<JsValue>& elements_of(const JsValue& array) {
     return array.object_val->array_elements;
 }
 
@@ -270,7 +270,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_array(std::vector<JsValue>(elements.begin() + static_cast<std::ptrdiff_t>(begin),
                                                         elements.begin() + static_cast<std::ptrdiff_t>(end)));
     });
-    auto splice_impl = [](std::vector<JsValue>& elements, Args args) {
+    auto splice_impl = []<typename Seq>(Seq& elements, Args args) {
         size_t start = relative_index(js_arg(args, 0), elements.size(), 0);
         size_t delete_count = 0;
         if (args.size() == 1) {
@@ -296,13 +296,13 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     js_define_method(ap, "toSpliced", 2, [splice_impl](Args args) {
         JsValue array = receiver("toSpliced");
-        std::vector<JsValue> copy = elements_of(array);
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         if (!args.empty()) splice_impl(copy, args);
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "concat", 1, [](Args args) {
         JsValue array = receiver("concat");
-        std::vector<JsValue> result = elements_of(array);
+        std::vector<JsValue> result(elements_of(array).begin(), elements_of(array).end());
         for (const auto& arg : args) {
             if (arg.is_array()) {
                 const auto& more = elements_of(arg);
@@ -333,7 +333,7 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     js_define_method(ap, "toReversed", 0, [](Args) {
         JsValue array = receiver("toReversed");
-        std::vector<JsValue> copy = elements_of(array);
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         std::reverse(copy.begin(), copy.end());
         return JsValue::make_array(copy);
     });
@@ -344,20 +344,20 @@ void install_array_builtins(JsIntrinsics& realm) {
             js_throw_type_error("The comparison function must be either a function or undefined");
         }
         // Sort a copy: the comparator is script and may touch the array.
-        std::vector<JsValue> copy = elements_of(array);
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         sort_values(copy, comparator);
-        elements_of(array) = std::move(copy);
+        elements_of(array).assign(copy.begin(), copy.end());
         return array;
     });
     js_define_method(ap, "toSorted", 1, [](Args args) {
         JsValue array = receiver("toSorted");
-        std::vector<JsValue> copy = elements_of(array);
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         sort_values(copy, js_arg(args, 0));
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "with", 2, [](Args args) {
         JsValue array = receiver("with");
-        std::vector<JsValue> copy = elements_of(array);
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
         if (index < 0) index += static_cast<double>(copy.size());
         if (index < 0 || index >= static_cast<double>(copy.size())) js_throw_range_error("Invalid index");

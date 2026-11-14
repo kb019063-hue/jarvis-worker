@@ -3,6 +3,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <list>
+#include <deque>
 #include <unordered_map>
 #include <memory>
 #include <functional>
@@ -318,8 +320,8 @@ public:
     JsObject* prototype_object() const;
     /// Human-oriented rendering used by console.log.
     std::string inspect() const;
-    std::vector<JsValue>& array_elements();
-    const std::vector<JsValue>& array_elements() const;
+    std::deque<JsValue>& array_elements();
+    const std::deque<JsValue>& array_elements() const;
     std::string to_string() const;
     double to_number() const;
 
@@ -389,7 +391,8 @@ private:
 ///
 /// ECMAScript requires property enumeration to follow insertion order, which a
 /// hash map cannot provide; `Object.keys`, `for...in` and `JSON.stringify` all
-/// depend on it. Small tables are scanned linearly; larger ones keep an index.
+/// depend on it. A list holds the entries in insertion order; the index is an
+/// insertion-ordered map from key to list iterator and is maintained eagerly.
 class PropertyMap {
 public:
     enum Flag : uint8_t {
@@ -417,8 +420,8 @@ public:
         }
     };
 
-    using iterator = std::vector<Entry>::iterator;
-    using const_iterator = std::vector<Entry>::const_iterator;
+    using iterator = std::list<Entry>::iterator;
+    using const_iterator = std::list<Entry>::const_iterator;
 
     iterator begin() { return m_entries.begin(); }
     iterator end() { return m_entries.end(); }
@@ -438,12 +441,16 @@ public:
     void clear();
 
 private:
+    // `delete` was quadratic: entries lived in a vector and the index was
+    // discarded and rebuilt on every erase. A list keeps insertion order for
+    // enumeration and makes erase O(1) without invalidating any other
+    // iterator; the hash index points into the list and is erased in O(1).
+    // Small tables stay linear and pay no hash-map cost until they grow.
     static constexpr size_t kIndexThreshold = 12;
-    long index_of(const std::string& key) const;
-    void rebuild_index();
-
-    std::vector<Entry> m_entries;
-    std::unordered_map<std::string, uint32_t> m_index;   // populated above kIndexThreshold
+    void build_index();
+    std::list<Entry> m_entries;
+    std::unordered_map<std::string, std::list<Entry>::iterator> m_index;
+    bool m_index_built{false};
 };
 
 /// Upper bound on a walk up a prototype chain. Chains cannot be circular (see

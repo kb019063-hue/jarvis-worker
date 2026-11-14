@@ -24,7 +24,10 @@ JsValue require_object(const JsValue& value, const char* where) {
 
 std::vector<JsValue> array_like_to_vector(const JsValue& value) {
     if (value.is_nullish()) return {};
-    if (value.is_array()) return value.object_val->array_elements;
+    if (value.is_array()) {
+        const auto& elements = value.object_val->array_elements;
+        return std::vector<JsValue>(elements.begin(), elements.end());
+    }
     if (!value.is_object_like()) js_throw_type_error("CreateListFromArrayLike called on non-object");
     std::vector<JsValue> out;
     double length = js_to_integer(js_to_number(value.get_property("length")));

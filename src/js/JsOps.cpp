@@ -924,7 +924,10 @@ void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&
 }
 
 std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
-    if (iterable.is_array()) return iterable.object_val->array_elements;
+    if (iterable.is_array()) {
+        return std::vector<JsValue>(iterable.object_val->array_elements.begin(),
+                                    iterable.object_val->array_elements.end());
+    }
     std::vector<JsValue> out;
     js_iterate(iterable, [&](const JsValue& v) {
         out.push_back(v);

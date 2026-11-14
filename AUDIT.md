@@ -46,6 +46,7 @@ The rest are documented with enough detail to act on.
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
 | 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1150 of 1188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
+| 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 
 ---
 
@@ -1062,10 +1063,7 @@ reads it one character at a time, and some results are 90,000 characters.
   the assertions alone catch two, which is why `make tsan` runs in CI.
 
 **Not part of this.** The audit's first table had two rows that are the same
-shape in other containers and are still open: `delete` of 50,000 keys from one
-object takes over 120 s (the property map rebuilds its index on every
-`delete`) and `shift()` until a 50,000-element array is empty takes 5.3 s
-(arrays are plain vectors). Node takes 91 ms and 0.2 s.
+shape in other containers, and both are fixed in finding 33 (Phase 30).
 
 ## 26. 🟡 Regular expressions over long input: lookbehind fixed, repeated groups still limited
 
@@ -1722,3 +1720,75 @@ successfully!` — two of them new (`table_colspan_and_rowspan_geometry`,
 1781 of 1792: the parser was not touched. The work landed originally as PR
 #16 (8 November) on a tree that was subsequently rebuilt through Phases
 23–27, and was re-landed by hand for that reason.
+
+---
+
+## 33. ✅ Property deletion and array front edits were quadratic
+
+**The hole.** A large property map rebuilt its entire hash index on every
+`delete`: an object with 50,000 keys performed 50,000 linear-index erases,
+then 50,000 rebuilds that hashed every remaining key, so deleting the last
+key was an operation on all the keys before it. Small property maps avoided
+the hash cost by staying linear, but the rebuild ran for the large ones.
+Arrays were plain `std::vector<JsValue>` instances, so `shift()` and two-at-a-time
+front edits copied (and destroyed) the whole tail each call.
+
+**The fix.** Property entries are now an insertion-ordered `std::list<Entry>`,
+and the hash index points into that list instead of into offsets. One index is
+built the first time a map grows past twelve entries and is maintained on
+insertion and removal; `erase()` removes the list node and the hash entry in
+O(1), and no iterator to any surviving property changes. Small maps still use
+the linear scan exactly as before, so the common case does not pay for a
+hash-map lookup it cannot use. A map that falls
+back under half the threshold drops its index, so the retired hash table is
+not left behind while the object lives. Array elements
+are now `std::deque<JsValue>`, making `shift()` and `unshift()` operations on
+the front of the deque; code that indexes, copies or otherwise round-trips an
+array re-reads bounded ranges and is unchanged. The full account is in
+ARCHITECTURE.md, Phase 30.
+
+**Measured.** The Phase 23 scripts, run on the same machine before and after:
+
+| Script | Before | After |
+| :--- | ---: | ---: |
+| `delete` of the 50,000 keys of one object | 131,423 ms | 25–29 ms |
+| `shift()` until a 50,000-element array is empty | 8,228 ms | 9–10 ms |
+
+`tools/bench/bench_delete_shift.py` keeps the two cases and the adjacent
+`unshift()`, front-`splice()` and enumeration-after-delete paths, compares
+against Node by default, and exits nonzero if a case times out, errors or
+prints a different result. One run printed:
+
+```
+python3 tools/bench/bench_delete_shift.py --reps 3 --max-ms 2500
+case                                           litebird  reference  result
+delete: 50k keys                                   58ms       59ms  0
+delete: reinsert after erase                       49ms       61ms  last
+shift: until an array is empty                     30ms      189ms  1249975000
+unshift: 20k times                                  9ms       50ms  19999 20000
+splice: remove the first half                      20ms       25ms  25000 25000
+enumerate: order after delete and insert            4ms       23ms  a,c,d,b
+```
+
+**What is still approximate.** Property maps below twelve entries have not
+changed their lookup algorithm; taking the middle out of an array with
+`splice()` is still linear in the number of elements that move; and a large
+map keeps its bucket array while it stays above half the threshold, releasing
+it only when it drops lower or the object is destroyed. `delete a[i]` still
+leaves holes in an array, as it did before.
+
+**How verified.** `make test` prints `All 113 engine test suites passed
+successfully!`. The new suite
+`js_property_maps_and_arrays_keep_their_order_through_front_edits` covers
+insertion order after `delete` and reassignment, enumerated order after a
+2,000-property workload, identity through `shift()`/`unshift()`, the state of
+`splice(0, n)`, and a full array consumed one element at a time.
+`make js-conformance` is 840 of 845 (everyday probe 90 of 90; 839 of 845 in
+the ASan build, which cannot fit the deep-nesting case). `make dom-conformance`
+is 572 of 572, `make url-conformance` is 1150 of 1188 and `make conformance`
+is 1781 of 1792, unchanged; the parser was not touched. `make fuzz` reports
+0 findings in 400 parser mutations and 400 layout/render and image cases;
+`make deep` reports 0 failures in 1,292 runs over 445 pages; and `make asan`
+reports no sanitizer finding in the 113 suites, the corpora, the fuzzers and
+the ASan deep run (842 executions). The bench command above passed against
+Node 22 on the same machine.

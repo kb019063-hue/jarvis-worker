@@ -1,6 +1,7 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <numeric>
@@ -8,12 +9,27 @@
 
 namespace litebird {
 
+void LayoutBox::apply_style_edges() {
+    dimensions.margin = style.margin;
+    dimensions.padding = style.padding;
+    dimensions.border = style.border_width;
+    if (border_scale != 1.0f) {
+        auto scaled = [&](float value) { return std::ceil(value * border_scale); };
+        dimensions.border = EdgeSizes(scaled(dimensions.border.top),
+                                      scaled(dimensions.border.right),
+                                      scaled(dimensions.border.bottom),
+                                      scaled(dimensions.border.left));
+    }
+}
+
 void LayoutBox::resolve_percentages(float containing_width, float containing_height) {
     // CSS 2.1: percentage widths, padding and margins resolve against the
     // containing block's *width*; percentage heights need a definite
     // containing height, and fall back to `auto` otherwise (which is what
     // happens for the usual auto-height ancestor).
-    const float width_basis = std::max(0.0f, containing_width);
+    const float width_basis = std::max(0.0f, (width_basis_override >= 0.0f)
+                                                ? width_basis_override
+                                                : containing_width);
     const float height_basis = (containing_height > 0.0f) ? containing_height : -1.0f;
 
     auto apply = [](float& pixels, float percent, float basis) {
@@ -53,10 +69,7 @@ void LayoutBox::layout(float containing_width, float containing_height) {
     if (stack_is_exhausted()) return;
 
     resolve_percentages(containing_width, containing_height);
-
-    dimensions.margin = style.margin;
-    dimensions.padding = style.padding;
-    dimensions.border = style.border_width;
+    apply_style_edges();
 
     switch (box_type) {
         case BoxType::FlexNode:

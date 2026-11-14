@@ -43,6 +43,13 @@ enum class Overflow {
     Scroll
 };
 
+/// `border-collapse` (CSS 2.1 17.6). Collapsed tables share borders between
+/// adjacent cells instead of giving each cell its own.
+enum class BorderCollapse {
+    Separate,
+    Collapse
+};
+
 /// CSS `float` values.
 enum class FloatType {
     None,
@@ -151,6 +158,11 @@ struct ComputedStyle {
     FloatType float_type{FloatType::None};
     ClearType clear_type{ClearType::None};
     Overflow overflow{Overflow::Visible};
+
+    // Tables: border model and the space between cells (CSS 2.1 17.6.1-2).
+    BorderCollapse border_collapse{BorderCollapse::Separate};
+    float border_spacing_x{0.0f};
+    float border_spacing_y{0.0f};
 
     // Positioning properties
     Position position{Position::Static};

@@ -29,7 +29,7 @@ scoreboard").
 | **DOM corpus** (what a script sees) | **572 / 572**; 61 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 110 suites, all passing | `make test` |
+| Engine unit tests | 112 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -38,7 +38,7 @@ make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
 make dom-conformance # the DOM a script sees: per-file pass rate
 make url-conformance # URL parsing and setters (web-platform-tests data)
-make test            # 110 engine suites
+make test            # 112 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM and URL corpora, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
@@ -269,9 +269,9 @@ vendored yet, so `make conformance` and CI still score the 1,792.
 
 > **Honest scope:** 99.4% on parser conformance means the DOM this engine builds
 > mostly matches a real browser's. It does **not** mean it renders real pages:
-> floats and tables now lay out (Phase 16), percentages resolve (Phase 18) and
-> `overflow` clips (Phase 18), but there is no bidi, no `rowspan`/`colspan`, no
-> `border-collapse`, external stylesheets and scripts are not loaded, and the
+> floats and tables lay out with spans and collapsed borders (Phases 16 and 29),
+> percentages resolve (Phase 18) and `overflow` clips (Phase 18), but there is
+> no bidi, external stylesheets and scripts are not loaded, and the
 > JS engine is a tree-walking interpreter without a JIT.
 > See "Known gaps" in `ARCHITECTURE.md`.
 
@@ -540,7 +540,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 110 engine test suites
+# Run the 112 engine test suites
 make test
 ```
 
@@ -603,14 +603,14 @@ make test
 make test
 ```
 
-Output (110 suites; the first and last lines shown):
+Output (112 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 110 engine test suites passed successfully!
+All 112 engine test suites passed successfully!
 ```
 
 ```bash

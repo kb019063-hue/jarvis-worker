@@ -340,6 +340,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
 | **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
+| **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. Phase 28 is the XML parser, in flight in PR #30. | ✅ Completed (html5lib 1781 of 1792 unchanged; 112/112 unit suites) |
 
 ---
 
@@ -2172,16 +2173,110 @@ scoreboard with a floor of 572, the URL data with a floor of 1150), and
 
 ---
 
+## Phase 29 Architecture: Table Spans and Collapsed Borders
+
+Phase 16's table algorithm knew one fact per cell: its column index. A cell
+that covered two columns or two rows had no representation, so neither did
+`colspan`, `rowspan`, `border-collapse` or `border-spacing`. This phase finishes
+the model. It re-lands the implementation written in PR #16 (8 November, on top
+of a tree that was subsequently rebuilt through Phases 23–27) on current `main`.
+
+### 1. Spans: placement before sizing
+
+Every cell is placed into an **occupancy grid** before any measurement
+happens. Row `r`, column `c` is reserved for a cell with
+`colspan`/`rowspan` by marking the slots it covers, so the next cell on the
+row skips them. `rowspan="0"` spans to the end of the rows the table has;
+`colspan` is clamped to 1000, so a hostile `colspan="99999999"` cannot
+allocate a grid. Occupied slots are sized by `std::vector<bool>`, so the
+reservation is one byte per cell.
+
+### 2. Column widths with spanning cells
+
+A spanning cell distributes its width requirement over the columns it covers
+(requirement minus the width the covered columns already have, spread evenly,
+clamped at zero) instead of demanding one wide column. Percentage cell widths
+resolve against the *table's* width exactly as before, but a percentage
+spanning cell now distributes over its covered columns the same way, and a
+cell marks itself with `width_basis_override = <table width>` so percentage
+lengths inside it resolve against the table, not against the column it happens
+to sit in (CSS 2.1 §17.5.2).
+
+### 3. Row heights
+
+Single-row cells set their row's height first. Then each rowspan cell that
+needs more room than the rows it covers already provide grows the *last* row
+it covers. The spanning cell is itself grown to fill the covered rows, which
+is why a `rowspan="2"` cell with a background paints as one tall box instead of
+a box with a gap under it.
+
+### 4. The two border models
+
+- `border-collapse: separate` (the default) keeps per-cell borders and
+  honours `border-spacing: <h> <v>`: the cells are inset by `h` from the
+  table's left edge and each cell is offset `h` from the previous, and the
+  same vertically with `v`. One value means horizontal and vertical are equal.
+- `border-collapse: collapse` makes each cell paint **half** of a shared edge
+  (4px + 4px renders as one 4px line, not 8px) and forces `border-spacing`
+  to zero. The implementation is `LayoutBox::border_scale`, applied when the
+  used border is computed from the style — never by mutating the style, so a
+  relayout that scaled twice would otherwise erode borders to nothing. Odd
+  borders are rounded *up* (`std::ceil`), so a 3px border paints 2px + 2px
+  rather than vanishing.
+
+### 5. Two latent bugs this surfaced, and how they were fixed here
+
+1. **Floats and table cells lost their style edges.** `layout_float` and the
+   table code called `layout_block`/`layout_table_cell` directly, and only
+   `layout()` copied margin/padding/border from the computed style onto the
+   box — a float with padding measured as if it had none, a cell with a
+   border lost it. Both now go through a shared `LayoutBox::apply_style_edges()`.
+   Floats bypass `layout()` because a floated inline keeps
+   `BoxType::InlineNode`; routing them through `layout()` would have sent a
+   floated `<span style="float:left">` down the inline path. Floats now
+   resolve percentages against their containing block too.
+2. **Cells laid out through `layout()` directly.** Table cells are
+   `BoxType::TableCellNode`, so they now go through the normal dispatch and
+   keep their edges via the same path as everything else.
+
+### 6. Verification
+
+```
+make test              # 112 engine test suites, all passing (2 new:
+                       # table_colspan_and_rowspan_geometry,
+                       # table_border_collapse_and_spacing)
+make conformance       # html5lib tree-construction: 1781 / 1792 (unchanged;
+                       # the parser was not touched)
+```
+
+### 7. What is still approximate (unchanged from the PR, restated)
+
+- Collapsed borders are halved rather than resolved per edge by the CSS 2.1
+  "widest wins" rule; the table's outer border is not merged with edge cells.
+- `empty-cells`, `caption-side` and `table-layout: fixed` are unimplemented.
+- Extra height demanded by a rowspan cell lands entirely on the last covered
+  row.
+- `rowspan="0"` spans to the end of the table, not to the end of the row
+  *group* the cell is in.
+- A spanned cell's extra width is spread evenly over the covered columns;
+  CSS 2.1 does not mandate a distribution algorithm for auto layout.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
    basic table layout landed in Phase 16; Phase 18 added percentage lengths and
-   real `overflow` clipping. Still missing: multicol, bidi, font
-   shaping/HarfBuzz, `rowspan`/`colspan`, `border-collapse`, scrollable
-   `overflow: auto` (it clips but cannot be scrolled), and rounded-corner
-   clipping. A block inside an inline box (`<a>x<p>y</p></a>`) is not laid
-   out at all: the "y" is missing. The DOM is trustworthy; the box tree is
-   plausible.
+   real `overflow` clipping; Phase 29 added table spans (`rowspan`/`colspan`,
+   including `rowspan="0"`), `border-spacing` and an approximate
+   `border-collapse: collapse` (cells paint half of a shared border rather
+   than resolving the CSS 2.1 "widest wins" rule edge by edge). Still missing:
+   multicol, bidi, font shaping/HarfBuzz, the table's outer border merge in
+   the collapsed model, `empty-cells`, `caption-side`, `table-layout: fixed`,
+   scrollable `overflow: auto` (it clips but cannot be scrolled), and
+   rounded-corner clipping. A block inside an inline box (`<a>x<p>y</p></a>`)
+   is not laid out at all: the "y" is missing. The DOM is trustworthy; the
+   box tree is plausible.
 2. **JavaScript is interpreted, and two containers are quadratic.** Scripts
    run on a tree-walking interpreter: 50 to 100 times slower than V8 on loops
    and calls. Long strings are no longer part of this (Phase 24), but deleting

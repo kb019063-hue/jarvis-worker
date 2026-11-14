@@ -199,7 +199,8 @@ JsValue ResponseObject::create_constructor() {
 // FetchAPI implementation
 // -------------------------------------------------------------
 
-JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
+JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
+                        const ResourceRequestContext& context) {
     if (args.empty()) {
         return Promise::make_rejected(JsValue::make_string("TypeError: fetch requires at least 1 argument"));
     }
@@ -259,14 +260,14 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
         }
     }
 
-    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata, signal_val]() {
+    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata, signal_val, context]() {
         if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
             JsValue reason = signal_val.get_property("reason");
             Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
             return;
         }
 
-        ResourceResponse resp = ResourceLoader::load(url, method, req_headers, req_body);
+        ResourceResponse resp = ResourceLoader::load_for_page(url, context, method, req_headers, req_body);
         if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
             JsValue reason = signal_val.get_property("reason");
             Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
@@ -276,7 +277,8 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args) {
         if (resp.success) {
             std::string st = (resp.status_code == 200) ? "OK" : ("Status " + std::to_string(resp.status_code));
             JsValue res_obj = ResponseObject::create_js_instance(
-                resp.body, resp.status_code, st, resp.headers, url
+                resp.body, resp.status_code, st, resp.headers,
+                resp.url.empty() ? url : resp.url
             );
             Promise::resolve(pdata, res_obj);
         } else {

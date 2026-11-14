@@ -133,7 +133,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css security-fetch help
 
 all: $(TARGET)
 
@@ -309,8 +309,13 @@ bench: $(TARGET)
 bench-css: $(TARGET)
 	@python3 tools/bench/bench_css_whitespace.py --sizes 30000,300000 --reps 3 --max-ms 3000
 
+## Page fetch() must not read arbitrary local files. Generates a marker file
+## and checks web, file:-base-smuggled, and local file: documents.
+security-fetch: $(TARGET)
+	@python3 tools/security/check_fetch_origin.py
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, security-fetch, clean"

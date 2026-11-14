@@ -23,6 +23,10 @@ jobs:
         # loops took over 20 s on the large cases. The limit is generous for
         # a shared runner but far below the quadratic cost.
         run: make bench-css
+      - name: Page fetch cannot read arbitrary local files
+        # A web document must not read a marker file by path, file: URL, or
+        # relative reference; a file: document keeps local access.
+        run: make security-fetch
 
   conformance:
     name: DOM conformance (html5lib corpus)

@@ -754,14 +754,14 @@ TEST(resource_loader_and_url_resolution) {
     assert(ResourceLoader::detect_mime_type("data.json") == "application/json");
 
     // 3. Local file loading
-    auto resp = ResourceLoader::load("examples/hello.html");
+    auto resp = ResourceLoader::load_navigation("examples/hello.html");
     assert(resp.success);
     assert(resp.status_code == 200);
     assert(resp.content_type == "text/html");
     assert(!resp.body.empty());
 
     // 4. Missing file error handling
-    auto missing_resp = ResourceLoader::load("examples/does_not_exist_xyz.html");
+    auto missing_resp = ResourceLoader::load_navigation("examples/does_not_exist_xyz.html");
     assert(!missing_resp.success);
     assert(missing_resp.status_code == 404);
 
@@ -8833,6 +8833,210 @@ TEST(css_long_whitespace_runs_keep_their_meaning) {
     assert(style.grid_row_start == 1 && style.grid_column_start == 2);
 }
 
+// --- Phase 33: page resource loads are origin-aware -------------------------
+
+TEST(resource_loader_page_requests_are_origin_aware) {
+    using namespace litebird;
+
+    const std::string secret_path = "/tmp/litebird-fetch-secret-" + std::to_string(static_cast<long>(::getpid())) + ".txt";
+    const std::string marker = "LOCAL_FILE_MARKER_37";
+    {
+        std::ofstream secret(secret_path);
+        secret << marker;
+    }
+    const std::string secret_name = secret_path.substr(secret_path.rfind('/') + 1);
+    const std::string secret_url = file_url_from_path(secret_path);
+
+    ResourceRequestContext web;
+    web.document_url = "https://example.test/app/page.html";
+    ResourceRequestContext file;
+    file.document_url = "file:///tmp/litebird-fetch-page.html";
+    ResourceRequestContext opaque;
+    opaque.document_url = "about:blank";
+    ResourceRequestContext empty;
+
+    // A web page must not read a local path, a file: URL, or a file: URL
+    // smuggled in through <base href>. The absolute path resolves against
+    // the https document, so it never reaches the filesystem either.
+    for (const std::string& request : std::array<std::string, 5>{secret_path, secret_url, "ftp://example.test/x", "blob:https://example.test/1", "javascript:alert(1)"}) {
+        auto resp = ResourceLoader::load_for_page(request, web);
+        assert(!resp.success);
+        assert(resp.body.empty());
+        assert(resp.body.find(marker) == std::string::npos);
+    }
+    ResourceRequestContext base_smuggled = web;
+    base_smuggled.base_url = "file:///tmp/";
+    auto smuggled = ResourceLoader::load_for_page(secret_name, base_smuggled);
+    assert(!smuggled.success);
+    assert(smuggled.body.empty());
+
+    // Opaque and missing contexts are data: only; they do not become local
+    // file readers just because the URL has no scheme.
+    for (const auto* context : {&opaque, &empty}) {
+        auto resp = ResourceLoader::load_for_page(secret_path, *context);
+        assert(!resp.success);
+        auto data = ResourceLoader::load_for_page("data:text/plain,ok", *context);
+        assert(data.success);
+        assert(data.body == "ok");
+    }
+
+    // A document the embedder loaded from file: keeps local-file access, and
+    // relative references resolve against that document rather than the
+    // process working directory.
+    auto local = ResourceLoader::load_for_page(secret_name, file);
+    assert(local.success);
+    assert(local.body == marker);
+    assert(local.url == secret_url);
+    auto local_absolute = ResourceLoader::load_for_page(secret_url, file);
+    assert(local_absolute.success);
+    assert(local_absolute.body == marker);
+
+    // data: is self-contained in every context.
+    auto data = ResourceLoader::load_for_page("data:text/plain,ok", web);
+    assert(data.success);
+    assert(data.body == "ok");
+
+    // The embedder's trusted navigation path still opens local files for the
+    // CLI/TUI, but it is a different entry point from page requests.
+    auto navigation = ResourceLoader::load_navigation(secret_path);
+    assert(navigation.success);
+    assert(navigation.body == marker);
+    auto navigation_url = ResourceLoader::load_navigation(secret_url);
+    assert(navigation_url.success);
+    assert(navigation_url.body == marker);
+    auto bad_navigation = ResourceLoader::load_navigation("javascript:alert(1)");
+    assert(!bad_navigation.success);
+
+    std::remove(secret_path.c_str());
+}
+
+TEST(fetch_and_workers_use_the_document_origin) {
+    using namespace litebird;
+
+    const std::string suffix = std::to_string(static_cast<long>(::getpid()));
+    const std::string secret_path = "/tmp/litebird-fetch-secret-" + suffix + ".txt";
+    const std::string worker_path = "/tmp/litebird-fetch-worker-" + suffix + ".js";
+    const std::string marker = "LOCAL_FILE_MARKER_37";
+    {
+        std::ofstream secret(secret_path);
+        secret << marker;
+        std::ofstream worker(worker_path);
+        worker << "postMessage('worker-file-ok');";
+    }
+    const std::string secret_name = secret_path.substr(secret_path.rfind('/') + 1);
+    const std::string worker_name = worker_path.substr(worker_path.rfind('/') + 1);
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expression) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expression).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expression).is_truthy();
+    };
+
+    // A web document: fetch and both worker entry points refuse the file.
+    auto web_doc = std::make_shared<Document>();
+    web_doc->set_url("https://example.test/app/page.html");
+    JsInterpreter web(web_doc);
+    web.load_page("<!DOCTYPE html><body></body>");
+    web.eval(
+        "var results = {}, workerErrors = {}, workerMessages = {};"
+        "function f(name, url) { return fetch(url).then(function (r) { return r.text().then(function (t) { results[name] = r.status + ':' + t; }); }, function (e) { results[name] = 'ERR:' + e; }); }"
+        "Promise.all([f('path', '" + secret_path + "'), f('file', 'file://" + secret_path + "'), f('data', 'data:text/plain,ok')]).then(function () { results.done = true; });"
+        "var w = new Worker('" + secret_path + "'); w.onerror = function (e) { workerErrors.load = e.message; };"
+        "var w2 = new Worker('data:text/javascript,fetch(\"" + secret_path + "\").then(function (r) { return r.text(); }).then(function (t) { postMessage(t); }, function (e) { postMessage(\"ERR:\" + e); });');"
+        "w2.onmessage = function (e) { workerMessages.fetch = String(e.data); };");
+    assert(wait_for(web, "!!(results.done && workerErrors.load && workerMessages.fetch)"));
+    const std::string path_result = web.eval("results.path").to_string();
+    const std::string file_result = web.eval("results.file").to_string();
+    const std::string data_result = web.eval("results.data").to_string();
+    const std::string worker_load_error = web.eval("workerErrors.load").to_string();
+    const std::string worker_fetch_result = web.eval("workerMessages.fetch").to_string();
+    assert(path_result.rfind("ERR:", 0) == 0);
+    assert(file_result.rfind("ERR:", 0) == 0);
+    assert(data_result == "200:ok");
+    assert(!worker_load_error.empty());
+    assert(worker_fetch_result.rfind("ERR:", 0) == 0);
+    assert(path_result.find(marker) == std::string::npos);
+    assert(file_result.find(marker) == std::string::npos);
+    assert(worker_fetch_result.find(marker) == std::string::npos);
+    web.eval("w.terminate(); w2.terminate();");
+
+    // A local CLI/TUI document keeps its local-file capability, including a
+    // relative worker script.
+    auto file_doc = std::make_shared<Document>();
+    file_doc->set_url("file:///tmp/litebird-fetch-page-" + suffix + ".html");
+    JsInterpreter local(file_doc);
+    local.load_page("<!DOCTYPE html><body></body>");
+    local.eval(
+        "var localFetch = '', localWorker = '', localWorkerError = '';"
+        "fetch('" + secret_name + "').then(function (r) { return r.text(); }).then(function (t) { localFetch = t; }, function (e) { localFetch = 'ERR:' + e; });"
+        "var lw = new Worker('" + worker_name + "'); lw.onmessage = function (e) { localWorker = String(e.data); }; lw.onerror = function (e) { localWorkerError = e.message; };");
+    assert(wait_for(local, "!!(localFetch && localWorker)"));
+    assert(local.eval("localFetch").to_string() == marker);
+    assert(local.eval("localWorker").to_string() == "worker-file-ok");
+    assert(local.eval("localWorkerError").to_string().empty());
+    local.eval("lw.terminate();");
+
+    std::remove(secret_path.c_str());
+    std::remove(worker_path.c_str());
+}
+
+TEST(fetch_relative_requests_use_the_document_base_url) {
+    using namespace litebird;
+
+    // A loopback server proves that a relative request from a web document
+    // goes to the resolved network address, not to a file of the same name.
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(server >= 0);
+    int reuse = 1;
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(server, 1) == 0);
+    socklen_t address_size = sizeof(address);
+    assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+    const auto port = ntohs(address.sin_port);
+    timeval timeout{};
+    timeout.tv_sec = 3;
+    setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    std::string request_line;
+    std::thread peer([server, &request_line]() {
+        const int client = accept(server, nullptr, nullptr);
+        if (client >= 0) {
+            char buffer[2048];
+            const ssize_t count = recv(client, buffer, sizeof(buffer) - 1, 0);
+            if (count > 0) {
+                buffer[count] = '\0';
+                request_line = buffer;
+                if (auto end = request_line.find("\r\n"); end != std::string::npos) request_line.resize(end);
+            }
+            const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnet";
+            (void)send(client, response.data(), response.size(), MSG_NOSIGNAL);
+            close(client);
+        }
+        close(server);
+    });
+
+    ResourceRequestContext context;
+    context.document_url = "http://127.0.0.1:" + std::to_string(port) + "/app/page.html";
+    context.base_url = "http://127.0.0.1:" + std::to_string(port) + "/sub/dir/";
+    auto response = ResourceLoader::load_for_page("../secret.txt", context);
+    peer.join();
+
+    assert(response.success);
+    assert(response.body == "net");
+    assert(response.url == "http://127.0.0.1:" + std::to_string(port) + "/sub/secret.txt");
+    assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 34: a function as the prototype of a function, and of an object
 // ---------------------------------------------------------------------------
@@ -9234,6 +9438,11 @@ int main() {
     RUN_TEST(css_text_trim_matches_the_character_by_character_model);
     RUN_TEST(css_whitespace_does_not_change_selector_or_value_meaning);
     RUN_TEST(css_long_whitespace_runs_keep_their_meaning);
+
+    // Phase 33: page resource loads are origin-aware.
+    RUN_TEST(resource_loader_page_requests_are_origin_aware);
+    RUN_TEST(fetch_and_workers_use_the_document_origin);
+    RUN_TEST(fetch_relative_requests_use_the_document_base_url);
 
     // Phase 34: a function as the prototype of a function.
     RUN_TEST(js_a_function_is_the_prototype_of_a_function);

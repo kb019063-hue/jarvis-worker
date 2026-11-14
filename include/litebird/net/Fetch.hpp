@@ -43,7 +43,10 @@ public:
 
 class FetchAPI {
 public:
-    static JsValue fetch(const std::vector<JsValue>& args);
+    /// The context is the document's, supplied by the host when the global
+    /// fetch is installed. There is no default that reads local paths.
+    static JsValue fetch(const std::vector<JsValue>& args,
+                         const ResourceRequestContext& context);
 };
 
 } // namespace litebird

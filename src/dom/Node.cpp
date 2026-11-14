@@ -3,6 +3,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/Document.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
 #include "litebird/dom/FormState.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/TreeWalk.hpp"
@@ -10,6 +11,7 @@
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include <iomanip>
+#include <mutex>
 #include <unordered_set>
 
 namespace litebird {
@@ -315,6 +317,9 @@ void Node::insert_before(std::shared_ptr<Node> new_child, std::shared_ptr<Node> 
     auto prev = (it == m_children.begin()) ? nullptr : *(it - 1);
     adopt_child(*this, *new_child);
     new_child->set_parent(shared_from_this());
+    if (m_type == NodeType::Document) {
+        static_cast<Document*>(this)->note_child_inserted(static_cast<std::size_t>(it - m_children.begin()));
+    }
     m_children.insert(it, new_child);
     mark_needs_layout();
     bump_tree_version();
@@ -334,6 +339,9 @@ void Node::remove_child(std::shared_ptr<Node> child) {
         auto next = (it + 1 == m_children.end()) ? nullptr : *(it + 1);
         auto removed = *it;
         removed->set_parent(nullptr);
+        if (m_type == NodeType::Document) {
+            static_cast<Document*>(this)->note_child_removed(static_cast<std::size_t>(it - m_children.begin()));
+        }
         m_children.erase(it);
         mark_needs_layout();
         bump_tree_version();
@@ -349,6 +357,7 @@ void Node::remove_child(std::shared_ptr<Node> child) {
 std::vector<std::shared_ptr<Node>> Node::take_children() {
     std::vector<std::shared_ptr<Node>> removed;
     removed.swap(m_children);
+    if (m_type == NodeType::Document) static_cast<Document*>(this)->note_children_taken();
     if (removed.empty()) return removed;
     for (const auto& child : removed) child->set_parent(nullptr);
     mark_needs_layout();
@@ -637,10 +646,59 @@ void Element::remove_attribute(const std::string& name) {
     bump_tree_version();
     if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, true, old_val);
 
-    if (auto hook = hooks().attribute_changed) {
-        auto keep = shared_from_this();
-        hook(*this, name, &old_val, nullptr);
+    auto keep = shared_from_this();
+    if (auto hook = hooks().attribute_changed) hook(*this, name, &old_val, nullptr);
+    // The namespace goes last: what the hook tells (an Attr object that is
+    // being detached) still asks for it. And only if the hook did not put
+    // the attribute back.
+    if (m_rare && !m_rare->attribute_namespaces.empty() && m_attributes.find(name) == m_attributes.end()) {
+        m_rare->attribute_namespaces.erase(name);
     }
+}
+
+const std::string* AttributeNamespaces::intern(const std::string& uri) {
+    // A node-based set: the strings stay where they are as it grows, and
+    // are never changed, so a pointer to one can be read from any thread.
+    // Adding one is what the lock is for (a worker is a thread).
+    static std::mutex lock;
+    static std::unordered_set<std::string> names;
+    const std::lock_guard<std::mutex> guard(lock);
+    return &*names.insert(uri).first;
+}
+
+const std::string& Element::attribute_namespace(const std::string& qualified_name) const {
+    if (m_rare && !m_rare->attribute_namespaces.empty()) {
+        if (const std::string* uri = m_rare->attribute_namespaces.find(qualified_name)) return *uri;
+    }
+    return empty_string();
+}
+
+void Element::set_attribute_ns(const std::string& namespace_uri, const std::string& qualified_name, std::string value) {
+    if (!namespace_uri.empty()) rare().attribute_namespaces.set(qualified_name, namespace_uri);
+    set_attribute(qualified_name, std::move(value));
+}
+
+const std::string* Element::find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const {
+    auto stored = [&](const std::string& name) -> const std::string* {
+        const auto it = m_attributes.find(name);
+        return it == m_attributes.end() ? nullptr : &it->first;
+    };
+    // An attribute in no namespace has no prefix: its whole name is its
+    // local name, colons and all.
+    if (namespace_uri.empty()) {
+        const std::string* name = stored(local_name);
+        return name && attribute_namespace(*name).empty() ? name : nullptr;
+    }
+    if (m_rare && !m_rare->attribute_namespaces.empty()) {
+        if (const std::string* qualified = m_rare->attribute_namespaces.find_expanded(namespace_uri, local_name)) {
+            if (const std::string* name = stored(*qualified)) return name;
+        }
+    }
+    return nullptr;
+}
+
+bool Node::is_cdata_section() const {
+    return m_type == NodeType::Text && static_cast<const Text*>(this)->cdata_section();
 }
 
 void Element::focus() {
@@ -727,7 +785,29 @@ void append_start_tag(const Element& element, bool xml, bool declare_namespace, 
     }
     for (const auto& [name, value] : element.attributes()) {
         out += ' ';
-        out += name;
+        // "The attribute's serialized name": the local name, with xml:,
+        // xmlns: or xlink: before it for those three namespaces whatever
+        // prefix the attribute has, and the qualified name for any other.
+        const std::string& uri = element.attribute_namespace(name);
+        if (uri.empty()) {
+            out += name;
+        } else {
+            const auto colon = name.find(':');
+            const std::string_view local = colon == std::string::npos ? std::string_view(name)
+                                                                      : std::string_view(name).substr(colon + 1);
+            if (uri == "http://www.w3.org/XML/1998/namespace") {
+                out += "xml:";
+                out += local;
+            } else if (uri == "http://www.w3.org/2000/xmlns/") {
+                out += local == "xmlns" ? "xmlns" : "xmlns:";
+                if (local != "xmlns") out += local;
+            } else if (uri == "http://www.w3.org/1999/xlink") {
+                out += "xlink:";
+                out += local;
+            } else {
+                out += name;
+            }
+        }
         out += "=\"";
         append_escaped(value, true, out);
         out += '"';
@@ -797,6 +877,17 @@ void append_markup(const Node& root, bool with_root, bool xml, std::string& out)
                 out += static_cast<const DocumentTypeNode&>(node).name();
                 out += '>';
                 return false;
+            case NodeType::ProcessingInstruction: {
+                // The HTML standard's fragment serialization: no "?" at the
+                // end, because the HTML parser reads this back as a comment.
+                const auto& instruction = static_cast<const ProcessingInstruction&>(node);
+                out += "<?";
+                out += instruction.target();
+                out += ' ';
+                out += instruction.data();
+                out += '>';
+                return false;
+            }
             case NodeType::Element: {
                 const auto& element = static_cast<const Element&>(node);
                 append_start_tag(element, xml, xml && is_root, out);

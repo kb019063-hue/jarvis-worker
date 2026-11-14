@@ -69,6 +69,24 @@ public:
     DocumentTypeNode* existing_doctype_node() const { return m_doctype_node.get(); }
     /// Takes the doctype out of the document (`doctype.remove()`).
     void remove_doctype();
+    /// Makes `node`, which a script made, the doctype: `document.doctype`
+    /// is that same object from now on. `preceding` is how many of the
+    /// children stand before it.
+    void adopt_doctype_node(const std::shared_ptr<DocumentTypeNode>& node, std::size_t preceding);
+    /// The doctype's place among the children moves with what is put in
+    /// and taken out before it. Called by Node for every such change.
+    void note_child_inserted(std::size_t index) {
+        if (m_doctype.present && index < m_doctype.preceding_children) ++m_doctype.preceding_children;
+    }
+    void note_child_removed(std::size_t index) {
+        if (m_doctype.present && index < m_doctype.preceding_children) --m_doctype.preceding_children;
+    }
+    void note_children_taken() { m_doctype.preceding_children = 0; }
+    /// For a node inserted "before the doctype": it went in where the
+    /// doctype stood, and the doctype now stands after it.
+    void move_doctype_after(std::size_t more_children) {
+        if (m_doctype.present) m_doctype.preceding_children += more_children;
+    }
 
     // --- What a script asks a document besides its tree ------------------------
     /// The address the document was loaded from; "about:blank" for one a
@@ -92,6 +110,24 @@ public:
     /// creates (createHTMLDocument, DOMParser) and for template_document().
     bool has_window() const { return m_has_window; }
     void set_has_window(bool value) { m_has_window = value; }
+
+    /// "text/html" for a document the HTML parser made and for one made by
+    /// createHTMLDocument(); an XML type ("application/xml",
+    /// "application/xhtml+xml", "image/svg+xml", ...) for one the XML parser
+    /// made, createDocument() made, or `new Document()` made.
+    const std::string& content_type() const { return m_content_type; }
+    void set_content_type(std::string type) {
+        m_content_type = std::move(type);
+        m_is_html = m_content_type == "text/html";
+    }
+    /// The DOM standard's "HTML document". In one, the names of HTML
+    /// elements and of their attributes are matched without regard to case
+    /// and shown in upper case; in an XML document a name is what it is.
+    bool is_html_document() const { return m_is_html; }
+    /// True for what createDocument() returns: the one kind of document
+    /// whose script object is an XMLDocument.
+    bool is_xml_document_object() const { return m_xml_document_object; }
+    void set_xml_document_object(bool value) { m_xml_document_object = value; }
 
     void set_quirks_mode(QuirksMode m) { m_quirks_mode = m; }
     QuirksMode quirks_mode() const { return m_quirks_mode; }
@@ -126,6 +162,9 @@ private:
     std::weak_ptr<Element> m_current_script;
     std::shared_ptr<Document> m_template_document;
     bool m_has_window{false};
+    std::string m_content_type{"text/html"};
+    bool m_is_html{true};
+    bool m_xml_document_object{false};
 
     // getElementById; see Document.cpp. The pointers are only read while the
     // tree is at the version the index was built at: an element cannot leave

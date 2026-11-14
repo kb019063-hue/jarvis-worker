@@ -1,6 +1,8 @@
 // Document, DOMImplementation, DOMParser and XMLSerializer.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/js/JsBuiltins.hpp"
@@ -36,6 +38,48 @@ std::string collapse_whitespace(const std::string& text) {
         out += c;
     }
     return out;
+}
+
+// "The html element of a document": its document element when that is an
+// <html> of HTML. In an XML document the root can be anything.
+std::shared_ptr<Element> html_element(const Document& document) {
+    auto root = document.document_element();
+    return root && is_html_element(*root, "html") ? root : nullptr;
+}
+
+std::shared_ptr<Element> head_element(const Document& document) {
+    if (document.is_html_document()) return document.head();
+    auto html = html_element(document);
+    if (!html) return nullptr;
+    for (const auto& child : html->children()) {
+        if (is_html_element(*child, "head")) return shared(static_cast<Element&>(*child));
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Element> body_element(const Document& document) {
+    if (document.is_html_document()) return document.body();
+    auto html = html_element(document);
+    if (!html) return nullptr;
+    for (const auto& child : html->children()) {
+        if (is_html_element(*child, "body") || is_html_element(*child, "frameset")) {
+            return shared(static_cast<Element&>(*child));
+        }
+    }
+    return nullptr;
+}
+
+bool is_svg_element(const Node& node, const char* name) {
+    return node.is_element() && static_cast<const Element&>(node).element_namespace() == ElementNamespace::SVG &&
+           static_cast<const Element&>(node).tag_name() == name;
+}
+
+// The <title> of a document whose root is <svg>: a child of the root.
+std::shared_ptr<Element> svg_title_element(const Element& root) {
+    for (const auto& child : root.children()) {
+        if (is_svg_element(*child, "title")) return shared(static_cast<Element&>(*child));
+    }
+    return nullptr;
 }
 
 std::shared_ptr<Element> title_element(const Document& document) {
@@ -100,15 +144,30 @@ void setup_implementation(Iface& I) {
         this_state<ImplementationState>("DOMImplementation");
         require_args(args, 2, "DOMImplementation.createDocument");
         auto document = make_document(r, false, nullptr);
-        const std::string name = args[1].is_nullish() ? std::string() : to_str(args[1]);
-        if (!name.empty()) document->append_child(create_element_ns(r, *document, args[0], name));
+        document->set_xml_document_object(true);
+        const std::string uri = args[0].is_nullish() ? std::string() : to_str(args[0]);
+        document->set_content_type(uri == xml::kXhtmlNamespace ? "application/xhtml+xml"
+                                   : uri == xml::kSvgNamespace ? "image/svg+xml" : "application/xml");
+        // [LegacyNullToEmptyString]: null is no root element, and undefined
+        // is a root element named "undefined".
+        const std::string name = to_str_null_empty(args[1]);
+        std::shared_ptr<Element> root;
+        if (!name.empty()) root = create_element_ns(r, *document, args[0], name);
+        if (args.size() > 2 && !args[2].is_nullish()) {
+            Node& doctype = node_argument(args, 2, "DOMImplementation.createDocument");
+            if (!doctype.is_document_type()) {
+                js_throw_type_error("Failed to execute 'createDocument' on 'DOMImplementation': parameter 3 is not of type 'DocumentType'.");
+            }
+            pre_insert(r, *document, doctype.shared_from_this(), nullptr);
+        }
+        if (root) document->append_child(root);
         return wrap(r, document);
     });
     I.method("createDocumentType", 3, [](Realm& r, Args args) {
         ImplementationState& state = this_state<ImplementationState>("DOMImplementation");
         require_args(args, 3, "DOMImplementation.createDocumentType");
         const std::string name = to_str(args[0]);
-        validate_name(r, name);
+        validate_doctype_name(r, name);
         auto type = std::make_shared<DocumentTypeNode>(name, to_str(args[1]), to_str(args[2]));
         type->set_owner_document(state.document);
         return wrap(r, type);
@@ -139,12 +198,20 @@ void setup_document(Iface& I) {
     for (const char* name : {"characterSet", "charset", "inputEncoding"}) {
         I.node_getter(doc, name, [](Realm&, Node&) { return str("UTF-8"); });
     }
-    I.node_getter(doc, "contentType", [](Realm&, Node&) { return str("text/html"); });
+    I.node_getter(doc, "contentType", [](Realm&, Node& self) { return str(as_document(self).content_type()); });
     I.node_getter(doc, "doctype", [](Realm& r, Node& self) { return wrap(r, as_document(self).doctype_node()); });
     I.node_getter(doc, "documentElement", [](Realm& r, Node& self) { return wrap(r, as_document(self).document_element()); });
-    I.node_getter(doc, "head", [](Realm& r, Node& self) { return wrap(r, as_document(self).head()); });
+    // SVG 2: the root element when it is an <svg> of SVG.
+    I.node_getter(doc, "rootElement", [](Realm& r, Node& self) {
+        auto root = as_document(self).document_element();
+        if (!root || !root->is_element()) return null();
+        const auto& element = static_cast<const Element&>(*root);
+        if (element.element_namespace() != ElementNamespace::SVG || element.tag_name() != "svg") return null();
+        return wrap(r, root);
+    });
+    I.node_getter(doc, "head", [](Realm& r, Node& self) { return wrap(r, head_element(as_document(self))); });
     I.node_accessor(doc, "body",
-        [](Realm& r, Node& self) { return wrap(r, as_document(self).body()); },
+        [](Realm& r, Node& self) { return wrap(r, body_element(as_document(self))); },
         [](Realm& r, Node& self, const JsValue& value) {
             Node* node = node_ptr(value);
             if (!node || !(is_html_element(*node, "body") || is_html_element(*node, "frameset"))) {
@@ -152,7 +219,7 @@ void setup_document(Iface& I) {
             }
             auto root = as_document(self).document_element();
             if (!root) throw_dom(r, "HierarchyRequestError", "The document has no document element.");
-            auto old = as_document(self).body();
+            auto old = body_element(as_document(self));
             if (old.get() == node) return;
             auto keep = node->shared_from_this();
             if (old) {
@@ -169,17 +236,33 @@ void setup_document(Iface& I) {
         });
     I.node_accessor(doc, "title",
         [](Realm&, Node& self) {
-            auto title = title_element(as_document(self));
+            Document& document = as_document(self);
+            auto root = document.document_element();
+            auto title = root && is_svg_element(*root, "svg") ? svg_title_element(*root) : title_element(document);
             return str(title ? collapse_whitespace(title->text_content()) : std::string());
         },
         [](Realm& r, Node& self, const JsValue& value) {
             Document& document = as_document(self);
-            auto title = title_element(document);
-            if (!title) {
-                auto head = document.head();
-                if (!head) return;
-                title = create_element(r, document, "title");
-                head->append_child(title);
+            auto root = document.document_element();
+            if (!root) return;
+            std::shared_ptr<Element> title;
+            if (is_svg_element(*root, "svg")) {
+                // A document that is a picture: its title is the first child of the root.
+                title = svg_title_element(*root);
+                if (!title) {
+                    title = xml::make_element(shared_document(self), xml::kSvgNamespace, std::string(), "title");
+                    pre_insert(r, *root, title, root->first_child().get());
+                }
+            } else if (!root->is_foreign()) {
+                title = title_element(document);
+                if (!title) {
+                    auto head = head_element(document);
+                    if (!head) return;
+                    title = xml::make_element(shared_document(self), xml::kXhtmlNamespace, std::string(), "title");
+                    head->append_child(title);
+                }
+            } else {
+                return;
             }
             set_text_content(*title, to_str(value));
         });
@@ -226,12 +309,18 @@ void setup_document(Iface& I) {
         Document& document = as_document(self);
         auto focused = document.focused_element();
         if (focused && focused->is_connected() && document_of(r, *focused).get() == &document) return wrap(r, focused);
-        if (auto body = document.body()) return wrap(r, body);
+        // Nothing has the focus: the body element, and where there is none
+        // (an XML document, say) the document element.
+        if (auto body = body_element(document)) return wrap(r, body);
         return wrap(r, document.document_element());
     });
     I.node_method(doc, "hasFocus", 0, [](Realm& r, Node& self, Args) { return boolean(&self == r.document.get()); });
-    I.node_getter(doc, "hidden", [](Realm&, Node&) { return boolean(false); });
-    I.node_getter(doc, "visibilityState", [](Realm&, Node&) { return str("visible"); });
+    // A document starts out hidden, and only one that is shown in a window
+    // becomes visible: the page's own is, one that a script made is not.
+    I.node_getter(doc, "hidden", [](Realm& r, Node& self) { return boolean(&self != r.document.get()); });
+    I.node_getter(doc, "visibilityState", [](Realm& r, Node& self) {
+        return str(&self == r.document.get() ? "visible" : "hidden");
+    });
     I.node_accessor(doc, "designMode",
         [](Realm&, Node&) { return str("off"); },
         [](Realm&, Node&, const JsValue&) {});
@@ -261,14 +350,8 @@ void setup_document(Iface& I) {
     I.node_method(doc, "getElementsByTagName", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.getElementsByTagName");
         const std::string name = to_str(args[0]);
-        const std::string lower = ascii_lower(name);
-        return make_live_list(r, "HTMLCollection", self.shared_from_this(), [name, lower](Node& root, NodeVector& out) {
-            for_each_descendant(root, [&](Node& node) {
-                if (!node.is_element()) return true;
-                const auto& element = static_cast<Element&>(node);
-                if (name == "*" || element.tag_name() == (element.is_foreign() ? name : lower)) out.push_back(node.shared_from_this());
-                return true;
-            });
+        return make_live_list(r, "HTMLCollection", self.shared_from_this(), [name](Node& root, NodeVector& out) {
+            collect_by_qualified_name(root, name, out);
         });
     });
     I.node_method(doc, "getElementsByTagNameNS", 2, [](Realm& r, Node& self, Args args) {
@@ -348,6 +431,16 @@ void setup_document(Iface& I) {
         require_args(args, 1, "Document.createElement");
         const std::string name = to_str(args[0]);
         validate_name(r, name);
+        Document& document = as_document(self);
+        if (!document.is_html_document()) {
+            // In an XML document the name is taken as it is, and it is an
+            // element of HTML only when the document is XHTML.
+            const bool xhtml = document.content_type() == "application/xhtml+xml";
+            auto element = xml::make_element(shared_document(self), xhtml ? xml::kXhtmlNamespace : "", std::string(), name);
+            JsValue object = wrap(r, element);
+            if (xhtml && name == "script") set_slot(object, "runnable", boolean(true));
+            return object;
+        }
         // createElement('button', {is: 'fancy-button'})
         std::string is;
         if (args.size() > 1 && args[1].is_object_like()) {
@@ -385,20 +478,45 @@ void setup_document(Iface& I) {
         comment->set_owner_document(shared_document(self));
         return wrap(r, comment);
     });
-    I.node_method(doc, "createCDATASection", 1, [](Realm& r, Node&, Args) -> JsValue {
-        throw_dom(r, "NotSupportedError", "This operation is not supported for HTML documents.");
+    I.node_method(doc, "createCDATASection", 1, [](Realm& r, Node& self, Args args) -> JsValue {
+        require_args(args, 1, "Document.createCDATASection");
+        if (as_document(self).is_html_document()) {
+            throw_dom(r, "NotSupportedError", "This operation is not supported for HTML documents.");
+        }
+        const std::string data = to_str(args[0]);
+        if (data.find("]]>") != std::string::npos) {
+            throw_dom(r, "InvalidCharacterError", "The data of a CDATA section cannot contain ']]>'.");
+        }
+        auto section = std::make_shared<Text>(data);
+        section->set_cdata_section(true);
+        section->set_owner_document(shared_document(self));
+        return wrap(r, section);
     });
-    I.node_method(doc, "createAttribute", 1, [](Realm& r, Node&, Args args) {
+    I.node_method(doc, "createProcessingInstruction", 2, [](Realm& r, Node& self, Args args) -> JsValue {
+        require_args(args, 2, "Document.createProcessingInstruction");
+        const std::string target = to_str(args[0]);
+        const std::string data = to_str(args[1]);
+        if (!xml::is_xml_name(target)) {
+            throw_dom(r, "InvalidCharacterError", "The target provided ('" + target + "') is not a valid name.");
+        }
+        if (data.find("?>") != std::string::npos) {
+            throw_dom(r, "InvalidCharacterError", "The data of a processing instruction cannot contain '?>'.");
+        }
+        auto instruction = std::make_shared<ProcessingInstruction>(target, data);
+        instruction->set_owner_document(shared_document(self));
+        return wrap(r, instruction);
+    });
+    I.node_method(doc, "createAttribute", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.createAttribute");
         const std::string name = to_str(args[0]);
-        validate_name(r, name);
-        return create_attribute(r, ascii_lower(name));
+        validate_attribute_name(r, name);
+        return create_attribute(r, as_document(self).is_html_document() ? ascii_lower(name) : name);
     });
     I.node_method(doc, "createAttributeNS", 2, [](Realm& r, Node&, Args args) {
         require_args(args, 2, "Document.createAttributeNS");
         const std::string name = to_str(args[1]);
-        validate_name(r, name);
-        return create_attribute(r, name);
+        const QualifiedName parts = validate_and_extract(r, args[0], name, true);
+        return create_attribute(r, name, parts.namespace_uri);
     });
     I.node_method(doc, "createEvent", 1, [](Realm& r, Node&, Args args) {
         require_args(args, 1, "Document.createEvent");
@@ -442,7 +560,16 @@ void setup_document(Iface& I) {
     });
 
     // --- Writing into the parser: there is no parser to write into any more -------
-    for (const char* name : {"open", "close", "write", "writeln", "clear", "captureEvents", "releaseEvents"}) {
+    for (const char* name : {"open", "close", "write", "writeln"}) {
+        I.node_method(doc, name, 0, [](Realm& r, Node& self, Args) {
+            // An XML parser cannot be written into: this much is defined.
+            if (!as_document(self).is_html_document()) {
+                throw_dom(r, "InvalidStateError", "Only HTML documents support document.write().");
+            }
+            return undefined();
+        });
+    }
+    for (const char* name : {"clear", "captureEvents", "releaseEvents"}) {
         I.node_method(doc, name, 0, [](Realm&, Node&, Args) { return undefined(); });
     }
     for (const char* name : {"execCommand", "queryCommandEnabled", "queryCommandState", "queryCommandSupported"}) {
@@ -477,7 +604,7 @@ void setup_dom_parser(Iface& I) {
     I.method("parseFromString", 2, [](Realm& r, Args args) {
         require_brand("DOMParser");
         require_args(args, 2, "DOMParser.parseFromString");
-        const std::string markup = to_str(args[0]);
+        const JsString text = js_to_js_string(args[0]);
         const std::string type = to_str(args[1]);
         static const char* const kTypes[] = {"text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"};
         bool known = false;
@@ -487,10 +614,36 @@ void setup_dom_parser(Iface& I) {
                                 "' is not a valid enum value of type SupportedType.");
         }
         // Scripts in a document made this way never run.
-        auto document = HtmlParser::parse(markup, false);
-        document->set_url(r.document ? r.document->url() : std::string("about:blank"));
+        const std::string url = r.document ? r.document->url() : std::string("about:blank");
+        if (type == "text/html") {
+            auto document = HtmlParser::parse(text.str(), false);
+            document->set_url(url);
+            document->set_ready_state("complete");
+            set_owner_of_tree(document);
+            return wrap(r, document);
+        }
+        auto document = std::make_shared<Document>();
+        document->set_content_type(type);
+        document->set_url(url);
         document->set_ready_state("complete");
-        set_owner_of_tree(document);
+        // XML has no place for half of a surrogate pair, which a string of
+        // JavaScript can hold: U+FFFD stands in for it, as in the browsers.
+        // (The HTML parser keeps one; it is a character of its input.)
+        const std::string markup = text.is_well_formed() ? text.str() : text.to_well_formed().str();
+        xml::XmlError error;
+        if (!xml::parse_xml_document(document, markup, error)) {
+            // XML has no error recovery: what was read is thrown away, and
+            // the document says what was wrong in the one way a script can
+            // test for (the HTML standard, "DOMParser").
+            document->take_children();
+            document->set_doctype(Doctype{});
+            auto root = xml::make_element(document, "http://www.mozilla.org/newlayout/xml/parsererror.xml",
+                                          std::string(), "parsererror");
+            auto message = std::make_shared<Text>(error.describe());
+            message->set_owner_document(document);
+            root->append_child(message);
+            document->append_child(root);
+        }
         return wrap(r, document);
     });
 }
@@ -499,18 +652,20 @@ void setup_xml_serializer(Iface& I) {
     I.method("serializeToString", 1, [](Realm&, Args args) {
         require_brand("XMLSerializer");
         require_args(args, 1, "XMLSerializer.serializeToString");
+        // An attribute has a serialization, and it is empty.
+        if (is_attr_object(args[0])) return str("");
         Node& node = node_argument(args, 0, "XMLSerializer.serializeToString");
-        if (node.is_document()) {
-            std::string out;
-            for (const auto& child : script_children(node)) out += child->outer_markup(true);
-            return str(out);
-        }
-        return str(node.outer_markup(true));
+        std::string out;
+        xml::serialize_xml(node, false, out);
+        return str(out);
     });
 }
 
 JsValue construct_document(Realm& realm, const InterfaceDef&, Args, const JsValue*) {
-    return wrap(realm, make_document(realm, false, nullptr));
+    // `new Document()` is an XML document, and not an XMLDocument object.
+    auto document = make_document(realm, false, nullptr);
+    document->set_content_type("application/xml");
+    return wrap(realm, document);
 }
 
 } // namespace
@@ -601,18 +756,10 @@ std::shared_ptr<JsExotic> document_exotic(Realm& realm, Document& document) {
 
 std::shared_ptr<Element> create_element_ns(Realm& realm, Document& document, const JsValue& ns_value,
                                            const std::string& qualified) {
-    validate_name(realm, qualified);
-    const std::string uri = ns_value.is_nullish() ? std::string() : to_str(ns_value);
-    const auto colon = qualified.find(':');
-    const std::string prefix = colon == std::string::npos ? std::string() : qualified.substr(0, colon);
-    const std::string local = colon == std::string::npos ? qualified : qualified.substr(colon + 1);
-    static const char* const kXml = "http://www.w3.org/XML/1998/namespace";
-    static const char* const kXmlns = "http://www.w3.org/2000/xmlns/";
-    if (!prefix.empty() && uri.empty()) throw_dom(realm, "NamespaceError", "A prefix was given without a namespace.");
-    if (prefix == "xml" && uri != kXml) throw_dom(realm, "NamespaceError", "The prefix 'xml' belongs to the XML namespace.");
-    if ((qualified == "xmlns" || prefix == "xmlns") != (uri == kXmlns)) {
-        throw_dom(realm, "NamespaceError", "'xmlns' and the XMLNS namespace go together.");
-    }
+    const QualifiedName parts = validate_and_extract(realm, ns_value, qualified, false);
+    const std::string& uri = parts.namespace_uri;
+    const std::string& prefix = parts.prefix;
+    const std::string& local = parts.local;
 
     ElementNamespace ns = ElementNamespace::Other;
     namespace_from_uri(uri, ns);
@@ -656,6 +803,7 @@ std::shared_ptr<Element> create_element(Realm& realm, Document& document, const 
 
 void register_document_interfaces() {
     register_interface({"Document", "Node", setup_document, construct_document, 0, "HTMLDocument"});
+    register_interface({"XMLDocument", "Document", nullptr, nullptr, 0, nullptr});
     register_interface({"DOMImplementation", nullptr, setup_implementation, nullptr, 0, nullptr});
     register_interface({"DOMParser", nullptr, setup_dom_parser, construct_plain, 0, nullptr});
     register_interface({"XMLSerializer", nullptr, setup_xml_serializer, construct_plain, 0, nullptr});

@@ -2,6 +2,7 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/TreeWalk.hpp"
+#include <algorithm>
 #include <queue>
 
 namespace litebird {
@@ -126,6 +127,22 @@ std::shared_ptr<DocumentTypeNode> Document::doctype_node() {
     return m_doctype_node;
 }
 
+void Document::adopt_doctype_node(const std::shared_ptr<DocumentTypeNode>& node, std::size_t preceding) {
+    auto self = std::static_pointer_cast<Document>(shared_from_this());
+    if (m_doctype_node && m_doctype_node != node) m_doctype_node->set_document(nullptr);
+    Doctype record;
+    record.present = true;
+    record.name = node->name();
+    record.public_id = node->public_id();
+    record.system_id = node->system_id();
+    record.preceding_children = std::min(preceding, children().size());
+    m_doctype = std::move(record);
+    m_doctype_node = node;
+    node->set_document(self);
+    node->set_owner_document(self);
+    bump_tree_version();
+}
+
 void Document::remove_doctype() {
     if (m_doctype_node) m_doctype_node->set_document(nullptr);
     m_doctype_node.reset();
@@ -137,6 +154,8 @@ std::shared_ptr<Document> Document::template_document() {
     if (!m_template_document) {
         m_template_document = std::make_shared<Document>();
         m_template_document->set_quirks_mode(m_quirks_mode);
+        // An XML document's templates hold XML: names keep their case there too.
+        m_template_document->set_content_type(m_content_type);
     }
     return m_template_document;
 }

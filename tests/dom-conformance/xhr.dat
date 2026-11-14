@@ -1,0 +1,549 @@
+#fixture
+<html><head><title>XMLHttpRequest</title></head><body><div id="host"></div></body></html>
+
+#name a request for a data: URL is answered
+#code
+var x = new XMLHttpRequest(), seen = [];
+['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'timeout', 'loadend'].forEach(function (type) {
+    x.addEventListener(type, function (e) {
+        seen.push(type === 'readystatechange' ? 'state ' + x.readyState : type + ' ' + e.loaded + ' ' + e.total + ' ' + e.lengthComputable);
+    });
+});
+x.addEventListener('loadend', function () {
+    console.log(seen.join(', '));
+    console.log(x.readyState, x.status, x.statusText, x.responseText, x.getResponseHeader('Content-Type'), x.getResponseHeader('content-length'));
+});
+console.log(x.readyState, x.status, JSON.stringify(x.statusText), JSON.stringify(x.responseText), x.responseXML, x.getResponseHeader('content-type'));
+x.open('GET', 'data:text/plain,hello');
+console.log(x.readyState, x.status, JSON.stringify(x.responseText), x.responseXML);
+x.send();
+console.log(x.readyState, x.status, JSON.stringify(x.responseText), seen.join(', '));
+#expect
+0 0 "" "" null null
+1 0 "" null
+1 0 "" state 1, loadstart 0 0 false
+state 1, loadstart 0 0 false, state 2, state 3, progress 5 0 false, state 4, load 5 0 false, loadend 5 0 false
+4 200 OK hello text/plain null
+
+#name the response comes after the script that asked for it
+#code
+var x = new XMLHttpRequest(), order = [];
+x.onload = function () { order.push('load'); };
+x.onloadend = function () { order.push('loadend'); console.log(order.join(' ')); };
+x.open('GET', 'data:text/plain,z');
+x.send();
+order.push('sent');
+Promise.resolve().then(function () { order.push('microtask'); });
+#expect
+sent microtask load loadend
+
+#name what a listener sees in each state
+#code
+var x = new XMLHttpRequest();
+x.onreadystatechange = function () {
+    var xml;
+    try { xml = x.responseXML ? x.responseXML.documentElement.nodeName : String(x.responseXML); } catch (e) { xml = e.name; }
+    console.log(x.readyState, x.status, x.responseText.length, xml, x.getResponseHeader('content-type'));
+};
+x.open('GET', 'data:text/xml,<a><b/></a>');
+x.send();
+#expect
+1 0 0 null null
+2 200 0 null text/xml
+3 200 11 null text/xml
+4 200 11 a text/xml
+
+#name responseXML is an XML document
+#code
+var x = new XMLHttpRequest();
+x.onload = function () {
+    var d = x.responseXML, root = d.documentElement;
+    console.log(d.nodeType, d.nodeName, root.nodeName, root.namespaceURI, root.firstChild.nodeName, root.firstChild.namespaceURI, root.lastChild.nodeValue);
+    console.log(d instanceof Document, d === x.responseXML, root.ownerDocument === d, d !== document, d.defaultView, d.readyState);
+    console.log(d.querySelector('b').getAttribute('id'), d.getElementById('k') === root.firstChild, d.getElementsByTagNameNS('urn:x', 'b').length, d.createElement('P').nodeName);
+    console.log(new XMLSerializer().serializeToString(d));
+    console.log(x.responseText, typeof x.response, x.response === x.responseText);
+};
+x.open('GET', 'data:application/xml,<a xmlns="urn:x"><b id="k">t</b><![CDATA[c]]></a>');
+x.send();
+#expect
+9 #document a urn:x b urn:x c
+true true true true null complete
+k true 1 P
+<a xmlns="urn:x"><b id="k">t</b><![CDATA[c]]></a>
+<a xmlns="urn:x"><b id="k">t</b><![CDATA[c]]></a> string true
+
+#name which types give a document
+#code
+var cases = [
+    'data:application/xml,<a/>', 'data:text/xml,<a/>', 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>',
+    'data:application/rss+xml,<rss/>', 'data:application/vnd.example+xml;charset=utf-8,<a/>', 'data:TEXT/XML,<a/>',
+    'data:text/plain,<a/>', 'data:application/json,<a/>', 'data:,<a/>', 'data:text/xml-external-parsed-entity,<a/>',
+    'data:application/xml,<a><b></a>', 'data:application/xml,', 'data:application/xml,<a/><b/>', 'data:text/html,<p>x</p>',
+];
+var at = 0;
+(function next() {
+    if (at === cases.length) return;
+    var x = new XMLHttpRequest(), url = cases[at++];
+    x.onloadend = function () {
+        var d = x.responseXML;
+        console.log(x.status, x.getResponseHeader('content-type'), d ? d.documentElement.nodeName + ' ' + d.documentElement.constructor.name : String(d), JSON.stringify(x.responseText));
+        next();
+    };
+    x.open('GET', url);
+    x.send();
+})();
+#expect
+200 application/xml a Element "<a/>"
+200 text/xml a Element "<a/>"
+200 image/svg+xml svg SVGSVGElement "<svg xmlns=\"http://www.w3.org/2000/svg\"><g/></svg>"
+200 application/rss+xml rss Element "<rss/>"
+200 application/vnd.example+xml;charset=utf-8 a Element "<a/>"
+200 text/xml a Element "<a/>"
+200 text/plain null "<a/>"
+200 application/json null "<a/>"
+200 text/plain;charset=US-ASCII null "<a/>"
+200 text/xml-external-parsed-entity null "<a/>"
+200 application/xml null "<a><b></a>"
+200 application/xml null ""
+200 application/xml null "<a/><b/>"
+200 text/html null "<p>x</p>"
+
+#name an XHTML response has HTML elements
+#code
+var x = new XMLHttpRequest();
+x.onload = function () {
+    var d = x.responseXML;
+    console.log(d.documentElement.nodeName, d.body.nodeName, d.body instanceof HTMLBodyElement, d.querySelector('p').constructor.name, d.querySelector('p').textContent, d.title);
+    console.log(d.createElement('DIV').nodeName, d.body.innerHTML);
+};
+x.open('GET', 'data:application/xhtml+xml,<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p>x<br/></p></body></html>');
+x.send();
+#expect
+html body true HTMLParagraphElement x T
+DIV <p xmlns="http://www.w3.org/1999/xhtml">x<br /></p>
+
+#name responseType decides what response is
+#code
+var cases = [['', 'data:text/xml,<a/>'], ['text', 'data:text/xml,<a/>'], ['document', 'data:text/xml,<a/>'], ['document', 'data:text/plain,<a/>'],
+             ['document', 'data:text/xml,<a>'], ['json', 'data:application/json,{"a":[1,null]}'], ['json', 'data:text/plain,[2]'],
+             ['json', 'data:application/json,{bad'], ['json', 'data:application/json,null'], ['blob', 'data:text/xml,<a/>']];
+var at = 0;
+(function next() {
+    if (at === cases.length) return;
+    var c = cases[at++], x = new XMLHttpRequest();
+    x.responseType = c[0];
+    x.onloadend = function () {
+        var text, xml, r = x.response, shown;
+        try { text = JSON.stringify(x.responseText); } catch (e) { text = e.name; }
+        try { xml = x.responseXML ? 'document' : String(x.responseXML); } catch (e) { xml = e.name; }
+        if (r && r.nodeType === 9) shown = 'document ' + r.documentElement.nodeName + ' ' + (r === x.response) + ' ' + (r === x.responseXML);
+        else if (r && typeof r.size === 'number' && typeof r.slice === 'function') shown = 'blob ' + r.size + ' ' + r.type + ' ' + (r === x.response);
+        else shown = typeof r + ' ' + JSON.stringify(r) + (r && typeof r === 'object' ? ' ' + (r === x.response) : '');
+        console.log(JSON.stringify(x.responseType), '|', text, '|', xml, '|', shown);
+        next();
+    };
+    x.open('GET', c[1]);
+    x.send();
+})();
+var y = new XMLHttpRequest();
+['arraybuffer', 'blob', 'document', 'json', 'text', '', 'rubbish', 'TEXT', null].forEach(function (type) { y.responseType = type; console.log(JSON.stringify(type), '->', JSON.stringify(y.responseType)); });
+#expect
+"arraybuffer" -> "arraybuffer"
+"blob" -> "blob"
+"document" -> "document"
+"json" -> "json"
+"text" -> "text"
+"" -> ""
+"rubbish" -> ""
+"TEXT" -> ""
+null -> ""
+"" | "<a/>" | document | string "<a/>"
+"text" | "<a/>" | InvalidStateError | string "<a/>"
+"document" | InvalidStateError | document | document a true true
+"document" | InvalidStateError | null | object null
+"document" | InvalidStateError | null | object null
+"json" | InvalidStateError | InvalidStateError | object {"a":[1,null]} true
+"json" | InvalidStateError | InvalidStateError | object [2] true
+"json" | InvalidStateError | InvalidStateError | object null
+"json" | InvalidStateError | InvalidStateError | object null
+"blob" | InvalidStateError | InvalidStateError | blob 4 text/xml true
+
+#name an HTML response is a document when the script asks for one
+#code
+var x = new XMLHttpRequest();
+x.responseType = 'document';
+x.onload = function () {
+    var d = x.response;
+    console.log(d.nodeType, d.documentElement.nodeName, d.contentType, d.body.innerHTML, d.title, d.readyState, d.defaultView, d.compatMode);
+    console.log(d.querySelector('p').constructor.name, d.scripts.length, typeof window.ranFromResponse, d === x.responseXML, d.URL.indexOf('data:text/html'));
+};
+x.open('GET', 'data:text/html,<title>T</title><p class=a>x<script>window.ranFromResponse=1</script>');
+x.send();
+var plain = new XMLHttpRequest();
+plain.onload = function () { console.log(plain.responseXML, plain.responseText); };
+plain.open('GET', 'data:text/html,<p>y</p>');
+plain.send();
+#expect
+9 HTML text/html <p class="a">x<script>window.ranFromResponse=1</script></p> T complete null BackCompat
+HTMLParagraphElement 1 undefined true 0
+null <p>y</p>
+
+#name overrideMimeType puts another type in place of the response's
+#code
+var cases = [['data:text/plain,<a/>', 'text/xml'], ['data:text/plain,<a/>', 'application/vnd.x+xml'], ['data:text/xml,<a/>', 'text/plain'],
+             ['data:text/xml,<a/>', 'rubbish'], ['data:text/xml,<a/>', ''], ['data:text/xml,<a/>', ' TEXT/XML '],
+             ['data:text/plain;charset=iso-8859-1,%E9', 'text/plain;charset=utf-8'], ['data:text/plain;charset=utf-8,%E9', 'text/plain;charset=iso-8859-1'],
+             ['data:text/plain;charset=iso-8859-1,%E9', 'text/plain']];
+var at = 0;
+(function next() {
+    if (at === cases.length) return;
+    var c = cases[at++], x = new XMLHttpRequest();
+    x.overrideMimeType(c[1]);
+    x.onloadend = function () {
+        console.log(JSON.stringify(c[1]), x.responseText.charCodeAt(0), x.responseXML ? x.responseXML.documentElement.nodeName : String(x.responseXML), x.getResponseHeader('content-type'));
+        next();
+    };
+    x.open('GET', c[0]);
+    x.send();
+})();
+#expect
+"text/xml" 60 a text/plain
+"application/vnd.x+xml" 60 a text/plain
+"text/plain" 60 null text/xml
+"rubbish" 60 null text/xml
+"" 60 null text/xml
+" TEXT/XML " 60 a text/xml
+"text/plain;charset=utf-8" 65533 null text/plain;charset=iso-8859-1
+"text/plain;charset=iso-8859-1" 233 null text/plain;charset=utf-8
+"text/plain" 233 null text/plain;charset=iso-8859-1
+
+#name data: URLs: types, base64 and percent signs
+#code
+var urls = ['data:text/xml;base64,PGEvPg==', 'data:text/xml;base64,PGEvPg', 'data:text/xml;BASE64,PGEvPg==', 'data:text/xml ;base64,PGEvPg==',
+            'data:text/xml;  base64,PGEvPg==', 'data:text/xml;base64,PGEv%20Pg==', 'data:;base64,PGEvPg==', 'data:text/xml;base64,@@@',
+            'data:text/xml;base64,PGEvP', 'data:text/xml;base64;x=1,PGEvPg==', 'data:;charset=x,y', 'data:text,y', 'data: text/xml ,<a/>',
+            'data:text/xml,%3Ca%3E%C3%A9%3C/a%3E', 'data:text/plain,a%zz%41%4', 'data:text/plain;x="a;b";Y=2;x=3,z', 'data:text/plain,a#b',
+            'data:text/plain,a%23b', 'data:text/plain', 'data:text/plain,', 'DATA:text/plain,up'];
+var at = 0;
+(function next() {
+    if (at === urls.length) return;
+    var x = new XMLHttpRequest(), url = urls[at++];
+    x.onloadend = function () { console.log(x.status, x.getResponseHeader('content-type'), JSON.stringify(x.responseText), x.responseXML ? x.responseXML.documentElement.nodeName : ''); next(); };
+    x.open('GET', url);
+    x.send();
+})();
+#expect
+200 text/xml "<a/>" a
+200 text/xml "<a/>" a
+200 text/xml "<a/>" a
+200 text/xml "<a/>" a
+200 text/xml "<a/>" a
+200 text/xml "<a/>" a
+200 text/plain;charset=US-ASCII "<a/>" 
+0 null "" 
+0 null "" 
+200 text/xml;x=1 "PGEvPg==" 
+200 text/plain;charset=x "y" 
+200 text/plain;charset=US-ASCII "y" 
+200 text/xml "<a/>" a
+200 text/xml "<a>é</a>" a
+200 text/plain "a%zzA%4" 
+200 text/plain;x="a;b";y=2 "z" 
+200 text/plain "a" 
+200 text/plain "a#b" 
+0 null "" 
+200 text/plain "" 
+200 text/plain "up" 
+
+#name the encoding of the text comes from the type, and a byte order mark wins
+#code
+var urls = ['data:text/plain,%C3%A9', 'data:text/plain,%E9', 'data:text/plain;charset=latin1,%E9%80', 'data:text/plain;charset=utf-16le,a%00b%00',
+            'data:text/plain;charset=utf-16be,%00a%00b', 'data:text/plain,%FF%FEa%00', 'data:text/plain,%FE%FF%00a', 'data:text/plain;charset=latin1,%EF%BB%BFa',
+            'data:text/plain;charset=bogus,%C3%A9', 'data:text/plain,%F0%9F%98%80%C3', 'data:text/plain;charset=%22utf-8%22,%C3%A9',
+            'data:text/xml;charset=iso-8859-1,%3Ca%3E%E9%3C/a%3E', 'data:text/plain,%ED%A0%80', 'data:text/plain;charset=utf-16le,%3D%D8a'];
+var at = 0;
+(function next() {
+    if (at === urls.length) return;
+    var x = new XMLHttpRequest();
+    x.onloadend = function () {
+        var t = x.responseText, units = [];
+        for (var k = 0; k < t.length; k++) units.push(t.charCodeAt(k).toString(16));
+        console.log(units.join(' '), x.responseXML ? x.responseXML.documentElement.textContent.charCodeAt(0) : '');
+        next();
+    };
+    x.open('GET', urls[at++]);
+    x.send();
+})();
+#expect
+e9 
+fffd 
+e9 20ac 
+61 62 
+61 62 
+61 
+61 
+61 
+e9 
+d83d de00 fffd 
+e9 
+3c 61 3e e9 3c 2f 61 3e 233
+fffd fffd fffd 
+fffd 
+
+#name an XML response says its encoding four ways, in this order: a byte order mark, the type, its declaration, UTF-8
+#code
+var declared = '%3C?xml version="1.0" encoding="ISO-8859-1"?%3E', declaredUtf8 = '%3C?xml version="1.0" encoding="UTF-8"?%3E';
+var requests = [
+    ['the type over the declaration', 'data:text/xml;charset=utf-8,' + declared + '%3Ca%3E%C3%A9%3C/a%3E'],
+    ['the type over the declaration, the other way', 'data:text/xml;charset=iso-8859-1,' + declaredUtf8 + '%3Ca%3E%E9%3C/a%3E'],
+    ['a name nobody knows, and UTF-8', 'data:text/xml;charset=bogus,%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark', 'data:text/xml,%EF%BB%BF%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark over the type', 'data:text/xml;charset=latin1,%EF%BB%BF%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-8 mark and a declaration', 'data:text/xml,%EF%BB%BF' + declaredUtf8 + '%3Ca%3E%C3%A9%3C/a%3E'],
+    ['a UTF-16 mark over the type', 'data:text/xml;charset=utf-8,%FF%FE%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a UTF-16 mark, the other order', 'data:text/xml,%FE%FF%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'],
+    ['UTF-16 by the type, no mark', 'data:text/xml;charset=utf-16le,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['UTF-16 by the type, the other order', 'data:text/xml;charset=utf-16be,%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'],
+    ['UTF-16 with no word on the order', 'data:text/xml;charset=utf-16,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['another name of UTF-16', 'data:application/xml;charset=ucs-2,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a name in quotes and capitals', 'data:text/xml;charset="ISO-8859-1",%3Ca%3E%E9%3C/a%3E'],
+    ['the charset of the type put in its place', 'data:text/xml,%3Ca%3E%E9%3C/a%3E', 'text/xml;charset=windows-1252'],
+    ['a type put in its place that names none', 'data:text/xml;charset=windows-1252,%3Ca%3E%E9%3C/a%3E', 'application/xml'],
+    ['UTF-16 with nothing to say so', 'data:text/xml,%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E%00'],
+    ['a character XML does not have', 'data:text/xml,%3Ca%3E%EF%BF%BE%3C/a%3E'],
+    ['a zero byte', 'data:text/xml,%3Ca%3E%00%3C/a%3E']
+];
+requests.forEach(function (request) {
+    var x = new XMLHttpRequest();
+    x.open('GET', request[1], false);
+    if (request[2]) x.overrideMimeType(request[2]);
+    x.send();
+    var text = x.responseText, d = x.responseXML, odd = [];
+    for (var k = 0; k < text.length; k++) { var c = text.charCodeAt(k); if (c < 32 || c > 126) odd.push(c.toString(16)); }
+    console.log(request[0] + ': ' + text.length + ' [' + odd.join(' ') + '] ' +
+                (d ? d.documentElement.nodeName + ' ' + d.documentElement.textContent.charCodeAt(0).toString(16) : 'no document'));
+});
+#expect
+the type over the declaration: 51 [e9] a e9
+the type over the declaration, the other way: 46 [e9] a e9
+a name nobody knows, and UTF-8: 8 [e9] a e9
+a UTF-8 mark: 8 [e9] a e9
+a UTF-8 mark over the type: 8 [e9] a e9
+a UTF-8 mark and a declaration: 46 [e9] a e9
+a UTF-16 mark over the type: 8 [e9] a e9
+a UTF-16 mark, the other order: 8 [e9] a e9
+UTF-16 by the type, no mark: 8 [e9] a e9
+UTF-16 by the type, the other order: 8 [e9] a e9
+UTF-16 with no word on the order: 8 [e9] a e9
+another name of UTF-16: 8 [e9] a e9
+a name in quotes and capitals: 8 [e9] a e9
+the charset of the type put in its place: 8 [e9] a e9
+a type put in its place that names none: 8 [e9] a e9
+UTF-16 with nothing to say so: 16 [0 0 0 fffd 0 0 0 0 0] no document
+a character XML does not have: 8 [fffe] no document
+a zero byte: 8 [0] no document
+
+#name open() checks the method and the address
+#code
+function attempt(method, url) {
+    var x = new XMLHttpRequest();
+    try { x.open(method, url); return 'opened ' + x.readyState; } catch (e) { return e.name + ' ' + (e instanceof DOMException) + ' ' + x.readyState; }
+}
+[['GET', 'data:,'], ['get', 'data:,'], ['PoSt', 'data:,'], ['patch', 'data:,'], ['X-Custom', 'data:,'], ['GE T', 'data:,'], ['', 'data:,'], ['GET\n', 'data:,'],
+ ['TRACE', 'data:,'], ['connect', 'data:,'], ['Track', 'data:,'], ['GET', 'http://[x'], ['GET', 'http://a b/'], ['GET', 'feed.xml'], ['GET', '']].forEach(function (c) {
+    console.log(JSON.stringify(c[0]), JSON.stringify(c[1]), attempt(c[0], c[1]));
+});
+try { new XMLHttpRequest().open('GET'); } catch (e) { console.log(e.name, e instanceof TypeError); }
+var x = new XMLHttpRequest(), states = [];
+x.onreadystatechange = function () { states.push(x.readyState); };
+x.open('GET', 'data:,a'); x.open('GET', 'data:,b');
+console.log(states.join(), XMLHttpRequest.UNSENT, XMLHttpRequest.OPENED, XMLHttpRequest.HEADERS_RECEIVED, XMLHttpRequest.LOADING, XMLHttpRequest.DONE, x.DONE);
+#expect
+"GET" "data:," opened 1
+"get" "data:," opened 1
+"PoSt" "data:," opened 1
+"patch" "data:," opened 1
+"X-Custom" "data:," opened 1
+"GE T" "data:," SyntaxError true 0
+"" "data:," SyntaxError true 0
+"GET\n" "data:," SyntaxError true 0
+"TRACE" "data:," SecurityError true 0
+"connect" "data:," SecurityError true 0
+"Track" "data:," SecurityError true 0
+"GET" "http://[x" SyntaxError true 0
+"GET" "http://a b/" SyntaxError true 0
+"GET" "feed.xml" opened 1
+"GET" "" opened 1
+TypeError true
+1 0 1 2 3 4 4
+
+#name what may be done in which state
+#code
+function attempt(name, fn) { try { var v = fn(); console.log(name, v === undefined ? 'ok' : v); } catch (e) { console.log(name, e.name); } }
+function opened(async) { var x = new XMLHttpRequest(); x.open('GET', 'data:text/xml,<a/>', async !== false); return x; }
+function done() { var x = opened(false); x.send(); return x; }
+attempt('send before open', function () { new XMLHttpRequest().send(); });
+attempt('send twice', function () { var x = opened(); x.send(); x.send(); });
+attempt('setRequestHeader before open', function () { new XMLHttpRequest().setRequestHeader('a', 'b'); });
+attempt('setRequestHeader after send', function () { var x = opened(); x.send(); x.setRequestHeader('a', 'b'); });
+attempt('setRequestHeader', function () { opened().setRequestHeader('X-A', ' b '); });
+attempt('a header name with a space', function () { opened().setRequestHeader('a b', 'c'); });
+attempt('an empty header name', function () { opened().setRequestHeader('', 'c'); });
+attempt('a header value with a line feed', function () { opened().setRequestHeader('a', 'c\nd'); });
+attempt('a header value that ends in a line feed', function () { opened().setRequestHeader('a', 'c\n'); });
+attempt('one argument', function () { opened().setRequestHeader('a'); });
+attempt('responseType when done', function () { done().responseType = 'text'; });
+attempt('an unknown responseType when done', function () { var x = done(); x.responseType = 'rubbish'; return x.responseType === ''; });
+attempt('overrideMimeType when done', function () { done().overrideMimeType('text/plain'); });
+attempt('overrideMimeType before open', function () { new XMLHttpRequest().overrideMimeType('text/plain'); });
+attempt('responseType on a synchronous request', function () { opened(false).responseType = 'document'; });
+attempt('timeout on a synchronous request', function () { opened(false).timeout = 5; });
+attempt('synchronous after a responseType', function () { var x = new XMLHttpRequest(); x.responseType = 'text'; x.open('GET', 'data:,', false); });
+attempt('synchronous after a timeout', function () { var x = new XMLHttpRequest(); x.timeout = 5; x.open('GET', 'data:,', false); });
+attempt('timeout', function () { var x = new XMLHttpRequest(); x.timeout = 250; return x.timeout; });
+attempt('withCredentials', function () { var x = new XMLHttpRequest(); x.withCredentials = true; return x.withCredentials; });
+attempt('withCredentials after send', function () { var x = opened(); x.send(); x.withCredentials = true; });
+attempt('withCredentials when done', function () { done().withCredentials = true; });
+attempt('upload', function () { var x = new XMLHttpRequest(); return [x.upload === x.upload, x.upload instanceof XMLHttpRequestUpload, x.upload instanceof XMLHttpRequestEventTarget, x instanceof EventTarget].join(); });
+#expect
+send before open InvalidStateError
+send twice InvalidStateError
+setRequestHeader before open InvalidStateError
+setRequestHeader after send InvalidStateError
+setRequestHeader ok
+a header name with a space SyntaxError
+an empty header name SyntaxError
+a header value with a line feed SyntaxError
+a header value that ends in a line feed ok
+one argument TypeError
+responseType when done InvalidStateError
+an unknown responseType when done true
+overrideMimeType when done InvalidStateError
+overrideMimeType before open ok
+responseType on a synchronous request InvalidAccessError
+timeout on a synchronous request InvalidAccessError
+synchronous after a responseType InvalidAccessError
+synchronous after a timeout InvalidAccessError
+timeout 250
+withCredentials true
+withCredentials after send InvalidStateError
+withCredentials when done InvalidStateError
+upload true,true,true,true
+
+#name a synchronous request
+#code
+var x = new XMLHttpRequest(), seen = [];
+x.onreadystatechange = function () { seen.push('state ' + x.readyState); };
+x.onload = function () { seen.push('load'); };
+x.onloadend = function () { seen.push('loadend'); };
+x.onloadstart = function () { seen.push('loadstart'); };
+x.open('GET', 'data:text/xml,<a><b/></a>', false);
+x.send();
+console.log(seen.filter(function (s) { return s !== 'loadstart'; }).join(', '));
+console.log(x.readyState, x.status, x.statusText, x.responseText, x.responseXML.documentElement.firstChild.nodeName, x.responseXML === x.responseXML);
+var bad = new XMLHttpRequest(), events = [];
+bad.onreadystatechange = function () { events.push(bad.readyState); };
+bad.onerror = function () { events.push('error'); };
+bad.open('GET', 'data:text/xml;base64,@@@', false);
+try { bad.send(); console.log('sent'); } catch (e) { console.log(e.name, e instanceof DOMException, e.code); }
+console.log(events.join(), bad.readyState, bad.status, JSON.stringify(bad.responseText), bad.responseXML);
+var post = new XMLHttpRequest();
+post.open('POST', 'data:text/plain,p', false);
+post.send('body');
+console.log(post.status, post.responseText);
+#expect
+state 1, state 4, load, loadend
+4 200 OK <a><b/></a> b true
+NetworkError true 19
+1 4 0 "" null
+200 p
+
+#name a request that cannot be answered fails
+#code
+var x = new XMLHttpRequest(), seen = [];
+['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'loadend'].forEach(function (type) {
+    x.addEventListener(type, function (e) { seen.push(type === 'readystatechange' ? 'state ' + x.readyState : type + ' ' + e.loaded + ' ' + e.total); });
+});
+x.addEventListener('loadend', function () {
+    console.log(seen.join(', '));
+    console.log(x.readyState, x.status, JSON.stringify(x.statusText), JSON.stringify(x.responseText), x.responseXML, x.response === '', x.getResponseHeader('content-type'), JSON.stringify(x.getAllResponseHeaders()), JSON.stringify(x.responseURL));
+});
+x.open('GET', 'data:text/xml;base64,@@@');
+x.send();
+#expect
+state 1, loadstart 0 0, state 4, error 0 0, loadend 0 0
+4 0 "" "" null true null "" ""
+
+#name abort()
+#code
+function watch(x, seen) {
+    ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'loadend'].forEach(function (type) {
+        x.addEventListener(type, function () { seen.push(type === 'readystatechange' ? 'state ' + x.readyState : type); });
+    });
+}
+var a = new XMLHttpRequest(), sa = []; watch(a, sa);
+a.abort();
+console.log('unsent:', sa.join(', '), a.readyState);
+a.open('GET', 'data:text/xml,<a/>'); sa.length = 0;
+a.abort();
+console.log('opened:', sa.join(', '), a.readyState);
+a.send(); sa.length = 0;
+a.abort();
+console.log('sent:', sa.join(', '), a.readyState, a.status, JSON.stringify(a.responseText));
+var d = new XMLHttpRequest(), sd = [];
+d.open('GET', 'data:text/xml,<a/>', false); d.send(); watch(d, sd);
+d.abort();
+console.log('done:', sd.join(', '), d.readyState, d.status, JSON.stringify(d.responseText), d.responseXML);
+var h = new XMLHttpRequest(), sh = []; watch(h, sh);
+h.addEventListener('readystatechange', function () { if (h.readyState === 2) h.abort(); });
+h.addEventListener('loadend', function () { Promise.resolve().then(function () { console.log('at headers:', sh.join(', '), h.readyState, h.status); }); });
+h.open('GET', 'data:text/xml,<a/>');
+h.send();
+#expect
+unsent:  0
+opened:  1
+sent: state 4, abort, loadend 0 0 ""
+done:  0 0 "" null
+at headers: state 1, loadstart, state 2, state 4, abort, loadend 0 0
+
+#name open() again starts over
+#code
+var x = new XMLHttpRequest();
+x.open('GET', 'data:text/xml,<a/>', false);
+x.send();
+var first = x.responseXML;
+console.log(x.status, x.responseText, first.documentElement.nodeName);
+x.open('GET', 'data:text/xml,<b/>', false);
+console.log(x.readyState, x.status, JSON.stringify(x.responseText), x.responseXML, JSON.stringify(x.responseURL), x.getResponseHeader('content-type'));
+x.send();
+console.log(x.status, x.responseText, x.responseXML.documentElement.nodeName, x.responseXML !== first, first.documentElement.nodeName);
+var y = new XMLHttpRequest(), seen = [];
+y.onload = function () { seen.push('load ' + y.responseText); };
+y.onloadend = function () { seen.push('loadend'); console.log(seen.join(', ')); };
+y.open('GET', 'data:text/plain,first');
+y.send();
+y.open('GET', 'data:text/plain,second');
+y.send();
+#expect
+200 <a/> a
+1 0 "" null "" null
+200 <b/> b true a
+load second, loadend
+
+#name the events and their handlers
+#code
+var x = new XMLHttpRequest();
+x.addEventListener('load', function (e) {
+    console.log(e.type, e.target === x, e.currentTarget === x, e instanceof ProgressEvent, e.bubbles, e.cancelable, e.isTrusted, e.loaded, e.total, e.lengthComputable);
+});
+x.onload = function (e) { console.log('handler', this === x, e.type); };
+x.onreadystatechange = function (e) { if (x.readyState === 4) console.log(e.type, e instanceof ProgressEvent, e instanceof Event, e.bubbles, e.cancelable, this === x); };
+console.log(typeof x.onload, x.onerror, x.onabort, x.ontimeout, x.onloadstart, x.onprogress, x.onloadend, 'onload' in XMLHttpRequestEventTarget.prototype, 'onreadystatechange' in XMLHttpRequestEventTarget.prototype);
+x.open('GET', 'data:text/plain,abc');
+x.send();
+#expect
+function null null null null null null true false
+readystatechange false true false false true
+load true true true false false true 3 0 false
+handler true load

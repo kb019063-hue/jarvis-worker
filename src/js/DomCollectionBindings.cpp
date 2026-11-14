@@ -5,6 +5,7 @@
 // when it is asked: `list[3]`, `list.length`, `"x" in dataset`.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/js/JsBuiltins.hpp"
 
 #include <algorithm>
@@ -507,7 +508,7 @@ struct DatasetState : JsExotic {
             return true;
         }
         const std::string text = to_str(value);
-        if (realm->alive) validate_name(*realm, attribute);
+        if (realm->alive) validate_attribute_name(*realm, attribute);
         element->set_attribute(attribute, text);
         return true;
     }
@@ -553,7 +554,13 @@ struct AttrState : JsExotic {
     std::string name;
     /// The value while the attribute belongs to no element.
     std::string detached_value;
+    /// The namespace while it belongs to no element (createAttributeNS).
+    std::string detached_namespace;
     std::shared_ptr<Document> document;
+
+    const std::string& namespace_uri() const {
+        return owner ? owner->attribute_namespace(name) : detached_namespace;
+    }
 
     std::string value() const {
         if (owner) {
@@ -581,37 +588,25 @@ JsValue new_attr(Realm& realm, const std::shared_ptr<Element>& owner, const std:
     return realm.make("Attr", state);
 }
 
-// The attributes with a namespace are the ones the HTML parser gives SVG and
-// MathML elements (`xlink:href`, `xml:lang`, `xmlns`, `xmlns:xlink`), and the
-// same names set by setAttributeNS. An attribute is stored under its
-// qualified name; this takes it apart again.
+// An attribute is stored under its qualified name; this takes it apart
+// again. Only an attribute with a namespace has a prefix: without one, a
+// colon is one more character of the name.
 struct AttrName {
     std::string prefix;
     std::string local;
-    const char* ns{nullptr};
+    const std::string* ns{nullptr};
 };
 
 AttrName attr_name(const AttrState& state) {
     AttrName out;
     out.local = state.name;
-    if (!state.owner || !state.owner->is_foreign()) return out;
-    static const std::pair<const char*, const char*> kPrefixes[] = {
-        {"xlink", "http://www.w3.org/1999/xlink"},
-        {"xml", "http://www.w3.org/XML/1998/namespace"},
-        {"xmlns", "http://www.w3.org/2000/xmlns/"},
-    };
-    if (state.name == "xmlns") {
-        out.ns = kPrefixes[2].second;
-        return out;
-    }
+    const std::string& uri = state.namespace_uri();
+    if (uri.empty()) return out;
+    out.ns = &uri;
     const auto colon = state.name.find(':');
-    if (colon == std::string::npos) return out;
-    for (const auto& [prefix, ns] : kPrefixes) {
-        if (state.name.compare(0, colon, prefix) != 0) continue;
-        out.prefix = prefix;
+    if (colon != std::string::npos) {
+        out.prefix = state.name.substr(0, colon);
         out.local = state.name.substr(colon + 1);
-        out.ns = ns;
-        break;
     }
     return out;
 }
@@ -626,7 +621,7 @@ void setup_attr(Iface& I) {
     });
     I.getter("namespaceURI", [](Realm&) {
         const AttrName name = attr_name(this_attr());
-        return name.ns ? str(name.ns) : null();
+        return name.ns ? str(*name.ns) : null();
     });
     I.getter("prefix", [](Realm&) {
         const AttrName name = attr_name(this_attr());
@@ -708,9 +703,17 @@ bool attribute_at(Realm& r, const JsValue& self, std::size_t index, JsValue& out
     return true;
 }
 
-// The name an attribute is stored under: lower case on an HTML element.
+// The name an attribute is stored under: lower case on an HTML element of
+// an HTML document.
 std::string stored_name(const Element& element, const std::string& name) {
-    return element.is_foreign() ? name : ascii_lower(name);
+    return is_html_in_html_document(element) ? ascii_lower(name) : name;
+}
+
+// The stored name of the attribute with this namespace and local name.
+bool stored_name_ns(const Element& element, const JsValue& ns, const std::string& local, std::string& out) {
+    const std::string* name = element.find_attribute_ns(ns.is_nullish() ? std::string() : to_str(ns), local);
+    if (name) out = *name;
+    return name != nullptr;
 }
 
 void setup_attribute_map(Iface& I) {
@@ -729,8 +732,8 @@ void setup_attribute_map(Iface& I) {
     I.method("getNamedItemNS", 2, [](Realm& r, Args args) {
         require_args(args, 2, "NamedNodeMap.getNamedItemNS");
         AttributeMapState& state = this_map();
-        const std::string name = to_str(args[1]);
-        return state.element->has_attribute(name) ? attr_object(r, *state.element, name) : null();
+        std::string name;
+        return stored_name_ns(*state.element, args[0], to_str(args[1]), name) ? attr_object(r, *state.element, name) : null();
     });
     I.method("setNamedItem", 1, [](Realm& r, Args args) {
         require_args(args, 1, "NamedNodeMap.setNamedItem");
@@ -753,9 +756,9 @@ void setup_attribute_map(Iface& I) {
     I.method("removeNamedItemNS", 2, [](Realm& r, Args args) {
         require_args(args, 2, "NamedNodeMap.removeNamedItemNS");
         AttributeMapState& state = this_map();
-        const std::string name = to_str(args[1]);
-        if (!state.element->has_attribute(name)) {
-            throw_dom(r, "NotFoundError", "No item with name '" + name + "' was found.");
+        std::string name;
+        if (!stored_name_ns(*state.element, args[0], to_str(args[1]), name)) {
+            throw_dom(r, "NotFoundError", "No item with name '" + to_str(args[1]) + "' was found.");
         }
         JsValue attr = attr_object(r, *state.element, name);
         state.element->remove_attribute(name);
@@ -785,6 +788,7 @@ void detach_attr_object(Realm& realm, Element& element, const std::string& name,
     const JsValue* existing = slot(owner, "attr:" + name);
     if (!existing) return;
     if (AttrState* state = state_of<AttrState>(*existing)) {
+        state->detached_namespace = state->namespace_uri();
         state->owner.reset();
         state->detached_value = last_value;
     }
@@ -801,9 +805,15 @@ JsValue construct_attr_detached(Realm& realm, const std::string& name) {
 
 } // namespace
 
-/// document.createAttribute(name).
-JsValue create_attribute(Realm& realm, const std::string& name) {
-    return construct_attr_detached(realm, name);
+/// document.createAttribute(name), and createAttributeNS with a namespace.
+bool is_attr_object(const JsValue& value) {
+    return state_of<AttrState>(value) != nullptr;
+}
+
+JsValue create_attribute(Realm& realm, const std::string& name, const std::string& namespace_uri) {
+    JsValue attr = construct_attr_detached(realm, name);
+    if (AttrState* state = state_of<AttrState>(attr)) state->detached_namespace = namespace_uri;
+    return attr;
 }
 
 /// element.setAttributeNode(attr): returns the Attr it replaced, or null.
@@ -817,6 +827,7 @@ JsValue set_attribute_node(Realm& realm, Element& element, const JsValue& attr) 
     JsValue owner = wrap(realm, element);
     JsValue previous = null();
     const std::string value = state->detached_value;
+    const std::string uri = state->detached_namespace;
     if (element.has_attribute(state->name)) {
         previous = attr_object(realm, element, state->name);
         detach_attr_object(realm, element, state->name, element.get_attribute(state->name));
@@ -824,7 +835,7 @@ JsValue set_attribute_node(Realm& realm, Element& element, const JsValue& attr) 
     state->owner = shared(element);
     state->document = document_of(realm, element);
     set_slot(owner, "attr:" + state->name, attr);
-    element.set_attribute(state->name, value);
+    element.set_attribute_ns(uri, state->name, value);
     return previous;
 }
 

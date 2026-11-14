@@ -142,7 +142,7 @@ jobs:
         # a regression.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 572
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 629
       - name: URL scoreboard (web-platform-tests data)
         # tests/url holds the URL parsing and setter cases browsers are tested
         # with. The floor in the Makefile is the number that pass today; the
@@ -152,6 +152,54 @@ jobs:
         with:
           name: dom-conformance-report
           path: build/dom-conformance.json
+
+  xml-and-wpt:
+    name: XML (W3C suite, Expat and libxml2) and web-platform-tests
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: The XML suite archive
+        # The W3C XML Conformance Test Suite is not in the repository
+        # (tests/xml/README.md says why). The runner downloads it from the
+        # W3C or, failing that, from a public copy on GitHub, and uses it
+        # only if its SHA-256 is the one pinned in the runner. This cache
+        # saves the download; a cached file with another hash is thrown away.
+        uses: actions/cache@v4
+        with:
+          path: build/xml-conformance/xmlts20130923.zip
+          key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
+      - name: XML scoreboard (W3C XML Conformance Test Suite)
+        # 1,702 documents apply to a parser that does not validate, knows
+        # namespaces, reads no external entity and follows XML 1.0 Fifth
+        # Edition. Each must be accepted or refused as the suite says, 261
+        # with the canonical form the suite gives. All of them pass; the
+        # floor in the Makefile is that number. All 2,585 documents are run:
+        # none may crash the parser or run out of time.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make xml-conformance
+      - name: Generated XML against Expat and libxml2, and the serializer's round trip
+        # 4,000 documents nobody wrote, half of them damaged, read by
+        # Litebird, by Expat (Firefox's parser) and by libxml2 (Chrome's and
+        # Safari's): no document the two read alike may be read otherwise.
+        # Then 3,000 trees with colliding prefixes, written by XMLSerializer
+        # and read back by Litebird and by Expat: each must be the same tree.
+        run: |
+          python3 -m pip install --quiet lxml
+          make diff-xml
+      - name: Web Platform Tests (dom/nodes, domparsing)
+        # The tests browsers are tested with, 76 files run with their own
+        # testharness.js. The floor in the Makefile is the number of subtests
+        # that pass today; each that does not is listed with its reason in
+        # tests/wpt/expected-failures.txt. The step also fails on a failure
+        # that is not listed and on a listed subtest that has begun to pass.
+        run: make wpt
 
   deep-pages:
     name: Deep and oversized pages (stack, memory and time limits)
@@ -165,7 +213,7 @@ jobs:
       - name: Build
         run: make -j"$(nproc)"
       - name: Pages nested 200,000 deep, oversized bitmaps, long runs of one thing
-        # 145 generated pages, each nesting or repeating one construct far past
+        # 165 generated pages, each nesting or repeating one construct far past
         # what a recursive walk or a quadratic loop survives, then 300 random
         # pages that keep the parser at its nesting limit. Every run is a child
         # process with an 8 MB stack, 2 GB of memory and 60 seconds. The
@@ -189,9 +237,17 @@ jobs:
         run: |
           sudo sysctl -w vm.mmap_rnd_bits=28 || true
           make tsan
-      - name: Sanitizer build, tests, the JavaScript, DOM and URL corpora and a fuzz smoke run
+      - name: The XML suite archive
+        # See the xml-and-wpt job: downloaded, checked against a pinned
+        # SHA-256, cached.
+        uses: actions/cache@v4
+        with:
+          path: build/xml-conformance/xmlts20130923.zip
+          key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
+      - name: Sanitizer build, tests, the corpora (JavaScript, DOM, URL, XML, web-platform-tests) and a fuzz smoke run
         env:
           ASAN_OPTIONS: detect_leaks=0
+          GITHUB_TOKEN: ${{ github.token }}
         run: make -j"$(nproc)" asan-core
       - name: Deep and oversized pages in the sanitizer build
         # For memory errors on these pages. They are a twentieth as deep as in

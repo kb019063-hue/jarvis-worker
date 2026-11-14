@@ -4,6 +4,11 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/Selector.hpp"
+#include "litebird/html/HtmlParser.hpp"
+#include "litebird/net/DataUrl.hpp"
+#include "litebird/net/UrlParser.hpp"
+#include "litebird/xml/XmlDom.hpp"
+#include "litebird/xml/XmlParser.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/JsInterpreter.hpp"
@@ -514,7 +519,7 @@ JsValue storage_object(Realm& realm, const char* slot_name, Storage& storage) {
 }
 
 // ---------------------------------------------------------------------------
-// matchMedia, XMLHttpRequest
+// matchMedia
 // ---------------------------------------------------------------------------
 
 struct MediaQueryState : JsExotic {
@@ -569,12 +574,47 @@ void setup_media_query_list(Iface& I) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// XMLHttpRequest
+// ---------------------------------------------------------------------------
+
+// What came back. `ok` false is the standard's "network error": no status,
+// no headers, no bytes.
+struct RequestResponse {
+    bool ok{false};
+    int status{0};
+    std::string status_text;
+    /// Names in lower case.
+    std::vector<std::pair<std::string, std::string>> headers;
+    /// The address that answered, with its fragment and without.
+    std::string url;
+    std::string url_without_fragment;
+    std::string bytes;
+};
+
 struct RequestState : JsExotic {
     int ready_state{0};
-    bool sent{false};
+    bool send_flag{false};
+    bool synchronous{false};
     std::string method;
-    std::string url;
+    Url url;
     std::string response_type;
+    double timeout{0};
+    bool with_credentials{false};
+    std::vector<std::pair<std::string, std::string>> request_headers;
+    bool has_override{false};
+    MimeType override_type;
+    RequestResponse response;
+    /// The response as text, once it has been asked for.
+    bool has_text{false};
+    std::string text;
+    /// What `response` and `responseXML` made of the bytes (a document, a
+    /// JSON value, a Blob; kept in the object's slot "response"): nothing
+    /// yet, something, or nothing and never will.
+    enum class Made { NotYet, Yes, Failed } made{Made::NotYet};
+    /// open() and abort() end the fetch that is under way. A task that
+    /// belongs to an ended one finds another number here and does nothing.
+    unsigned generation{0};
 };
 
 RequestState& this_request() {
@@ -600,45 +640,274 @@ void setup_request_target(Iface& I) {
     }
 }
 
-// There is no network behind this: a request that is sent fails, the way a
-// request does when the server cannot be reached.
+void forget_response(const JsValue& self, RequestState& state) {
+    state.response = RequestResponse{};
+    state.has_text = false;
+    state.text.clear();
+    state.made = RequestState::Made::NotYet;
+    clear_slot(self, "response");
+}
+
+// A progress event of XMLHttpRequest. No response here has a Content-Length
+// to compare with, so the total is never known.
+void fire_progress(Realm& r, const JsValue& self, const char* type, std::size_t loaded) {
+    dispatch(r, self,
+             make_event(r, "ProgressEvent", type, false, false,
+                        {{"lengthComputable", boolean(false)}, {"loaded", num(static_cast<double>(loaded))}, {"total", num(0)}}),
+             true);
+}
+
+// The fetch. The one kind of address that is answered is a data: URL, which
+// holds its own response and needs neither a network nor a disk. Every other
+// request fails, the way a request does when the server cannot be reached:
+// the loader behind fetch() takes whatever is not `data:` or `http://` for a
+// path on this machine (AGENTS.md has the row), and that is no thing to hand
+// to a second interface.
+void perform(const RequestState& state, RequestResponse& out) {
+    out = RequestResponse{};
+    if (state.url.protocol() != "data:") return;
+    MimeType type;
+    std::string body;
+    const std::string address = state.url.href(true);
+    if (!process_data_url(address, type, body)) return;
+    out.ok = true;
+    out.status = 200;
+    out.status_text = "OK";
+    out.headers.emplace_back("content-type", type.serialize());
+    out.url = state.url.href();
+    out.url_without_fragment = address;
+    out.bytes = std::move(body);
+}
+
+// "Get a response MIME type": what Content-Type says, and text/xml when it
+// says nothing that can be read.
+MimeType response_mime(const RequestState& state) {
+    MimeType type;
+    for (const auto& [name, value] : state.response.headers) {
+        if (name == "content-type" && MimeType::parse(value, type)) return type;
+    }
+    type.type = "text";
+    type.subtype = "xml";
+    return type;
+}
+
+MimeType final_mime(const RequestState& state) {
+    return state.has_override ? state.override_type : response_mime(state);
+}
+
+// "Get a final encoding": the charset of the response's type, or of the type
+// the script put in its place, as the name of an encoding. Empty when there
+// is none, and when it names no encoding this build reads.
+std::string final_charset(const RequestState& state) {
+    std::string label;
+    // The type is kept in a name: parameter() gives a pointer into it.
+    const MimeType response = response_mime(state);
+    if (const std::string* charset = response.parameter("charset")) label = *charset;
+    if (state.has_override) {
+        if (const std::string* charset = state.override_type.parameter("charset")) label = *charset;
+    }
+    return encoding_name_for_label(label);
+}
+
+// "Get a text response".
+const std::string& text_response(RequestState& state) {
+    if (state.has_text) return state.text;
+    std::string charset = final_charset(state);
+    if (state.response_type.empty() && charset.empty() && final_mime(state).is_xml()) {
+        // An XML document says what it is encoded in, and responseText
+        // listens to it (responseType "text" does not). When what it says
+        // cannot be followed, the text is read as UTF-8.
+        std::string encoding;
+        xml::XmlError error;
+        if (xml::xml_encoding(state.response.bytes, encoding, error)) charset = encoding;
+    }
+    // Whatever the encoding, bytes that are no text in it become U+FFFD.
+    state.text = decode_text(state.response.bytes, charset);
+    state.has_text = true;
+    return state.text;
+}
+
+// "Set a document response". Null for a type that is neither HTML nor XML,
+// for HTML when the script did not ask for a document, and for XML that is
+// not well formed: there is no `parsererror` document here, unlike DOMParser.
+JsValue document_response(Realm& r, const RequestState& state) {
+    const MimeType type = final_mime(state);
+    const bool html = type.is_html();
+    if (!html && !type.is_xml()) return null();
+    if (html && state.response_type.empty()) return null();
+    const std::string charset = final_charset(state);
+    std::shared_ptr<Document> document;
+    if (html) {
+        // Scripts in a document made this way never run. The encoding is
+        // the type's, or UTF-8: a <meta charset> is not looked for, here as
+        // for a page.
+        document = HtmlParser::parse(decode_text(state.response.bytes, charset), false);
+        for (const auto& child : document->children()) child->set_owner_document(document);
+    } else {
+        std::string utf8, encoding;
+        xml::XmlError error;
+        if (!xml::decode_xml(state.response.bytes, utf8, encoding, error, charset)) return null();
+        document = std::make_shared<Document>();
+        document->set_content_type(type.essence());
+        if (!xml::parse_xml_document(document, utf8, error)) return null();
+    }
+    document->set_url(state.response.url);
+    document->set_ready_state("complete");
+    return wrap(r, document);
+}
+
+// "Parse JSON from bytes": the bytes are UTF-8 whatever the type says.
+JsValue json_response(Realm& r, const RequestState& state) {
+    const JsValue json = r.window.is_object() ? r.window.get_property("JSON") : undefined();
+    const JsValue parse = json.is_object() ? json.get_property("parse") : undefined();
+    if (!parse.is_callable()) return null();
+    JsValue value = null(), thrown;
+    const std::string text = utf8_decode(state.response.bytes);
+    if (!js_capture_throw([&]() { value = js_call(parse, json, {str(text)}); }, thrown)) return null();
+    return value;
+}
+
+// What `response` is for the types that are objects, and `responseXML`:
+// made the first time it is asked for, and the same object after that.
+JsValue response_object(Realm& r, const JsValue& self, RequestState& state) {
+    if (state.made == RequestState::Made::Failed || !state.response.ok) return null();
+    if (state.made == RequestState::Made::Yes) {
+        const JsValue* kept = slot(self, "response");
+        return kept ? *kept : null();
+    }
+    const std::string& type = state.response_type;
+    JsValue made = null();
+    if (type.empty() || type == "document") {
+        made = document_response(r, state);
+    } else if (type == "json") {
+        // Text that is not JSON is null, and is read again the next time.
+        made = json_response(r, state);
+        if (made.type == JsType::Null) return made;
+    } else if (type == "blob") {
+        made = make_blob(r, state.response.bytes, final_mime(state).serialize());
+    }
+    // "arraybuffer": the engine has no ArrayBuffer to give, and says null.
+    if (made.type == JsType::Null) {
+        state.made = RequestState::Made::Failed;
+        return made;
+    }
+    set_slot(self, "response", made);
+    state.made = RequestState::Made::Yes;
+    return made;
+}
+
+// The response arrives: all of it in one task, since nothing here comes in
+// pieces. While it is arriving, a listener may abort the request or open
+// another, and what was to follow is then not fired. Once it has arrived the
+// last three events are fired whatever their listeners do, as the standard
+// has it ("handle response end-of-body" checks nothing between them).
+void deliver(Realm& r, const JsValue& self, unsigned generation) {
+    RequestState* state = state_of<RequestState>(self);
+    if (!r.alive || !state || state->generation != generation || !state->send_flag) return;
+    const auto current = [&]() { return state->generation == generation; };
+    RequestResponse response;
+    perform(*state, response);
+    if (!response.ok) {
+        state->ready_state = 4;
+        state->send_flag = false;
+        fire(r, self, "readystatechange");
+        fire_progress(r, self, "error", 0);
+        fire_progress(r, self, "loadend", 0);
+        return;
+    }
+    state->response = std::move(response);
+    const std::size_t length = state->response.bytes.size();
+    state->ready_state = 2;
+    fire(r, self, "readystatechange");
+    if (!current()) return;
+    if (length != 0) {
+        state->ready_state = 3;
+        fire(r, self, "readystatechange");
+        if (!current()) return;
+    }
+    fire_progress(r, self, "progress", length);
+    if (!current()) return;
+    state->ready_state = 4;
+    state->send_flag = false;
+    fire(r, self, "readystatechange");
+    fire_progress(r, self, "load", length);
+    fire_progress(r, self, "loadend", length);
+}
+
 void setup_request(Iface& I) {
     static const std::pair<const char*, int> kStates[] = {
         {"UNSENT", 0}, {"OPENED", 1}, {"HEADERS_RECEIVED", 2}, {"LOADING", 3}, {"DONE", 4},
     };
     for (const auto& entry : kStates) I.constant(entry.first, entry.second);
     I.getter("readyState", [](Realm&) { return num(this_request().ready_state); });
-    I.getter("status", [](Realm&) {
-        this_request();
-        return num(0);
+    I.getter("status", [](Realm&) { return num(this_request().response.status); });
+    I.getter("statusText", [](Realm&) { return str(this_request().response.status_text); });
+    I.getter("responseText", [](Realm& r) {
+        RequestState& state = this_request();
+        if (!state.response_type.empty() && state.response_type != "text") {
+            throw_dom(r, "InvalidStateError",
+                      "The value is only accessible if the object's 'responseType' is '' or 'text' (was '" + state.response_type + "').");
+        }
+        if (state.ready_state != 3 && state.ready_state != 4) return str("");
+        return str(text_response(state));
     });
-    I.getter("statusText", [](Realm&) {
-        this_request();
-        return str("");
+    I.getter("response", [](Realm& r) {
+        const JsValue self = JsValue::current_this();
+        RequestState& state = this_request();
+        if (state.response_type.empty() || state.response_type == "text") {
+            return state.ready_state == 3 || state.ready_state == 4 ? str(text_response(state)) : str("");
+        }
+        if (state.ready_state != 4) return null();
+        return response_object(r, self, state);
     });
-    I.getter("responseText", [](Realm&) {
-        this_request();
-        return str("");
-    });
-    I.getter("response", [](Realm&) {
-        const RequestState& state = this_request();
-        return state.response_type.empty() || state.response_type == "text" ? str("") : null();
-    });
-    I.getter("responseURL", [](Realm&) {
-        this_request();
-        return str("");
-    });
-    I.getter("responseXML", [](Realm&) {
-        this_request();
-        return null();
+    I.getter("responseURL", [](Realm&) { return str(this_request().response.url_without_fragment); });
+    I.getter("responseXML", [](Realm& r) {
+        const JsValue self = JsValue::current_this();
+        RequestState& state = this_request();
+        if (!state.response_type.empty() && state.response_type != "document") {
+            throw_dom(r, "InvalidStateError",
+                      "The value is only accessible if the object's 'responseType' is '' or 'document' (was '" + state.response_type + "').");
+        }
+        if (state.ready_state != 4) return null();
+        return response_object(r, self, state);
     });
     I.accessor("responseType",
         [](Realm&) { return str(this_request().response_type); },
-        [](Realm&, const JsValue& value) { this_request().response_type = to_str(value); });
-    I.accessor("timeout", [](Realm&) { this_request(); return num(0); }, [](Realm&, const JsValue&) { this_request(); });
+        [](Realm& r, const JsValue& value) {
+            RequestState& state = this_request();
+            const std::string type = to_str(value);
+            bool known = false;
+            for (const char* candidate : {"", "arraybuffer", "blob", "document", "json", "text"}) known = known || type == candidate;
+            if (!known) return;                 // an enumeration: any other word is not assigned
+            if (state.ready_state == 3 || state.ready_state == 4) {
+                throw_dom(r, "InvalidStateError", "The response type cannot be set if the object's state is LOADING or DONE.");
+            }
+            if (state.synchronous) {
+                throw_dom(r, "InvalidAccessError", "The response type cannot be changed for synchronous requests made from a document.");
+            }
+            state.response_type = type;
+        });
+    I.accessor("timeout",
+        [](Realm&) { return num(this_request().timeout); },
+        [](Realm& r, const JsValue& value) {
+            RequestState& state = this_request();
+            if (state.synchronous) {
+                throw_dom(r, "InvalidAccessError", "Timeouts cannot be set for synchronous requests made from a document.");
+            }
+            double number = to_double(value);
+            if (!std::isfinite(number)) number = 0;
+            number = std::fmod(std::trunc(number), 4294967296.0);
+            state.timeout = number < 0 ? number + 4294967296.0 : number;
+        });
     I.accessor("withCredentials",
-        [](Realm&) { this_request(); return boolean(false); },
-        [](Realm&, const JsValue&) { this_request(); });
+        [](Realm&) { return boolean(this_request().with_credentials); },
+        [](Realm& r, const JsValue& value) {
+            RequestState& state = this_request();
+            if ((state.ready_state != 0 && state.ready_state != 1) || state.send_flag) {
+                throw_dom(r, "InvalidStateError", "The value may only be set if the object's state is UNSENT or OPENED.");
+            }
+            state.with_credentials = to_bool(value);
+        });
     I.getter("upload", [](Realm& r) {
         this_request();
         return cached(JsValue::current_this(), "upload", [&]() { return r.make("XMLHttpRequestUpload"); });
@@ -650,60 +919,138 @@ void setup_request(Iface& I) {
         require_args(args, 2, "XMLHttpRequest.open");
         const JsValue self = JsValue::current_this();
         RequestState& state = this_request();
-        state.method = ascii_upper(to_str(args[0]));
-        state.url = to_str(args[1]);
-        state.sent = false;
-        state.ready_state = 1;
-        fire(r, self, "readystatechange");
+        std::string method = to_str(args[0]);
+        if (!is_http_token(method)) throw_dom(r, "SyntaxError", "'" + method + "' is not a valid HTTP method.");
+        const std::string upper = ascii_upper(method);
+        if (upper == "CONNECT" || upper == "TRACE" || upper == "TRACK") {
+            throw_dom(r, "SecurityError", "'" + method + "' HTTP method is unsupported.");
+        }
+        for (const char* known : {"DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"}) {
+            if (upper == known) method = upper;
+        }
+        const std::string reference = to_str(args[1]);
+        Url url;
+        const bool parsed = r.document ? parse_url(r, *r.document, reference, url)
+                                       : Url::parse(reference, static_cast<const Url*>(nullptr), url);
+        if (!parsed) throw_dom(r, "SyntaxError", "Invalid URL: " + reference);
+        const bool synchronous = args.size() >= 3 && !to_bool(args[2]);
+        if (synchronous && (state.timeout != 0 || !state.response_type.empty())) {
+            throw_dom(r, "InvalidAccessError",
+                      "Synchronous requests from a document must not set a response type or a timeout.");
+        }
+        ++state.generation;
+        state.send_flag = false;
+        state.method = method;
+        state.url = url;
+        state.synchronous = synchronous;
+        state.request_headers.clear();
+        forget_response(self, state);
+        if (state.ready_state != 1) {
+            state.ready_state = 1;
+            fire(r, self, "readystatechange");
+        }
         return undefined();
     });
     I.method("setRequestHeader", 2, [](Realm& r, Args args) {
         require_args(args, 2, "XMLHttpRequest.setRequestHeader");
-        if (this_request().ready_state != 1) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
+        RequestState& state = this_request();
+        if (state.ready_state != 1 || state.send_flag) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
+        const std::string name = to_str(args[0]);
+        std::string value = to_str(args[1]);
+        const auto is_blank = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+        while (!value.empty() && is_blank(value.back())) value.pop_back();
+        std::size_t start = 0;
+        while (start < value.size() && is_blank(value[start])) ++start;
+        value.erase(0, start);
+        if (!is_http_token(name)) throw_dom(r, "SyntaxError", "'" + name + "' is not a valid HTTP header field name.");
+        if (value.find_first_of(std::string("\0\n\r", 3)) != std::string::npos) {
+            throw_dom(r, "SyntaxError", "The value given is not a valid HTTP header field value.");
+        }
+        state.request_headers.emplace_back(name, std::move(value));
         return undefined();
     });
     I.method("send", 0, [](Realm& r, Args) {
         const JsValue self = JsValue::current_this();
         RequestState& state = this_request();
-        if (state.ready_state != 1 || state.sent) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
-        state.sent = true;
-        Realm* realm = &r;
-        EventLoop::default_loop().post_task([realm, self]() {
-            RequestState* request = state_of<RequestState>(self);
-            if (!realm->alive || !request || !request->sent) return;
-            request->ready_state = 4;
-            request->sent = false;
-            fire(*realm, self, "readystatechange");
-            for (const char* type : {"error", "loadend"}) {
-                dispatch(*realm, self, make_event(*realm, "ProgressEvent", type, false, false), true);
+        if (state.ready_state != 1 || state.send_flag) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
+        state.send_flag = true;
+        const unsigned generation = state.generation;
+        if (state.synchronous) {
+            RequestResponse response;
+            perform(state, response);
+            state.ready_state = 4;
+            state.send_flag = false;
+            if (!response.ok) {
+                throw_dom(r, "NetworkError", "Failed to execute 'send' on 'XMLHttpRequest': Failed to load '" + state.url.href() + "'.");
             }
-        });
+            state.response = std::move(response);
+            const std::size_t length = state.response.bytes.size();
+            fire(r, self, "readystatechange");
+            fire_progress(r, self, "load", length);
+            fire_progress(r, self, "loadend", length);
+            return undefined();
+        }
+        fire_progress(r, self, "loadstart", 0);
+        // A listener may have aborted the request or opened another.
+        if (state.generation != generation || state.ready_state != 1 || !state.send_flag) return undefined();
+        Realm* realm = &r;
+        EventLoop::default_loop().post_task([realm, self, generation]() { deliver(*realm, self, generation); });
         return undefined();
     });
     I.method("abort", 0, [](Realm& r, Args) {
         const JsValue self = JsValue::current_this();
         RequestState& state = this_request();
-        if (state.sent) {
-            state.sent = false;
+        ++state.generation;
+        if ((state.ready_state == 1 && state.send_flag) || state.ready_state == 2 || state.ready_state == 3) {
             state.ready_state = 4;
+            state.send_flag = false;
+            forget_response(self, state);
             fire(r, self, "readystatechange");
-            for (const char* type : {"abort", "loadend"}) {
-                dispatch(r, self, make_event(r, "ProgressEvent", type, false, false), true);
-            }
+            fire_progress(r, self, "abort", 0);
+            fire_progress(r, self, "loadend", 0);
         }
-        state.ready_state = 0;
+        // A request that is done goes back to the start, and says so to nobody.
+        if (state.ready_state == 4) {
+            state.ready_state = 0;
+            forget_response(self, state);
+        }
         return undefined();
     });
-    I.method("getResponseHeader", 1, [](Realm&, Args) {
-        this_request();
-        return null();
+    I.method("getResponseHeader", 1, [](Realm&, Args args) {
+        require_args(args, 1, "XMLHttpRequest.getResponseHeader");
+        const RequestState& state = this_request();
+        const std::string name = ascii_lower(to_str(args[0]));
+        std::string value;
+        bool found = false;
+        for (const auto& header : state.response.headers) {
+            if (header.first != name) continue;
+            if (found) value += ", ";
+            value += header.second;
+            found = true;
+        }
+        return found ? str(value) : null();
     });
     I.method("getAllResponseHeaders", 0, [](Realm&, Args) {
-        this_request();
-        return str("");
+        const RequestState& state = this_request();
+        auto headers = state.response.headers;
+        std::stable_sort(headers.begin(), headers.end(),
+                         [](const auto& a, const auto& b) { return ascii_upper(a.first) < ascii_upper(b.first); });
+        std::string out;
+        for (const auto& [name, value] : headers) out += name + ": " + value + "\r\n";
+        return str(out);
     });
-    I.method("overrideMimeType", 1, [](Realm&, Args) {
-        this_request();
+    I.method("overrideMimeType", 1, [](Realm& r, Args args) {
+        require_args(args, 1, "XMLHttpRequest.overrideMimeType");
+        RequestState& state = this_request();
+        if (state.ready_state == 3 || state.ready_state == 4) {
+            throw_dom(r, "InvalidStateError", "The MIME type cannot be overridden when the object's state is LOADING or DONE.");
+        }
+        state.has_override = true;
+        if (!MimeType::parse(to_str(args[0]), state.override_type)) {
+            state.override_type = MimeType{};
+            state.override_type.type = "application";
+            state.override_type.subtype = "octet-stream";
+        }
         return undefined();
     });
 }

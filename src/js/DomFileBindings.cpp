@@ -259,6 +259,13 @@ bool is_file(const JsValue& value) {
     return state && state->is_file;
 }
 
+JsValue make_blob(Realm& realm, const std::string& bytes, const std::string& type) {
+    auto state = std::make_shared<BlobState>();
+    state->bytes = bytes;
+    state->type = normalized_type(type);
+    return realm.make("Blob", state);
+}
+
 JsValue make_file(Realm& realm, const std::string& bytes, const std::string& name, const std::string& type) {
     auto state = std::make_shared<BlobState>();
     state->is_file = true;

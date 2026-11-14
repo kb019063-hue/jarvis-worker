@@ -4,6 +4,8 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/DomLive.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/FormState.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 
@@ -14,13 +16,16 @@ namespace dom {
 
 bool is_any_node(const Node&) { return true; }
 bool is_element_node(const Node& node) { return node.is_element(); }
-bool is_character_data(const Node& node) { return node.is_text() || node.is_comment(); }
+bool is_character_data(const Node& node) {
+    return node.is_text() || node.is_comment() || node.is_processing_instruction();
+}
 
 namespace {
 
 bool is_text_node(const Node& node) { return node.is_text(); }
 bool is_fragment_node(const Node& node) { return node.is_document_fragment(); }
 bool is_doctype_node(const Node& node) { return node.is_document_type(); }
+bool is_instruction_node(const Node& node) { return node.is_processing_instruction(); }
 
 std::u16string units(const std::string& text) { return js_utf8_to_utf16(text); }
 std::string utf8(std::u16string_view text) { return js_utf16_to_utf8(text); }
@@ -89,12 +94,13 @@ std::string node_name(const Node& node) {
         case NodeType::Element: {
             const auto& element = static_cast<const Element&>(node);
             const std::string name = qualified_name(element);
-            return element.is_foreign() ? name : ascii_upper(name);
+            return is_html_in_html_document(element) ? ascii_upper(name) : name;
         }
-        case NodeType::Text: return "#text";
+        case NodeType::Text: return node.is_cdata_section() ? "#cdata-section" : "#text";
         case NodeType::Comment: return "#comment";
         case NodeType::DocumentFragment: return "#document-fragment";
         case NodeType::DocumentType: return static_cast<const DocumentTypeNode&>(node).name();
+        case NodeType::ProcessingInstruction: return static_cast<const ProcessingInstruction&>(node).target();
     }
     return std::string();
 }
@@ -102,7 +108,8 @@ std::string node_name(const Node& node) {
 int node_type_number(const Node& node) {
     switch (node.type()) {
         case NodeType::Element: return 1;
-        case NodeType::Text: return 3;
+        case NodeType::Text: return node.is_cdata_section() ? 4 : 3;
+        case NodeType::ProcessingInstruction: return 7;
         case NodeType::Comment: return 8;
         case NodeType::Document: return 9;
         case NodeType::DocumentType: return 10;
@@ -151,11 +158,36 @@ bool nodes_equal(const Node& a, const Node& b) {
                 const auto& ex = static_cast<const Element&>(*x);
                 const auto& ey = static_cast<const Element&>(*y);
                 if (ex.element_namespace() != ey.element_namespace() || ex.tag_name() != ey.tag_name()) return false;
-                if (!(ex.attributes() == ey.attributes())) return false;
+                if (ex.other_namespace_uri() != ey.other_namespace_uri() || ex.prefix() != ey.prefix()) return false;
+                // Attributes are the same by namespace, local name and
+                // value: the prefix is not part of it.
+                if (ex.attributes().size() != ey.attributes().size()) return false;
+                for (const auto& [name, value] : ex.attributes()) {
+                    const std::string& uri = ex.attribute_namespace(name);
+                    const std::string* other = nullptr;
+                    if (uri.empty()) {
+                        other = ey.attribute_namespace(name).empty() ? ey.attribute(name) : nullptr;
+                    } else {
+                        const auto colon = name.find(':');
+                        const std::string local = colon == std::string::npos ? name : name.substr(colon + 1);
+                        if (const std::string* stored = ey.find_attribute_ns(uri, local)) other = ey.attribute(*stored);
+                    }
+                    if (!other || *other != value) return false;
+                }
                 break;
             }
             case NodeType::Text:
+                if (x->is_cdata_section() != y->is_cdata_section()) return false;
+                if (character_data(*x) != character_data(*y)) return false;
+                break;
             case NodeType::Comment:
+                if (character_data(*x) != character_data(*y)) return false;
+                break;
+            case NodeType::ProcessingInstruction:
+                if (static_cast<const ProcessingInstruction&>(*x).target() !=
+                    static_cast<const ProcessingInstruction&>(*y).target()) {
+                    return false;
+                }
                 if (character_data(*x) != character_data(*y)) return false;
                 break;
             case NodeType::DocumentType: {
@@ -186,7 +218,8 @@ void normalize_subtree(Node& root) {
         const NodeVector children = parent->children();
         std::shared_ptr<Node> run;         // the text node the following ones are merged into
         for (const auto& child : children) {
-            if (!child->is_text()) {
+            // A CDATA section stays what it is: only plain text is merged.
+            if (!child->is_text() || child->is_cdata_section()) {
                 run.reset();
                 continue;
             }
@@ -214,11 +247,73 @@ std::shared_ptr<Node> text_node_for(Realm& realm, Node& context, const std::stri
     return text;
 }
 
-bool document_has_element_child(const Node& document, const Node* except) {
-    for (const auto& child : document.children()) {
-        if (child->is_element() && child.get() != except) return true;
+// A document has at most one doctype and one element, the doctype first.
+// Where they stand next to `child`: the node an insertion goes before, or
+// the node a replacement takes out. The doctype is not among children();
+// its place is a count of the children before it.
+struct DocumentShape {
+    bool has_doctype{false};
+    /// An element child; when replacing, one other than `child`.
+    bool has_element{false};
+    /// "A doctype is following child."
+    bool doctype_follows_child{false};
+    /// "An element is preceding child."
+    bool element_precedes_child{false};
+};
+
+DocumentShape document_shape(const Node& parent, const Node* child, bool replacing) {
+    const auto& document = static_cast<const Document&>(parent);
+    const auto& children = parent.children();
+    DocumentShape shape;
+    shape.has_doctype = document.has_doctype();
+    const std::size_t doctype_at = std::min(document.doctype().preceding_children, children.size());
+    const bool child_is_doctype = child && child->is_document_type();
+    bool seen_child = false;
+    for (std::size_t i = 0; i < children.size(); ++i) {
+        const Node* node = children[i].get();
+        if (node == child) {
+            seen_child = true;
+            if (shape.has_doctype && i < doctype_at) shape.doctype_follows_child = true;
+            if (replacing) continue;
+        }
+        if (!node->is_element()) continue;
+        shape.has_element = true;
+        if (node == child) continue;
+        if (child_is_doctype ? i < doctype_at : (child && !seen_child)) shape.element_precedes_child = true;
     }
-    return false;
+    return shape;
+}
+
+// Whether `node` may go into the document `parent`: before `child` (null for
+// the end), or in place of `child` when replacing.
+void ensure_document_shape(Realm& realm, const Node& parent, const Node& node, const Node* child, bool replacing) {
+    std::size_t elements = 0;
+    if (node.is_document_fragment()) {
+        for (const auto& inner : node.children()) {
+            if (inner->is_text()) throw_dom(realm, "HierarchyRequestError", "A document cannot have text as a child.");
+            if (inner->is_element()) ++elements;
+        }
+        if (elements > 1) throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
+        if (elements == 0) return;
+    } else if (node.is_element()) {
+        elements = 1;
+    } else if (!node.is_document_type()) {
+        return;         // a comment or a processing instruction goes anywhere
+    }
+    const DocumentShape shape = document_shape(parent, child, replacing);
+    if (elements == 1) {
+        if (shape.has_element) throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
+        if ((!replacing && child && child->is_document_type()) || shape.doctype_follows_child) {
+            throw_dom(realm, "HierarchyRequestError", "An element cannot come before the doctype.");
+        }
+        return;
+    }
+    if (shape.has_doctype && !(replacing && child && child->is_document_type())) {
+        throw_dom(realm, "HierarchyRequestError", "Only one doctype on document allowed.");
+    }
+    if (shape.element_precedes_child || (!replacing && !child && shape.has_element)) {
+        throw_dom(realm, "HierarchyRequestError", "A doctype cannot come after the document element.");
+    }
 }
 
 // Runs the scripts among the nodes that have just been connected.
@@ -244,25 +339,31 @@ void after_insertion(Realm& realm, const NodeVector& inserted) {
 // The insertion itself, after the checks.
 void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, std::shared_ptr<Node> reference) {
     if (node->is_document_type()) {
-        // A doctype is not kept among the children; the document records it.
+        // A doctype is not kept among the children; the document records
+        // it, with its place among them, and the node the script holds is
+        // the one document.doctype gives back.
         if (auto* document = parent.as_document()) {
-            auto& type = static_cast<DocumentTypeNode&>(*node);
-            Doctype record;
-            record.present = true;
-            record.name = type.name();
-            record.public_id = type.public_id();
-            record.system_id = type.system_id();
-            record.preceding_children = 0;
-            document->set_doctype(record);
+            auto type = std::static_pointer_cast<DocumentTypeNode>(node);
+            if (auto old = type->document()) old->remove_doctype();
+            const auto& children = parent.children();
+            std::size_t before = children.size();
+            if (reference) {
+                const auto at = std::find(children.begin(), children.end(), reference);
+                if (at != children.end()) before = static_cast<std::size_t>(at - children.begin());
+            }
+            document->adopt_doctype_node(type, before);
         }
         return;
     }
-    if (reference && reference->is_document_type()) {
-        // "Before the doctype" is before the child that follows it.
+    const bool before_doctype = reference && reference->is_document_type();
+    if (before_doctype) {
+        // "Before the doctype" is where the child that follows it stands;
+        // the doctype is moved past what goes in, below.
         const auto& document = static_cast<const Document&>(parent);
-        const std::size_t index = document.doctype().preceding_children;
+        const std::size_t index = std::min(document.doctype().preceding_children, parent.children().size());
         reference = index < parent.children().size() ? parent.children()[index] : nullptr;
     }
+    const std::size_t children_before = parent.children().size();
     // A node from another document belongs to this one from now on.
     if (auto to = document_of(realm, parent)) {
         auto from = node->owner_document();
@@ -282,6 +383,9 @@ void insert_node(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, 
         inserted.push_back(node);
         if (reference) parent.insert_before(node, reference);
         else parent.append_child(node);
+    }
+    if (before_doctype && parent.children().size() > children_before) {
+        static_cast<Document&>(parent).move_doctype_after(parent.children().size() - children_before);
     }
     after_insertion(realm, inserted);
 }
@@ -312,6 +416,7 @@ std::shared_ptr<Node> script_parent(const Node& node) {
 const std::string& character_data(const Node& node) {
     if (node.is_text()) return static_cast<const Text&>(node).text();
     if (node.is_comment()) return static_cast<const Comment&>(node).data();
+    if (node.is_processing_instruction()) return static_cast<const ProcessingInstruction&>(node).data();
     return kEmpty;
 }
 
@@ -330,6 +435,10 @@ void store_character_data(Node& node, const std::string& data) {
         auto& comment = static_cast<Comment&>(node);
         old = comment.data();
         comment.set_data(data);
+    } else if (node.is_processing_instruction()) {
+        auto& instruction = static_cast<ProcessingInstruction&>(node);
+        old = instruction.data();
+        instruction.set_data(data);
     } else {
         return;
     }
@@ -425,32 +534,7 @@ void ensure_pre_insert_validity(Realm& realm, Node& parent, Node& node, Node* ch
     if (node.is_document_type() && !parent.is_document()) {
         throw_dom(realm, "HierarchyRequestError", "A doctype may only be a child of a document.");
     }
-    if (!parent.is_document()) return;
-
-    // A document has at most one element and one doctype, the doctype first.
-    const auto& document = static_cast<const Document&>(parent);
-    if (node.is_document_fragment()) {
-        std::size_t elements = 0;
-        for (const auto& inner : node.children()) {
-            if (inner->is_text()) throw_dom(realm, "HierarchyRequestError", "A document cannot have text as a child.");
-            if (inner->is_element()) ++elements;
-        }
-        if (elements > 1 || (elements == 1 && document_has_element_child(parent, nullptr))) {
-            throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
-        }
-    } else if (node.is_element()) {
-        if (document_has_element_child(parent, nullptr)) {
-            throw_dom(realm, "HierarchyRequestError", "Only one element on document allowed.");
-        }
-        if (child && child->is_document_type()) {
-            throw_dom(realm, "HierarchyRequestError", "An element cannot come before the doctype.");
-        }
-    } else if (node.is_document_type()) {
-        if (document.has_doctype()) throw_dom(realm, "HierarchyRequestError", "Only one doctype on document allowed.");
-        if (document_has_element_child(parent, nullptr) && !child) {
-            throw_dom(realm, "HierarchyRequestError", "A doctype cannot come after the document element.");
-        }
-    }
+    if (parent.is_document()) ensure_document_shape(realm, parent, node, child, false);
 }
 
 void pre_insert(Realm& realm, Node& parent, const std::shared_ptr<Node>& node, Node* child) {
@@ -485,7 +569,13 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
             case NodeType::Element: {
                 const auto& from = static_cast<const Element&>(source);
                 auto element = std::make_shared<Element>(from.tag_name(), from.element_namespace());
+                // The name as it is, whatever its case, and the namespace
+                // and prefix: a copy of <p:Item xmlns:p="urn:x"> is one too.
+                element->set_tag_name_verbatim(from.tag_name());
+                element->set_prefix(from.prefix());
+                element->set_other_namespace_uri(from.other_namespace_uri());
                 element->m_attributes = from.m_attributes;
+                element->copy_attribute_namespaces(from);
                 if (const FormControlState* state = from.form_state()) {
                     // What a control holds is cloned with it.
                     FormControlState& made = element->ensure_form_state();
@@ -509,12 +599,20 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
                 copy = element;
                 break;
             }
-            case NodeType::Text:
-                copy = std::make_shared<Text>(static_cast<const Text&>(source).text());
+            case NodeType::Text: {
+                auto text = std::make_shared<Text>(static_cast<const Text&>(source).text());
+                text->set_cdata_section(source.is_cdata_section());
+                copy = text;
                 break;
+            }
             case NodeType::Comment:
                 copy = std::make_shared<Comment>(static_cast<const Comment&>(source).data());
                 break;
+            case NodeType::ProcessingInstruction: {
+                const auto& from = static_cast<const ProcessingInstruction&>(source);
+                copy = std::make_shared<ProcessingInstruction>(from.target(), from.data());
+                break;
+            }
             case NodeType::DocumentFragment:
                 copy = std::make_shared<Node>(NodeType::DocumentFragment);
                 break;
@@ -526,9 +624,12 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
             case NodeType::Document: {
                 const auto& from = static_cast<const Document&>(source);
                 auto document = std::make_shared<Document>();
-                document->set_doctype(from.doctype());
+                // The doctype is a child: a copy that is not deep has none.
+                if (deep) document->set_doctype(from.doctype());
                 document->set_quirks_mode(from.quirks_mode());
                 document->set_url(from.url());
+                document->set_content_type(from.content_type());
+                document->set_xml_document_object(from.is_xml_document_object());
                 copy = document;
                 break;
             }
@@ -772,14 +873,14 @@ void setup_node(Iface& I) {
     I.node_accessor(any, "nodeValue",
         [](Realm&, Node& self) { return is_character_data(self) ? str(character_data(self)) : null(); },
         [](Realm&, Node& self, const JsValue& value) {
-            if (is_character_data(self)) set_character_data(self, to_str_null_empty(value));
+            if (is_character_data(self)) set_character_data(self, to_str_nullable(value));
         });
     I.node_accessor(any, "textContent",
         [](Realm&, Node& self) {
             if (self.is_document() || self.is_document_type()) return null();
             return str(self.text_content());
         },
-        [](Realm&, Node& self, const JsValue& value) { set_text_content(self, to_str_null_empty(value)); });
+        [](Realm&, Node& self, const JsValue& value) { set_text_content(self, to_str_nullable(value)); });
     I.node_method(any, "normalize", 0, [](Realm&, Node& self, Args) {
         normalize_subtree(self);
         return undefined();
@@ -810,31 +911,35 @@ void setup_node(Iface& I) {
         }
         return boolean(false);
     });
+    // The DOM standard's "locate a namespace" and "locate a namespace
+    // prefix": the element's own name first, then its xmlns attributes, then
+    // the same for each ancestor.
     I.node_method(any, "lookupNamespaceURI", 1, [](Realm&, Node& self, Args args) {
-        const bool no_prefix = js_arg(args, 0).is_nullish() || to_str(js_arg(args, 0)).empty();
-        const Node* at = &self;
-        std::shared_ptr<Node> hold;
-        while (at && !at->is_element()) {
-            hold = at->is_document() ? std::shared_ptr<Node>(static_cast<const Document*>(at)->document_element())
-                                     : script_parent(*at);
-            at = hold.get();
-        }
-        if (!at || !no_prefix) return null();
-        const std::string uri = namespace_uri_of(static_cast<const Element&>(*at));
+        const std::string prefix = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
+        const std::string uri = xml::locate_namespace(self, prefix);
         return uri.empty() ? null() : str(uri);
     });
-    I.node_method(any, "lookupPrefix", 1, [](Realm&, Node&, Args) { return null(); });
+    I.node_method(any, "lookupPrefix", 1, [](Realm&, Node& self, Args args) {
+        const std::string uri = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
+        if (uri.empty()) return null();
+        std::shared_ptr<Node> hold;
+        const Node* at = &self;
+        if (self.is_document()) {
+            hold = static_cast<const Document&>(self).document_element();
+            at = hold.get();
+        } else if (self.is_document_type() || self.is_document_fragment()) {
+            at = nullptr;
+        } else if (!self.is_element()) {
+            hold = self.parent();
+            at = hold && hold->is_element() ? hold.get() : nullptr;
+        }
+        std::string prefix;
+        if (!at || !xml::locate_prefix(static_cast<const Element&>(*at), uri, prefix)) return null();
+        return str(prefix);
+    });
     I.node_method(any, "isDefaultNamespace", 1, [](Realm&, Node& self, Args args) {
         const std::string wanted = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
-        const Node* at = &self;
-        std::shared_ptr<Node> hold;
-        while (at && !at->is_element()) {
-            hold = at->is_document() ? std::shared_ptr<Node>(static_cast<const Document*>(at)->document_element())
-                                     : script_parent(*at);
-            at = hold.get();
-        }
-        const std::string actual = at ? namespace_uri_of(static_cast<const Element&>(*at)) : std::string();
-        return boolean(actual == wanted);
+        return boolean(xml::locate_namespace(self, std::string()) == wanted);
     });
 
     I.node_method(any, "insertBefore", 2, [](Realm& r, Node& self, Args args) {
@@ -865,26 +970,18 @@ void setup_node(Iface& I) {
             (node.is_document_type() && !self.is_document())) {
             throw_dom(r, "HierarchyRequestError", "This node cannot be inserted here.");
         }
-        if (self.is_document()) {
-            if (node.is_element() && document_has_element_child(self, &child)) {
-                throw_dom(r, "HierarchyRequestError", "Only one element on document allowed.");
-            }
-            if (node.is_document_fragment()) {
-                std::size_t elements = 0;
-                for (const auto& inner : node.children()) {
-                    if (inner->is_text()) throw_dom(r, "HierarchyRequestError", "A document cannot have text as a child.");
-                    if (inner->is_element()) ++elements;
-                }
-                if (elements > 1 || (elements == 1 && document_has_element_child(self, &child))) {
-                    throw_dom(r, "HierarchyRequestError", "Only one element on document allowed.");
-                }
-            }
-        }
+        if (self.is_document()) ensure_document_shape(r, self, node, &child, true);
         auto keep_node = node.shared_from_this();
         auto keep_child = child.shared_from_this();
-        if (child.is_document_type()) {
-            remove_node(r, child);
-            insert_node(r, self, keep_node, nullptr);
+        if (child.is_document_type() || node.is_document_type()) {
+            // A doctype is not among the children: one goes out and the
+            // other goes in where it stood.
+            if (&node != &child) {
+                std::shared_ptr<Node> after = script_sibling(child, +1);
+                if (after == keep_node) after = script_sibling(node, +1);
+                remove_node(r, child);
+                insert_node(r, self, keep_node, after);
+            }
             return args[1];
         }
         std::shared_ptr<Node> reference = child.next_sibling();
@@ -1035,6 +1132,19 @@ void setup_text(Iface& I) {
 
 void setup_comment(Iface&) {}
 
+// A CDATA section is a Text node with another name; everything it can do is
+// on Text.prototype.
+void setup_cdata_section(Iface&) {}
+
+void setup_processing_instruction(Iface& I) {
+    const auto instruction = &is_instruction_node;
+    I.node_getter(instruction, "target", [](Realm&, Node& self) {
+        return str(static_cast<ProcessingInstruction&>(self).target());
+    });
+    // The style sheet an <?xml-stylesheet?> names: none is ever loaded.
+    I.node_getter(instruction, "sheet", [](Realm&, Node&) { return null(); });
+}
+
 void setup_fragment(Iface& I) {
     const auto fragment = &is_fragment_node;
     define_parent_node(I, fragment);
@@ -1060,6 +1170,8 @@ void register_node_interfaces() {
     register_interface({"CharacterData", "Node", setup_character_data, nullptr, 0, nullptr});
     register_interface({"Text", "CharacterData", setup_text, construct_text, 0, nullptr});
     register_interface({"Comment", "CharacterData", setup_comment, construct_comment, 0, nullptr});
+    register_interface({"CDATASection", "Text", setup_cdata_section, nullptr, 0, nullptr});
+    register_interface({"ProcessingInstruction", "CharacterData", setup_processing_instruction, nullptr, 0, nullptr});
     register_interface({"DocumentFragment", "Node", setup_fragment, construct_fragment, 0, nullptr});
     register_interface({"DocumentType", "Node", setup_doctype, nullptr, 0, nullptr});
 }

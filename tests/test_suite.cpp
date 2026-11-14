@@ -3,6 +3,12 @@
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
+#include "litebird/dom/AttributeList.hpp"
+#include "litebird/xml/XmlParser.hpp"
+#include "litebird/xml/XmlTools.hpp"
+#include "litebird/xml/XmlDom.hpp"
+#include "litebird/net/DataUrl.hpp"
+#include <fstream>
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
@@ -41,8 +47,16 @@
 #include "litebird/net/AbortController.hpp"
 #include "js_string_stress.hpp"
 
+#if defined(__SANITIZE_ADDRESS__)
+// From the sanitizer's runtime (sanitizer/allocator_interface.h, which not
+// every compiler installs). Weak: a runtime without it links all the same.
+extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
+#endif
+
 #include <iostream>
 #include <cmath>
+#include <random>
+#include <cstdio>
 #include <algorithm>
 #include <functional>
 #include <sstream>
@@ -61,10 +75,36 @@
 // real number of suites whenever a test was added.
 static int g_tests_run = 0;
 
+/// Called after every suite. In the sanitizer build it gives memory back;
+/// in the normal build it does nothing.
+///
+/// The suites run in one process and nothing in the engine collects
+/// unasked, so what the scripts of a suite made stays until the process
+/// ends. AddressSanitizer adds to that: every block that is freed is kept
+/// for a while (256 MB of quarantine), and the pages behind freed blocks
+/// are not handed back. One suite that nests 100,000 arrays leaves 1.4 GB
+/// behind that way, and by the last of the large suites the process had
+/// 3.8 GB and was killed on a machine with 4 GB (the sandbox these checks
+/// are run in; CI's runners have 16 GB and did not notice).
+///
+/// So after each suite, when its interpreters are gone: collect what their
+/// scripts made, and tell the sanitizer's allocator to return what it holds.
+/// A block freed in one suite and used in a later one would no longer be
+/// reported; within a suite nothing changes.
+#if defined(__SANITIZE_ADDRESS__)
+static void give_memory_back() {
+    litebird::Heap::default_heap().collect_garbage();
+    if (__sanitizer_purge_allocator) __sanitizer_purge_allocator();
+}
+#else
+static void give_memory_back() {}
+#endif
+
 #define RUN_TEST(name) do { \
     ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
+    give_memory_back(); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
 
@@ -3707,6 +3747,1316 @@ TEST(dom_follows_the_standard_where_jsdom_does_not) {
         Promise.resolve().then(function () { order.push('promise 2'); });
     )JS");
     assert(js.eval("order.join()").to_string() == "promise,observer,promise 2");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 28: XML. The parser alone, then XML documents in the DOM.
+// ---------------------------------------------------------------------------
+
+TEST(xml_parser_reads_xml_1_0_and_nothing_outside_the_document) {
+    using namespace litebird;
+    auto events = [](const std::string& text) {
+        std::string out;
+        xml::XmlError error;
+        return xml::xml_event_dump(text, out, error) ? out : std::string("error");
+    };
+
+    // 1. Everything a document holds, each name with its namespace: the
+    //    internal subset is read (an entity, a default for an attribute, a
+    //    type that makes the parser normalize a value), CDATA is text, and a
+    //    character reference in an attribute is not normalized away.
+    assert(events("<?xml version=\"1.0\"?>\n"
+                  "<!DOCTYPE r [<!ENTITY e \"v &amp; w\"><!ATTLIST r d CDATA \"def\" t NMTOKENS #IMPLIED>]>\n"
+                  "<r xmlns:p=\"urn:p\" t=\"  a   b  \" p:x=\"1&#10;2\">&e;<![CDATA[<c>]]><p:k/><!--n--><?pi  data ?></r>\n") ==
+           "doctype r||\nelement r\nattr d=\"def\"\nattr t=\"a b\"\nattr {urn:p}x=\"1\\n2\"\ntext \"v & w<c>\"\n"
+           "element {urn:p}k\nend\ncomment \"n\"\npi pi \"data \"\nend\n");
+
+    // 2. Line ends become one line feed in text; in an attribute value every
+    //    white space character becomes a space, and none is taken out.
+    assert(events("<a b=\" x \n\ty \">1\r\n2\r3</a>") == "element a\nattr b=\" x   y \"\ntext \"1\\n2\\n3\"\nend\n");
+
+    // 3. Well formed: accepted.
+    const char* const accepted[] = {
+        "<a/>", "<a></a>", "<a b='1' c=\"2\"/>", "<a>&#x10FFFF;</a>", "<\xC3\xA9/>", "<_a.b-c/>",
+        "<a><![CDATA[]]]]><![CDATA[>]]></a>", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><a/>",
+        "<a xmlns:p=\"u\"><p:b p:c=\"1\"/></a>", "<!DOCTYPE a [<!ELEMENT a EMPTY>]><a/>",
+        "<a>\n</a>\n<!--after-->\n<?pi?>\n", "<a b=\"x&#9;y\"/>", "<a xmlns=\"\"/>",
+        "<a xml:lang=\"en\" xml:space=\"preserve\"/>", "<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\"/>",
+        // A 1.x document is read as 1.0 (XML 1.0 Fifth Edition, 2.8).
+        "<?xml version=\"1.1\"?><a/>",
+        // With an external subset that was not read, an entity nobody
+        // declared is not an error of form: the declaration may be there.
+        "<!DOCTYPE a SYSTEM \"x.dtd\"><a>&undef;</a>",
+        "<!DOCTYPE a [<!ENTITY % p SYSTEM \"p.ent\">%p;]><a>&undef;</a>",
+    };
+    for (const char* text : accepted) assert(events(text) != "error");
+
+    // 4. Not well formed: refused, each for its own reason.
+    const std::string refused[] = {
+        "", "<a>", "<a></b>", "<a/><b/>", "text", "<a/>text", "<a b=1/>", "<a b=\"1\" b=\"2\"/>", "<a b=\"1\"c=\"2\"/>",
+        "<a b=\"<\"/>", "<a>&undefined;</a>", "<a>&#0;</a>", "<a>&#xD800;</a>", "<a>]]></a>", "<a><!-- a -- b --></a>",
+        "<?xml version=\"1.0\"?><?xml version=\"1.0\"?><a/>", " <?xml version=\"1.0\"?><a/>", "<a>\x01</a>",
+        "<a><?xml foo?></a>", "<1a/>", "<a b=\"&lt\"/>", "<a>&amp</a>", "<!DOCTYPE a><!DOCTYPE a><a/>", "<a><b></a></b>",
+        std::string("<a\0/>", 5), "<a>\xFF</a>", "<a>\xC3</a>", "<a>\xEF\xBF\xBE</a>",
+        // An entity that names itself; one whose text is half an element;
+        // a '<' that reaches an attribute value through an entity.
+        "<!DOCTYPE a [<!ENTITY e \"&e;\">]><a>&e;</a>", "<!DOCTYPE a [<!ENTITY e \"<b>\">]><a>&e;</a>",
+        "<!DOCTYPE a [<!ENTITY e \"<\">]><a b=\"&e;\"/>",
+        // Namespaces in XML: a prefix nobody declared, one attribute twice
+        // under two prefixes, the reserved prefixes and names, two colons.
+        "<a xmlns:p=\"u\"><q:b/></a>", "<a p:b=\"1\"/>", "<a xmlns:p=\"u\" xmlns:q=\"u\" p:x=\"1\" q:x=\"2\"/>",
+        "<a xmlns:xmlns=\"u\"/>", "<a xmlns:xml=\"u\"/>", "<a xmlns:p=\"\"/>", "<a:b:c xmlns:a=\"u\"/>", "<:a/>", "<a:/>",
+        "<a xmlns=\"http://www.w3.org/2000/xmlns/\"/>", "<a xmlns:p=\"http://www.w3.org/XML/1998/namespace\"/>",
+    };
+    for (const std::string& text : refused) assert(events(text) == "error");
+
+    // 5. An error says where.
+    {
+        std::string out;
+        xml::XmlError error;
+        assert(!xml::xml_event_dump("<a>\n  <b></a>", out, error));
+        assert(error.line == 2);
+        assert(error.describe().find("line 2") != std::string::npos);
+    }
+
+    // 6. Nothing outside the document is read. An external entity is a
+    //    file on this machine; its text must not come back.
+    {
+        const std::string path = "/tmp/litebird-xml-test-secret.txt";
+        FILE* file = fopen(path.c_str(), "w");
+        assert(file);
+        fputs("SECRET", file);
+        fclose(file);
+        const std::string read = events("<!DOCTYPE a [<!ENTITY x SYSTEM \"file://" + path + "\">"
+                                        "<!ENTITY % pe SYSTEM \"file://" + path + "\">%pe;]><a>&x;</a>");
+        assert(read == "doctype a||\nelement a\nend\n");
+        assert(events("<!DOCTYPE a SYSTEM \"file://" + path + "\"><a/>").find("SECRET") == std::string::npos);
+        // In an attribute value such a reference is forbidden outright.
+        assert(events("<!DOCTYPE a [<!ENTITY x SYSTEM \"file://" + path + "\">]><a b=\"&x;\"/>") == "error");
+        remove(path.c_str());
+    }
+
+    // 7. Bytes to text: the byte order mark, UTF-16 with and without one,
+    //    an encoding the declaration names, one that nobody knows.
+    auto decoded = [](const std::string& bytes, std::string_view transport = {}) {
+        std::string text, encoding;
+        xml::XmlError error;
+        if (!xml::decode_xml(bytes, text, encoding, error, transport)) {
+            return std::string(error.unsupported_encoding ? "unsupported" : "error");
+        }
+        return text;
+    };
+    auto utf16 = [](const std::string& ascii, bool big_endian) {
+        std::string out;
+        for (char c : ascii) {
+            if (big_endian) out += '\0';
+            out += c;
+            if (!big_endian) out += '\0';
+        }
+        return out;
+    };
+    assert(decoded("\xEF\xBB\xBF<a/>") == "<a/>");
+    assert(decoded("\xFF\xFE" + utf16("<a>x</a>", false)) == "<a>x</a>");
+    assert(decoded("\xFE\xFF" + utf16("<a>x</a>", true)) == "<a>x</a>");
+    assert(decoded(utf16("<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>", true)).find("<a/>") != std::string::npos);
+    assert(decoded("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>\xE9</a>").find("<a>\xC3\xA9</a>") != std::string::npos);
+    assert(decoded("<?xml version=\"1.0\" encoding=\"no-such-thing\"?><a/>") == "unsupported");
+    // What the transport says (a Content-Type charset) comes first.
+    assert(decoded("<a>\xE9</a>", "iso-8859-1") == "<a>\xC3\xA9</a>");
+
+    // 8. Names.
+    assert(xml::is_xml_name("a") && xml::is_xml_name("_a.b-c") && xml::is_xml_name("a:b:c") && xml::is_xml_name("\xC3\xA9"));
+    assert(!xml::is_xml_name("") && !xml::is_xml_name("1a") && !xml::is_xml_name("a b") && !xml::is_xml_name("-a"));
+    assert(xml::is_xml_qname("a") && xml::is_xml_qname("p:a"));
+    assert(!xml::is_xml_qname("a:b:c") && !xml::is_xml_qname(":a") && !xml::is_xml_qname("a:") && !xml::is_xml_qname("p:1"));
+
+    // 9. The canonical form the conformance suite compares.
+    {
+        std::string out;
+        xml::XmlError error;
+        assert(xml::xml_canonical_form("<!DOCTYPE r [<!ATTLIST r d CDATA \"def\">]>\n<r xmlns:p=\"urn:p\" p:x=\"1&#10;2\" b='\"'><![CDATA[<c>]]><p:k/><!--n--><?pi  data ?></r>\n", out, error));
+        assert(out == "<r b=\"&quot;\" d=\"def\" p:x=\"1&#10;2\" xmlns:p=\"urn:p\">&lt;c&gt;<p:k></p:k><?pi data ?></r>");
+    }
+}
+
+TEST(xml_parser_bounds_what_a_hostile_document_costs) {
+    using namespace litebird;
+    struct Counter : xml::XmlHandler {
+        std::size_t elements = 0, depth = 0, deepest = 0, text = 0, attributes = 0;
+        void start_element(const xml::XmlName&, std::vector<xml::XmlAttribute>& list) override {
+            ++elements;
+            attributes += list.size();
+            if (++depth > deepest) deepest = depth;
+        }
+        void end_element(const xml::XmlName&) override { --depth; }
+        void characters(std::string_view data) override { text += data.size(); }
+    };
+    auto seconds_since = [](std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+
+    // 1. A billion laughs: ten entities, each ten of the one before. Written
+    //    out it is ten gigabytes. It is refused, and soon.
+    {
+        std::string text = "<!DOCTYPE l [<!ENTITY a \"aaaaaaaaaa\">";
+        const std::string names = "abcdefghij";
+        for (std::size_t i = 1; i < names.size(); ++i) {
+            text += std::string("<!ENTITY ") + names[i] + " \"";
+            for (int k = 0; k < 10; ++k) text += std::string("&") + names[i - 1] + ";";
+            text += "\">";
+        }
+        Counter counter;
+        xml::XmlError error;
+        const auto start = std::chrono::steady_clock::now();
+        assert(!xml::parse_xml(text + "]><l>&j;</l>", counter, error));
+        assert(seconds_since(start) < 30.0);
+        assert(counter.text < 64u * 1024u * 1024u);
+        // The same in an attribute value.
+        Counter second;
+        assert(!xml::parse_xml(text + "]><l b=\"&j;\"/>", second, error));
+        assert(seconds_since(start) < 60.0);
+    }
+
+    // 2. One long entity used many times: 50,000 characters, 50,000 times,
+    //    2.5 GB from 200 kB. Refused too.
+    {
+        std::string text = "<!DOCTYPE q [<!ENTITY e \"" + std::string(50000, 'x') + "\">]><q>";
+        for (int i = 0; i < 50000; ++i) text += "&e;";
+        text += "</q>";
+        Counter counter;
+        xml::XmlError error;
+        assert(!xml::parse_xml(text, counter, error));
+        assert(counter.text < 64u * 1024u * 1024u);
+    }
+
+    // 3. And a document that uses entities the way documents do is read:
+    //    a megabyte of text out of a small entity is nobody's attack.
+    {
+        std::string text = "<!DOCTYPE q [<!ENTITY e \"" + std::string(100, 'x') + "\">]><q>";
+        for (int i = 0; i < 10000; ++i) text += "&e;";
+        text += "</q>";
+        Counter counter;
+        xml::XmlError error;
+        assert(xml::parse_xml(text, counter, error));
+        assert(counter.text == 1000000);
+    }
+
+    // 4. 200,000 elements inside each other: read in a loop, not by
+    //    functions calling themselves.
+    {
+        std::string text;
+        for (int i = 0; i < 200000; ++i) text += "<a>";
+        for (int i = 0; i < 200000; ++i) text += "</a>";
+        Counter counter;
+        xml::XmlError error;
+        assert(xml::parse_xml(text, counter, error));
+        assert(counter.elements == 200000 && counter.deepest == 200000);
+    }
+
+    // 5. 50,000 attributes on one element, 50,000 namespace declarations
+    //    with 50,000 children that use them: the cost of each is its size.
+    //    (Finding a repeated attribute by comparing each with all the others
+    //    is the square of it: minutes.)
+    {
+        std::string many = "<a";
+        for (int i = 0; i < 50000; ++i) many += " a" + std::to_string(i) + "=\"v\"";
+        many += "/>";
+        Counter counter;
+        xml::XmlError error;
+        const auto start = std::chrono::steady_clock::now();
+        assert(xml::parse_xml(many, counter, error));
+        assert(counter.attributes == 50000);
+        // The same with the last one a repeat of the first: found.
+        std::string repeated = many.substr(0, many.size() - 2) + " a0=\"again\"/>";
+        assert(!xml::parse_xml(repeated, counter, error));
+
+        std::string declared = "<r";
+        for (int i = 0; i < 50000; ++i) declared += " xmlns:p" + std::to_string(i) + "=\"urn:n" + std::to_string(i) + "\"";
+        declared += ">";
+        for (int i = 0; i < 50000; ++i) declared += "<p" + std::to_string(i) + ":c/>";
+        declared += "</r>";
+        Counter second;
+        assert(xml::parse_xml(declared, second, error));
+        assert(second.elements == 50001);
+        assert(seconds_since(start) < 60.0);
+    }
+
+    // 6. The DOCTYPE is text from the same hand. 50,000 attributes declared
+    //    for one element (each must be looked up: the first declaration of
+    //    a name is the one that counts), the same one declared 50,000 times,
+    //    a content model 200,000 parentheses deep, one naming 50,000
+    //    elements, an entity that is a chain of 50,000.
+    {
+        const auto start = std::chrono::steady_clock::now();
+        xml::XmlError error;
+        std::string list = "<!DOCTYPE a [<!ATTLIST a";
+        for (int i = 0; i < 50000; ++i) list += " a" + std::to_string(i) + " CDATA \"v\"";
+        list += ">]><a/>";
+        Counter declared;
+        assert(xml::parse_xml(list, declared, error));
+        assert(declared.attributes == 50000);
+
+        std::string again = "<!DOCTYPE a [";
+        for (int i = 0; i < 50000; ++i) again += "<!ATTLIST a x CDATA \"v" + std::to_string(i) + "\">";
+        again += "]><a/>";
+        struct First : xml::XmlHandler {
+            std::string value;
+            void start_element(const xml::XmlName&, std::vector<xml::XmlAttribute>& attributes) override {
+                assert(attributes.size() == 1 && !attributes[0].specified);
+                value = attributes[0].value;
+            }
+        } first;
+        assert(xml::parse_xml(again, first, error));
+        assert(first.value == "v0");
+
+        Counter model;
+        assert(xml::parse_xml("<!DOCTYPE a [<!ELEMENT a " + std::string(200000, '(') + "b" + std::string(200000, ')') + ">]><a/>", model, error));
+        assert(!xml::parse_xml("<!DOCTYPE a [<!ELEMENT a " + std::string(200000, '(') + "b" + std::string(199999, ')') + ">]><a/>", model, error));
+        std::string mixed = "<!DOCTYPE a [<!ELEMENT a (#PCDATA";
+        for (int i = 0; i < 50000; ++i) mixed += "|e" + std::to_string(i);
+        assert(xml::parse_xml(mixed + ")*>]><a/>", model, error));
+
+        std::string chain = "<!DOCTYPE a [<!ENTITY e0 \"x\">";
+        for (int i = 1; i < 50000; ++i) chain += "<!ENTITY e" + std::to_string(i) + " \"&e" + std::to_string(i - 1) + ";\">";
+        Counter linked;
+        assert(xml::parse_xml(chain + "]><a b=\"&e49999;\">&e49999;</a>", linked, error));
+        assert(linked.text == 1);
+        //    And the chain closed into a ring is an entity that contains
+        //    itself: refused, not followed.
+        assert(!xml::parse_xml(chain + "<!ENTITY ring \"&last;\"><!ENTITY last \"&ring;\">]><a>&ring;</a>", linked, error));
+        assert(seconds_since(start) < 60.0);
+    }
+
+    // 7. An attribute default is text the document did not write where it
+    //    appears. One default of a megabyte and 100,000 empty tags are 100
+    //    GB of attribute values from 1.4 MB: counted with what entities
+    //    add, and refused under the same limit.
+    {
+        const auto start = std::chrono::steady_clock::now();
+        xml::XmlError error;
+        std::string empty_tags;
+        for (int i = 0; i < 100000; ++i) empty_tags += "<e/>";
+        Counter counter;
+        assert(!xml::parse_xml("<!DOCTYPE a [<!ATTLIST e x CDATA \"" + std::string(1000000, 'v') + "\">]><a>" + empty_tags + "</a>", counter, error));
+        assert(error.message.find("expand") != std::string::npos);
+        assert(counter.elements < 1000);
+        //    A hundred defaults on each of 10,000 elements: 12 MB from 43 kB.
+        std::string hundred = "<!DOCTYPE a [<!ATTLIST e";
+        for (int i = 0; i < 100; ++i) hundred += " a" + std::to_string(i) + " CDATA \"0123456789\"";
+        Counter many;
+        assert(!xml::parse_xml(hundred + ">]><a>" + empty_tags.substr(0, 40000) + "</a>", many, error));
+        //    The same on ten elements is a document like any other, and so
+        //    is one small default on 100,000.
+        Counter few;
+        assert(xml::parse_xml(hundred + ">]><a>" + empty_tags.substr(0, 40) + "</a>", few, error));
+        assert(few.attributes == 1000);
+        Counter small;
+        assert(xml::parse_xml("<!DOCTYPE a [<!ATTLIST e x CDATA \"v\">]><a>" + empty_tags + "</a>", small, error));
+        assert(small.attributes == 100000);
+        assert(seconds_since(start) < 60.0);
+    }
+}
+
+TEST(xml_documents_in_the_dom) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/dir/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><html><head><title>t</title></head><body></body></html>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var P = new DOMParser(), S = new XMLSerializer();
+        function xml(text, type) { return P.parseFromString(text, type || 'application/xml'); }
+        function caught(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. The four XML types give a document of that content type whose
+    //    elements keep their names and have no namespace unless the text
+    //    gives them one. (This used to be the HTML parser: <Root> came back
+    //    as <html><head></head><body><root>.)
+    assert(S("['application/xml', 'text/xml', 'image/svg+xml', 'application/xhtml+xml'].map(function (t) {"
+             "  var d = xml('<Root/>', t); return d.contentType + ' ' + d.documentElement.nodeName + ' ' + d.documentElement.namespaceURI + ' ' + d.childNodes.length; }).join('|')") ==
+           "application/xml Root null 1|text/xml Root null 1|image/svg+xml Root null 1|application/xhtml+xml Root null 1");
+    assert(S("caught(function () { xml('<a/>', 'text/plain'); })") == "TypeError");
+    assert(S("var d = xml('<a/>'); [d.URL, d.characterSet, d.compatMode, d.defaultView, d.location, d.doctype].join(' ')") ==
+           "https://example.test/dir/page.html UTF-8 CSS1Compat   ");
+
+    // 2. Names are case-sensitive, in the tree and for whoever searches it.
+    assert(S("var d = xml('<Root A=\"1\" a=\"2\"><Child/></Root>'), r = d.documentElement;"
+             "[r.tagName, r.getAttribute('A'), r.getAttribute('a'), r.firstChild.nodeName, d.querySelector('Child') !== null,"
+             " d.querySelector('child'), d.getElementsByTagName('child').length, d.getElementsByTagName('Child').length].join(' ')") ==
+           "Root 1 2 Child true  0 1");
+
+    // 3. Namespaces: of elements, of attributes, declarations as attributes
+    //    of their own, and the three questions a node answers about them.
+    assert(S("var d = xml('<r xmlns=\"urn:d\" xmlns:p=\"urn:p\" p:a=\"1\" b=\"2\"><p:c/><d xmlns=\"\"/></r>'), r = d.documentElement, a = r.attributes;"
+             "[r.namespaceURI, r.prefix, r.localName, a.length, a[0].name, a[0].namespaceURI, a[1].name, a[1].prefix, a[1].localName,"
+             " a[2].name, a[2].namespaceURI, a[2].prefix, a[2].localName, a[3].namespaceURI, r.firstChild.namespaceURI, r.firstChild.prefix,"
+             " r.firstChild.localName, r.firstChild.tagName, r.lastChild.namespaceURI].join(' ')") ==
+           "urn:d  r 4 xmlns http://www.w3.org/2000/xmlns/ xmlns:p xmlns p p:a urn:p p a  urn:p p c p:c ");
+    assert(S("[r.getAttributeNS('urn:p', 'a'), r.getAttributeNS(null, 'b'), r.getAttributeNS('urn:p', 'b'), r.hasAttributeNS('urn:p', 'a'),"
+             " r.lookupNamespaceURI('p'), r.lookupNamespaceURI(null), r.lookupNamespaceURI('q'), r.lookupPrefix('urn:p'), r.lookupPrefix('urn:d'),"
+             " r.isDefaultNamespace('urn:d'), r.lastChild.isDefaultNamespace(null), r.lastChild.lookupNamespaceURI('p'),"
+             " r.firstChild.lookupNamespaceURI(null)].join(' ')") ==
+           "1 2  true urn:p urn:d  p  true true urn:p urn:d");
+
+    // 4. An element in the XHTML or SVG namespace is the element HTML and
+    //    SVG know, whatever document it is in; any other is an Element.
+    assert(S("var d = xml('<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p id=\"p\">x</p><svg xmlns=\"http://www.w3.org/2000/svg\"/><P/></body></html>');"
+             "var p = d.getElementById('p');"
+             "[p.constructor.name, p.tagName, d.body.constructor.name, p.nextSibling.constructor.name, p.nextSibling.nextSibling.constructor.name,"
+             " xml('<p/>').documentElement.constructor.name].join(' ')") ==
+           "HTMLParagraphElement p HTMLBodyElement SVGSVGElement HTMLUnknownElement Element");
+
+    // 5. CDATA sections and processing instructions are nodes of their own
+    //    kinds, in the document and above its element; the XML declaration
+    //    is not a node.
+    assert(S("var d = xml('<?xml version=\"1.0\"?><!--c--><?pi d a t a?><a><![CDATA[<x>&]]>t<?q?></a>'), a = d.documentElement;"
+             "[d.childNodes.length, d.firstChild.nodeType, d.childNodes[1].nodeType, d.childNodes[1].target, d.childNodes[1].data,"
+             " d.childNodes[1].nodeName, d.childNodes[1].constructor.name, a.childNodes.length, a.firstChild.nodeType,"
+             " a.firstChild.constructor.name, a.firstChild.nodeName, a.firstChild.data, a.firstChild instanceof Text,"
+             " a.lastChild.target, a.lastChild.data === '', a.textContent].join('|')") ==
+           "3|8|7|pi|d a t a|pi|ProcessingInstruction|3|4|CDATASection|#cdata-section|<x>&|true|q|true|<x>&t");
+
+    // 6. The five entities and character references; nothing else unless
+    //    the document declares it.
+    assert(S("xml('<a b=\"&lt;&amp;&gt;&quot;&apos;&#65;&#x42;\">&lt;&amp;&gt;&quot;&apos;&#67;</a>').documentElement.getAttribute('b')") == "<&>\"'AB");
+    assert(S("xml('<a>&lt;&amp;&gt;&quot;&apos;&#67;</a>').documentElement.textContent") == "<&>\"'C");
+    assert(S("xml('<a>&nbsp;</a>').documentElement.nodeName") == "parsererror");
+    assert(S("var d = xml('<!DOCTYPE r PUBLIC \"pub\" \"sys\" [<!ENTITY e \"v\"><!ATTLIST r d CDATA \"def\">]><r>&e;</r>');"
+             "[d.doctype.name, d.doctype.publicId, d.doctype.systemId, d.documentElement.textContent, d.documentElement.getAttribute('d'),"
+             " S.serializeToString(d)].join('|')") ==
+           "r|pub|sys|v|def|<!DOCTYPE r PUBLIC \"pub\" \"sys\"><r d=\"def\">v</r>");
+
+    // 7. Not well formed: no exception. The document is one parsererror
+    //    element, in the namespace Firefox gave it and the HTML standard
+    //    took, holding the reason as text.
+    assert(S("var d = xml('<a><b></a>'), r = d.documentElement;"
+             "[r.nodeName, r.namespaceURI, d.childNodes.length, r.childNodes.length, r.firstChild.nodeType, r.textContent.indexOf('line 1') >= 0,"
+             " d.getElementsByTagName('parsererror').length,"
+             " d.getElementsByTagNameNS('http://www.mozilla.org/newlayout/xml/parsererror.xml', 'parsererror').length].join(' ')") ==
+           "parsererror http://www.mozilla.org/newlayout/xml/parsererror.xml 1 1 3 true 1 1");
+    assert(S("['', 'text', '<a>', '<a/><b/>', '<p:a/>', '<a b=1/>', '<a>&x;</a>'].map(function (t) { return xml(t).documentElement.nodeName; }).join()") ==
+           "parsererror,parsererror,parsererror,parsererror,parsererror,parsererror,parsererror");
+    // Nothing of the half-read document is left beside the error.
+    assert(S("var d = xml('<!DOCTYPE a><!--c--><a><b/><c>'); d.childNodes.length + ' ' + d.doctype") == "1 null");
+
+    // 8. A script is not run, and nothing is fetched: this document has no
+    //    window. An external entity is not read.
+    js.eval("var ran = 0; xml('<html xmlns=\"http://www.w3.org/1999/xhtml\"><script>ran = 1;</script><img src=\"x\" onerror=\"ran = 2\"/></html>');");
+    assert(S("ran") == "0");
+    assert(S("var d = xml('<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r>&x;</r>'); d.documentElement.nodeName + '[' + d.documentElement.textContent + ']'") == "r[]");
+
+    // 9. A lone surrogate in the string cannot be in an XML document: the
+    //    string is made well-formed Unicode first, as the standard says.
+    assert(S("xml('<a>\\uD800</a>').documentElement.textContent === '\\uFFFD'") == "true");
+
+    // 10. What the hostile documents of the parser's own test do here.
+    assert(S("var e = '<!DOCTYPE l [<!ENTITY a \"aaaaaaaaaa\">', n = 'abcdefghij';"
+             "for (var i = 1; i < 10; i++) { var r = ''; for (var k = 0; k < 10; k++) r += '&' + n[i - 1] + ';'; e += '<!ENTITY ' + n[i] + ' \"' + r + '\">'; }"
+             "xml(e + ']><l>&j;</l>').documentElement.nodeName") == "parsererror");
+    assert(S("var n = 200000, d = xml(new Array(n + 1).join('<a>') + new Array(n + 1).join('</a>')), depth = 0;"
+             "for (var e = d.documentElement; e; e = e.firstChild) depth++;"
+             "depth + ' ' + S.serializeToString(d).length + ' ' + d.getElementsByTagName('a').length") == "200000 1399997 200000");
+    js.eval("d = null; e = null; gc();");
+
+    // 11. Documents a script makes: createDocument gives an XMLDocument with
+    //     the content type of its namespace; new Document() an XML document
+    //     with no element. Neither lowercases a name.
+    assert(S("var I = document.implementation, a = I.createDocument('http://www.w3.org/1999/xhtml', 'html'), b = I.createDocument('http://www.w3.org/2000/svg', 'svg'),"
+             " c = I.createDocument('urn:x', 'p:r', I.createDocumentType('r', '', '')), n = I.createDocument(null, null);"
+             "[a.contentType, a.documentElement.constructor.name, b.contentType, b.documentElement.constructor.name, c.contentType, c.doctype.name,"
+             " S.serializeToString(c), n.documentElement, I.createDocument(null, '').documentElement, I.createDocument(null, undefined).documentElement.nodeName,"
+             " a.constructor.name, a instanceof XMLDocument, a instanceof Document, b.rootElement === b.documentElement, a.rootElement].join(' ')") ==
+           "application/xhtml+xml HTMLHtmlElement image/svg+xml SVGSVGElement application/xml r <!DOCTYPE r><p:r xmlns:p=\"urn:x\"/>   undefined XMLDocument true true true ");
+    assert(S("var d = new Document(); [d.contentType, d.constructor.name, d.URL, d.documentElement, d.createElement('A').localName,"
+             " d.createElement('a').namespaceURI, d.createElement('a').constructor.name].join(' ')") ==
+           "application/xml Document about:blank  A  Element");
+    assert(S("var d = xml('<a/>'); [caught(function () { d.write('x'); }), caught(function () { d.open(); }), caught(function () { d.close(); }),"
+             " d.createElement('B').localName, d.body, d.head, d.title, d.forms.length].join(' ')") ==
+           "InvalidStateError InvalidStateError InvalidStateError B    0");
+    assert(S("caught(function () { document.createCDATASection('x'); }) + ' ' + xml('<a/>').createCDATASection('x').data") == "NotSupportedError x");
+}
+
+TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var P = new DOMParser(), S = new XMLSerializer(), XMLNS = 'http://www.w3.org/2000/xmlns/';
+        function xml(text) { return P.parseFromString(text, 'application/xml'); }
+        var X = document.implementation.createDocument(null, null);
+        function el(ns, name) { return X.createElementNS(ns, name); }
+        function strict(build) { var r = el(null, 'r'); build(r); try { return r.innerHTML; } catch (e) { return e.name; } }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. A document: the DOCTYPE, comments, processing instructions and
+    //    CDATA sections as they are; no XML declaration.
+    assert(S("S.serializeToString(xml('<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE a><!--c--><a><?p d?><![CDATA[x]]><b/></a>'))") ==
+           "<!DOCTYPE a><!--c--><a><?p d?><![CDATA[x]]><b/></a>");
+
+    // 2. What is escaped. In text: & < >. In an attribute value: & < > "
+    //    and the three characters a parser would turn into spaces. (The
+    //    working draft of September 2026 dropped '>' from the attribute
+    //    list while its note still names it; every browser writes &gt;.)
+    assert(S("var r = el(null, 'r'); r.setAttribute('a', '<>&\"\\'\\t\\n\\r\\u00a0'); r.textContent = '<>&\"\\'\\t\\n\\u00a0'; S.serializeToString(r)") ==
+           "<r a=\"&lt;&gt;&amp;&quot;'&#9;&#xA;&#xD;\xC2\xA0\">&lt;&gt;&amp;\"'\t\n\xC2\xA0</r>");
+
+    // 3. The identifiers of a DOCTYPE in the quote they do not hold.
+    assert(S("[['p', 's'], ['p\"q', \"s'\"], [\"p'q\", 's\"t'], ['', 's'], ['p', '']].map(function (ids) {"
+             "  return S.serializeToString(document.implementation.createDocumentType('r', ids[0], ids[1])); }).join(' ')") ==
+           "<!DOCTYPE r PUBLIC \"p\" \"s\"> <!DOCTYPE r PUBLIC 'p\"q' \"s'\"> <!DOCTYPE r PUBLIC \"p'q\" 's\"t'> <!DOCTYPE r SYSTEM \"s\"> <!DOCTYPE r PUBLIC \"p\">");
+
+    // 4. HTML elements: the names that have no end tag in HTML are written
+    //    with " /", the others with one; the namespace is declared once.
+    assert(S("var d = document.createElement('div'); d.innerHTML = '<br><img src=\"a.png\"><p>x</p><input disabled>'; S.serializeToString(d)") ==
+           "<div xmlns=\"http://www.w3.org/1999/xhtml\"><br /><img src=\"a.png\" /><p>x</p><input disabled=\"\" /></div>");
+    assert(S("var f = new DocumentFragment(); f.append(document.createElement('div'), document.createElement('span')); S.serializeToString(f)") ==
+           "<div xmlns=\"http://www.w3.org/1999/xhtml\"></div><span xmlns=\"http://www.w3.org/1999/xhtml\"></span>");
+
+    // 5. A declaration that says what is already so is left out; one that
+    //    is needed to leave a default namespace is written.
+    assert(S("S.serializeToString(xml('<root xmlns=\"uri1\"><child xmlns=\"uri1\"/></root>'))") == "<root xmlns=\"uri1\"><child/></root>");
+    assert(S("var r = el('urn:a', 'r'); r.appendChild(el(null, 'c')).appendChild(el('urn:a', 'd')); S.serializeToString(r)") ==
+           "<r xmlns=\"urn:a\"><c xmlns=\"\"><d xmlns=\"urn:a\"/></c></r>");
+    // The xml prefix is never declared.
+    assert(S("var r = el(null, 'r'); r.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:lang', 'en');"
+             "r.appendChild(el('http://www.w3.org/XML/1998/namespace', 'xml:x')); S.serializeToString(r)") == "<r xml:lang=\"en\"><xml:x/></r>");
+
+    // 6. An attribute keeps its prefix (the draft of September 2026, and
+    //    what browsers always did); it is declared where it is used, again
+    //    if an ancestor has the prefix for another namespace.
+    assert(S("var r = el(null, 'r'); r.setAttributeNS('uri2', 'p:name', 'v'); S.serializeToString(r)") == "<r xmlns:p=\"uri2\" p:name=\"v\"/>");
+    assert(S("var r = xml('<root xmlns:p=\"uri1\"><child/></root>').documentElement; r.firstChild.setAttributeNS('uri2', 'p:foobar', 'v'); S.serializeToString(r)") ==
+           "<root xmlns:p=\"uri1\"><child xmlns:p=\"uri2\" p:foobar=\"v\"/></root>");
+    // With no prefix it gets a made-up one: ns1, ns2, ... counted over the
+    // whole text.
+    assert(S("var r = el(null, 'r'); r.setAttributeNS('u1', 'a', '1'); r.setAttributeNS('u2', 'b', '2');"
+             "var c = el(null, 'c'); c.setAttributeNS('u3', 'c', '3'); r.appendChild(c); S.serializeToString(r)") ==
+           "<r xmlns:ns1=\"u1\" ns1:a=\"1\" xmlns:ns2=\"u2\" ns2:b=\"2\"><c xmlns:ns3=\"u3\" ns3:c=\"3\"/></r>");
+
+    // 7. Where the standard's algorithm writes text that reads back as
+    //    another tree, or as no tree. Litebird does not follow it there
+    //    (w3c/DOM-Parsing issues 44, 45, 75, 83; the web-platform-tests
+    //    that assert the algorithm are listed in tests/wpt/README.md).
+    //
+    //    44: a made-up prefix must not be one that is declared here.
+    //    The standard: <child xmlns:ns1="uri1" xmlns:ns1="uri3" ...>.
+    assert(S("var r = xml('<root xmlns:ns2=\"uri2\"><child xmlns:ns1=\"uri1\"/></root>').documentElement;"
+             "r.firstChild.setAttributeNS('uri3', 'attr1', 'value1'); S.serializeToString(r)") ==
+           "<root xmlns:ns2=\"uri2\"><child xmlns:ns1=\"uri1\" xmlns:ns3=\"uri3\" ns3:attr1=\"value1\"/></root>");
+    //    45, 75: q was u1 on the outer element and is u2 on the inner one.
+    //    The standard writes q:name for an attribute in u1; read back, it
+    //    is in u2.
+    assert(S("var r = xml('<el1 xmlns:p=\"u1\" xmlns:q=\"u1\"><el2 xmlns:q=\"u2\"/></el1>').documentElement;"
+             "r.firstChild.setAttributeNS('u1', 'name', 'v'); S.serializeToString(r)") ==
+           "<el1 xmlns:p=\"u1\" xmlns:q=\"u1\"><el2 xmlns:q=\"u2\" p:name=\"v\"/></el1>");
+    assert(S("var back = xml(S.serializeToString(r)).documentElement.firstChild; back.getAttributeNS('u1', 'name') + ' ' + back.attributes.length") == "v 2");
+    //    83: an attribute named xmlns in no namespace (setAttribute, or the
+    //    HTML parser on <html xmlns="...">) is not a declaration, and
+    //    written out it would be one: of another namespace than the
+    //    element's, or a second xmlns on one tag.
+    assert(S("var r = el(null, 'r'); r.setAttribute('xmlns', 'urn:q'); var a = el('urn:a', 'a'); a.setAttribute('xmlns', 'urn:q');"
+             "S.serializeToString(r) + ' ' + S.serializeToString(a)") == "<r/> <a xmlns=\"urn:a\"/>");
+    assert(S("var h = P.parseFromString('<html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><body></body></html>', 'text/html');"
+             "h.documentElement.attributes[0].namespaceURI + ' ' + S.serializeToString(h.documentElement)") ==
+           "null <html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en\"><head></head><body></body></html>");
+
+    // 8. XMLSerializer does not refuse what XML cannot hold: it writes it,
+    //    and the text is not XML. That is the standard, and scripts rely on
+    //    serializeToString not throwing.
+    assert(S("var r = el(null, 'r'); r.appendChild(X.createComment('a--b-')); var c = X.createCDATASection('x'); c.data = 'a]]>b'; r.appendChild(c);"
+             "r.appendChild(X.createTextNode('cr\\rhere')); var p = X.createProcessingInstruction('t', 'x'); p.data = 'a?>b'; r.appendChild(p);"
+             "S.serializeToString(r)") == "<r><!--a--b---><![CDATA[a]]>b]]>cr\rhere<?t a?>b?></r>");
+    assert(S("var r = el(null, 'root'); r.setAttributeNS(XMLNS, 'xmlns:foo', ''); S.serializeToString(r)") == "<root xmlns:foo=\"\"/>");
+    //    A carriage return in text is written as it is, so it reads back as
+    //    a line feed: the one thing here that is lost without a word.
+    assert(S("var r = el(null, 'r'); r.textContent = 'a\\rb'; xml(S.serializeToString(r)).documentElement.textContent === 'a\\nb'") == "true");
+
+    // 9. innerHTML and outerHTML of an XML document do refuse ("require
+    //    well-formed"): InvalidStateError for each of those, and for a CDATA
+    //    section holding ]]>, which the standard would write.
+    assert(S("[strict(function (r) { r.appendChild(X.createComment('a--b')); }), strict(function (r) { r.appendChild(X.createComment('a-')); }),"
+             " strict(function (r) { var c = X.createCDATASection('x'); c.data = 'a]]>b'; r.appendChild(c); }),"
+             " strict(function (r) { var p = X.createProcessingInstruction('t', 'x'); p.data = 'a?>b'; r.appendChild(p); }),"
+             " strict(function (r) { r.appendChild(X.createTextNode('bad\\u0001char')); }),"
+             " strict(function (r) { var c = el(null, 'c'); c.setAttributeNS(XMLNS, 'xmlns:p', ''); r.appendChild(c); }),"
+             " strict(function (r) { r.appendChild(X.createTextNode('fine')); })].join(' ')") ==
+           "InvalidStateError InvalidStateError InvalidStateError InvalidStateError InvalidStateError InvalidStateError fine");
+    //    xmlns="" on an element with a prefix is well formed and harmless;
+    //    the standard's text refuses it (issue 48).
+    assert(S("strict(function (r) { var c = el('urn:a', 'p:c'); c.setAttributeNS(XMLNS, 'xmlns', ''); r.appendChild(c); })") ==
+           "<p:c xmlns:p=\"urn:a\" xmlns=\"\"/>");
+
+    // 10. What is not a node, and what is a node with nothing to write.
+    assert(S("var name = 'no error'; try { S.serializeToString({}); } catch (e) { name = e.name; } name") == "TypeError");
+    assert(S("var r = el(null, 'r'); r.setAttribute('a', '1'); JSON.stringify([S.serializeToString(r.attributes[0]), S.serializeToString(X.createDocumentFragment())])") == "[\"\",\"\"]");
+
+    // 11. A wide tree and a wide element cost their size: one scope of
+    //     prefixes for the whole walk, taken back as the walk leaves each
+    //     element. (A copy of the scope per element, which is how the
+    //     standard is written, made 50,000 declarations on a root with
+    //     50,000 children cost their product.)
+    const auto start = std::chrono::steady_clock::now();
+    assert(S("var r = el(null, 'r'); for (var i = 0; i < 50000; i++) r.setAttributeNS(XMLNS, 'xmlns:p' + i, 'urn:n' + i);"
+             "for (var i = 0; i < 50000; i++) r.appendChild(el('urn:n' + i, 'p' + i + ':c'));"
+             "var text = S.serializeToString(r), back = xml(text).documentElement;"
+             "[text.length > 1000000, back.childNodes.length, back.lastChild.namespaceURI, back.lastChild.prefix, text.indexOf('ns1')].join(' ')") ==
+           "true 50000 urn:n49999 p49999 -1");
+    assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
+}
+
+TEST(inner_html_of_an_xml_document_is_xml) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var P = new DOMParser();
+        function xml(text) { return P.parseFromString(text, 'application/xml'); }
+        function caught(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. The text is parsed as XML, with the namespaces in scope where it
+    //    goes: the default one and every prefix.
+    assert(S("var d = xml('<r xmlns=\"urn:d\" xmlns:p=\"urn:p\"><host/></r>'), h = d.documentElement.firstChild;"
+             "h.innerHTML = '<p:a/><b>t</b><![CDATA[c]]><?pi x?><!--k-->';"
+             "[h.childNodes.length, h.firstChild.namespaceURI, h.childNodes[1].namespaceURI, h.childNodes[2].nodeType, h.childNodes[3].nodeType,"
+             " h.childNodes[4].nodeType].join(' ')") == "5 urn:p urn:d 4 7 8");
+    //    And written as XML: each child says where it stands.
+    assert(S("h.innerHTML") == "<p:a xmlns:p=\"urn:p\"/><b xmlns=\"urn:d\">t</b><![CDATA[c]]><?pi x?><!--k-->");
+    assert(S("h.outerHTML") == "<host xmlns=\"urn:d\"><p:a xmlns:p=\"urn:p\"/><b>t</b><![CDATA[c]]><?pi x?><!--k--></host>");
+
+    // 2. Text that is not well formed is a SyntaxError, and the element
+    //    keeps what it had. HTML would have made something of it.
+    assert(S("var d = xml('<r><host>keep</host></r>'), h = d.documentElement.firstChild;"
+             "[caught(function () { h.innerHTML = '<unclosed>'; }), caught(function () { h.innerHTML = '<q:a/>'; }),"
+             " caught(function () { h.innerHTML = 'a &nbsp; b'; }), caught(function () { h.innerHTML = '<a></b>'; }), h.textContent].join(' ')") ==
+           "SyntaxError SyntaxError SyntaxError SyntaxError keep");
+    assert(S("h.innerHTML = 'text &amp; <more/>'; h.innerHTML + ' ' + h.childNodes.length") == "text &amp; <more/> 2");
+
+    // 3. No HTML rules: names keep their case, <br></br> is one element,
+    //    <title> holds elements, nothing is moved to a <head>.
+    assert(S("var d = xml('<r/>'); d.documentElement.innerHTML = '<DIV><br></br><Title><i/></Title></DIV>';"
+             "d.documentElement.innerHTML + ' ' + d.documentElement.firstChild.constructor.name") == "<DIV><br/><Title><i/></Title></DIV> Element");
+
+    // 4. outerHTML, insertAdjacentHTML and createContextualFragment go the
+    //    same way.
+    assert(S("var d = xml('<r><a/></r>'), a = d.documentElement.firstChild; a.insertAdjacentHTML('beforebegin', '<x/>');"
+             "a.insertAdjacentHTML('afterend', 'tail'); a.outerHTML = '<y/><z/>'; d.documentElement.innerHTML") == "<x/><y/><z/>tail");
+    assert(S("var d = xml('<r xmlns=\"urn:d\"/>'), range = d.createRange(); range.selectNodeContents(d.documentElement);"
+             "range.createContextualFragment('<a/>').firstChild.namespaceURI") == "urn:d");
+    assert(S("var d = xml('<r><a/></r>'); caught(function () { d.documentElement.firstChild.insertAdjacentHTML('afterbegin', '<b>'); })") == "SyntaxError");
+
+    // 5. An XHTML <template> in an XML document: what the parser puts in
+    //    it goes to its content, as in HTML.
+    assert(S("var d = xml('<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><template><b/>t</template></body></html>'), t = d.querySelector('template');"
+             "[t.childNodes.length, t.content.childNodes.length, t.innerHTML].join(' ')") == "0 2 <b xmlns=\"http://www.w3.org/1999/xhtml\"></b>t");
+
+    // 6. An HTML document is not touched by any of this: its innerHTML is
+    //    HTML whatever namespace the element is in.
+    assert(S("var s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); document.body.appendChild(s); s.innerHTML = '<circle r=1><unclosed>';"
+             "s.innerHTML + ' ' + s.firstChild.namespaceURI") == "<circle r=\"1\"><unclosed></unclosed></circle> http://www.w3.org/2000/svg");
+}
+
+TEST(dom_names_are_checked_by_the_dom_standard) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var X = document.implementation.createDocument(null, null);
+        function each(list, f) { return list.map(function (item) { try { return String(f(item)); } catch (e) { return e.name; } }).join(' '); }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // The DOM stopped asking for XML names in 2025: a name is what the HTML
+    // parser could have made. So 'a<b' is an element and 'a b' is not.
+    //
+    // 1. An element's local name. One that begins with a letter may hold
+    //    anything but white space, NUL, '/' and '>'; any other must begin
+    //    with ':', '_' or a character past ASCII and go on with name
+    //    characters.
+    assert(S("each(['a', 'a<b', 'a:b', 'A', '', 'a b', '1a', 'a\\u00e9', ':a', '_a', 'a>b', '-a', 'a/b', 'a=b', '_a<'], function (n) { return document.createElement(n).localName; })") ==
+           "a a<b a:b a InvalidCharacterError InvalidCharacterError InvalidCharacterError a\xC3\xA9 :a _a InvalidCharacterError InvalidCharacterError InvalidCharacterError a=b InvalidCharacterError");
+
+    // 2. A qualified name with its namespace: the prefix is what stands
+    //    before the first colon; xml and xmlns go with their namespaces
+    //    only; a prefix needs a namespace.
+    assert(S("each([[null, 'p:a'], ['u', 'p:a'], ['u', 'xml:a'], ['http://www.w3.org/XML/1998/namespace', 'xml:a'], ['u', 'xmlns'],"
+             " ['http://www.w3.org/2000/xmlns/', 'xmlns'], ['http://www.w3.org/2000/xmlns/', 'xmlns:p'], ['http://www.w3.org/2000/xmlns/', 'a'], ['u', 'a:b:c'], ['u', ':a'],"
+             " ['u', 'a:'], ['', 'a'], ['u', '1a']], function (c) { var e = document.createElementNS(c[0], c[1]); return e.prefix + '|' + e.localName + '|' + e.namespaceURI; })") ==
+           "NamespaceError p|a|u NamespaceError xml|a|http://www.w3.org/XML/1998/namespace NamespaceError null|xmlns|http://www.w3.org/2000/xmlns/ "
+           "xmlns|p|http://www.w3.org/2000/xmlns/ NamespaceError a|b:c|u InvalidCharacterError InvalidCharacterError null|a|null InvalidCharacterError");
+
+    // 3. An attribute's name: anything but white space, NUL, '/', '=', '>'.
+    assert(S("var e = document.createElement('div');"
+             "each(['a', 'A', 'a:b', '', 'a b', 'a=b', '1', '<', 'a>b', 'a/b', '\\u00e9'], function (n) { e.setAttribute(n, 'v'); return 'ok'; }) + ' ' + e.getAttributeNames().join()") ==
+           "ok ok ok InvalidCharacterError InvalidCharacterError InvalidCharacterError ok ok InvalidCharacterError InvalidCharacterError ok a,a:b,1,<,\xC3\xA9");
+    assert(S("each(['a', 'a b', '', 'a=b'], function (n) { return document.createAttribute(n).name; }) + ' ' +"
+             "each([['u', 'p:a'], [null, 'p:a'], ['u', 'a b'], ['u', 'xmlns:p']], function (c) { e.setAttributeNS(c[0], c[1], 'v'); return 'ok'; })") ==
+           "a InvalidCharacterError InvalidCharacterError InvalidCharacterError ok NamespaceError InvalidCharacterError NamespaceError");
+    assert(S("each(['b', 'a b', ''], function (n) { return e.toggleAttribute(n); })") == "true InvalidCharacterError InvalidCharacterError");
+
+    // 4. A processing instruction's target is still an XML name, and its
+    //    data cannot hold the two characters that would end it; nor a CDATA
+    //    section the three that end it. A doctype's name may be empty.
+    assert(S("each([function () { return X.createProcessingInstruction('xml', 'x').target; }, function () { return X.createProcessingInstruction('a b', 'x'); },"
+             " function () { return X.createProcessingInstruction('', 'x'); }, function () { return X.createProcessingInstruction('t', 'a?>b'); },"
+             " function () { return X.createCDATASection('a]]>b'); }, function () { return document.createProcessingInstruction('t', 'd').nodeName; },"
+             " function () { return document.implementation.createDocumentType('a b', '', '').name; },"
+             " function () { return '[' + document.implementation.createDocumentType('', '', '').name + ']'; },"
+             " function () { return document.implementation.createDocumentType('a>', '', '').name; },"
+             " function () { return document.implementation.createDocumentType('a<b', '', '').name; }], function (f) { return f(); })") ==
+           "xml InvalidCharacterError InvalidCharacterError InvalidCharacterError InvalidCharacterError t InvalidCharacterError [] InvalidCharacterError a<b");
+}
+
+TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var S = new XMLSerializer(), I = document.implementation;
+        function caught(f) { try { f(); return 'ok'; } catch (e) { return e.name; } }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. What a document may hold, checked before anything is moved: one
+    //    element, one doctype, the doctype first, no text.
+    assert(S("var d = I.createDocument(null, null), dt = I.createDocumentType('r', '', ''), r = d.createElement('r'); d.appendChild(r);"
+             "[caught(function () { d.appendChild(dt); }), caught(function () { d.insertBefore(dt, r); }), d.doctype === dt, d.childNodes.length, d.firstChild === dt,"
+             " caught(function () { d.appendChild(d.createElement('second')); }), caught(function () { d.insertBefore(d.createElement('x'), dt); }),"
+             " caught(function () { d.appendChild(d.createTextNode('t')); }), caught(function () { d.insertBefore(I.createDocumentType('q', '', ''), r); }),"
+             " caught(function () { d.replaceChild(d.createElement('x'), dt); }), caught(function () { d.replaceChild(I.createDocumentType('q', '', ''), r); }),"
+             " d.childNodes.length].join(' ')") ==
+           "HierarchyRequestError ok true 2 true HierarchyRequestError HierarchyRequestError HierarchyRequestError HierarchyRequestError HierarchyRequestError HierarchyRequestError 2");
+
+    // 2. document.doctype is the node a script put there, follows it out
+    //    and back in, and is written where it stands among the children.
+    assert(S("d.removeChild(dt); var gone = d.doctype; d.replaceChild(dt, r); var swapped = [d.doctype === dt, d.documentElement]; d.appendChild(r);"
+             "var first = S.serializeToString(d); d.insertBefore(d.createComment('c'), dt);"
+             "[String(gone), swapped.join(), first, S.serializeToString(d), dt.ownerDocument === d, dt.parentNode === d].join(' ')") ==
+           "null true, <!DOCTYPE r><r/> <!--c--><!DOCTYPE r><r/> true true");
+
+    // 3. A fragment counts as its children.
+    assert(S("var d = I.createDocument(null, null), f = d.createDocumentFragment(); f.appendChild(d.createElement('a')); f.appendChild(d.createElement('b'));"
+             "var two = caught(function () { d.appendChild(f); }); f.removeChild(f.lastChild); f.appendChild(d.createComment('c')); d.appendChild(f);"
+             "var g = d.createDocumentFragment(); g.appendChild(d.createTextNode('t'));"
+             "[two, S.serializeToString(d), caught(function () { d.appendChild(g); }), caught(function () { d.prepend('text'); })].join(' ')") ==
+           "HierarchyRequestError <a/><!--c--> HierarchyRequestError HierarchyRequestError");
+
+    // 4. The same in an HTML document, whose doctype the parser made; the
+    //    mode the parser chose does not change with it.
+    assert(S("var d = I.createHTMLDocument('t'), old = d.doctype, out = [old.name, d.childNodes.length]; d.removeChild(old); out.push(String(d.doctype), d.compatMode);"
+             "var n = I.createDocumentType('html', 'p', 's'); d.insertBefore(n, d.documentElement); out.push(d.doctype === n, d.doctype.publicId, d.firstChild === n);"
+             "d.doctype.remove(); out.push(String(d.doctype), d.childNodes.length); d.prepend(n); out.push(d.doctype === n);"
+             "var clone = d.cloneNode(true); out.push(clone.doctype !== n, clone.doctype.publicId, clone.doctype.ownerDocument === clone,"
+             " new XMLSerializer().serializeToString(d).indexOf('<!DOCTYPE html PUBLIC \"p\" \"s\">')); out.join(' ')") ==
+           "html 2 null CSS1Compat true p true null 1 true true p true 0");
+    //    The page's own document.
+    assert(S("var mine = document.doctype; document.removeChild(mine); var none = document.doctype; document.insertBefore(mine, document.documentElement);"
+             "[String(none), document.doctype === mine, document.childNodes.length, caught(function () { document.appendChild(I.createDocumentType('x', '', '')); })].join(' ')") ==
+           "null true 2 HierarchyRequestError");
+}
+
+TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    // The HTML parser gives eleven attributes of SVG and MathML elements a
+    // namespace ("adjust foreign attributes"). They used to be stored under
+    // the names of the html5lib test format ("xlink href"), so no script
+    // found xlink:href on any inline <svg>, and innerHTML wrote a name no
+    // parser reads.
+    js.load_page("<!DOCTYPE html><body><svg id=\"s\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewbox=\"0 0 1 1\">"
+                 "<a id=\"lnk\" xlink:href=\"#x\" xlink:nope=\"n\" xml:lang=\"en\"><foreignObject><b id=\"b\" xlink:href=\"q\" xmlns=\"u\"></b></foreignObject></a></svg>"
+                 "<p id=\"p\" xlink:href=\"x\" xml:lang=\"en\" xmlns:xlink=\"v\">t</p><math id=\"m\" xlink:title=\"T\" definitionurl=\"d\"></math></body>");
+    js.notify_document_loaded();
+    js.eval("function names(e) { var out = []; for (var i = 0; i < e.attributes.length; i++) { var a = e.attributes[i]; out.push(a.name + '=' + a.prefix + '|' + a.localName + '|' + a.namespaceURI); } return out.join(' '); }"
+            "var s = document.getElementById('s'), lnk = document.getElementById('lnk'), b = document.getElementById('b'), p = document.getElementById('p'), m = document.getElementById('m');");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    assert(S("names(lnk)") == "id=null|id|null xlink:href=xlink|href|http://www.w3.org/1999/xlink xlink:nope=null|xlink:nope|null "
+                               "xml:lang=xml|lang|http://www.w3.org/XML/1998/namespace");
+    assert(S("names(s)") == "id=null|id|null xmlns=null|xmlns|http://www.w3.org/2000/xmlns/ xmlns:xlink=xmlns|xlink|http://www.w3.org/2000/xmlns/ viewBox=null|viewBox|null");
+    assert(S("names(m)") == "id=null|id|null xlink:title=xlink|title|http://www.w3.org/1999/xlink definitionURL=null|definitionURL|null");
+    // On an HTML element they are plain names, in the page and inside
+    // <foreignObject> alike.
+    assert(S("names(p)") == "id=null|id|null xlink:href=null|xlink:href|null xml:lang=null|xml:lang|null xmlns:xlink=null|xmlns:xlink|null");
+    assert(S("names(b)") == "id=null|id|null xlink:href=null|xlink:href|null xmlns=null|xmlns|null");
+
+    // A script finds them by either name.
+    assert(S("[lnk.getAttribute('xlink:href'), lnk.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), lnk.hasAttribute('xlink:href'),"
+             " lnk.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang'), lnk.getAttributeNS(null, 'xlink:href'),"
+             " p.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), p.getAttribute('xlink:href'),"
+             " document.querySelectorAll('[*|href]').length, document.querySelectorAll('[xlink\\\\:href]').length].join(' ')") ==
+           "#x #x true en   x 1 2");
+
+    // HTML serialization writes the name the standard gives each; XML
+    // serialization declares what needs declaring.
+    assert(S("s.outerHTML") ==
+           "<svg id=\"s\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 1 1\">"
+           "<a id=\"lnk\" xlink:href=\"#x\" xlink:nope=\"n\" xml:lang=\"en\"><foreignObject><b id=\"b\" xlink:href=\"q\" xmlns=\"u\"></b></foreignObject></a></svg>");
+    assert(S("new XMLSerializer().serializeToString(lnk)") ==
+           "<a xmlns=\"http://www.w3.org/2000/svg\" id=\"lnk\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xlink:href=\"#x\" xlink:nope=\"n\" xml:lang=\"en\">"
+           "<foreignObject><b xmlns=\"http://www.w3.org/1999/xhtml\" id=\"b\" xlink:href=\"q\"></b></foreignObject></a>");
+    // innerHTML written and read again is the same tree.
+    assert(S("var copy = document.createElement('div'); copy.innerHTML = s.outerHTML; names(copy.querySelector('a')) === names(lnk) && copy.innerHTML === s.outerHTML") == "true");
+
+    // The tree dump of the html5lib tests still writes them its way.
+    const std::string dump = dump_tree_webplatform(*doc);
+    assert(dump.find("xlink href=\"#x\"") != std::string::npos);
+    assert(dump.find("xml lang=\"en\"") != std::string::npos);
+    assert(dump.find("xmlns xlink=\"http://www.w3.org/1999/xlink\"") != std::string::npos);
+    assert(dump.find("xlink:nope=\"n\"") != std::string::npos);
+}
+
+TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
+    using namespace litebird;
+    // tests/dom-conformance/xml.dat records what jsdom prints. In these
+    // places jsdom and the standards differ, so the corpus stays away from
+    // them (tests/dom-conformance/README.md) and the standard's answer is
+    // asserted here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var P = new DOMParser(), S = new XMLSerializer();
+        function xml(text, type) { return P.parseFromString(text, type || 'application/xml'); }
+    )JS");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. A processing instruction in an HTML element is written by
+    //    innerHTML ("<?" target " " data ">"); jsdom leaves it out.
+    assert(S("var d = document.createElement('div'); d.appendChild(document.createProcessingInstruction('t', 'd')); d.appendChild(document.createTextNode('x')); d.innerHTML") == "<?t d>x");
+
+    // 2. document.title on a document whose root is <svg> with no <title>:
+    //    a title element as the first child of the root. When the root is
+    //    empty, jsdom puts it after the root: a document with two elements,
+    //    whose title is still "".
+    assert(S("var d = xml('<svg xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); d.title = 'T'; S.serializeToString(d) + ' ' + d.title + ' ' + d.childNodes.length") ==
+           "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>T</title></svg> T 1");
+    assert(S("var d = xml('<svg xmlns=\"http://www.w3.org/2000/svg\"><g/></svg>', 'image/svg+xml'); d.title = 'T'; S.serializeToString(d) + ' ' + d.title") ==
+           "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>T</title><g/></svg> T");
+
+    // 3. A DOCTYPE with one of the public identifiers the HTML standard
+    //    lists (the XHTML and MathML DTDs) declares the entity names of
+    //    HTML; jsdom gives a parsererror.
+    assert(S("var d = xml('<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">"
+             "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>&nbsp;&eacute;&hellip;</body></html>');"
+             "d.documentElement.nodeName + ' ' + (d.documentElement.textContent === '\\u00a0\\u00e9\\u2026')") == "html true");
+    assert(S("xml('<!DOCTYPE html PUBLIC \"-//WAPFORUM//DTD XHTML Mobile 1.2//EN\" \"x\"><html xmlns=\"http://www.w3.org/1999/xhtml\">&copy;</html>').documentElement.textContent === '\\u00a9'") == "true");
+    //    Any other DOCTYPE does not: with no external subset the name is
+    //    not declared, and that is an error of form. With an external
+    //    subset nobody reads (this parser reads none) XML does not call it
+    //    one (4.1, "Entity Declared"): the reference stands for nothing.
+    assert(S("xml('<!DOCTYPE html><html xmlns=\"http://www.w3.org/1999/xhtml\">&nbsp;</html>').documentElement.nodeName") == "parsererror");
+    assert(S("var d = xml('<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"x\"><html>a&nbsp;b</html>');"
+             "d.documentElement.nodeName + ' [' + d.documentElement.textContent + ']'") == "html [ab]");
+
+    // 4. The copy of a document DOMParser made is a Document, as it is
+    //    itself; jsdom makes the copy an XMLDocument.
+    assert(S("var d = xml('<a/>'), x = document.implementation.createDocument(null, 'a');"
+             "[d.constructor.name, d.cloneNode(true).constructor.name, d.cloneNode(true).contentType, x.constructor.name, x.cloneNode(true).constructor.name].join(' ')") ==
+           "Document Document application/xml XMLDocument XMLDocument");
+
+    // 5. dir and designMode are on every Document; jsdom has them on HTML
+    //    documents only.
+    assert(S("var d = xml('<a/>'); typeof d.dir + ' [' + d.dir + '] ' + d.designMode") == "string [] off");
+
+    // 6. activeElement with no body is the document element; jsdom: null.
+    assert(S("var h = document.implementation.createHTMLDocument('t'); h.body.remove();"
+             "[xml('<a/>').activeElement.nodeName, h.activeElement.nodeName, document.activeElement.nodeName, new Document().activeElement].join(' ')") == "a HTML BODY ");
+
+    // 7. A document nobody looks at is hidden; jsdom: "prerender".
+    assert(S("var d = xml('<a/>'); [d.visibilityState, d.hidden, document.implementation.createHTMLDocument('t').visibilityState].join(' ')") == "hidden true hidden");
+
+    // 8. The XML serializer is the working draft of September 2026; jsdom's
+    //    is the one before (xmlns:ns1 for an attribute that had a prefix,
+    //    &#x9; for a tab, double quotes around any DOCTYPE identifier).
+    assert(S("var r = document.implementation.createDocument(null, 'r').documentElement; r.setAttributeNS('urn:u', 'p:a', 'tab\\there'); S.serializeToString(r)") ==
+           "<r xmlns:p=\"urn:u\" p:a=\"tab&#9;here\"/>");
+    assert(S("S.serializeToString(document.implementation.createDocumentType('r', 'say \"hi\"', ''))") == "<!DOCTYPE r PUBLIC 'say \"hi\"'>");
+}
+
+TEST(selectors_know_namespaces) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><svg><a xlink:href=\"#x\"></a></svg><a href=\"#y\"></a></body>");
+    js.notify_document_loaded();
+    js.eval("function count(d, selector) { try { return d.querySelectorAll(selector).length; } catch (e) { return e.name; } }"
+            "var d = new DOMParser().parseFromString('<r xmlns:x=\"urn:x\" xmlns=\"urn:d\"><a x:k=\"1\" k=\"2\"/><x:a/><b xmlns=\"\"/></r>', 'application/xml');");
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // A name alone is an element of any namespace; *| says so aloud; a bar
+    // with nothing before it is "in no namespace". A prefix needs a
+    // declaration, and querySelector has nowhere to make one.
+    assert(S("['a', '*|a', '|a', '|b', 'b', '*|*', '|*', '*', 'x|a', 'A'].map(function (s) { return count(d, s); }).join(' ')") == "2 2 0 1 1 4 1 4 SyntaxError 0");
+    // An attribute selector with no bar is an attribute in no namespace.
+    assert(S("['[k]', '[*|k]', '[|k=\"2\"]', '[*|k=\"1\"]', '[x\\\\:k]', '[x|k]'].map(function (s) { return count(d, s); }).join(' ')") == "1 1 1 1 0 SyntaxError");
+    // In an HTML page: the xlink:href of an inline <svg> is not [href], and
+    // is [*|href].
+    assert(S("['a', '[href]', '[*|href]', '[xlink\\\\:href]', 'svg a', 'svg|a'].map(function (s) { return count(document, s); }).join(' ')") == "2 1 2 0 1 SyntaxError");
+    assert(S("document.querySelector('svg a').matches('[*|href=\"#x\"]') + ' ' + document.querySelector('svg a').closest('*|svg').localName") == "true svg");
+}
+
+TEST(attribute_lists_keep_their_order_and_stay_fast) {
+    using namespace litebird;
+
+    // 1. The list against a plain vector, under random edits, across the
+    //    size at which it starts to keep an index (32).
+    {
+        std::mt19937 random(20261114);
+        for (int round = 0; round < 200; ++round) {
+            AttributeList list;
+            std::vector<std::pair<std::string, std::string>> model;
+            const int names = round < 100 ? 12 + round : 400;
+            const int steps = round < 100 ? 300 : 3000;
+            for (int step = 0; step < steps; ++step) {
+                const std::string name = "n" + std::to_string(random() % names);
+                const auto in_model = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+                switch (random() % 6) {
+                    case 0: case 1: case 2: {
+                        const std::string value = std::to_string(step);
+                        list[name] = value;
+                        if (in_model == model.end()) model.emplace_back(name, value);
+                        else in_model->second = value;
+                        break;
+                    }
+                    case 3: {
+                        assert(list.erase(name) == (in_model == model.end() ? 0u : 1u));
+                        if (in_model != model.end()) model.erase(in_model);
+                        break;
+                    }
+                    case 4: {
+                        const auto found = list.find(name);
+                        assert((found == list.end()) == (in_model == model.end()));
+                        if (found != list.end()) {
+                            assert(found->second == in_model->second);
+                            assert(found - list.begin() == in_model - model.begin());
+                            if (random() % 4 == 0) {
+                                list.erase(found);
+                                model.erase(in_model);
+                            }
+                        }
+                        break;
+                    }
+                    default: {
+                        assert(list.count(name) == (in_model == model.end() ? 0u : 1u));
+                        AttributeList copy = list;
+                        assert(copy == list && copy.size() == model.size());
+                        break;
+                    }
+                }
+                assert(list.size() == model.size());
+            }
+            std::size_t at = 0;
+            for (const auto& item : list) {
+                assert(item == model[at]);
+                assert(list[at] == model[at]);
+                ++at;
+            }
+            assert(at == model.size());
+        }
+    }
+
+    // 2. The side table of namespaces, against a plain vector.
+    {
+        std::mt19937 random(7);
+        for (int round = 0; round < 100; ++round) {
+            AttributeNamespaces table;
+            struct Row { std::string qualified, uri; };
+            std::vector<Row> model;
+            const int names = round < 50 ? 10 + round : 300;
+            for (int step = 0; step < 2000; ++step) {
+                const int n = static_cast<int>(random() % names);
+                const std::string local = "a" + std::to_string(n);
+                const std::string qualified = (n % 3 == 0 ? "" : "p" + std::to_string(n % 3) + ":") + local;
+                const auto in_model = std::find_if(model.begin(), model.end(), [&](const Row& row) { return row.qualified == qualified; });
+                switch (random() % 5) {
+                    case 0: case 1: {
+                        // One namespace per name most of the time; now and then another.
+                        const std::string uri = "urn:" + std::to_string(random() % 8 == 0 ? (n + 1) % 4 : n % 4);
+                        table.set(qualified, uri);
+                        if (in_model == model.end()) model.push_back({qualified, uri});
+                        else in_model->uri = uri;
+                        break;
+                    }
+                    case 2: {
+                        table.erase(qualified);
+                        if (in_model != model.end()) model.erase(in_model);
+                        break;
+                    }
+                    case 3: {
+                        const std::string* found = table.find(qualified);
+                        assert((found == nullptr) == (in_model == model.end()));
+                        if (found) assert(*found == in_model->uri);
+                        break;
+                    }
+                    default: {
+                        // A name has one local part here, so namespace and
+                        // local name find at most one entry.
+                        for (int k = 0; k < 4; ++k) {
+                            const std::string uri = "urn:" + std::to_string(k);
+                            const std::string* found = table.find_expanded(uri, local);
+                            const bool expected = in_model != model.end() && in_model->uri == uri;
+                            assert((found != nullptr) == expected);
+                            if (found) assert(*found == qualified);
+                        }
+                        break;
+                    }
+                }
+                assert(table.size() == model.size());
+            }
+        }
+    }
+
+    // 3. From a script: 50,000 attributes set, read, half of them removed,
+    //    and the order is still the order they were added in.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    const auto start = std::chrono::steady_clock::now();
+    assert(js.eval("var e = document.createElement('div'); for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, i);"
+                   "var sum = 0; for (var i = 0; i < 50000; i++) sum += Number(e.getAttribute('a' + i));"
+                   "for (var j = 49999; j >= 25000; j--) e.removeAttribute('a' + j);"
+                   "e.setAttribute('a3', 'again'); e.setAttribute('z', 'last');"
+                   "[sum, e.attributes.length, e.attributes[0].name, e.attributes[3].value, e.attributes[24999].name, e.attributes[25000].name,"
+                   " e.getAttribute('a25000'), e.hasAttribute('a24999'), e.outerHTML.length > 300000].join(' ')").to_string() ==
+           "1249975000 25001 a0 again a24999 z  true true");
+    //    With namespaces: found by namespace and local name.
+    assert(js.eval("var n = document.createElementNS('urn:x', 'e'); for (var i = 0; i < 20000; i++) n.setAttributeNS('urn:n' + (i % 7), 'p' + (i % 7) + ':a' + i, i);"
+                   "for (var i = 19999; i >= 10000; i--) n.removeAttributeNS('urn:n' + (i % 7), 'a' + i);"
+                   "[n.attributes.length, n.getAttributeNS('urn:n3', 'a17'), n.getAttributeNS('urn:n4', 'a17'), n.hasAttributeNS('urn:n' + (9999 % 7), 'a9999'),"
+                   " n.hasAttributeNS('urn:n' + (10000 % 7), 'a10000'), n.getAttribute('p3:a17'), n.attributes[9999].localName].join(' ')").to_string() ==
+           "10000 17  true false 17 a9999");
+    assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
+}
+
+TEST(xml_http_request_answers_data_urls_and_nothing_else) {
+    using namespace litebird;
+
+    // --- MIME types (the MIME Sniffing Standard) ---------------------------
+    {
+        MimeType type;
+        assert(MimeType::parse(" Text/XML ; Charset=\"UTF-8\"; x=1;x=2 ;y ; z=\"a\\\"b\" ;w= ", type));
+        assert(type.essence() == "text/xml");
+        assert(type.parameter("charset") && *type.parameter("charset") == "UTF-8");
+        assert(*type.parameter("x") == "1");                // given twice: the first counts
+        assert(!type.parameter("y") && !type.parameter("w"));   // a name and no value
+        assert(type.serialize() == "text/xml;charset=UTF-8;x=1;z=\"a\\\"b\"");
+        assert(MimeType::parse("text/plain;x=\"a;b\"junk;y=2", type) && type.serialize() == "text/plain;x=\"a;b\";y=2");
+        assert(MimeType::parse("a/b;c=\"unclosed", type) && *type.parameter("c") == "unclosed");
+        for (const char* bad : {"", "text", "text/", "/xml", "te xt/xml", "text/x ml", "text/xml/", "text/\"xml\"", ";charset=x"}) {
+            assert(!MimeType::parse(bad, type));
+        }
+        const auto kind = [](const char* text) {
+            MimeType parsed;
+            assert(MimeType::parse(text, parsed));
+            return parsed.is_xml() ? 'x' : parsed.is_html() ? 'h' : '-';
+        };
+        assert(kind("text/xml") == 'x' && kind("application/xml") == 'x' && kind("image/svg+xml") == 'x');
+        assert(kind("APPLICATION/RSS+XML;charset=x") == 'x' && kind("a/b+xml") == 'x');
+        assert(kind("text/html") == 'h' && kind("application/xhtml+xml") == 'x');
+        assert(kind("text/xml-external-parsed-entity") == '-' && kind("application/xml-dtd") == '-' && kind("image/xml") == '-');
+        assert(kind("text/plain") == '-' && kind("application/+xml") == '-' && kind("text/xmlx") == '-');
+        assert(is_http_token("GET") && is_http_token("X-Custom_1") && !is_http_token("") && !is_http_token("GE T") &&
+               !is_http_token("a:b") && !is_http_token("a\n"));
+    }
+
+    // --- data: URLs (the Fetch Standard) ------------------------------------
+    {
+        MimeType type;
+        std::string body;
+        assert(process_data_url("data:text/xml;base64,PGEvPg==", type, body) && body == "<a/>" && type.serialize() == "text/xml");
+        assert(process_data_url("data:text/xml;base64,PGEv Pg", type, body) && body == "<a/>");     // spaces and no padding
+        assert(process_data_url("data:text/plain ;  BASE64,YQ==", type, body) && body == "a" && type.serialize() == "text/plain");
+        assert(process_data_url("data:;base64,YQ", type, body) && body == "a" && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data:application/octet-stream;base64,AP8=", type, body) && body == std::string("\0\xFF", 2));
+        assert(process_data_url("data:,a%20b%zz%4", type, body) && body == "a b%zz%4" && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data:;charset=x,y", type, body) && type.serialize() == "text/plain;charset=x");
+        assert(process_data_url("data:text,y", type, body) && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data: TEXT/XML ,%3Ca/%3E", type, body) && body == "<a/>" && type.serialize() == "text/xml");
+        assert(process_data_url("data:text/xml;base64;x=1,PGEvPg==", type, body) && body == "PGEvPg==");    // base64 is not last
+        assert(process_data_url("data:text/plain,a,b", type, body) && body == "a,b");
+        assert(process_data_url("data:text/plain,", type, body) && body.empty());
+        assert(!process_data_url("data:text/xml;base64,@@@", type, body));
+        assert(!process_data_url("data:text/xml;base64,PGEvP", type, body));     // a length no base64 text has
+        assert(!process_data_url("data:text/plain", type, body));                // no comma
+        assert(!process_data_url("http://example.test/,", type, body));
+    }
+
+    // --- Bytes into text (the Encoding Standard) ------------------------------
+    {
+        assert(decode_text("\xC3\xA9", "") == "\xC3\xA9");
+        assert(decode_text("\xE9", "") == "\xEF\xBF\xBD");
+        assert(decode_text("\xE9\x80", " Latin1 ") == "\xC3\xA9\xE2\x82\xAC");   // windows-1252: 0x80 is the euro sign
+        assert(decode_text("\xE9", "us-ascii") == "\xC3\xA9" && decode_text("\xE9", "ISO-8859-1") == "\xC3\xA9");
+        assert(decode_text(std::string("a\0b\0", 4), "utf-16le") == "ab");
+        assert(decode_text(std::string("\0a\0b", 4), "UTF-16BE") == "ab");
+        assert(decode_text(std::string("\x3D\xD8\x00\xDE", 4), "utf-16") == "\xF0\x9F\x98\x80");
+        assert(decode_text(std::string("\xFE\xFF\0a", 4), "latin1") == "a");     // a byte order mark wins
+        assert(decode_text(std::string("\xFF\xFE" "a\0", 4), "utf-8") == "a");
+        assert(decode_text("\xEF\xBB\xBF" "a", "utf-16be") == "a");
+        assert(decode_text("\xC3\xA9", "bogus") == "\xC3\xA9");                  // an unknown name: UTF-8
+        assert(decode_text("\xF0\x9F\x98\x80\xC3", "") == "\xF0\x9F\x98\x80\xEF\xBF\xBD");
+        assert(decode_text("\xED\xA0\x80", "") == "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD");     // a surrogate is three errors
+        assert(decode_text("\xC0\xAF" "a", "") == "\xEF\xBF\xBD\xEF\xBF\xBD" "a");              // no overlong forms
+        assert(decode_text("\xE2\x82" "a", "") == "\xEF\xBF\xBD" "a");                          // cut short: one error, and the next byte is read
+        assert(decode_text(std::string("\x3D\xD8" "a", 3), "utf-16le") == "\xEF\xBF\xBD");      // half a pair and half a unit: one error
+        assert(decode_text(std::string("\x3D\xD8" "a\0", 4), "utf-16le") == "\xEF\xBF\xBD" "a");
+        assert(decode_text(std::string("\x00\xDE" "a\0", 4), "utf-16le") == "\xEF\xBF\xBD" "a");
+        assert(decode_text(std::string("a\0b", 3), "utf-16le") == "a\xEF\xBF\xBD");
+        assert(utf8_decode("\xEF\xBB\xBF" "a") == "a");
+        assert(utf8_decode("\xFF\xFE" "a") == "\xEF\xBF\xBD\xEF\xBF\xBD" "a");   // UTF-8 whatever the bytes say
+
+        // The names of the four encodings, as the Encoding Standard lists them.
+        assert(encoding_name_for_label(" UTF8 ") == "UTF-8" && encoding_name_for_label("unicode-1-1-utf-8") == "UTF-8");
+        assert(encoding_name_for_label("utf-16") == "UTF-16LE" && encoding_name_for_label("UCS-2") == "UTF-16LE");
+        assert(encoding_name_for_label("utf-16be") == "UTF-16BE");
+        assert(encoding_name_for_label("ascii") == "windows-1252" && encoding_name_for_label("ISO-8859-1") == "windows-1252" &&
+               encoding_name_for_label("cp819") == "windows-1252");
+        // Any other name is no name: one the standard has and this build
+        // cannot read, like one nobody has.
+        assert(encoding_name_for_label("").empty() && encoding_name_for_label("bogus").empty() &&
+               encoding_name_for_label("shift_jis").empty() && encoding_name_for_label("utf-32").empty() &&
+               encoding_name_for_label("\"utf-8\"").empty());
+    }
+
+    // --- The encoding of an XML entity (XML 1.0, 4.3.3 and appendix F) ------
+    {
+        using litebird::xml::decode_xml;
+        using litebird::xml::xml_encoding;
+        using litebird::xml::XmlError;
+        const auto encoding_of = [](std::string_view bytes, std::string_view transport = {}) {
+            std::string name;
+            XmlError error;
+            if (!xml_encoding(bytes, name, error, transport)) return std::string(error.unsupported_encoding ? "unsupported" : "error");
+            return name;
+        };
+        const auto decoded = [](std::string_view bytes, std::string_view transport = {}) {
+            std::string utf8, name;
+            XmlError error;
+            if (!decode_xml(bytes, utf8, name, error, transport)) return std::string("error");
+            return utf8;
+        };
+        const std::string latin1 = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>\xE9</a>";
+        const std::string le = std::string("<\0a\0/\0>\0", 8), be = std::string("\0<\0a\0/\0>", 8);
+        // With nothing from outside: a mark, then the declaration, then UTF-8.
+        assert(encoding_of("<a/>") == "UTF-8" && encoding_of(latin1) == "windows-1252");
+        assert(encoding_of("\xEF\xBB\xBF<a/>") == "UTF-8" && encoding_of("\xFF\xFE" + le) == "UTF-16LE" && encoding_of("\xFE\xFF" + be) == "UTF-16BE");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "unsupported");
+        //   A declaration that the bytes contradict is an error of form.
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>") == "error");
+        assert(encoding_of("\xEF\xBB\xBF" + latin1) == "error");
+        //   UTF-16 with no mark and no declaration cannot be told: it is read as UTF-8.
+        assert(encoding_of(le) == "UTF-8");
+        // What the transport says outranks all but a mark, and then the
+        // declaration has no say (it is not even an error to contradict it).
+        assert(encoding_of(le, "UTF-16LE") == "UTF-16LE" && encoding_of(be, "UTF-16BE") == "UTF-16BE");
+        assert(decoded(le, "UTF-16LE") == "<a/>" && decoded(be, "UTF-16BE") == "<a/>" && decoded(le, "utf-16") == "<a/>");
+        assert(encoding_of(latin1, "UTF-8") == "UTF-8" && encoding_of("<a/>", "windows-1252") == "windows-1252");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>", "UTF-8") == "UTF-8");
+        assert(encoding_of("\xEF\xBB\xBF<a/>", "windows-1252") == "UTF-8" && encoding_of("\xFF\xFE" + le, "UTF-8") == "UTF-16LE");
+        assert(encoding_of("\xEF\xBB\xBF" + latin1, "UTF-8") == "UTF-8");
+        //   A name this build does not know is no word from the transport.
+        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "shift_jis") == "UTF-8");
+        // Bytes that are no text in the encoding: no document (4.3.3).
+        assert(decoded(std::string("<\0a\0>\0\x3D\xD8<\0/\0a\0>\0", 16), "UTF-16LE") == "error");
+        assert(decoded(std::string("<\0a\0/\0>", 7), "UTF-16LE") == "error");
+        assert(decoded("<a>\xE9</a>", "windows-1252") == "<a>\xC3\xA9</a>");
+    }
+
+    // --- The object ---------------------------------------------------------
+    // tests/dom-conformance/xhr.dat records what jsdom answers. Here is what
+    // jsdom cannot be asked: the places where it differs from the standard,
+    // and what a request must not be able to reach.
+    const std::string secret_path = "/tmp/litebird-xhr-secret-" + std::to_string(static_cast<long>(::getpid())) + ".xml";
+    {
+        std::ofstream secret(secret_path);
+        secret << "<secret>on disk</secret>";
+    }
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto settle = [&]() {
+        for (int i = 0; i < 200 && EventLoop::default_loop().has_pending_tasks(); ++i) EventLoop::default_loop().tick();
+        EventLoop::default_loop().run_microtasks();
+    };
+    auto S = [&](const std::string& expression) { return js.eval(expression).to_string(); };
+    js.eval(R"JS(
+        // A synchronous request, sent.
+        function get(url, setup) {
+            var x = new XMLHttpRequest();
+            x.open('GET', url, false);
+            if (setup) setup(x);
+            x.send();
+            return x;
+        }
+        // An asynchronous one: results[name] is what happened, once it has ended.
+        var results = {}, requests = {};
+        function later(name, url, setup, read) {
+            var x = new XMLHttpRequest(), seen = [];
+            ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'timeout', 'loadend'].forEach(function (type) {
+                x.addEventListener(type, function (e) {
+                    seen.push(type === 'readystatechange' ? 'state ' + x.readyState : type === 'progress' || type === 'load' ? type + ' ' + e.loaded + '/' + e.total : type);
+                    if (type === 'loadend') results[name] = seen.join(', ') + (read ? ' | ' + read(x) : '');
+                });
+            });
+            requests[name] = { x: x, seen: seen };
+            if (setup) setup(x);
+            x.open('GET', url);
+            x.send();
+        }
+        function asDocument(x) { x.responseType = 'document'; }
+    )JS");
+
+    // 1. The document of a response has the response's type; in jsdom every
+    //    XML one is application/xml.
+    assert(S("get('data:text/xml,<a/>').responseXML.contentType") == "text/xml");
+    assert(S("get('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\"/>').responseXML.contentType") == "image/svg+xml");
+    assert(S("get('data:application/xhtml+xml,<html xmlns=\"http://www.w3.org/1999/xhtml\"/>').responseXML.contentType") == "application/xhtml+xml");
+    assert(S("get('data:Application/XML;charset=utf-8,<a/>').responseXML.contentType") == "application/xml");
+    assert(S("get('data:text/plain,<rss/>', function (x) { x.overrideMimeType('application/rss+xml'); }).responseXML.contentType") == "application/rss+xml");
+    assert(S("get('data:,<a/>', function (x) { x.overrideMimeType('text/xml'); }).responseXML.documentElement.nodeName") == "a");
+
+    // 2. Every header line ends in CR LF, the last one too; jsdom leaves the
+    //    last one open.
+    assert(S("get('data:text/xml;charset=UTF-8,<a/>').getAllResponseHeaders()") == "content-type: text/xml;charset=UTF-8\r\n");
+    assert(S("new XMLHttpRequest().getAllResponseHeaders()") == "");
+
+    // 3. responseURL has no fragment; the document's address is the address
+    //    that was asked for. jsdom keeps the fragment in both.
+    assert(S("var x = get('data:text/xml,<a/>#frag'); x.responseURL + ' ' + x.responseXML.URL + ' ' + x.responseText") ==
+           "data:text/xml,<a/> data:text/xml,<a/>#frag <a/>");
+
+    // 4. An XML response says what it is encoded in, and both responseXML
+    //    and responseText listen; jsdom reads it as UTF-8.
+    const std::string latin1 = "'data:text/xml,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%E9%3C/a%3E'";
+    assert(S("var x = get(" + latin1 + "); x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText.charCodeAt(x.responseText.length - 5)") == "233 233");
+    //    responseType "text" does not look inside: UTF-8, and the byte is no UTF-8.
+    js.eval("later('text type', " + latin1 + ", function (x) { x.responseType = 'text'; }, function (x) { return x.response.charCodeAt(x.response.length - 5); });");
+    //    The charset of the type outranks the declaration.
+    assert(S("get('data:text/xml;charset=utf-8,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%C3%A9%3C/a%3E').responseXML.documentElement.textContent.charCodeAt(0)") == "233");
+    //    UTF-16 with a byte order mark.
+    assert(S("var x = get('data:text/xml,%FF%FE%3C%00a%00/%00%3E%00'); x.responseXML.documentElement.nodeName + ' ' + x.responseText") == "a <a/>");
+    //    An encoding this build cannot read: no document, and the text as UTF-8.
+    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EUC-JP\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 43");
+    //    Bytes that are no text in the document's encoding: XML calls that
+    //    fatal (4.3.3), so there is no document; jsdom puts U+FFFD in their
+    //    place and gives one. responseText has the U+FFFD in both.
+    assert(S("var x = get('data:text/xml,%3Ca%3E%E9%3C/a%3E'); String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    assert(S("var x = get('data:text/xml,%3Ca%3E%ED%A0%80%3C/a%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 10");
+    assert(S("var x = get('data:text/xml;charset=utf-16le,%3C%00a%00%3E%00%3D%D8%3C%00/%00a%00%3E%00'); String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    //    A declaration the bytes contradict: no document either; jsdom does
+    //    not look at the declaration.
+    assert(S("String(get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"UTF-16\"?%3E%3Ca/%3E').responseXML)") == "null");
+    //    A charset nobody knows is no charset, and then the declaration
+    //    decides; jsdom reads UTF-8.
+    assert(S("var x = get('data:text/xml;charset=bogus,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%E9%3C/a%3E');"
+             "x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText.charCodeAt(x.responseText.length - 5)") == "233 233");
+    //    The charset of an overriding type replaces the response's even
+    //    when it names nothing ("get a final encoding": the label is taken
+    //    first and looked up afterwards); jsdom then goes back to the
+    //    response's.
+    assert(S("var x = get('data:text/xml;charset=windows-1252,%3Ca%3E%E9%3C/a%3E', function (x) { x.overrideMimeType('text/xml;charset=bogus'); });"
+             "String(x.responseXML) + ' ' + x.responseText.charCodeAt(3)") == "null 65533");
+    //    UTF-16 named by the type, with no byte order mark.
+    assert(S("var x = get('data:text/xml;charset=utf-16be,%00%3C%00a%00%3E%00%E9%00%3C%00/%00a%00%3E'); x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText") == "233 <a>\xC3\xA9</a>");
+
+    // 5. A synchronous request fires no progress event, and no total is
+    //    known; jsdom fires one with a total.
+    assert(S("var seen = [], x = new XMLHttpRequest();"
+             "['readystatechange', 'loadstart', 'progress', 'load', 'loadend'].forEach(function (t) { x.addEventListener(t, function (e) { seen.push(t === 'readystatechange' ? 'state ' + x.readyState : t + ' ' + e.loaded + '/' + e.total + '/' + e.lengthComputable); }); });"
+             "x.open('GET', 'data:text/xml,<a><b/></a>', false); x.send(); seen.join(', ')") ==
+           "state 1, state 4, load 11/0/false, loadend 11/0/false");
+
+    // 6. After abort() nothing more is fired; jsdom still delivers a
+    //    progress event.
+    js.eval("later('aborted', 'data:text/xml,<a/>', function (x) { x.addEventListener('readystatechange', function () { if (x.readyState === 3) x.abort(); }); });");
+
+    // 7. An HTML response is parsed with scripting off, as DOMParser parses
+    //    (a <noscript> in the head holds elements, and a <p> ends it); jsdom
+    //    parses it the way it parsed the page.
+    js.eval("later('html', 'data:text/html,<noscript><p>n</p></noscript><img src=x onerror=\"window.ranInResponse = 1\"><script>window.ranInResponse = 2</script>', asDocument,"
+            "function (x) { return x.response.head.innerHTML + ' | ' + x.response.body.firstChild.outerHTML + ' | ' + typeof window.ranInResponse + ' | ' + x.response.contentType; });");
+    //    An HTML response with nothing in it is still a document; jsdom says null.
+    js.eval("later('empty html', 'data:text/html,', asDocument, function (x) { return x.response.documentElement.outerHTML; });");
+    //    Scripts of an XML response do not run either.
+    assert(S("var x = get('data:application/xhtml+xml,<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><script>window.ranInXml = 1</script></head></html>');"
+             "x.responseXML.scripts.length + ' ' + typeof window.ranInXml + ' ' + (x.responseXML.defaultView === null)") == "1 undefined true");
+
+    // 8. What is not a data: URL is not answered. In particular a request
+    //    reads no file: not by a file: address, not by a path, and not when
+    //    the type is overridden.
+    js.eval("var secret = '" + secret_path + "';"
+            "later('file', 'file://' + secret, null, function (x) { return x.status + ' [' + x.responseText + '] ' + x.responseXML + ' [' + x.responseURL + ']'; });"
+            "later('path', secret, function (x) { x.overrideMimeType('text/xml'); }, function (x) { return x.status + ' [' + x.responseText + '] ' + x.responseXML; });"
+            "later('relative', '../../../../../../..' + secret, null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('http', 'http://127.0.0.1:9/feed.xml', null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('https', 'https://example.test/feed.xml', null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('blob', 'blob:https://example.test/1', null, function (x) { return String(x.status); });"
+            "later('about', 'about:blank', null, function (x) { return String(x.status); });"
+            "later('javascript', 'javascript:window.ranFromUrl = 1', null, function (x) { return x.status + ' ' + typeof window.ranFromUrl; });");
+    assert(S("try { get('file://' + secret); 'read' } catch (e) { e.name + ' ' + e.code }") == "NetworkError 19");
+    assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
+    assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
+
+    // 9. There is no ArrayBuffer in the engine: that response is null.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+
+    // 10. The XML parser's limits hold here as they do for DOMParser: a
+    //     document that expands without end gives no document, at once.
+    assert(S("var levels = '<!ENTITY a0 \"aaaaaaaaaa\">';"
+             "for (var i = 1; i < 12; i++) levels += '<!ENTITY a' + i + ' \"' + new Array(11).join('&a' + (i - 1) + ';') + '\">';"
+             "var bomb = '<!DOCTYPE r [' + levels + ']><r>&a11;</r>', t0 = Date.now();"
+             "var x = get('data:application/xml,' + encodeURIComponent(bomb));"
+             "String(x.responseXML) + ' ' + (x.responseText === bomb) + ' ' + (Date.now() - t0 < 5000)") == "null true true");
+    //     A large response is read in time that grows with its size.
+    assert(S("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
+             "var x = get('data:text/xml,' + big);"
+             "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < 5000)") == "200000 2800007 true");
+
+    settle();
+    assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
+    assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
+           "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
+    assert(S("results.html") == "state 1, loadstart, state 2, state 3, progress 116/0, state 4, load 116/0, loadend | "
+                                "<noscript></noscript> | <p>n</p> | undefined | text/html");
+    assert(S("results['empty html']") == "state 1, loadstart, state 2, progress 0/0, state 4, load 0/0, loadend | <html><head></head><body></body></html>");
+    const std::string failed = "state 1, loadstart, state 4, error, loadend | ";
+    assert(S("results.file") == failed + "0 [] null []");
+    assert(S("results.path") == failed + "0 [] null");
+    assert(S("results.relative") == failed + "0 []");
+    assert(S("results.http") == failed + "0 []");
+    assert(S("results.https") == failed + "0 []");
+    assert(S("results.blob") == failed + "0");
+    assert(S("results.about") == failed + "0");
+    assert(S("results.javascript") == failed + "0 undefined");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    std::remove(secret_path.c_str());
 }
 
 TEST(css_filters_and_canvas_blending) {
@@ -7542,6 +8892,18 @@ int main() {
     RUN_TEST(page_scripts_run_by_the_rules_of_a_page_load);
     RUN_TEST(get_element_by_id_answers_from_an_index);
     RUN_TEST(dom_follows_the_standard_where_jsdom_does_not);
+    RUN_TEST(xml_parser_reads_xml_1_0_and_nothing_outside_the_document);
+    RUN_TEST(xml_parser_bounds_what_a_hostile_document_costs);
+    RUN_TEST(xml_documents_in_the_dom);
+    RUN_TEST(xml_serializer_writes_a_tree_that_reads_back_the_same);
+    RUN_TEST(inner_html_of_an_xml_document_is_xml);
+    RUN_TEST(dom_names_are_checked_by_the_dom_standard);
+    RUN_TEST(a_document_keeps_one_doctype_and_one_element_in_that_order);
+    RUN_TEST(foreign_attributes_from_the_html_parser_have_namespaces);
+    RUN_TEST(xml_dom_follows_the_standard_where_jsdom_does_not);
+    RUN_TEST(selectors_know_namespaces);
+    RUN_TEST(attribute_lists_keep_their_order_and_stay_fast);
+    RUN_TEST(xml_http_request_answers_data_urls_and_nothing_else);
     RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(ranges_follow_the_tree);
     RUN_TEST(css_filters_and_canvas_blending);

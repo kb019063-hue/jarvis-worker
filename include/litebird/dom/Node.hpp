@@ -24,7 +24,10 @@ enum class NodeType {
     /// `<!DOCTYPE html>` as a script sees it (`document.doctype`). Such a node
     /// is never among anybody's children(): the document keeps the doctype in
     /// a field, and the bindings show it between the right two children.
-    DocumentType
+    DocumentType,
+    /// `<?target data?>`. The HTML parser never makes one (it reads `<?` as a
+    /// comment); the XML parser and `createProcessingInstruction` do.
+    ProcessingInstruction
 };
 
 /// What the tree tells the script bindings. A member that is null is skipped,
@@ -74,6 +77,11 @@ public:
     bool is_comment() const { return m_type == NodeType::Comment; }
     bool is_document_fragment() const { return m_type == NodeType::DocumentFragment; }
     bool is_document_type() const { return m_type == NodeType::DocumentType; }
+    bool is_processing_instruction() const { return m_type == NodeType::ProcessingInstruction; }
+    /// A Text node that is a CDATA section: `<![CDATA[ ]]>` in an XML
+    /// document. It is text in every respect but its name and how it is
+    /// written back, so its type() is Text.
+    bool is_cdata_section() const;
 
     /// The document this node belongs to, connected or not: the one that
     /// created it, or the one it was last inserted into. Empty for a node

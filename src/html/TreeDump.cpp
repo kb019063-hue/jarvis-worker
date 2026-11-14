@@ -1,3 +1,4 @@
+#include "litebird/dom/ProcessingInstruction.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/dom/Comment.hpp"
 #include "litebird/dom/Document.hpp"
@@ -70,8 +71,24 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 os << "<" << namespace_prefix(el.element_namespace()) << el.tag_name() << ">\n";
 
                 // Attributes are emitted sorted by name, each on its own line.
-                std::vector<std::pair<std::string, std::string>> attrs(
-                    el.attributes().begin(), el.attributes().end());
+                // One with a namespace is written the way the test format
+                // has it: the namespace's name, a space, the local name
+                // ("xlink href", "xml lang", "xmlns xlink").
+                std::vector<std::pair<std::string, std::string>> attrs;
+                attrs.reserve(el.attributes().size());
+                for (const auto& [name, value] : el.attributes()) {
+                    const std::string& uri = el.attribute_namespace(name);
+                    const char* shown = uri == "http://www.w3.org/1999/xlink" ? "xlink "
+                                      : uri == "http://www.w3.org/XML/1998/namespace" ? "xml "
+                                      : uri == "http://www.w3.org/2000/xmlns/" ? "xmlns "
+                                      : nullptr;
+                    if (!shown) {
+                        attrs.emplace_back(name, value);
+                        continue;
+                    }
+                    const auto colon = name.find(':');
+                    attrs.emplace_back(shown + (colon == std::string::npos ? name : name.substr(colon + 1)), value);
+                }
                 std::sort(attrs.begin(), attrs.end(),
                           [](const auto& a, const auto& b) { return a.first < b.first; })
                 ;
@@ -107,6 +124,13 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 break;
             case NodeType::DocumentType:
                 break;      // never a child; the document's doctype is written below
+            case NodeType::ProcessingInstruction: {
+                // The form the html5lib tests have for one: `<?target data>`.
+                const auto& instruction = static_cast<const ProcessingInstruction&>(node);
+                write_indent(os, depth);
+                os << "<?" << instruction.target() << " " << instruction.data() << ">\n";
+                break;
+            }
         }
     };
 

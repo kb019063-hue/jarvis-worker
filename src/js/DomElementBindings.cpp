@@ -2,6 +2,7 @@
 // geometry.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/Selector.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
@@ -43,33 +44,21 @@ std::shared_ptr<SelectorList> parse_selector(Realm& realm, const std::string& te
 // Names
 // ---------------------------------------------------------------------------
 
-bool is_name_start(unsigned char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':' || c >= 0x80;
-}
-
-bool is_name_char(unsigned char c) {
-    return is_name_start(c) || (c >= '0' && c <= '9') || c == '-' || c == '.';
-}
-
+// The name an attribute is looked up by: in lower case for an HTML element in
+// an HTML document, as given everywhere else.
 std::string attribute_name(const Element& element, const std::string& name) {
-    return element.is_foreign() ? name : ascii_lower(name);
+    return is_html_in_html_document(element) ? ascii_lower(name) : name;
 }
 
-// The stored name of the attribute a namespaced lookup means. Namespaces of
-// attributes are not kept; the local name decides.
-const std::string* find_attribute_ns(const Element& element, const std::string& local, std::string& stored) {
-    if (const std::string* value = element.attribute(local)) {
-        stored = local;
-        return value;
-    }
-    for (const auto& [name, value] : element.attributes()) {
-        const auto colon = name.find(':');
-        if (colon != std::string::npos && name.compare(colon + 1, std::string::npos, local) == 0) {
-            stored = name;
-            return &value;
-        }
-    }
-    return nullptr;
+// The value of the attribute with this namespace and local name; `stored`
+// receives the name it is kept under.
+const std::string* find_attribute_ns(const Element& element, const JsValue& ns, const std::string& local,
+                                     std::string& stored) {
+    const std::string uri = ns.is_nullish() ? std::string() : to_str(ns);
+    const std::string* name = element.find_attribute_ns(uri, local);
+    if (!name) return nullptr;
+    stored = *name;
+    return element.attribute(stored);
 }
 
 std::string namespace_uri(const Element& element) {
@@ -213,6 +202,24 @@ bool can_host_shadow(const Element& element) {
            element.tag_name().find('-') != std::string::npos;
 }
 
+// innerHTML and outerHTML in an XML document: the XML serialization, which
+// has to be something an XML parser reads back.
+std::string xml_markup(Realm& realm, Element& element, bool outer) {
+    std::string out;
+    const bool written = outer ? xml::serialize_xml(element, true, out) : xml::serialize_xml_children(element, true, out);
+    if (!written) throw_dom(realm, "InvalidStateError", "The element cannot be written as well-formed XML.");
+    return out;
+}
+
+// The <body> that stands for a parent that is not an element when markup is
+// parsed next to `near`. It belongs to the same document, which decides
+// whether the markup is HTML or XML.
+std::shared_ptr<Element> stand_in_body(Realm& realm, const Node& near) {
+    auto body = std::make_shared<Element>("body");
+    if (auto document = document_of(realm, near)) body->set_owner_document(document);
+    return body;
+}
+
 void setup_element(Iface& I) {
     El E(I);
     E.getter("namespaceURI", [](Realm&, Element& el) {
@@ -224,7 +231,7 @@ void setup_element(Iface& I) {
     E.getter("tagName", [](Realm&, Element& el) {
         // An HTML element's name is given in upper case; any other as written.
         const std::string name = qualified_name(el);
-        return str(el.is_foreign() ? name : ascii_upper(name));
+        return str(is_html_in_html_document(el) ? ascii_upper(name) : name);
     });
     E.string("id");
     E.string("className", "class");
@@ -246,7 +253,7 @@ void setup_element(Iface& I) {
     E.method("getAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.getAttributeNS");
         std::string stored;
-        return nullable_str(find_attribute_ns(el, to_str(args[1]), stored));
+        return nullable_str(find_attribute_ns(el, args[0], to_str(args[1]), stored));
     });
     E.method("setAttribute", 2, [](Realm& r, Element& el, Args args) {
         require_args(args, 2, "Element.setAttribute");
@@ -255,14 +262,18 @@ void setup_element(Iface& I) {
     });
     E.method("setAttributeNS", 3, [](Realm& r, Element& el, Args args) {
         require_args(args, 3, "Element.setAttributeNS");
+        // "Set an attribute value": an attribute is found by its namespace
+        // and local name, and keeps the prefix it has.
         const std::string name = to_str(args[1]);
-        validate_name(r, name);
-        const auto colon = name.find(':');
-        const bool no_namespace = args[0].is_nullish() || to_str(args[0]).empty();
-        if (colon != std::string::npos && no_namespace) {
-            throw_dom(r, "NamespaceError", "A prefix was given without a namespace.");
+        const QualifiedName parts = validate_and_extract(r, args[0], name, true);
+        const std::string& uri = parts.namespace_uri;
+        const std::string& local = parts.local;
+        if (const std::string* stored = el.find_attribute_ns(uri, local)) {
+            const std::string existing = *stored;
+            el.set_attribute(existing, to_str(args[2]));
+        } else {
+            el.set_attribute_ns(uri, name, to_str(args[2]));
         }
-        el.set_attribute(name, to_str(args[2]));
         return undefined();
     });
     E.method("removeAttribute", 1, [](Realm&, Element& el, Args args) {
@@ -273,13 +284,13 @@ void setup_element(Iface& I) {
     E.method("removeAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.removeAttributeNS");
         std::string stored;
-        if (find_attribute_ns(el, to_str(args[1]), stored)) el.remove_attribute(stored);
+        if (find_attribute_ns(el, args[0], to_str(args[1]), stored)) el.remove_attribute(stored);
         return undefined();
     });
     E.method("toggleAttribute", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.toggleAttribute");
         std::string name = to_str(args[0]);
-        validate_name(r, name);
+        validate_attribute_name(r, name);
         name = attribute_name(el, name);
         const bool has_force = args.size() > 1 && !args[1].is_undefined();
         const bool force = has_force && to_bool(args[1]);
@@ -299,7 +310,7 @@ void setup_element(Iface& I) {
     E.method("hasAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.hasAttributeNS");
         std::string stored;
-        return boolean(find_attribute_ns(el, to_str(args[1]), stored) != nullptr);
+        return boolean(find_attribute_ns(el, args[0], to_str(args[1]), stored) != nullptr);
     });
     E.method("getAttributeNode", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.getAttributeNode");
@@ -309,7 +320,7 @@ void setup_element(Iface& I) {
     E.method("getAttributeNodeNS", 2, [](Realm& r, Element& el, Args args) {
         require_args(args, 2, "Element.getAttributeNodeNS");
         std::string stored;
-        return find_attribute_ns(el, to_str(args[1]), stored) ? attr_object(r, el, stored) : null();
+        return find_attribute_ns(el, args[0], to_str(args[1]), stored) ? attr_object(r, el, stored) : null();
     });
     E.method("setAttributeNode", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.setAttributeNode");
@@ -374,14 +385,8 @@ void setup_element(Iface& I) {
     E.method("getElementsByTagName", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.getElementsByTagName");
         const std::string name = to_str(args[0]);
-        const std::string lower = ascii_lower(name);
-        return make_live_list(r, "HTMLCollection", el.shared_from_this(), [name, lower](Node& root, NodeVector& out) {
-            for_each_descendant(root, [&](Node& node) {
-                if (!node.is_element()) return true;
-                const auto& element = static_cast<Element&>(node);
-                if (name == "*" || element.tag_name() == (element.is_foreign() ? name : lower)) out.push_back(node.shared_from_this());
-                return true;
-            });
+        return make_live_list(r, "HTMLCollection", el.shared_from_this(), [name](Node& root, NodeVector& out) {
+            collect_by_qualified_name(root, name, out);
         });
     });
     E.method("getElementsByTagNameNS", 2, [](Realm& r, Element& el, Args args) {
@@ -418,10 +423,16 @@ void setup_element(Iface& I) {
 
     // --- Markup -------------------------------------------------------------------
     E.accessor("innerHTML",
-        [](Realm&, Element& el) { return str(el.inner_markup()); },
+        [](Realm& r, Element& el) {
+            if (in_html_document(el)) return str(el.inner_markup());
+            return str(xml_markup(r, el, false));
+        },
         [](Realm& r, Element& el, const JsValue& value) { set_inner_markup(r, el, to_str_null_empty(value)); });
     E.accessor("outerHTML",
-        [](Realm&, Element& el) { return str(el.outer_markup()); },
+        [](Realm& r, Element& el) {
+            if (in_html_document(el)) return str(el.outer_markup());
+            return str(xml_markup(r, el, true));
+        },
         [](Realm& r, Element& el, const JsValue& value) {
             const std::string markup = to_str_null_empty(value);
             auto parent = el.parent();
@@ -431,7 +442,7 @@ void setup_element(Iface& I) {
             }
             std::shared_ptr<Element> context;
             if (parent->is_element()) context = std::static_pointer_cast<Element>(parent);
-            else context = std::make_shared<Element>("body");
+            else context = stand_in_body(r, el);
             auto fragment = parse_fragment(r, *context, markup);
             auto keep = shared(el);
             auto next = el.next_sibling();
@@ -454,12 +465,14 @@ void setup_element(Iface& I) {
                 throw_dom(r, "NoModificationAllowedError", "The element has no parent.");
             }
             if (parent->is_element()) context = std::static_pointer_cast<Element>(parent);
-            else context = std::make_shared<Element>("body");
+            else context = stand_in_body(r, el);
         } else {
             context = shared(el);
         }
         // In an <html> context the fragment is parsed as for a <body>.
-        if (!context->is_foreign() && context->tag_name() == "html") context = std::make_shared<Element>("body");
+        if (in_html_document(el) && !context->is_foreign() && context->tag_name() == "html") {
+            context = stand_in_body(r, el);
+        }
         insert_adjacent(r, el, where, parse_fragment(r, *context, markup));
         return undefined();
     });
@@ -561,20 +574,97 @@ bool matches_selector(Realm& realm, Element& element, const std::string& selecto
     return parse_selector(realm, selector)->matches(element, &element);
 }
 
+// The names a script may give, as the DOM standard has them since 2025.
+// They are wider than XML's: a name that starts with a letter may hold
+// anything but white space, NUL, "/" and ">", because that is what the HTML
+// parser would read as a name.
+namespace {
+
+bool has_forbidden(const std::string& name, bool also_equals) {
+    for (const char c : name) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == '\0' || c == '/' || c == '>') return true;
+        if (also_equals && c == '=') return true;
+    }
+    return false;
+}
+
+bool is_valid_element_local_name(const std::string& name) {
+    if (name.empty()) return false;
+    const unsigned char first = static_cast<unsigned char>(name[0]);
+    if ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) return !has_forbidden(name, false);
+    if (first != ':' && first != '_' && first < 0x80) return false;
+    for (std::size_t i = 1; i < name.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        const bool allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+                             c == '.' || c == ':' || c == '_' || c >= 0x80;
+        if (!allowed) return false;
+    }
+    return true;
+}
+
+} // namespace
+
 void validate_name(Realm& realm, const std::string& name) {
-    bool valid = !name.empty() && is_name_start(static_cast<unsigned char>(name[0]));
-    for (std::size_t i = 1; valid && i < name.size(); ++i) valid = is_name_char(static_cast<unsigned char>(name[i]));
-    if (!valid) throw_dom(realm, "InvalidCharacterError", "'" + name + "' is not a valid name.");
+    if (!is_valid_element_local_name(name)) throw_dom(realm, "InvalidCharacterError", "'" + name + "' is not a valid name.");
+}
+
+void validate_attribute_name(Realm& realm, const std::string& name) {
+    if (name.empty() || has_forbidden(name, true)) {
+        throw_dom(realm, "InvalidCharacterError", "'" + name + "' is not a valid attribute name.");
+    }
+}
+
+void validate_doctype_name(Realm& realm, const std::string& name) {
+    for (const char c : name) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == '\0' || c == '>') {
+            throw_dom(realm, "InvalidCharacterError", "'" + name + "' is not a valid doctype name.");
+        }
+    }
+}
+
+// "Validate and extract" of the DOM standard.
+QualifiedName validate_and_extract(Realm& realm, const JsValue& ns, const std::string& qualified, bool attribute) {
+    QualifiedName out;
+    out.namespace_uri = ns.is_nullish() ? std::string() : to_str(ns);
+    out.local = qualified;
+    const auto colon = qualified.find(':');
+    bool has_prefix = false;
+    if (colon != std::string::npos) {
+        has_prefix = true;
+        out.prefix = qualified.substr(0, colon);
+        out.local = qualified.substr(colon + 1);
+        if (out.prefix.empty() || has_forbidden(out.prefix, false)) {
+            throw_dom(realm, "InvalidCharacterError", "'" + qualified + "' has a namespace prefix that is not valid.");
+        }
+    }
+    if (attribute) validate_attribute_name(realm, out.local);
+    else validate_name(realm, out.local);
+    if (has_prefix && out.namespace_uri.empty()) throw_dom(realm, "NamespaceError", "A prefix was given without a namespace.");
+    if (out.prefix == "xml" && out.namespace_uri != xml::kXmlNamespace) {
+        throw_dom(realm, "NamespaceError", "The prefix 'xml' belongs to the XML namespace.");
+    }
+    if ((qualified == "xmlns" || out.prefix == "xmlns") != (out.namespace_uri == xml::kXmlnsNamespace)) {
+        throw_dom(realm, "NamespaceError", "'xmlns' and the XMLNS namespace go together.");
+    }
+    return out;
 }
 
 void set_attribute_from_script(Realm& realm, Element& element, const std::string& name, const std::string& value) {
-    validate_name(realm, name);
+    validate_attribute_name(realm, name);
     element.set_attribute(attribute_name(element, name), value);
 }
 
 std::shared_ptr<Node> parse_fragment(Realm& realm, Element& context, const std::string& markup) {
-    auto fragment = std::make_shared<Node>(NodeType::DocumentFragment);
     auto document = document_of(realm, context);
+    if (!in_html_document(context)) {
+        // The XML fragment parsing algorithm: the markup has to be well
+        // formed where it stands, and nothing is recovered when it is not.
+        xml::XmlError error;
+        auto parsed = xml::parse_xml_fragment(document, context, markup, error);
+        if (!parsed) throw_dom(realm, "SyntaxError", "The markup is not well-formed XML: " + error.describe() + ".");
+        return parsed;
+    }
+    auto fragment = std::make_shared<Node>(NodeType::DocumentFragment);
     if (document) fragment->set_owner_document(document);
     for (const auto& node : HtmlParser::parse_inner_html(context, markup)) fragment->append_child(node);
     // Elements made from markup become instances of their definitions when
@@ -599,6 +689,17 @@ void set_inner_markup(Realm& realm, Node& node, const std::string& markup) {
     if (!node.is_element()) return;
     auto& element = static_cast<Element&>(node);
     Node& target = markup_target(element);
+    if (!in_html_document(element)) {
+        auto fragment = parse_fragment(realm, element, markup);
+        const NodeVector children = fragment->children();
+        fragment->take_children();
+        if (&target != &element) {
+            if (auto document = document_of(realm, element)) target.set_owner_document(document->template_document());
+        }
+        replace_all_children(realm, target, children);
+        element.mark_needs_layout();
+        return;
+    }
     auto parsed = HtmlParser::parse_inner_html(element, markup);
     if (&target != &element) {
         // A template's contents belong to a document of their own.

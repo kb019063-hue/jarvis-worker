@@ -208,6 +208,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 
 ### 4.9 Network, EventLoop & TUI Shell
 - **ResourceLoader (`include/litebird/net/ResourceLoader.hpp`):**
+  - Page requests use `load_for_page(url, context)` (Phase 33): the document URL is the capability, the base URL only resolves references, and web documents cannot read local files. Embedder navigation is the separate `load_navigation`.
   - Zero-dependency POSIX socket HTTP/1.1 client. Caller-controlled methods, request targets, and headers are validated against HTTP syntax/control-byte rules; request/response headers are capped at 64 KiB and the full response stream at 16 MiB.
   - Resolves relative URLs (`../`, `./`, `/`).
 - **EventLoop (`include/litebird/js/EventLoop.hpp`):**
@@ -431,7 +432,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
     - `status` (integer code, e.g. 200), `statusText` ("OK"), `ok` (boolean, status in range 200-299), `url` (string), and `headers` (`HeadersObject`).
     - Body readers: `text()` returning a Promise resolving to raw body string, and `json()` returning a Promise resolving to parsed JavaScript object/array via `Json::parse()`.
 - **Async Execution & Microtask Integration:**
-  - `FetchAPI::fetch(input, init)` creates an unfulfilled Promise, decodes `RequestInit` options (`method`, `headers`, `body`), and dispatches network/data loading through `ResourceLoader`.
+  - `FetchAPI::fetch(input, init, context)` creates an unfulfilled Promise, decodes `RequestInit` options (`method`, `headers`, `body`), and dispatches through `ResourceLoader::load_for_page` with the document context captured at call time (Phase 33).
   - Seamlessly integrates with the microtask scheduler and JavaScript `async` / `await` workflows.
 
 ### Pillar 4: Standard `URL` & `URLSearchParams` APIs
@@ -449,7 +450,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 ### Pillar 1: Web Workers & Concurrent JS Execution
 - **Dedicated Execution Threads (`include/litebird/js/Worker.hpp`, `src/js/Worker.cpp`):**
   - `WorkerThread`: Spawns a dedicated OS thread hosting its own isolated `JsInterpreter` environment, runtime heaps, and microtask queues, preventing worker operations from blocking the main UI thread.
-  - Script loading supports both `data:text/javascript,...` inline payload data and filesystem scripts via `ResourceLoader`.
+  - Script loading supports `data:text/javascript,...` and goes through `ResourceLoader::load_for_page` with the creator's context (Phase 33): a web page cannot load a local worker script, a `file:` document can, and a failed load is an error event rather than the path executed as source.
   - Thread-local isolation ensures `JsValue` function callers (`s_function_caller`) remain thread-local and re-entrant across worker contexts without cross-thread clobbering.
 - **Inter-Process/Thread Communication (IPC):**
   - Thread-safe queues (`std::mutex`, `std::condition_variable`) transmit deep-cloned JSON messages between the main thread and worker threads.
@@ -2940,7 +2941,7 @@ without a fragment, and `fetch()` reports it as `Response.url`.
 ### 3. Callers
 
 `JsInterpreter` installs `fetch` and `Worker` with a context provider read at
-call time: the current document URL and the first valid `<base href>`. An
+call time: the current document URL and the document's `<base href>`. An
 alive guard keeps a retained native closure from touching a destroyed realm.
 The bytecode `VM` uses its document address as the context. A worker inherits
 the creator's capability; a classic worker's base URL becomes its loaded
@@ -2957,7 +2958,14 @@ load posts an error event instead of executing the refused path as source.
 `../secret.txt` from a web document goes to the resolved HTTP path, not disk).
 `make security-fetch` writes a marker file and runs the CLI against generated
 pages: web document, web document with a `file:` base, and local `file:`
-document. It prints `3 checks; 0 failure(s).`
+document. It prints `3 checks; 0 failure(s).` The full release run also kept
+html5lib 1781/1792, JS 840/845, DOM 629/629, URL 1150/1188, XML 1702/1702,
+WPT 4640/5192, diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed,
+ASan 132/132 (JS 839/845), and ASan deep 882 runs/0 failed. Outside the DOM
+corpus, `tools/conformance/compare_with_jsdom.py` on a generated base/history
+probe printed `4 lines, 4 the same` before and after; jsdom 31 has no
+fetch/Worker, so the resource policy itself is checked by the unit suites and
+`make security-fetch`, not recorded as a jsdom expectation.
 
 Repro:
 

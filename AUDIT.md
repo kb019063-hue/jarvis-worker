@@ -2048,7 +2048,11 @@ source. `Response.url` is the resolved address without a fragment.
 generates a marker file and prints `3 checks; 0 failure(s).` Repro:
 `printf 'LOCAL_SECRET\n' > /tmp/secret.txt; printf '<script>fetch("/tmp/secret.txt").then(r=>r.text()).then(console.log, e=>console.log("ERR:"+e));</script>' > /tmp/page.html; ./build/litebird /tmp/page.html --url=https://example.test/page.html`.
 Before: `LOCAL_SECRET`. After: no marker; the request is refused or resolved
-as a web URL. The conformance scoreboards are unchanged.
+as a web URL. The conformance scoreboards are unchanged (html5lib 1781/1792,
+JS 840/845, DOM 629/629, URL 1150/1188, XML 1702/1702, WPT 4640/5192);
+diff-trees/diff-xml have 0 differing, deep has 1332 runs/0 failed, ASan has
+132/132 suites and 882 deep runs/0 failed. A generated base/history probe run
+through `compare_with_jsdom.py` printed `4 lines, 4 the same` before/after.
 
 **What is still open.** CORS/same-origin network policy and
 `XMLHttpRequest` over the network are the next row; `https:` is not

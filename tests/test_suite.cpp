@@ -5536,6 +5536,84 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
 // builds on its own for ThreadSanitizer.
 TEST(js_string_matches_a_utf16_model_under_random_edits) { litebird_tests::js_string_model_test(); }
 
+TEST(js_property_maps_and_arrays_keep_their_order_through_front_edits) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 33. `delete` used to rebuild the property index on every
+    // erase and `shift()` moved the whole tail each call. Counting work would
+    // assert implementation details, so this test pins the observable contract
+    // while a 2,000-edit workload takes the paths that used to be quadratic.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        var object = {};
+        object.a = 'a';
+        object.b = 'b';
+        object.c = 'c';
+        object.d = 'd';
+        delete object.b;
+        object.b = 'B';
+        object.c = 'C';
+        var rearranged = Object.keys(object).join(',');
+
+        var big = {};
+        for (var i = 0; i < 2000; i++) big['k' + i] = i;
+        var removed = 0;
+        for (var i = 0; i < 2000; i += 2) {
+            removed += big['k' + i];
+            delete big['k' + i];
+        }
+        var remaining = 0;
+        for (var i = 1; i < 2000; i += 2) remaining += big['k' + i];
+        var keys = Object.keys(big);
+        var last = keys[keys.length - 1];
+        var reinserted = last === 'k1999';
+        delete big['k1'];
+        big['k1'] = 'reinserted';
+        var reinsertedFirst = false;
+        var reinsertedKeys = Object.keys(big);
+        reinsertedFirst = reinsertedKeys[reinsertedKeys.length - 1] === 'k1';
+
+        var values = [{ label: 'kept' }, { label: 'second' }];
+        var kept = values[0];
+        var shifted = values.shift();
+        var sameObject = shifted === kept;
+        values.unshift(shifted);
+        var roundTripped = values[0] === kept && values[1].label === 'second';
+
+        var front = [];
+        for (var i = 0; i < 1000; i++) front.push(i);
+        var gone = front.splice(0, 500);
+        var spliceFront = gone.length + ':' + front.length + ':' + front[0] + ':' + front[front.length - 1];
+
+        var shiftedTotal = 0;
+        var array = [];
+        for (var i = 0; i < 2000; i++) array.push(i);
+        while (array.length) shiftedTotal += array.shift();
+
+        var unshiftFront = [];
+        for (var i = 0; i < 1000; i++) unshiftFront.unshift(i);
+
+        var all = rearranged + '|' + removed + '|' + remaining + '|' +
+            keys.length + '|' + last + '|' + reinserted + '|' + reinsertedFirst + '|' +
+            sameObject + '|' + roundTripped + '|' + spliceFront + '|' + shiftedTotal + '|' + unshiftFront[0];
+    )");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("rearranged").to_string() == "a,c,d,b");
+    assert(js.global_env()->get("removed").to_number() == 999000.0);
+    assert(js.global_env()->get("remaining").to_number() == 1000000.0);
+    assert(js.global_env()->get("keys").array_elements().size() == 1000);
+    assert(js.global_env()->get("last").to_string() == "k1999");
+    assert(js.global_env()->get("reinserted").bool_val);
+    assert(js.global_env()->get("reinsertedFirst").bool_val);
+    assert(js.global_env()->get("sameObject").bool_val);
+    assert(js.global_env()->get("roundTripped").bool_val);
+    assert(js.global_env()->get("spliceFront").to_string() == "500:500:500:999");
+    assert(js.global_env()->get("shiftedTotal").to_number() == 1999000.0);
+    assert(js.global_env()->get("unshiftFront").array_elements().front().to_number() == 999.0);
+    assert(js.global_env()->get("all").to_string() ==
+           "a,c,d,b|999000|1000000|1000|k1999|true|true|true|true|500:500:500:999|1999000|999");
+}
+
 TEST(js_strings_can_be_used_from_several_threads) { litebird_tests::js_string_thread_test(); }
 
 TEST(phase19_js_compatibility_basics) {
@@ -7344,6 +7422,7 @@ int main() {
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
+    RUN_TEST(js_property_maps_and_arrays_keep_their_order_through_front_edits);
     RUN_TEST(js_strings_can_be_used_from_several_threads);
     RUN_TEST(phase19_js_compatibility_basics);
     RUN_TEST(js_value_payload_is_compact_and_copy_safe);

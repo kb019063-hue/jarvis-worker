@@ -156,42 +156,48 @@ const JsValue::FunctionData* JsValue::function_data() const {
 // PropertyMap
 // ---------------------------------------------------------------------------
 
-long PropertyMap::index_of(const std::string& key) const {
-    if (m_entries.size() > kIndexThreshold) {
-        auto it = m_index.find(key);
-        return it == m_index.end() ? -1 : static_cast<long>(it->second);
-    }
-    for (size_t i = 0; i < m_entries.size(); ++i) {
-        if (m_entries[i].first == key) return static_cast<long>(i);
-    }
-    return -1;
-}
-
-void PropertyMap::rebuild_index() {
+void PropertyMap::build_index() {
     m_index.clear();
-    if (m_entries.size() <= kIndexThreshold) return;
-    m_index.reserve(m_entries.size() * 2);
-    for (size_t i = 0; i < m_entries.size(); ++i) m_index[m_entries[i].first] = static_cast<uint32_t>(i);
+    m_index.reserve(m_entries.size() * 2 + 1);
+    for (auto it = m_entries.begin(); it != m_entries.end(); ++it) m_index.emplace(it->first, it);
+    m_index_built = true;
 }
 
 PropertyMap::iterator PropertyMap::find(const std::string& key) {
-    long i = index_of(key);
-    return i < 0 ? m_entries.end() : m_entries.begin() + i;
+    if (m_index_built) {
+        auto it = m_index.find(key);
+        return it == m_index.end() ? m_entries.end() : it->second;
+    }
+    for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+        if (it->first == key) return it;
+    }
+    return m_entries.end();
 }
 
 PropertyMap::const_iterator PropertyMap::find(const std::string& key) const {
-    long i = index_of(key);
-    return i < 0 ? m_entries.end() : m_entries.begin() + i;
+    if (m_index_built) {
+        auto it = m_index.find(key);
+        return it == m_index.end() ? m_entries.end() : it->second;
+    }
+    for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+        if (it->first == key) return it;
+    }
+    return m_entries.end();
 }
 
 PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
-    long i = index_of(key);
-    if (i >= 0) return m_entries[static_cast<size_t>(i)];
+    if (auto it = m_index_built ? m_index.find(key) : m_index.end(); it != m_index.end()) return *it->second;
+    if (!m_index_built) {
+        for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+            if (it->first == key) return *it;
+        }
+    }
     m_entries.emplace_back();
     m_entries.back().first = key;
-    if (m_entries.size() == kIndexThreshold + 1) rebuild_index();
-    else if (m_entries.size() > kIndexThreshold + 1) m_index[key] = static_cast<uint32_t>(m_entries.size() - 1);
-    return m_entries.back();
+    auto back = std::prev(m_entries.end());
+    if (m_entries.size() > kIndexThreshold && !m_index_built) build_index();
+    else if (m_index_built) m_index.emplace(back->first, back);
+    return *back;
 }
 
 JsValue& PropertyMap::operator[](const std::string& key) {
@@ -199,16 +205,23 @@ JsValue& PropertyMap::operator[](const std::string& key) {
 }
 
 bool PropertyMap::erase(const std::string& key) {
-    long i = index_of(key);
-    if (i < 0) return false;
-    m_entries.erase(m_entries.begin() + i);
-    rebuild_index();     // deletion is rare; keeping insertion order matters more
+    auto node = find(key);
+    if (node == m_entries.end()) return false;
+    m_entries.erase(node);         // O(1), every other iterator and index entry stays valid
+    if (m_index_built) m_index.erase(key);
+    if (m_entries.size() <= kIndexThreshold / 2) {
+        // Drop the bucket array once the map is small again; rebuilding it is
+        // bounded by the threshold and avoids keeping a large table alive.
+        m_index.clear();
+        m_index_built = false;
+    }
     return true;
 }
 
 void PropertyMap::clear() {
     m_entries.clear();
     m_index.clear();
+    m_index_built = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +490,7 @@ bool JsValue::is_array() const {
     return type == JsType::Object && object_val && object_val->is_array;
 }
 
-std::vector<JsValue>& JsValue::array_elements() {
+std::deque<JsValue>& JsValue::array_elements() {
     if (!object_val) {
         object_val = Heap::default_heap().allocate_object();
         object_val->is_array = true;
@@ -487,8 +500,8 @@ std::vector<JsValue>& JsValue::array_elements() {
     return object_val->array_elements;
 }
 
-const std::vector<JsValue>& JsValue::array_elements() const {
-    static const std::vector<JsValue> s_empty;
+const std::deque<JsValue>& JsValue::array_elements() const {
+    static const std::deque<JsValue> s_empty;
     return (object_val && object_val->is_array) ? object_val->array_elements : s_empty;
 }
 
@@ -1021,7 +1034,7 @@ JsValue JsValue::make_array(const std::vector<JsValue>& elements) {
     JsObject* obj = Heap::default_heap().allocate_object();
     obj->is_array = true;
     obj->klass = ObjectClass::Array;
-    obj->array_elements = elements;
+    obj->array_elements.assign(elements.begin(), elements.end());
     // Methods live on Array.prototype. They used to be six closures installed
     // on every single array, which also made them show up as own properties.
     obj->prototype = JsIntrinsics::get().array_proto;

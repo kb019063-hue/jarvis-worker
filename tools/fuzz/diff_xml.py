@@ -25,18 +25,30 @@ instruction, names written with their namespaces.
                 an entity that is not declared when part of the DTD was not
                 read.
 
+One kind of document is judged by the grammar and not by the two parsers: an
+XML declaration whose version is not "1." and at least one digit (production
+26, VersionNum). Expat does not look at the version at all (version="abc"
+passes) and libxml2 lets "1." through with no digit, so on version="1." the
+two agree with each other and not with XML. Litebird must refuse every such
+document; the summary says how many there were.
+
 Exit status 1 when more than --max-differ documents DIFFER, or when Litebird
-crashes or runs out of time on any.
+crashes or runs out of time on any. Exit status 2 when lxml is not installed
+(pip install lxml): Expat alone keeps the name characters of the old
+editions, so it cannot be the only reference. --expat-only runs without
+libxml2 all the same and then fails on crashes and timeouts only.
 
 Usage:
     python3 tools/fuzz/diff_xml.py [--count 2000] [--seed 20261114] [--show 5]
                                    [--binary build/litebird] [--max-differ 0]
+                                   [--expat-only]
 """
 import argparse
 import concurrent.futures
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -416,6 +428,18 @@ def damage(rng, text):
     return text
 
 
+VERSION = re.compile(rb"""^<\?xml[ \t\r\n]+version[ \t\r\n]*=[ \t\r\n]*(?:"([^"]*)"|'([^']*)')""")
+
+
+def version_outside_grammar(data):
+    """True when the document declares a version that is not VersionNum."""
+    match = VERSION.match(data)
+    if not match:
+        return False
+    value = match.group(1) if match.group(1) is not None else match.group(2)
+    return re.fullmatch(rb"1\.[0-9]+", value) is None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", default=os.path.join(REPO, "build", "litebird"))
@@ -427,9 +451,19 @@ def main():
                         help="print this many documents on which Expat and libxml2 disagree")
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+    parser.add_argument("--expat-only", action="store_true",
+                        help="run without libxml2; then only crashes and timeouts fail")
     args = parser.parse_args()
+    if not os.path.exists(args.binary):
+        sys.stderr.write("%s: no such file (run `make` first)\n" % args.binary)
+        return 2
+    if etree is None and not args.expat_only:
+        sys.stderr.write("lxml is not installed (pip install lxml). Expat alone cannot be the reference:\n"
+                         "it keeps the name characters of the editions before the fifth. --expat-only\n"
+                         "runs with it all the same and fails on crashes and timeouts only.\n")
+        return 2
     if etree is None:
-        print("lxml is not installed (pip install lxml): comparing with Expat alone")
+        print("lxml is not installed: comparing with Expat alone, differences are printed and not counted")
 
     rng = random.Random(args.seed)
     documents = []
@@ -449,7 +483,7 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             ours = list(pool.map(lambda p: litebird_events(args.binary, p, args.timeout), paths))
 
-    agree = differ = disagree = accepted = broken = 0
+    agree = differ = disagree = accepted = broken = by_grammar = 0
     with_expat = with_libxml2 = with_neither = 0
     shown = shown_disagree = 0
     for data, (mine, my_message) in zip(documents, ours):
@@ -461,6 +495,12 @@ def main():
         second, second_message = lxml_events(data) if etree is not None else (first, first_message)
         if mine is not None:
             accepted += 1
+        if version_outside_grammar(data):
+            by_grammar += 1
+            if mine is not None:
+                differ += 1
+                print("DIFFER: a version number that is not VersionNum was accepted: %r" % data[:200])
+            continue
         if first != second:
             disagree += 1
             if mine == first:
@@ -489,10 +529,16 @@ def main():
                 print("    %-9s %s" % (name, "rejects: " + message[:150] if value is None else repr(value[:300])))
     print("XML differential: %d documents (seed %d, half of them damaged), Litebird accepts %d; %d agree with both, "
           "%d DIFFER, %d where Expat and libxml2 disagree (Litebird is with Expat on %d, with libxml2 on %d, "
-          "with neither on %d)%s"
+          "with neither on %d); %d with a version number outside the grammar, all refused%s"
           % (len(documents), args.seed, accepted, agree, differ, disagree, with_expat, with_libxml2, with_neither,
-             "; %d crashes or timeouts" % broken if broken else ""))
-    return 1 if broken or differ > args.max_differ else 0
+             by_grammar, "; %d crashes or timeouts" % broken if broken else ""))
+    if broken:
+        return 1
+    if etree is None:
+        return 0
+    # With neither: Litebird reads a document one way, Expat another and
+    # libxml2 a third. No such document is known; one would be worth a look.
+    return 1 if differ > args.max_differ or with_neither else 0
 
 
 if __name__ == "__main__":

@@ -33,9 +33,10 @@ from upstream's tree.
 | | Files | About |
 | :--- | ---: | :--- |
 | `domparsing/` | 16 | `DOMParser` for XML and HTML, the `parsererror` document, CDATA, doctypes, entities, `XMLSerializer`, a round trip |
-| `dom/nodes/` | 60 test files, 9 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data |
+| `dom/nodes/` | 60 test files, 10 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data |
 | `resources/testharness.js` | 1 | the harness |
 | `dom/common.js`, `dom/constants.js`, `common/` | 4 | what the tests include, and two documents some load into a frame |
+| `LICENSE.md` | 1 | the licence of the tests |
 
 They are the tests for what Phase 28 built (XML in the DOM) and for the code
 it touched. It is not all of `dom/`: the rest is to be added as it is worked
@@ -101,7 +102,27 @@ subtests assert:
 | `serializer-another-tree` | "…even if the prefix is assigned to another namespace" | `<el2 xmlns:q="u2" q:name="v"/>` for an attribute in `u1`: read back, the attribute is in `u2` (issue 45) | `p:name="v"`, the prefix that still stands for `u1` |
 | `serializer-redundant-xmlns` | "…a prefix bound to an empty namespace URI…" | `<root xmlns="" xmlns:foo=""/>` | `<root xmlns:foo=""/>`: the standard leaves out a default declaration that says what is already so, and the subtest "Check if redundant xmlns="..." is dropped" of the same file asserts exactly that. No implementation passes both |
 
-The serializer is checked by something stronger than either reading:
-`tools/fuzz/xml_roundtrip.py` builds trees with prefixes and declarations
-that collide in every way it can think of, serializes each, parses the text
-and compares the two trees, namespace by namespace.
+The serializer is checked by something stronger than either reading. A tree
+that is written and read again must be the same tree: every element and
+attribute with the namespace and the local name it had. That is a statement
+about Litebird that needs no reference to be right about, and
+`tools/fuzz/xml_roundtrip.py` (`make diff-xml` runs it) checks it on trees
+made to break it: a prefix that stands for one namespace on an element and
+for another on its parent, elements whose own `xmlns` attributes contradict
+their names, an `xmlns` attribute in no namespace, and the prefixes `ns1`,
+`ns2`, `ns3`, which are the ones the serializer makes up. Each tree is
+serialized, the text is read by `DOMParser` and by Expat, and both must give
+the tree that was written; the tree read back is then serialized and read
+once more.
+
+```text
+$ python3 tools/fuzz/xml_roundtrip.py --count 3000
+XML round trip: 3000 trees, 3000 come back the same from Litebird and from Expat, 0 do not
+  1252 of the trees that pass hold a name that contradicts a declaration in scope (3347 such names);
+  165 were written with other prefixes the second time, and none changed after that
+```
+
+Following the two subtests above to the letter makes this fail: with the
+standard's "generate a prefix" as written (issue 44) 265 of those 3,000 trees
+do not come back, and with a prefix kept for its old namespace after a nearer
+element has given it another (issues 45 and 75), 498 do not.

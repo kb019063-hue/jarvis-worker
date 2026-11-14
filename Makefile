@@ -89,6 +89,21 @@ TEST_TARGET = $(BUILD_DIR)/test_suite
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
+XML_CONFORMANCE = python3 tools/conformance/run_xml_conformance.py
+WPT = python3 tools/conformance/run_wpt.py
+# Documents of the W3C XML suite that must be read as the suite says: every
+# one that applies to a parser of this kind (tests/xml/README.md says which).
+XML_FLOOR ?= 1702
+# Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
+# others is listed with its reason in tests/wpt/expected-failures.txt; the
+# runner also fails on one that fails and is not listed.
+WPT_FLOOR ?= 4640
+# Generated documents for `make diff-xml`, and trees for its round trip; the
+# sanitizer build runs fewer of each.
+XML_DIFF_COUNT ?= 4000
+XML_ROUNDTRIP_COUNT ?= 3000
+XML_ASAN_DIFF_COUNT ?= 1000
+XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 # URL cases that must pass (tests/url). The 38 that do not are host names
 # outside ASCII.
 URL_FLOOR ?= 1150
@@ -98,7 +113,7 @@ URL_FLOOR ?= 1150
 JS_ASAN_FLOOR ?= 833
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 572
+DOM_ASAN_FLOOR ?= 610
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -117,7 +132,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance diff-strings diff-trees fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench help
 
 all: $(TARGET)
 
@@ -166,6 +181,33 @@ dom-conformance: $(TARGET)
 url-conformance: $(TARGET)
 	@python3 tools/conformance/run_url_conformance.py --min-pass $(URL_FLOOR)
 
+## XML scoreboard: the W3C XML Conformance Test Suite through the XML parser
+## alone (litebird --xml-canonical): what must be accepted, what must be
+## refused, and the canonical form of 261 documents. The suite is not in the
+## repository (tests/xml/README.md says why): the first run downloads it
+## into build/xml-conformance and uses it only if its SHA-256 is the pinned
+## one. With no network and no file the target fails; it never passes with
+## the suite not run.
+xml-conformance: $(TARGET)
+	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
+
+## The web-platform-tests in tests/wpt (dom/nodes and domparsing), the tests
+## browsers are tested with, run with their own testharness.js. Needs nothing
+## but the binary. Fails when fewer than the floor pass, when a subtest fails
+## that tests/wpt/expected-failures.txt does not list, when a listed one
+## passes, and when a file differs from tests/wpt/MANIFEST.txt.
+wpt: $(TARGET)
+	@$(WPT) --min-pass $(WPT_FLOOR)
+
+## Documents nobody wrote, half of them damaged, read by Litebird, by Expat
+## and by libxml2: no document the two read alike may be read otherwise.
+## Then trees with colliding prefixes and declarations, written by
+## XMLSerializer and read back by Litebird and by Expat: every one must come
+## back the same tree. Needs lxml for libxml2 (pip install lxml).
+diff-xml: $(TARGET)
+	@python3 tools/fuzz/diff_xml.py --binary $(TARGET) --count $(XML_DIFF_COUNT)
+	@python3 tools/fuzz/xml_roundtrip.py --binary $(TARGET) --count $(XML_ROUNDTRIP_COUNT)
+
 ## A grid of string expressions (subjects x methods, operators and regular
 ## expressions) evaluated by Litebird and by Node.js, results compared.
 ## Needs Node.js; there are no expectations to maintain.
@@ -206,7 +248,8 @@ deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
 
 ## Address + UB sanitizer build, then the test suite, the JavaScript, DOM and
-## URL corpora, a fuzz smoke run (asan-core) and the deep pages (asan-deep).
+## URL corpora, the XML suite, the web-platform-tests, generated XML, a fuzz
+## smoke run (asan-core) and the deep pages (asan-deep).
 ## LeakSanitizer is disabled: the JS engine has known pre-existing leaks that
 ## are tracked as a separate cleanup item (see ARCHITECTURE.md, "Known gaps").
 asan: asan-core
@@ -221,6 +264,10 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_url_conformance.py --binary build-asan/litebird --timeout 600 --min-pass $(URL_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 $(XML_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 120 --min-pass $(XML_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 $(WPT) --binary build-asan/litebird --quiet --timeout 600 --min-pass $(WPT_FLOOR)
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/diff_xml.py --binary build-asan/litebird --count $(XML_ASAN_DIFF_COUNT) --timeout 120 --expat-only
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
@@ -256,4 +303,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, diff-strings, diff-trees, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"

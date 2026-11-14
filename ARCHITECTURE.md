@@ -2787,7 +2787,11 @@ unchanged.
    in a `RangeError` where V8 answers, because the matcher recurses; a single
    character or class under `*` has no such limit (AUDIT.md, finding 26).
 3. **Single process, no sandbox.** Chrome's original headline feature was
-   process-per-tab isolation. Untrusted input is parsed in-process.
+   process-per-tab isolation. Untrusted input is parsed in-process. And one
+   thing a sandbox would have hidden: `fetch()` reads files of this machine
+   for any page that asks, because its loader takes whatever is not `data:`
+   or `http://` for a path and nothing checks where the page came from
+   (Phase 28, section 10; the first row of the task table in AGENTS.md).
 4. **Memory is only reclaimed on request.** The collector is sound (Phase 23,
    section 5) but runs only when a script calls `gc()` or the shell's heap
    view is opened; a long-running page grows until then. Leak detection is
@@ -2807,7 +2811,8 @@ unchanged.
    published before its tree-construction tests moved to
    web-platform-tests (June 2026). That copy has 1,973 cases now and
    Litebird passes 1,868 of them: 88 of the others need processing
-   instructions, which the standard has now and Litebird does not, and 6
+   instructions, which the standard's parser now makes and Litebird's does
+   not (the node type exists since Phase 28), and 6
    need a script to run while the page is parsed. And a corpus does not
    hold everything: `<br/>` closing its parent had no case in it (Phase 26).
    `make diff-trees` compares random pages with parse5 for that reason.
@@ -2816,18 +2821,23 @@ unchanged.
 8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
    layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
    is under-sized rather than blurry.
-9. **The DOM a script sees is measured against jsdom, not against pages.**
-   It passes all 572 cases of its corpus (Phase 27), and the corpus can
-   only ask what jsdom can answer and what somebody thought to ask. No
+9. **The DOM a script sees is measured against jsdom and a part of
+   web-platform-tests, not against pages.**
+   It passes all 629 cases of its corpus (Phases 27 and 28) and 4,640 of
+   the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
+   only ask what jsdom can answer and what somebody thought to ask, and the
+   rest of web-platform-tests has not been run. No
    layout while scripts run (`getBoundingClientRect()` is zero), no
    navigation to another page, no external scripts or stylesheets, no
-   `document.write`, no style sheet objects (`sheet.cssRules`), no XML
-   (`DOMParser` parses every type as HTML), date and time inputs without
+   `document.write`, no style sheet objects (`sheet.cssRules`), no frames
+   with documents and no page that is XML (XML documents come from
+   `DOMParser` and `XMLHttpRequest`, Phase 28), requests answered for
+   `data:` URLs only, four text encodings, date and time inputs without
    their values, `el.style` shorthands kept whole. Absent: `TextEncoder`,
    `crypto`, `indexedDB`, `MessageChannel`, XPath, Web Animations,
    `ElementInternals`, and what needs typed arrays. A host name outside
-   ASCII is not converted (38 of the 1,188 URL cases). The full list is in
-   Phase 27, section 12.
+   ASCII is not converted (38 of the 1,188 URL cases). The full lists are in
+   Phase 27, section 12, and Phase 28, section 10.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10.

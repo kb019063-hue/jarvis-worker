@@ -797,16 +797,23 @@ console.log(ok, !(after - before > 100));
 #expect
 true true
 
-#name collect: a function that is reachable only as a prototype stays alive
+#name collect: a function that is reachable only as a prototype stays alive, with what it closed over
 #code
 var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
 
-var o = (function () { function Hidden() { return 'called'; } Hidden.tag = 't'; return Object.create(Hidden); })();
+var o = (function () { var secret = 'called'; function Hidden() { return secret; } Hidden.tag = 't'; return Object.create(Hidden); })();
+var inst = (function () {
+  var A = (function () { var hidden = { v: 'kept' }; return class A { constructor() { this.h = hidden.v; } }; })();
+  class B extends A {}
+  delete A.prototype.constructor;
+  return new B();
+})();
+var bound = (function () { var target = { v: 'bound kept' }; return Object.create(function () { return this.v; }.bind(target)); })();
 gc(); churn(); gc(); churn();
-var H = Object.getPrototypeOf(o);
-console.log(typeof H, H(), o.tag, H.name, H.tag, Object.getPrototypeOf(o) === H);
+var H = Object.getPrototypeOf(o), P = Object.getPrototypeOf(inst.constructor);
+console.log(typeof H, H(), o.tag, H.name, H.tag, Object.getPrototypeOf(o) === H, P.name, new P().h, inst.h, Object.getPrototypeOf(bound)());
 #expect
-function called t Hidden t true
+function called t Hidden t true A kept kept bound kept
 
 #name collect: a parent class reachable only through an instance of its child
 #code

@@ -703,22 +703,37 @@ JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<Js
     return fn.call_with_this(this_val, args);
 }
 
+namespace {
+/// The mark on the one built-in function that is known not to be a
+/// constructor (see JsIntrinsics::JsIntrinsics). A property, not a comparison
+/// with the realm's Function.prototype: the function may be another realm's.
+const char* const kNotAConstructor = "%not-a-constructor";
+}
+
+bool js_is_constructor(const JsValue& value) {
+    if (!value.is_function()) return false;
+    const JsValue::FunctionData* fd = value.function_data();
+    if (fd && fd->node) return fd->is_constructor;
+    if (const JsObject* cell = value.property_cell()) {
+        return cell->properties.find(kNotAConstructor) == cell->properties.end();
+    }
+    return true;
+}
+
 JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target) {
     if (!ctor.is_function()) js_throw_type_error(js_describe_thrown(ctor) + " is not a constructor");
+    const JsValue::FunctionData* fd = ctor.function_data();
+    if (!js_is_constructor(ctor)) {
+        js_throw_type_error((!fd || fd->name.empty() ? std::string("function") : fd->name) + " is not a constructor");
+    }
     if (new_target) {
-        // It has to be something `new` could be used on: a function, and not
-        // an arrow function, a method, an async or a generator function.
-        const JsValue::FunctionData* target_fd = new_target->function_data();
-        if (!new_target->is_function() || (target_fd && target_fd->node && !target_fd->is_constructor)) {
+        // It has to be something `new` could be used on as well.
+        if (!js_is_constructor(*new_target)) {
             js_throw_type_error(js_describe_thrown(*new_target) + " is not a constructor");
         }
         if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
     }
-    const JsValue::FunctionData* fd = ctor.function_data();
     if (fd && fd->node) {
-        if (!fd->is_constructor) {
-            js_throw_type_error((fd->name.empty() ? std::string("function") : fd->name) + " is not a constructor");
-        }
         JsValue instance = JsValue::make_object();
         JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
         if (proto.is_object_like()) {
@@ -1026,6 +1041,20 @@ JsIntrinsics::JsIntrinsics() {
     };
     object_proto = make(nullptr);
     function_proto = make(object_proto);
+    // Function.prototype is a function itself: it takes anything and returns
+    // undefined. So the prototype of every function is a function, `typeof
+    // Object.getPrototypeOf(f)` says so, and the cell knows its function the
+    // way the cell of a parent class does (JsValue::as_prototype).
+    // It is not a constructor: `new Function.prototype()` throws, and so does
+    // `super()` in a class that extends null, whose parent is this function.
+    {
+        JsValue function = js_make_native("", 0, [](const std::vector<JsValue>&) { return JsValue::make_undefined(); });
+        function.function_cell(function_proto);
+        function_proto->set_function_value(function);
+        auto& mark = function_proto->properties.entry(kNotAConstructor);
+        mark.second = JsValue::make_boolean(true);
+        mark.flags = 0;         // not writable, not listed, not deletable
+    }
     array_proto = make(object_proto);
     array_proto->is_array = true;
     array_proto->klass = ObjectClass::Array;

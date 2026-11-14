@@ -642,8 +642,7 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         if (parent.type != JsType::Null) {
             // An arrow function, a method, an async or a generator function
             // cannot be constructed, so it cannot be a parent either.
-            const auto* parent_fd = parent.function_data();
-            if (!parent.is_function() || (parent_fd && parent_fd->node && !parent_fd->is_constructor)) {
+            if (!js_is_constructor(parent)) {
                 js_throw_type_error("Class extends value " + js_describe_thrown(parent) +
                                     " is not a constructor or null");
             }
@@ -799,11 +798,11 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     // The parent is the constructor's prototype at this moment, as the
     // language has it: `Object.setPrototypeOf(Derived, Other)` changes what
     // `super(...)` calls. A class that extends null has Function.prototype
-    // there, which is not a function.
+    // there, a function that is not a constructor.
     JsValue parent;
     if (JsObject* link = ctor.prototype_object()) parent = JsValue::make_object(link);
     const auto* parent_fd = parent.function_data();
-    if (!parent.is_function() || (parent_fd && parent_fd->node && !parent_fd->is_constructor)) {
+    if (!js_is_constructor(parent)) {
         js_throw_type_error("Super constructor is not a constructor");
     }
 

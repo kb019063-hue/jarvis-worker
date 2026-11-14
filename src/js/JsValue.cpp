@@ -382,7 +382,7 @@ JsObject* JsValue::property_cell(bool create) const {
     return m_extra->cell;
 }
 
-JsObject* JsValue::function_cell() const {
+JsObject* JsValue::function_cell(JsObject* adopt) const {
     if (!is_function()) return nullptr;
     if (JsObject* cell = property_cell(true)) return cell;
     if (!m_extra) return nullptr;
@@ -391,8 +391,14 @@ JsObject* JsValue::function_cell() const {
     // the table can be shared with another payload (a function value that was
     // changed while it was being built), and a PropertyMap's index points
     // into its own list.
-    JsObject* cell = Heap::default_heap().allocate_object();
-    cell->prototype = JsIntrinsics::get().function_proto;
+    //
+    // An adopted cell keeps the prototype it has. Nothing is asked of the
+    // realm for it: the realm is what is being built when this happens.
+    JsObject* cell = adopt;
+    if (!cell) {
+        cell = Heap::default_heap().allocate_object();
+        cell->prototype = JsIntrinsics::get().function_proto;
+    }
     cell->klass = ObjectClass::Function;
     if (m_extra->props) {
         for (const auto& entry : *m_extra->props) {

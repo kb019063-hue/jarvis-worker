@@ -379,7 +379,12 @@ public:
     /// then on it is stored the way a script function is. Null for anything
     /// that is not a function. This is what a function needs before its
     /// prototype can be anything but Function.prototype.
-    JsObject* function_cell() const;
+    ///
+    /// Given `adopt`, a native function that has no cell yet takes that
+    /// existing cell for its own instead of a new one. That is for
+    /// Function.prototype alone: its cell is there before any function is,
+    /// and it is a function itself.
+    JsObject* function_cell(JsObject* adopt = nullptr) const;
     /// The cell that stands for this value in a prototype chain, for
     /// `Object.create(value)`, `Object.setPrototypeOf(x, value)`, `class X
     /// extends value`. For an object, its cell. For a function, its cell,

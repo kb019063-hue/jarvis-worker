@@ -8833,6 +8833,273 @@ TEST(css_long_whitespace_runs_keep_their_meaning) {
     assert(style.grid_row_start == 1 && style.grid_column_start == 2);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 34: a function as the prototype of a function, and of an object
+// ---------------------------------------------------------------------------
+
+TEST(js_a_function_is_the_prototype_of_a_function) {
+    using namespace litebird;
+
+    // `Object.getPrototypeOf(Derived)` gave back an object that was not
+    // `Base` and could not be called: a prototype link is a pointer to a
+    // cell, a function is a value, and nothing led from one to the other.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        class Base { constructor(x) { this.x = x; } static s() { return 'static of ' + this.name; } }
+        class Derived extends Base {}
+        class Leaf extends Derived {}
+        function Plain() {}
+        Plain.own = 1;
+        function Proto() { return 'called'; }
+        var child = Object.create(Proto);
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("Object.getPrototypeOf(Derived) === Base") == "true");
+    assert(text("typeof Object.getPrototypeOf(Derived)") == "function");
+    assert(text("Derived.__proto__ === Base && Reflect.getPrototypeOf(Leaf) === Derived") == "true");
+    assert(text("new (Object.getPrototypeOf(Derived))(7).x") == "7");
+    // Static members are found along the link, through any number of levels,
+    // and run with the class they were asked on as `this`.
+    assert(text("Leaf.s()") == "static of Leaf");
+    assert(text("Leaf.hasOwnProperty('s')") == "false");
+    assert(text("Base.isPrototypeOf(Leaf) && !Leaf.isPrototypeOf(Base)") == "true");
+    // The six error constructors: what every assert_throws_js of
+    // web-platform-tests walks before it looks at anything else.
+    assert(text("[TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError]"
+                ".every(function (C) { return Object.getPrototypeOf(C) === Error; })") == "true");
+    assert(text("Object.getPrototypeOf(Error) === Function.prototype") == "true");
+
+    // The same through the engine's own interface.
+    JsValue base = js.eval("Base");
+    JsValue derived = js.eval("Derived");
+    assert(derived.prototype_object() != nullptr);
+    assert(derived.prototype_object() == base.as_prototype());
+    assert(base.as_prototype() == base.as_prototype());            // one cell, however often it is asked for
+    JsValue link = JsValue::make_object(derived.prototype_object());
+    assert(link.is_function());
+    assert(link.identity() == base.identity());
+    assert(link.get_property("name").to_string() == "Base");
+    assert(base.as_prototype()->function_value() != nullptr);
+
+    // A function that is nobody's prototype has a cell for its properties
+    // and no way back from it: the cell and the function would keep each
+    // other alive, and only the collector could take the pair apart.
+    JsValue plain = js.eval("Plain");
+    assert(plain.property_cell() != nullptr);
+    assert(plain.property_cell()->function_value() == nullptr);
+    // An object's cell has none either.
+    assert(js.eval("({ a: 1 })").property_cell()->function_value() == nullptr);
+
+    // Function.prototype is a function: the prototype of every function is.
+    assert(JsIntrinsics::get().function_proto->function_value() != nullptr);
+    assert(text("typeof Function.prototype + ':' + typeof Object.getPrototypeOf(Plain) + ':' + typeof Plain.__proto__") ==
+           "function:function:function");
+    assert(text("Object.getPrototypeOf(Plain) === Function.prototype && Object.getPrototypeOf(Math.max) === Function.prototype") == "true");
+    assert(text("String(Function.prototype()) + ':' + Function.prototype.length + ':' + (Function.prototype.name === '')") ==
+           "undefined:0:true");
+    assert(text("Object.getPrototypeOf(Function.prototype) === Object.prototype") == "true");
+    assert(text("Function.prototype.constructor === Function && Plain instanceof Function && Function.prototype.isPrototypeOf(Plain)") ==
+           "true");
+    // It is not a constructor's prototype property that arrow functions and
+    // methods would find: they have none.
+    assert(text("typeof (() => 1).prototype + ':' + typeof ({ m() {} }).m.prototype + ':' + typeof Function.prototype.prototype") ==
+           "undefined:undefined:undefined");
+    assert(text("typeof Object.create(Function.prototype) + ':' + typeof Object.create(Function.prototype).call") ==
+           "object:function");
+
+    // A function as the prototype of an object.
+    assert(text("Object.getPrototypeOf(child) === Proto") == "true");
+    assert(text("Object.getPrototypeOf(child)()") == "called");
+    assert(text("typeof child") == "object");
+    assert(text("child.name + ':' + child.length + ':' + (child.prototype === Proto.prototype)") == "Proto:0:true");
+    assert(text("var o = { __proto__: Proto }; Object.getPrototypeOf(o) === Proto") == "true");
+    assert(text("function C() {} C.prototype = Proto; Object.getPrototypeOf(new C()) === Proto") == "true");
+
+    // A built-in function gets a cell the first time it needs one, and keeps
+    // what it had: its name, its length, its text, and what it does.
+    JsValue native = js.eval("Math.max");
+    JsObject* native_cell = native.function_cell();
+    assert(native_cell != nullptr);
+    assert(native.function_cell() == native_cell);
+    assert(text("Math.max.name + ':' + Math.max.length + ':' + Math.max(1, 5)") == "max:2:5");
+    assert(text("var n = Object.create(Math.max); Object.getPrototypeOf(n) === Math.max") == "true");
+    assert(text("Object.getPrototypeOf(n)(2, 9)") == "9");
+    assert(text("n.name + ':' + n.length + ':' + typeof n.call") == "max:2:function");
+    assert(text("String(Object.getPrototypeOf(n)) === String(Math.max)") == "true");
+
+    // A chain cannot be closed into a loop through functions either.
+    assert(text("var r; try { Object.setPrototypeOf(Base, Leaf); r = 'no error'; } catch (e) { r = e.name; } r") ==
+           "TypeError");
+    assert(text("Reflect.setPrototypeOf(Proto, child)") == "false");
+    assert(text("Object.getPrototypeOf(Base) === Function.prototype") == "true");
+}
+
+TEST(js_classes_and_their_parents_are_collected) {
+    using namespace litebird;
+
+    // A function that is a prototype and its cell keep each other alive, so
+    // only the collector frees them. It has to: every `class B extends A`
+    // makes such a pair.
+    JsIntrinsics::get();
+    // Twice: the suites before this one leave hundreds of thousands of cells
+    // behind, and those that something still held a handle to during the
+    // first collection are freed by the second (300,309 alive after one,
+    // 269 after two, when this was written).
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function make(i) { class Base { static s() { return i; } } class D extends Base {} return D; }
+            var kept = (function () { var secret = 'called'; function Hidden() { return secret; } Hidden.tag = 't'; return Object.create(Hidden); })();
+            var instance = (function () { class A { static s() { return 'static of A'; } } class B extends A {} return new B(); })();
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t before = Heap::default_heap().stats().alive_cells;
+
+        js.eval_ast("var keep = []; for (var i = 0; i < 500; i++) keep.push(make(i));");
+        Heap::default_heap().collect_garbage();
+        const size_t with_classes = Heap::default_heap().stats().alive_cells;
+        // Two classes a pair, each a cell and a prototype object.
+        assert(with_classes >= before + 2000);
+        assert(js.eval("keep[499].s() + ':' + Object.getPrototypeOf(keep[5]).s()").to_string() == "499:5");
+
+        js.eval_ast("keep = null;");
+        Heap::default_heap().collect_garbage();
+        const size_t after = Heap::default_heap().stats().alive_cells;
+        assert(after <= before + 4);         // the array's cell and such; nothing that grows with 500
+
+        // What is reachable only as a prototype is not collected, and neither
+        // is what it closed over.
+        Heap::default_heap().collect_garbage();
+        assert(js.eval("var H = Object.getPrototypeOf(kept); typeof H + ':' + H() + ':' + kept.tag + ':' + H.name")
+                   .to_string() == "function:called:t:Hidden");
+        assert(js.eval("Object.getPrototypeOf(instance.constructor).s()").to_string() == "static of A");
+
+        // A prototype that was replaced goes; the one in use stays.
+        js.eval_ast(R"(
+            function F() {}
+            for (var j = 0; j < 500; j++) Object.setPrototypeOf(F, function Temp() {});
+            Object.setPrototypeOf(F, function Last() { return 'last'; });
+            H = null;
+        )");
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells <= after + 8);
+        assert(js.eval("Object.getPrototypeOf(F).name + ':' + Object.getPrototypeOf(F)()").to_string() == "Last:last");
+    }
+    // With the interpreter gone, so is everything its scripts made.
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+}
+
+TEST(js_classes_compiled_to_es5_run) {
+    using namespace litebird;
+
+    // What a compiler turns `class B extends A` into. Each line of these
+    // helpers failed before Phase 34: `Object.defineProperty(B, "prototype",
+    // { writable: false })` threw, `_getPrototypeOf(B)` was not `A`, and
+    // `Reflect.construct` ignored its third argument.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+        function _inherits(subClass, superClass) {
+            if (typeof superClass !== 'function' && superClass !== null) throw new TypeError('Super expression must either be null or a function');
+            subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+            Object.defineProperty(subClass, 'prototype', { writable: false });
+            if (superClass) Object.setPrototypeOf(subClass, superClass);
+        }
+        function _createSuper(Derived) {
+            return function () {
+                var Super = _getPrototypeOf(Derived);
+                return Reflect.construct(Super, arguments, _getPrototypeOf(this).constructor);
+            };
+        }
+        var Animal = function Animal(name) { this.name = name; };
+        Animal.prototype.speak = function () { return this.name + ' makes a sound'; };
+        Animal.create = function (name) { return new this(name); };
+        var Dog = (function (_Animal) {
+            _inherits(Dog, _Animal);
+            var _super = _createSuper(Dog);
+            function Dog() { return _super.apply(this, arguments); }
+            Dog.prototype.speak = function () { return _Animal.prototype.speak.call(this) + ', woof'; };
+            return Dog;
+        })(Animal);
+        var MyError = (function (_Error) {
+            _inherits(MyError, _Error);
+            var _super = _createSuper(MyError);
+            function MyError() { return _super.apply(this, arguments); }
+            return MyError;
+        })(Error);
+
+        var __extends = (function () {
+            var extendStatics = function (d, b) { extendStatics = Object.setPrototypeOf; return extendStatics(d, b); };
+            return function (d, b) { extendStatics(d, b); function __() { this.constructor = d; } d.prototype = (__.prototype = b.prototype, new __()); };
+        })();
+        var Shape = (function () { function Shape(n) { this.n = n; } Shape.make = function (n) { return new this(n); }; return Shape; })();
+        var Circle = (function (_super) { __extends(Circle, _super); function Circle() { return _super !== null && _super.apply(this, arguments) || this; } return Circle; })(Shape);
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("var d = Dog.create('Rex'); d.speak()") == "Rex makes a sound, woof");
+    assert(text("d instanceof Dog && d instanceof Animal && Object.getPrototypeOf(Dog) === Animal") == "true");
+    assert(text("var e = new MyError('boom'); (e instanceof MyError) + ':' + (e instanceof Error) + ':' + e.message") ==
+           "true:true:boom");
+    assert(text("Circle.make(3).n + ':' + (Circle.make(3) instanceof Circle) + ':' + (Object.getPrototypeOf(Circle) === Shape)") ==
+           "3:true:true");
+
+    // The prototype property of a constructor: there before it is read,
+    // writable and nothing else, and it can be made read-only once.
+    assert(text("function F() {} var pd = Object.getOwnPropertyDescriptor(F, 'prototype');"
+                "[pd.writable, pd.enumerable, pd.configurable, F.hasOwnProperty('prototype')].join()") ==
+           "true,false,false,true");
+    assert(text("Object.defineProperty(F, 'prototype', { writable: false }); F.prototype = 5; typeof F.prototype") == "object");
+    assert(text("var r; try { Object.defineProperty(F, 'prototype', { writable: true }); r = 'no error'; } catch (x) { r = x.name; } r") ==
+           "TypeError");
+    assert(text("Reflect.defineProperty(F, 'prototype', { value: 1 })") == "false");
+    // An assigned prototype is not enumerable: a loop that copies static
+    // members must not copy it.
+    assert(text("function P() {} P.prototype = { m: 1 }; P.s = 1; Object.keys(P).join()") == "s");
+
+    // Reflect.construct with a third argument, also for a built-in.
+    assert(text("function A2(x) { this.x = x; } function B2() {} var made = Reflect.construct(A2, [3], B2);"
+                "[made.x, made instanceof B2, made instanceof A2].join()") == "3,true,false");
+    assert(text("var arr = Reflect.construct(Array, [1, 2, 3], B2); [Array.isArray(arr), arr.length, arr instanceof B2].join()") ==
+           "true,3,true");
+    assert(text("try { Reflect.construct(A2, [], function () {}.bind ? (() => 1) : 0); r = 'no error'; } catch (x) { r = x.name; } r") ==
+           "TypeError");
+}
+
+TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval_ast(R"(
+        class MyEvent extends Event { constructor(type, extra) { super(type); this.extra = extra; } }
+        class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
+        class Card extends HTMLElement { static get observedAttributes() { return ['title']; } }
+        var seen = [];
+        var bus = new Bus();
+        bus.addEventListener('x', function (e) { seen.push(e.type, e.extra, e instanceof MyEvent, e instanceof Event); });
+        bus.emit('x');
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("seen.join()") == "x,7,true,true");
+    assert(text("Object.getPrototypeOf(MyEvent) === Event") == "true");
+    assert(text("Object.getPrototypeOf(Bus) === EventTarget") == "true");
+    assert(text("Object.getPrototypeOf(Card) === HTMLElement") == "true");
+    assert(text("typeof Object.getPrototypeOf(Card)") == "function");
+    // A static member of the interface is found through the class.
+    assert(text("MyEvent.CAPTURING_PHASE + ':' + MyEvent.hasOwnProperty('CAPTURING_PHASE')") == "1:false");
+    assert(text("Card.observedAttributes.join()") == "title");
+    // The interface objects themselves keep working once they have a cell.
+    assert(text("Event.name + ':' + (new Event('y').type) + ':' + (document.createElement('div') instanceof HTMLElement)") ==
+           "Event:y:true");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -8967,6 +9234,12 @@ int main() {
     RUN_TEST(css_text_trim_matches_the_character_by_character_model);
     RUN_TEST(css_whitespace_does_not_change_selector_or_value_meaning);
     RUN_TEST(css_long_whitespace_runs_keep_their_meaning);
+
+    // Phase 34: a function as the prototype of a function.
+    RUN_TEST(js_a_function_is_the_prototype_of_a_function);
+    RUN_TEST(js_classes_and_their_parents_are_collected);
+    RUN_TEST(js_classes_compiled_to_es5_run);
+    RUN_TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

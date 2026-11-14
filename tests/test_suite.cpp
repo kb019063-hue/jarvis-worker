@@ -4485,8 +4485,11 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
     assert(S("var d = document.createElement('div'); d.appendChild(document.createProcessingInstruction('t', 'd')); d.appendChild(document.createTextNode('x')); d.innerHTML") == "<?t d>x");
 
     // 2. document.title on a document whose root is <svg> with no <title>:
-    //    a title element as the first child of the root; jsdom puts it
-    //    after the root.
+    //    a title element as the first child of the root. When the root is
+    //    empty, jsdom puts it after the root: a document with two elements,
+    //    whose title is still "".
+    assert(S("var d = xml('<svg xmlns=\"http://www.w3.org/2000/svg\"/>', 'image/svg+xml'); d.title = 'T'; S.serializeToString(d) + ' ' + d.title + ' ' + d.childNodes.length") ==
+           "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>T</title></svg> T 1");
     assert(S("var d = xml('<svg xmlns=\"http://www.w3.org/2000/svg\"><g/></svg>', 'image/svg+xml'); d.title = 'T'; S.serializeToString(d) + ' ' + d.title") ==
            "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>T</title><g/></svg> T");
 

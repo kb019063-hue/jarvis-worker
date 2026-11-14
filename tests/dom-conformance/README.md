@@ -62,15 +62,22 @@ XML documents and the serializer (`xml_dom_follows_the_standard_where_jsdom_does
 | Point | The standard | jsdom 31 |
 | :--- | :--- | :--- |
 | `innerHTML` of an HTML element that holds a processing instruction | `<?target data>` | Left out |
-| `document.title = 'T'` when the root is `<svg>` and has no `<title>` | A `<title>` as the first child of the root | Put after the root |
+| `document.title = 'T'` when the root is an empty `<svg>` | A `<title>` as the child of the root | Put after the root: a document with two elements, and `document.title` is still empty |
 | An XHTML DOCTYPE with one of the public identifiers the HTML standard lists | Declares the entity names of HTML: `&nbsp;` is a character | `parsererror` |
 | The clone of a document `DOMParser` made from XML | A `Document` | An `XMLDocument` |
-| `document.dir`, `designMode` on an XML document | There, as on every `Document` | Missing |
+| `document.dir`, `designMode` of a document `DOMParser` made from XML | `""` and `off`, as on every `Document` | `undefined`, and no `designMode` |
 | `activeElement` of a document with no body | The document element | `null` |
 | `visibilityState` of a document a script made | `hidden` | `prerender` |
 | An attribute with a prefix, serialized | Keeps its prefix when nothing else has it (the standard since September 2026) | A made-up `ns1` |
 | A tab in an attribute value, serialized | `&#9;` | `&#x9;` |
-| A made-up prefix when `ns1` is declared on the element already | The next free one (issue 44 of the standard: its text writes `xmlns:ns1` twice) | `ns1` again: not well formed |
+| A DOCTYPE identifier that holds a double quote, serialized | In single quotes | In double quotes: not well formed |
+
+One more difference is not the standard's side against jsdom's. Where an
+attribute needs a made-up prefix and the element already declares `ns1`, the
+standard's text writes `xmlns:ns1` twice (its issue 44, open), and so does
+jsdom; no XML parser reads that. Litebird takes the next free prefix.
+`tests/wpt/README.md` has this and the other places where the serializer
+leaves the text so that what it writes can be read back.
 
 `XMLHttpRequest` (`xml_http_request_answers_data_urls_and_nothing_else`):
 

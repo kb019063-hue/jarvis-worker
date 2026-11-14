@@ -45,7 +45,8 @@ struct TraversalState : JsExotic {
         int type = 0;
         switch (node->type()) {
             case NodeType::Element: type = 1; break;
-            case NodeType::Text: type = 3; break;
+            case NodeType::Text: type = node->is_cdata_section() ? 4 : 3; break;
+            case NodeType::ProcessingInstruction: type = 7; break;
             case NodeType::Comment: type = 8; break;
             case NodeType::Document: type = 9; break;
             case NodeType::DocumentType: type = 10; break;

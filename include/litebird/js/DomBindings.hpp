@@ -225,6 +225,19 @@ inline std::shared_ptr<Node> shared(Node& node) { return node.shared_from_this()
 /// The document `node` belongs to; the realm's own when the node was built
 /// by hand and never told.
 std::shared_ptr<Document> document_of(Realm& realm, const Node& node);
+/// Whether the document `node` belongs to is an HTML document (and not an
+/// XML one: see Document::is_html_document). A node nobody gave a document
+/// belongs to the page.
+bool in_html_document(const Node& node);
+/// The DOM standard's "HTML element in an HTML document": the one case in
+/// which the names of an element and of its attributes are matched without
+/// regard to case, and its tagName is in upper case.
+bool is_html_in_html_document(const Element& element);
+/// getElementsByTagName: the elements below `root` whose qualified name is
+/// `name` ("*" for all), added to `out` in tree order. In an HTML document an
+/// HTML element is matched by the name in lower case; everything else, and
+/// everything in an XML document, by the name as given.
+void collect_by_qualified_name(Node& root, const std::string& name, std::vector<std::shared_ptr<Node>>& out);
 
 // ---------------------------------------------------------------------------
 // Errors and conversions
@@ -629,10 +642,12 @@ JsValue attr_object(Realm& realm, Element& element, const std::string& name);
 /// holds one, keeps the last value and no longer belongs to the element.
 void detach_attr_object(Realm& realm, Element& element, const std::string& name, const std::string& last_value);
 /// document.createAttribute(name): an Attr that belongs to no element yet.
-JsValue create_attribute(Realm& realm, const std::string& name);
+JsValue create_attribute(Realm& realm, const std::string& name, const std::string& namespace_uri = std::string());
 /// element.setAttributeNode(attr): returns the Attr it replaced, or null.
 JsValue set_attribute_node(Realm& realm, Element& element, const JsValue& attr);
 JsValue remove_attribute_node(Realm& realm, Element& element, const JsValue& attr);
+/// Whether `value` is an Attr object.
+bool is_attr_object(const JsValue& value);
 
 // --- DomEventBindings.cpp -------------------------------------------------------
 void register_event_interfaces();
@@ -693,6 +708,17 @@ void set_inner_markup(Realm& realm, Node& node, const std::string& markup);
 std::shared_ptr<Node> parse_fragment(Realm& realm, Element& context, const std::string& markup);
 /// Throws InvalidCharacterError unless `name` can be an element or attribute name.
 void validate_name(Realm& realm, const std::string& name);
+/// The same check for the name of an attribute and for the name of a doctype.
+void validate_attribute_name(Realm& realm, const std::string& name);
+void validate_doctype_name(Realm& realm, const std::string& name);
+/// A namespace and a qualified name a script gave, taken apart by the DOM
+/// standard's "validate and extract". An empty namespace is none.
+struct QualifiedName {
+    std::string namespace_uri;
+    std::string prefix;
+    std::string local;
+};
+QualifiedName validate_and_extract(Realm& realm, const JsValue& ns, const std::string& qualified, bool attribute);
 /// Sets an attribute the way setAttribute does (name lowercased on HTML
 /// elements) and returns nothing.
 void set_attribute_from_script(Realm& realm, Element& element, const std::string& name, const std::string& value);

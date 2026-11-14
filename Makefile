@@ -23,6 +23,7 @@ SRCS = src/dom/Node.cpp \
        src/html/HtmlTreeBuilderModes.cpp \
        src/xml/XmlParser.cpp \
        src/xml/XmlTools.cpp \
+       src/xml/XmlDom.cpp \
        src/css/CssParser.cpp \
        src/css/StyleResolver.cpp \
        src/layout/LayoutBox.cpp \

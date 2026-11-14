@@ -415,9 +415,19 @@ const Element* previous_element(const Element& element) {
     return nullptr;
 }
 
+// Names in a selector are matched without regard to case for an HTML element
+// in an HTML document, and exactly for everything else: an element of SVG,
+// and every element of an XML document. (Asked only when the selector has a
+// capital letter in the name; otherwise both ways are the same comparison.)
+bool names_ignore_case(const Element& element) {
+    if (element.is_foreign()) return false;
+    auto owner = element.owner_document();
+    return !owner || owner->is_html_document();
+}
+
 bool match_attribute(const Element& element, const AttributePart& part) {
-    const std::string* found = element.attribute(element.is_foreign() ? part.name : part.name_lower);
-    if (!found && element.is_foreign()) found = element.attribute(part.name_lower);
+    const bool same = part.name == part.name_lower;
+    const std::string* found = element.attribute(same || !names_ignore_case(element) ? part.name : part.name_lower);
     if (!found) return false;
     if (part.op == 0) return true;
     std::string value = *found;
@@ -524,9 +534,8 @@ struct SelectorMatcher {
 
     bool match_compound(const Compound& compound, const Element& element) const {
         if (!compound.any_type) {
-            if (element.is_foreign()) {
-                if (element.tag_name() != compound.type) return false;
-            } else if (element.tag_name() != compound.type_lower) {
+            const bool same = compound.type == compound.type_lower;
+            if (element.tag_name() != (same || !names_ignore_case(element) ? compound.type : compound.type_lower)) {
                 return false;
             }
         }

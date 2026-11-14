@@ -4,6 +4,9 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/DomLive.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
+#include "litebird/dom/TreeWalk.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/CustomElementRegistry.hpp"
 
 #include <cmath>
@@ -526,13 +529,35 @@ const char* html_interface_for_tag(const std::string& tag) {
 }
 
 std::string namespace_uri_of(const Element& element) {
-    switch (element.element_namespace()) {
-        case ElementNamespace::HTML: return "http://www.w3.org/1999/xhtml";
-        case ElementNamespace::SVG: return "http://www.w3.org/2000/svg";
-        case ElementNamespace::MathML: return "http://www.w3.org/1998/Math/MathML";
-        case ElementNamespace::Other: return element.other_namespace_uri();
-    }
-    return std::string();
+    return xml::element_namespace_uri(element);
+}
+
+bool in_html_document(const Node& node) {
+    if (node.is_document()) return static_cast<const Document&>(node).is_html_document();
+    auto owner = node.owner_document();
+    return !owner || owner->is_html_document();
+}
+
+bool is_html_in_html_document(const Element& element) {
+    return !element.is_foreign() && in_html_document(element);
+}
+
+void collect_by_qualified_name(Node& root, const std::string& name, NodeVector& out) {
+    const bool all = name == "*";
+    const bool html_document = in_html_document(root);
+    const std::string lower = ascii_lower(name);
+    for_each_descendant(root, [&](Node& node) {
+        if (!node.is_element()) return true;
+        const auto& element = static_cast<Element&>(node);
+        if (all) {
+            out.push_back(node.shared_from_this());
+            return true;
+        }
+        const std::string& wanted = html_document && !element.is_foreign() ? lower : name;
+        const bool matches = element.prefix().empty() ? element.tag_name() == wanted : qualified_name(element) == wanted;
+        if (matches) out.push_back(node.shared_from_this());
+        return true;
+    });
 }
 
 std::string qualified_name(const Element& element) {
@@ -543,7 +568,7 @@ std::string qualified_name(const Element& element) {
 std::string interface_for(const Node& node) {
     switch (node.type()) {
         case NodeType::Document:
-            return "Document";
+            return static_cast<const Document&>(node).is_xml_document_object() ? "XMLDocument" : "Document";
         case NodeType::Element: {
             const auto& element = static_cast<const Element&>(node);
             switch (element.element_namespace()) {
@@ -560,13 +585,15 @@ std::string interface_for(const Node& node) {
             return "Element";
         }
         case NodeType::Text:
-            return "Text";
+            return node.is_cdata_section() ? "CDATASection" : "Text";
         case NodeType::Comment:
             return "Comment";
         case NodeType::DocumentFragment:
             return dynamic_cast<const ShadowRoot*>(&node) ? "ShadowRoot" : "DocumentFragment";
         case NodeType::DocumentType:
             return "DocumentType";
+        case NodeType::ProcessingInstruction:
+            return "ProcessingInstruction";
     }
     return "Node";
 }

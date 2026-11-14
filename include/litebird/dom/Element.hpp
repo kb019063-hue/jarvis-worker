@@ -102,6 +102,26 @@ public:
     void set_attribute(const std::string& name, std::string value);
     void remove_attribute(const std::string& name);
 
+    // Attributes are kept under their qualified names ("xlink:href"). The
+    // few that have a namespace have it recorded next to the list: what the
+    // XML parser read with a prefix, and what setAttributeNS was given. (So
+    // an element cannot hold two attributes whose qualified names are the
+    // same and whose namespaces differ; only a script can ask for that.)
+    /// The namespace of the attribute stored as `qualified_name`; empty for
+    /// an attribute in no namespace.
+    const std::string& attribute_namespace(const std::string& qualified_name) const;
+    /// Sets an attribute and its namespace. An empty namespace is none.
+    void set_attribute_ns(const std::string& namespace_uri, const std::string& qualified_name, std::string value);
+    /// The stored name of the attribute with this namespace and local name;
+    /// null when there is none.
+    const std::string* find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const;
+    /// Copies the namespaces of `other`'s attributes: for a clone.
+    void copy_attribute_namespaces(const Element& other) {
+        if (other.m_rare && !other.m_rare->attribute_namespaces.empty()) {
+            rare().attribute_namespaces = other.m_rare->attribute_namespaces;
+        }
+    }
+
     /// In the order they were added; see AttributeList.hpp.
     const AttributeList& attributes() const {
         return m_attributes;
@@ -257,6 +277,8 @@ public:
         std::string is_value;
         std::string prefix;
         std::string other_namespace;
+        /// Qualified name and namespace of each attribute that has one.
+        AttributeNamespaces attribute_namespaces;
     };
     std::unique_ptr<Rare> m_rare;
     Rare& rare() {

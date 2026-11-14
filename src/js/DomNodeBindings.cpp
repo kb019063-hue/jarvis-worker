@@ -4,6 +4,8 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/DomLive.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/FormState.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 
@@ -14,13 +16,16 @@ namespace dom {
 
 bool is_any_node(const Node&) { return true; }
 bool is_element_node(const Node& node) { return node.is_element(); }
-bool is_character_data(const Node& node) { return node.is_text() || node.is_comment(); }
+bool is_character_data(const Node& node) {
+    return node.is_text() || node.is_comment() || node.is_processing_instruction();
+}
 
 namespace {
 
 bool is_text_node(const Node& node) { return node.is_text(); }
 bool is_fragment_node(const Node& node) { return node.is_document_fragment(); }
 bool is_doctype_node(const Node& node) { return node.is_document_type(); }
+bool is_instruction_node(const Node& node) { return node.is_processing_instruction(); }
 
 std::u16string units(const std::string& text) { return js_utf8_to_utf16(text); }
 std::string utf8(std::u16string_view text) { return js_utf16_to_utf8(text); }
@@ -89,12 +94,13 @@ std::string node_name(const Node& node) {
         case NodeType::Element: {
             const auto& element = static_cast<const Element&>(node);
             const std::string name = qualified_name(element);
-            return element.is_foreign() ? name : ascii_upper(name);
+            return is_html_in_html_document(element) ? ascii_upper(name) : name;
         }
-        case NodeType::Text: return "#text";
+        case NodeType::Text: return node.is_cdata_section() ? "#cdata-section" : "#text";
         case NodeType::Comment: return "#comment";
         case NodeType::DocumentFragment: return "#document-fragment";
         case NodeType::DocumentType: return static_cast<const DocumentTypeNode&>(node).name();
+        case NodeType::ProcessingInstruction: return static_cast<const ProcessingInstruction&>(node).target();
     }
     return std::string();
 }
@@ -102,7 +108,8 @@ std::string node_name(const Node& node) {
 int node_type_number(const Node& node) {
     switch (node.type()) {
         case NodeType::Element: return 1;
-        case NodeType::Text: return 3;
+        case NodeType::Text: return node.is_cdata_section() ? 4 : 3;
+        case NodeType::ProcessingInstruction: return 7;
         case NodeType::Comment: return 8;
         case NodeType::Document: return 9;
         case NodeType::DocumentType: return 10;
@@ -151,11 +158,25 @@ bool nodes_equal(const Node& a, const Node& b) {
                 const auto& ex = static_cast<const Element&>(*x);
                 const auto& ey = static_cast<const Element&>(*y);
                 if (ex.element_namespace() != ey.element_namespace() || ex.tag_name() != ey.tag_name()) return false;
+                if (ex.other_namespace_uri() != ey.other_namespace_uri() || ex.prefix() != ey.prefix()) return false;
                 if (!(ex.attributes() == ey.attributes())) return false;
+                for (const auto& [name, value] : ex.attributes()) {
+                    if (ex.attribute_namespace(name) != ey.attribute_namespace(name)) return false;
+                }
                 break;
             }
             case NodeType::Text:
+                if (x->is_cdata_section() != y->is_cdata_section()) return false;
+                if (character_data(*x) != character_data(*y)) return false;
+                break;
             case NodeType::Comment:
+                if (character_data(*x) != character_data(*y)) return false;
+                break;
+            case NodeType::ProcessingInstruction:
+                if (static_cast<const ProcessingInstruction&>(*x).target() !=
+                    static_cast<const ProcessingInstruction&>(*y).target()) {
+                    return false;
+                }
                 if (character_data(*x) != character_data(*y)) return false;
                 break;
             case NodeType::DocumentType: {
@@ -186,7 +207,8 @@ void normalize_subtree(Node& root) {
         const NodeVector children = parent->children();
         std::shared_ptr<Node> run;         // the text node the following ones are merged into
         for (const auto& child : children) {
-            if (!child->is_text()) {
+            // A CDATA section stays what it is: only plain text is merged.
+            if (!child->is_text() || child->is_cdata_section()) {
                 run.reset();
                 continue;
             }
@@ -312,6 +334,7 @@ std::shared_ptr<Node> script_parent(const Node& node) {
 const std::string& character_data(const Node& node) {
     if (node.is_text()) return static_cast<const Text&>(node).text();
     if (node.is_comment()) return static_cast<const Comment&>(node).data();
+    if (node.is_processing_instruction()) return static_cast<const ProcessingInstruction&>(node).data();
     return kEmpty;
 }
 
@@ -330,6 +353,10 @@ void store_character_data(Node& node, const std::string& data) {
         auto& comment = static_cast<Comment&>(node);
         old = comment.data();
         comment.set_data(data);
+    } else if (node.is_processing_instruction()) {
+        auto& instruction = static_cast<ProcessingInstruction&>(node);
+        old = instruction.data();
+        instruction.set_data(data);
     } else {
         return;
     }
@@ -485,7 +512,13 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
             case NodeType::Element: {
                 const auto& from = static_cast<const Element&>(source);
                 auto element = std::make_shared<Element>(from.tag_name(), from.element_namespace());
+                // The name as it is, whatever its case, and the namespace
+                // and prefix: a copy of <p:Item xmlns:p="urn:x"> is one too.
+                element->set_tag_name_verbatim(from.tag_name());
+                element->set_prefix(from.prefix());
+                element->set_other_namespace_uri(from.other_namespace_uri());
                 element->m_attributes = from.m_attributes;
+                element->copy_attribute_namespaces(from);
                 if (const FormControlState* state = from.form_state()) {
                     // What a control holds is cloned with it.
                     FormControlState& made = element->ensure_form_state();
@@ -509,12 +542,20 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
                 copy = element;
                 break;
             }
-            case NodeType::Text:
-                copy = std::make_shared<Text>(static_cast<const Text&>(source).text());
+            case NodeType::Text: {
+                auto text = std::make_shared<Text>(static_cast<const Text&>(source).text());
+                text->set_cdata_section(source.is_cdata_section());
+                copy = text;
                 break;
+            }
             case NodeType::Comment:
                 copy = std::make_shared<Comment>(static_cast<const Comment&>(source).data());
                 break;
+            case NodeType::ProcessingInstruction: {
+                const auto& from = static_cast<const ProcessingInstruction&>(source);
+                copy = std::make_shared<ProcessingInstruction>(from.target(), from.data());
+                break;
+            }
             case NodeType::DocumentFragment:
                 copy = std::make_shared<Node>(NodeType::DocumentFragment);
                 break;
@@ -526,9 +567,12 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
             case NodeType::Document: {
                 const auto& from = static_cast<const Document&>(source);
                 auto document = std::make_shared<Document>();
-                document->set_doctype(from.doctype());
+                // The doctype is a child: a copy that is not deep has none.
+                if (deep) document->set_doctype(from.doctype());
                 document->set_quirks_mode(from.quirks_mode());
                 document->set_url(from.url());
+                document->set_content_type(from.content_type());
+                document->set_xml_document_object(from.is_xml_document_object());
                 copy = document;
                 break;
             }
@@ -810,31 +854,35 @@ void setup_node(Iface& I) {
         }
         return boolean(false);
     });
+    // The DOM standard's "locate a namespace" and "locate a namespace
+    // prefix": the element's own name first, then its xmlns attributes, then
+    // the same for each ancestor.
     I.node_method(any, "lookupNamespaceURI", 1, [](Realm&, Node& self, Args args) {
-        const bool no_prefix = js_arg(args, 0).is_nullish() || to_str(js_arg(args, 0)).empty();
-        const Node* at = &self;
-        std::shared_ptr<Node> hold;
-        while (at && !at->is_element()) {
-            hold = at->is_document() ? std::shared_ptr<Node>(static_cast<const Document*>(at)->document_element())
-                                     : script_parent(*at);
-            at = hold.get();
-        }
-        if (!at || !no_prefix) return null();
-        const std::string uri = namespace_uri_of(static_cast<const Element&>(*at));
+        const std::string prefix = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
+        const std::string uri = xml::locate_namespace(self, prefix);
         return uri.empty() ? null() : str(uri);
     });
-    I.node_method(any, "lookupPrefix", 1, [](Realm&, Node&, Args) { return null(); });
+    I.node_method(any, "lookupPrefix", 1, [](Realm&, Node& self, Args args) {
+        const std::string uri = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
+        if (uri.empty()) return null();
+        std::shared_ptr<Node> hold;
+        const Node* at = &self;
+        if (self.is_document()) {
+            hold = static_cast<const Document&>(self).document_element();
+            at = hold.get();
+        } else if (self.is_document_type() || self.is_document_fragment()) {
+            at = nullptr;
+        } else if (!self.is_element()) {
+            hold = self.parent();
+            at = hold && hold->is_element() ? hold.get() : nullptr;
+        }
+        std::string prefix;
+        if (!at || !xml::locate_prefix(static_cast<const Element&>(*at), uri, prefix)) return null();
+        return str(prefix);
+    });
     I.node_method(any, "isDefaultNamespace", 1, [](Realm&, Node& self, Args args) {
         const std::string wanted = js_arg(args, 0).is_nullish() ? std::string() : to_str(js_arg(args, 0));
-        const Node* at = &self;
-        std::shared_ptr<Node> hold;
-        while (at && !at->is_element()) {
-            hold = at->is_document() ? std::shared_ptr<Node>(static_cast<const Document*>(at)->document_element())
-                                     : script_parent(*at);
-            at = hold.get();
-        }
-        const std::string actual = at ? namespace_uri_of(static_cast<const Element&>(*at)) : std::string();
-        return boolean(actual == wanted);
+        return boolean(xml::locate_namespace(self, std::string()) == wanted);
     });
 
     I.node_method(any, "insertBefore", 2, [](Realm& r, Node& self, Args args) {
@@ -1035,6 +1083,19 @@ void setup_text(Iface& I) {
 
 void setup_comment(Iface&) {}
 
+// A CDATA section is a Text node with another name; everything it can do is
+// on Text.prototype.
+void setup_cdata_section(Iface&) {}
+
+void setup_processing_instruction(Iface& I) {
+    const auto instruction = &is_instruction_node;
+    I.node_getter(instruction, "target", [](Realm&, Node& self) {
+        return str(static_cast<ProcessingInstruction&>(self).target());
+    });
+    // The style sheet an <?xml-stylesheet?> names: none is ever loaded.
+    I.node_getter(instruction, "sheet", [](Realm&, Node&) { return null(); });
+}
+
 void setup_fragment(Iface& I) {
     const auto fragment = &is_fragment_node;
     define_parent_node(I, fragment);
@@ -1060,6 +1121,8 @@ void register_node_interfaces() {
     register_interface({"CharacterData", "Node", setup_character_data, nullptr, 0, nullptr});
     register_interface({"Text", "CharacterData", setup_text, construct_text, 0, nullptr});
     register_interface({"Comment", "CharacterData", setup_comment, construct_comment, 0, nullptr});
+    register_interface({"CDATASection", "Text", setup_cdata_section, nullptr, 0, nullptr});
+    register_interface({"ProcessingInstruction", "CharacterData", setup_processing_instruction, nullptr, 0, nullptr});
     register_interface({"DocumentFragment", "Node", setup_fragment, construct_fragment, 0, nullptr});
     register_interface({"DocumentType", "Node", setup_doctype, nullptr, 0, nullptr});
 }

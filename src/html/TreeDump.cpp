@@ -1,3 +1,4 @@
+#include "litebird/dom/ProcessingInstruction.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/dom/Comment.hpp"
 #include "litebird/dom/Document.hpp"
@@ -107,6 +108,13 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 break;
             case NodeType::DocumentType:
                 break;      // never a child; the document's doctype is written below
+            case NodeType::ProcessingInstruction: {
+                // The form the html5lib tests have for one: `<?target data>`.
+                const auto& instruction = static_cast<const ProcessingInstruction&>(node);
+                write_indent(os, depth);
+                os << "<?" << instruction.target() << " " << instruction.data() << ">\n";
+                break;
+            }
         }
     };
 

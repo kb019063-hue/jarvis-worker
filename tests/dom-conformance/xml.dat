@@ -1,0 +1,811 @@
+#fixture
+<html><head><title>XML</title></head><body><div id="host"></div></body></html>
+
+#name DOMParser makes an XML document
+#code
+var d = new DOMParser().parseFromString('<a><b id="k">t</b><c/></a>', 'application/xml');
+var root = d.documentElement;
+console.log(d.nodeType, d.nodeName, d.contentType, d.characterSet, d.compatMode, d.URL === document.URL, d.doctype, d.childNodes.length);
+console.log(root.nodeType, root.nodeName, root.tagName, root.localName, root.prefix, root.namespaceURI, root.constructor === Element, root instanceof HTMLElement);
+console.log(d.querySelector('b').textContent, d.getElementById('k').nodeName, root.children.length, root.lastChild.childNodes.length);
+console.log(new XMLSerializer().serializeToString(d));
+console.log(d instanceof Document, d.defaultView, d.readyState, d !== document, root.ownerDocument === d);
+#expect
+9 #document application/xml UTF-8 CSS1Compat true null 1
+1 a a a null null true false
+t b 2 0
+<a><b id="k">t</b><c/></a>
+true null complete true true
+
+#name the types DOMParser takes
+#code
+['text/xml', 'application/xml', 'application/xhtml+xml', 'image/svg+xml'].forEach(function (type) {
+    var d = new DOMParser().parseFromString('<svg xmlns="http://www.w3.org/2000/svg"><title>t</title></svg>', type);
+    console.log(d.contentType, d.documentElement.constructor.name, d.documentElement.firstChild.constructor.name, d.documentElement.namespaceURI);
+});
+['text/plain', 'application/json', 'TEXT/XML', '', 'text/xml; charset=utf-8'].forEach(function (type) {
+    try { new DOMParser().parseFromString('<a/>', type); console.log(type, 'accepted'); }
+    catch (e) { console.log(JSON.stringify(type), e.name, e instanceof TypeError); }
+});
+#expect
+text/xml SVGSVGElement SVGTitleElement http://www.w3.org/2000/svg
+application/xml SVGSVGElement SVGTitleElement http://www.w3.org/2000/svg
+application/xhtml+xml SVGSVGElement SVGTitleElement http://www.w3.org/2000/svg
+image/svg+xml SVGSVGElement SVGTitleElement http://www.w3.org/2000/svg
+"text/plain" TypeError true
+"application/json" TypeError true
+"TEXT/XML" TypeError true
+"" TypeError true
+"text/xml; charset=utf-8" TypeError true
+
+#name an XHTML document: the interfaces of HTML, and names that keep their case
+#code
+var d = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p class="x">hi<br/></p><DIV/></body></html>', 'application/xhtml+xml');
+var p = d.querySelector('p');
+console.log(d.documentElement.constructor.name, p.constructor.name, p.tagName, p.nodeName, p.className, d.title);
+console.log(d.body.constructor.name, d.head.constructor.name, d.body.lastChild.tagName, d.body.lastChild.constructor.name);
+console.log(d.querySelectorAll('div').length, d.querySelectorAll('DIV').length, d.getElementsByTagName('div').length, d.getElementsByTagName('DIV').length, d.getElementsByTagName('P').length, d.getElementsByTagName('p').length);
+console.log(new XMLSerializer().serializeToString(d));
+#expect
+HTMLHtmlElement HTMLParagraphElement p p x T
+HTMLBodyElement HTMLHeadElement DIV HTMLUnknownElement
+0 1 0 1 0 1
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p class="x">hi<br /></p><DIV></DIV></body></html>
+
+#name comments, processing instructions, CDATA sections and the doctype are nodes
+#code
+var d = new DOMParser().parseFromString('<?xml version="1.0" encoding="UTF-8"?><!--c1--><?pi some data?><!DOCTYPE a><a>x<![CDATA[<raw>&amp;]]>y<!--c2--><?t?><b> </b></a><!--c3-->', 'text/xml');
+function kind(n) { return n.nodeType + ' ' + n.nodeName + ' ' + n.constructor.name + ' ' + JSON.stringify(n.nodeValue); }
+console.log(d.childNodes.length);
+for (var i = 0; i < d.childNodes.length; i++) console.log(kind(d.childNodes[i]));
+var a = d.documentElement;
+for (i = 0; i < a.childNodes.length; i++) console.log(kind(a.childNodes[i]));
+var cdata = a.childNodes[1], pi = d.childNodes[1];
+console.log(JSON.stringify(a.textContent), pi.target, pi.data, cdata.data, cdata.length, cdata.wholeText, cdata instanceof Text, cdata instanceof CharacterData, pi instanceof CharacterData, pi instanceof Text);
+console.log(a.childNodes[4].target, JSON.stringify(a.childNodes[4].data), Node.CDATA_SECTION_NODE, Node.PROCESSING_INSTRUCTION_NODE);
+console.log(new XMLSerializer().serializeToString(d));
+#expect
+5
+8 #comment Comment "c1"
+7 pi ProcessingInstruction "some data"
+10 a DocumentType null
+1 a Element null
+8 #comment Comment "c3"
+3 #text Text "x"
+4 #cdata-section CDATASection "<raw>&amp;"
+3 #text Text "y"
+8 #comment Comment "c2"
+7 t ProcessingInstruction ""
+1 b Element null
+"x<raw>&amp;y " pi some data <raw>&amp; 10 x<raw>&amp;y true true true false
+t "" 4 7
+<!--c1--><?pi some data?><!DOCTYPE a><a>x<![CDATA[<raw>&amp;]]>y<!--c2--><?t ?><b> </b></a><!--c3-->
+
+#name a doctype with its identifiers
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml"/>', 'application/xml');
+console.log(d.doctype.name, '|', d.doctype.publicId, '|', d.doctype.systemId, '|', d.doctype.nodeType, d.doctype.nodeName, d.firstChild === d.doctype);
+console.log(s.serializeToString(d.doctype));
+console.log(s.serializeToString(d));
+d = new DOMParser().parseFromString('<!DOCTYPE a SYSTEM "a.dtd"><a/>', 'application/xml');
+console.log(d.doctype.name, JSON.stringify(d.doctype.publicId), d.doctype.systemId, s.serializeToString(d));
+d = new DOMParser().parseFromString('<!-- first --><!DOCTYPE a [<!ELEMENT a ANY>]><a/>', 'application/xml');
+console.log(d.childNodes.length, d.childNodes[0].nodeType, d.childNodes[1].nodeType, s.serializeToString(d));
+#expect
+html | -//W3C//DTD XHTML 1.0 Strict//EN | http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd | 10 html true
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml"></html>
+a "" a.dtd <!DOCTYPE a SYSTEM "a.dtd"><a/>
+3 8 10 <!-- first --><!DOCTYPE a><a/>
+
+#name namespaces of elements and attributes
+#code
+var d = new DOMParser().parseFromString('<r xmlns="urn:d" xmlns:p="urn:p" p:at="1" plain="2"><p:e xmlns:q="urn:q" q:x="3"><f xmlns=""/></p:e></r>', 'application/xml');
+var r = d.documentElement, e = r.firstChild, f = e.firstChild;
+console.log(r.namespaceURI, r.prefix, r.localName, r.tagName, '|', e.namespaceURI, e.prefix, e.localName, e.tagName, e.nodeName, '|', f.namespaceURI, f.prefix, f.tagName);
+console.log(r.attributes.length);
+for (var i = 0; i < r.attributes.length; i++) {
+    var a = r.attributes[i];
+    console.log([a.name, a.localName, a.prefix, a.namespaceURI, a.value, a.nodeName].join(' | '));
+}
+console.log(r.getAttributeNS('urn:p', 'at'), r.getAttribute('p:at'), r.getAttributeNS(null, 'plain'), r.getAttributeNS('urn:p', 'plain'), r.getAttributeNS(null, 'at'), r.getAttribute('at'));
+console.log(r.hasAttributeNS('http://www.w3.org/2000/xmlns/', 'p'), r.hasAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns'), r.hasAttributeNS(null, 'xmlns'), e.getAttributeNS('urn:q', 'x'), e.hasAttribute('q:x'), e.hasAttribute('x'));
+console.log(new XMLSerializer().serializeToString(d));
+#expect
+urn:d null r r | urn:p p e p:e p:e | null null f
+4
+xmlns | xmlns |  | http://www.w3.org/2000/xmlns/ | urn:d | xmlns
+xmlns:p | p | xmlns | http://www.w3.org/2000/xmlns/ | urn:p | xmlns:p
+p:at | at | p | urn:p | 1 | p:at
+plain | plain |  |  | 2 | plain
+1 1 2 null null null
+true true false 3 true false
+<r xmlns="urn:d" xmlns:p="urn:p" p:at="1" plain="2"><p:e xmlns:q="urn:q" q:x="3"><f xmlns=""/></p:e></r>
+
+#name the five entities and character references
+#code
+var d = new DOMParser().parseFromString('<a b="&lt;&amp;&quot;&apos;&gt;&#65;&#x42;">&lt;&amp;&gt;&quot;&apos;&#65;&#x1F600;&#10;</a>', 'application/xml');
+var a = d.documentElement;
+console.log(a.getAttribute('b'), JSON.stringify(a.textContent), a.childNodes.length, a.firstChild.length);
+console.log(new XMLSerializer().serializeToString(d));
+['<a>&nbsp;</a>', '<a>&#0;</a>', '<a>&#x110000;</a>', '<a>&#xD800;</a>', '<a>&unknown;</a>', '<a>&amp</a>', '<a>& amp;</a>', '<a b="&lt"/>', '<a>&#9;&#xA;&#xD;</a>', '<a>&#12;</a>'].forEach(function (text) {
+    var bad = new DOMParser().parseFromString(text, 'application/xml');
+    console.log(text, bad.documentElement.nodeName);
+});
+#expect
+<&"'>AB "<&>\"'A😀\n" 1 9
+<a b="&lt;&amp;&quot;'&gt;AB">&lt;&amp;&gt;"'A😀
+</a>
+<a>&nbsp;</a> parsererror
+<a>&#0;</a> parsererror
+<a>&#x110000;</a> parsererror
+<a>&#xD800;</a> parsererror
+<a>&unknown;</a> parsererror
+<a>&amp</a> parsererror
+<a>& amp;</a> parsererror
+<a b="&lt"/> parsererror
+<a>&#9;&#xA;&#xD;</a> a
+<a>&#12;</a> parsererror
+
+#name an entity declared in the DOCTYPE
+#code
+var d = new DOMParser().parseFromString('<!DOCTYPE a [<!ENTITY e "val">]><a b="&e;">&e;</a>', 'application/xml');
+console.log(d.documentElement.nodeName, d.documentElement.textContent, d.documentElement.getAttribute('b'), d.doctype.name, d.childNodes.length);
+console.log(new XMLSerializer().serializeToString(d));
+#expect
+a val val a 2
+<!DOCTYPE a><a b="val">val</a>
+
+#name attribute values and line ends are normalized
+#code
+var d = new DOMParser().parseFromString('<a b="  x\n\ty  " c="&#10;&#9;" d=\'q"q\' e="\r\n">\r\nline\rtwo\n</a>', 'application/xml');
+var a = d.documentElement;
+console.log(JSON.stringify([a.getAttribute('b'), a.getAttribute('c'), a.getAttribute('d'), a.getAttribute('e'), a.textContent]));
+#expect
+["  x  y  ","\n\t","q\"q"," ","\nline\ntwo\n"]
+
+#name white space between elements is text
+#code
+var d = new DOMParser().parseFromString('<?xml version="1.0"?>\n<a>\n  <b/>\n  <c> </c>\n</a>\n<!-- end -->\n', 'application/xml');
+var a = d.documentElement;
+console.log(d.childNodes.length, a.childNodes.length, JSON.stringify(a.firstChild.data), a.children.length, a.childElementCount, JSON.stringify(a.lastElementChild.textContent), a.firstElementChild.nextElementSibling.nodeName);
+#expect
+2 5 "\n  " 2 2 " " c
+
+#name text that is not well formed gives a document that says so
+#code
+var NS = 'http://www.mozilla.org/newlayout/xml/parsererror.xml';
+function report(text) {
+    var d = new DOMParser().parseFromString(text, 'application/xml');
+    var e = d.documentElement;
+    return [e.localName === 'parsererror' && e.namespaceURI === NS ? 'error' : 'ok:' + e.nodeName, d.childNodes.length, d.getElementsByTagNameNS(NS, 'parsererror').length].join(' ');
+}
+['<a><b></a>', '<a>', '', 'text', '<a/><b/>', '<a b=1/>', '<a b="1" b="2"/>', '<p:a/>', '<a><!-- -- --></a>', '<a><?xml v?></a>', '<a>]]></a>', '<a b="<"/>', '<1a/>', '<a></A>', '<?xml version="1.0"?>\n<a/>', '\n<?xml version="1.0"?><a/>', '<a xmlns:xml="urn:x"/>', '<a xmlns:p=""/>', '<a>\u0001</a>', '<a/>x', '<a/><!--ok--><?ok?> ', '<a b="1"c="2"/>', '<a/ >', '< a/>', '<a><![CDATA[x]]></a>', '<a><![CDATA[x]></a>', '<![CDATA[x]]><a/>', '<a xmlns:p="u" xmlns:q="u" p:x="1" q:x="2"/>', '<a xml:lang="en"/>', '<xmlns:a xmlns:xmlns="u"/>', '<a:b xmlns:a="u"><a:c/></a:b>', '<a><b/><b/></a><?x?><!--y-->', '<!DOCTYPE a><!DOCTYPE a><a/>', '<a><!DOCTYPE a></a>', '<?xml version="1.0" standalone="maybe"?><a/>', '<a>\ufffe</a>', '<a\u00a0b="1"/>', '<\u00e9t\u00e9 \u00e0="1"/>', '<a>&#x41;&#66;</a>', '<a b="&#x41;" />'].forEach(function (text) {
+    console.log(JSON.stringify(text), report(text));
+});
+var bad = new DOMParser().parseFromString('<a><b></a>', 'text/xml');
+console.log(bad.contentType, bad.documentElement.childNodes.length > 0, bad.documentElement.textContent.length > 0, bad.querySelector('a'), bad.querySelector('parsererror') === bad.documentElement);
+#expect
+"<a><b></a>" error 1 1
+"<a>" error 1 1
+"" error 1 1
+"text" error 1 1
+"<a/><b/>" error 1 1
+"<a b=1/>" error 1 1
+"<a b=\"1\" b=\"2\"/>" error 1 1
+"<p:a/>" error 1 1
+"<a><!-- -- --></a>" error 1 1
+"<a><?xml v?></a>" error 1 1
+"<a>]]></a>" error 1 1
+"<a b=\"<\"/>" error 1 1
+"<1a/>" error 1 1
+"<a></A>" error 1 1
+"<?xml version=\"1.0\"?>\n<a/>" ok:a 1 0
+"\n<?xml version=\"1.0\"?><a/>" error 1 1
+"<a xmlns:xml=\"urn:x\"/>" error 1 1
+"<a xmlns:p=\"\"/>" error 1 1
+"<a>\u0001</a>" error 1 1
+"<a/>x" error 1 1
+"<a/><!--ok--><?ok?> " ok:a 3 0
+"<a b=\"1\"c=\"2\"/>" error 1 1
+"<a/ >" error 1 1
+"< a/>" error 1 1
+"<a><![CDATA[x]]></a>" ok:a 1 0
+"<a><![CDATA[x]></a>" error 1 1
+"<![CDATA[x]]><a/>" error 1 1
+"<a xmlns:p=\"u\" xmlns:q=\"u\" p:x=\"1\" q:x=\"2\"/>" error 1 1
+"<a xml:lang=\"en\"/>" ok:a 1 0
+"<xmlns:a xmlns:xmlns=\"u\"/>" error 1 1
+"<a:b xmlns:a=\"u\"><a:c/></a:b>" ok:a:b 1 0
+"<a><b/><b/></a><?x?><!--y-->" ok:a 3 0
+"<!DOCTYPE a><!DOCTYPE a><a/>" error 1 1
+"<a><!DOCTYPE a></a>" error 1 1
+"<?xml version=\"1.0\" standalone=\"maybe\"?><a/>" error 1 1
+"<a>￾</a>" error 1 1
+"<a b=\"1\"/>" error 1 1
+"<été à=\"1\"/>" ok:été 1 0
+"<a>&#x41;&#66;</a>" ok:a 1 0
+"<a b=\"&#x41;\" />" ok:a 1 0
+text/xml true true null true
+
+#name createElement in an XML document keeps the name as given
+#code
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+var e = d.createElement('Foo'), up = d.createElementNS('http://www.w3.org/1999/xhtml', 'DIV'), low = d.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+console.log(e.nodeName, e.namespaceURI, e.tagName, e.localName, e.constructor.name, '|', up.tagName, up.constructor.name, '|', low.tagName, low.constructor.name, '|', d.createElement('div').constructor.name, d.createElement('div').namespaceURI);
+var x = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"/>', 'application/xhtml+xml');
+var xe = x.createElement('Div'), xl = x.createElement('div');
+console.log(xe.namespaceURI, xe.tagName, xe.constructor.name, '|', xl.tagName, xl.constructor.name, xl.namespaceURI);
+['a b', '1a', '', 'a<b'].forEach(function (name) { try { d.createElement(name); console.log('made', name); } catch (err) { console.log(JSON.stringify(name), err.name); } });
+#expect
+Foo null Foo Foo Element | DIV HTMLUnknownElement | div HTMLDivElement | Element null
+http://www.w3.org/1999/xhtml Div HTMLUnknownElement | div HTMLDivElement http://www.w3.org/1999/xhtml
+"a b" InvalidCharacterError
+"1a" InvalidCharacterError
+"" InvalidCharacterError
+made a<b
+
+#name the names of attributes are case-sensitive in XML
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a Foo="1" foo="2"/>', 'application/xml');
+var a = d.documentElement;
+a.setAttribute('BAR', '3');
+console.log(a.getAttribute('Foo'), a.getAttribute('foo'), a.getAttribute('FOO'), a.getAttribute('BAR'), a.getAttribute('bar'), a.hasAttribute('bar'), a.hasAttribute('BAR'), a.attributes.length, a.getAttributeNames().join());
+a.removeAttribute('FOO'); a.toggleAttribute('Foo'); a.toggleAttribute('Zed');
+console.log(s.serializeToString(a), d.createAttribute('MiXed').name, a.attributes.getNamedItem('BAR').value, a.attributes.getNamedItem('bar'));
+var x = new DOMParser().parseFromString('<p xmlns="http://www.w3.org/1999/xhtml" CLASS="a" class="b" ID="x" id="y"/>', 'application/xhtml+xml');
+var p = x.documentElement;
+p.setAttribute('TITLE', 't');
+console.log(p.className, p.id, JSON.stringify(p.title), p.getAttribute('TITLE'), p.getAttribute('title'), x.getElementById('y') === p, x.getElementById('x'));
+console.log(x.querySelector('.b') === p, x.querySelector('#y') === p, x.querySelector('[CLASS]') === p, x.querySelector('[class="b"]') === p, x.querySelector('[Class]'), p.matches('P'), p.matches('p'));
+console.log(s.serializeToString(p));
+#expect
+1 2 null 3 null false true 3 Foo,foo,BAR
+<a foo="2" BAR="3" Zed=""/> MiXed 3 null
+b y "" t null true null
+true true true true null false true
+<p xmlns="http://www.w3.org/1999/xhtml" CLASS="a" class="b" ID="x" id="y" TITLE="t"></p>
+
+#name nodes moved between an HTML document and an XML document
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a><Bb Cc="1"/></a>', 'application/xml');
+var e = document.importNode(d.documentElement.firstChild, true);
+document.getElementById('host').appendChild(e);
+console.log(e.nodeName, e.tagName, e.constructor === Element, e.namespaceURI, e.getAttribute('Cc'), e.getAttribute('cc'), e.ownerDocument === document);
+console.log(document.querySelectorAll('Bb').length, document.querySelectorAll('bb').length, document.getElementsByTagName('Bb').length, document.getElementsByTagName('bb').length, document.getElementById('host').innerHTML);
+var div = document.createElement('DIV');
+div.setAttribute('ABC', '1');
+console.log(div.tagName, div.getAttribute('ABC'), div.getAttribute('abc'));
+d.documentElement.appendChild(d.adoptNode(div));
+console.log(div.tagName, div.nodeName, div.getAttribute('ABC'), div.getAttribute('abc'), div.ownerDocument === d, d.querySelectorAll('div').length, d.querySelectorAll('DIV').length, div.constructor === HTMLDivElement);
+console.log(s.serializeToString(d));
+document.body.appendChild(div);
+console.log(div.tagName, div.getAttribute('ABC'), document.querySelectorAll('DIV').length);
+#expect
+Bb Bb true null 1 null true
+1 0 1 0 <Bb Cc="1"></Bb>
+DIV 1 1
+div div null 1 true 1 0 true
+<a><Bb Cc="1"/><div xmlns="http://www.w3.org/1999/xhtml" abc="1"></div></a>
+DIV 1 2
+
+#name innerHTML and outerHTML are written as XML in an XML document
+#code
+var d = new DOMParser().parseFromString('<a><b c="1">t&amp;<br xmlns="http://www.w3.org/1999/xhtml"/><![CDATA[x]]><!--k--><?p q?></b><e/></a>', 'application/xml');
+var a = d.documentElement;
+console.log(a.innerHTML);
+console.log(a.outerHTML);
+console.log(a.firstChild.innerHTML);
+console.log(JSON.stringify(a.lastChild.innerHTML), a.lastChild.outerHTML);
+var x = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"><body><p>one<br/>two</p><img src="a.png"/></body></html>', 'application/xhtml+xml');
+console.log(x.body.innerHTML);
+console.log(x.body.firstChild.outerHTML);
+a.appendChild(d.createComment('a--b'));
+try { a.innerHTML; console.log('no error'); } catch (err) { console.log(err.name, err instanceof DOMException); }
+console.log(new XMLSerializer().serializeToString(a.lastChild));
+#expect
+<b c="1">t&amp;<br xmlns="http://www.w3.org/1999/xhtml" /><![CDATA[x]]><!--k--><?p q?></b><e/>
+<a><b c="1">t&amp;<br xmlns="http://www.w3.org/1999/xhtml" /><![CDATA[x]]><!--k--><?p q?></b><e/></a>
+t&amp;<br xmlns="http://www.w3.org/1999/xhtml" /><![CDATA[x]]><!--k--><?p q?>
+"" <e/>
+<p xmlns="http://www.w3.org/1999/xhtml">one<br />two</p><img xmlns="http://www.w3.org/1999/xhtml" src="a.png" />
+<p xmlns="http://www.w3.org/1999/xhtml">one<br />two</p>
+InvalidStateError true
+<!--a--b-->
+
+#name innerHTML is parsed as XML, with the namespaces in scope
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a xmlns:p="urn:p"><b/></a>', 'application/xml');
+var b = d.documentElement.firstChild;
+b.innerHTML = '<p:x>1</p:x><y/>text<!--c--><![CDATA[d]]><?pi z?>';
+console.log(b.childNodes.length, b.firstChild.nodeName, b.firstChild.namespaceURI, b.childNodes[1].nodeName, b.childNodes[1].namespaceURI, b.childNodes[4].nodeType, b.lastChild.nodeType, b.lastChild.target);
+console.log(s.serializeToString(d));
+['<unclosed>', '<q:x/>', '&nbsp;', '</b>', '<a b=c/>', 'x<!DOCTYPE a>', '<?xml version="1.0"?><a/>'].forEach(function (markup) {
+    try { b.innerHTML = markup; console.log('no error', markup); } catch (err) { console.log(markup, err.name, err instanceof DOMException, b.childNodes.length); }
+});
+b.innerHTML = '<br/>&lt;&#65;';
+console.log(s.serializeToString(b), b.lastChild.data);
+b.innerHTML = '';
+console.log(b.childNodes.length);
+var n = new DOMParser().parseFromString('<a xmlns="urn:d"><b/></a>', 'application/xml');
+n.documentElement.firstChild.innerHTML = '<c/><d xmlns=""/>';
+console.log(n.documentElement.firstChild.firstChild.namespaceURI, n.documentElement.firstChild.lastChild.namespaceURI, s.serializeToString(n));
+var x = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"><body/></html>', 'application/xhtml+xml');
+x.body.innerHTML = '<p>a<br/>b</p><DIV/>';
+console.log(x.body.firstChild.constructor.name, x.body.lastChild.constructor.name, x.body.childNodes.length, x.body.firstChild.childNodes.length);
+try { x.body.innerHTML = '<p>a<br>b</p>'; } catch (err) { console.log(err.name, x.body.childNodes.length); }
+#expect
+6 p:x urn:p y null 4 7 pi
+<a xmlns:p="urn:p"><b><p:x>1</p:x><y/>text<!--c--><![CDATA[d]]><?pi z?></b></a>
+<unclosed> SyntaxError true 6
+<q:x/> SyntaxError true 6
+&nbsp; SyntaxError true 6
+</b> SyntaxError true 6
+<a b=c/> SyntaxError true 6
+x<!DOCTYPE a> SyntaxError true 6
+<?xml version="1.0"?><a/> SyntaxError true 6
+<b><br/>&lt;A</b> <A
+0
+urn:d null <a xmlns="urn:d"><b><c/><d xmlns=""/></b></a>
+HTMLParagraphElement HTMLUnknownElement 2 3
+SyntaxError 2
+
+#name insertAdjacentHTML and outerHTML in an XML document
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a><b/></a>', 'application/xml');
+var b = d.documentElement.firstChild;
+b.insertAdjacentHTML('beforebegin', '<x/>');
+b.insertAdjacentHTML('beforeend', '<Y/>t');
+b.insertAdjacentHTML('afterend', '<!--z-->');
+console.log(s.serializeToString(d));
+b.outerHTML = '<z><w/></z>';
+console.log(s.serializeToString(d), b.parentNode);
+try { d.documentElement.insertAdjacentHTML('afterbegin', '<open>'); } catch (err) { console.log(err.name); }
+try { d.documentElement.outerHTML = '<q/>'; } catch (err) { console.log(err.name); }
+var range = d.createRange();
+range.selectNodeContents(d.documentElement);
+var made = range.createContextualFragment('<m><n/></m>tail');
+console.log(made.childNodes.length, made.firstChild.nodeName, made.firstChild.namespaceURI, made.firstChild.firstChild.nodeName);
+try { range.createContextualFragment('<m>'); } catch (err) { console.log(err.name); }
+#expect
+<a><x/><b><Y/>t</b><!--z--></a>
+<a><x/><z><w/></z><!--z--></a> null
+SyntaxError
+NoModificationAllowedError
+2 m null n
+SyntaxError
+
+#name CDATA sections made by a script
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+var a = d.documentElement;
+var c = d.createCDATASection('x<y');
+a.appendChild(c);
+console.log(c.nodeType, c.nodeName, c.constructor.name, c.data, c.length, c instanceof Text, c instanceof CDATASection, Object.prototype.toString.call(c));
+console.log(s.serializeToString(d), a.textContent, a.innerHTML);
+try { document.createCDATASection('x'); console.log('no error'); } catch (err) { console.log(err.name); }
+try { d.createCDATASection('a]]>b'); console.log('no error'); } catch (err) { console.log(err.name); }
+var tail = c.splitText(1);
+console.log(tail.nodeType, tail.nodeName, tail.data, c.data, a.childNodes.length);
+var copy = c.cloneNode();
+console.log(copy.nodeType, copy.data, copy.isEqualNode(c), copy.isEqualNode(d.createTextNode('x')));
+a.normalize();
+console.log(a.childNodes.length, s.serializeToString(a));
+a.appendChild(d.createTextNode('p')); a.appendChild(d.createTextNode('q')); a.normalize();
+console.log(a.childNodes.length, s.serializeToString(a));
+c.data = 'new'; c.appendData('!');
+console.log(s.serializeToString(a), c.nodeValue, c.textContent);
+try { d.appendChild(d.createCDATASection('top')); } catch (err) { console.log(err.name); }
+#expect
+4 #cdata-section CDATASection x<y 3 true true [object CDATASection]
+<a><![CDATA[x<y]]></a> x<y <![CDATA[x<y]]>
+NotSupportedError
+InvalidCharacterError
+3 #text <y x 2
+4 x true false
+2 <a><![CDATA[x]]>&lt;y</a>
+2 <a><![CDATA[x]]>&lt;ypq</a>
+<a><![CDATA[new!]]>&lt;ypq</a> new! new!
+HierarchyRequestError
+
+#name processing instructions made by a script
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+var p = d.createProcessingInstruction('xml-stylesheet', 'href="a.css"');
+d.insertBefore(p, d.documentElement);
+console.log(p.nodeType, p.nodeName, p.constructor.name, p.target, p.data, p.nodeValue, p.textContent, p.length, p instanceof CharacterData, p instanceof ProcessingInstruction, Object.prototype.toString.call(p));
+console.log(s.serializeToString(d), d.childNodes.length, d.firstChild === p, p.parentNode === d, p.nextSibling === d.documentElement, d.documentElement.previousSibling === p);
+p.data = 'new';
+console.log(s.serializeToString(p));
+var hp = document.createProcessingInstruction('t', 'd');
+console.log(hp.nodeType, hp.ownerDocument === document, s.serializeToString(hp));
+['a b', '', '1x', 'a<'].forEach(function (target) { try { d.createProcessingInstruction(target, 'x'); console.log('made'); } catch (err) { console.log(JSON.stringify(target), err.name); } });
+try { d.createProcessingInstruction('t', 'a?>b'); console.log('made'); } catch (err) { console.log(err.name); }
+var c = p.cloneNode();
+console.log(c.nodeType, c.target, c.data, c.isEqualNode(p), p.isEqualNode(d.createProcessingInstruction('xml-stylesheet', 'other')), p.isEqualNode(d.createProcessingInstruction('other', 'new')));
+p.appendData('!'); p.deleteData(0, 1); p.insertData(0, '>'); p.replaceData(1, 1, 'W');
+console.log(p.data, p.substringData(0, 2), p.length);
+d.documentElement.appendChild(c);
+console.log(d.documentElement.textContent === '', d.documentElement.childNodes.length, d.documentElement.children.length, s.serializeToString(d));
+p.remove();
+console.log(d.childNodes.length, p.parentNode);
+#expect
+7 xml-stylesheet ProcessingInstruction xml-stylesheet href="a.css" href="a.css" href="a.css" 12 true true [object ProcessingInstruction]
+<?xml-stylesheet href="a.css"?><a/> 2 true true true true
+<?xml-stylesheet new?>
+7 true <?t d?>
+"a b" InvalidCharacterError
+"" InvalidCharacterError
+"1x" InvalidCharacterError
+"a<" InvalidCharacterError
+InvalidCharacterError
+7 xml-stylesheet new true false false
+>Ww! >W 4
+true 1 0 <?xml-stylesheet >Ww!?><a><?xml-stylesheet new?></a>
+1 null
+
+#name createDocument makes an XMLDocument
+#code
+var s = new XMLSerializer(), di = document.implementation;
+var a = di.createDocument(null, null, null);
+console.log(a.nodeType, a.constructor.name, a.contentType, a.childNodes.length, a.URL, a.compatMode, Object.prototype.toString.call(a), a instanceof XMLDocument, a instanceof Document);
+var b = di.createDocument('urn:x', 'p:root', null);
+console.log(b.contentType, b.documentElement.nodeName, b.documentElement.namespaceURI, b.documentElement.prefix, b.documentElement.localName, s.serializeToString(b));
+var c = di.createDocument('http://www.w3.org/1999/xhtml', 'html', null);
+console.log(c.contentType, c.documentElement.constructor.name, c.body, JSON.stringify(c.title), c.createElement('P').tagName, c.createElement('P').namespaceURI);
+var e = di.createDocument('http://www.w3.org/2000/svg', 'svg', di.createDocumentType('svg', 'pub', 'sys'));
+console.log(e.contentType, e.childNodes.length, e.doctype.name, e.firstChild === e.doctype, s.serializeToString(e));
+console.log(a.createElement('X').tagName, a.createElement('X').namespaceURI, typeof XMLDocument, XMLDocument.prototype instanceof Document, Object.getPrototypeOf(a) === XMLDocument.prototype);
+[['urn:x', 'a:b:c'], [null, 'p:a'], ['urn:x', 'xml:a'], ['urn:x', 'xmlns'], ['http://www.w3.org/2000/xmlns/', 'a'], ['urn:x', '1a']].forEach(function (pair) {
+    try { di.createDocument(pair[0], pair[1], null); console.log('made', pair[1]); } catch (err) { console.log(pair[1], err.name); }
+});
+#expect
+9 XMLDocument application/xml 0 about:blank CSS1Compat [object XMLDocument] true true
+application/xml p:root urn:x p root <p:root xmlns:p="urn:x"/>
+application/xhtml+xml HTMLHtmlElement null "" P http://www.w3.org/1999/xhtml
+image/svg+xml 2 svg true <!DOCTYPE svg PUBLIC "pub" "sys"><svg xmlns="http://www.w3.org/2000/svg"/>
+X null function true true
+made a:b:c
+p:a NamespaceError
+xml:a NamespaceError
+xmlns NamespaceError
+a NamespaceError
+1a InvalidCharacterError
+
+#name new Document() is an XML document
+#code
+var d = new Document();
+var x = d.createElement('X');
+console.log(d.nodeType, d.contentType, d.URL, d.childNodes.length, x.tagName, x.namespaceURI, x.constructor === Element, Object.prototype.toString.call(d), d instanceof XMLDocument);
+d.appendChild(x);
+x.setAttribute('Aa', '1');
+console.log(new XMLSerializer().serializeToString(d), d.documentElement === x, x.getAttribute('aa'), x.getAttribute('Aa'));
+console.log(document.contentType, document.createElement('X').tagName, Object.prototype.toString.call(document), document instanceof XMLDocument);
+#expect
+9 application/xml about:blank 0 X null true [object Document] false
+<X Aa="1"/> true null 1
+text/html X [object Document] false
+
+#name an XML document has no body, no head, and a title only where HTML or SVG has one
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a><title>t1</title><body/><head/><b id="i"/></a>', 'application/xml');
+console.log(JSON.stringify(d.title), d.body, d.head, d.forms.length, d.images.length, d.links.length, d.getElementById('i').nodeName, d.readyState, d.defaultView, d.location, JSON.stringify(d.cookie), d.styleSheets.length);
+d.title = 'x';
+console.log(JSON.stringify(d.title), s.serializeToString(d));
+var svg = new DOMParser().parseFromString('<svg xmlns="http://www.w3.org/2000/svg"><g><title>inner</title></g><title> svg  t </title><title>second</title></svg>', 'image/svg+xml');
+console.log(svg.title);
+svg.title = 'new';
+console.log(svg.title, s.serializeToString(svg));
+var h = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>x</p></body></html>', 'application/xhtml+xml');
+h.title = 'ht';
+console.log(h.title, h.body.nodeName, h.head.nodeName, s.serializeToString(h));
+var nohead = new DOMParser().parseFromString('<html xmlns="http://www.w3.org/1999/xhtml"/>', 'application/xhtml+xml');
+nohead.title = 'lost';
+console.log(JSON.stringify(nohead.title), nohead.body, nohead.head, s.serializeToString(nohead));
+#expect
+"" null null 0 0 0 b complete null null "" 0
+"" <a><title>t1</title><body/><head/><b id="i"/></a>
+svg t
+new <svg xmlns="http://www.w3.org/2000/svg"><g><title>inner</title></g><title>new</title><title>second</title></svg>
+ht body head <html xmlns="http://www.w3.org/1999/xhtml"><head><title>ht</title></head><body><p>x</p></body></html>
+"" null null <html xmlns="http://www.w3.org/1999/xhtml"></html>
+
+#name document.write is not for XML documents
+#code
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+['write', 'writeln', 'open', 'close'].forEach(function (method) {
+    try { d[method]('x'); console.log(method, 'no error'); } catch (err) { console.log(method, err.name, err instanceof DOMException); }
+});
+var h = new DOMParser().parseFromString('<p>x</p>', 'text/html');
+console.log(h.contentType, h.body.innerHTML, h.querySelector('P').tagName);
+#expect
+write InvalidStateError true
+writeln InvalidStateError true
+open InvalidStateError true
+close InvalidStateError true
+text/html <p>x</p> P
+
+#name cloning an XML document and its nodes
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<!DOCTYPE a><a b="1" xmlns:p="urn:p" p:c="2"><?p d?><![CDATA[c]]><p:e/><!--k--></a>', 'application/xml');
+var c = d.cloneNode(true);
+console.log(c.contentType, s.serializeToString(c), c.isEqualNode(d), c !== d, c.documentElement.childNodes[1].nodeType, c.createElement('X').tagName, d.cloneNode(false).childNodes.length, d.cloneNode(false).contentType);
+var e = d.documentElement.cloneNode(true);
+console.log(e.isEqualNode(d.documentElement), e.getAttributeNS('urn:p', 'c'), e.attributes[2].namespaceURI, e.attributes[2].prefix, e.childNodes[2].namespaceURI, e.childNodes[2].prefix, e.ownerDocument === d, s.serializeToString(e));
+var shallow = d.documentElement.cloneNode(false);
+console.log(shallow.childNodes.length, shallow.attributes.length, shallow.isEqualNode(d.documentElement));
+e.setAttributeNS('urn:p', 'p:c', '3');
+console.log(e.isEqualNode(d.documentElement), e.attributes.length);
+var other = new DOMParser().parseFromString('<a b="1" xmlns:p="urn:other" p:c="2"/>', 'application/xml').documentElement;
+var same = new DOMParser().parseFromString('<a b="1" xmlns:p="urn:p" p:c="2"/>', 'application/xml').documentElement;
+console.log(shallow.isEqualNode(other), shallow.isEqualNode(same));
+#expect
+application/xml <!DOCTYPE a><a b="1" xmlns:p="urn:p" p:c="2"><?p d?><![CDATA[c]]><p:e/><!--k--></a> true true 4 X 0 application/xml
+true 2 urn:p p urn:p p true <a b="1" xmlns:p="urn:p" p:c="2"><?p d?><![CDATA[c]]><p:e/><!--k--></a>
+0 3 false
+false 3
+false true
+
+#name XMLSerializer on an HTML document
+#code
+var s = new XMLSerializer();
+var d = document.implementation.createHTMLDocument('T');
+d.body.innerHTML = '<p CLASS="a">x<br><img src=a.png><svg viewBox="0 0 1 1"><circle r="1"/></svg><script>1<2</scr' + 'ipt></p><template><i>t</i></template><input disabled>';
+console.log(s.serializeToString(d));
+console.log(s.serializeToString(d.body.firstChild));
+console.log(s.serializeToString(d.body.lastChild), d.contentType);
+console.log(s.serializeToString(document.createElement('div')), s.serializeToString(document.createElement('br')), s.serializeToString(document.createElementNS('http://www.w3.org/2000/svg', 'svg')));
+#expect
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p class="a">x<br /><img src="a.png" /><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle r="1"/></svg><script>1&lt;2</script></p><template><i>t</i></template><input disabled="" /></body></html>
+<p xmlns="http://www.w3.org/1999/xhtml" class="a">x<br /><img src="a.png" /><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle r="1"/></svg><script>1&lt;2</script></p>
+<input xmlns="http://www.w3.org/1999/xhtml" disabled="" /> text/html
+<div xmlns="http://www.w3.org/1999/xhtml"></div> <br xmlns="http://www.w3.org/1999/xhtml" /> <svg xmlns="http://www.w3.org/2000/svg"/>
+
+#name XMLSerializer declares the namespaces a tree needs
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+var e = d.createElementNS('urn:x', 'p:e');
+e.setAttributeNS('urn:y', 'q:at', 'v');
+e.setAttributeNS('urn:x', 'p:same', 'w');
+e.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:lang', 'en');
+e.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#h');
+var c = d.createElementNS('urn:x', 'c');
+e.appendChild(c);
+e.appendChild(d.createElementNS('urn:z', 'p:other'));
+c.appendChild(d.createElementNS(null, 'none'));
+e.appendChild(d.createElementNS('urn:x', 'r:pref'));
+console.log(s.serializeToString(e));
+console.log(e.getAttributeNS('urn:y', 'at'), e.attributes[0].namespaceURI, e.attributes[0].prefix, e.attributes[0].localName, e.attributes[0].name);
+var f = d.createElementNS('urn:x', 'e');
+f.setAttributeNS('urn:y', 'at', 'v');
+f.setAttributeNS('urn:y2', 'p:at2', 'v');
+f.setAttributeNS('urn:y3', 'p:at3', 'v');
+var g = d.createElement('g');
+g.setAttribute('xmlns:p', 'urn:late');
+f.appendChild(g);
+console.log(s.serializeToString(f));
+var deep = new DOMParser().parseFromString('<a xmlns="urn:d" xmlns:p="urn:p"><p:b><c xmlns="urn:e"><d/><p:f/></c><g xmlns:p="urn:q"><p:h/></g></p:b></a>', 'application/xml');
+console.log(s.serializeToString(deep));
+console.log(s.serializeToString(deep.querySelector('c')), s.serializeToString(deep.documentElement.firstChild.lastChild.firstChild));
+#expect
+<p:e xmlns:p="urn:x" xmlns:ns1="urn:y" ns1:at="v" p:same="w" xml:lang="en" xmlns:ns2="http://www.w3.org/1999/xlink" ns2:href="#h"><p:c><none/></p:c><p:other xmlns:p="urn:z"/><p:pref/></p:e>
+v urn:y q at q:at
+<e xmlns="urn:x" xmlns:ns1="urn:y" ns1:at="v" xmlns:ns2="urn:y2" ns2:at2="v" xmlns:ns3="urn:y3" ns3:at3="v"><g xmlns="" xmlns:p="urn:late"/></e>
+<a xmlns="urn:d" xmlns:p="urn:p"><p:b><c xmlns="urn:e"><d/><p:f/></c><g xmlns:p="urn:q"><p:h/></g></p:b></a>
+<c xmlns="urn:e"><d/><p:f xmlns:p="urn:p"/></c> <p:h xmlns:p="urn:q"/>
+
+#name XMLSerializer escapes text and attribute values
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a/>', 'application/xml');
+var a = d.documentElement;
+a.setAttribute('v', 'a\n\t"\'<>&b');
+a.textContent = 'a\n\t"\'<>&b]]>';
+a.appendChild(d.createComment('c-c'));
+console.log(JSON.stringify(s.serializeToString(d)));
+var f = d.createDocumentFragment();
+f.appendChild(d.createElement('x'));
+f.appendChild(d.createTextNode('y'));
+console.log(s.serializeToString(f), s.serializeToString(d.createTextNode('<t>')), s.serializeToString(d.createComment('c')), s.serializeToString(d.createElement('empty')));
+try { s.serializeToString({}); } catch (err) { console.log(err.name); }
+try { s.serializeToString(); } catch (err) { console.log(err.name); }
+#expect
+"<a v=\"a&#xA;&#x9;&quot;'&lt;&gt;&amp;b\">a\n\t\"'&lt;&gt;&amp;b]]&gt;<!--c-c--></a>"
+<x/>y &lt;t&gt; <!--c--> <empty/>
+TypeError
+TypeError
+
+#name lookupNamespaceURI, lookupPrefix and isDefaultNamespace
+#code
+var d = new DOMParser().parseFromString('<a xmlns="urn:d" xmlns:p="urn:p"><p:b><c xmlns:p="urn:p2" at="1"/></p:b></a>', 'application/xml');
+var c = d.querySelector('c'), b = c.parentNode;
+console.log(c.lookupNamespaceURI('p'), b.lookupNamespaceURI('p'), c.lookupPrefix('urn:p'), c.lookupPrefix('urn:p2'), c.lookupPrefix('urn:d'), c.lookupNamespaceURI(''), c.lookupNamespaceURI(null), c.isDefaultNamespace('urn:d'), c.isDefaultNamespace('urn:p'));
+console.log(d.lookupNamespaceURI('p'), d.lookupPrefix('urn:p'), d.isDefaultNamespace('urn:d'), d.createElement('z').lookupNamespaceURI(null), c.lookupNamespaceURI('xml'), c.lookupNamespaceURI('xmlns'), c.lookupNamespaceURI('nope'), c.lookupPrefix(null), c.lookupPrefix(''));
+console.log(c.firstChild, c.attributes[0].lookupNamespaceURI === undefined, d.createTextNode('t').lookupNamespaceURI('p'), d.createDocumentFragment().lookupNamespaceURI('p'));
+console.log(document.body.lookupNamespaceURI(null), document.body.lookupPrefix('http://www.w3.org/1999/xhtml'), document.lookupNamespaceURI('xml'), document.body.isDefaultNamespace('http://www.w3.org/1999/xhtml'), document.isDefaultNamespace(null));
+var made = d.createElementNS('urn:m', 'm:el');
+console.log(made.lookupNamespaceURI('m'), made.lookupPrefix('urn:m'), made.lookupNamespaceURI(null), made.isDefaultNamespace(null));
+#expect
+urn:p2 urn:p p p null urn:d urn:d true false
+urn:p p true null http://www.w3.org/XML/1998/namespace http://www.w3.org/2000/xmlns/ null null null
+null false null null
+http://www.w3.org/1999/xhtml null http://www.w3.org/XML/1998/namespace true false
+urn:m m null true
+
+#name selectors and getElementsByTagName are case-sensitive in XML
+#code
+var d = new DOMParser().parseFromString('<a xmlns:p="urn:p"><p:b x="1"/><b X="2"/><B/></a>', 'application/xml');
+console.log(d.querySelectorAll('b').length, d.querySelectorAll('B').length, d.querySelectorAll('[x]').length, d.querySelectorAll('[X]').length, d.querySelectorAll('[x="1"]').length, d.querySelectorAll('a > b').length, d.querySelectorAll('A b').length);
+console.log(d.getElementsByTagName('b').length, d.getElementsByTagName('B').length, d.getElementsByTagName('p:b').length, d.getElementsByTagNameNS('urn:p', 'b').length, d.getElementsByTagNameNS('*', 'b').length, d.getElementsByTagNameNS(null, 'b').length, d.getElementsByTagNameNS('', 'B').length, d.getElementsByTagName('*').length, d.querySelectorAll('*').length);
+console.log(d.documentElement.children.length, d.documentElement.firstElementChild.nodeName, d.documentElement.getElementsByTagName('b').length, d.documentElement.getElementsByTagName('p:b')[0].localName, d.documentElement.querySelector('B').nodeName, d.documentElement.lastElementChild.matches('B'), d.documentElement.lastElementChild.matches('b'), d.documentElement.firstElementChild.closest('a').nodeName, d.documentElement.firstElementChild.closest('A'));
+#expect
+2 1 1 1 1 2 0
+1 1 1 1 2 1 1 4 4
+3 p:b 1 b B true false a null
+
+#name attributes with namespaces, set and removed by a script
+#code
+var s = new XMLSerializer();
+var d = new DOMParser().parseFromString('<a xmlns:p="urn:p" p:x="1" x="2"/>', 'application/xml');
+var a = d.documentElement;
+console.log(a.getAttributeNS('urn:p', 'x'), a.getAttributeNS(null, 'x'), a.getAttribute('p:x'), a.getAttribute('x'), a.getAttributeNodeNS('urn:p', 'x').name, a.getAttributeNodeNS(null, 'x').name, a.getAttributeNodeNS('urn:q', 'x'), a.attributes.getNamedItemNS('urn:p', 'x').value, a.attributes.getNamedItemNS(null, 'p:x'));
+a.setAttributeNS('urn:p', 'q:x', 'changed');
+console.log(a.attributes.length, a.getAttributeNS('urn:p', 'x'), a.getAttributeNodeNS('urn:p', 'x').name, a.getAttributeNodeNS('urn:p', 'x').prefix);
+a.setAttributeNS('urn:n', 'n:y', '3');
+a.setAttributeNS(null, 'plain', '4');
+console.log(a.attributes.length, a.getAttributeNS('urn:n', 'y'), a.hasAttributeNS('urn:n', 'y'), a.hasAttributeNS('urn:n', 'n:y'), a.hasAttributeNS(null, 'plain'), a.hasAttribute('n:y'), s.serializeToString(a));
+a.removeAttributeNS('urn:p', 'x'); a.removeAttributeNS(null, 'x'); a.removeAttributeNS('urn:wrong', 'y');
+console.log(a.attributes.length, a.getAttributeNames().join(), s.serializeToString(a));
+[['urn:x', 'a:b:c', 'InvalidCharacterError'], [null, 'p:a'], ['urn:x', 'xml:a'], ['urn:x', 'xmlns'], ['http://www.w3.org/2000/xmlns/', 'a'], ['urn:x', '1a'], ['', 'p:a']].forEach(function (pair) {
+    try { a.setAttributeNS(pair[0], pair[1], 'v'); console.log('set', pair[1]); } catch (err) { console.log(pair[1], err.name); }
+});
+var attr = d.createAttributeNS('urn:made', 'm:at');
+attr.value = 'v';
+console.log(attr.namespaceURI, attr.prefix, attr.localName, attr.name, attr.ownerElement, attr.specified);
+a.setAttributeNodeNS(attr);
+console.log(a.getAttributeNS('urn:made', 'at'), attr.ownerElement === a, a.getAttributeNodeNS('urn:made', 'at') === attr);
+a.removeAttributeNode(attr);
+console.log(attr.namespaceURI, attr.ownerElement, attr.value, a.hasAttributeNS('urn:made', 'at'));
+var h = document.createElement('div');
+h.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#x');
+console.log(h.attributes[0].namespaceURI, h.attributes[0].localName, h.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), h.getAttribute('xlink:href'), h.outerHTML);
+#expect
+1 2 1 2 p:x x null 1 null
+3 changed p:x p
+5 3 true false true true <a xmlns:p="urn:p" p:x="changed" x="2" xmlns:ns1="urn:n" ns1:y="3" plain="4"/>
+3 xmlns:p,n:y,plain <a xmlns:p="urn:p" xmlns:ns1="urn:n" ns1:y="3" plain="4"/>
+set a:b:c
+p:a NamespaceError
+xml:a NamespaceError
+xmlns NamespaceError
+a NamespaceError
+set 1a
+p:a NamespaceError
+urn:made m at m:at null true
+v true true
+urn:made null v false
+http://www.w3.org/1999/xlink href #x #x <div xlink:href="#x"></div>
+
+#name TreeWalker and NodeIterator see CDATA sections and processing instructions
+#code
+var d = new DOMParser().parseFromString('<a>t<![CDATA[c]]><?p d?><!--k--><b>u</b></a>', 'application/xml');
+function walk(what) {
+    var w = d.createTreeWalker(d, what), out = [];
+    while (w.nextNode()) out.push(w.currentNode.nodeType);
+    return out.join();
+}
+console.log(walk(NodeFilter.SHOW_ALL), '|', walk(NodeFilter.SHOW_TEXT), '|', walk(NodeFilter.SHOW_CDATA_SECTION), '|', walk(NodeFilter.SHOW_PROCESSING_INSTRUCTION), '|', walk(NodeFilter.SHOW_COMMENT), '|', walk(NodeFilter.SHOW_TEXT | NodeFilter.SHOW_CDATA_SECTION));
+var it = d.createNodeIterator(d.documentElement, NodeFilter.SHOW_ALL, function (n) { return n.nodeType === 7 || n.nodeType === 4 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; });
+var seen = [], n;
+while ((n = it.nextNode())) seen.push(n.nodeName);
+console.log(seen.join(), NodeFilter.SHOW_CDATA_SECTION, NodeFilter.SHOW_PROCESSING_INSTRUCTION);
+var r = d.createRange();
+r.setStart(d.documentElement.childNodes[2], 0); r.setEnd(d.documentElement.childNodes[2], 1);
+console.log(JSON.stringify(r.toString()), r.startContainer.nodeType, r.cloneContents().firstChild.nodeType, r.cloneContents().firstChild.data);
+r.selectNodeContents(d.documentElement);
+console.log(r.toString());
+#expect
+1,3,4,7,8,1,3 | 3,3 | 4 | 7 | 8 | 3,4,3
+#cdata-section,p 8 64
+"" 7 7 d
+tcu
+
+#name a mutation observer hears of the data of a processing instruction and of a CDATA section
+#code
+var d = new DOMParser().parseFromString('<a><?p one?><![CDATA[two]]></a>', 'application/xml');
+var a = d.documentElement, log = [];
+var observer = new MutationObserver(function (records) {
+    records.forEach(function (r) { log.push(r.type + ' ' + r.target.nodeType + ' ' + r.oldValue + ' ' + r.addedNodes.length + ' ' + r.removedNodes.length); });
+});
+observer.observe(a, {characterData: true, characterDataOldValue: true, childList: true, subtree: true});
+a.firstChild.data = 'uno';
+a.lastChild.data = 'dos';
+a.appendChild(d.createProcessingInstruction('q', 'three'));
+a.removeChild(a.firstChild);
+a.insertBefore(d.createCDATASection('four'), a.firstChild);
+observer.takeRecords().forEach(function (r) { log.push(r.type + ' ' + r.target.nodeType + ' ' + r.oldValue + ' ' + r.addedNodes.length + ' ' + r.removedNodes.length + ' ' + (r.addedNodes[0] ? r.addedNodes[0].nodeType : '-')); });
+console.log(log.join('; '));
+#expect
+characterData 7 one 0 0 -; characterData 4 two 0 0 -; childList 1 null 1 0 7; childList 1 null 0 1 -; childList 1 null 1 0 4
+
+#name a small program: reading a feed
+#code
+var feed = '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n<channel>\n  <title>News &amp; notes</title>\n  <link>https://example.test/</link>\n  <item>\n    <title>First &lt;post&gt;</title>\n    <dc:creator>Ann</dc:creator>\n    <content:encoded><![CDATA[<p>Hello <b>world</b></p>]]></content:encoded>\n    <guid isPermaLink="false">a-1</guid>\n  </item>\n  <item>\n    <title>Second</title>\n    <dc:creator><![CDATA[Bob & Co]]></dc:creator>\n    <guid>https://example.test/2</guid>\n  </item>\n</channel>\n</rss>';
+var doc = new DOMParser().parseFromString(feed, 'text/xml');
+if (doc.querySelector('parsererror')) console.log('not a feed');
+var DC = 'http://purl.org/dc/elements/1.1/', CONTENT = 'http://purl.org/rss/1.0/modules/content/';
+console.log(doc.documentElement.getAttribute('version'), doc.querySelector('channel > title').textContent, doc.getElementsByTagName('item').length);
+Array.prototype.forEach.call(doc.querySelectorAll('item'), function (item) {
+    var creator = item.getElementsByTagNameNS(DC, 'creator')[0];
+    var body = item.getElementsByTagNameNS(CONTENT, 'encoded')[0];
+    var guid = item.querySelector('guid');
+    console.log([item.querySelector('title').textContent, creator.textContent, creator.prefix, body ? body.textContent : '(none)', guid.textContent, guid.getAttribute('isPermaLink')].join(' | '));
+});
+var host = document.getElementById('host');
+Array.prototype.forEach.call(doc.getElementsByTagName('item'), function (item) {
+    var li = document.createElement('li');
+    li.textContent = item.getElementsByTagName('title')[0].textContent;
+    host.appendChild(li);
+});
+console.log(host.innerHTML);
+#expect
+2.0 News & notes 2
+First <post> | Ann | dc | <p>Hello <b>world</b></p> | a-1 | false
+Second | Bob & Co | dc | (none) | https://example.test/2 | 
+<li>First &lt;post&gt;</li><li>Second</li>
+
+#name a small program: a drawing fetched as text and put into the page
+#code
+var text = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" class="icon"><title>Home</title><defs><path id="shape" d="M3 12l9-9 9 9"/></defs><use xlink:href="#shape" fill="none"/></svg>';
+var parsed = new DOMParser().parseFromString(text, 'image/svg+xml');
+var root = parsed.documentElement;
+if (root.nodeName !== 'svg') console.log('not a drawing');
+var host = document.getElementById('host');
+var icon = document.importNode(root, true);
+icon.removeAttribute('class');
+icon.setAttribute('width', '24');
+host.appendChild(icon);
+var use = icon.querySelector('use');
+console.log(icon.namespaceURI, icon.tagName, icon.constructor.name, icon.ownerDocument === document, icon.getAttribute('viewBox'), icon.querySelector('title').textContent);
+console.log(use.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), use.getAttribute('xlink:href'), use.attributes[0].namespaceURI, use.attributes[0].localName, use.namespaceURI, host.querySelector('svg use') === use, host.querySelector('path').id);
+console.log(host.innerHTML);
+console.log(new XMLSerializer().serializeToString(icon));
+console.log(root.parentNode === parsed, parsed.querySelector('use') !== use, document.querySelectorAll('svg').length);
+#expect
+http://www.w3.org/2000/svg svg SVGSVGElement true 0 0 24 24 Home
+#shape #shape http://www.w3.org/1999/xlink href http://www.w3.org/2000/svg true shape
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" width="24"><title>Home</title><defs><path id="shape" d="M3 12l9-9 9 9"></path></defs><use xlink:href="#shape" fill="none"></use></svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24" width="24"><title>Home</title><defs><path id="shape" d="M3 12l9-9 9 9"/></defs><use xlink:href="#shape" fill="none"/></svg>
+true true 1
+
+#name a long document and a deep one
+#code
+var wide = '<list>';
+for (var i = 0; i < 3000; i++) wide += '<item n="' + i + '">v' + i + '</item>';
+wide += '</list>';
+var d = new DOMParser().parseFromString(wide, 'application/xml');
+console.log(d.documentElement.children.length, d.documentElement.lastChild.getAttribute('n'), d.querySelectorAll('item[n$="99"]').length, new XMLSerializer().serializeToString(d).length === wide.length);
+var deep = '', depth = 2000;
+for (i = 0; i < depth; i++) deep += '<n>';
+deep += 'bottom';
+for (i = 0; i < depth; i++) deep += '</n>';
+d = new DOMParser().parseFromString(deep, 'application/xml');
+var at = d.documentElement, count = 1;
+while (at.firstChild && at.firstChild.nodeType === 1) { at = at.firstChild; count++; }
+console.log(count, at.textContent, d.getElementsByTagName('n').length, new XMLSerializer().serializeToString(d) === deep, d.documentElement.textContent);
+d = new DOMParser().parseFromString(deep.slice(0, -4), 'application/xml');
+console.log(d.documentElement.nodeName, d.getElementsByTagName('n').length);
+#expect
+3000 2999 30 true
+2000 bottom 2000 true bottom
+parsererror 0

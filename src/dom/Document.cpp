@@ -137,6 +137,8 @@ std::shared_ptr<Document> Document::template_document() {
     if (!m_template_document) {
         m_template_document = std::make_shared<Document>();
         m_template_document->set_quirks_mode(m_quirks_mode);
+        // An XML document's templates hold XML: names keep their case there too.
+        m_template_document->set_content_type(m_content_type);
     }
     return m_template_document;
 }

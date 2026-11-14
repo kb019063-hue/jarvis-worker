@@ -93,6 +93,24 @@ public:
     bool has_window() const { return m_has_window; }
     void set_has_window(bool value) { m_has_window = value; }
 
+    /// "text/html" for a document the HTML parser made and for one made by
+    /// createHTMLDocument(); an XML type ("application/xml",
+    /// "application/xhtml+xml", "image/svg+xml", ...) for one the XML parser
+    /// made, createDocument() made, or `new Document()` made.
+    const std::string& content_type() const { return m_content_type; }
+    void set_content_type(std::string type) {
+        m_content_type = std::move(type);
+        m_is_html = m_content_type == "text/html";
+    }
+    /// The DOM standard's "HTML document". In one, the names of HTML
+    /// elements and of their attributes are matched without regard to case
+    /// and shown in upper case; in an XML document a name is what it is.
+    bool is_html_document() const { return m_is_html; }
+    /// True for what createDocument() returns: the one kind of document
+    /// whose script object is an XMLDocument.
+    bool is_xml_document_object() const { return m_xml_document_object; }
+    void set_xml_document_object(bool value) { m_xml_document_object = value; }
+
     void set_quirks_mode(QuirksMode m) { m_quirks_mode = m; }
     QuirksMode quirks_mode() const { return m_quirks_mode; }
 
@@ -126,6 +144,9 @@ private:
     std::weak_ptr<Element> m_current_script;
     std::shared_ptr<Document> m_template_document;
     bool m_has_window{false};
+    std::string m_content_type{"text/html"};
+    bool m_is_html{true};
+    bool m_xml_document_object{false};
 
     // getElementById; see Document.cpp. The pointers are only read while the
     // tree is at the version the index was built at: an element cannot leave

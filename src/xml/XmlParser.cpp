@@ -135,6 +135,8 @@ bool is_xhtml_public_id(const std::string& id) {
         "-//W3C//DTD XHTML 1.1 plus MathML 2.0 plus SVG 1.1//EN",
         "-//W3C//DTD MathML 2.0//EN",
         "-//WAPFORUM//DTD XHTML Mobile 1.0//EN",
+        "-//WAPFORUM//DTD XHTML Mobile 1.1//EN",
+        "-//WAPFORUM//DTD XHTML Mobile 1.2//EN",
     };
     for (const char* known : kIds) {
         if (id == known) return true;

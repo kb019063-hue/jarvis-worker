@@ -342,6 +342,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
 | **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. Phase 28 is the XML parser, in flight in PR #30. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
 | **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
+| **Phase 31** | **CSS whitespace trimming is linear:** the parser and resolver scan outer whitespace once and shift the surviving text at most once; `nth-child` no longer copies and lowercases padding per child. 300,000 spaces in the measured `:nth-child`, grid, filter, duration and transform paths went from seconds to tens or hundreds of milliseconds with the same layout/paint. | ✅ Completed (116/116 unit suites; `make bench-css` compares 20 padded runs with compact pages) |
 
 ---
 
@@ -2371,6 +2372,91 @@ finding, and its ASan deep run covers 842 executions.
 
 ---
 
+## Phase 31 Architecture: CSS Whitespace Trimming Is Linear
+
+### 1. What was wrong
+
+Finding 28 measured 300,000 spaces inside `:nth-child( )` at about nine
+seconds. The cause was not the HTML parser or layout: several CSS trim sites
+did this:
+
+```cpp
+while (!text.empty() && std::isspace(text.front())) text.erase(text.begin());
+```
+
+Every erase shifted the whole remaining string. A run of n spaces before a
+value therefore cost O(n²) before the value was read. The nth matcher also
+took its argument by value and lowercased the padding before trimming it,
+once for every child it tested.
+
+### 2. What changed
+
+`include/litebird/css/CssText.hpp` provides `css_trim_view` and `css_trim`.
+The view scans the two outer runs without copying. The owned-string version
+erases the leading run once and resizes the tail once. The attribute-selector
+quote stripper uses the same bounded-scan shape with its existing quote set.
+All front-erasure loops in `src/css/CssParser.cpp` and
+`src/css/StyleResolver.cpp` were replaced; `grep -n 'erase(.*begin())'
+src/css/*.cpp` now finds none.
+
+The nth matcher takes a view, trims before allocating/lowercasing, and
+shorthand/duration trimming stays in views until a token is stored. The
+whitespace set is deliberately unchanged: `std::isspace` in the process
+locale, with an unsigned-char cast. The engine does not call `setlocale`;
+in its C locale this includes VT. Changing that to the CSS whitespace
+production would be a tokenizer change, not this cost fix.
+
+### 3. Measured through the page pipeline
+
+`tools/bench/bench_css_whitespace.py` writes a compact page and the same page
+with spaces in parser/resolver arguments, runs `--dump-layout --dump-paint`,
+and compares the bytes. With `--baseline` it also compares the old binary's
+dump and reports its time. Times below are whole-process milliseconds, best
+of three for the new binary and one run for the baseline, on the same
+two-core verification machine; they are not microbenchmarks of trim alone.
+
+| 300,000 spaces per placeholder | Before | After |
+| :--- | ---: | ---: |
+| `:nth-child` formula | 13,591 | 76 |
+| attribute name and quoted value | 4,508 | 91 |
+| attribute presence | 2,269 | 47 |
+| keyframe selector | 46 | 46 |
+| grid `minmax(...)` | 9,010 | 192 |
+| grid `repeat(...)` | 21,293 | 188 |
+| filter name/argument/colour | 6,752 | 160 |
+| shorthand tokens | 173 | 176 |
+| durations and `grid-area` | 5,444 | 266 |
+| transform functions/arguments | 11,685 | 305 |
+
+The keyframe and shorthand cases were already cheap in this pipeline because
+other whitespace consumption happens before the trim; they are kept as
+behaviour guards, not claimed as speedups.
+
+```bash
+make bench-css
+# or reproduce the table against a saved pre-change binary:
+python3 tools/bench/bench_css_whitespace.py \
+  --sizes 30000,300000 --reps 3 --max-ms 3000 --baseline build/litebird-before
+```
+
+The checked-in CI guard uses 30,000 and 300,000 spaces, three repetitions,
+compact/padded output equality and a generous 3,000 ms per-run limit. It
+fails on a crash, timeout, sanitizer report, different dump or slow case.
+
+### 4. Verification and limits
+
+Three appended unit suites cover the helper against the old character model
+(including empty input, embedded NUL, high bytes and VT), parsed selector
+fields and resolved values across every changed path, and 300,000-space
+inputs. `make test` passes 116 suites. The conformance corpora are unchanged.
+This phase does not make the CSS parser spec-complete, does not change CSS
+whitespace recognition, and does not address the separate layout, tokenizer
+attribute-count or style-object tasks. The `:nth-child(2n + 1)` sign-space
+parsing bug found while building the benchmark is also still open; the
+benchmark keeps `+1` glued and AUDIT.md finding 35 records the repro.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -2445,8 +2531,8 @@ finding, and its ASan deep run covers 842 executions.
    Length is bounded for what `make deep` generates, not in general. 10,000
    floats with a size in one box take 46 s, and past 128 rows of them the
    rest are placed in one row that runs out of the box; removing the first
-   child of 50,000, one at a time, takes a second; 300,000 spaces inside
-   `:nth-child( )` take 9 s. At the nesting limit, misnested formatting tags
+   child of 50,000, one at a time, takes a second. The CSS whitespace cost
+   was removed in Phase 31. At the nesting limit, misnested formatting tags
    can leave content out of its written order. Measurements are in AUDIT.md,
    finding 28.
 

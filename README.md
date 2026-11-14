@@ -29,7 +29,7 @@ scoreboard").
 | **DOM corpus** (what a script sees) | **572 / 572**; 61 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 113 suites, all passing | `make test` |
+| Engine unit tests | 116 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations + 400 layout/render/image runs, 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 145 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,292 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -38,11 +38,12 @@ make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
 make dom-conformance # the DOM a script sees: per-file pass rate
 make url-conformance # URL parsing and setters (web-platform-tests data)
-make test            # 113 engine suites
+make test            # 116 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM and URL corpora, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
+make bench-css       # CSS whitespace runs: same paint as compact pages, each under 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
@@ -540,7 +541,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 113 engine test suites
+# Run the 116 engine test suites
 make test
 ```
 
@@ -603,14 +604,14 @@ make test
 make test
 ```
 
-Output (113 suites; the first and last lines shown):
+Output (116 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 113 engine test suites passed successfully!
+All 116 engine test suites passed successfully!
 ```
 
 ```bash
@@ -624,3 +625,18 @@ python3 tools/conformance/run_dom_conformance.py --show 10 --filter forms  # fai
 python3 tools/conformance/run_dom_conformance.py --reference            # the corpus itself, against jsdom (needs Node.js and npm)
 make url-conformance                                                    # URL parsing and setters
 ```
+
+
+### CSS whitespace runs (Phase 31)
+
+The CSS parser and style resolver used to trim a leading run of spaces by
+erasing the first character repeatedly, shifting the whole remainder each
+time. `make bench-css` runs ten compact/padded page pairs through parsing,
+style, layout and paint at 30,000 and 300,000 spaces per placeholder. The
+dumps must match, and each padded run must finish within three seconds.
+On the verification machine the 300,000-space `:nth-child` case went from
+13.6 s to 76 ms; `repeat(...)`, `minmax(...)` and `translate(...)` went from
+9–21 s to 0.19–0.31 s. The command and full table are in `ARCHITECTURE.md`,
+Phase 31. This is a cost fix, not a claim of broader CSS conformance. The
+separate `:nth-child(2n + 1)` sign-space parsing bug is still open and is
+recorded with a repro in `AUDIT.md`, finding 35.

@@ -1,4 +1,5 @@
 #include "litebird/css/CssParser.hpp"
+#include "litebird/css/CssText.hpp"
 #include <cctype>
 #include <sstream>
 
@@ -217,15 +218,21 @@ SimpleSelector CssParser::parse_simple_selector() {
                 std::string k = attr_str.substr(0, eq);
                 std::string v = attr_str.substr(eq + 1);
                 auto strip = [](std::string& str) {
-                    while (!str.empty() && (std::isspace(str.front()) || str.front() == '"' || str.front() == '\'')) str.erase(str.begin());
-                    while (!str.empty() && (std::isspace(str.back()) || str.back() == '"' || str.back() == '\'')) str.pop_back();
+                    const auto trim_char = [](char c) {
+                        return css_is_space(c) || c == '"' || c == '\'';
+                    };
+                    std::size_t first = 0;
+                    std::size_t last = str.size();
+                    while (first < last && trim_char(str[first])) ++first;
+                    while (last > first && trim_char(str[last - 1])) --last;
+                    str.resize(last);
+                    if (first != 0) str.erase(0, first);
                 };
                 strip(k);
                 strip(v);
                 s.attributes.emplace_back(std::move(k), std::move(v));
             } else {
-                while (!attr_str.empty() && std::isspace(attr_str.front())) attr_str.erase(attr_str.begin());
-                while (!attr_str.empty() && std::isspace(attr_str.back())) attr_str.pop_back();
+                css_trim(attr_str);
                 s.attributes.emplace_back(std::move(attr_str), "");
             }
         } else if (peek() == ':') {
@@ -359,8 +366,7 @@ KeyframesRule CssParser::parse_keyframes() {
         while (m_cursor < m_css.size() && peek() != '{') {
             sel_str += advance();
         }
-        while (!sel_str.empty() && std::isspace(sel_str.front())) sel_str.erase(sel_str.begin());
-        while (!sel_str.empty() && std::isspace(sel_str.back())) sel_str.pop_back();
+        css_trim(sel_str);
 
         float offset = 0.0f;
         if (sel_str == "from" || sel_str == "0%") {

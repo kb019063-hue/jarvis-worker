@@ -7,6 +7,7 @@
 #include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
+#include "litebird/css/CssText.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
@@ -7317,6 +7318,142 @@ TEST(replacing_children_detaches_the_old_ones) {
     }
 }
 
+// Phase 31: CSS whitespace trimming. Keep this block together: the XML work
+// in flight appends its own suites here too, and neither reorders the other.
+TEST(css_text_trim_matches_the_character_by_character_model) {
+    using namespace litebird;
+    const std::string spaces = " \t\n\r\f\v";
+    const std::vector<std::string> cases = {
+        "", "x", "  x  ", "\t\nx\r\f", "  \t\n\r\f\v", "a b",
+        std::string(" \tx\0y\n ", 8), std::string("\x80x\xff", 3)
+    };
+    for (const auto& input : cases) {
+        std::string model = input;
+        while (!model.empty() && std::isspace(static_cast<unsigned char>(model.front()))) model.erase(model.begin());
+        while (!model.empty() && std::isspace(static_cast<unsigned char>(model.back()))) model.pop_back();
+        std::string actual = input;
+        css_trim(actual);
+        assert(actual == model);
+        assert(css_trim_view(input) == model);
+    }
+    // A view points into the caller's text; trimming an empty string is safe.
+    const std::string source = "  value  ";
+    const auto view = css_trim_view(source);
+    assert(view.data() == source.data() + 2 && view.size() == 5);
+    std::string empty;
+    css_trim(empty);
+    assert(empty.empty());
+    // The C locale's VT is preserved as a trimming character. This task does
+    // not silently change the parser's whitespace set to the CSS production.
+    assert(css_is_space('\v'));
+    assert(!css_is_space('\x80') && !css_is_space('\xff'));
+    for (char c : spaces) {
+        std::string text(1000, c);
+        text += "keep";
+        text.append(1000, c);
+        css_trim(text);
+        assert(text == "keep");
+    }
+}
+
+TEST(css_whitespace_does_not_change_selector_or_value_meaning) {
+    using namespace litebird;
+    const std::string pad(256, ' ');
+    auto padded = [&](std::string text) {
+        std::size_t pos = 0;
+        while ((pos = text.find("{p}", pos)) != std::string::npos) {
+            text.replace(pos, 3, pad);
+            pos += pad.size();
+        }
+        return text;
+    };
+    auto resolve = [](const std::string& css, const std::string& html, const std::string& id) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        resolver.add_stylesheet(CssParser::parse(css));
+        auto element = doc->get_element_by_id(id);
+        assert(element != nullptr);
+        return resolver.resolve_style(element);
+    };
+    const std::string box = "<div id='box' data-kind='card' data-ready>x</div>";
+    // Attribute names, quoted values and presence selectors reach the parser's
+    // two trimming paths. The parsed selector, not just the paint, is checked.
+    for (const std::string& css : {
+        std::string("div[{p}data-kind{p}={p}\"card\"{p}]{color:rgb(255,0,0)}"),
+        std::string("div[{p}data-ready{p}]{color:rgb(255,0,0)}")}) {
+        auto sheet = CssParser::parse(padded(css));
+        assert(sheet.rules.size() == 1);
+        const auto& attrs = sheet.rules[0].selectors[0].parts[0].attributes;
+        assert(attrs.size() == 1);
+        assert(attrs[0].first == (css.find('=') == std::string::npos ? "data-ready" : "data-kind"));
+        assert(attrs[0].second == (css.find('=') == std::string::npos ? "" : "card"));
+        assert(resolve(padded(css), box, "box").color == Color(255, 0, 0));
+    }
+    // The old nth matcher copied and lowercased all padding for every child.
+    const std::string items = "<ul><li id='a'>a</li><li id='b'>b</li><li id='c'>c</li></ul>";
+    const std::string nth = "li:nth-child({p}2n{p}+1{p}){color:rgb(255,0,0)}";
+    assert(resolve(padded(nth), items, "a").color == Color(255, 0, 0));
+    assert(resolve(padded(nth), items, "b").color != Color(255, 0, 0));
+    assert(resolve(padded(nth), items, "c").color == Color(255, 0, 0));
+    for (const std::string& formula : {"odd", "even", "3n", "-n+2", "+n+1", "0n+2", "2"}) {
+        const std::string compact_rule = "li:nth-child(" + formula + "){color:rgb(0,0,255)}";
+        const std::string padded_rule = "li:nth-child({p}" + formula + "{p}){color:rgb(0,0,255)}";
+        for (const std::string& id : {"a", "b", "c"}) {
+            assert(resolve(padded(padded_rule), items, id).color == resolve(compact_rule, items, id).color);
+        }
+    }
+    // Keyframe offsets use the parser's trim; invalid all-space offsets do not
+    // become a new keyword or crash.
+    auto frames = CssParser::parse(padded("@keyframes fade{0%{opacity:1}{p}50%{p}{opacity:0.5}100%{opacity:1}}"));
+    assert(frames.keyframes.size() == 1 && frames.keyframes[0].keyframes.size() == 3);
+    assert(frames.keyframes[0].keyframes[1].offset == 0.5f);
+    // Grid track arguments and repeat arguments are resolved, not merely stored.
+    auto grid = resolve(padded("#box{display:grid;grid-template-columns:minmax({p}100px{p},{p}1fr{p})}"), box, "box");
+    assert(grid.grid_col_track_defs.size() == 1);
+    assert(grid.grid_col_track_defs[0].min_px == 100.0f && grid.grid_col_track_defs[0].max_fr == 1.0f);
+    auto repeat = resolve(padded("#box{display:grid;grid-template-columns:repeat({p}auto-fit{p},{p}minmax({p}100px{p},{p}1fr{p}){p})}"), box, "box");
+    assert(repeat.grid_auto_fit_columns && repeat.grid_auto_fit_def.min_px == 100.0f);
+    // Filter names, arguments and the drop-shadow colour.
+    auto filter = resolve(padded("#box{filter:{p}blur({p}5px{p}){p}drop-shadow({p}2px 3px 4px{p}#ff0000{p})}"), box, "box");
+    assert(filter.filters.size() == 2);
+    assert(filter.filters[0].type == FilterType::Blur && filter.filters[0].blur_radius == 5.0f);
+    assert(filter.filters[1].type == FilterType::DropShadow && filter.filters[1].color == Color(255, 0, 0));
+    // Shorthand tokens keep their separators; only outer padding is removed.
+    auto shorthand = resolve(padded("#box{margin:{p}1px {p}2px {p}3px {p}4px;font:{p}bold {p}20px {p}serif;border:{p}2px solid rgb(0,0,255)}"), box, "box");
+    assert(shorthand.margin == EdgeSizes(1, 2, 3, 4));
+    assert(shorthand.font_size == 20.0f && shorthand.font_weight == 700);
+    assert(shorthand.border_width.top == 2.0f && shorthand.border_color == Color(0, 0, 255));
+    auto timing = resolve(padded("#box{animation-duration:{p}250ms{p};transition-duration:{p}500ms{p};grid-area:{p}1{p}/{p}2{p}/{p}3{p}/{p}4{p}}"), box, "box");
+    assert(timing.animation_duration == 0.25f && timing.transition_duration == 0.5f);
+    assert(timing.grid_row_start == 1 && timing.grid_column_start == 2 && timing.grid_row_end == 3 && timing.grid_column_end == 4);
+    const std::string transform = "#box{transform:{p}translate({p}10px{p},{p}20px{p}){p}scale({p}2{p},{p}3{p})}";
+    auto moved = resolve(padded(transform), box, "box").transform_matrix;
+    auto compact = resolve("#box{transform:translate(10px,20px) scale(2,3)}", box, "box").transform_matrix;
+    assert(moved.a == compact.a && moved.d == compact.d && moved.e == compact.e && moved.f == compact.f);
+    assert(moved.e == 10.0f && moved.f == 20.0f);
+}
+
+TEST(css_long_whitespace_runs_keep_their_meaning) {
+    using namespace litebird;
+    // A size the old character-by-character loops took seconds to pass. The
+    // timing guard lives in tools/bench/bench_css_whitespace.py and CI; this
+    // suite checks the answer and runs under the sanitizers too.
+    const std::string pad(300000, ' ');
+    auto doc = HtmlParser::parse("<ul><li id='a'>a</li><li id='b'>b</li></ul>");
+    StyleResolver resolver;
+    resolver.add_stylesheet(CssParser::parse("li:nth-child(" + pad + "odd" + pad + "){color:rgb(255,0,0)}"));
+    assert(resolver.resolve_style(doc->get_element_by_id("a")).color == Color(255, 0, 0));
+    assert(resolver.resolve_style(doc->get_element_by_id("b")).color != Color(255, 0, 0));
+    auto attr = CssParser::parse("div[" + pad + "data-x" + pad + "=" + pad + "\"y\"" + pad + "]{color:rgb(0,0,255)}");
+    assert(attr.rules.size() == 1);
+    assert(attr.rules[0].selectors[0].parts[0].attributes.at(0) == std::make_pair(std::string("data-x"), std::string("y")));
+    StyleResolver values;
+    values.add_stylesheet(CssParser::parse("#x{grid-area:" + pad + "1" + pad + "/" + pad + "2" + pad + "}"));
+    auto xdoc = HtmlParser::parse("<div id='x'></div>");
+    auto style = values.resolve_style(xdoc->get_element_by_id("x"));
+    assert(style.grid_row_start == 1 && style.grid_column_start == 2);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -7433,6 +7570,11 @@ int main() {
     RUN_TEST(float_left_and_right_can_stack_side_by_side);
     RUN_TEST(table_colspan_and_rowspan_geometry);
     RUN_TEST(table_border_collapse_and_spacing);
+
+    // Phase 31: CSS whitespace trimming.
+    RUN_TEST(css_text_trim_matches_the_character_by_character_model);
+    RUN_TEST(css_whitespace_does_not_change_selector_or_value_meaning);
+    RUN_TEST(css_long_whitespace_runs_keep_their_meaning);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -2142,15 +2142,15 @@ scoreboard with a floor of 572, the URL data with a floor of 1150), and
 - **`DOMParser` knows HTML only.** `parseFromString(text,
   'application/xml')` or `'image/svg+xml'` parses the text as HTML: there
   is no XML parser, so no XML document, no `parsererror`, no `responseXML`.
-  The answer is wrong and nothing says so.
+  The answer is wrong and nothing says so. (Phase 28 wrote the parser.)
 - **Date and time inputs are text inputs.** `type="date"`, `time`,
   `month`, `week` and `datetime-local` keep whatever is assigned, and have
   no `valueAsDate`, `valueAsNumber` or `stepUp()`. `number` and `range`
   have all of it.
 - **SVG elements have no SVG DOM.** They are `SVGElement` with the members
   of `Element`: `className` is a string, there is no `viewBox`, no
-  `getBBox()`. `tests/dom-conformance/open/dates-and-xml.js` shows these
-  three.
+  `getBBox()`. `tests/dom-conformance/open/dates-and-svg.js` shows the
+  last two; until Phase 28 it showed all three.
 - **Nothing is fetched.** A `<script src>` or a stylesheet link is not
   loaded (a script inserted with a `src` gets an `error` event).
   `document.write` does nothing.

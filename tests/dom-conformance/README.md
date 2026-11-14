@@ -13,8 +13,10 @@ python3 tools/conformance/run_dom_conformance.py --reference   # check the corpu
 python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside the corpus: where do jsdom and Litebird differ?
 ```
 
-572 cases in 21 files. Litebird passes 572; the engine before the bindings
-were rewritten (`main` at `6f08a70`) passes 61.
+629 cases in 23 files, and Litebird passes all of them. Of the 572 that
+Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
+57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
+XML_BEFORE.
 
 ## Where the expectations come from
 
@@ -55,6 +57,36 @@ The first five rows are asserted in `dom_follows_the_standard_where_jsdom_does_n
 the computed style in `computed_style_answers_for_every_property`, the last
 two in `ranges_follow_the_tree`.
 
+XML documents and the serializer (`xml_dom_follows_the_standard_where_jsdom_does_not`):
+
+| Point | The standard | jsdom 31 |
+| :--- | :--- | :--- |
+| `innerHTML` of an HTML element that holds a processing instruction | `<?target data>` | Left out |
+| `document.title = 'T'` when the root is `<svg>` and has no `<title>` | A `<title>` as the first child of the root | Put after the root |
+| An XHTML DOCTYPE with one of the public identifiers the HTML standard lists | Declares the entity names of HTML: `&nbsp;` is a character | `parsererror` |
+| The clone of a document `DOMParser` made from XML | A `Document` | An `XMLDocument` |
+| `document.dir`, `designMode` on an XML document | There, as on every `Document` | Missing |
+| `activeElement` of a document with no body | The document element | `null` |
+| `visibilityState` of a document a script made | `hidden` | `prerender` |
+| An attribute with a prefix, serialized | Keeps its prefix when nothing else has it (the standard since September 2026) | A made-up `ns1` |
+| A tab in an attribute value, serialized | `&#9;` | `&#x9;` |
+| A made-up prefix when `ns1` is declared on the element already | The next free one (issue 44 of the standard: its text writes `xmlns:ns1` twice) | `ns1` again: not well formed |
+
+`XMLHttpRequest` (`xml_http_request_answers_data_urls_and_nothing_else`):
+
+| Point | The standard | jsdom 31 |
+| :--- | :--- | :--- |
+| `responseText` of an XML response with no charset on its type | In the encoding the document declares (`encoding="ISO-8859-1"`) | UTF-8 always |
+| An XML response whose bytes are not text in its encoding, or whose declaration contradicts them | `responseXML` is null: XML calls it a fatal error (4.3.3) | U+FFFD in their place, and a document |
+| A charset nobody knows on the type of an XML response | No charset: the declaration decides | UTF-8 |
+| `overrideMimeType('text/xml;charset=bogus')` on a response with a charset | The override's charset replaces the response's and then names nothing | The response's charset is used |
+| `responseXML.contentType` | The type of the response (`text/xml`, `image/svg+xml`) | `application/xml` always |
+| `responseURL` of an address with a fragment | Without the fragment | With it |
+| `getAllResponseHeaders()` | Every line ends in CR LF | Not the last |
+| An HTML response, `responseType = 'document'` | Parsed with scripting off: a `<noscript>` in the head holds elements. An empty one is a document too | Parsed with scripting on; an empty one is null |
+| A synchronous request | `readystatechange`, `load`, `loadend`; the total is 0 with no `Content-Length` | A `progress` event as well, and the total is what was loaded |
+| `abort()` while the response is arriving | `readystatechange`, `abort`, `loadend`, and nothing after | One more `progress` |
+
 Do not "fix" a failing case by recording such an answer. If Litebird and jsdom
 disagree, read the standard first.
 
@@ -94,6 +126,8 @@ case that dies early fails because its output is cut short.
 | `events.dat`, `forms.dat` | Dispatch, the event classes, handlers; form controls, their state, validation and submission |
 | `components.dat` | Custom elements and shadow trees |
 | `errors.dat` | Which exception each misuse throws, and what a page sees of an uncaught one |
+| `xml.dat` | `DOMParser` with the XML types and what it gives when the text is not well formed, namespaces, CDATA sections and processing instructions, `createDocument`, `XMLSerializer`, `innerHTML` in an XML document, which names are names |
+| `xhr.dat` | `XMLHttpRequest` for `data:` URLs: states and events, `responseXML`, `responseType`, `overrideMimeType`, encodings, what may be called when, `abort()` |
 | `programs.dat` | Small pages that do a whole job: a todo list, tabs, a sortable table, a router |
 
 ## Outside the corpus
@@ -116,7 +150,7 @@ fixed. They are not cases and the runner does not read them:
 | Files | What they show |
 | :--- | :--- |
 | `open/inline-style.html`, `.js` | `el.style`: shorthands kept whole, `length` and `item()`, values not rewritten in CSSOM's form. 27 lines, 15 differ; a few of those are jsdom's (it drops the quotes of a font family) |
-| `open/dates-and-xml.html`, `.js` | Date and time inputs, `DOMParser` with an XML type, the SVG DOM. 10 lines, all differ |
+| `open/dates-and-svg.html`, `.js` | Date and time inputs, the SVG DOM. 7 lines, all differ. (Until Phase 28 the file was `dates-and-xml` and had three lines more, for `DOMParser` with an XML type; those are cases in `xml.dat` now) |
 
 ```bash
 python3 tools/conformance/compare_with_jsdom.py tests/dom-conformance/open/inline-style.html tests/dom-conformance/open/inline-style.js
@@ -166,7 +200,9 @@ with `#name `, and cannot be exactly `#html`, `#code` or `#expect`.
    `history.state` is not a copy, `document.domain`, transient observers on a
    removed subtree, the `unhandledrejection` event, `structuredClone`,
    `scrollTo`, `formAction`, when a link click changes `location.hash`, and
-   layout of any kind (every box is 0 by 0).
+   layout of any kind (every box is 0 by 0). And a request for anything
+   but a `data:` URL: jsdom sends it over the network, and the recorder
+   then records nothing for the whole case.
 7. The code runs through `eval` in jsdom and as a script in Litebird. They
    agree except that a top-level `var` can be deleted in one and not in the
    other, and that code which throws at top level is refused by the recorder.

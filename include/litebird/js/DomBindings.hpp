@@ -757,6 +757,8 @@ void register_url_interfaces();
 void register_file_interfaces();
 bool is_blob(const JsValue& value);
 bool is_file(const JsValue& value);
+/// A new Blob holding `bytes`.
+JsValue make_blob(Realm& realm, const std::string& bytes, const std::string& type);
 /// A new File holding `bytes`.
 JsValue make_file(Realm& realm, const std::string& bytes, const std::string& name, const std::string& type);
 /// A File with the bytes and type of `blob` and the name `name`.

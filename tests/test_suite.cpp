@@ -7,6 +7,8 @@
 #include "litebird/xml/XmlParser.hpp"
 #include "litebird/xml/XmlTools.hpp"
 #include "litebird/xml/XmlDom.hpp"
+#include "litebird/net/DataUrl.hpp"
+#include <fstream>
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
@@ -4611,6 +4613,235 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
     assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
 }
 
+TEST(xml_http_request_answers_data_urls_and_nothing_else) {
+    using namespace litebird;
+
+    // --- MIME types (the MIME Sniffing Standard) ---------------------------
+    {
+        MimeType type;
+        assert(MimeType::parse(" Text/XML ; Charset=\"UTF-8\"; x=1;x=2 ;y ; z=\"a\\\"b\" ;w= ", type));
+        assert(type.essence() == "text/xml");
+        assert(type.parameter("charset") && *type.parameter("charset") == "UTF-8");
+        assert(*type.parameter("x") == "1");                // given twice: the first counts
+        assert(!type.parameter("y") && !type.parameter("w"));   // a name and no value
+        assert(type.serialize() == "text/xml;charset=UTF-8;x=1;z=\"a\\\"b\"");
+        assert(MimeType::parse("text/plain;x=\"a;b\"junk;y=2", type) && type.serialize() == "text/plain;x=\"a;b\";y=2");
+        assert(MimeType::parse("a/b;c=\"unclosed", type) && *type.parameter("c") == "unclosed");
+        for (const char* bad : {"", "text", "text/", "/xml", "te xt/xml", "text/x ml", "text/xml/", "text/\"xml\"", ";charset=x"}) {
+            assert(!MimeType::parse(bad, type));
+        }
+        const auto kind = [](const char* text) {
+            MimeType parsed;
+            assert(MimeType::parse(text, parsed));
+            return parsed.is_xml() ? 'x' : parsed.is_html() ? 'h' : '-';
+        };
+        assert(kind("text/xml") == 'x' && kind("application/xml") == 'x' && kind("image/svg+xml") == 'x');
+        assert(kind("APPLICATION/RSS+XML;charset=x") == 'x' && kind("a/b+xml") == 'x');
+        assert(kind("text/html") == 'h' && kind("application/xhtml+xml") == 'x');
+        assert(kind("text/xml-external-parsed-entity") == '-' && kind("application/xml-dtd") == '-' && kind("image/xml") == '-');
+        assert(kind("text/plain") == '-' && kind("application/+xml") == '-' && kind("text/xmlx") == '-');
+        assert(is_http_token("GET") && is_http_token("X-Custom_1") && !is_http_token("") && !is_http_token("GE T") &&
+               !is_http_token("a:b") && !is_http_token("a\n"));
+    }
+
+    // --- data: URLs (the Fetch Standard) ------------------------------------
+    {
+        MimeType type;
+        std::string body;
+        assert(process_data_url("data:text/xml;base64,PGEvPg==", type, body) && body == "<a/>" && type.serialize() == "text/xml");
+        assert(process_data_url("data:text/xml;base64,PGEv Pg", type, body) && body == "<a/>");     // spaces and no padding
+        assert(process_data_url("data:text/plain ;  BASE64,YQ==", type, body) && body == "a" && type.serialize() == "text/plain");
+        assert(process_data_url("data:;base64,YQ", type, body) && body == "a" && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data:application/octet-stream;base64,AP8=", type, body) && body == std::string("\0\xFF", 2));
+        assert(process_data_url("data:,a%20b%zz%4", type, body) && body == "a b%zz%4" && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data:;charset=x,y", type, body) && type.serialize() == "text/plain;charset=x");
+        assert(process_data_url("data:text,y", type, body) && type.serialize() == "text/plain;charset=US-ASCII");
+        assert(process_data_url("data: TEXT/XML ,%3Ca/%3E", type, body) && body == "<a/>" && type.serialize() == "text/xml");
+        assert(process_data_url("data:text/xml;base64;x=1,PGEvPg==", type, body) && body == "PGEvPg==");    // base64 is not last
+        assert(process_data_url("data:text/plain,a,b", type, body) && body == "a,b");
+        assert(process_data_url("data:text/plain,", type, body) && body.empty());
+        assert(!process_data_url("data:text/xml;base64,@@@", type, body));
+        assert(!process_data_url("data:text/xml;base64,PGEvP", type, body));     // a length no base64 text has
+        assert(!process_data_url("data:text/plain", type, body));                // no comma
+        assert(!process_data_url("http://example.test/,", type, body));
+    }
+
+    // --- Bytes into text (the Encoding Standard) ------------------------------
+    {
+        assert(decode_text("\xC3\xA9", "") == "\xC3\xA9");
+        assert(decode_text("\xE9", "") == "\xEF\xBF\xBD");
+        assert(decode_text("\xE9\x80", " Latin1 ") == "\xC3\xA9\xE2\x82\xAC");   // windows-1252: 0x80 is the euro sign
+        assert(decode_text("\xE9", "us-ascii") == "\xC3\xA9" && decode_text("\xE9", "ISO-8859-1") == "\xC3\xA9");
+        assert(decode_text(std::string("a\0b\0", 4), "utf-16le") == "ab");
+        assert(decode_text(std::string("\0a\0b", 4), "UTF-16BE") == "ab");
+        assert(decode_text(std::string("\x3D\xD8\x00\xDE", 4), "utf-16") == "\xF0\x9F\x98\x80");
+        assert(decode_text(std::string("\xFE\xFF\0a", 4), "latin1") == "a");     // a byte order mark wins
+        assert(decode_text(std::string("\xFF\xFE" "a\0", 4), "utf-8") == "a");
+        assert(decode_text("\xEF\xBB\xBF" "a", "utf-16be") == "a");
+        assert(decode_text("\xC3\xA9", "bogus") == "\xC3\xA9");                  // an unknown name: UTF-8
+        assert(decode_text("\xF0\x9F\x98\x80\xC3", "") == "\xF0\x9F\x98\x80\xEF\xBF\xBD");
+        assert(decode_text("\xED\xA0\x80", "") == "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD");     // a surrogate is three errors
+        assert(decode_text("\xC0\xAF" "a", "") == "\xEF\xBF\xBD\xEF\xBF\xBD" "a");              // no overlong forms
+        assert(decode_text("\xE2\x82" "a", "") == "\xEF\xBF\xBD" "a");                          // cut short: one error, and the next byte is read
+        assert(decode_text(std::string("\x3D\xD8" "a", 3), "utf-16le") == "\xEF\xBF\xBD");      // half a pair and half a unit: one error
+        assert(decode_text(std::string("\x3D\xD8" "a\0", 4), "utf-16le") == "\xEF\xBF\xBD" "a");
+        assert(decode_text(std::string("\x00\xDE" "a\0", 4), "utf-16le") == "\xEF\xBF\xBD" "a");
+        assert(decode_text(std::string("a\0b", 3), "utf-16le") == "a\xEF\xBF\xBD");
+        assert(utf8_decode("\xEF\xBB\xBF" "a") == "a");
+        assert(utf8_decode("\xFF\xFE" "a") == "\xEF\xBF\xBD\xEF\xBF\xBD" "a");   // UTF-8 whatever the bytes say
+    }
+
+    // --- The object ---------------------------------------------------------
+    // tests/dom-conformance/xhr.dat records what jsdom answers. Here is what
+    // jsdom cannot be asked: the places where it differs from the standard,
+    // and what a request must not be able to reach.
+    const std::string secret_path = "/tmp/litebird-xhr-secret-" + std::to_string(static_cast<long>(::getpid())) + ".xml";
+    {
+        std::ofstream secret(secret_path);
+        secret << "<secret>on disk</secret>";
+    }
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto settle = [&]() {
+        for (int i = 0; i < 200 && EventLoop::default_loop().has_pending_tasks(); ++i) EventLoop::default_loop().tick();
+        EventLoop::default_loop().run_microtasks();
+    };
+    auto S = [&](const std::string& expression) { return js.eval(expression).to_string(); };
+    js.eval(R"JS(
+        // A synchronous request, sent.
+        function get(url, setup) {
+            var x = new XMLHttpRequest();
+            x.open('GET', url, false);
+            if (setup) setup(x);
+            x.send();
+            return x;
+        }
+        // An asynchronous one: results[name] is what happened, once it has ended.
+        var results = {}, requests = {};
+        function later(name, url, setup, read) {
+            var x = new XMLHttpRequest(), seen = [];
+            ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'timeout', 'loadend'].forEach(function (type) {
+                x.addEventListener(type, function (e) {
+                    seen.push(type === 'readystatechange' ? 'state ' + x.readyState : type === 'progress' || type === 'load' ? type + ' ' + e.loaded + '/' + e.total : type);
+                    if (type === 'loadend') results[name] = seen.join(', ') + (read ? ' | ' + read(x) : '');
+                });
+            });
+            requests[name] = { x: x, seen: seen };
+            if (setup) setup(x);
+            x.open('GET', url);
+            x.send();
+        }
+        function asDocument(x) { x.responseType = 'document'; }
+    )JS");
+
+    // 1. The document of a response has the response's type; in jsdom every
+    //    XML one is application/xml.
+    assert(S("get('data:text/xml,<a/>').responseXML.contentType") == "text/xml");
+    assert(S("get('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\"/>').responseXML.contentType") == "image/svg+xml");
+    assert(S("get('data:application/xhtml+xml,<html xmlns=\"http://www.w3.org/1999/xhtml\"/>').responseXML.contentType") == "application/xhtml+xml");
+    assert(S("get('data:Application/XML;charset=utf-8,<a/>').responseXML.contentType") == "application/xml");
+    assert(S("get('data:text/plain,<rss/>', function (x) { x.overrideMimeType('application/rss+xml'); }).responseXML.contentType") == "application/rss+xml");
+    assert(S("get('data:,<a/>', function (x) { x.overrideMimeType('text/xml'); }).responseXML.documentElement.nodeName") == "a");
+
+    // 2. Every header line ends in CR LF, the last one too; jsdom leaves the
+    //    last one open.
+    assert(S("get('data:text/xml;charset=UTF-8,<a/>').getAllResponseHeaders()") == "content-type: text/xml;charset=UTF-8\r\n");
+    assert(S("new XMLHttpRequest().getAllResponseHeaders()") == "");
+
+    // 3. responseURL has no fragment; the document's address is the address
+    //    that was asked for. jsdom keeps the fragment in both.
+    assert(S("var x = get('data:text/xml,<a/>#frag'); x.responseURL + ' ' + x.responseXML.URL + ' ' + x.responseText") ==
+           "data:text/xml,<a/> data:text/xml,<a/>#frag <a/>");
+
+    // 4. An XML response says what it is encoded in, and both responseXML
+    //    and responseText listen; jsdom reads it as UTF-8.
+    const std::string latin1 = "'data:text/xml,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%E9%3C/a%3E'";
+    assert(S("var x = get(" + latin1 + "); x.responseXML.documentElement.textContent.charCodeAt(0) + ' ' + x.responseText.charCodeAt(x.responseText.length - 5)") == "233 233");
+    //    responseType "text" does not look inside: UTF-8, and the byte is no UTF-8.
+    js.eval("later('text type', " + latin1 + ", function (x) { x.responseType = 'text'; }, function (x) { return x.response.charCodeAt(x.response.length - 5); });");
+    //    The charset of the type outranks the declaration.
+    assert(S("get('data:text/xml;charset=utf-8,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%C3%A9%3C/a%3E').responseXML.documentElement.textContent.charCodeAt(0)") == "233");
+    //    UTF-16 with a byte order mark.
+    assert(S("var x = get('data:text/xml,%FF%FE%3C%00a%00/%00%3E%00'); x.responseXML.documentElement.nodeName + ' ' + x.responseText") == "a <a/>");
+    //    An encoding this build cannot read: no document, and the text as UTF-8.
+    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EUC-JP\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 43");
+
+    // 5. A synchronous request fires no progress event, and no total is
+    //    known; jsdom fires one with a total.
+    assert(S("var seen = [], x = new XMLHttpRequest();"
+             "['readystatechange', 'loadstart', 'progress', 'load', 'loadend'].forEach(function (t) { x.addEventListener(t, function (e) { seen.push(t === 'readystatechange' ? 'state ' + x.readyState : t + ' ' + e.loaded + '/' + e.total + '/' + e.lengthComputable); }); });"
+             "x.open('GET', 'data:text/xml,<a><b/></a>', false); x.send(); seen.join(', ')") ==
+           "state 1, state 4, load 11/0/false, loadend 11/0/false");
+
+    // 6. After abort() nothing more is fired; jsdom still delivers a
+    //    progress event.
+    js.eval("later('aborted', 'data:text/xml,<a/>', function (x) { x.addEventListener('readystatechange', function () { if (x.readyState === 3) x.abort(); }); });");
+
+    // 7. An HTML response is parsed with scripting off, as DOMParser parses
+    //    (a <noscript> in the head holds elements, and a <p> ends it); jsdom
+    //    parses it the way it parsed the page.
+    js.eval("later('html', 'data:text/html,<noscript><p>n</p></noscript><img src=x onerror=\"window.ranInResponse = 1\"><script>window.ranInResponse = 2</script>', asDocument,"
+            "function (x) { return x.response.head.innerHTML + ' | ' + x.response.body.firstChild.outerHTML + ' | ' + typeof window.ranInResponse + ' | ' + x.response.contentType; });");
+    //    An HTML response with nothing in it is still a document; jsdom says null.
+    js.eval("later('empty html', 'data:text/html,', asDocument, function (x) { return x.response.documentElement.outerHTML; });");
+    //    Scripts of an XML response do not run either.
+    assert(S("var x = get('data:application/xhtml+xml,<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><script>window.ranInXml = 1</script></head></html>');"
+             "x.responseXML.scripts.length + ' ' + typeof window.ranInXml + ' ' + (x.responseXML.defaultView === null)") == "1 undefined true");
+
+    // 8. What is not a data: URL is not answered. In particular a request
+    //    reads no file: not by a file: address, not by a path, and not when
+    //    the type is overridden.
+    js.eval("var secret = '" + secret_path + "';"
+            "later('file', 'file://' + secret, null, function (x) { return x.status + ' [' + x.responseText + '] ' + x.responseXML + ' [' + x.responseURL + ']'; });"
+            "later('path', secret, function (x) { x.overrideMimeType('text/xml'); }, function (x) { return x.status + ' [' + x.responseText + '] ' + x.responseXML; });"
+            "later('relative', '../../../../../../..' + secret, null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('http', 'http://127.0.0.1:9/feed.xml', null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('https', 'https://example.test/feed.xml', null, function (x) { return x.status + ' [' + x.responseText + ']'; });"
+            "later('blob', 'blob:https://example.test/1', null, function (x) { return String(x.status); });"
+            "later('about', 'about:blank', null, function (x) { return String(x.status); });"
+            "later('javascript', 'javascript:window.ranFromUrl = 1', null, function (x) { return x.status + ' ' + typeof window.ranFromUrl; });");
+    assert(S("try { get('file://' + secret); 'read' } catch (e) { e.name + ' ' + e.code }") == "NetworkError 19");
+    assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
+    assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
+
+    // 9. There is no ArrayBuffer in the engine: that response is null.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+
+    // 10. The XML parser's limits hold here as they do for DOMParser: a
+    //     document that expands without end gives no document, at once.
+    assert(S("var levels = '<!ENTITY a0 \"aaaaaaaaaa\">';"
+             "for (var i = 1; i < 12; i++) levels += '<!ENTITY a' + i + ' \"' + new Array(11).join('&a' + (i - 1) + ';') + '\">';"
+             "var bomb = '<!DOCTYPE r [' + levels + ']><r>&a11;</r>', t0 = Date.now();"
+             "var x = get('data:application/xml,' + encodeURIComponent(bomb));"
+             "String(x.responseXML) + ' ' + (x.responseText === bomb) + ' ' + (Date.now() - t0 < 5000)") == "null true true");
+    //     A large response is read in time that grows with its size.
+    assert(S("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
+             "var x = get('data:text/xml,' + big);"
+             "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < 5000)") == "200000 2800007 true");
+
+    settle();
+    assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
+    assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
+           "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
+    assert(S("results.html") == "state 1, loadstart, state 2, state 3, progress 116/0, state 4, load 116/0, loadend | "
+                                "<noscript></noscript> | <p>n</p> | undefined | text/html");
+    assert(S("results['empty html']") == "state 1, loadstart, state 2, progress 0/0, state 4, load 0/0, loadend | <html><head></head><body></body></html>");
+    const std::string failed = "state 1, loadstart, state 4, error, loadend | ";
+    assert(S("results.file") == failed + "0 [] null []");
+    assert(S("results.path") == failed + "0 [] null");
+    assert(S("results.relative") == failed + "0 []");
+    assert(S("results.http") == failed + "0 []");
+    assert(S("results.https") == failed + "0 []");
+    assert(S("results.blob") == failed + "0");
+    assert(S("results.about") == failed + "0");
+    assert(S("results.javascript") == failed + "0 undefined");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    std::remove(secret_path.c_str());
+}
+
 TEST(css_filters_and_canvas_blending) {
     using namespace litebird;
     // 1. ImageFilter algorithms
@@ -8240,6 +8471,7 @@ int main() {
     RUN_TEST(xml_dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(selectors_know_namespaces);
     RUN_TEST(attribute_lists_keep_their_order_and_stay_fast);
+    RUN_TEST(xml_http_request_answers_data_urls_and_nothing_else);
     RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(ranges_follow_the_tree);
     RUN_TEST(css_filters_and_canvas_blending);

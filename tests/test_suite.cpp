@@ -7424,10 +7424,10 @@ TEST(css_whitespace_does_not_change_selector_or_value_meaning) {
     assert(resolve(padded(nth), items, "a").color == Color(255, 0, 0));
     assert(resolve(padded(nth), items, "b").color != Color(255, 0, 0));
     assert(resolve(padded(nth), items, "c").color == Color(255, 0, 0));
-    for (const std::string& formula : {"odd", "even", "3n", "-n+2", "+n+1", "0n+2", "2"}) {
+    for (const std::string formula : {"odd", "even", "3n", "-n+2", "+n+1", "0n+2", "2"}) {
         const std::string compact_rule = "li:nth-child(" + formula + "){color:rgb(0,0,255)}";
         const std::string padded_rule = "li:nth-child({p}" + formula + "{p}){color:rgb(0,0,255)}";
-        for (const std::string& id : {"a", "b", "c"}) {
+        for (const std::string id : {"a", "b", "c"}) {
             assert(resolve(padded(padded_rule), items, id).color == resolve(compact_rule, items, id).color);
         }
     }

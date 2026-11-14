@@ -1,3 +1,4 @@
+#include "litebird/xml/XmlTools.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/html/HtmlParser.hpp"
@@ -118,6 +119,8 @@ int main(int argc, char* argv[]) {
     std::string run_script_file;
     bool run_script = false;
     std::string page_url;
+    // "canonical" or "events": read the file as XML and print that form.
+    std::string xml_dump;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -134,6 +137,10 @@ int main(int argc, char* argv[]) {
             scripting = false;
         } else if (arg.rfind("--virtual-time-budget=", 0) == 0) {
             virtual_time_budget_ms = std::max(0, std::atoi(arg.substr(std::string("--virtual-time-budget=").size()).c_str()));
+        } else if (arg == "--xml-canonical") {
+            xml_dump = "canonical";
+        } else if (arg == "--xml-events") {
+            xml_dump = "events";
         } else if (arg == "--dump-css") {
             dump_css = true;
         } else if (arg == "--dump-layout") {
@@ -233,6 +240,26 @@ int main(int argc, char* argv[]) {
 
     std::string html_content;
     if (!read_file(input_file, html_content)) return 1;
+
+    // --xml-canonical, --xml-events: the file through the XML parser alone.
+    // Exit status 0 for a well-formed document, 1 for one that is not (the
+    // reason goes to standard error), 3 for an encoding this build cannot read.
+    if (!xml_dump.empty()) {
+        std::string text, encoding, out;
+        litebird::xml::XmlError error;
+        if (!litebird::xml::decode_xml(html_content, text, encoding, error)) {
+            std::cerr << error.describe() << "\n";
+            return error.unsupported_encoding ? 3 : 1;
+        }
+        const bool well_formed = xml_dump == "canonical" ? litebird::xml::xml_canonical_form(text, out, error)
+                                                         : litebird::xml::xml_event_dump(text, out, error);
+        if (!well_formed) {
+            std::cerr << error.describe() << "\n";
+            return 1;
+        }
+        std::cout << out;
+        return 0;
+    }
 
     // 1. HTML Parsing
     if (dump_dom_webplatform) {

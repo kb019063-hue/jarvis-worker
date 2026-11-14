@@ -21,6 +21,8 @@ SRCS = src/dom/Node.cpp \
        src/html/EntityTable.cpp \
        src/html/HtmlTreeBuilder.cpp \
        src/html/HtmlTreeBuilderModes.cpp \
+       src/xml/XmlParser.cpp \
+       src/xml/XmlTools.cpp \
        src/css/CssParser.cpp \
        src/css/StyleResolver.cpp \
        src/layout/LayoutBox.cpp \

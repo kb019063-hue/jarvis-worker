@@ -17,6 +17,12 @@ jobs:
         run: make test
       - name: Smoke-test the CLI
         run: ./build/litebird examples/hello.html --dump-dom-webplatform
+      - name: CSS whitespace stays linear and keeps the same paint
+        # Ten parser/resolver paths, each at 30,000 and 300,000 spaces. Every
+        # padded page is compared with its compact form; the old front-erasure
+        # loops took over 20 s on the large cases. The limit is generous for
+        # a shared runner but far below the quadratic cost.
+        run: make bench-css
 
   conformance:
     name: DOM conformance (html5lib corpus)

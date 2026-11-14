@@ -1,6 +1,7 @@
 #include "litebird/css/StyleResolver.hpp"
 #include <unordered_set>
 #include "litebird/css/CssParser.hpp"
+#include "litebird/css/CssText.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/FormState.hpp"
 #include <sstream>
@@ -128,10 +129,10 @@ std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
     return candidates;
 }
 
-static bool match_nth_formula(int idx, std::string formula) {
-    std::transform(formula.begin(), formula.end(), formula.begin(), ::tolower);
-    while (!formula.empty() && std::isspace(formula.front())) formula.erase(formula.begin());
-    while (!formula.empty() && std::isspace(formula.back())) formula.pop_back();
+static bool match_nth_formula(int idx, std::string_view formula_text) {
+    std::string formula(css_trim_view(formula_text));
+    std::transform(formula.begin(), formula.end(), formula.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     if (formula.empty()) return false;
     if (formula == "odd") return (idx % 2 != 0);
@@ -164,7 +165,7 @@ static bool match_nth_formula(int idx, std::string formula) {
 
     int b = 0;
     std::string rest = formula.substr(n_pos + 1);
-    while (!rest.empty() && std::isspace(rest.front())) rest.erase(rest.begin());
+    css_trim(rest);
     if (!rest.empty()) {
         try {
             b = std::stoi(rest);
@@ -430,10 +431,8 @@ static ComputedStyle::GridTrackDef parse_single_grid_track(const std::string& to
         if (comma != std::string::npos) {
             std::string min_part = inside.substr(0, comma);
             std::string max_part = inside.substr(comma + 1);
-            while (!min_part.empty() && std::isspace(static_cast<unsigned char>(min_part.front()))) min_part.erase(min_part.begin());
-            while (!min_part.empty() && std::isspace(static_cast<unsigned char>(min_part.back()))) min_part.pop_back();
-            while (!max_part.empty() && std::isspace(static_cast<unsigned char>(max_part.front()))) max_part.erase(max_part.begin());
-            while (!max_part.empty() && std::isspace(static_cast<unsigned char>(max_part.back()))) max_part.pop_back();
+            css_trim(min_part);
+            css_trim(max_part);
 
             if (min_part.ends_with("px")) {
                 try { def.min_px = std::stof(min_part.substr(0, min_part.size() - 2)); } catch (...) {}
@@ -504,10 +503,8 @@ static void parse_grid_template(std::string_view val,
             if (comma != std::string::npos) {
                 std::string count_str = inside.substr(0, comma);
                 std::string item_str = inside.substr(comma + 1);
-                while (!count_str.empty() && std::isspace(static_cast<unsigned char>(count_str.front()))) count_str.erase(count_str.begin());
-                while (!count_str.empty() && std::isspace(static_cast<unsigned char>(count_str.back()))) count_str.pop_back();
-                while (!item_str.empty() && std::isspace(static_cast<unsigned char>(item_str.front()))) item_str.erase(item_str.begin());
-                while (!item_str.empty() && std::isspace(static_cast<unsigned char>(item_str.back()))) item_str.pop_back();
+                css_trim(count_str);
+                css_trim(item_str);
 
                 if (count_str == "auto-fit" || count_str == "auto-fill") {
                     is_auto_fit = true;
@@ -567,14 +564,12 @@ static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
         size_t open_p = s.find('(', i);
         if (open_p == std::string::npos) break;
         std::string name = s.substr(i, open_p - i);
-        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
-        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+        css_trim(name);
 
         size_t close_p = s.find(')', open_p);
         if (close_p == std::string::npos) break;
         std::string arg = s.substr(open_p + 1, close_p - (open_p + 1));
-        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.front()))) arg.erase(arg.begin());
-        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.back()))) arg.pop_back();
+        css_trim(arg);
 
         FilterFunction fn;
         if (name == "blur") {
@@ -647,7 +642,7 @@ static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
                         try { fn.blur_radius = std::stof(tok3); } catch (...) {}
                         std::string color_part;
                         std::getline(ss, color_part);
-                        while (!color_part.empty() && std::isspace(static_cast<unsigned char>(color_part.front()))) color_part.erase(color_part.begin());
+                        css_trim(color_part);
                         if (!color_part.empty()) {
                             fn.color = Color::parse(color_part);
                         } else {
@@ -712,12 +707,8 @@ static void parse_grid_template_areas(std::string_view val, std::unordered_map<s
 
 bool StyleResolver::expand_shorthand(const std::string& prop, const std::string& val,
                                       std::vector<std::pair<std::string, std::string>>& out) const {
-    auto trim = [](std::string text) {
-        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.erase(text.begin());
-        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
-        return text;
-    };
-    auto split_tokens = [&](const std::string& text) {
+    auto trim = [](std::string_view text) { return css_trim_view(text); };
+    auto split_tokens = [&](std::string_view text) {
         std::vector<std::string> tokens;
         std::string current;
         int depth = 0;
@@ -801,7 +792,7 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
     if (border_sides.count(prop)) {
         auto tokens = split_tokens(trim(val));
         for (const auto& raw_token : tokens) {
-            const std::string token = trim(raw_token);
+            const std::string token(trim(raw_token));
             if (token.empty()) continue;
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
@@ -1175,9 +1166,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         style.animation_name = val;
     } else if (prop == "animation-duration") {
         auto parse_sec = [](std::string_view s) -> float {
-            std::string str(s);
-            while (!str.empty() && std::isspace(str.front())) str.erase(str.begin());
-            while (!str.empty() && std::isspace(str.back())) str.pop_back();
+            std::string str(css_trim_view(s));
             if (str.size() > 2 && str.substr(str.size() - 2) == "ms") {
                 try { return std::stof(str.substr(0, str.size() - 2)) / 1000.0f; } catch (...) { return 0.0f; }
             } else if (!str.empty() && str.back() == 's') {
@@ -1219,9 +1208,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         style.transition_property = val;
     } else if (prop == "transition-duration") {
         auto parse_sec = [](std::string_view s) -> float {
-            std::string str(s);
-            while (!str.empty() && std::isspace(str.front())) str.erase(str.begin());
-            while (!str.empty() && std::isspace(str.back())) str.pop_back();
+            std::string str(css_trim_view(s));
             if (str.size() > 2 && str.substr(str.size() - 2) == "ms") {
                 try { return std::stof(str.substr(0, str.size() - 2)) / 1000.0f; } catch (...) { return 0.0f; }
             } else if (!str.empty() && str.back() == 's') {
@@ -1274,8 +1261,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             std::string part;
             std::vector<int> lines;
             while (std::getline(ss, part, '/')) {
-                while (!part.empty() && std::isspace(static_cast<unsigned char>(part.front()))) part.erase(part.begin());
-                while (!part.empty() && std::isspace(static_cast<unsigned char>(part.back()))) part.pop_back();
+                css_trim(part);
                 try { lines.push_back(std::stoi(part)); } catch (...) { lines.push_back(0); }
             }
             if (lines.size() >= 1) style.grid_row_start = lines[0];
@@ -1321,8 +1307,7 @@ static TransformMatrix2D parse_transform_matrix(const std::string& str) {
         size_t open_paren = str.find('(', i);
         if (open_paren == std::string::npos) break;
         std::string func = str.substr(i, open_paren - i);
-        while (!func.empty() && std::isspace(func.front())) func.erase(func.begin());
-        while (!func.empty() && std::isspace(func.back())) func.pop_back();
+        css_trim(func);
 
         size_t close_paren = str.find(')', open_paren);
         if (close_paren == std::string::npos) break;
@@ -1333,8 +1318,7 @@ static TransformMatrix2D parse_transform_matrix(const std::string& str) {
         std::stringstream ss(args_str);
         std::string arg;
         while (std::getline(ss, arg, ',')) {
-            while (!arg.empty() && std::isspace(arg.front())) arg.erase(arg.begin());
-            while (!arg.empty() && std::isspace(arg.back())) arg.pop_back();
+            css_trim(arg);
             if (!arg.empty()) args.push_back(arg);
         }
         if (args.empty()) {

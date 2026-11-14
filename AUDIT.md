@@ -47,6 +47,7 @@ The rest are documented with enough detail to act on.
 | 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1150 of 1188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
+| 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
 
 ---
@@ -1265,10 +1266,10 @@ far as the stack goes (finding 24, point 3).
 | 10,000 | 46 s |
 | 20,000 | not finished after 60 s |
 | `while (el.firstChild) el.removeChild(el.firstChild)`, 50,000 children | 1.0 s |
-| 300,000 spaces inside `:nth-child( )` | 8.8 s |
-| 300,000 spaces inside an attribute selector | 6.3 s |
+| 300,000 spaces inside `:nth-child( )` | 8.8 s (fixed in Phase 31, finding 35) |
+| 300,000 spaces inside an attribute selector | 6.3 s (fixed in Phase 31, finding 35) |
 | one element with 50,000 attributes | 4.5 s |
-| 300,000 spaces inside `repeat(`, `minmax(` or `translate(` | 2.1 s each |
+| 300,000 spaces inside `repeat(`, `minmax(` or `translate(` | 2.1 s each (fixed in Phase 31, finding 35) |
 | `at.innerHTML = "<div><div><form></form></div></div>"`, then the same on the inner `<div>`, 5,000 levels down (new in Phase 26) | 1.0 s |
 
 The floats are the one that matters. A float that does not fit beside the
@@ -1284,8 +1285,9 @@ straight to the bottom edge of the float in the way. That can move a float
 its own.
 
 Removing the first child moves every other child up, because children are a
-vector. The spaces are trimmed one character at a time from the front of a
-string, in about twenty places in the CSS code. The tokenizer drops a
+vector. The spaces were trimmed one character at a time from the front of a
+string, in about twenty places in the CSS code; Phase 31 replaced those loops
+with bounded scans (finding 35). The tokenizer drops a
 duplicate attribute by comparing each one with every attribute already on
 the tag. Markup assigned to `innerHTML` that holds a `<form>` has to know
 whether a form is above the element, which is a walk to the root at every
@@ -1794,7 +1796,6 @@ reports no sanitizer finding in the 113 suites, the corpora, the fuzzers and
 the ASan deep run (842 executions). The bench command above passed against
 Node 22 on the same machine.
 
----
 
 ## 34. ✅ `DOMParser` gave an HTML document for XML
 
@@ -1932,6 +1933,51 @@ merged tree, in the sandbox.
   documents to this parser: each the same tree after it is written and
   read`; `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0
   failed`. No report from either sanitizer. It takes 23 minutes here.
+
+---
+
+## 35. ✅ CSS whitespace trimming was quadratic
+
+**The hole.** The CSS parser and resolver trimmed leading whitespace with
+`erase(begin())` in a loop. Each space shifted the entire remaining value.
+Finding 28 measured 300,000 spaces inside `:nth-child( )` at 8.8 s; the
+reproducible page-pipeline baseline for this phase measured 14.6 s on its
+machine. The same shape appeared in attribute selectors, grid track
+arguments, filters, shorthands, durations, grid areas and transforms.
+
+**The fix.** `CssText.hpp` scans the outer runs once and edits an owned
+string at most once at the front. Callers that only need a token keep a
+string view. The nth matcher trims before copying/lowercasing and no longer
+copies the padding for every child. The existing whitespace and quote sets
+are preserved; this is not a CSS tokenizer conformance change.
+
+**Measured.** `python3 tools/bench/bench_css_whitespace.py --sizes
+30000,300000 --reps 3 --max-ms 3000 --baseline BUILD` compares every padded
+page with its compact form and with the baseline binary. At 300,000 spaces:
+nth-child 14,627 → 111 ms; attribute value 4,687 → 90 ms; grid minmax
+9,786 → 199 ms; grid repeat 22,545 → 188 ms; filters 7,191 → 156 ms;
+durations/grid-area 5,791 → 283 ms; transforms 11,694 → 304 ms. The full
+table and protocol are in ARCHITECTURE.md, Phase 31. Keyframe and shorthand
+cases were already cheap in this pipeline and stayed cheap.
+
+**What is still approximate.** The whitespace set is still the C locale's
+`std::isspace`, not the CSS whitespace production; VT is still trimmed.
+The separate `:nth-child(2n + 1)` sign-space parsing bug is **not** fixed:
+with three items it still paints only item 2 red, because the formula tail
+`+ 1` is read as `0`. The benchmark deliberately keeps `+1` glued so it
+measures the trimming cost without depending on that bug. Repro:
+`printf '<ul><li>a</li><li>b</li><li>c</li></ul><style>li:nth-child(2n + 1){color:rgb(255,0,0)}</style>' > /tmp/nth.html && ./build/litebird /tmp/nth.html --dump-paint`.
+The finding-28 float, computed-style memory and 50,000-attribute tokenizer
+costs are also not fixed here and remain open tasks.
+
+**How verified.** `make test` passes 117 suites, including the helper model,
+selector/value equivalence and long-run suites. `make bench-css` passes 20
+padded runs with identical compact/paged layout and paint. The scoreboards are
+unchanged: HTML 1781/1792, JS 840/845, DOM 572/572, URL 1150/1188.
+`make diff-trees` has 0 differing pages; `make deep` has 0 failures in 1,292
+runs; `make fuzz` has 0 findings in 800 runs; `make asan` reports no sanitizer
+finding (ASan JS 839/845, ASan deep 842 runs, 0 failed); `make tsan`,
+`make bench` and `make diff-strings` pass.
 
 ---
 

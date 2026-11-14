@@ -133,7 +133,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css help
 
 all: $(TARGET)
 
@@ -304,8 +304,13 @@ tsan:
 bench: $(TARGET)
 	@python3 tools/bench/bench_strings.py --max-ms 3000
 
+## CSS whitespace runs through the page pipeline. Each padded page must paint
+## like its compact form; the 300,000-space cases used to take seconds.
+bench-css: $(TARGET)
+	@python3 tools/bench/bench_css_whitespace.py --sizes 30000,300000 --reps 3 --max-ms 3000
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, clean"

@@ -34,7 +34,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 126 suites, all passing | `make test` |
+| Engine unit tests | 129 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -46,11 +46,12 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 126 engine suites
+make test            # 129 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
+make bench-css       # CSS whitespace runs: same paint as compact pages, each under 3 s
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
@@ -633,7 +634,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 126 engine test suites
+# Run the 129 engine test suites
 make test
 ```
 
@@ -698,14 +699,14 @@ make test
 make test
 ```
 
-Output (126 suites; the first and last lines shown):
+Output (129 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 126 engine test suites passed successfully!
+All 129 engine test suites passed successfully!
 ```
 
 ```bash
@@ -719,3 +720,18 @@ python3 tools/conformance/run_dom_conformance.py --show 10 --filter forms  # fai
 python3 tools/conformance/run_dom_conformance.py --reference            # the corpus itself, against jsdom (needs Node.js and npm)
 make url-conformance                                                    # URL parsing and setters
 ```
+
+
+### CSS whitespace runs (Phase 31)
+
+The CSS parser and style resolver used to trim a leading run of spaces by
+erasing the first character repeatedly, shifting the whole remainder each
+time. `make bench-css` runs ten compact/padded page pairs through parsing,
+style, layout and paint at 30,000 and 300,000 spaces per placeholder. The
+dumps must match, and each padded run must finish within three seconds.
+On the verification machine the 300,000-space `:nth-child` case went from
+14.6 s to 111 ms; `repeat(...)`, `minmax(...)` and `translate(...)` went from
+9.8–22.5 s to 0.19–0.30 s. The command and full table are in `ARCHITECTURE.md`,
+Phase 31. This is a cost fix, not a claim of broader CSS conformance. The
+separate `:nth-child(2n + 1)` sign-space parsing bug is still open and is
+recorded with a repro in `AUDIT.md`, finding 35.

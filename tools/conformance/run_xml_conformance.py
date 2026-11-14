@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Runs the W3C XML Conformance Test Suite against Litebird's XML parser.
 
-The suite (tests/xml/xmlts20130923.zip, the W3C's archive as published) is
-2,585 documents contributed by Sun, OASIS/NIST, IBM, Fuji Xerox, James Clark
-and the University of Edinburgh. Each says whether it is well formed, and many
-come with the canonical form a parser must be able to write back.
+The suite (xmlts20130923.zip, the W3C's archive as published) is 2,585
+documents contributed by Sun, OASIS/NIST, IBM, Fuji Xerox, James Clark and the
+University of Edinburgh. Each says whether it is well formed, and many come
+with the canonical form a parser must be able to write back.
+
+The archive is not in this repository (tests/xml/README.md says why). It is
+downloaded once into build/xml-conformance/, from the W3C or, failing that,
+from a public copy, and used only if its SHA-256 is the one written below.
 
 A browser's XML parser does not validate, is aware of namespaces, reads no
 external entity and follows XML 1.0 Fifth Edition. So of the suite:
@@ -28,7 +32,9 @@ Usage:
 
 Options:
     --binary PATH     Litebird binary (default: build/litebird)
-    --suite PATH      The archive (default: tests/xml/xmlts20130923.zip)
+    --suite PATH      The archive, if you have it already (default: downloaded
+                      to build/xml-conformance/xmlts20130923.zip)
+    --fetch-only      Download and check the archive, run nothing
     --filter SUBSTR   Only tests whose ID or path contains SUBSTR
     --show N          Print up to N failing tests
     --jobs N          Parallel processes (default: os.cpu_count())
@@ -42,26 +48,94 @@ Options:
 """
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 import xml.parsers.expat as expat
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+SUITE_NAME = "xmlts20130923.zip"
+SUITE_SHA256 = "f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb"
+SUITE_SOURCES = [
+    # The publisher.
+    ("https://www.w3.org/XML/Test/xmlts20130923.zip", {}),
+    # The same file in a public repository (kornelski/xml-rs, tests/), asked
+    # for by the hash Git gives its content.
+    ("https://api.github.com/repos/kornelski/xml-rs/git/blobs/5a2781ff68ca581acfecf57dd7f7282b64805802",
+     {"Accept": "application/vnd.github.raw"}),
+]
+
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def fetch_suite(into):
+    """The path of the archive, downloading it if it is not there yet.
+
+    A file whose hash is not SUITE_SHA256 is never used: not a truncated
+    download, not an error page, not another edition of the suite.
+    """
+    path = os.path.join(into, SUITE_NAME)
+    if os.path.exists(path):
+        if sha256_of(path) == SUITE_SHA256:
+            return path
+        os.remove(path)
+    os.makedirs(into, exist_ok=True)
+    problems = []
+    for url, headers in SUITE_SOURCES:
+        headers = dict(headers)
+        headers["User-Agent"] = "litebird-conformance"
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token and url.startswith("https://api.github.com/"):
+            headers["Authorization"] = "Bearer " + token
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as reply:
+                data = reply.read()
+        except Exception as error:  # no network, a refusal, a timeout: try the next source
+            problems.append("%s: %s" % (url, error))
+            continue
+        got = hashlib.sha256(data).hexdigest()
+        if got != SUITE_SHA256:
+            problems.append("%s: %d bytes with SHA-256 %s, which is not the suite" % (url, len(data), got))
+            continue
+        partial = path + ".part"
+        with open(partial, "wb") as out:
+            out.write(data)
+        os.replace(partial, path)
+        print("downloaded %s from %s" % (SUITE_NAME, url.split("/")[2]))
+        return path
+    sys.stderr.write("The XML conformance suite could not be downloaded:\n")
+    for problem in problems:
+        sys.stderr.write("  " + problem + "\n")
+    sys.stderr.write("Get %s from https://www.w3.org/XML/Test/ and put it at\n  %s\nor pass --suite PATH.\n"
+                     % (SUITE_NAME, path))
+    return None
+
 
 def unpack(archive, into):
+    """Unpacks the archive once; the stamp says which archive is unpacked."""
     stamp = os.path.join(into, ".unpacked")
-    if os.path.exists(stamp) and os.path.getmtime(stamp) >= os.path.getmtime(archive):
+    digest = sha256_of(archive)
+    if os.path.exists(stamp) and open(stamp).read().strip() == digest:
         return os.path.join(into, "xmlconf")
+    shutil.rmtree(os.path.join(into, "xmlconf"), ignore_errors=True)
     os.makedirs(into, exist_ok=True)
     with zipfile.ZipFile(archive) as z:
         z.extractall(into)
     with open(stamp, "w") as out:
-        out.write("ok\n")
+        out.write(digest + "\n")
     return os.path.join(into, "xmlconf")
 
 
@@ -170,7 +244,8 @@ def run_lxml(test):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", default=os.path.join(REPO, "build", "litebird"))
-    parser.add_argument("--suite", default=os.path.join(REPO, "tests", "xml", "xmlts20130923.zip"))
+    parser.add_argument("--suite")
+    parser.add_argument("--fetch-only", action="store_true")
     parser.add_argument("--filter", default="")
     parser.add_argument("--show", type=int, default=0)
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
@@ -181,7 +256,26 @@ def main():
     parser.add_argument("--reference", action="store_true")
     args = parser.parse_args()
 
-    root = unpack(args.suite, os.path.join(REPO, "build", "xml-conformance"))
+    work = os.path.join(REPO, "build", "xml-conformance")
+    if args.suite:
+        if not os.path.exists(args.suite):
+            sys.stderr.write("%s: no such file\n" % args.suite)
+            return 2
+        if sha256_of(args.suite) != SUITE_SHA256:
+            print("note: %s is not the archive of 23 September 2013 the numbers in the documents are for"
+                  % args.suite)
+        archive = args.suite
+    else:
+        archive = fetch_suite(work)
+        if archive is None:
+            return 2
+    if args.fetch_only:
+        print("%s  %s" % (SUITE_SHA256, archive))
+        return 0
+    if not args.reference and not os.path.exists(args.binary):
+        sys.stderr.write("%s: no such file (run `make` first)\n" % args.binary)
+        return 2
+    root = unpack(archive, work)
     tests = [t for t in read_catalogs(root) if args.filter in t["ID"] or args.filter in t["path"]]
 
     if args.reference:

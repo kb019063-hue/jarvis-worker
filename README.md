@@ -34,7 +34,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 132 suites, all passing | `make test` |
+| Engine unit tests | 133 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -701,7 +701,7 @@ make test
 make test
 ```
 
-Output (132 suites; the first and last lines shown):
+Output (133 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
@@ -735,8 +735,9 @@ On the verification machine the 300,000-space `:nth-child` case went from
 14.6 s to 111 ms; `repeat(...)`, `minmax(...)` and `translate(...)` went from
 9.8–22.5 s to 0.19–0.30 s. The command and full table are in `ARCHITECTURE.md`,
 Phase 31. This is a cost fix, not a claim of broader CSS conformance. The
-separate `:nth-child(2n + 1)` sign-space parsing bug is still open and is
-recorded with a repro in `AUDIT.md`, finding 35.
+separate `:nth-child(2n + 1)` sign-space parsing bug is fixed as of finding
+39: the formula matcher ignores whitespace tokens and parses strictly signed
+integers (`AUDIT.md`, finding 39).
 
 
 ### Page resource origin (Phase 33)

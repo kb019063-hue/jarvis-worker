@@ -16,12 +16,17 @@
 // costs the square of its size.
 //
 // The index does not hold positions: taking an attribute out of the middle
-// moves every one after it, and an index of positions would have to be
+// moves the tail, and an index of positions would have to be
 // written again each time (removing half of 50,000 attributes took 88
 // seconds that way). Each attribute gets a number when it is added, the
 // numbers only grow, so the list is always in the order of its numbers; the
 // index maps a name to its number and the position is found by bisection.
-// Removing one then costs what moving the tail of the vector costs.
+// The items and the index numbers live in vectors with a logical start
+// offset. Removing the last one pops the back; removing the first advances
+// the start and leaves a dead prefix that is compacted only once it is at
+// least as large as the live tail. Draining 50,000 attributes from either end
+// is therefore linear, and an empty list still allocates nothing. A middle
+// removal still moves the tail of the vector.
 //
 // The interface is the part of unordered_map the engine used, so the callers
 // did not change: find/end, count, operator[], erase, range-for over pairs.
@@ -44,71 +49,105 @@ public:
     using const_iterator = std::vector<value_type>::const_iterator;
 
     AttributeList() = default;
-    AttributeList(const AttributeList& other) : m_items(other.m_items) {}
-    AttributeList(AttributeList&&) noexcept = default;
+    AttributeList(const AttributeList& other) : m_storage(other.begin(), other.end()) {}
+    AttributeList(AttributeList&& other) noexcept
+        : m_storage(std::move(other.m_storage)), m_start(std::exchange(other.m_start, 0)),
+          m_index(std::move(other.m_index)) {}
     AttributeList& operator=(const AttributeList& other) {
         if (this != &other) {
-            m_items = other.m_items;
+            m_storage.assign(other.begin(), other.end());
+            m_start = 0;
             m_index.reset();
         }
         return *this;
     }
-    AttributeList& operator=(AttributeList&&) noexcept = default;
+    AttributeList& operator=(AttributeList&& other) noexcept {
+        if (this != &other) {
+            m_storage = std::move(other.m_storage);
+            m_start = std::exchange(other.m_start, 0);
+            m_index = std::move(other.m_index);
+        }
+        return *this;
+    }
 
-    iterator begin() { return m_items.begin(); }
-    iterator end() { return m_items.end(); }
-    const_iterator begin() const { return m_items.begin(); }
-    const_iterator end() const { return m_items.end(); }
+    iterator begin() { return m_storage.begin() + static_cast<std::ptrdiff_t>(m_start); }
+    iterator end() { return m_storage.end(); }
+    const_iterator begin() const { return m_storage.cbegin() + static_cast<std::ptrdiff_t>(m_start); }
+    const_iterator end() const { return m_storage.cend(); }
 
-    std::size_t size() const { return m_items.size(); }
-    bool empty() const { return m_items.empty(); }
-    const value_type& operator[](std::size_t index) const { return m_items[index]; }
+    std::size_t size() const { return m_storage.size() - m_start; }
+    bool empty() const { return size() == 0; }
+    const value_type& operator[](std::size_t index) const { return m_storage[m_start + index]; }
 
     iterator find(const std::string& name) {
         const std::size_t at = position(name);
-        return at == kNone ? m_items.end() : m_items.begin() + static_cast<std::ptrdiff_t>(at);
+        return at == kNone ? end() : begin() + static_cast<std::ptrdiff_t>(at);
     }
     const_iterator find(const std::string& name) const {
         const std::size_t at = position(name);
-        return at == kNone ? m_items.end() : m_items.begin() + static_cast<std::ptrdiff_t>(at);
+        return at == kNone ? end() : begin() + static_cast<std::ptrdiff_t>(at);
     }
     std::size_t count(const std::string& name) const { return position(name) == kNone ? 0 : 1; }
 
     /// The value of `name`, added at the end with an empty value when absent.
     std::string& operator[](const std::string& name) {
         const std::size_t at = position(name);
-        if (at != kNone) return m_items[at].second;
-        m_items.emplace_back(name, std::string());
+        if (at != kNone) return m_storage[m_start + at].second;
+        m_storage.emplace_back(name, std::string());
         if (m_index) {
             m_index->number_of.emplace(name, m_index->next);
             m_index->numbers.push_back(m_index->next++);
         }
-        return m_items.back().second;
+        return m_storage.back().second;
     }
 
     std::size_t erase(const std::string& name) {
         auto it = find(name);
-        if (it == m_items.end()) return 0;
+        if (it == end()) return 0;
         erase(it);
         return 1;
     }
     iterator erase(const_iterator position) {
-        if (m_index) {
-            m_index->number_of.erase(position->first);
-            m_index->numbers.erase(m_index->numbers.begin() + (position - m_items.cbegin()));
+        const std::size_t at = static_cast<std::size_t>(position - m_storage.cbegin()) - m_start;
+        const std::size_t live = size();
+        if (m_index) m_index->number_of.erase(position->first);
+        if (at == 0) {
+            // Front erase: leave the dead pair in place and advance the
+            // logical start. Compaction happens only when the dead prefix is
+            // at least as large as the live tail, so a full drain is linear.
+            ++m_start;
+            if (m_index) ++m_index->numbers_start;
+            if (live == 1) {
+                clear();
+                return end();
+            }
+            compact();
+            return begin();
         }
-        return m_items.erase(position);
+        if (m_index) {
+            m_index->numbers.erase(m_index->numbers.begin() + static_cast<std::ptrdiff_t>(m_index->numbers_start + at));
+        }
+        if (at + 1 == live) {
+            m_storage.pop_back();
+            if (live == 1) {
+                clear();
+                return end();
+            }
+            return end();
+        }
+        return m_storage.erase(position);
     }
     void clear() {
-        m_items.clear();
+        m_storage.clear();
+        m_start = 0;
         m_index.reset();
     }
 
     /// The same attributes with the same values, in any order: what "the same
     /// attributes" means wherever the HTML standard compares two elements.
     bool operator==(const AttributeList& other) const {
-        if (m_items.size() != other.m_items.size()) return false;
-        for (const auto& item : m_items) {
+        if (size() != other.size()) return false;
+        for (const auto& item : *this) {
             auto it = other.find(item.first);
             if (it == other.end() || it->second != item.second) return false;
         }
@@ -124,36 +163,60 @@ private:
     struct Index {
         /// The number each name was given when it was added.
         std::unordered_map<std::string, std::size_t> number_of;
-        /// numbers[i] is the number of m_items[i]: always ascending.
+        /// numbers[numbers_start + i] is the number of the i-th live item:
+        /// always ascending. The start advances with a front erase.
         std::vector<std::size_t> numbers;
+        std::size_t numbers_start{0};
         std::size_t next{0};
     };
 
     std::size_t position(const std::string& name) const {
         if (!m_index) {
-            if (m_items.size() < kIndexFrom) {
-                for (std::size_t i = 0; i < m_items.size(); ++i) {
-                    if (m_items[i].first == name) return i;
+            if (size() < kIndexFrom) {
+                for (std::size_t i = 0; i < size(); ++i) {
+                    if (m_storage[m_start + i].first == name) return i;
                 }
                 return kNone;
             }
             m_index = std::make_unique<Index>();
-            m_index->number_of.reserve(m_items.size() * 2);
-            m_index->numbers.reserve(m_items.size() * 2);
+            m_index->number_of.reserve(size() * 2);
+            m_index->numbers.reserve(size() * 2);
             // The first of two with one name is the one a scan would find.
-            for (std::size_t i = 0; i < m_items.size(); ++i) {
-                m_index->number_of.emplace(m_items[i].first, i);
+            for (std::size_t i = 0; i < size(); ++i) {
+                m_index->number_of.emplace(m_storage[m_start + i].first, i);
                 m_index->numbers.push_back(i);
             }
-            m_index->next = m_items.size();
+            m_index->next = size();
         }
         const auto found = m_index->number_of.find(name);
         if (found == m_index->number_of.end()) return kNone;
-        const auto at = std::lower_bound(m_index->numbers.begin(), m_index->numbers.end(), found->second);
-        return static_cast<std::size_t>(at - m_index->numbers.begin());
+        const auto first = m_index->numbers.begin() + static_cast<std::ptrdiff_t>(m_index->numbers_start);
+        const auto at = std::lower_bound(first, m_index->numbers.end(), found->second);
+        return static_cast<std::size_t>(at - first);
     }
 
-    std::vector<value_type> m_items;
+    /// Drop a dead prefix once it is at least as large as the live tail.
+    /// Doing it only at that point keeps repeated front erases amortized O(1)
+    /// and keeps an empty list allocation-free.
+    void compact() {
+        const std::size_t live = size();
+        if (live == 0) {
+            clear();
+            return;
+        }
+        if (m_start >= live) {
+            m_storage.erase(m_storage.begin(), m_storage.begin() + static_cast<std::ptrdiff_t>(m_start));
+            m_start = 0;
+        }
+        if (m_index && m_index->numbers_start >= live) {
+            m_index->numbers.erase(m_index->numbers.begin(),
+                                   m_index->numbers.begin() + static_cast<std::ptrdiff_t>(m_index->numbers_start));
+            m_index->numbers_start = 0;
+        }
+    }
+
+    std::vector<value_type> m_storage;
+    std::size_t m_start{0};
     mutable std::unique_ptr<Index> m_index;
 };
 

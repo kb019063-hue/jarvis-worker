@@ -2632,31 +2632,31 @@ tag still drops the token.
 **Measured.** Whole-process times (`--dump-dom-webplatform`: parse and tree
 dump, no layout, no scripts), best of three, idle machine, same hour. The
 baseline is this merged tree built with `main`'s tokenizer, kept as
-`build/litebird-merged-baseline`, so the only difference is this change:
+`build/litebird-final-baseline`, so the only difference is this change:
 
 ```bash
 python3 tools/bench/bench_tokenizer_attributes.py \
-  --baseline build/litebird-merged-baseline --reps 3 --max-ms 1000
+  --baseline build/litebird-final-baseline --reps 3 --max-ms 1000
 ```
 
 | Case (50,000 attribute occurrences) | Baseline | Current | Speedup |
 | :--- | ---: | ---: | ---: |
-| distinct names | 2,730 ms | 47 ms | 57.9× |
-| each name twice | 1,109 ms | 24 ms | 47.1× |
-| uppercase repeats | 1,022 ms | 33 ms | 31.1× |
-| long names, each twice | 2,570 ms | 56 ms | 46.2× |
-| quoted, bare, unquoted | 464 ms | 18 ms | 25.8× |
-| many small tags | 29 ms | 26 ms | 1.1× |
-| end tag with attributes | 2,636 ms | 15 ms | 177.3× |
+| distinct names | 3,868 ms | 95 ms | 40.7× |
+| each name twice | 1,166 ms | 34 ms | 34.3× |
+| uppercase repeats | 1,091 ms | 42 ms | 26.1× |
+| long names, each twice | 3,260 ms | 71 ms | 45.9× |
+| quoted, bare, unquoted | 545 ms | 18 ms | 30.9× |
+| many small tags | 33 ms | 34 ms | 1.0× |
+| end tag with attributes | 3,153 ms | 21 ms | 149.7× |
 
 Every dump equals the tree the markup must produce — computed by the bench
 from the markup, not recorded from a binary — and equals the baseline
 binary's dump byte for byte. The square is gone: distinct names at
-25,000/50,000/100,000/200,000 attributes take 48/68/173/374 ms (before: 586 ms
-at 25,000, 2,730 ms at 50,000). Tokenizing alone, 50,000 attributes cost 28 ms
+25,000/50,000/100,000/200,000 attributes take 45/95/183/344 ms (before: 628 ms
+at 25,000, 3,868 ms at 50,000). Tokenizing alone, 50,000 attributes cost 28 ms
 in the release build and 102 ms under ASan/UBSan. `make
 bench-tokenizer-attributes` is the checked-in guard: seven cases, three
-repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 2.7 s).
+repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 3.9 s).
 
 **How it was verified.** `make test` passes 155 suites; the two new ones are
 `tokenizer_repeated_attribute_names_keep_the_first` and
@@ -2676,13 +2676,13 @@ The release run on the merged tree kept every scoreboard: html5lib
 1781/1792, JS 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
 4658/5192 (534 listed, 0 unlisted); diff-trees 6,000 pages and diff-xml 4,000
 documents with 0 differing, XML round trip 3000/3000; deep 1,332 runs over
-465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 21.5 s);
+465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 26.4 s);
 bench-css 20 padded runs, bench-attributes 6 cases,
 bench-tokenizer-attributes 7 cases and security-fetch 3 checks, all with 0
 failures; verify-media 35 checks and fuzz-media 1,800 cases clean;
 diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
-page was 15.7 MB before and 15.9 MB after: the index is freed when the tag
-ends and the dump reuses its memory.
+page was 16.1 MB in both binaries: the index is freed when the tag ends and
+the dump reuses its memory.
 
 The sanitizer run on the same tree reported nothing: ASan/UBSan 155/155
 suites, JS 906/921 (one fewer than release: a deep-recursion case needs more
@@ -2691,7 +2691,7 @@ stack than a sanitizer build's frames leave, as before), DOM
 documents with 0 differing and 1,000/1,000 round trips; fuzz 400 parser
 mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep
 882 runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest
-3.3 s). `make tsan` passed (the string type under ThreadSanitizer, then under
+3.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
 ASan with leak checking).
 
 **What is still open.** A cost fix in one function, not a parser conformance

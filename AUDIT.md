@@ -2574,7 +2574,7 @@ laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
 ./build/test_suite
 make security-fetch
 ```
-`make test` passes **152/152** suites (and **152/152** under ASan+UBSan),
+`make test` passes **153/153** suites (and **153/153** under ASan+UBSan),
 including `img_subresources_enforce_document_origin_security` (proving a web
 page at `https://app.example/index.html` — with and without
 `<base href="file:///...">` — is denied local PNG access and lays out the

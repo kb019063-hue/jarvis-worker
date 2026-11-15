@@ -61,6 +61,8 @@ ComputedStyle inherited_only_style(const ComputedStyle& parent) {
     s.color = parent.color;
     s.font_size = parent.font_size;
     s.font_weight = parent.font_weight;
+    s.line_height = parent.line_height;
+    s.line_height_number = parent.line_height_number;
     s.text_align = parent.text_align;
     s.text_decoration = parent.text_decoration;
     s.border_collapse = parent.border_collapse;

@@ -726,14 +726,14 @@ make test
 make test
 ```
 
-Output (152 suites; the first and last lines shown):
+Output (153 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 152 engine test suites passed successfully!
+All 153 engine test suites passed successfully!
 ```
 
 ```bash

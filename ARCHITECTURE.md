@@ -3123,7 +3123,7 @@ make -j$(nproc) && make test
 ./build/litebird --gui --port=8080
 ```
 
-- `make test`: **152/152** unit suites pass after merging `main` (`build-asan/test_suite` verified cleanly).
+- `make test`: **153/153** unit suites pass after merging `main` (`build-asan/test_suite` verified cleanly).
 - Conformance & security: HTML **1781/1792** (`diff-trees` **6,000/6,000** equal),
   JS **907/921** (Everyday **90/90**), DOM **640/640** (Everyday **68/68**;
   out-of-corpus `compare_with_jsdom.py` probe **5/5** equal), URL **1188/1188**,

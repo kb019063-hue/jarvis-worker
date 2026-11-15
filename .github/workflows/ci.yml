@@ -23,6 +23,11 @@ jobs:
         # loops took over 20 s on the large cases. The limit is generous for
         # a shared runner but far below the quadratic cost.
         run: make bench-css
+      - name: Attribute-list end removals stay linear
+        # Six DOM cases at 50,000 attributes: front/back/alternating drains,
+        # front-half update/reinsert, namespaces, and short-list churn. Each
+        # must print the expected checksum; the old front erase took seconds.
+        run: make bench-attributes
       - name: Page fetch cannot read arbitrary local files
         # A web document must not read a marker file by path, file: URL, or
         # relative reference; a file: document keeps local access.

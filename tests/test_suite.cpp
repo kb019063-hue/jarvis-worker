@@ -9096,6 +9096,172 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
 }
 
+// --- Phase 35: attribute-list end removals ---------------------------------
+
+TEST(attribute_list_end_removals_keep_order_and_index) {
+    using namespace litebird;
+
+    // Cross the scan/index boundary in both directions. Erase through both
+    // overloads, reinsert names (their numbers must keep increasing), update
+    // values in place, and compare every observable with a vector model.
+    for (const int count : {0, 1, 31, 32, 33, 129, 513}) {
+        AttributeList list;
+        std::vector<AttributeList::value_type> model;
+        for (int i = 0; i < count; ++i) {
+            const std::string name = "a" + std::to_string(i);
+            list[name] = std::to_string(i);
+            model.emplace_back(name, std::to_string(i));
+        }
+        // Force the long list's index before the first removal.
+        assert(list.count("missing") == 0);
+        int removed_front = 0;
+        int removed_back = 0;
+        while (!model.empty()) {
+            const bool front = ((removed_front + removed_back) % 3) != 2;
+            const auto at = front ? model.begin() : model.end() - 1;
+            const std::string name = at->first;
+            if ((removed_front + removed_back) % 2 == 0) {
+                auto found = list.find(name);
+                assert(found != list.end());
+                const bool was_front = at == model.begin();
+                const bool was_back = at == model.end() - 1;
+                const std::string next_name = was_front
+                    ? (model.size() > 1 ? std::next(at)->first : std::string())
+                    : std::string();
+                auto next = list.erase(found);
+                if (was_front && !next_name.empty()) {
+                    assert(next != list.end() && next->first == next_name);
+                } else if (was_back) {
+                    assert(next == list.end());
+                }
+                if (front) ++removed_front; else ++removed_back;
+            } else {
+                assert(list.erase(name) == 1);
+                if (front) ++removed_front; else ++removed_back;
+            }
+            // The model erase uses the name because the list's erase may
+            // compact its storage and invalidate the endpoint we read above.
+            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+            assert(model_at != model.end());
+            model.erase(model_at);
+            assert(list.size() == model.size());
+            assert(list.empty() == model.empty());
+            assert(list.count(name) == 0);
+            assert(list.erase(name) == 0);
+            for (std::size_t i = 0; i < model.size(); ++i) {
+                assert(list[i] == model[i]);
+                auto found = list.find(model[i].first);
+                assert(found != list.end() && found - list.begin() == static_cast<std::ptrdiff_t>(i));
+                assert(found->second == model[i].second);
+            }
+            std::size_t walked = 0;
+            for (const auto& item : list) {
+                assert(item == model[walked++]);
+            }
+            assert(walked == model.size());
+            if (!model.empty()) {
+                // Updating keeps the position. Now and then a fresh name is
+                // appended while the ends are being drained; its number must
+                // be greater than every surviving one. Most steps shrink the
+                // model, so this loop terminates.
+                const std::string kept = model.back().first;
+                list[kept] = "updated";
+                model.back().second = "updated";
+                assert(list.count(kept) == 1);
+                if ((removed_front + removed_back) % 7 == 0) {
+                    const std::string returned = front ? ("front" + std::to_string(removed_front)) : ("back" + std::to_string(removed_back));
+                    list[returned] = "new";
+                    model.emplace_back(returned, "new");
+                    assert(list.find(returned) == list.end() - 1);
+                }
+            }
+        }
+        assert(list.empty());
+        list["after-clear"] = "ok";
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
+    }
+
+    // Copy and assignment preserve the visible order/values and remain
+    // independently editable after the source has had its ends drained.
+    AttributeList source;
+    for (int i = 0; i < 80; ++i) source["k" + std::to_string(i)] = std::to_string(i);
+    assert(source.count("k79") == 1);
+    AttributeList copy(source);
+    AttributeList assigned;
+    assigned["old"] = "gone";
+    assigned = source;
+    assert(copy == source && assigned == source);
+    assert(source.erase("k0") == 1 && source.erase("k79") == 1);
+    assert(copy.count("k0") == 1 && copy.count("k79") == 1);
+    assert(assigned.count("k0") == 1 && assigned.count("k79") == 1);
+    copy["k1"] = "changed";
+    assert(assigned["k1"] == "1" && source["k1"] == "1");
+    AttributeList moved(std::move(copy));
+    assert(copy.empty());
+    assert(moved.size() == 80 && moved["k1"] == "changed" && moved.count("k79") == 1);
+    AttributeList move_assigned;
+    move_assigned = std::move(assigned);
+    assert(assigned.empty());
+    assert(move_assigned.size() == 80 && move_assigned.count("k0") == 1);
+    move_assigned.clear();
+    assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
+    move_assigned["fresh"] = "1";
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
+
+    // The index can be built after a dead prefix already exists: stay below
+    // the scan threshold while erasing the front, grow past it, then search.
+    AttributeList late;
+    for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
+    for (int i = 0; i < 10; ++i) late.erase(late.begin());
+    for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
+    assert(late.count("l50") == 1); // builds the index with a nonzero start
+    for (int i = 10; i < 51; ++i) {
+        assert(late.erase("l" + std::to_string(i)) == 1);
+        assert(late.size() == static_cast<std::size_t>(51 - i - 1));
+    }
+    assert(late.empty());
+}
+
+TEST(attribute_list_front_removal_is_linear_in_practice) {
+    using namespace litebird;
+
+    // The old vector shifted both the items and the parallel number vector
+    // on every front erase: 50,000 script removals took about six seconds on
+    // the verification machine. The logical-start vector compacts only when
+    // the dead prefix reaches the live tail. This is a generous wall-clock
+    // regression guard, not a microbenchmark; the reproducible comparison is
+    // tools/bench/bench_attributes.py / make bench-attributes.
+    AttributeList direct;
+    for (int i = 0; i < 50000; ++i) direct["a" + std::to_string(i)] = std::to_string(i);
+    assert(direct.count("a49999") == 1);
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 50000; ++i) {
+        assert(direct.erase("a" + std::to_string(i)) == 1);
+        assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
+    }
+    const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(direct.empty());
+    assert(direct_seconds < 5.0);
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    start = std::chrono::steady_clock::now();
+    assert(js.eval(
+        "var e = document.createElement('div');"
+        "for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, String(i));"
+        "for (var i = 0; i < 50000; i++) e.removeAttribute('a' + i);"
+        "e.setAttribute('last', 'ok');"
+        "[e.attributes.length, e.attributes[0].name, e.getAttribute('last'), e.hasAttribute('a0'), e.outerHTML].join('|')").to_string() ==
+        "1|last|ok|false|<div last=\"ok\"></div>");
+    const double script_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(script_seconds < 10.0);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -9233,6 +9399,10 @@ int main() {
 
     // CSS <an+b> formula parsing (finding 35's tail).
     RUN_TEST(nth_child_formula_parsing);
+
+    // Phase 35: attribute-list end removals.
+    RUN_TEST(attribute_list_end_removals_keep_order_and_index);
+    RUN_TEST(attribute_list_front_removal_is_linear_in_practice);
 
     // Phase 33: page resource loads are origin-aware.
     RUN_TEST(resource_loader_page_requests_are_origin_aware);

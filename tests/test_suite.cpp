@@ -8812,6 +8812,65 @@ TEST(css_whitespace_does_not_change_selector_or_value_meaning) {
     assert(moved.e == 10.0f && moved.f == 20.0f);
 }
 
+TEST(nth_child_formula_parsing) {
+    using namespace litebird;
+    // The <an+b> micro-syntax ignores whitespace tokens: "2n + 1" and
+    // "2n+1" are the same formula, and the signs may be surrounded by spaces.
+    // Before the fix the tail "+ 1" was read as 0 (std::stoi rejected the
+    // sign-then-space), painting only the even items.
+    const std::string items = "<ul><li id='a'>a</li><li id='b'>b</li><li id='c'>c</li></ul>";
+    auto matches = [&](const std::string& formula) {
+        auto doc = HtmlParser::parse(items);
+        StyleResolver resolver;
+        resolver.add_stylesheet(CssParser::parse("li:nth-child(" + formula + "){color:rgb(255,0,0)}"));
+        std::array<bool, 3> hit{};
+        for (int i = 0; i < 3; ++i) {
+            const char id[3] = {static_cast<char>('a' + i), '\0', '\0'};
+            hit[i] = resolver.resolve_style(doc->get_element_by_id(id)).color == Color(255, 0, 0);
+        }
+        return hit;
+    };
+    const std::array<bool, 3> none{false, false, false};
+    const auto expect = [&](const std::string& formula, bool a, bool b, bool c) {
+        const auto hit = matches(formula);
+        assert(hit[0] == a);
+        assert(hit[1] == b);
+        assert(hit[2] == c);
+    };
+    // The reported bug and its neighbours.
+    expect("2n + 1", true, false, true);
+    expect("2n+ 1", true, false, true);
+    expect("2n +1", true, false, true);
+    expect("2n\t+\n1", true, false, true);
+    expect("2n\f+\r1", true, false, true);
+    expect("2N+1", true, false, true);
+    expect("+ 2n + 1", true, false, true);
+    expect("- n + 2", true, true, false);
+    expect("+ n + 1", true, true, true);
+    expect("n - 1", true, true, true);
+    expect("-n+2", true, true, false);
+    expect("-2n+5", true, false, true);
+    expect("3n-2", true, false, false);
+    expect("0n+2", false, true, false);
+    expect("0n+5", false, false, false);
+    expect("odd", true, false, true);
+    expect("even", false, true, false);
+    expect("2", false, true, false);
+    expect("+2", false, true, false);
+    expect("-2", false, false, false);
+    expect("N", true, true, true);
+    // Invalid formulas match nothing and never crash.
+    for (const std::string& formula : {"2n+a", "n+x", "2nn", "+", "-", "1.5", "++1", "n++1", "1+1", "2n+3n",
+                                       "2++1", "--1", "n n", "", "   ", "n+", "2n-", "5n"}) {
+        if (formula == "5n") {
+            expect("5n", false, false, false);  // a=5: matches only idx 5, which is not in three items
+            continue;
+        }
+        const auto hit = matches(formula);
+        assert(hit == none);
+    }
+}
+
 TEST(css_long_whitespace_runs_keep_their_meaning) {
     using namespace litebird;
     // A size the old character-by-character loops took seconds to pass. The
@@ -9561,6 +9620,9 @@ int main() {
     RUN_TEST(css_text_trim_matches_the_character_by_character_model);
     RUN_TEST(css_whitespace_does_not_change_selector_or_value_meaning);
     RUN_TEST(css_long_whitespace_runs_keep_their_meaning);
+
+    // CSS <an+b> formula parsing (finding 35's tail).
+    RUN_TEST(nth_child_formula_parsing);
 
     // Phase 33: page resource loads are origin-aware.
     RUN_TEST(resource_loader_page_requests_are_origin_aware);

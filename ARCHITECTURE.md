@@ -2827,8 +2827,11 @@ has 0 differing pages, `make deep` 0 failures in 1,292 runs, `make fuzz`
 This phase does not make the CSS parser spec-complete, does not change CSS
 whitespace recognition, and does not address the separate layout, tokenizer
 attribute-count or style-object tasks. The `:nth-child(2n + 1)` sign-space
-parsing bug found while building the benchmark is also still open; the
-benchmark keeps `+1` glued and AUDIT.md finding 35 records the repro.
+parsing bug found while building the benchmark is fixed (AUDIT.md finding 39:
+whitespace tokens are ignored inside the `<an+b>` micro-syntax and the offset
+and coefficient are strictly signed integers, so an invalid formula matches
+nothing); the benchmark kept `+1` glued while the bug was open, so its
+timings never depended on the fix.
 
 ---
 

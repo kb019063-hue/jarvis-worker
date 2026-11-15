@@ -44,7 +44,7 @@ The rest are documented with enough detail to act on.
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
-| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1150 of 1188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
+| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1,188 of 1,188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
@@ -1548,7 +1548,7 @@ implementation (ARCHITECTURE.md, Phase 27, section 11).
 | :--- | ---: | ---: |
 | All 572 cases | 61 | 572 |
 | `everyday.dat`: 68 snippets from *You Might Not Need jQuery*, written first and never edited | 13 | 68 |
-| URL parsing and setters, the web-platform-tests data (1,188 cases) | 2 | 1,150 |
+| URL parsing and setters, the web-platform-tests data (1,188 cases) | 2 | 1,188 |
 
 ### What a script met
 
@@ -1789,7 +1789,7 @@ insertion order after `delete` and reassignment, enumerated order after a
 `splice(0, n)`, and a full array consumed one element at a time.
 `make js-conformance` is 840 of 845 (everyday probe 90 of 90; 839 of 845 in
 the ASan build, which cannot fit the deep-nesting case). `make dom-conformance`
-is 572 of 572, `make url-conformance` is 1150 of 1188 and `make conformance`
+is 572 of 572, `make url-conformance` is 1,188 of 1,188 and `make conformance`
 is 1781 of 1792, unchanged; the parser was not touched. `make fuzz` reports
 0 findings in 400 parser mutations and 400 layout/render and image cases;
 `make deep` reports 0 failures in 1,292 runs over 445 pages; and `make asan`
@@ -2009,7 +2009,7 @@ test suites passed successfully!`. The refactor initially made the DOM corpus
 571/572 because the declaration normalizer no longer accepted `transparent` and
 `currentcolor`; both values are accepted explicitly in the declaration block and
 572/572 was restored. The rerun is 572/572. `make conformance` is 1781/1792,
-`make js-conformance` is 840/845, `make url-conformance` is 1150/1188,
+`make js-conformance` is 840/845, `make url-conformance` is 1,188/1,188,
 `make diff-trees` has 0 differing pages, `make fuzz` is 0/800 findings,
 `make deep` is 0/1,292 failures, and `make asan` reports no sanitizer finding
 (ASan JS corpus 839/845; ASan deep 842 executions). The HTML and JS floors are
@@ -2061,3 +2061,74 @@ HTTP `fetch()` is not CORS-checked. A `file:` document is a local embedder
 context and can read local files, so opening untrusted local HTML remains a
 trust decision. Worker MIME checks, module workers, and external
 `<script src>`/`<link>` loading are unchanged.
+---
+
+## 38. ✅ Host names outside ASCII are converted with UTS #46
+
+**The hole.** The URL parser kept host names with characters outside ASCII
+as written: `http://faß.example` stayed `faß.example` instead of becoming
+`xn--fa-hia.example`. The web-platform-tests URL corpus said so
+(`make url-conformance` was 1,150 of 1,188; every one of the 38 failures
+was such a host), and so did every browser the data was recorded from.
+
+**The fix.** The host parser now runs the URL Standard's domain parser:
+percent-decode, UTF-8 decode (no BOM), then Unicode's UTS #46
+(Nontransitional Processing — the flags the standard mandates:
+`CheckBidi=true`, `CheckJoiners=true`, `Transitional=false`,
+`VerifyDnsLength=false`), then the standard's forbidden-domain-code-point
+check, then the usual `ends in a number` → IPv4 fallback. The UTS #46
+machinery (mapping table, recursive canonical decompositions,
+composition pairs derived from single-step decompositions and verified
+through NFC, bidi classes, joining types) is table-driven and lives in
+`src/net/Idna.cpp`; the mapping table and joining types are Unicode 15.1.0
+(the `idna` package), while combining marks, combining classes,
+decompositions, composition pairs and bidi classes come from the generator
+host's `unicodedata` (14.0.0 here) — the generated header states both. Two bugs in the first cut were caught by
+diffing against an outside oracle: the Punycode encoder started from code
+point 0 instead of 0x80 (RFC 3492 `initial_n`), and the recomposition step
+kept the consumed combining mark's class instead of resetting it to 0,
+which broke every double-accented precomposed letter (U+01D6 `ǖ`, U+0390
+`ΐ`, U+1E08 `Ḉ`); the composition pair table also had to be built from
+single-step (not recursive) decompositions. `check_label` no longer
+enforces the IDNA2008 CONTEXTO rules (middle dot only between `l`s and so
+on): UTS #46 and the URL Standard never had them, and Node's
+`domainToASCII` accepts those code points.
+
+**How verified.** `make url-conformance` is 1,188 of 1,188 with a floor of
+1,188. Beyond the corpus: every Unicode code point (1,112,063 of them) was
+run through `domain_to_ascii` and compared against Node's `domainToASCII` —
+99.9% identical, and every divergence accounted for (see
+`tests/url/README.md`: IPv4 handling lives one layer up in the host parser
+and is checked there, Node is lenient where RFC 5893 forbids mixing
+left-to-right and right-to-left, and Node rejects the code points that are
+PVALID only because they are unassigned). A 2,263-case sweep of
+multi-code-point domains against both Node and Python's `idna` found no
+other disagreement, and an exhaustive code point differential against a
+Python UTS #46 mirror prints zero real divergences.
+
+**What is still approximate.**
+
+- ẞ (U+1E9E) converts to `xn--zca` (UTS #46 Nontransitional). Node's ICU
+  answers `ss`. The WHATWG mapping and the corpus win; the divergence is
+  deliberate and documented, never to be "fixed".
+- ß (U+00DF) in a domain maps to itself, not `ss` — Nontransitional, as
+  required.
+- Bidi: litebird implements RFC 5893 §2 exactly (CheckBidi), which rejects
+  labels that mix left-to-right and right-to-left characters and labels
+  that start with an AN-class digit or a combining mark, where Node accepts
+  some of them. The URL Standard's CheckBidi is the authority; if the
+  web-platform-tests data ever gains a mixed-direction host case, this is
+  the behaviour it must have.
+- Unassigned code points that are PVALID (e.g. U+11F00) are accepted; both
+  Node and Python's `idna` reject them (they have no bidi data for them).
+  UTS #46 accepts them, so does litebird.
+- The ASCII fast path (all-ASCII domain returned lowercased, regardless of
+  what ToASCII would say) is the standard's web-compatibility rule, not a
+  shortcut: an all-ASCII domain with, say, an interior underscore parses
+  even though UseSTD3ASCIIRules would call it invalid.
+- Combining marks, combining classes, decompositions, composition pairs and
+  bidi classes come from the generator host's `unicodedata` (Unicode 14.0.0,
+  Python 3.11); the mapping and joining-type tables are Unicode 15.1.0. The
+  drift only affects code points assigned after Unicode 14 — currently all
+  unassigned PVALID code points, which need no bidi data anyway. The
+  generated header states both versions.

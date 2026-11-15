@@ -83,7 +83,49 @@ public:
     void set_template_contents(std::shared_ptr<Node> frag) { m_template_contents = std::move(frag); }
 
     const Rect& bounding_box() const { return m_bounding_box; }
-    void set_bounding_box(const Rect& r) { m_bounding_box = r; }
+    void set_bounding_box(const Rect& r) {
+        m_bounding_box = r;
+        m_has_layout_box = (r.width > 0.0f || r.height > 0.0f || r.x != 0.0f || r.y != 0.0f);
+    }
+    bool has_layout_box() const { return m_has_layout_box; }
+    void clear_layout_box() {
+        m_bounding_box = Rect();
+        m_has_layout_box = false;
+        if (m_rare) m_rare->layout_border = EdgeSizes();
+    }
+    void set_layout_box(const Rect& border_box, const EdgeSizes& border = EdgeSizes()) {
+        m_bounding_box = border_box;
+        m_has_layout_box = true;
+        if (border.top != 0.0f || border.right != 0.0f || border.bottom != 0.0f || border.left != 0.0f) {
+            rare().layout_border = border;
+        } else if (m_rare) {
+            m_rare->layout_border = EdgeSizes();
+        }
+    }
+    void union_layout_box(const Rect& r) {
+        if (!m_has_layout_box) {
+            m_bounding_box = r;
+            m_has_layout_box = true;
+            return;
+        }
+        const float min_x = std::min(m_bounding_box.x, r.x);
+        const float min_y = std::min(m_bounding_box.y, r.y);
+        const float max_x = std::max(m_bounding_box.x + m_bounding_box.width, r.x + r.width);
+        const float max_y = std::max(m_bounding_box.y + m_bounding_box.height, r.y + r.height);
+        m_bounding_box = Rect(min_x, min_y, max_x - min_x, max_y - min_y);
+    }
+    EdgeSizes layout_border() const {
+        return m_rare ? m_rare->layout_border : EdgeSizes();
+    }
+    Rect padding_box() const {
+        const EdgeSizes b = layout_border();
+        return Rect(
+            m_bounding_box.x + b.left,
+            m_bounding_box.y + b.top,
+            std::max(0.0f, m_bounding_box.width - b.left - b.right),
+            std::max(0.0f, m_bounding_box.height - b.top - b.bottom)
+        );
+    }
 
     bool has_attribute(const std::string& name) const {
         return m_attributes.find(name) != m_attributes.end();
@@ -280,6 +322,8 @@ public:
         std::string other_namespace;
         /// Qualified name and namespace of each attribute that has one.
         AttributeNamespaces attribute_namespaces;
+        /// Layout border widths (stored only when non-zero so Element pays 0 bytes).
+        EdgeSizes layout_border;
     };
     std::unique_ptr<Rare> m_rare;
     Rare& rare() {
@@ -295,6 +339,7 @@ public:
     bool m_is_hovered{false};
     bool m_is_focused{false};
     bool m_is_active{false};
+    bool m_has_layout_box{false};
 };
 
 } // namespace litebird

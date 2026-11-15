@@ -10,6 +10,7 @@
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/net/DataUrl.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/UrlParser.hpp"
 #include "litebird/net/Fetch.hpp"
@@ -167,15 +168,115 @@ void JsInterpreter::notify_document_interactive() {
     dom::fire(realm, *m_document, "readystatechange");
 }
 
+void JsInterpreter::notify_window_resized() {
+    JsIntrinsics::set_current(m_realm.get());
+    if (m_document) {
+        JsScriptScope scope;
+        dom::Realm& realm = dom::realm_of(*m_realm);
+        dom::fire(realm, dom::window_of(realm), "resize");
+        return;
+    }
+    fire_window_event("resize");
+}
+
 void JsInterpreter::load_page(std::string_view html, bool scripting,
                               const std::function<void(const std::string& source)>& before) {
     if (!m_document) return;
     std::shared_ptr<Document> document = m_document;
+    document->clear_subresource_caches();
+    document->install_default_layout_updater();
+
+    struct DeferredScript {
+        std::shared_ptr<Element> element;
+        bool ok{false};
+        std::string source;
+    };
+    std::vector<DeferredScript> deferred_scripts;
+    std::size_t external_script_fetches = 0;
+    static constexpr std::size_t kMaxExternalScriptFetches = 256;
+
+    auto fetch_external_script = [&](const std::shared_ptr<Element>& script, std::string& source_out) -> bool {
+        source_out.clear();
+        const std::string raw_src = dom::strip_ascii_space(script->get_attribute("src"));
+        if (raw_src.empty() || external_script_fetches >= kMaxExternalScriptFetches) {
+            return false;
+        }
+        ++external_script_fetches;
+
+        ResourceRequestContext ctx;
+        ctx.document_url = document->url();
+        ctx.base_url = ctx.document_url;
+        Url base;
+        if (dom::document_base_url(dom::realm_of(*m_realm), *document, base)) {
+            ctx.base_url = base.href();
+        }
+        if (script->has_attribute("crossorigin")) {
+            ctx.mode = RequestMode::Cors;
+            if (dom::ascii_lower(dom::strip_ascii_space(script->get_attribute("crossorigin"))) == "use-credentials") {
+                ctx.include_credentials = true;
+            }
+        } else {
+            ctx.mode = RequestMode::NoCors;
+        }
+
+        ResourceResponse resp = ResourceLoader::load_for_page(raw_src, ctx);
+        if (!resp.success) return false;
+
+        std::string charset_label = script->get_attribute("charset");
+        MimeType mime;
+        if (MimeType::parse(resp.content_type, mime)) {
+            if (const std::string* cs = mime.parameter("charset")) {
+                charset_label = *cs;
+            }
+        }
+        source_out = charset_label.empty()
+                         ? resp.body
+                         : decode_text(resp.body, encoding_name_for_label(charset_label));
+        return true;
+    };
+
+    auto fire_script_event_if_observed = [&](const std::shared_ptr<Element>& script, const char* event_name) {
+        const std::string handler_attr = std::string("on") + event_name;
+        if (!script->has_listeners(event_name) && !script->has_attribute(handler_attr) && !script->script_object()) {
+            return;
+        }
+        JsIntrinsics::set_current(m_realm.get());
+        JsScriptScope scope;
+        dom::fire(dom::realm_of(*m_realm), *script, event_name);
+    };
+
     HtmlParser::parse_into(document, html, scripting, [&](const std::shared_ptr<Element>& script) {
         // Not in the page (inside a <template>, or an earlier script took
-        // its parent out), nothing to fetch, or not JavaScript.
+        // its parent out) or not a classic JavaScript script.
         if (!script->is_connected() || script->owner_document() != document) return;
-        if (script->has_attribute("src") || !dom::is_classic_script(*script)) return;
+        if (!dom::is_classic_script(*script)) return;
+
+        if (script->has_attribute("src")) {
+            // HTML Standard §4.12.1.1: inline fallback text inside <script src="...">
+            // never executes even if fetching `src` fails.
+            std::string ext_source;
+            const bool fetched = fetch_external_script(script, ext_source);
+            if (script->has_attribute("defer") && !script->has_attribute("async")) {
+                deferred_scripts.push_back(DeferredScript{script, fetched, std::move(ext_source)});
+                return;
+            }
+            if (!fetched) {
+                fire_script_event_if_observed(script, "error");
+                return;
+            }
+            if (before) before(ext_source);
+            {
+                JsIntrinsics::set_current(m_realm.get());
+                JsScriptScope checkpoint;
+            }
+            auto previous = document->current_script();
+            document->set_current_script(script);
+            eval_ast(ext_source);
+            document->set_current_script(previous);
+            fire_script_event_if_observed(script, "load");
+            return;
+        }
+
         const std::string source = script->text_content();
         if (source.empty()) return;
         if (before) before(source);
@@ -192,6 +293,22 @@ void JsInterpreter::load_page(std::string_view html, bool scripting,
         document->set_current_script(previous);
     });
     notify_document_interactive();
+
+    // Execute parser-inserted `defer` external scripts in document order after
+    // readyState becomes "interactive" and before DOMContentLoaded.
+    for (const auto& def : deferred_scripts) {
+        if (!def.element || !def.element->is_connected() || def.element->owner_document() != document) continue;
+        if (!def.ok) {
+            fire_script_event_if_observed(def.element, "error");
+            continue;
+        }
+        if (before) before(def.source);
+        auto previous = document->current_script();
+        document->set_current_script(def.element);
+        eval_ast(def.source);
+        document->set_current_script(previous);
+        fire_script_event_if_observed(def.element, "load");
+    }
 }
 
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {

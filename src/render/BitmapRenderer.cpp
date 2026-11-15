@@ -1,4 +1,5 @@
 #include "litebird/render/BitmapRenderer.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
@@ -277,21 +278,18 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
             Point tp = current_transform().map_point(arg.position);
-
-            // Advance must match the metric the layout engine assumes, otherwise
-            // glyphs collide and line widths disagree with the box geometry.
-            const int advance = std::max(1, static_cast<int>(std::lround(arg.font_size * 0.55f)));
-            const int scale = std::max(1, advance / 8);
-            int cur_x = static_cast<int>(tp.x);
-            int cur_y = static_cast<int>(tp.y);
-
-            for (char ch : arg.text) {
-                draw_char(cur_x, cur_y, ch, arg.color, scale);
-                if (arg.font_weight >= 600) {
-                    draw_char(cur_x + 1, cur_y, ch, arg.color, scale);
+            FontRenderer::instance().draw_text(
+                tp.x,
+                tp.y,
+                arg.text,
+                arg.font_size,
+                arg.font_weight,
+                [this, &arg](int px, int py, uint8_t coverage) {
+                    Color c = arg.color;
+                    c.a = static_cast<uint8_t>((static_cast<uint32_t>(c.a) * coverage + 127u) / 255u);
+                    set_pixel(px, py, c);
                 }
-                cur_x += advance;
-            }
+            );
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {
                 Rect tr = current_transform().map_rect(arg.rect);

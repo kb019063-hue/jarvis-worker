@@ -34,7 +34,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 148 suites, all passing | `make test` |
+| Engine unit tests | 157 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 148 engine suites
+make test            # 157 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -710,9 +710,11 @@ make test
 | `--dump-bytecode` | Disassemble JavaScript code into VM bytecode |
 | `--render-terminal` | Render page to ANSI Truecolor terminal (default) |
 | `--render-bmp <file>` | Render page to an uncompressed 24-bit BMP image |
+| `--render-png <file>` | Render page to a compressed PNG image (with TrueType `.ttf` text when available) |
+| `--gui [--port=<N>] [url]` | Launch the interactive browser Web GUI on `0.0.0.0:<N>` (default `8080`) with viewport, navigation, interaction, and DevTools |
 | `--run-js "<code>"` | Run a script, then its timers and promise callbacks. Exits 1 if anything was left uncaught |
 | `--run-script <file>` | Load the page, run the file as one more script, then the page's load events and timers. Nothing is drawn. Exits 1 if anything was left uncaught |
-| `--url=<URL>` | The address the page is said to come from (`location.href`); by default the `file:` URL of the file |
+| `--url=<URL>` | The address the page is said to come from (`location.href`); by default the `file:` URL of the file (or the fetched `http:`/`https:` URL) |
 | `--virtual-time-budget=<ms>` | How much timer time a page gets to settle before it is rendered (default 16, one frame) |
 | `--xml-canonical <file>` | Read the file as XML and print its canonical form, the one the XML conformance suite compares. Exits 0 for a well-formed document, 1 for one that is not (the reason on standard error), 3 for an encoding this build cannot read |
 | `--xml-events <file>` | Read the file as XML and print what the parser reports, one line an event (`tools/fuzz/diff_xml.py` compares these with Expat and libxml2). The same exit statuses |
@@ -726,14 +728,14 @@ make test
 make test
 ```
 
-Output (144 suites; the first and last lines shown):
+Output (153 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
-Running test: html_parser... PASSED
+Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 144 engine test suites passed successfully!
+All 153 engine test suites passed successfully!
 ```
 
 ```bash
@@ -795,10 +797,10 @@ A document the embedder loaded from `file:` keeps local-file access for the
 CLI/TUI; trusted navigation is a separate `load_navigation` entry point.
 `make security-fetch` generates a marker file and checks the web, base-smuggled,
 and local cases (3 checks, 0 failures). `make test` includes the loader,
-fetch/worker, and relative-base suites. CORS, `XMLHttpRequest` over the network,
-and HTTPS remain open tasks; this is the local-file boundary, not a full Fetch
-implementation. Details and repro are in `ARCHITECTURE.md`, Phase 33, and
-`AUDIT.md`, finding 37.
+`make security-fetch` generates a marker file and checks the web, base-smuggled,
+and local cases (3 checks, 0 failures). `make test` includes the loader,
+fetch/worker, and relative-base suites. Details and repro are in
+`ARCHITECTURE.md`, Phase 33, and `AUDIT.md`, finding 37.
 
 
 ### A function as a prototype (Phase 34)
@@ -828,6 +830,39 @@ constructor, `Symbol.species`, `Symbol.hasInstance`, custom elements compiled
 by Babel) is in `ARCHITECTURE.md`, Phase 34, section 9, with a failing case
 each; the design and what it costs are in the same place, and `AUDIT.md`,
 finding 41, says what found what.
+
+
+### Usable browser pipeline: HTTPS/CORS, subresources, live layout, TrueType & Web GUI (Phase 36)
+
+Phase 36 connects the parsers, layout engine, and script runtime into an
+interactive multi-resource browser without adding external build-time link
+dependencies:
+
+- **HTTPS/TLS, HTTP/1.1 & CORS**: Runtime `dlopen` of OpenSSL 3 (`libssl.so.3`)
+  with SNI and CA hostname verification; HTTP/1.1 `Transfer-Encoding: chunked`,
+  pure-C++20 `gzip`/`deflate`/zlib decompression (`Deflate.cpp`), redirect
+  chaining, and CORS `Access-Control-Allow-Origin` enforcement across `fetch()`
+  and networked `XMLHttpRequest`.
+- **External stylesheets, scripts & origin-safe images**: `<link rel="stylesheet">`,
+  `<base href>`, `media` attributes, recursive `@import`, classic and `defer`
+  `<script src>` execution in HTML order, and PNG/JPEG/GIF/SVG `<img src>`
+  subresource decoding gated by `ResourceLoader::load_for_page` (`AUDIT.md`,
+  finding 44).
+- **Live DOM geometry, TrueType `.ttf` text & `--gui` browser**: On-demand
+  reflow for `getBoundingClientRect()`/`offset*`/`client*`, block-in-inline
+  splitting (`<a>x<p>y</p></a>`), form-control `InlineBlock` layout, a pure-C++20
+  TrueType `.ttf` glyph rasterizer (`FontRenderer.cpp`), CLI XML/SVG document
+  loading, `--render-png`, and `--gui [--port=8080]` (`WebBrowserServer`).
+
+```bash
+./build/litebird examples/usable_browser_demo/index.html --render-png /tmp/demo.png
+./build/litebird https://api.github.com/zen
+./build/litebird --gui --port=8080
+```
+
+Still open: `<iframe>` nested documents, WebP/AVIF images, `@font-face`/WOFF2
+and HarfBuzz/bidi shaping, CORS preflight `OPTIONS`, and `ArrayBuffer`. Full
+details are in `ARCHITECTURE.md`, Phase 36, and `AUDIT.md`, finding 44.
 
 
 ### Media & Vector Rendering (Phase 38)

@@ -350,7 +350,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
-| **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (148/148 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
+| **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 
 ---
 
@@ -2991,13 +2991,161 @@ refused/resolved as a web URL and the marker is not printed.
 ### 5. What is still open
 
 This is the local-file disclosure boundary, not a complete Fetch/XHR network
-stack. CORS and same-origin network policy for `XMLHttpRequest` remain the next
-AGENTS row; `https:` is still unsupported; `blob:`, `about:`, and custom
-schemes are not fetched; cross-origin HTTP `fetch()` is not CORS-checked. A
-`file:` document is treated as a local embedder context and can read local
-files, so opening untrusted local HTML is still a trust decision. Worker
-script MIME checks, module workers, and external `<script src>`/`<link>`
-loading are unchanged/open.
+stack. Phase 36 subsequently added `https:` (via runtime `dlopen` of OpenSSL 3),
+HTTP/1.1 chunked + gzip/deflate decoding, CORS enforcement for cross-origin
+`fetch()` and `XMLHttpRequest`, external `<script src>` / `<link rel="stylesheet">`,
+and origin-checked `<img src>` loading (Finding 44). Still open: CORS preflight
+`OPTIONS` requests and credentialed CORS cookies, `blob:`/`about:` URL fetching,
+and worker script MIME/module policy (`Worker.cpp`). A `file:` document is still
+treated as a local embedder context and can read local files, so opening
+untrusted local HTML remains a trust decision.
+
+---
+
+## Phase 36 Architecture: Usable Browser Pipeline, HTTPS/HTTP1.1/CORS, Subresources, Live Reflow, TrueType & Web GUI
+
+Before Phase 36, Litebird's parsers and DOM passed thousands of conformance
+cases, yet opening a real multi-file web page or web app failed immediately:
+`https:` did not exist, HTTP/1.1 `Transfer-Encoding: chunked` and
+`Content-Encoding: gzip`/`deflate` failed, `XMLHttpRequest` rejected every
+non-`data:` URL, `<link rel="stylesheet">`, `@import`, and `<script src>` were
+ignored, `<img src>` could only read raw uncompressed BMP/PPM files (and
+bypassed document-origin checks — AUDIT.md, finding 44), `getBoundingClientRect()`
+returned `0×0` inside scripts, `<a href="#">x<p>y</p></a>` dropped `<p>y</p>`,
+the CLI parsed `.xml`/`.svg` files as HTML, text rendered only as unscaled 8×8
+blocks, and there was no graphical browser UI beyond terminal ANSI or offline
+`.bmp` dumps.
+
+Phase 36 wires those missing browser subsystems end-to-end while keeping zero
+compile-time library link flags (`Makefile` links no `-lssl`, `-lz`, or
+`-lfreetype`).
+
+### 1. Pure-C++20 DEFLATE / zlib / gzip (`Deflate.hpp`, `Deflate.cpp`)
+
+Implements RFC 1951 (stored, fixed Huffman, dynamic Huffman), RFC 1950 (zlib
+header + Adler-32 verification), and RFC 1952 (gzip headers/trailers + CRC-32
+verification, including concatenated gzip members), plus `compress_zlib_stored`
+for valid PNG encoding. Decompression enforces a configurable output ceiling
+(default 64 MiB) so zip/gzip bombs abort deterministically without exhausting
+heap memory.
+
+### 2. HTTPS/TLS, HTTP/1.1 Transport, and CORS (`ResourceLoader`, `Fetch`, `DomWindowBindings`)
+
+- **Runtime `dlopen` TLS (`OpenSslDynamic`)**: Loads `libssl.so.3` /
+  `libcrypto.so.3` on demand via `dlopen`/`dlsym`, enables SNI
+  (`SSL_ctrl(..., SSL_CTRL_SET_TLSEXT_HOSTNAME, ...)`), verifies server
+  certificates against the system trust store (`SSL_CTX_set_default_verify_paths`
+  + `X509_VERIFY_PARAM_set1_host`), and degrades cleanly with an explicit error
+  if no OpenSSL runtime is installed on the host.
+- **HTTP/1.1 Wire Framing**: Non-blocking POSIX socket connect across IPv4/IPv6
+  (`getaddrinfo` + `poll`), reserved `.test`/`.invalid` fast-fail so offline
+  conformance suites never stall on DNS, `Transfer-Encoding: chunked`
+  reassembly, transparent `gzip`/`deflate` body decompression, and up to 5
+  `301`/`302`/`303`/`307`/`308` redirects (`303` and `301`/`302` `POST`
+  rewritten to `GET`, cross-origin `Authorization` stripped).
+- **CORS & Same-Origin Enforcement**: `ResourceLoader::is_same_origin` and
+  `check_cors_access_control` enforce `Access-Control-Allow-Origin` (`*` or
+  exact origin match) on cross-origin `fetch()` and `XMLHttpRequest` responses
+  while preserving Phase 33's local-file isolation (`xml_http_request_answers_data_urls_and_nothing_else`
+  and `make security-fetch`). `xhr.responseType = 'arraybuffer'` returns `null`
+  cleanly until `ArrayBuffer` exists.
+
+### 3. External Stylesheets, `<base href>`, `@import`, and Classic/Deferred `<script src>`
+
+- **`DocumentStyles` (`DocumentStyles.hpp`, `DocumentStyles.cpp`)**: Collects
+  author stylesheets in tree order across inline `<style>`, `<link rel="stylesheet">`
+  (honouring `disabled`, `media` queries against the viewport, and `<base href>`
+  via `Document::base_uri()`), and XML `<?xml-stylesheet?>` processing
+  instructions. Leading `@import` rules are expanded recursively up to depth 5
+  with URL cycle detection and per-session `StyleSheetCache` deduplication.
+- **`JsInterpreter::load_page`**: Fetches and executes classic `<script src>`
+  elements synchronously at parser-insertion points (`document.currentScript`
+  set during execution, `error` event dispatched on failed loads without
+  executing HTTP 4xx/5xx error pages as JS), and queues external `<script src defer>`
+  scripts to run in document order right before `DOMContentLoaded`.
+
+### 4. Origin-Safe PNG/SVG `<img>` Subresources (`ImageDecoder`, `LayoutTree`)
+
+`ImageDecoder` adds full 8-bit/16-bit grayscale, RGB, palette (`PLTE`+`tRNS`),
+and RGBA non-interlaced + Adam7 interlaced PNG decoding (`decode_png`), PNG
+encoding (`encode_png` / `save_png`), and SVG subresource rasterization.
+`LayoutTree` fetches `<img src>` exclusively through `ResourceLoader::load_for_page`
+with per-document caching and `0×0` unloaded sizing (AUDIT.md, finding 44).
+
+### 5. Live DOM Geometry, Block-in-Inline Splitting & Layout Reflow
+
+- **Zero-overhead box storage on `Element`**: `Element` stores `m_has_layout_box`
+  in an existing padding byte (`sizeof(Element)` unchanged) and border widths on
+  `Element::Rare`, keeping per-node memory flat on 200,000-node stress pages.
+- **On-demand reflow (`Document::ensure_layout`)**: `getBoundingClientRect()`,
+  `getClientRects()`, `offsetWidth`/`offsetHeight`/`offsetLeft`/`offsetTop`/`offsetParent`,
+  `clientWidth`/`clientHeight`/`clientLeft`/`clientTop`, and `scrollWidth`/`scrollHeight`
+  compare `Document::tree_version()` against the last laid-out version and
+  rebuild style + layout on demand when DOM/attributes/styles/viewport changed.
+  Detached or `display: none` nodes immediately return `0` / empty rects / `null`
+  `offsetParent`.
+- **Layout fixes**: `LayoutTree` splits `InlineNode` boxes around block-level
+  descendants (`<a href="#">x<p>y</p></a>`) in linear time and unions fragment
+  rects back onto the inline element, copies only CSS inherited properties into
+  `TextNode` boxes (`inherited_only_style`, fixing doubled background/border/padding
+  on text children), synthesizes `InlineBlock` boxes with `FormState` labels/values
+  for `<button>`/`<input>`/`<select>`/`<textarea>`, shrink-wraps `inline-block`
+  auto widths, and accounts for child padding+border in flex/grid item advances.
+
+### 6. TrueType (`.ttf`) Font Parser & Anti-Aliased Rasterizer (`FontRenderer`)
+
+`FontRenderer` parses binary TrueType tables (`cmap` format 4 & 12, `head`,
+`hhea`, `hmtx`, `maxp`, `loca`, `glyf` simple + compound glyphs) in pure C++20,
+flattens quadratic Bézier contours, and scanline-rasterizes 4×4 supersampled
+coverage bitmaps with UTF-8 codepoint decoding and an LRU glyph cache. It
+auto-discovers a system sans-serif `.ttf` (e.g. `DejaVuSans.ttf`,
+`LiberationSans-Regular.ttf`) when present and falls back cleanly to the
+built-in 8×8 bitmap font when none exists. Both `LayoutBox` text measurement
+and `BitmapRenderer::fill_text` share `FontRenderer` metrics so wrapped lines
+and painted glyphs align.
+
+### 7. CLI XML/SVG Loading, `--render-png`, and Embedded `--gui` Browser (`WebBrowserServer`)
+
+- `src/main.cpp` and `BrowserShell` load `http://`/`https://` URLs via
+  `ResourceLoader::load_navigation`, route `.xml`/`.xhtml`/`.svg` paths and
+  `application/xml` / `text/xml` / `*+xml` responses through `parse_xml_document`,
+  and add `--render-png <file>`.
+- `litebird --gui [--port=8080] [url]` starts `WebBrowserServer`, an embedded
+  multi-threaded HTTP/1.1 browser UI bound to `0.0.0.0:<port>` with serialized
+  engine access, live PNG viewport rendering, address bar, Back/Forward/Reload,
+  viewport resize, click/scroll/keyboard/form forwarding (`hit_test` -> focus ->
+  3-phase DOM `click` -> `<a href>` navigation), and DOM/Console/Network
+  DevTools inspector tabs, plus `/demo/index.html` (`examples/usable_browser_demo/`).
+
+### 8. Verification
+
+```bash
+make -j$(nproc) && make test
+./build/litebird examples/usable_browser_demo/index.html --render-png /tmp/demo.png
+./build/litebird --gui --port=8080
+```
+
+- `make test`: **153/153** unit suites pass after merging `main` (`build-asan/test_suite` verified cleanly).
+- Conformance & security: HTML **1781/1792** (`diff-trees` **6,000/6,000** equal),
+  JS **907/921** (Everyday **90/90**), DOM **640/640** (Everyday **68/68**;
+  out-of-corpus `compare_with_jsdom.py` probe **5/5** equal), URL **1188/1188**,
+  XML **1702/1702**, WPT **4658/5192** (0 unlisted), `make security-fetch`
+  **3/3**, `make bench-css` **20/20**, `make bench-attributes` **6/6**,
+  `make verify-media` **35/35**, `make fuzz-media` **1800/1800**,
+  `make diff-strings` **95** (`<= 95`), `make tsan` pass, `make deep`
+  **1332/1332** (0 failed), `make asan-deep` **882/882** (0 failed).
+
+### 9. What is still open
+
+- **Frames (`<iframe>` / `<frame>`)**: `iframe.contentDocument` /
+  `contentWindow` and nested browsing contexts do not exist yet (495 listed WPT
+  subtests).
+- **Additional image & font formats**: PNG, JPEG, GIF, SVG, BMP, and PPM are
+  decoded through `ImageDecoder`; WebP, AVIF, `@font-face` remote font loading,
+  WOFF/WOFF2, and complex script shaping (HarfBuzz/bidi) remain open.
+- **Networking & CSSOM corners**: CORS preflight `OPTIONS` requests,
+  credentialed cross-origin cookies, HTTP/2, `ArrayBuffer`/binary XHR bodies,
+  and CSSOM `sheet.cssRules` remain open.
 
 ---
 
@@ -3603,11 +3751,11 @@ Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
 
 ### 5. Verification & what remains open
 
-- `make test`: **148/148** unit suites pass in both Release (`-O2`) and
+- `make test`: **157/157** unit suites pass in both Release (`-O2`) and
   ASan+UBSan (`build-asan/test_suite`).
 - `make security-worker`: **17/17** end-to-end checks pass against a live
   loopback HTTP server (including **60/60** concurrent 4-worker startup/exit
-  CLI runs in Release and **30/30** under ASan+UBSan; additionally verified
+  CLI runs in both Release and ASan+UBSan; additionally verified
   **200/200** consecutive runs with 0 crashes, vs 4/30–7/60 `SIGSEGV` before).
 - Remaining gaps: ES module worker execution (requires an engine-wide ES module
   loader), structured clone beyond JSON (`ArrayBuffer`/transferables/cyclic
@@ -3624,13 +3772,14 @@ Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
    real `overflow` clipping; Phase 29 added table spans (`rowspan`/`colspan`,
    including `rowspan="0"`), `border-spacing` and an approximate
    `border-collapse: collapse` (cells paint half of a shared border rather
-   than resolving the CSS 2.1 "widest wins" rule edge by edge). Still missing:
-   multicol, bidi, font shaping/HarfBuzz, the table's outer border merge in
+   than resolving the CSS 2.1 "widest wins" rule edge by edge); Phase 36 added
+   block-in-inline splitting (`<a>x<p>y</p></a>`), `inline-block` shrink-to-fit,
+   form-control `InlineBlock` boxes, and on-demand script reflow. Still missing:
+   multicol, bidi, complex font shaping/HarfBuzz, the table's outer border merge in
    the collapsed model, `empty-cells`, `caption-side`, `table-layout: fixed`,
-   scrollable `overflow: auto` (it clips but cannot be scrolled), and
-   rounded-corner clipping. A block inside an inline box (`<a>x<p>y</p></a>`)
-   is not laid out at all: the "y" is missing. The DOM is trustworthy; the
-   box tree is plausible.
+   per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
+   boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
+   handles everyday layouts but not full CSS2.2/CSS3 edge cases.
 2. **JavaScript is interpreted, and one regular-expression limit remains.**
    Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
    on loops and calls. Long strings are no longer quadratic (Phase 24), and
@@ -3640,9 +3789,11 @@ Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
    in a `RangeError` where V8 answers, because the matcher recurses; a single
    character or class under `*` has no such limit (AUDIT.md, finding 26).
 3. **Single process, no sandbox.** Chrome's original headline feature was
-   process-per-tab isolation. Untrusted input is parsed in-process. One
-   thing a sandbox would have hidden was closed in Phase 33: `fetch()` read
-   files of this machine for any page that asked.
+   process-per-tab isolation. Untrusted input is parsed in-process. Page-initiated
+   `fetch()`, `XMLHttpRequest`, `Worker`, stylesheet, script, and `<img>` loads
+   enforce the document-origin boundary so web pages cannot read local files
+   (Phases 33 and 36), whereas local `file:` documents retain local relative
+   access by design.
 4. **Memory is only reclaimed on request.** The collector is sound (Phase 23,
    section 5) but runs only when a script calls `gc()` or the shell's heap
    view is opened; a long-running page grows until then. Leak detection is
@@ -3671,25 +3822,28 @@ Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
    `make diff-trees` compares random pages with parse5 for that reason.
 7. **Conformance is not rendering.** 99.4% of the parser corpus is a DOM
    guarantee, not a promise that real pages look right.
-8. **The bitmap font is 8x8 and unscaled per glyph.** Text advance now matches
-   layout, but glyphs are drawn at 8px regardless of `font-size`, so large text
-   is under-sized rather than blurry.
+8. **TrueType `.ttf` rendering has no `@font-face` or HarfBuzz shaping.** When a
+   system `.ttf` font is present, `FontRenderer` rasterizes anti-aliased UTF-8
+   glyphs at the computed `font-size`; when no `.ttf` file is available on the
+   host, rendering falls back to the unscaled 8×8 bitmap font. Webfont
+   downloads (`@font-face`, WOFF/WOFF2), kerning/ligatures (`GPOS`/`GSUB`), and
+   right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
-   web-platform-tests, not against pages.**
+   web-platform-tests, plus targeted end-to-end integration tests.**
    It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 4,658 of
    the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
    only ask what jsdom can answer and what somebody thought to ask, and the
-   rest of web-platform-tests has not been run. No
-   layout while scripts run (`getBoundingClientRect()` is zero), no
-   navigation to another page, no external scripts or stylesheets, no
-   `document.write`, no style sheet objects (`sheet.cssRules`), no frames
-   with documents and no page that is XML (XML documents come from
-   `DOMParser` and `XMLHttpRequest`, Phase 28), requests answered for
-   `data:` URLs only, four text encodings, date and time inputs without
-   their values, `el.style` shorthands kept whole. Absent: `TextEncoder`,
-   `crypto`, `indexedDB`, `MessageChannel`, XPath, Web Animations,
-   `ElementInternals`, and what needs typed arrays. The full lists are in
-   Phase 27, section 12, and Phase 28, section 10.
+   rest of web-platform-tests has not been run. Phase 36 added on-demand layout
+   (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
+   `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
+   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`. Still
+   missing: `document.write`, style sheet objects (`sheet.cssRules`), frames
+   with documents (`iframe.contentDocument`), CORS preflight `OPTIONS`, four text
+   encodings only, date and time inputs without their values, `el.style`
+   shorthands kept whole. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
+   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
+   Phase 28, section 10, and Phase 36, section 9.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10. Around classes: `new.target` is the

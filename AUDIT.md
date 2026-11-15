@@ -49,12 +49,13 @@ The rest are documented with enough detail to act on.
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
-| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS remain open |
+| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS landed in Phase 36 (preflight `OPTIONS` open) |
 | 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases and the tokenizer repeated-name cost remain |
 | 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
-| 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch waits for PR #39; WebP/AVIF & text remain open |
+| 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch wired in Phase 36; WebP/AVIF & text remain open |
+| 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 
 ---
@@ -2529,6 +2530,75 @@ tree, in the sandbox.
 
 ---
 
+## 44. ✅ `<img src>` bypassed document-origin security, and unloaded images without dimensions laid out as 100×100 boxes
+
+**The hole.** Phase 33 moved `fetch()` and `Worker` behind
+`ResourceLoader::load_for_page`, but `LayoutTree::build_element` (`src/layout/LayoutTree.cpp`)
+still passed an `<img>` element's raw `src` attribute straight to
+`ImageDecoder::decode_file(src)`. `decode_file` opened any non-`data:` string
+with `std::ifstream(path, std::ios::binary)`. Consequently, a remote web
+document (`https://attacker.example/page.html`, or one smuggling
+`<base href="file:///...">`) could embed `<img src="/path/to/local.png">` or
+`<img src="file:///path/to/local.bmp">`, read local disk images in-process, and
+observe their decoded intrinsic pixel dimensions via layout or
+`getBoundingClientRect()`/`offsetWidth`/`offsetHeight` side channels.
+
+In addition, when an `<img>` without explicit `width`/`height` attributes or
+CSS dimensions failed to decode (or was blocked by origin policy),
+`LayoutBox::layout_image` (`src/layout/LayoutBox.cpp`) sized the box to a
+hardcoded `100×100` placeholder, pushing surrounding content down by 100 px,
+and inline-formatted `<img>` boxes (`InlineFormattingContext`) never wrote their
+laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
+`img.getBoundingClientRect()` returned `0×0` even for valid inline images.
+
+**The fix.**
+1. `LayoutTree` now resolves and loads every `<img src>` through
+   `ResourceLoader::load_for_page(src, doc.base_uri(), doc.url(), /*enforce_cors=*/false)`
+   and caches decoded bitmaps per resolved URL on `Document`
+   (`lookup_decoded_image` / `cache_decoded_image`). Web documents (`http:`,
+   `https:`, `data:`) cannot read `file:` URLs or local filesystem paths, even
+   when `<base href="file:///...">` is present; trusted local `file:` documents
+   keep relative local image loading.
+2. `ImageDecoder::decode_bytes` now decodes PNG (`decode_png` / `encode_png`,
+   backed by the pure-C++20 RFC 1950/1951/1952 `Deflate` engine with 64 MiB
+   decompression and 16384×16384 / 64M-pixel bounds), wires Phase 38's
+   `JpegDecoder` and `GifDecoder`, and rasterizes SVG subresources alongside
+   BMP, PPM, and `data:image/*;base64,...` URLs.
+3. Unloaded or blocked `<img>` elements without explicit `width`/`height` now
+   lay out as `0×0` instead of `100×100` (explicit HTML `width`/`height`
+   attributes or CSS `width`/`height` are still honoured), and
+   `InlineFormattingContext` writes laid-out `ImageNode` border-box coordinates
+   back to the `Element` so `getBoundingClientRect()`/`offsetWidth` report live
+   inline image geometry.
+
+**How verified.**
+```bash
+./build/test_suite
+make security-fetch
+```
+`make test` passes **153/153** suites (and **153/153** under ASan+UBSan),
+including `img_subresources_enforce_document_origin_security` (proving a web
+page at `https://app.example/index.html` — with and without
+`<base href="file:///...">` — is denied local PNG access and lays out the
+blocked `<img>` at `0×0`, while a local `file:` document decodes the same PNG
+at its `24×18` intrinsic size and reports `24×18` from
+`img.getBoundingClientRect()`). `make security-fetch` passes `3 checks; 0 failure(s)`.
+
+**What is still approximate.**
+- WebP, AVIF, and ICO `<img>` payloads are not decoded yet (PNG, JPEG, GIF, SVG,
+  BMP, and PPM are decoded).
+- `HTMLImageElement` script properties and events (`naturalWidth`,
+  `naturalHeight`, `complete`, `decode()`, `load`/`error` events on `<img>`,
+  `srcset`, and `<picture>`) are not implemented yet.
+- Unloaded `<img>` elements with non-empty `alt` text and no explicit
+  dimensions collapse to `0×0` rather than synthesizing an inline `alt`-text
+  fallback box.
+- Cross-origin `<img>` loads follow the standard default `no-cors` subresource
+  model, but `<canvas>` taint tracking (`crossorigin="anonymous"`) is not
+  enforced yet because `drawImage` does not yet take `HTMLImageElement` bitmaps.
+
+---
+
 ## 45. ✅ Worker MIME/module policy, EventTarget error dispatch, and shutdown `SIGSEGV`
 
 **What was wrong.**
@@ -2592,25 +2662,25 @@ tree, in the sandbox.
     `JsLexer`'s keyword table, `JsOps`'s `symbol_registry()`, and
     `DomBindings`'s interface table) so all active worker threads are woken
     and joined cleanly before static destructors run.
-- Added 4 unit test suites in `tests/test_suite.cpp` (suites 145–148) and
+- Added 4 unit test suites in `tests/test_suite.cpp` (suites 154–157) and
   `tools/security/verify_worker_policy.py` (`make security-worker`, wired into
   CI `build-and-test` and `make asan-core`).
 
 **How it was verified.**
-- `make test`: **148/148** unit suites pass in Release (`-O2`) and
-  **148/148** under ASan+UBSan (`build-asan/test_suite`, `ASAN_OPTIONS=detect_leaks=0`).
+- `make test`: **157/157** unit suites pass in Release (`-O2`) and
+  **157/157** under ASan+UBSan (`build-asan/test_suite`, `ASAN_OPTIONS=detect_leaks=0`).
 - `make security-worker`: **17/17** checks pass in Release (loopback HTTP
   `text/javascript`, `text/plain`, `text/html`, `application/json`, missing
   `Content-Type`, HTTP `404`, `data:` MIME checks, `{type:"module"}` refusal,
   `{type:"classic", name}`, invalid `type` `TypeError`, `importScripts` MIME
   and Phase 33 local-file boundary, and **60/60** concurrent 4-worker
-  startup/exit runs) and **17/17** under ASan+UBSan (**30/30** stress runs).
+  startup/exit runs) and **17/17** under ASan+UBSan (**60/60** stress runs).
 - Extended startup/exit stress check: **200/200** consecutive CLI runs of
   4 concurrent `new Worker(...)` with immediate exit pass (**0 crashes**,
   down from 4/30 `SIGSEGV` before; also resolves the 7/60 `SIGSEGV` /
   `heap-use-after-free` worker startup exit bug noted in finding 41).
 - Existing conformance suites unchanged on latest `main`: `make conformance`
-  1781/1792, `make js-conformance` 907/921, `make dom-conformance` 640/640,
+  1781/1792, `make js-conformance` 906/921, `make dom-conformance` 640/640,
   `make url-conformance` 1188/1188, `make wpt` 4658/5192, `make security-fetch`
   3/3, `make verify-media` 35/35, `make bench-attributes` 6/6, `make bench-css`
   20/20.
@@ -2627,5 +2697,4 @@ tree, in the sandbox.
   destroyed at static teardown; Phase 40 warms them before registering
   `atexit_shutdown_workers()` so worker threads are always joined first, and a
   small follow-up can heap-allocate both like `Heap::default_heap()`.
-
 

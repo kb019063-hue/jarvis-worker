@@ -1,11 +1,17 @@
 #include "litebird/dom/Document.hpp"
+#include "litebird/css/DocumentStyles.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
 #include "litebird/dom/TreeWalk.hpp"
+#include "litebird/layout/LayoutTree.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 #include <algorithm>
 #include <queue>
 
 namespace litebird {
+
+Document::Document() : Node(NodeType::Document) {}
+Document::~Document() = default;
 
 std::shared_ptr<Element> Document::document_element() const {
     for (const auto& ch : m_children) {
@@ -158,6 +164,63 @@ std::shared_ptr<Document> Document::template_document() {
         m_template_document->set_content_type(m_content_type);
     }
     return m_template_document;
+}
+
+void Document::ensure_layout() {
+    if (!m_layout_updater || m_in_layout_update) return;
+    const uint64_t current_ver = tree_version();
+    if (m_layout_tree_version == current_ver && current_ver != 0) return;
+
+    m_in_layout_update = true;
+    m_layout_updater(*this);
+    m_layout_tree_version = tree_version();
+    m_in_layout_update = false;
+}
+
+void Document::install_default_layout_updater() {
+    if (m_layout_updater) return;
+    m_layout_updater = [](Document& doc) {
+        StyleResolver resolver = DocumentStyles::build_resolver(
+            doc, &doc.stylesheet_cache(), doc.viewport_width(), doc.viewport_height()
+        );
+        LayoutTree::build(
+            doc.shared_from_this(), resolver, doc.viewport_width(), doc.viewport_height()
+        );
+    };
+}
+
+StyleSheetCache& Document::stylesheet_cache() {
+    if (!m_stylesheet_cache) {
+        m_stylesheet_cache = std::make_unique<StyleSheetCache>();
+    }
+    return *m_stylesheet_cache;
+}
+
+std::shared_ptr<ImageData> Document::find_cached_image(const std::string& resolved_url, bool& in_cache) const {
+    auto it = m_image_cache.find(resolved_url);
+    if (it == m_image_cache.end()) {
+        in_cache = false;
+        return nullptr;
+    }
+    in_cache = true;
+    return it->second;
+}
+
+void Document::store_cached_image(const std::string& resolved_url, std::shared_ptr<ImageData> img) {
+    m_image_cache[resolved_url] = std::move(img);
+}
+
+bool Document::allow_external_image_fetch() {
+    if (m_external_image_fetches >= kMaxExternalImageFetches) return false;
+    ++m_external_image_fetches;
+    return true;
+}
+
+void Document::clear_subresource_caches() {
+    if (m_stylesheet_cache) m_stylesheet_cache->clear();
+    m_image_cache.clear();
+    m_external_image_fetches = 0;
+    m_layout_tree_version = 0;
 }
 
 void Document::dump_open(std::ostream& os, const std::string& indent, bool) const {

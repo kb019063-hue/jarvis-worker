@@ -52,6 +52,10 @@ public:
     float content_height() const { return m_content_height; }
 
     // Viewport & Scrolling
+    float viewport_width() const { return m_viewport_w; }
+    float viewport_height() const { return m_viewport_h; }
+    void set_viewport_size(float width, float height);
+    const std::string& status_message() const { return m_status_message; }
     float scroll_y() const { return m_scroll_y; }
     float scroll_x() const { return m_scroll_x; }
     void scroll_to(float x, float y);
@@ -70,6 +74,9 @@ public:
     void focus_element(int index);
     bool activate_focused();
     bool click_at(float x, float y);
+    bool hover_at(float x, float y);
+    bool type_text(const std::string& text);
+    bool handle_key(const std::string& key);
     std::shared_ptr<Element> element_at(float x, float y) const;
 
     // Tick & Event Loop
@@ -78,7 +85,8 @@ public:
     void mark_dirty() { m_dirty = true; }
     void relayout();
 
-    // Terminal Frame Rendering
+    // Graphical PNG & Terminal Frame Rendering
+    std::vector<uint8_t> render_png_frame();
     std::string render_terminal_frame(bool devtools = false);
     void print_terminal_frame(std::ostream& os = std::cout, bool devtools = false);
 
@@ -86,7 +94,7 @@ public:
     void run_interactive();
 
 private:
-    void show_page(const std::string& html);
+    void show_page(const std::string& html, const std::string& content_type = "text/html");
     void rebuild_layout();
     void scan_interactive_elements();
     Rect compute_element_bounds(const std::shared_ptr<Element>& el, const std::shared_ptr<LayoutBox>& box) const;

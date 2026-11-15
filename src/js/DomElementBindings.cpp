@@ -494,23 +494,56 @@ void setup_element(Iface& I) {
         return undefined();
     });
 
-    // --- Geometry: the layout box, zero before there is one -------------------------
-    E.method("getBoundingClientRect", 0, [](Realm& r, Element& el, Args) {
+    // --- Geometry: live on-demand layout box when a page layout updater is active ---
+    auto ensure_element_layout = [](Realm& r, Element& el) -> bool {
+        if (!el.is_connected()) return false;
+        if (auto doc = document_of(r, el)) {
+            doc->ensure_layout();
+        }
+        return true;
+    };
+    E.method("getBoundingClientRect", 0, [ensure_element_layout](Realm& r, Element& el, Args) {
+        if (!ensure_element_layout(r, el)) return make_rect(r, 0, 0, 0, 0);
         const Rect box = el.bounding_box();
         return make_rect(r, box.x, box.y, box.width, box.height);
     });
-    E.method("getClientRects", 0, [](Realm& r, Element& el, Args) {
+    E.method("getClientRects", 0, [ensure_element_layout](Realm& r, Element& el, Args) {
+        if (!ensure_element_layout(r, el)) return JsValue::make_array();
         const Rect box = el.bounding_box();
         std::vector<JsValue> rects;
         if (box.width > 0 || box.height > 0) rects.push_back(make_rect(r, box.x, box.y, box.width, box.height));
         return JsValue::make_array(rects);
     });
-    E.getter("clientWidth", [](Realm&, Element& el) { return num(std::round(el.bounding_box().width)); });
-    E.getter("clientHeight", [](Realm&, Element& el) { return num(std::round(el.bounding_box().height)); });
-    E.getter("clientTop", [](Realm&, Element&) { return num(0); });
-    E.getter("clientLeft", [](Realm&, Element&) { return num(0); });
-    E.getter("scrollWidth", [](Realm&, Element& el) { return num(std::round(el.bounding_box().width)); });
-    E.getter("scrollHeight", [](Realm&, Element& el) { return num(std::round(el.bounding_box().height)); });
+    E.getter("clientWidth", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        if (auto doc = document_of(r, el); doc && doc->document_element().get() == &el && doc->has_layout_updater()) {
+            return num(std::round(doc->viewport_width()));
+        }
+        return num(std::round(el.padding_box().width));
+    });
+    E.getter("clientHeight", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        if (auto doc = document_of(r, el); doc && doc->document_element().get() == &el && doc->has_layout_updater()) {
+            return num(std::round(doc->viewport_height()));
+        }
+        return num(std::round(el.padding_box().height));
+    });
+    E.getter("clientTop", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        return num(std::round(el.layout_border().top));
+    });
+    E.getter("clientLeft", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        return num(std::round(el.layout_border().left));
+    });
+    E.getter("scrollWidth", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        return num(std::round(el.padding_box().width));
+    });
+    E.getter("scrollHeight", [ensure_element_layout](Realm& r, Element& el) {
+        if (!ensure_element_layout(r, el)) return num(0);
+        return num(std::round(el.padding_box().height));
+    });
     // Nothing scrolls: the offsets stay zero whatever is assigned.
     E.accessor("scrollTop", [](Realm&, Element&) { return num(0); }, [](Realm&, Element&, const JsValue&) {});
     E.accessor("scrollLeft", [](Realm&, Element&) { return num(0); }, [](Realm&, Element&, const JsValue&) {});

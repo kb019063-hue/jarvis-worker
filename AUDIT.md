@@ -53,6 +53,8 @@ The rest are documented with enough detail to act on.
 | 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases and the tokenizer repeated-name cost remain |
+| 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch waits for PR #39; WebP/AVIF & text remain open |
+| 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` (4/30 runs) during static teardown of `js_symbol_for_key`'s registry | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` in `JsOps.cpp` remain open |
 
 ---
 
@@ -2358,4 +2360,105 @@ JavaScript engine file was changed.
   shadows (`shadowBlur`/`shadowColor`), `createPattern`, `Path2D`,
   `drawImage(HTMLImageElement)` (only `ImageData` / canvas-to-canvas is wired),
   and remaining Porter-Duff / blend modes beyond the existing set.
+
+---
+
+## 45. ✅ Worker MIME/module policy, EventTarget error dispatch, and shutdown `SIGSEGV`
+
+**What was wrong.**
+1. **No MIME or HTTP-status check on worker scripts:** `src/js/Worker.cpp` ran
+   any response returned by `ResourceLoader::load_for_page` as classic
+   JavaScript regardless of its `Content-Type` (`text/plain`, `text/html`,
+   `application/json`, default `data:,...`, missing `Content-Type`, or HTTP
+   `3xx` responses where `resp.success` was true).
+2. **`WorkerOptions` ignored:** `new Worker(url, { type: "module" })` silently
+   ignored the options argument and executed the script as classic JavaScript;
+   invalid `type` values did not throw `TypeError`; `options.name` was dropped;
+   calling `Worker(...)` without `new` did not throw `TypeError`.
+3. **Broken `EventTarget` error dispatch:** `WorkerObject::add_event_listener`
+   stored `"error"` listeners in `m_error_listeners`, but `post_error()` only
+   ever called `m_onerror`, silently dropping all `addEventListener("error")`
+   listeners. There was no `removeEventListener`, deduplication, `{ once }`,
+   `handleEvent`, `preventDefault()`, `stopImmediatePropagation()`,
+   `self.onerror`/`self.location`/`self.name`, or `importScripts(...)`, and
+   `WorkerObject::create_js_instance()` did not wire `onmessage`/`onerror`.
+4. **Exit-time `SIGSEGV` (4/30 runs on `main`) & reference-cycle leak:**
+   `create_constructor()` stored `[inst, worker]` inside `worker->m_onmessage`
+   while `inst` stored `worker` inside its method closures, creating a strong
+   reference cycle. Because `Heap::default_heap()` is intentionally never
+   destroyed at exit, active `WorkerObject` threads were never terminated or
+   joined before `main()` returned. Reproducing with
+   `for (var i = 0; i < 4; i++) new Worker("data:text/javascript,postMessage(1)");`
+   crashed with `SIGSEGV` (`rc = -11`) in **4 of 30 runs** on `main`; a
+   captured backtrace showed worker threads still inside
+   `WorkerObject::worker_thread_main` → `JsInterpreter::JsInterpreter` →
+   `install_object_builtins` → `js_symbol_for_key` dereferencing
+   `symbol_registry()`'s `static std::unordered_map` after `__run_exit_handlers`
+   had already destroyed it. Nested workers also had no parent-loop wake
+   mechanism or child teardown before the parent's `EventLoop` was destroyed.
+
+**What changed.**
+- `include/litebird/js/Worker.hpp` and `src/js/Worker.cpp`:
+  - Added `WorkerObject::is_javascript_mime_type()` implementing WHATWG MIME
+    Sniffing §4.3 (the 16 JavaScript MIME essences, parameter stripping, ASCII
+    HTTP whitespace trimming, case-insensitive matching, no MIME sniffing) and
+    required HTTP `2xx` + a JavaScript MIME type in `load_worker_script()` for
+    both `new Worker(...)` and `importScripts(...)`.
+  - Added `WorkerType` / `WorkerOptions` parsing (`new` check, `type` enum
+    validation, `{ type: "module" }` rejected cleanly via an `ErrorEvent`
+    instead of running classic JS, `name` exposed on `self.name` and global
+    `name`, plus `self.location` and `importScripts(...)`).
+  - Replaced ad-hoc callbacks with unified `ListenerMap` / `EventControl`
+    dispatch on both `Worker` and `self` (supporting `onerror`/`onmessage` +
+    `addEventListener` + `removeEventListener` + deduplication + `{ once }` +
+    `{ handleEvent }` + `preventDefault()` + `stopImmediatePropagation()` +
+    `ErrorEvent` metadata, and shared across `create_constructor` and
+    `create_js_instance`).
+  - Isolated owner-thread `JsValue` state into `WorkerOwnerJsState` (released
+    on `terminate()` and on the worker's final exit task to eliminate both
+    cross-thread non-atomic `handle_count` races and the `inst` ↔ `WorkerObject`
+    cycle).
+  - Added a lifetime-guarded `WorkerOwnerLoopState` with parent-wake support
+    for nested workers and guaranteed child teardown before parent `EventLoop`
+    destruction.
+  - Serialized worker `JsInterpreter` initialization and registered an immortal
+    `WorkerRegistry` with a `std::atexit` hook (installed after warming up
+    `JsLexer`'s static keyword table) so all active worker threads are woken
+    and joined cleanly before static destructors run.
+- Added 4 unit test suites in `tests/test_suite.cpp` (suites 140–143) and
+  `tools/security/verify_worker_policy.py` (`make security-worker`, wired into
+  CI `build-and-test` and `make asan-core`).
+
+**How it was verified.**
+- `make test`: **143/143** unit suites pass in Release (`-O2`) and
+  **143/143** under ASan+UBSan (`build-asan/test_suite`, `ASAN_OPTIONS=detect_leaks=0`).
+- `make security-worker`: **17/17** checks pass in Release (loopback HTTP
+  `text/javascript`, `text/plain`, `text/html`, `application/json`, missing
+  `Content-Type`, HTTP `404`, `data:` MIME checks, `{type:"module"}` refusal,
+  `{type:"classic", name}`, invalid `type` `TypeError`, `importScripts` MIME
+  and Phase 33 local-file boundary, and **60/60** concurrent 4-worker
+  startup/exit runs) and **17/17** under ASan+UBSan (**30/30** stress runs).
+- Extended startup/exit stress check: **200/200** consecutive CLI runs of
+  4 concurrent `new Worker(...)` with immediate exit pass (**0 crashes**,
+  down from 4/30 `SIGSEGV` on `main`).
+- Existing conformance suites unchanged: `make conformance` 1781/1792,
+  `make js-conformance` 839/845 (everyday 90/90), `make dom-conformance`
+  629/629, `make url-conformance` 1188/1188, `make wpt` 4640/5192,
+  `make security-fetch` 3/3, `make verify-media` 35/35, `make bench-attributes`
+  6/6, `make bench-css` 20/20.
+
+**What is still open.**
+- **ES module workers:** `{ type: "module" }` is now explicitly refused with an
+  error event instead of silently running classic JS; actual module worker
+  execution waits for an ES module loader in the JS engine.
+- **Structured clone & messaging ports:** `postMessage` still serializes via
+  JSON (no `ArrayBuffer`, transferables, cyclic object graphs, `MessagePort`,
+  or `SharedWorker`).
+- **Defense-in-depth in `src/js/JsOps.cpp`:** `symbol_registry()`'s
+  `static std::unordered_map` is still destroyed at static teardown; Phase 40
+  prevented worker threads from reaching teardown, but once PR #36 merges,
+  `symbol_registry()` should be heap-allocated like `Heap::default_heap()` and
+  `EventLoop::default_loop()` so no late thread can ever observe a destroyed
+  registry.
+
 

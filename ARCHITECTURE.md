@@ -348,6 +348,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
+| **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
+| **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the 4/30 exit-time `SIGSEGV` crash). | ✅ Completed (143/143 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 
 ---
 
@@ -3165,6 +3167,91 @@ mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
 ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
 is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
 and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
+
+---
+
+## Phase 40 Architecture: Worker MIME/Module Policy, EventTarget Dispatch & Lifecycle Safety
+
+Phase 40 completes the remaining Web Worker policy and lifecycle gaps in
+`include/litebird/js/Worker.hpp` and `src/js/Worker.cpp` while preserving the
+Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
+
+### 1. Strict JavaScript MIME Policy & HTTP Status Checks
+
+- `WorkerObject::is_javascript_mime_type(std::string_view)` implements WHATWG
+  MIME Sniffing §4.3: it strips MIME parameters after `;`, trims ASCII HTTP
+  whitespace, ASCII-lowercases the essence, and accepts only the 16 standard
+  JavaScript MIME types (`text/javascript`, `application/javascript`,
+  `application/ecmascript`, `text/javascript1.0`–`1.5`, etc.).
+- Both top-level `new Worker(url, options)` fetches and worker-side
+  `importScripts(...urls)` route through `load_worker_script()`, requiring
+  `ResourceLoader::load_for_page` success, an HTTP `2xx` status code, a
+  non-empty `Content-Type`, and a valid JavaScript MIME essence (no MIME
+  sniffing). `data:text/plain`, default `data:,...`, HTTP `text/plain`,
+  `text/html`, `application/json`, missing `Content-Type`, HTTP `3xx`/`4xx`,
+  and local `.txt` files are refused cleanly with an error event.
+
+### 2. `WorkerOptions` Validation, Module Policy & Worker Global Scope
+
+- `new Worker(...)` validates construction (`new` required, at least 1
+  argument, `options` nullish or object, `options.type` in `{"classic",
+  "module"}` else synchronous `TypeError`).
+- `{ type: "module" }` is no longer silently executed as classic JavaScript:
+  `start()` refuses execution and queues an `ErrorEvent` delivered to both
+  `worker.onerror` and `worker.addEventListener("error", ...)`.
+- Inside `DedicatedWorkerGlobalScope`, `self` and global bindings expose
+  `self.name` (`options.name`), `self.location` (parsed via `Url::parse`),
+  `self.postMessage`, `self.close`, `self.addEventListener`,
+  `self.removeEventListener`, `self.importScripts`, `self.fetch`, and
+  `self.Worker`.
+
+### 3. Complete `EventTarget` Dispatch & Owner-Thread State Isolation
+
+- Page-side `Worker` (`attach_js_instance`, shared by both `create_constructor`
+  and `create_js_instance`) and worker-side `self` share a `ListenerMap`
+  supporting function and `{ handleEvent }` listeners, duplicate suppression
+  via `strict_equals`, `removeEventListener`, `{ once: true }`,
+  `preventDefault()`, `stopPropagation()`, and `stopImmediatePropagation()`.
+- Error events populate `type`, `message`, `filename`, `lineno`, `colno`,
+  `error`, `cancelable: true`, `defaultPrevented`, `target`, and
+  `currentTarget`, and invoke both `onerror` and all `"error"` listeners.
+  Uncaught worker errors first notify `self.onerror` and `self`'s `"error"`
+  listeners; if not canceled, they forward to the parent worker's `"error"`
+  listeners and `onerror`.
+- All owner-thread `JsValue` handles (`js_instance`, `onmessage`, `onerror`,
+  listener lists) live in `WorkerOwnerJsState` and are only read, mutated, or
+  released on the owner thread so non-atomic `JsObject::handle_count` never
+  races across threads. Releasing `WorkerOwnerJsState` on `terminate()` or
+  after the worker's final exit task breaks the previous `inst` ↔ `WorkerObject`
+  reference cycle.
+
+### 4. Concurrent Startup, Nested Workers & Exit-Safe Shutdown
+
+- `worker_thread_main()` serializes `JsInterpreter` construction behind a
+  process-wide mutex (skipping startup if already terminated) and attaches each
+  parent worker's `EventLoop` via a lifetime-guarded `WorkerOwnerLoopState`
+  with a wake callback so nested child workers wake their parent loop without
+  polling and are always terminated and joined before the parent's `EventLoop`
+  is destroyed.
+- Every live worker registers a `std::weak_ptr<WorkerObject>` in an immortal
+  `WorkerRegistry`. On first `WorkerObject::start()`, after warming up static
+  tables used by workers (`JsLexer`), `std::atexit` registers
+  `atexit_shutdown_workers()`, which wakes and joins every active worker thread
+  before C++ tears down static containers such as `js_symbol_for_key`'s
+  `symbol_registry()`.
+
+### 5. Verification & what remains open
+
+- `make test`: **143/143** unit suites pass in both Release (`-O2`) and
+  ASan+UBSan (`build-asan/test_suite`).
+- `make security-worker`: **17/17** end-to-end checks pass against a live
+  loopback HTTP server (including **60/60** concurrent 4-worker startup/exit
+  CLI runs in Release and **30/30** under ASan+UBSan; additionally verified
+  **200/200** consecutive runs with 0 crashes, vs 4/30 `SIGSEGV` before).
+- Remaining gaps: ES module worker execution (requires an engine-wide ES module
+  loader), structured clone beyond JSON (`ArrayBuffer`/transferables/cyclic
+  objects), `SharedWorker`/`MessagePort`, and heap-allocating `symbol_registry()`
+  in `src/js/JsOps.cpp` once PR #36 merges (see `AUDIT.md`, finding 45).
 
 ---
 

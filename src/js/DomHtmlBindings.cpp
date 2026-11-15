@@ -209,17 +209,38 @@ void setup_html_element(Iface& I) {
         dispatch(r, wrap(r, el), event, false);
         return undefined();
     });
-    // Offsets come from the layout box; before layout there is none.
-    H.getter("offsetParent", [](Realm& r, Element& el) {
+    // Offsets come from the live layout box; detached elements return 0/null.
+    auto ensure_html_layout = [](Realm& r, Element& el) -> bool {
+        if (!el.is_connected()) return false;
+        if (auto doc = document_of(r, el)) {
+            doc->ensure_layout();
+        }
+        return true;
+    };
+    H.getter("offsetParent", [ensure_html_layout](Realm& r, Element& el) {
+        if (!ensure_html_layout(r, el)) return null();
+        if (!el.is_foreign() && (el.tag_name() == "body" || el.tag_name() == "html")) return null();
         const Rect box = el.bounding_box();
         if (box.width <= 0 && box.height <= 0) return null();
         auto document = document_of(r, el);
         return wrap(r, document ? document->body() : nullptr);
     });
-    H.getter("offsetTop", [](Realm&, Element& el) { return num(std::round(el.bounding_box().y)); });
-    H.getter("offsetLeft", [](Realm&, Element& el) { return num(std::round(el.bounding_box().x)); });
-    H.getter("offsetWidth", [](Realm&, Element& el) { return num(std::round(el.bounding_box().width)); });
-    H.getter("offsetHeight", [](Realm&, Element& el) { return num(std::round(el.bounding_box().height)); });
+    H.getter("offsetTop", [ensure_html_layout](Realm& r, Element& el) {
+        if (!ensure_html_layout(r, el)) return num(0);
+        return num(std::round(el.bounding_box().y));
+    });
+    H.getter("offsetLeft", [ensure_html_layout](Realm& r, Element& el) {
+        if (!ensure_html_layout(r, el)) return num(0);
+        return num(std::round(el.bounding_box().x));
+    });
+    H.getter("offsetWidth", [ensure_html_layout](Realm& r, Element& el) {
+        if (!ensure_html_layout(r, el)) return num(0);
+        return num(std::round(el.bounding_box().width));
+    });
+    H.getter("offsetHeight", [ensure_html_layout](Realm& r, Element& el) {
+        if (!ensure_html_layout(r, el)) return num(0);
+        return num(std::round(el.bounding_box().height));
+    });
     define_common_element_members(I, &is_html_node);
 }
 

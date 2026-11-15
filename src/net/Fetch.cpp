@@ -217,6 +217,7 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
     std::unordered_map<std::string, std::string> req_headers;
     std::string req_body;
     JsValue signal_val = JsValue::make_undefined();
+    ResourceRequestContext req_context = context;
 
     if (args.size() > 1 && args[1].type == JsType::Object) {
         JsValue opts = args[1];
@@ -225,6 +226,21 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
 
         JsValue b = opts.get_property("body");
         if (b.is_truthy()) req_body = b.to_string();
+
+        JsValue mode_val = opts.get_property("mode");
+        if (mode_val.type == JsType::String) {
+            const std::string mode_str = mode_val.to_string();
+            if (mode_str == "same-origin") req_context.mode = RequestMode::SameOrigin;
+            else if (mode_str == "no-cors") req_context.mode = RequestMode::NoCors;
+            else if (mode_str == "cors") req_context.mode = RequestMode::Cors;
+        }
+
+        JsValue cred_val = opts.get_property("credentials");
+        if (cred_val.type == JsType::String) {
+            const std::string cred_str = cred_val.to_string();
+            if (cred_str == "include") req_context.include_credentials = true;
+            else if (cred_str == "omit") req_context.include_credentials = false;
+        }
 
         signal_val = opts.get_property("signal");
 
@@ -260,22 +276,24 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
         }
     }
 
-    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata, signal_val, context]() {
+    EventLoop::default_loop().post_task([url, method, req_headers, req_body, pdata, signal_val, req_context]() {
         if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
             JsValue reason = signal_val.get_property("reason");
             Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
             return;
         }
 
-        ResourceResponse resp = ResourceLoader::load_for_page(url, context, method, req_headers, req_body);
+        ResourceResponse resp = ResourceLoader::load_for_page(url, req_context, method, req_headers, req_body);
         if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
             JsValue reason = signal_val.get_property("reason");
             Promise::reject(pdata, reason.is_truthy() ? reason : JsValue::make_string("AbortError: The operation was aborted"));
             return;
         }
 
-        if (resp.success) {
-            std::string st = (resp.status_code == 200) ? "OK" : ("Status " + std::to_string(resp.status_code));
+        if (resp.network_ok) {
+            std::string st = !resp.status_text.empty()
+                                 ? resp.status_text
+                                 : ((resp.status_code == 200) ? "OK" : ("Status " + std::to_string(resp.status_code)));
             JsValue res_obj = ResponseObject::create_js_instance(
                 resp.body, resp.status_code, st, resp.headers,
                 resp.url.empty() ? url : resp.url

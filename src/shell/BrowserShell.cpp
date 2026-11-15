@@ -1,8 +1,15 @@
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/css/CssParser.hpp"
+#include "litebird/css/DocumentStyles.hpp"
+#include "litebird/dom/Event.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
-#include "litebird/css/CssParser.hpp"
+#include "litebird/js/DomBindings.hpp"
+#include "litebird/net/DataUrl.hpp"
+#include "litebird/render/BitmapRenderer.hpp"
+#include "litebird/render/ImageDecoder.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -61,20 +68,66 @@ bool BrowserShell::can_go_forward() const {
 // JsInterpreter::load_page), and the style sheets of the page as the scripts
 // left it. The page's address is set first: it is what its scripts see as
 // location.href and what its relative links are relative to.
-void BrowserShell::show_page(const std::string& html) {
+void BrowserShell::show_page(const std::string& html, const std::string& content_type) {
     // The old page goes first, so that there is never a moment with two.
     m_js_engine.reset();
     m_document = std::make_shared<Document>();
     m_document->set_url(ResourceLoader::address_of(m_current_url));
-    m_js_engine = std::make_unique<JsInterpreter>(m_document);
-    m_js_engine->load_page(html);
-    m_js_engine->notify_document_loaded();
+    m_document->set_viewport_size(m_viewport_w, m_viewport_h);
 
-    m_resolver = StyleResolver();
-    for (const auto& el : m_document->get_elements_by_tag_name("style")) {
-        auto sheet = CssParser::parse(el->text_content());
-        m_resolver.add_stylesheet(sheet);
+    MimeType mime;
+    const bool parsed_mime = MimeType::parse(content_type, mime);
+    const bool is_svg = parsed_mime && mime.type == "image" && mime.subtype == "svg+xml";
+    const bool is_xml = is_svg ||
+                        (parsed_mime && ((mime.type == "application" && (mime.subtype == "xml" || mime.subtype == "xhtml+xml")) ||
+                                         (mime.type == "text" && mime.subtype == "xml")));
+
+    if (is_xml) {
+        m_document->set_content_type(mime.essence());
+        std::string xml_text;
+        std::string xml_enc;
+        xml::XmlError xml_err;
+        if (xml::decode_xml(html, xml_text, xml_enc, xml_err)) {
+            if (!xml::parse_xml_document(m_document, xml_text, xml_err)) {
+                m_document = std::make_shared<Document>();
+                m_document->set_url(ResourceLoader::address_of(m_current_url));
+                m_document->set_viewport_size(m_viewport_w, m_viewport_h);
+            }
+        }
+        m_js_engine = std::make_unique<JsInterpreter>(m_document);
+    } else if (parsed_mime && mime.type == "image") {
+        // Standalone raster image URL: wrap in a clean viewer document.
+        const std::string safe_url = m_document->url();
+        const std::string img_html =
+            "<!DOCTYPE html><html><head><title>Image</title>"
+            "<style>body{margin:0;background:#0f172a;padding:24px;}img{display:block;}</style>"
+            "</head><body><img src=\"" + safe_url + "\"></body></html>";
+        m_js_engine = std::make_unique<JsInterpreter>(m_document);
+        m_js_engine->load_page(img_html, false);
+    } else {
+        std::string decoded_html = html;
+        if (parsed_mime) {
+            if (const std::string* cs = mime.parameter("charset")) {
+                decoded_html = decode_text(html, *cs);
+            }
+        }
+        m_js_engine = std::make_unique<JsInterpreter>(m_document);
+        m_js_engine->load_page(decoded_html);
     }
+
+    m_document->set_layout_updater([this](Document&) {
+        m_resolver = DocumentStyles::build_resolver(
+            *m_document, &m_document->stylesheet_cache(), m_viewport_w, m_viewport_h
+        );
+        m_layout_root = LayoutTree::build(m_document, m_resolver, m_viewport_w, m_viewport_h);
+    });
+
+    m_js_engine->notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(150));
+
+    m_resolver = DocumentStyles::build_resolver(
+        *m_document, &m_document->stylesheet_cache(), m_viewport_w, m_viewport_h
+    );
 }
 
 bool BrowserShell::back() {
@@ -89,8 +142,10 @@ bool BrowserShell::back() {
         return false;
     }
 
-    m_current_url = prev_url;
-    show_page(resp.body);
+    m_current_url = (!resp.url.empty() && (prev_url.rfind("http://", 0) == 0 || prev_url.rfind("https://", 0) == 0))
+                        ? resp.url
+                        : prev_url;
+    show_page(resp.body, resp.content_type);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -111,8 +166,10 @@ bool BrowserShell::forward() {
         return false;
     }
 
-    m_current_url = next_url;
-    show_page(resp.body);
+    m_current_url = (!resp.url.empty() && (next_url.rfind("http://", 0) == 0 || next_url.rfind("https://", 0) == 0))
+                        ? resp.url
+                        : next_url;
+    show_page(resp.body, resp.content_type);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
@@ -130,7 +187,10 @@ bool BrowserShell::reload() {
         return false;
     }
 
-    show_page(resp.body);
+    if (!resp.url.empty() && (m_current_url.rfind("http://", 0) == 0 || m_current_url.rfind("https://", 0) == 0)) {
+        m_current_url = resp.url;
+    }
+    show_page(resp.body, resp.content_type);
 
     rebuild_layout();
     m_status_message = "Reloaded " + m_current_url;
@@ -144,7 +204,8 @@ bool BrowserShell::navigate_to(const std::string& url) {
         m_status_message = "Error loading " + url + ": " + resp.error_message;
         std::string error_html = "<html><head><title>Error</title><style>body{font-size:16px;color:#ef4444;background-color:#0f172a;margin:20px;}h1{color:#f87171;}</style></head><body><h1>Navigation Error</h1><p>" + resp.error_message + "</p></body></html>";
         m_document = HtmlParser::parse(error_html);
-        m_resolver = StyleResolver();
+        m_document->set_viewport_size(m_viewport_w, m_viewport_h);
+        m_resolver = DocumentStyles::build_resolver(*m_document, nullptr, m_viewport_w, m_viewport_h);
         m_js_engine.reset();
         m_js_engine = std::make_unique<JsInterpreter>(m_document);
         rebuild_layout();
@@ -152,27 +213,49 @@ bool BrowserShell::navigate_to(const std::string& url) {
         return false;
     }
 
+    const bool is_http_nav = (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0);
+    const std::string final_url = (is_http_nav && !resp.url.empty()) ? resp.url : url;
+
     // Update history
     if (!m_history.empty() && m_history_index + 1 < m_history.size()) {
         m_history.erase(m_history.begin() + m_history_index + 1, m_history.end());
     }
-    m_history.push_back(url);
+    m_history.push_back(final_url);
     m_history_index = m_history.size() - 1;
-    m_current_url = url;
+    m_current_url = final_url;
 
-    show_page(resp.body);
+    show_page(resp.body, resp.content_type);
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
     rebuild_layout();
-    m_status_message = "Loaded " + url;
+    m_status_message = "Loaded " + m_current_url;
     m_dirty = true;
     return true;
+}
+
+void BrowserShell::set_viewport_size(float width, float height) {
+    width = std::clamp(width, 200.0f, 4096.0f);
+    height = std::clamp(height, 150.0f, 4096.0f);
+    if (m_viewport_w == width && m_viewport_h == height) return;
+    m_viewport_w = width;
+    m_viewport_h = height;
+    if (m_document) {
+        m_document->set_viewport_size(m_viewport_w, m_viewport_h);
+    }
+    if (m_js_engine) {
+        m_js_engine->notify_window_resized();
+    }
+    rebuild_layout();
+    m_dirty = true;
 }
 
 void BrowserShell::rebuild_layout() {
     if (!m_document) return;
 
+    m_resolver = DocumentStyles::build_resolver(
+        *m_document, &m_document->stylesheet_cache(), m_viewport_w, m_viewport_h
+    );
     m_layout_root = LayoutTree::build(m_document, m_resolver, m_viewport_w, m_viewport_h);
     if (m_layout_root) {
         m_display_list = DisplayList::build(m_layout_root);
@@ -190,53 +273,12 @@ void BrowserShell::relayout() {
 }
 
 Rect BrowserShell::compute_element_bounds(const std::shared_ptr<Element>& el, const std::shared_ptr<LayoutBox>& box) const {
-    if (!box || !el) return Rect();
-    if (stack_is_exhausted()) return Rect();
-
-    Rect result;
-    bool found = false;
-
-    if (box->node == el) {
-        result = box->dimensions.border_box();
-        found = true;
+    if (!el) return Rect();
+    if (el->has_layout_box()) {
+        return el->bounding_box();
     }
-
-    // Check inline line box fragments
-    for (const auto& line : box->line_boxes) {
-        for (const auto& frag : line.fragments) {
-            if (frag.box && frag.box->node == el) {
-                if (!found) {
-                    result = frag.rect;
-                    found = true;
-                } else {
-                    float min_x = std::min(result.x, frag.rect.x);
-                    float min_y = std::min(result.y, frag.rect.y);
-                    float max_x = std::max(result.x + result.width, frag.rect.x + frag.rect.width);
-                    float max_y = std::max(result.y + result.height, frag.rect.y + frag.rect.height);
-                    result = Rect(min_x, min_y, max_x - min_x, max_y - min_y);
-                }
-            }
-        }
-    }
-
-    // Recurse into children
-    for (const auto& ch : box->children) {
-        Rect ch_rect = compute_element_bounds(el, ch);
-        if (ch_rect.width > 0 && ch_rect.height > 0) {
-            if (!found) {
-                result = ch_rect;
-                found = true;
-            } else {
-                float min_x = std::min(result.x, ch_rect.x);
-                float min_y = std::min(result.y, ch_rect.y);
-                float max_x = std::max(result.x + result.width, ch_rect.x + ch_rect.width);
-                float max_y = std::max(result.y + result.height, ch_rect.y + ch_rect.height);
-                result = Rect(min_x, min_y, max_x - min_x, max_y - min_y);
-            }
-        }
-    }
-
-    return result;
+    if (!box || stack_is_exhausted()) return Rect();
+    return el->bounding_box();
 }
 
 void BrowserShell::scan_interactive_elements() {
@@ -345,13 +387,11 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
         if (!box) return;
         if (stack_is_exhausted()) return;
         Rect b_rect = box->dimensions.border_box();
-        bool inside = false;
+        Point local_p(adjusted_x, adjusted_y);
         if (box->style.has_transform && !box->style.transform_matrix.is_identity()) {
-            Point local_p = box->style.transform_matrix.inverse().map_point(adjusted_x, adjusted_y);
-            inside = b_rect.contains(local_p.x, local_p.y);
-        } else {
-            inside = b_rect.contains(adjusted_x, adjusted_y);
+            local_p = box->style.transform_matrix.inverse().map_point(adjusted_x, adjusted_y);
         }
+        const bool inside = b_rect.contains(local_p.x, local_p.y);
 
         if (inside) {
             if (box->node) {
@@ -361,9 +401,32 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
                     hit_element = std::dynamic_pointer_cast<Element>(box->node->parent());
                 }
             }
-            // Recurse into children
+
+            // Check inline formatting context fragments (`<a>`, `<span>`, `<b>`, `<img>`, ...)
+            for (const auto& line : box->line_boxes) {
+                for (const auto& frag : line.fragments) {
+                    if (frag.is_space || !frag.box) continue;
+                    if (frag.rect.contains(local_p.x, local_p.y)) {
+                        if (frag.box->node) {
+                            if (auto el = std::dynamic_pointer_cast<Element>(frag.box->node)) {
+                                hit_element = el;
+                            } else if (frag.box->node->parent()) {
+                                hit_element = std::dynamic_pointer_cast<Element>(frag.box->node->parent());
+                            }
+                        }
+                    }
+                }
+            }
+
             for (const auto& ch : box->children) {
                 search(ch);
+            }
+        } else {
+            // Out-of-flow positioned descendants can sit outside their parent's box.
+            for (const auto& ch : box->children) {
+                if (ch && ch->style.is_out_of_flow()) {
+                    search(ch);
+                }
             }
         }
     };
@@ -376,28 +439,287 @@ bool BrowserShell::click_at(float x, float y) {
     auto el = element_at(x, y);
     if (!el) return false;
 
-    // Check if element is a link
-    std::shared_ptr<Node> curr = el;
-    while (curr) {
-        if (auto elem = std::dynamic_pointer_cast<Element>(curr)) {
-            if (elem->tag_name() == "a" && elem->has_attribute("href")) {
-                std::string target = elem->get_attribute("href");
-                std::string next_url = ResourceLoader::resolve_url(m_current_url, target);
-                return navigate_to(next_url);
-            }
-        }
-        curr = curr->parent();
+    const std::string tag = el->tag_name();
+    if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+        el->has_attribute("tabindex")) {
+        el->focus();
     }
 
-    el->click();
+    // Dispatch click event first so page JS handlers (and `preventDefault()`) run.
+    bool canceled = false;
+    if (dom::Realm* realm = dom::realm_if_any(*el)) {
+        JsIntrinsics::set_current(realm->intrinsics);
+        JsScriptScope scope;
+        JsValue ev = dom::make_event(
+            *realm,
+            "PointerEvent",
+            "click",
+            true,
+            true,
+            {
+                {"view", dom::window_of(*realm)},
+                {"clientX", JsValue::make_number(x)},
+                {"clientY", JsValue::make_number(y)},
+                {"pageX", JsValue::make_number(x + m_scroll_x)},
+                {"pageY", JsValue::make_number(y + m_scroll_y)},
+            },
+            true
+        );
+        canceled = !dom::dispatch(*realm, dom::wrap(*realm, *el), ev, false);
+    } else {
+        canceled = !el->click();
+    }
+
+    EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
+
+    if (!canceled) {
+        std::shared_ptr<Node> curr = el;
+        while (curr) {
+            if (auto elem = std::dynamic_pointer_cast<Element>(curr)) {
+                if (elem->tag_name() == "a" && elem->has_attribute("href")) {
+                    const std::string target = elem->get_attribute("href");
+                    if (!target.empty() && target[0] == '#') {
+                        if (target.size() > 1 && m_document) {
+                            rebuild_layout();
+                            if (auto anchor = m_document->get_element_by_id(target.substr(1))) {
+                                scroll_to(m_scroll_x, anchor->bounding_box().y);
+                                m_status_message = "Scrolled to " + target;
+                                return true;
+                            }
+                        }
+                        scroll_to(m_scroll_x, 0.0f);
+                        return true;
+                    }
+                    const std::string base_url = m_document
+                                                     ? DocumentStyles::request_context(*m_document).base_url
+                                                     : m_current_url;
+                    const std::string next_url = ResourceLoader::resolve_url(base_url, target);
+                    if (!next_url.empty()) {
+                        return navigate_to(next_url);
+                    }
+                    break;
+                }
+            }
+            curr = curr->parent();
+        }
+    }
+
+    m_status_message = "Clicked <" + el->tag_name() + (el->id().empty() ? "" : ("#" + el->id())) + ">";
     rebuild_layout();
     m_dirty = true;
     return true;
 }
 
+bool BrowserShell::hover_at(float x, float y) {
+    if (!m_document) return false;
+    auto hit = element_at(x, y);
+    bool changed = false;
+    for_each_descendant(*m_document, [&](Node& n) {
+        if (!n.is_element()) return true;
+        auto& elem = static_cast<Element&>(n);
+        bool want = false;
+        for (std::shared_ptr<Node> cur = hit; cur; cur = cur->parent()) {
+            if (cur.get() == &elem) {
+                want = true;
+                break;
+            }
+        }
+        if (elem.is_hovered() != want) {
+            elem.set_hovered(want);
+            changed = true;
+        }
+        return true;
+    });
+    if (changed) {
+        Node::bump_tree_version();
+        rebuild_layout();
+        m_dirty = true;
+    }
+    return changed;
+}
+
+bool BrowserShell::type_text(const std::string& text) {
+    if (!m_document || text.empty()) return false;
+    auto target = m_document->focused_element();
+    if (!target) target = focused_element();
+    if (!target) return false;
+    const std::string tag = target->tag_name();
+    if (tag != "input" && tag != "textarea") return false;
+
+    target->set_value(target->value() + text);
+    if (dom::Realm* realm = dom::realm_if_any(*target)) {
+        JsIntrinsics::set_current(realm->intrinsics);
+        JsScriptScope scope;
+        dom::fire(*realm, *target, "input", true);
+    } else {
+        target->dispatch_event(std::make_shared<Event>("input", true, false));
+    }
+    EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+    rebuild_layout();
+    m_dirty = true;
+    return true;
+}
+
+bool BrowserShell::handle_key(const std::string& key) {
+    if (!m_document) return false;
+    if (key == "PageDown") { scroll_by(0.0f, m_viewport_h * 0.8f); return true; }
+    if (key == "PageUp") { scroll_by(0.0f, -m_viewport_h * 0.8f); return true; }
+    if (key == "ArrowDown" && !m_document->focused_element()) { scroll_by(0.0f, 48.0f); return true; }
+    if (key == "ArrowUp" && !m_document->focused_element()) { scroll_by(0.0f, -48.0f); return true; }
+    if (key == "Home" && !m_document->focused_element()) { scroll_to(0.0f, 0.0f); return true; }
+    if (key == "End" && !m_document->focused_element()) { scroll_to(0.0f, m_content_height); return true; }
+    if (key == "Tab") { focus_next(); return true; }
+
+    auto target = m_document->focused_element();
+    if (target) {
+        const std::string tag = target->tag_name();
+        if (key == "Backspace" && (tag == "input" || tag == "textarea")) {
+            std::string val = target->value();
+            if (!val.empty()) {
+                while (!val.empty() && (static_cast<uint8_t>(val.back()) & 0xC0u) == 0x80u) {
+                    val.pop_back();
+                }
+                if (!val.empty()) val.pop_back();
+                target->set_value(val);
+                if (dom::Realm* realm = dom::realm_if_any(*target)) {
+                    JsIntrinsics::set_current(realm->intrinsics);
+                    JsScriptScope scope;
+                    dom::fire(*realm, *target, "input", true);
+                }
+                EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+                rebuild_layout();
+                m_dirty = true;
+            }
+            return true;
+        }
+        if (key == "Enter") {
+            if (tag == "textarea") {
+                return type_text("\n");
+            }
+            if (dom::Realm* realm = dom::realm_if_any(*target)) {
+                JsIntrinsics::set_current(realm->intrinsics);
+                JsScriptScope scope;
+                dom::fire(*realm, *target, "change", true);
+            }
+            target->click();
+            EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+            rebuild_layout();
+            m_dirty = true;
+            return true;
+        }
+    }
+
+    if (key.size() == 1 && static_cast<unsigned char>(key[0]) >= 32) {
+        return type_text(key);
+    }
+    return false;
+}
+
+std::vector<uint8_t> BrowserShell::render_png_frame() {
+    const int w = std::clamp(static_cast<int>(std::lround(m_viewport_w)), 1, 4096);
+    const int h = std::clamp(static_cast<int>(std::lround(m_viewport_h)), 1, 4096);
+
+    BitmapRenderer renderer(w, h);
+    Color canvas_bg = Color::white();
+    if (m_layout_root && !m_layout_root->style.background_color.is_transparent()) {
+        canvas_bg = m_layout_root->style.background_color;
+    }
+    renderer.clear(canvas_bg);
+
+    DisplayList scrolled;
+    if (m_scroll_x != 0.0f || m_scroll_y != 0.0f) {
+        TransformMatrix2D scroll_tf = TransformMatrix2D::translation(-m_scroll_x, -m_scroll_y);
+        scrolled.add(PushTransformCommand{scroll_tf});
+        for (const auto& cmd : m_display_list.commands()) {
+            scrolled.add(cmd);
+        }
+        scrolled.add(PopTransformCommand{});
+        renderer.render(scrolled);
+    } else {
+        renderer.render(m_display_list);
+    }
+
+    // Draw subtle focus outline and text input value overlay on form controls so
+    // interactive `<input>` / `<button>` elements are visually clear in `--gui`.
+    if (m_document) {
+        DisplayList overlay;
+        for_each_descendant(*m_document, [&](Node& n) {
+            if (!n.is_element()) return true;
+            auto& el = static_cast<Element&>(n);
+            if (!el.has_layout_box()) return true;
+            Rect r = el.bounding_box();
+            r.x -= m_scroll_x;
+            r.y -= m_scroll_y;
+            if (r.width <= 0.0f || r.height <= 0.0f || r.y + r.height < 0.0f || r.y > m_viewport_h) {
+                return true;
+            }
+            const std::string& tag = el.tag_name();
+            if (tag == "input" || tag == "textarea") {
+                const bool focused = (m_document->focused_element().get() == &el);
+                DrawRectCommand bg;
+                bg.rect = r;
+                bg.color = Color(255, 255, 255, 255);
+                bg.border_radius = 4.0f;
+                overlay.add(bg);
+
+                DrawBorderCommand bdr;
+                bdr.rect = r;
+                bdr.width = focused ? EdgeSizes(2, 2, 2, 2) : EdgeSizes(1, 1, 1, 1);
+                bdr.color = focused ? Color(37, 99, 235, 255) : Color(148, 163, 184, 255);
+                bdr.border_radius = 4.0f;
+                overlay.add(bdr);
+
+                std::string shown = el.value();
+                Color txt_color(15, 23, 42, 255);
+                if (shown.empty() && el.has_attribute("placeholder")) {
+                    shown = el.get_attribute("placeholder");
+                    txt_color = Color(148, 163, 184, 255);
+                }
+                if (!shown.empty()) {
+                    DrawTextCommand txt;
+                    txt.position = Point(r.x + 8.0f, r.y + std::max(2.0f, (r.height - 18.0f) * 0.5f));
+                    txt.text = shown;
+                    txt.color = txt_color;
+                    txt.font_size = 14.0f;
+                    txt.font_weight = 400;
+                    overlay.add(txt);
+                }
+            } else if (m_document->focused_element().get() == &el) {
+                DrawBorderCommand focus_ring;
+                focus_ring.rect = Rect(r.x - 2.0f, r.y - 2.0f, r.width + 4.0f, r.height + 4.0f);
+                focus_ring.width = EdgeSizes(2, 2, 2, 2);
+                focus_ring.color = Color(59, 130, 246, 220);
+                focus_ring.border_radius = 4.0f;
+                overlay.add(focus_ring);
+            }
+            return true;
+        });
+        if (!overlay.commands().empty()) {
+            renderer.render(overlay);
+        }
+    }
+
+    ImageData img;
+    img.width = w;
+    img.height = h;
+    img.pixels.resize(static_cast<std::size_t>(w * h));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const Color c = renderer.get_pixel(x, y);
+            img.pixels[static_cast<std::size_t>(y * w + x)] =
+                (static_cast<uint32_t>(c.a) << 24) |
+                (static_cast<uint32_t>(c.r) << 16) |
+                (static_cast<uint32_t>(c.g) << 8) |
+                static_cast<uint32_t>(c.b);
+        }
+    }
+    return ImageDecoder::encode_png(img);
+}
+
 void BrowserShell::scroll_to(float x, float y) {
     m_scroll_x = std::max(0.0f, x);
-    float max_y = std::max(0.0f, m_content_height - (m_term_rows - 3) * 20.0f);
+    const float visible_h = std::min(m_viewport_h, static_cast<float>(std::max(1, m_term_rows - 3)) * 20.0f);
+    float max_y = std::max(0.0f, m_content_height - visible_h);
     m_scroll_y = std::clamp(y, 0.0f, max_y);
     m_dirty = true;
 }

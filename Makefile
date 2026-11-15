@@ -25,12 +25,14 @@ SRCS = src/dom/Node.cpp \
        src/xml/XmlTools.cpp \
        src/xml/XmlDom.cpp \
        src/css/CssParser.cpp \
+       src/css/DocumentStyles.cpp \
        src/css/StyleResolver.cpp \
        src/layout/LayoutBox.cpp \
        src/layout/LayoutTree.cpp \
        src/layout/FloatTableLayout.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
+       src/render/FontRenderer.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -76,6 +78,7 @@ SRCS = src/dom/Node.cpp \
        src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
+       src/net/Deflate.cpp \
        src/net/UrlParser.cpp \
        src/net/DataUrl.cpp \
        src/net/Idna.cpp \
@@ -83,7 +86,8 @@ SRCS = src/dom/Node.cpp \
        src/net/Fetch.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
-       src/shell/BrowserShell.cpp
+       src/shell/BrowserShell.cpp \
+       src/shell/WebBrowserServer.cpp
 
 OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 

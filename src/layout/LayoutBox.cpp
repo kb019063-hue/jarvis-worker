@@ -1,5 +1,6 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -390,7 +391,10 @@ void LayoutBox::layout_flex(float containing_width) {
         if (style.flex_wrap == FlexWrap::Wrap) {
             FlexLine cur_line;
             for (auto& child : in_flow) {
-                float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
+                float child_avail_w = (child->style.width >= 0.0f)
+                                          ? child->style.width
+                                          : (child->style.is_inline_block() ? dimensions.content.width
+                                                                            : (dimensions.content.width / in_flow.size()));
                 child->layout(child_avail_w);
                 float item_w = child->dimensions.margin_box().width;
                 float item_h = child->dimensions.margin_box().height;
@@ -413,7 +417,10 @@ void LayoutBox::layout_flex(float containing_width) {
         } else {
             FlexLine single;
             for (auto& child : in_flow) {
-                float child_avail_w = (child->style.width >= 0.0f) ? child->style.width : (dimensions.content.width / in_flow.size());
+                float child_avail_w = (child->style.width >= 0.0f)
+                                          ? child->style.width
+                                          : (child->style.is_inline_block() ? dimensions.content.width
+                                                                            : (dimensions.content.width / in_flow.size()));
                 child->layout(child_avail_w);
                 single.items.push_back(child);
                 single.line_items_width += child->dimensions.margin_box().width;
@@ -487,7 +494,10 @@ void LayoutBox::layout_flex(float containing_width) {
                 switch (style.align_items) {
                     case AlignItems::Stretch:
                         if (child->style.height < 0.0f && cur_line_max_h > 0.0f) {
-                            child->dimensions.content.height = cur_line_max_h;
+                            float child_v_extra = child->dimensions.margin.top + child->dimensions.margin.bottom +
+                                                  child->dimensions.border.top + child->dimensions.border.bottom +
+                                                  child->dimensions.padding.top + child->dimensions.padding.bottom;
+                            child->dimensions.content.height = std::max(0.0f, cur_line_max_h - child_v_extra);
                         }
                         break;
                     case AlignItems::FlexEnd:
@@ -502,8 +512,10 @@ void LayoutBox::layout_flex(float containing_width) {
                         break;
                 }
 
-                float new_x = dimensions.content.x + x_cursor + child->dimensions.margin.left;
-                float new_y = dimensions.content.y + y_line_cursor + y_offset + child->dimensions.margin.top;
+                float new_x = dimensions.content.x + x_cursor +
+                              child->dimensions.margin.left + child->dimensions.border.left + child->dimensions.padding.left;
+                float new_y = dimensions.content.y + y_line_cursor + y_offset +
+                              child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
 
                 if (child->style.position == Position::Relative) {
                     if (child->style.has_left) new_x += child->style.left;
@@ -537,8 +549,10 @@ void LayoutBox::layout_flex(float containing_width) {
             child->layout(dimensions.content.width);
             max_child_w = std::max(max_child_w, child->dimensions.margin_box().width);
 
-            float new_x = dimensions.content.x + child->dimensions.margin.left;
-            float new_y = dimensions.content.y + y_cursor + child->dimensions.margin.top;
+            float new_x = dimensions.content.x +
+                          child->dimensions.margin.left + child->dimensions.border.left + child->dimensions.padding.left;
+            float new_y = dimensions.content.y + y_cursor +
+                          child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
 
             if (child->style.position == Position::Relative) {
                 if (child->style.has_left) new_x += child->style.left;
@@ -761,8 +775,10 @@ void LayoutBox::layout_grid(float containing_width) {
         size_t rs = std::min(placements[i].r_start, num_rows - 1);
 
         auto& child = in_flow[i];
-        float new_x = dimensions.content.x + col_x[cs] + child->dimensions.margin.left;
-        float new_y = dimensions.content.y + row_y[rs] + child->dimensions.margin.top;
+        float new_x = dimensions.content.x + col_x[cs] +
+                      child->dimensions.margin.left + child->dimensions.border.left + child->dimensions.padding.left;
+        float new_y = dimensions.content.y + row_y[rs] +
+                      child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
 
         if (child->style.position == Position::Relative) {
             if (child->style.has_left) new_x += child->style.left;
@@ -803,7 +819,8 @@ void LayoutBox::layout_inline(float containing_width) {
 
 void LayoutBox::layout_text(float containing_width) {
     lines.clear();
-    float char_w = style.font_size * 0.55f;
+    FontRenderer& font_renderer = FontRenderer::instance();
+    const float space_advance = font_renderer.measure_text(" ", style.font_size, style.font_weight);
     float line_h = style.font_size * 1.25f;
 
     if (containing_width <= 0.0f) containing_width = 800.0f;
@@ -812,30 +829,36 @@ void LayoutBox::layout_text(float containing_width) {
     std::stringstream ss(text);
     std::string word;
     std::string current_line;
+    float current_w = 0.0f;
     float max_w = 0.0f;
 
     while (ss >> word) {
-        float word_w = word.length() * char_w;
-        float space_w = current_line.empty() ? 0.0f : char_w;
+        const float word_w = font_renderer.measure_text(word, style.font_size, style.font_weight);
+        const float space_w = current_line.empty() ? 0.0f : space_advance;
 
-        if (!current_line.empty() && (current_line.length() * char_w + space_w + word_w) > containing_width) {
+        if (!current_line.empty() && (current_w + space_w + word_w) > containing_width) {
             lines.push_back(current_line);
-            max_w = std::max(max_w, current_line.length() * char_w);
+            max_w = std::max(max_w, current_w);
             current_line = word;
+            current_w = word_w;
         } else {
-            if (!current_line.empty()) current_line += " ";
+            if (!current_line.empty()) {
+                current_line += " ";
+                current_w += space_w;
+            }
             current_line += word;
+            current_w += word_w;
         }
     }
 
     if (!current_line.empty()) {
         lines.push_back(current_line);
-        max_w = std::max(max_w, current_line.length() * char_w);
+        max_w = std::max(max_w, current_w);
     }
 
     if (lines.empty()) {
         lines.push_back(text);
-        max_w = text.length() * char_w;
+        max_w = font_renderer.measure_text(text, style.font_size, style.font_weight);
     }
 
     dimensions.content.width = max_w;
@@ -843,7 +866,7 @@ void LayoutBox::layout_text(float containing_width) {
 }
 
 struct InlineItem {
-    enum class Type { Text, Space };
+    enum class Type { Text, Space, LineBreak };
     Type type{Type::Text};
     std::string text;
     float width{0.0f};
@@ -863,7 +886,8 @@ static void collect_items(
 
     if (box->box_type == BoxType::TextNode) {
         ComputedStyle effective_style = box->style;
-        float char_w = effective_style.font_size * 0.55f;
+        FontRenderer& font_renderer = FontRenderer::instance();
+        const float space_w = font_renderer.measure_text(" ", effective_style.font_size, effective_style.font_weight);
         float line_h = effective_style.font_size * 1.25f;
 
         size_t i = 0;
@@ -879,7 +903,7 @@ static void collect_items(
                 InlineItem item;
                 item.type = InlineItem::Type::Space;
                 item.text = " ";
-                item.width = char_w;
+                item.width = space_w;
                 item.height = line_h;
                 item.style = effective_style;
                 item.source_box = box;
@@ -893,7 +917,7 @@ static void collect_items(
                 InlineItem item;
                 item.type = InlineItem::Type::Text;
                 item.text = word;
-                item.width = word.length() * char_w;
+                item.width = font_renderer.measure_text(word, effective_style.font_size, effective_style.font_weight);
                 item.height = line_h;
                 item.style = effective_style;
                 item.source_box = box;
@@ -901,6 +925,16 @@ static void collect_items(
             }
         }
     } else if (box->box_type == BoxType::InlineNode) {
+        if (box->node && box->node->is_element() && !box->node->as_element()->is_foreign() &&
+            box->node->as_element()->tag_name() == "br") {
+            InlineItem br;
+            br.type = InlineItem::Type::LineBreak;
+            br.height = box->style.font_size * 1.25f;
+            br.style = box->style;
+            br.source_box = box;
+            items.push_back(br);
+            return;
+        }
         size_t initial_count = items.size();
         for (const auto& ch : box->children) {
             collect_items(ch, items, box->style);
@@ -950,26 +984,50 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     line_boxes.clear();
 
     // 1. Calculate Content Width
-    float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right +
-                                    dimensions.border.left + dimensions.border.right +
-                                    dimensions.padding.left + dimensions.padding.right;
+    float h_padding_border = dimensions.border.left + dimensions.border.right +
+                            dimensions.padding.left + dimensions.padding.right;
+    float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
 
     if (style.width >= 0.0f) {
-        dimensions.content.width = style.width;
+        dimensions.content.width = (style.box_sizing == BoxSizing::BorderBox)
+                                       ? std::max(0.0f, style.width - h_padding_border)
+                                       : style.width;
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
+    }
+    if (style.min_width >= 0.0f) {
+        float min_w = (style.box_sizing == BoxSizing::BorderBox)
+                          ? std::max(0.0f, style.min_width - h_padding_border)
+                          : style.min_width;
+        dimensions.content.width = std::max(dimensions.content.width, min_w);
+    }
+    if (style.max_width >= 0.0f) {
+        float max_w = (style.box_sizing == BoxSizing::BorderBox)
+                          ? std::max(0.0f, style.max_width - h_padding_border)
+                          : style.max_width;
+        dimensions.content.width = std::min(dimensions.content.width, max_w);
     }
 
     float available_width = dimensions.content.width;
     if (available_width <= 0.0f) available_width = 800.0f;
 
-    // 2. Collect Inline Items
+    // 2. Collect Inline Items (pass only inherited text properties from block container)
+    ComputedStyle base_inline_style;
+    base_inline_style.color = style.color;
+    base_inline_style.font_size = style.font_size;
+    base_inline_style.font_weight = style.font_weight;
+    base_inline_style.text_align = style.text_align;
+    base_inline_style.text_decoration = style.text_decoration;
+
     std::vector<InlineItem> items;
     for (const auto& ch : children) {
-        collect_items(ch, items, style);
+        collect_items(ch, items, base_inline_style);
     }
 
     if (items.empty()) {
+        if (style.is_inline_block() && style.width < 0.0f) {
+            dimensions.content.width = 0.0f;
+        }
         dimensions.content.height = (style.height >= 0.0f) ? style.height : 0.0f;
         return;
     }
@@ -1062,6 +1120,24 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     };
 
     for (const auto& item : items) {
+        if (item.type == InlineItem::Type::LineBreak) {
+            if (!current_line.fragments.empty()) {
+                finish_line(current_line, current_x);
+            } else {
+                // Empty line created by consecutive `<br><br>`
+                LineBox empty_line;
+                empty_line.rect.width = 0.0f;
+                empty_line.rect.height = std::max(estimated_line_height, item.height);
+                empty_line.left_intrusion = line_left;
+                empty_line.right_intrusion = line_right;
+                line_boxes.push_back(std::move(empty_line));
+            }
+            current_x = 0.0f;
+            line_top += estimated_line_height;
+            line_capacity = measure_band(line_top, line_left, line_right);
+            continue;
+        }
+
         if (current_line.fragments.empty() && item.type == InlineItem::Type::Space) {
             // Drop leading space at line start
             continue;
@@ -1098,6 +1174,27 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
 
     if (!current_line.fragments.empty()) {
         finish_line(current_line, current_x);
+    }
+
+    if (style.is_inline_block() && style.width < 0.0f) {
+        float max_line_w = 0.0f;
+        for (const auto& line : line_boxes) {
+            max_line_w = std::max(max_line_w, line.rect.width);
+        }
+        dimensions.content.width = max_line_w;
+        if (style.min_width >= 0.0f) {
+            float min_w = (style.box_sizing == BoxSizing::BorderBox)
+                              ? std::max(0.0f, style.min_width - h_padding_border)
+                              : style.min_width;
+            dimensions.content.width = std::max(dimensions.content.width, min_w);
+        }
+        if (style.max_width >= 0.0f) {
+            float max_w = (style.box_sizing == BoxSizing::BorderBox)
+                              ? std::max(0.0f, style.max_width - h_padding_border)
+                              : style.max_width;
+            dimensions.content.width = std::min(dimensions.content.width, max_w);
+        }
+        available_width = dimensions.content.width;
     }
 
     // 4. Vertical Placement, text-align and float offsets
@@ -1300,8 +1397,8 @@ void LayoutBox::shift_position(float dx, float dy) {
 
 void LayoutBox::layout_image(float containing_width) {
     (void)containing_width;
-    float w = (style.width >= 0.0f) ? style.width : (image ? static_cast<float>(image->width) : 100.0f);
-    float h = (style.height >= 0.0f) ? style.height : (image ? static_cast<float>(image->height) : 100.0f);
+    float w = (style.width >= 0.0f) ? style.width : (image ? static_cast<float>(image->width) : 0.0f);
+    float h = (style.height >= 0.0f) ? style.height : (image ? static_cast<float>(image->height) : 0.0f);
 
     if (style.box_sizing == BoxSizing::BorderBox) {
         float h_pb = dimensions.border.left + dimensions.border.right + dimensions.padding.left + dimensions.padding.right;

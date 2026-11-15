@@ -40,6 +40,15 @@ Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old
 Object.setPrototypeOf(Old, HTMLElement);
 t('by hand: define and create', function () { customElements.define('x-old', Old); var e = document.createElement('x-old'); return [e instanceof Old, e instanceof HTMLElement, e.made, e.localName, e.constructor === Old]; });
 t('by hand: new', function () { var e = new Old(); return [e instanceof Old, e.localName, e.made]; });
+t('by hand: parsed', function () { var h = document.getElementById('host'); h.innerHTML = '<x-old></x-old>'; var e = h.firstChild; return [e instanceof Old, e.made, e.localName]; });
+t('by hand: defined after the element exists', function () {
+  var h = document.getElementById('host'); h.innerHTML = '<x-late></x-late>'; var e = h.firstChild;
+  function Late() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+  Late.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Late, writable: true, configurable: true } });
+  Object.setPrototypeOf(Late, HTMLElement);
+  customElements.define('x-late', Late);
+  return [e instanceof Late, e.made, h.firstChild === e];
+});
 
 // 3. Reflect.construct of an interface with a class as new.target.
 t('Reflect.construct(Event, [type], Sub)', function () { class Sub extends Event {} var e = Reflect.construct(Event, ['x'], Sub); return [e instanceof Sub, e instanceof Event, e.type]; });

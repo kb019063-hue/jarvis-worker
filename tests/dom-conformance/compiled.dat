@@ -1,0 +1,218 @@
+#fixture
+<html><head><title>Compiled classes</title></head><body><div id="host"></div></body></html>
+
+#name a custom element written for ES5: Reflect.construct(HTMLElement, [], new.target)
+#code
+function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+Old.prototype.greet = function () { return 'hello from ' + this.localName; };
+Object.setPrototypeOf(Old, HTMLElement);
+customElements.define('x-old', Old);
+var a = document.createElement('x-old'), b = new Old();
+console.log(a instanceof Old, a instanceof HTMLElement, a.made, a.localName, a.constructor === Old, a.greet());
+console.log(b instanceof Old, b.localName, b.made, b.ownerDocument === document, a !== b, b.nodeType);
+document.getElementById('host').appendChild(b);
+console.log(document.querySelector('x-old') === b, b.isConnected, b.outerHTML);
+#expect
+true true true x-old true hello from x-old
+true x-old true true true 1
+true true <x-old></x-old>
+
+#name an ES5 custom element with callbacks and observed attributes
+#code
+var log = [];
+function Counter() { var self = Reflect.construct(HTMLElement, [], new.target); self.count = 0; log.push('constructed'); return self; }
+Counter.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Counter, writable: true, configurable: true } });
+Counter.prototype.connectedCallback = function () { log.push('connected'); this.textContent = 'count ' + this.count; };
+Counter.prototype.disconnectedCallback = function () { log.push('disconnected'); };
+Counter.prototype.attributeChangedCallback = function (name, before, after) { log.push(name + ':' + before + '>' + after); this.count = Number(after); };
+Counter.observedAttributes = ['start'];
+Object.setPrototypeOf(Counter, HTMLElement);
+customElements.define('x-counter', Counter);
+var c = document.createElement('x-counter');
+c.setAttribute('start', '5');
+c.setAttribute('other', 'x');
+document.getElementById('host').appendChild(c);
+c.remove();
+console.log(log.join(' '), '|', c.textContent, c.count);
+#expect
+constructed start:null>5 connected disconnected | count 5 5
+
+#name what Babel emits for class Greeter extends HTMLElement
+#code
+function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+function _setPrototypeOf(o, p) { return Object.setPrototypeOf(o, p); }
+function _inherits(subClass, superClass) { subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.defineProperty(subClass, "prototype", { writable: false }); if (superClass) _setPrototypeOf(subClass, superClass); }
+function _possibleConstructorReturn(self, call) { if (call && (typeof call === "object" || typeof call === "function")) { return call; } else if (call !== void 0) { throw new TypeError("Derived constructors may only return object or undefined"); } if (self === void 0) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return self; }
+function _createSuper(Derived) { return function _createSuperInternal() { var Super = _getPrototypeOf(Derived), NewTarget = _getPrototypeOf(this).constructor; return _possibleConstructorReturn(this, Reflect.construct(Super, arguments, NewTarget)); }; }
+function _construct(Parent, args, Class) { return Reflect.construct(Parent, args, Class); }
+function _wrapNativeSuper(Class) { function Wrapper() { return _construct(Class, arguments, _getPrototypeOf(this).constructor); } Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, enumerable: false, writable: true, configurable: true } }); return _setPrototypeOf(Wrapper, Class); }
+var Greeter = (function (_HTMLElement) {
+  _inherits(Greeter, _HTMLElement);
+  var _super = _createSuper(Greeter);
+  function Greeter() { var _this; _this = _super.call(this); _this.made = true; return _this; }
+  Greeter.prototype.connectedCallback = function () { this.textContent = 'hello ' + (this.getAttribute('name') || 'nobody'); };
+  return Greeter;
+})(_wrapNativeSuper(HTMLElement));
+var Loud = (function (_Greeter) {
+  _inherits(Loud, _Greeter);
+  var _super2 = _createSuper(Loud);
+  function Loud() { var _this2; _this2 = _super2.call(this); _this2.loud = true; return _this2; }
+  Loud.prototype.shout = function () { return this.textContent.toUpperCase() + '!'; };
+  return Loud;
+})(Greeter);
+customElements.define('x-greeter', Greeter);
+customElements.define('x-loud', Loud);
+var g = document.createElement('x-greeter'), l = new Loud();
+g.setAttribute('name', 'you');
+l.setAttribute('name', 'all');
+document.getElementById('host').appendChild(g);
+document.getElementById('host').appendChild(l);
+console.log(g instanceof Greeter, g instanceof HTMLElement, g.made, g.textContent, g.constructor === Greeter, g instanceof Loud);
+console.log(l instanceof Loud, l instanceof Greeter, l.made, l.loud, l.localName, l.shout(), Object.getPrototypeOf(l) === Loud.prototype);
+#expect
+true true true hello you true false
+true true true true x-loud HELLO ALL! true
+
+#name a class that extends a compiled custom element
+#code
+function Base() { var self = Reflect.construct(HTMLElement, [], new.target); self.fromBase = new.target.name; return self; }
+Base.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Base, writable: true, configurable: true } });
+Base.prototype.baseMethod = function () { return 'base'; };
+Object.setPrototypeOf(Base, HTMLElement);
+class Modern extends Base {
+  label = 'field';
+  constructor() { var s = super(); this.same = s === this; this.kind = new.target.name; }
+  connectedCallback() { this.setAttribute('seen', this.kind); }
+}
+customElements.define('x-modern', Modern);
+var m = document.createElement('x-modern'), n = new Modern();
+document.getElementById('host').appendChild(m);
+console.log(m instanceof Modern, m instanceof Base, m instanceof HTMLElement, m.fromBase, m.kind, m.same, m.label, m.baseMethod(), m.getAttribute('seen'));
+console.log(n instanceof Modern, n.localName, n.kind, n.label, n.getAttribute('seen'), n !== m);
+#expect
+true true true Modern Modern true field base Modern
+true x-modern Modern field null true
+
+#name new.target in the constructor of a custom element and of its parent class
+#code
+var seen = [];
+class Widget extends HTMLElement {
+  constructor() {
+    super();
+    if (new.target === Widget) throw new TypeError('Widget is abstract');
+    seen.push('Widget:' + new.target.name);
+  }
+}
+class Button extends Widget { constructor() { super(); seen.push('Button:' + new.target.name); } }
+class IconButton extends Button {}
+customElements.define('x-widget', Widget);
+customElements.define('x-button', Button);
+customElements.define('x-icon-button', IconButton);
+var errors = 0;
+window.onerror = function () { errors++; return true; };
+var b = document.createElement('x-button'), i = new IconButton(), w = document.createElement('x-widget');
+console.log(seen.join(' '), '|', b instanceof Button, i instanceof IconButton, i instanceof Button, i.localName);
+console.log(w instanceof Widget, w instanceof HTMLElement, w.localName, errors);
+try { new Widget(); console.log('made'); } catch (e) { console.log(e.name, e.message); }
+#expect
+Widget:Button Button:Button Widget:IconButton Button:IconButton | true true true x-icon-button
+false true x-widget 1
+TypeError Widget is abstract
+
+#name Reflect.construct(HTMLElement, [], NewTarget) needs a defined class
+#code
+function attempt(label, fn) { try { var v = fn(); console.log(label, 'made', v.localName); } catch (e) { console.log(label, e.name); } }
+function Plain() {}
+Plain.prototype = Object.create(HTMLElement.prototype);
+function Defined() { return Reflect.construct(HTMLElement, [], new.target); }
+Defined.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Defined, writable: true, configurable: true } });
+Object.setPrototypeOf(Defined, HTMLElement);
+customElements.define('x-defined', Defined);
+attempt('undefined class', function () { return Reflect.construct(HTMLElement, [], Plain); });
+attempt('defined class', function () { return Reflect.construct(HTMLElement, [], Defined); });
+attempt('another interface', function () { return Reflect.construct(HTMLDivElement, [], Defined); });
+attempt('HTMLElement itself', function () { return Reflect.construct(HTMLElement, [], HTMLElement); });
+attempt('a plain function', function () { return Reflect.construct(HTMLElement, [], function () {}); });
+attempt('Object', function () { return Reflect.construct(HTMLElement, [], Object); });
+attempt('no new.target', function () { return Reflect.construct(HTMLElement, []); });
+attempt('called', function () { return HTMLElement.call(document.createElement('div')); });
+#expect
+undefined class TypeError
+defined class made x-defined
+another interface TypeError
+HTMLElement itself TypeError
+a plain function TypeError
+Object TypeError
+no new.target TypeError
+called TypeError
+
+#name Reflect.construct of Event, CustomEvent and EventTarget with a new.target
+#code
+class Sub extends Event {}
+var e = Reflect.construct(Event, ['ping', {bubbles: true}], Sub);
+function Detail() {}
+Detail.prototype = Object.create(CustomEvent.prototype);
+Detail.prototype.describe = function () { return this.type + ':' + this.detail.n; };
+var c = Reflect.construct(CustomEvent, ['data', {detail: {n: 7}}], Detail);
+function Bus() {}
+Bus.prototype = Object.create(EventTarget.prototype);
+Bus.prototype.emit = function (type) { return this.dispatchEvent(new Event(type)); };
+var bus = Reflect.construct(EventTarget, [], Bus), heard = [];
+bus.addEventListener('ping', function (ev) { heard.push(ev.type + ':' + (ev instanceof Sub) + ':' + (ev.target === bus)); });
+bus.dispatchEvent(e);
+bus.emit('ping');
+console.log(e instanceof Sub, e instanceof Event, e.type, e.bubbles, Object.getPrototypeOf(e) === Sub.prototype);
+console.log(c instanceof Detail, c instanceof CustomEvent, c instanceof Event, c.describe(), bus instanceof Bus, bus instanceof EventTarget, heard.join(' '));
+#expect
+true true ping true true
+true true true data:7 true true ping:true:true ping:false:true
+
+#name new.target in a class that extends Event or EventTarget
+#code
+class AppEvent extends Event { constructor(type, init) { super(type, init); this.kind = new.target.name; } }
+class Saved extends AppEvent { constructor() { super('saved', {cancelable: true}); } }
+class Emitter extends EventTarget { constructor() { super(); this.kind = new.target.name; } }
+class Store extends Emitter {}
+var s = new Store(), got = [];
+s.addEventListener('saved', function (ev) { got.push(ev.kind, ev instanceof Saved, ev.cancelable, ev.target === s); });
+s.dispatchEvent(new Saved());
+console.log(s.kind, new Emitter().kind, new AppEvent('x').kind, got.join(' '));
+var r = Reflect.construct(AppEvent, ['y'], Saved);
+console.log(r.kind, r instanceof Saved, r.type);
+#expect
+Store Emitter AppEvent Saved true true true
+Saved true y
+
+#name what TypeScript emits for ES5 cannot extend HTMLElement: the interface refuses a call
+#code
+var __extends = function (d, b) { Object.setPrototypeOf(d, b); function __() { this.constructor = d; } d.prototype = (__.prototype = b.prototype, new __()); };
+var Legacy = (function (_super) {
+  __extends(Legacy, _super);
+  function Legacy() { var _this = _super.call(this) || this; _this.made = true; return _this; }
+  return Legacy;
+})(HTMLElement);
+customElements.define('x-legacy', Legacy);
+try { new Legacy(); console.log('made'); } catch (e) { console.log(e.name); }
+var Bus = (function (_super) {
+  __extends(Bus, _super);
+  function Bus() { return _super.call(this) || this; }
+  return Bus;
+})(EventTarget);
+try { new Bus(); console.log('made'); } catch (e) { console.log(e.name); }
+#expect
+TypeError
+TypeError
+
+#name createElement and cloneNode construct a compiled custom element once each
+#code
+var made = 0;
+function Tag() { var self = Reflect.construct(HTMLElement, [], new.target); made++; return self; }
+Tag.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Tag, writable: true, configurable: true } });
+Object.setPrototypeOf(Tag, HTMLElement);
+customElements.define('x-tag', Tag);
+var a = document.createElement('x-tag'), b = document.createElement('x-tag');
+var copy = a.cloneNode(false);
+console.log(made, a instanceof Tag, b instanceof Tag, a !== b, copy instanceof Tag, copy !== a);
+#expect
+3 true true true true true

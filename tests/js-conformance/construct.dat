@@ -1,0 +1,729 @@
+#name an abstract class: new.target in the parent is the class new was applied to
+#code
+class Shape {
+  constructor() {
+    if (new.target === Shape) throw new TypeError('Shape is abstract');
+    this.kind = new.target.name;
+  }
+}
+class Circle extends Shape {}
+class Dot extends Circle { constructor() { super(); this.dot = true; } }
+var r = [new Circle().kind, new Dot().kind, new Dot().dot];
+try { new Shape(); r.push('made a Shape'); } catch (e) { r.push(e.name + ': ' + e.message); }
+console.log(r.join(' | '));
+#expect
+Circle | Dot | true | TypeError: Shape is abstract
+
+#name new.target is the same function at every level of a chain of classes
+#code
+var seen = [];
+class A { constructor() { seen.push('A:' + new.target.name); } }
+class B extends A { constructor() { super(); seen.push('B:' + new.target.name); } }
+class C extends B {}
+class D extends C { constructor() { super(); seen.push('D:' + new.target.name); } }
+new D(); new C(); new B(); new A();
+console.log(seen.join(' '));
+#expect
+A:D B:D D:D A:C B:C A:B B:B A:A
+
+#name new.target under a function parent: a class that extends a function
+#code
+var seen = [];
+function Base() { seen.push(new.target === undefined ? 'undefined' : new.target.name); }
+class Mid extends Base { constructor() { super(); seen.push(new.target.name); } }
+class Leaf extends Mid {}
+new Leaf(); new Mid(); new Base(); Base();
+console.log(seen.join(' '));
+#expect
+Leaf Leaf Mid Mid Base undefined
+
+#name Reflect.construct(F, args, G): new.target in F is G and the object has G.prototype
+#code
+function F(a, b) { this.sum = a + b; this.target = new.target; }
+function G() { this.neverRuns = true; }
+G.prototype.hello = function () { return 'hello from G'; };
+var o = Reflect.construct(F, [2, 3], G);
+console.log(o.target === G, o.sum, o instanceof G, o instanceof F, o.hello(), 'neverRuns' in o);
+var p = Reflect.construct(F, [1, 1]);
+console.log(p.target === F, p instanceof F);
+var q = Reflect.construct(F, [1, 1], F);
+console.log(q.target === F, q instanceof F);
+#expect
+true 5 true false hello from G false
+true true
+true true
+
+#name Reflect.construct(Class, args, Other): through super() too
+#code
+class A { constructor() { this.a = new.target.name; } }
+class B extends A { constructor() { super(); this.b = new.target.name; } }
+class Other { who() { return 'other'; } }
+var o = Reflect.construct(B, [], Other);
+console.log(o.a, o.b, o instanceof Other, o instanceof B, o instanceof A, o.who());
+#expect
+Other Other true false false other
+
+#name new.target is undefined in a call: plain, call(), apply(), Reflect.apply, a method, a callback
+#code
+function F() { return new.target === undefined ? 'undefined' : typeof new.target; }
+var o = { m: function () { return new.target === undefined; }, n() { return new.target === undefined; } };
+var r = [F(), F.call({}), F.apply({}, []), Reflect.apply(F, null, []), new F() instanceof F, o.m(), o.n()];
+r.push([1].map(function () { return new.target === undefined; })[0]);
+console.log(r.join(' '));
+#expect
+undefined undefined undefined undefined true true true true
+
+#name a constructor called with call() by another constructor sees no new.target
+#code
+function Parent() { this.viaNew = new.target !== undefined; }
+function Child() { Parent.call(this); this.childNew = new.target === Child; }
+Child.prototype = Object.create(Parent.prototype);
+var c = new Child();
+console.log(c.viaNew, c.childNew, new Parent().viaNew);
+#expect
+false true true
+
+#name the guard that makes a function work with and without new
+#code
+function Point(x, y) {
+  if (!new.target) return new Point(x, y);
+  this.x = x; this.y = y;
+}
+function Strict() { if (new.target === undefined) throw new TypeError('use new'); }
+var a = Point(1, 2), b = new Point(3, 4), r = [a instanceof Point, a.x + a.y, b instanceof Point, b.x + b.y];
+try { Strict(); r.push('called'); } catch (e) { r.push(e.message); }
+r.push(new Strict() instanceof Strict);
+console.log(r.join(' '));
+#expect
+true 3 true 7 use new true
+
+#name an arrow function has the new.target of the function around it
+#code
+function F() { this.get = () => new.target; this.nested = () => (() => new.target)(); }
+function G() {}
+class K { constructor() { this.get = () => new.target; } }
+class L extends K {}
+var f = new F(), g = Reflect.construct(F, [], G), l = new L();
+console.log(f.get() === F, f.nested() === F, g.get() === G, g.nested() === G, l.get() === L, new K().get() === K);
+function plain() { return (() => new.target)(); }
+console.log(plain() === undefined);
+#expect
+true true true true true true
+true
+
+#name a function inside a constructor has a new.target of its own
+#code
+function Outer() {
+  function inner() { return new.target; }
+  this.called = inner() === undefined;
+  this.made = new inner() instanceof inner;
+  var captured;
+  function Probe() { captured = new.target; }
+  new Probe();
+  this.probe = captured === Probe;
+  this.mine = new.target === Outer;
+}
+var o = new Outer();
+console.log(o.called, o.made, o.probe, o.mine);
+#expect
+true false true true
+
+#name new.target is still the same after the constructor made other objects
+#code
+var log = [];
+class Part { constructor() { log.push('Part:' + new.target.name); } }
+class SubPart extends Part {}
+class Whole {
+  constructor() {
+    this.a = new Part(); this.b = new SubPart(); this.c = Reflect.construct(Part, [], SubPart);
+    [1, 2].forEach(function () { new Part(); });
+    log.push('Whole:' + new.target.name);
+  }
+}
+class Bigger extends Whole { constructor() { super(); log.push('Bigger:' + new.target.name); } }
+new Bigger();
+console.log(log.join(' '));
+#expect
+Part:Part Part:SubPart Part:SubPart Part:Part Part:Part Whole:Bigger Bigger:Bigger
+
+#name a constructor that makes more of itself: each call has its own new.target
+#code
+var seen = [];
+class Node_ {
+  constructor(depth) {
+    seen.push(depth + ':' + new.target.name);
+    if (depth < 3) this.child = depth % 2 ? new Node_(depth + 1) : new Leaf_(depth + 1);
+    seen.push(depth + ':' + new.target.name);
+  }
+}
+class Leaf_ extends Node_ {}
+new Node_(0);
+console.log(seen.join(' '));
+#expect
+0:Node_ 1:Leaf_ 2:Node_ 3:Leaf_ 3:Leaf_ 2:Node_ 1:Leaf_ 0:Node_
+
+#name new.target in a parameter default and in a destructured parameter
+#code
+function F(a = new.target, {b = new.target} = {}) { this.a = a; this.b = b; }
+function G() {}
+var f = new F(), g = Reflect.construct(F, [], G);
+console.log(f.a === F, f.b === F, g.a === G, g.b === G, (function (a = new.target) { return a; })() === undefined);
+class K { constructor(t = new.target.name) { this.t = t; } }
+class L extends K {}
+console.log(new K().t, new L().t);
+#expect
+true true true true true
+K L
+
+#name new.target in a method, a getter, a setter, a static method, a field: undefined
+#code
+var r = [];
+class K {
+  f = new.target;
+  g = () => new.target;
+  static s = new.target;
+  constructor() { this.viaGetter = this.probe; this.viaMethod = this.m(); this.value = 1; }
+  get probe() { return new.target === undefined; }
+  set value(v) { r.push('setter:' + (new.target === undefined)); }
+  m() { return new.target === undefined; }
+  static sm() { return new.target === undefined; }
+}
+var k = new K();
+r.push(k.viaGetter, k.viaMethod, K.sm(), k.f === undefined, k.g() === undefined, K.s === undefined);
+console.log(r.join(' '));
+#expect
+setter:true true true true true true true
+
+#name new.target in a generator and in an async function is undefined
+#code
+function* gen() { yield new.target === undefined; yield (() => new.target)() === undefined; }
+async function later() { return new.target === undefined; }
+var it = gen(), r = [it.next().value, it.next().value];
+later().then(function (v) { r.push(v); console.log(r.join(' ')); });
+#expect
+true true true
+
+#name new on a bound function: new.target is the target function
+#code
+function F(a, b) { this.nt = new.target; this.args = a + ',' + b; }
+var B = F.bind({ignored: true}, 1), BB = B.bind(null, 2);
+var x = new B(9), y = new BB();
+console.log(x.nt === F, x.args, x instanceof F, y.nt === F, y.args, y instanceof F, 'ignored' in x);
+class K { constructor() { this.nt = new.target; } }
+var BK = K.bind(null), k = new BK();
+console.log(k.nt === K, k instanceof K);
+#expect
+true 1,9 true true 1,2 true false
+true true
+
+#name Reflect.construct on a bound function: the named new.target reaches the target
+#code
+function F(a) { this.nt = new.target; this.a = a; }
+function G() {}
+G.prototype.tag = 'G';
+var B = F.bind(null, 'bound');
+var o = Reflect.construct(B, [], G);
+console.log(o.nt === G, o.a, o.tag, o instanceof G, o instanceof F);
+var p = Reflect.construct(F, ['direct'], B);
+console.log(p.nt === F, p instanceof F, p.a);
+#expect
+true bound G true false
+false false direct
+
+#name Reflect.construct on a bound function whose target returns another object: it comes back untouched
+#code
+var other = {tag: 'other'};
+function F() { return other; }
+function G() {}
+var r = Reflect.construct(F.bind(null), [], G);
+console.log(r === other, Object.getPrototypeOf(r) === Object.prototype, r.tag);
+var s = Reflect.construct(F, [], G);
+console.log(s === other, Object.getPrototypeOf(s) === Object.prototype);
+#expect
+true true other
+true true
+
+#name a class that extends a bound function: the instance is the one the target was given
+#code
+var seen;
+function F(x) { seen = this; this.x = x; this.nt = new.target.name; }
+F.prototype.m = function () { return 'm' + this.x; };
+var B = F.bind(null, 7);
+B.prototype = F.prototype;
+class D extends B { constructor() { super(); this.own = 1; } }
+var d = new D();
+console.log(seen === d, d.x, d.own, d.nt, d instanceof D, d instanceof F, d.m());
+#expect
+true 7 1 D true true m7
+
+#name Reflect.construct needs constructors: what it refuses
+#code
+function F() {}
+var r = [];
+function attempt(label, fn) { try { fn(); r.push(label + ':ok'); } catch (e) { r.push(label + ':' + e.name); } }
+attempt('arrow target', function () { Reflect.construct(F, [], () => 1); });
+attempt('method target', function () { Reflect.construct(F, [], {m() {}}.m); });
+attempt('undefined target', function () { Reflect.construct(F, [], undefined); });
+attempt('object target', function () { Reflect.construct(F, [], {}); });
+attempt('arrow constructor', function () { Reflect.construct(() => 1, [], F); });
+attempt('no arguments list', function () { Reflect.construct(F); });
+attempt('class target', function () { Reflect.construct(F, [], class {}); });
+attempt('bound target', function () { Reflect.construct(F, [], F.bind(null)); });
+attempt('built-in target', function () { Reflect.construct(F, [], Array); });
+console.log(r.join(' '));
+#expect
+arrow target:TypeError method target:TypeError undefined target:TypeError object target:TypeError arrow constructor:TypeError no arguments list:TypeError class target:ok bound target:ok built-in target:ok
+
+#name new.target.prototype makes the object: the factory idiom
+#code
+function Base() { var self = Object.create(new.target.prototype); self.made = 'by Base'; return self; }
+class Derived extends Base { hello() { return 'hello'; } }
+class Further extends Derived { constructor() { super(); this.further = true; } }
+var d = new Derived(), f = new Further();
+console.log(d instanceof Derived, d.made, d.hello(), f instanceof Further, f.further, f.made, Object.getPrototypeOf(f) === Further.prototype);
+#expect
+true by Base hello true true by Base true
+
+#name an error names itself after new.target
+#code
+class AppError extends Error {
+  constructor(message) { super(message); this.name = new.target.name; }
+}
+class NotFound extends AppError {}
+class Timeout extends AppError { constructor() { super('timed out'); this.retry = true; } }
+var a = new NotFound('no such page'), b = new Timeout(), c = new AppError('plain');
+console.log(a.name, a.message, a instanceof NotFound, a instanceof Error, String(a));
+console.log(b.name, b.message, b.retry, c.name, Object.prototype.toString.call(a));
+#expect
+NotFound no such page true true NotFound: no such page
+Timeout timed out true AppError [object Error]
+
+#name new.target in a class that extends a built-in: Map, Array, Promise, Error
+#code
+var seen = [];
+class M extends Map { constructor(it) { super(it); seen.push(new.target.name); } }
+class N extends M {}
+class L extends Array { constructor() { super(); seen.push(new.target.name); } }
+class LL extends L {}
+class E extends Error { constructor(m) { super(m); seen.push(new.target.name); } }
+class EE extends E {}
+var n = new N([[1, 'one']]), ll = new LL(), ee = new EE('m');
+ll.push(4, 5);
+console.log(seen.join(' '), n.get(1), n.size, n instanceof N, ll.length, Array.isArray(ll), ll instanceof LL, ee.message, ee instanceof EE);
+#expect
+N LL EE one 1 true 2 true true m true
+
+#name a mixin: each layer sees the class that was constructed
+#code
+var Serializable = function (Base) { return class extends Base { constructor(...a) { super(...a); this.layers = (this.layers || []).concat('S:' + new.target.name); } }; };
+var Observable = function (Base) { return class extends Base { constructor(...a) { super(...a); this.layers = (this.layers || []).concat('O:' + new.target.name); } }; };
+class Model { constructor(id) { this.id = id; this.layers = ['M:' + new.target.name]; } }
+class User extends Observable(Serializable(Model)) {}
+var u = new User(7);
+console.log(u.id, u.layers.join(' '), u instanceof Model, u instanceof User);
+#expect
+7 M:User S:User O:User true true
+
+#name Reflect.construct of a built-in with a new.target: the object is the built-in's, with the other prototype
+#code
+function G() {}
+function sub(Parent) { function S() {} S.prototype = Object.create(Parent.prototype); return S; }
+var A = sub(Array), a = Reflect.construct(Array, [3], A);
+var D = sub(Date), d = Reflect.construct(Date, [0], D);
+var S = sub(String), s = Reflect.construct(String, ['ab'], S);
+var R = sub(RegExp), re = Reflect.construct(RegExp, ['a+', 'g'], R);
+var M = sub(Map), m = Reflect.construct(Map, [[[1, 2]]], M);
+var E = sub(Error), e = Reflect.construct(Error, ['boom'], E);
+var o = Reflect.construct(Object, [], G);
+console.log(a instanceof A, Array.isArray(a), a.length, d instanceof D, d.getTime(), s instanceof S, s.length, s + '!');
+console.log(re instanceof R, re.test('caat'), re.flags, m instanceof M, m.get(1), e instanceof E, e.message, Object.getPrototypeOf(o) === G.prototype);
+#expect
+true true 3 true 0 true 2 ab!
+true true g true 2 true boom true
+
+#name Reflect.construct(Function, [body], G): a function with G.prototype
+#code
+function G() {}
+G.prototype.k = 5;
+var f = Reflect.construct(Function, ['a', 'return a * 2'], G);
+console.log(typeof f, f(4), Object.getPrototypeOf(f) === G.prototype, f.k, typeof f.call, f.length);
+#expect
+function 8 true 5 undefined 1
+
+#name new.target whose prototype is not an object: the default prototype is used
+#code
+function F() {}
+function G() {}
+G.prototype = null;
+function H() {}
+H.prototype = 5;
+var o = Reflect.construct(F, [], G), a = Reflect.construct(Array, [], H), e = Reflect.construct(Error, ['m'], G);
+class K {}
+var k = Reflect.construct(K, [], G);
+console.log(Object.getPrototypeOf(o) === Object.prototype, Object.getPrototypeOf(a) === Array.prototype, Array.isArray(a),
+            Object.getPrototypeOf(e) === Error.prototype, e.message, Object.getPrototypeOf(k) === Object.prototype);
+#expect
+true true true true m true
+
+#name the prototype is read from new.target once, before the constructor's own code
+#code
+var reads = 0, proto = {tag: 'P'};
+function accessor() { var nt = function () {}.bind(null); Object.defineProperty(nt, 'prototype', { get: function () { reads++; return proto; } }); return nt; }
+function F() { this.readsInside = reads; }
+var o = Reflect.construct(F, [], accessor());
+var first = reads;
+class A { constructor() { this.readsInside = reads; } }
+class B extends A {}
+var b = Reflect.construct(B, [], accessor());
+var second = reads;
+var a = Reflect.construct(Array, [2], accessor());
+console.log(first, o.tag, o.readsInside, second, b.tag, b.readsInside, reads, a.tag, a.length);
+#expect
+1 P 1 2 P 2 3 P 2
+
+#name an object a parent function returns is this in the child
+#code
+var registry = [];
+function Parent() { var o = {from: 'parent'}; registry.push(o); return o; }
+class Child extends Parent {
+  constructor() { var before = super(); this.own = 2; this.same = before === this; }
+}
+var c = new Child();
+console.log(c === registry[0], c.from, c.own, c.same, c instanceof Child, Object.getPrototypeOf(c) === Object.prototype);
+#expect
+true parent 2 true false true
+
+#name an object a parent class returns is this in the child, through two levels
+#code
+var made = {tag: 'made'};
+class A { constructor() { this.lost = true; return made; } }
+class B extends A { constructor() { super(); this.b = 1; } }
+class C extends B { constructor() { super(); this.c = 2; } }
+var c = new C();
+console.log(c === made, c.b, c.c, 'lost' in c, c instanceof C, c.tag);
+#expect
+true 1 2 false false made
+
+#name the fields of a child go on the object its parent returned
+#code
+class Parent { constructor(target) { return target; } }
+class Child extends Parent {
+  count = 7;
+  label = 'on ' + (this === store ? 'the returned object' : 'another object');
+  #secret = 42;
+  reveal() { return this.#secret; }
+  static reveal(o) { return o.#secret; }
+}
+var store = {};
+var c = new Child(store);
+console.log(c === store, store.count, store.label, Child.reveal(store), typeof store.reveal, Object.keys(store).join());
+#expect
+true 7 on the returned object 42 undefined count,label
+
+#name the value of super() is this
+#code
+class A { constructor() { this.a = 1; } }
+class B extends A { constructor() { var s = super(); this.same = s === this; s.viaSuper = true; } }
+class M extends Map { constructor() { var s = super(); this.same = s === this; } }
+class E extends Error { constructor() { var s = super('m'); this.same = s === this; } }
+var b = new B();
+console.log(b.same, b.viaSuper, b.a, new M().same, new E().same);
+#expect
+true true 1 true true
+
+#name a parent returns a function or an array: that is the instance
+#code
+function callable() { return 'called'; }
+class F { constructor() { return callable; } }
+class G extends F { extra = 1; constructor() { super(); this.more = 2; } }
+var g = new G();
+class Arr { constructor() { return [1, 2]; } }
+class Stack extends Arr { constructor() { super(); this.push(3); } }
+var s = new Stack();
+console.log(g === callable, g(), g.extra, g.more, typeof g, Array.isArray(s), s.length, s.join('-'), s instanceof Stack);
+delete callable.extra; delete callable.more;
+#expect
+true called 1 2 function true 3 1-2-3 false
+
+#name a parent that returns a primitive: the return value is ignored
+#code
+function P() { this.p = 1; return 5; }
+class C extends P { constructor() { super(); this.c = 2; } }
+class Q { constructor() { this.q = 1; } }
+var c = new C();
+console.log(c.p, c.c, c instanceof C, c instanceof P, typeof c);
+#expect
+1 2 true true object
+
+#name a singleton parent: every new gives the one object, and the child's constructor runs on it again
+#code
+var instance = null, runs = 0;
+class Registry { constructor() { if (instance) return instance; instance = this; this.items = []; } }
+class AppRegistry extends Registry { constructor(name) { super(); runs++; this.items.push(name); } }
+var a = new AppRegistry('a'), b = new AppRegistry('b'), c = new Registry();
+console.log(a === b, b === c, a.items.join(), runs, a instanceof AppRegistry);
+#expect
+true true a,b 2 true
+
+#name what Babel emits for a class hierarchy: _createSuper with Reflect.construct
+#code
+function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+function _inherits(subClass, superClass) {
+  subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+  Object.defineProperty(subClass, 'prototype', { writable: false });
+  if (superClass) Object.setPrototypeOf(subClass, superClass);
+}
+function _possibleConstructorReturn(self, call) {
+  if (call && (typeof call === 'object' || typeof call === 'function')) return call;
+  if (call !== void 0) throw new TypeError('Derived constructors may only return object or undefined');
+  if (self === void 0) throw new ReferenceError("this hasn't been initialised - super() hasn't been called");
+  return self;
+}
+function _createSuper(Derived) {
+  return function _createSuperInternal() {
+    var Super = _getPrototypeOf(Derived), NewTarget = _getPrototypeOf(this).constructor;
+    return _possibleConstructorReturn(this, Reflect.construct(Super, arguments, NewTarget));
+  };
+}
+var Animal = function Animal(name) { this.name = name; this.madeAs = new.target.name; };
+Animal.prototype.speak = function () { return this.name + ' makes a sound'; };
+var Dog = (function (_Animal) {
+  _inherits(Dog, _Animal);
+  var _super = _createSuper(Dog);
+  function Dog(name) { var _this; _this = _super.call(this, name); _this.tricks = []; return _this; }
+  Dog.prototype.speak = function () { return this.name + ' barks'; };
+  return Dog;
+})(Animal);
+var Puppy = (function (_Dog) {
+  _inherits(Puppy, _Dog);
+  var _super2 = _createSuper(Puppy);
+  function Puppy() { var _this2; _this2 = _super2.apply(this, arguments); _this2.age = 0; return _this2; }
+  return Puppy;
+})(Dog);
+var p = new Puppy('Rex'), d = new Dog('Fido');
+console.log(p.name, p.madeAs, p.age, p.tricks.length, p.speak(), p instanceof Puppy, p instanceof Dog, p instanceof Animal);
+console.log(d.madeAs, d.speak(), d instanceof Puppy, Object.getPrototypeOf(p) === Puppy.prototype, p.constructor === Puppy);
+#expect
+Rex Puppy 0 0 Rex barks true true true
+Dog Fido barks false true true
+
+#name what Babel emits for a subclass of a built-in: _wrapNativeSuper
+#code
+function _construct(Parent, args, Class) { return Reflect.construct(Parent, args, Class); }
+function _wrapNativeSuper(Class) {
+  function Wrapper() { return _construct(Class, arguments, Object.getPrototypeOf(this).constructor); }
+  Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, enumerable: false, writable: true, configurable: true } });
+  return Object.setPrototypeOf(Wrapper, Class);
+}
+function _inherits(subClass, superClass) {
+  subClass.prototype = Object.create(superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+  Object.setPrototypeOf(subClass, superClass);
+}
+var HttpError = (function (_Error) {
+  _inherits(HttpError, _Error);
+  function HttpError(status, message) {
+    var _this = Reflect.construct(_Error, [message], Object.getPrototypeOf(this).constructor);
+    _this.status = status; _this.name = 'HttpError';
+    return _this;
+  }
+  return HttpError;
+})(_wrapNativeSuper(Error));
+var List = (function (_Array) {
+  _inherits(List, _Array);
+  function List() { return Reflect.construct(_Array, arguments, Object.getPrototypeOf(this).constructor); }
+  List.prototype.last = function () { return this[this.length - 1]; };
+  return List;
+})(_wrapNativeSuper(Array));
+var e = new HttpError(404, 'not found'), l = new List(1, 2, 3);
+l.push(4);
+console.log(e instanceof HttpError, e instanceof Error, e.status, e.message, String(e), Object.prototype.toString.call(e));
+console.log(l instanceof List, Array.isArray(l), l.length, l.last(), l.join('+'));
+#expect
+true true 404 not found HttpError: not found [object Error]
+true true 4 4 1+2+3+4
+
+#name what TypeScript emits for ES5: _super.call(this) || this
+#code
+var __extends = function (d, b) {
+  Object.setPrototypeOf(d, b);
+  function __() { this.constructor = d; }
+  d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+var Base = (function () {
+  function Base(id) { this.id = id; this.viaNew = new.target !== undefined; }
+  Base.prototype.describe = function () { return 'item ' + this.id; };
+  return Base;
+})();
+var Item = (function (_super) {
+  __extends(Item, _super);
+  function Item(id, tag) { var _this = _super.call(this, id) || this; _this.tag = tag; return _this; }
+  return Item;
+})(Base);
+var Cached = (function (_super) {
+  __extends(Cached, _super);
+  function Cached() { var _this = _super.call(this) || this; _this.fromCache = _this === Cached.store; return _this; }
+  Cached.store = {stored: true};
+  return Cached;
+})(function () { return Cached.store; });
+var i = new Item(3, 'x'), c = new Cached();
+console.log(i.id, i.tag, i.viaNew, i.describe(), i instanceof Item, i instanceof Base, c.fromCache, c.stored);
+#expect
+3 x false item 3 true true true true
+
+#name super() twice: the parent runs again, then it is a ReferenceError
+#code
+var runs = 0;
+class A { constructor() { runs++; } }
+class B extends A {
+  constructor() {
+    super();
+    try { super(); this.second = 'no error'; } catch (e) { this.second = e.name; }
+  }
+}
+var b = new B();
+console.log(runs, b.second, b instanceof B);
+#expect
+2 ReferenceError true
+
+#name a derived constructor may return an object or nothing, not a primitive
+#code
+class A {}
+function attempt(value) {
+  class B extends A { constructor() { super(); return value; } }
+  try { var b = new B(); return b instanceof B ? 'instance' : typeof b; } catch (e) { return e.name; }
+}
+var obj = {}, fn = function () {};
+console.log(attempt(undefined), attempt(null), attempt(1), attempt('s'), attempt(false), attempt(Symbol('x')), attempt(obj), attempt(fn), attempt([]));
+class Plain { constructor() { return 1; } }
+function Old() { return 'text'; }
+console.log(new Plain() instanceof Plain, new Old() instanceof Old);
+#expect
+instance TypeError TypeError TypeError TypeError TypeError object function object
+true true
+
+#name a derived constructor that returns without calling super()
+#code
+class A { constructor() { this.a = 1; } }
+function attempt(Class) { try { var o = new Class(); return o instanceof A ? 'instance' : JSON.stringify(o); } catch (e) { return e.name; } }
+class Never extends A { constructor() {} }
+class Sometimes extends A { constructor(yes) { if (yes) super(); } }
+class Other extends A { constructor() { return {other: true}; } }
+class Caught extends A { constructor() { try { throw 1; } catch (e) {} } }
+class ViaReflect extends A { constructor() {} }
+var r = [attempt(Never), attempt(Other), attempt(Caught)];
+try { new Sometimes(false); r.push('made'); } catch (e) { r.push(e.name); }
+r.push(new Sometimes(true).a);
+try { Reflect.construct(ViaReflect, []); r.push('made'); } catch (e) { r.push(e.name); }
+class Top extends Never { constructor() { super(); } }
+r.push(attempt(Top));
+console.log(r.join(' '));
+#expect
+ReferenceError {"other":true} ReferenceError ReferenceError 1 ReferenceError ReferenceError
+
+#name super() that throws leaves this unbound
+#code
+class Fails { constructor() { throw new RangeError('no'); } }
+class Swallows extends Fails { constructor() { try { super(); } catch (e) { } } }
+class Recovers extends Fails { constructor() { try { super(); } catch (e) { return {recovered: e.name}; } } }
+var tries = 0;
+class Flaky { constructor() { if (++tries < 2) throw new Error('first time'); this.ok = true; } }
+class Retries extends Flaky { constructor() { try { super(); } catch (e) { super(); } this.after = tries; } }
+var r = [];
+try { new Swallows(); r.push('made'); } catch (e) { r.push(e.name); }
+r.push(new Recovers().recovered);
+var x = new Retries();
+r.push(x.ok, x.after, x instanceof Retries);
+console.log(r.join(' '));
+#expect
+ReferenceError RangeError true 2 true
+
+#name a class that extends null
+#code
+var r = [];
+function attempt(label, fn) { try { r.push(label + ':' + fn()); } catch (e) { r.push(label + ':' + e.name); } }
+attempt('default', function () { class N extends null {} new N(); return 'made'; });
+attempt('empty', function () { class N extends null { constructor() {} } new N(); return 'made'; });
+attempt('returns', function () { class N extends null { constructor() { return Object.create(N.prototype); } hi() { return 'hi'; } } var n = new N(); return [n.hi(), Object.getPrototypeOf(N.prototype) === null, n instanceof N]; });
+attempt('new.target', function () { class N extends null { constructor() { return Object.create(new.target.prototype); } } class M extends N { m() { return 'm'; } } return new M().m(); });
+console.log(r.join(' '));
+#expect
+default:TypeError empty:ReferenceError returns:hi,true,true new.target:m
+
+#name super() in an arrow function binds this of the constructor
+#code
+class A { constructor(v) { this.a = v; } }
+class B extends A {
+  constructor() {
+    var init = (v) => super(v);
+    var result = init(5);
+    this.same = result === this;
+    this.b = 2;
+  }
+}
+var later;
+class C extends A { constructor() { later = () => super(9); return {early: true}; } }
+var b = new B(), c = new C(), r = [b.a, b.b, b.same, b instanceof B, c.early];
+try { var made = later(); r.push(made.a, made instanceof C); } catch (e) { r.push(e.name); }
+try { later(); r.push('twice'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+5 2 true true true 9 true ReferenceError
+
+#name the parent is whatever the class's prototype is when super() runs, and new.target stays
+#code
+var seen = [];
+class A { constructor() { seen.push('A:' + new.target.name); } }
+class Z { constructor() { seen.push('Z:' + new.target.name); this.z = true; } }
+class B extends A { constructor() { super(); seen.push('B:' + new.target.name); } }
+class C extends B {}
+new C();
+Object.setPrototypeOf(B, Z);
+var c = new C();
+console.log(seen.join(' '), c.z, c instanceof A, c instanceof C);
+#expect
+A:C B:C Z:C B:C true true true
+
+#name instances made with a named new.target are collected
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+function Parent() { this.handler = () => new.target; }
+function Target() {}
+class Child extends Parent { constructor() { super(); this.self = () => this; this.nt = new.target; } }
+class Returns extends (function () { return {made: 1}; }) { field = [1, 2, 3]; }
+var keep = new Child(), ok = keep.handler() === Child && keep.nt === Child && Reflect.construct(Parent, [], Target).handler() === Target;
+gc();
+var before = gc().alive_cells;
+for (var i = 0; i < 2000; i++) { new Child(); Reflect.construct(Parent, [], Target); Reflect.construct(Child, [], Target); new Returns(); new (Parent.bind(null))(); }
+gc(); churn();
+var after = gc().alive_cells;
+console.log(ok, !(after - before > 100), keep.handler() === Child);
+#expect
+true true true
+
+#name this cannot be used before super() has run
+#code
+class A { constructor() { this.a = 1; } }
+var r = [];
+class B extends A { constructor() { try { this.x = 1; r.push('wrote this'); } catch (e) { r.push(e.name); } super(); r.push(this.a); } }
+new B();
+class C extends A { constructor() { var read = () => this; try { read(); r.push('read this'); } catch (e) { r.push(e.name); } super(); r.push(read() === this); } }
+new C();
+class D extends A { constructor() { try { super.toString(); r.push('used super.x'); } catch (e) { r.push(e.name); } super(); } }
+new D();
+class E extends A { constructor() { try { return this; } catch (e) { r.push(e.name); } super(); } }
+r.push(new E().a);
+console.log(r.join(' '));
+#expect
+ReferenceError 1 ReferenceError true ReferenceError ReferenceError 1
+
+#name new.target and super() inside eval
+#code
+function F() { this.direct = eval('new.target') === F; this.arrow = (() => eval('new.target'))() === F; }
+function G() {}
+class A { constructor() { this.a = 1; } }
+class B extends A { constructor() { eval('super()'); this.b = this.a + 1; } }
+var f = new F(), g = Reflect.construct(F, [], G);
+console.log(f.direct, f.arrow, g.direct, eval('typeof F'), new B().b, (function () { return eval('new.target'); })() === undefined);
+#expect
+true true false function 2 true

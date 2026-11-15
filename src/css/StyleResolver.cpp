@@ -1,5 +1,6 @@
 #include "litebird/css/StyleResolver.hpp"
 #include <unordered_set>
+#include <algorithm>
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/CssText.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
@@ -129,53 +130,78 @@ std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
     return candidates;
 }
 
+// Parse a strictly signed base-10 integer (optional single sign, then at
+// least one digit). CSS tokenises the parts of an <an+b> formula separately,
+// so this rejects anything that is not one token's worth of number: "+1" is
+// valid, "1.5", "x", "" and "++1" are not (the caller decides what an empty
+// part means).
+static bool parse_b_integer(const std::string& text, int& out) {
+    size_t i = 0;
+    int sign = 1;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+        sign = text[i] == '-' ? -1 : 1;
+        ++i;
+    }
+    if (i >= text.size()) return false;
+    long value = 0;
+    for (; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<long>(c - '0');
+        if (value > 0x7fffffffL) return false;
+    }
+    out = static_cast<int>(sign * value);
+    return true;
+}
+
+// The <an+b> micro-syntax ignores whitespace tokens: `:nth-child(2n + 1)`
+// and `:nth-child(2n+1)` are the same formula, and so are the spaces around
+// a sign (`+ 1` is `+1`).
+static void erase_css_whitespace(std::string& text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
+                   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+               }),
+               text.end());
+}
+
 static bool match_nth_formula(int idx, std::string_view formula_text) {
     std::string formula(css_trim_view(formula_text));
     std::transform(formula.begin(), formula.end(), formula.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    erase_css_whitespace(formula);
 
     if (formula.empty()) return false;
     if (formula == "odd") return (idx % 2 != 0);
     if (formula == "even") return (idx % 2 == 0);
 
-    size_t n_pos = formula.find('n');
+    const size_t n_pos = formula.find('n');
     if (n_pos == std::string::npos) {
-        try {
-            int b = std::stoi(formula);
-            return idx == b;
-        } catch (...) {
-            return false;
-        }
+        // A plain integer: matches only that position.
+        int b = 0;
+        return parse_b_integer(formula, b) && idx == b;
     }
 
+    // The coefficient: empty, a bare sign, or a signed integer; anything
+    // else ("2nn", "1.5n", "xn") makes the formula invalid.
+    const std::string a_text = formula.substr(0, n_pos);
     int a = 1;
-    if (n_pos == 0) {
+    if (a_text.empty() || a_text == "+") {
         a = 1;
-    } else if (n_pos == 1 && formula[0] == '-') {
+    } else if (a_text == "-") {
         a = -1;
-    } else if (n_pos == 1 && formula[0] == '+') {
-        a = 1;
-    } else {
-        try {
-            a = std::stoi(formula.substr(0, n_pos));
-        } catch (...) {
-            a = 1;
-        }
+    } else if (!parse_b_integer(a_text, a)) {
+        return false;
     }
 
+    // The offset: empty (0) or a signed integer.
+    const std::string b_text = formula.substr(n_pos + 1);
     int b = 0;
-    std::string rest = formula.substr(n_pos + 1);
-    css_trim(rest);
-    if (!rest.empty()) {
-        try {
-            b = std::stoi(rest);
-        } catch (...) {
-            b = 0;
-        }
+    if (!b_text.empty() && !parse_b_integer(b_text, b)) {
+        return false;
     }
 
     if (a == 0) return idx == b;
-    int diff = idx - b;
+    const int diff = idx - b;
     if (diff % a != 0) return false;
     return (diff / a) >= 0;
 }

@@ -864,7 +864,7 @@ static void collect_items(
     if (box->box_type == BoxType::TextNode) {
         ComputedStyle effective_style = box->style;
         float char_w = effective_style.font_size * 0.55f;
-        float line_h = effective_style.font_size * 1.25f;
+        float line_h = effective_style.effective_line_height();
 
         size_t i = 0;
         const std::string& str = box->text;
@@ -1042,7 +1042,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     float line_right = 0.0f;
     float line_capacity = measure_band(line_top, line_left, line_right);
 
-    const float estimated_line_height = style.font_size * 1.25f;
+    const float estimated_line_height = style.effective_line_height();
 
     auto finish_line = [&](LineBox& line, float width) {
         while (!line.fragments.empty() && line.fragments.back().is_space) {
@@ -1051,8 +1051,11 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         }
         if (!line.fragments.empty()) {
             line.rect.width = width;
-            float max_h = style.font_size * 1.25f;
+            float max_h = style.effective_line_height();
             for (const auto& f : line.fragments) {
+                // CSS 2.1, 10.8.1: the line box's height is at least the
+                // largest of the inline boxes on it, strut included.
+                max_h = std::max(max_h, f.style.effective_line_height());
                 max_h = std::max(max_h, f.rect.height);
             }
             line.rect.height = max_h;

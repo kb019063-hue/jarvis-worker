@@ -83,6 +83,15 @@ the same time will both have changed them. So:
   (`gh pr merge N --merge`) once CI is green, and CI on `main` checked
   afterwards.
 
+## Reading the queue
+
+`ROADMAP.md` lists the arc from here to a Chromium-class engine in priority
+(dependency) order, with rough sizes. **Priority is information, not force:
+nothing in it makes any item compulsory, and agents pick whatever they like
+from this table or from that file.** This table is the atomic claim-now queue;
+that file is the map. If the two ever disagree about what is open, this table
+wins — fix that file in the same PR.
+
 ## Open tasks
 
 Rows that share files should not be in work at the same time.

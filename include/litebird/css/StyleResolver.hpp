@@ -151,8 +151,22 @@ struct ComputedStyle {
     BoxShadow box_shadow;
     float font_size{16.0f};
     int font_weight{400};
+    // Line height: a -1 sentinel means "not declared" (normal; layout falls
+    // back to 1.25 * font_size). line_height holds a computed px length;
+    // line_height_number holds a bare unitless multiplier. Both inherit per
+    // CSS: a declared multiplier is inherited as a multiplier, a declared
+    // length or percentage is inherited as a length.
+    float line_height{-1.0f};
+    float line_height_number{-1.0f};
     std::string text_align{"left"};
     std::string text_decoration{"none"}; // "none", "underline"
+
+    // The line height layout should use for this element.
+    float effective_line_height() const {
+        if (line_height_number >= 0.0f) return line_height_number * font_size;
+        if (line_height >= 0.0f) return line_height;
+        return font_size * 1.25f;
+    }
 
     // Floats and clearance (CSS 2.1, sections 9.5 and 9.5.2)
     FloatType float_type{FloatType::None};

@@ -279,6 +279,130 @@ TEST(style_resolver_indexed_candidates_preserve_cascade) {
     }
 }
 
+TEST(percentage_font_size_and_line_height) {
+    using namespace litebird;
+    // Percentages compound down the tree: each level resolves against the
+    // parent's computed size, and em lengths on the element resolve against
+    // its own. A 50% child of 16px is 8px, and 50% of that is 4px.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-size: 16px;">
+            <div id="half" style="font-size: 50%;"><span id="quarter" style="font-size: 50%;">x</span></div>
+        </div>
+    )");
+    StyleResolver resolver;
+    auto half = doc->get_element_by_id("half");
+    auto quarter = doc->get_element_by_id("quarter");
+    assert(half && quarter);
+    auto half_style = resolver.resolve_style(half, nullptr);
+    assert(half_style.font_size == 8.0f);
+    auto quarter_style = resolver.resolve_style(quarter, &half_style);
+    assert(quarter_style.font_size == 4.0f);
+
+    // line-height keywords, numbers, percentages and lengths. The used value
+    // multiplies the element's own font size; percentages resolve where they
+    // were declared.
+    auto line_height_of = [&](const std::string& declaration, float font_size_px) {
+        auto element = HtmlParser::parse("<p id=\"p\">x</p>");
+        auto p = element->get_element_by_id("p");
+        StyleResolver scoped;
+        scoped.add_stylesheet(CssParser::parse(
+            "#p { font-size: " + std::to_string(static_cast<int>(font_size_px)) + "px; line-height: " + declaration + "; }"));
+        return scoped.resolve_style(p, nullptr);
+    };
+
+    // normal: not declared -> the 1.25 fallback the renderer always used
+    assert(line_height_of("normal", 16.0f).effective_line_height() == 20.0f);
+    // unchanged font size: normal tracks the element's size
+    assert(line_height_of("normal", 20.0f).effective_line_height() == 25.0f);
+    // bare number: a multiplier of the element's own font size
+    assert(line_height_of("1.5", 16.0f).effective_line_height() == 24.0f);
+    assert(line_height_of("2", 20.0f).effective_line_height() == 40.0f);
+    // percentage: of the font size where it was declared
+    assert(line_height_of("150%", 16.0f).effective_line_height() == 24.0f);
+    assert(line_height_of("37.5%", 16.0f).effective_line_height() == 6.0f);
+    // absolute length
+    assert(line_height_of("40px", 16.0f).effective_line_height() == 40.0f);
+
+    // Inheritance: a declared multiplier is inherited as a multiplier (the
+    // child multiplies its own font size); a declared percentage is resolved
+    // once and inherited as a length; a declared length is inherited as a length.
+    auto inheritance_doc = HtmlParser::parse(R"(
+        <div id="parent"><span id="child">x</span></div>
+    )");
+    auto parent = inheritance_doc->get_element_by_id("parent");
+    auto child = inheritance_doc->get_element_by_id("child");
+    assert(parent && child);
+
+    StyleResolver multiplier;
+    multiplier.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 1.5; } #child { font-size: 20px; }"));
+    auto parent_style = multiplier.resolve_style(parent, nullptr);
+    auto child_style = multiplier.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 30.0f); // 1.5 * 20px, not 24px
+
+    StyleResolver percentage;
+    percentage.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 150%; } #child { font-size: 20px; }"));
+    parent_style = percentage.resolve_style(parent, nullptr);
+    child_style = percentage.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 24.0f); // inherited as a length
+
+    StyleResolver length;
+    length.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 40px; } #child { font-size: 20px; }"));
+    parent_style = length.resolve_style(parent, nullptr);
+    child_style = length.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 40.0f);
+
+    // normal is not declared and stays undeclared down the tree
+    StyleResolver normal;
+    normal.add_stylesheet(CssParser::parse("#parent { font-size: 16px; } #child { font-size: 20px; }"));
+    parent_style = normal.resolve_style(parent, nullptr);
+    child_style = normal.resolve_style(child, &parent_style);
+    assert(child_style.line_height < 0.0f && child_style.line_height_number < 0.0f);
+    assert(child_style.effective_line_height() == 25.0f); // 1.25 * own font size
+
+    // font: size/line-height shorthand feeds both properties
+    StyleResolver shorthand;
+    shorthand.add_stylesheet(CssParser::parse("#parent { font: 16px/2 serif; }"));
+    parent_style = shorthand.resolve_style(parent, nullptr);
+    assert(parent_style.font_size == 16.0f);
+    assert(parent_style.effective_line_height() == 32.0f);
+
+    // Order independence: line-height: <percentage> must see the element's
+    // own font size even when font-size is declared after it on the same
+    // element, in the stylesheet and in the longhand pass.
+    StyleResolver reversed;
+    reversed.add_stylesheet(CssParser::parse("#parent { line-height: 150%; font-size: 20px; }"));
+    parent_style = reversed.resolve_style(parent, nullptr);
+    assert(parent_style.effective_line_height() == 30.0f); // 1.5 * 20px
+
+    // The layout stage actually uses the property: a paragraph with
+    // line-height: 48px lays its line boxes out 48px apart, replacing the
+    // hardcoded 1.25x estimate.
+    auto layout_doc = HtmlParser::parse(R"(
+        <p id="p" style="width: 500px; font-size: 16px; line-height: 48px;">
+            one two three four five six seven eight nine ten eleven twelve
+        </p>
+    )");
+    StyleResolver laid;
+    auto p = layout_doc->get_element_by_id("p");
+    auto root = LayoutTree::build(layout_doc, laid, 800.0f, 600.0f);
+    assert(root);
+    Node* wanted = static_cast<Node*>(p.get());
+    auto find_p = [](const auto& self, const std::shared_ptr<LayoutBox>& box, Node* wanted) -> std::shared_ptr<LayoutBox> {
+        if (!box) return nullptr;
+        if (box->node.get() == wanted) return box;
+        for (const auto& ch : box->children) {
+            if (auto found = self(self, ch, wanted)) return found;
+        }
+        return nullptr;
+    };
+    auto paragraph = find_p(find_p, root, wanted);
+    assert(paragraph);
+    assert(!paragraph->line_boxes.empty());
+    for (const auto& line : paragraph->line_boxes) {
+        assert(line.rect.height == 48.0f);
+    }
+}
+
 TEST(layout_box_tree) {
     using namespace litebird;
     std::string html = R"(
@@ -9971,6 +10095,7 @@ int main() {
     RUN_TEST(css_parser_and_specificity);
     RUN_TEST(style_resolver_and_cascade);
     RUN_TEST(style_resolver_indexed_candidates_preserve_cascade);
+    RUN_TEST(percentage_font_size_and_line_height);
     RUN_TEST(layout_box_tree);
     RUN_TEST(javascript_engine);
     RUN_TEST(bytecode_virtual_machine);

@@ -10731,8 +10731,12 @@ TEST(worker_mime_policy_enforces_javascript_content_types) {
                 reply = "HTTP/1.1 200 OK\r\nContent-Length: " +
                         std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
             } else if (path == "/redirect.js") {
-                std::string body = "postMessage('MUST_NOT_RUN_302');";
+                std::string body = "redirecting";
                 reply = "HTTP/1.1 302 Found\r\nLocation: /ok.js\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/status300.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_300');";
+                reply = "HTTP/1.1 300 Multiple Choices\r\nContent-Type: text/javascript\r\nContent-Length: " +
                         std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
             } else {
                 std::string body = "postMessage('MUST_NOT_RUN_404');";
@@ -10768,25 +10772,28 @@ TEST(worker_mime_policy_enforces_javascript_content_types) {
         "  spawn('http_plain', '" + base + "/plain.js'),"
         "  spawn('http_html', '" + base + "/html.js'),"
         "  spawn('http_no_ct', '" + base + "/missing-ct.js'),"
-        "  spawn('http_302', '" + base + "/redirect.js'),"
+        "  spawn('http_redirect', '" + base + "/redirect.js'),"
+        "  spawn('http_300', '" + base + "/status300.js'),"
         "  spawn('http_404', '" + base + "/notfound.js')"
         "];"
     );
 
     assert(wait_for(js,
-        "!!(msgs.data_js && msgs.data_app_js && msgs.http_ok && msgs.http_legacy && "
+        "!!(msgs.data_js && msgs.data_app_js && msgs.http_ok && msgs.http_legacy && msgs.http_redirect && "
         "errs.data_plain && errs.data_default && errs.data_html && "
-        "errs.http_plain && errs.http_html && errs.http_no_ct && errs.http_302 && errs.http_404)"));
+        "errs.http_plain && errs.http_html && errs.http_no_ct && errs.http_300 && errs.http_404)"));
 
     assert(js.eval("msgs.data_js").to_string() == "data-js-ok");
     assert(js.eval("msgs.data_app_js").to_string() == "data-app-ok");
     assert(js.eval("msgs.http_ok").to_string() == "http-js-ok");
     assert(js.eval("msgs.http_legacy").to_string() == "http-legacy-ok");
+    assert(js.eval("msgs.http_redirect").to_string() == "http-js-ok");
     assert(js.eval("!msgs.data_plain && !msgs.data_default && !msgs.data_html").is_truthy());
-    assert(js.eval("!msgs.http_plain && !msgs.http_html && !msgs.http_no_ct && !msgs.http_302 && !msgs.http_404").is_truthy());
+    assert(js.eval("!msgs.http_plain && !msgs.http_html && !msgs.http_no_ct && !msgs.http_300 && !msgs.http_404").is_truthy());
     assert(js.eval("errs.data_plain").to_string().find("text/plain") != std::string::npos);
     assert(js.eval("errs.http_html").to_string().find("text/html") != std::string::npos);
     assert(js.eval("errs.http_no_ct").to_string().find("missing Content-Type") != std::string::npos);
+    assert(js.eval("errs.http_300").to_string().find("300") != std::string::npos);
     assert(js.eval("errs.http_404").to_string().find("404") != std::string::npos);
 
     js.eval("ws.forEach(function(w) { w.terminate(); });");

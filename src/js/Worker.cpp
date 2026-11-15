@@ -171,11 +171,16 @@ std::string response_content_type(const ResourceResponse& resp) {
 std::optional<std::string> load_worker_script(
     std::string_view url_or_path,
     const ResourceRequestContext& context,
+    RequestMode mode,
     std::string& error,
     std::string& loaded_url
 ) {
-    // A worker script is a page-initiated load (Phase 33 local-file boundary).
-    auto resp = ResourceLoader::load_for_page(std::string(url_or_path), context);
+    // A worker script is a page-initiated load (Phase 33 local-file boundary
+    // plus Phase 36 RequestMode: same-origin for top-level classic workers,
+    // no-cors for importScripts).
+    ResourceRequestContext req_ctx = context;
+    req_ctx.mode = mode;
+    auto resp = ResourceLoader::load_for_page(std::string(url_or_path), req_ctx);
     if (!resp.url.empty()) loaded_url = resp.url;
     if (resp.status_code > 0 && (resp.status_code < 200 || resp.status_code >= 300)) {
         error = "Worker script request failed with HTTP status " + std::to_string(resp.status_code);
@@ -535,7 +540,8 @@ void WorkerObject::start() {
 
     std::string load_error;
     std::string loaded_url;
-    auto script_source = load_worker_script(m_script_url, m_context, load_error, loaded_url);
+    auto script_source = load_worker_script(m_script_url, m_context, RequestMode::SameOrigin,
+                                            load_error, loaded_url);
     if (!loaded_url.empty()) m_resolved_url = loaded_url;
 
     if (!script_source) {
@@ -995,7 +1001,8 @@ void WorkerObject::worker_thread_main(std::string script_source) {
                 const std::string url = arg.to_string();
                 std::string err;
                 std::string loaded_url;
-                auto imported = load_worker_script(url, worker_context, err, loaded_url);
+                auto imported = load_worker_script(url, worker_context, RequestMode::NoCors,
+                                                   err, loaded_url);
                 if (!imported) {
                     js_throw_error(JsErrorKind::Error,
                                    "NetworkError: Failed to execute 'importScripts' on 'WorkerGlobalScope': " + err);

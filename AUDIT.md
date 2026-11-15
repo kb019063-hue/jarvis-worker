@@ -2381,7 +2381,7 @@ and nothing about what an interface object does when it is called.
 **How verified.** Every line is a command and what it printed on the merged
 tree, in the sandbox.
 
-- `make test`: `All 138 engine test suites passed successfully!`, five of
+- `make test`: `All 140 engine test suites passed successfully!`, five of
   them new. Linked against the objects of `main`, with the lines that use
   the new C++ interface cut, each of the five fails at least half of its
   checks.
@@ -2405,9 +2405,10 @@ tree, in the sandbox.
   `make diff-strings` 95 of 50,580 results differ, `make bench`, `make
   bench-css` 20 runs and 0 failures, `make security-fetch` 3 checks and 0
   failures: all as on `main`.
-- `make deep` and `make asan` were run before the last merge of `main`,
-  which brought one fix to a CSS selector and its suite; the unit tests were
-  run again in the sanitizer build after it, 138 of 138.
+- `make deep` and `make asan` were run before the last two merges of
+  `main`, which brought a fix to a CSS selector, the attribute list of Phase
+  35 and three suites; the unit tests were run again in the sanitizer build
+  after them, 140 of 140.
 - `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])`.
 - `make asan`: 137 of 137 suites; JavaScript 906 of 921 (the one more is a
   case of deep recursion that needs more stack than a sanitizer build's

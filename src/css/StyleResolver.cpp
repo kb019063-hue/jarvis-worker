@@ -857,6 +857,12 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
             else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
             else if (lowered == "italic" || lowered == "oblique") continue;
             else if (lowered.find_first_of("0123456789") != std::string::npos &&
+                     lowered.find('/') != std::string::npos) {
+                // Shorthand "size/line-height" pair, e.g. font: 16px/1.5 serif.
+                const std::size_t slash = token.find('/');
+                out.emplace_back("font-size", token.substr(0, slash));
+                out.emplace_back("line-height", token.substr(slash + 1));
+            } else if (lowered.find_first_of("0123456789") != std::string::npos &&
                      (lowered.ends_with("px") || lowered.ends_with("em") || lowered.ends_with("rem") ||
                       lowered.ends_with("pt") || lowered.ends_with("%"))) {
                 out.emplace_back("font-size", token);
@@ -1175,7 +1181,43 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                prop == "border-bottom-color" || prop == "border-left-color") {
         style.border_color = Color::parse(val);
     } else if (prop == "font-size") {
-        style.font_size = parse_length(val, 16.0f);
+        if (is_percentage_value(val)) {
+            // Percentages compound down the tree: resolve against the
+            // inherited font size (m_em_base holds it at this point).
+            style.font_size = m_em_base * parse_length(val, 16.0f) / 100.0f;
+        } else {
+            style.font_size = parse_length(val, 16.0f);
+        }
+    } else if (prop == "line-height") {
+        const std::string text{css_trim_view(val)};
+        bool is_number = false;
+        float multiplier = 0.0f;
+        if (text != "normal" && !is_percentage_value(text)) {
+            std::size_t consumed = 0;
+            try {
+                multiplier = std::stof(text, &consumed);
+                is_number = consumed == text.size();
+            } catch (...) {}
+        }
+        if (text == "normal") {
+            style.line_height = -1.0f;
+            style.line_height_number = -1.0f;
+        } else if (is_percentage_value(text)) {
+            // A percentage is of the element's own font size.
+            style.line_height = style.font_size * parse_length(text, 0.0f) / 100.0f;
+            style.line_height_number = -1.0f;
+        } else if (is_number) {
+            if (multiplier >= 0.0f) {
+                style.line_height_number = multiplier;
+                style.line_height = -1.0f;
+            } // a negative multiplier is not a legal line-height; drop the declaration
+        } else {
+            const float len = parse_length(text, -1.0f);
+            if (len >= 0.0f) {
+                style.line_height = len;
+                style.line_height_number = -1.0f;
+            } // negative lengths are not a legal line-height; drop the declaration
+        }
     } else if (prop == "font-weight") {
         if (val == "bold") style.font_weight = 700;
         else if (val == "normal") style.font_weight = 400;
@@ -1702,6 +1744,13 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
         style.custom_properties = parent_style->custom_properties;
+        if (parent_style->line_height_number >= 0.0f) {
+            // A declared multiplier is inherited as a multiplier.
+            style.line_height_number = parent_style->line_height_number;
+        } else if (parent_style->line_height >= 0.0f) {
+            // A declared length or percentage is inherited as a length.
+            style.line_height = parent_style->line_height;
+        }
     }
 
     struct MatchedRule {

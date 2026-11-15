@@ -347,7 +347,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 31** | **CSS whitespace trimming is linear:** the parser and resolver scan outer whitespace once and shift the surviving text at most once; `nth-child` no longer copies and lowercases padding per child. 300,000 spaces in the measured `:nth-child`, grid, filter, duration and transform paths went from seconds to tens or hundreds of milliseconds with the same layout/paint. | ✅ Completed (117/117 unit suites; `make bench-css` compares 20 padded runs with compact pages) |
 | **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
-| **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (134/134 unit suites; `make bench-attributes` 6 cases, 0 failures) |
+| **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 
 ---
 
@@ -2832,8 +2832,11 @@ has 0 differing pages, `make deep` 0 failures in 1,292 runs, `make fuzz`
 This phase does not make the CSS parser spec-complete, does not change CSS
 whitespace recognition, and does not address the separate layout, tokenizer
 attribute-count or style-object tasks. The `:nth-child(2n + 1)` sign-space
-parsing bug found while building the benchmark is also still open; the
-benchmark keeps `+1` glued and AUDIT.md finding 35 records the repro.
+parsing bug found while building the benchmark is fixed (AUDIT.md finding 39:
+whitespace tokens are ignored inside the `<an+b>` micro-syntax and the offset
+and coefficient are strictly signed integers, so an invalid formula matches
+nothing); the benchmark kept `+1` glued while the bug was open, so its
+timings never depended on the fix.
 
 ---
 
@@ -3057,7 +3060,7 @@ crash, timeout, wrong checksum or slow case.
 
 ### 4. Verification
 
-`make test` passes 134 suites. The two new suites are
+`make test` passes 135 suites. The two new suites are
 `attribute_list_end_removals_keep_order_and_index` (model comparison across
 the scan/index boundary, both erase overloads, reinsert/update, copy/move,
 moved-from emptiness, late index build after a dead prefix, clear and
@@ -3068,10 +3071,10 @@ bench-attributes` passes 6 cases with 0 failures. A generated out-of-corpus
 probe run through `tools/conformance/compare_with_jsdom.py` printed `4 lines,
 4 the same` before and after. The merged release run kept html5lib 1781/1792,
 JS 840/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192,
-diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed (slowest 24.0 s),
+diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed (slowest 25.0 s),
 bench-css 20 padded runs/0 failures, security-fetch 3 checks/0 failures, and
 diff-strings at the 95-difference ceiling. The sanitizer scoreboards are
-recorded in AUDIT.md, finding 39.
+recorded in AUDIT.md, finding 40.
 
 ### 5. What is still open
 

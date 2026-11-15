@@ -50,7 +50,9 @@ The rest are documented with enough detail to act on.
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
 | 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS remain open |
-| 39 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases and the tokenizer repeated-name cost remain |
+| 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
+| 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
+| 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases and the tokenizer repeated-name cost remain |
 
 ---
 
@@ -1837,7 +1839,7 @@ of them by reading the code.
 
 | Found by | What |
 | :--- | :--- |
-| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front was still the square then (fixed in Phase 35, finding 39) |
+| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front was still the square then (fixed in Phase 35, finding 40) |
 | The same question asked of the DOCTYPE | 50,000 attributes declared for one element took 4.5 s. And one attribute default of a megabyte with 100,000 empty tags made 100 GB of attribute values from a 1.4 MB document: entity expansion was bounded and defaults were not. Both bounded now, and both are deep pages |
 | Expat and libxml2 on generated documents (`tools/fuzz/diff_xml.py`) | No fault of Litebird's in 64,000 documents, and one in the references: three runs of 20,000 reported 10 differences, and all ten were `version="1."`, which Expat and libxml2 accept and the grammar does not (`'1.' [0-9]+`). A document whose version is outside the grammar is now judged by the grammar |
 | web-platform-tests, on their first run | Three faults that were not about XML: attributes of inline `<svg>` had no namespace (the row with `xlink:href` above), a doctype a script inserted was not `document.doctype`, and `lookupNamespaceURI('xml')` answered for a node that has no namespaces. 607 jsdom-recorded cases had passed over all three |
@@ -1872,7 +1874,7 @@ of them by reading the code.
   a qualified name in two namespaces, and collections do not list their
   names as own properties: 33 subtests.
 - **Removing all 50,000 attributes of an element from the front took 9 s**
-  at Phase 28; from the back, 22 ms of 25,000. Fixed in Phase 35 (finding 39).
+  at Phase 28; from the back, 22 ms of 25,000. Fixed in Phase 35 (finding 40).
 - **The HTML tokenizer still searches for a repeated attribute name**: one
   element with 50,000 attributes takes 2.9 s in the HTML parser (10.4 s
   before the attribute list had an index).
@@ -1964,13 +1966,10 @@ cases were already cheap in this pipeline and stayed cheap.
 
 **What is still approximate.** The whitespace set is still the C locale's
 `std::isspace`, not the CSS whitespace production; VT is still trimmed.
-The separate `:nth-child(2n + 1)` sign-space parsing bug is **not** fixed:
-with three items it still paints only item 2 red, because the formula tail
-`+ 1` is read as `0`. The benchmark deliberately keeps `+1` glued so it
-measures the trimming cost without depending on that bug. Repro:
-`printf '<ul><li>a</li><li>b</li><li>c</li></ul><style>li:nth-child(2n + 1){color:rgb(255,0,0)}</style>' > /tmp/nth.html && ./build/litebird /tmp/nth.html --dump-paint`.
-The finding-28 float, computed-style memory and 50,000-attribute tokenizer
-costs are also not fixed here and remain open tasks.
+The separate `:nth-child(2n + 1)` sign-space parsing bug that this phase
+surfaced **is** fixed now — see finding 39. The finding-28 float,
+computed-style memory and 50,000-attribute tokenizer costs are also not
+fixed here and remain open tasks.
 
 **How verified.** `make test` passes 117 suites, including the helper model,
 selector/value equivalence and long-run suites. `make bench-css` passes 20
@@ -2136,7 +2135,56 @@ Python UTS #46 mirror prints zero real divergences.
 
 ---
 
-## 39. ✅ Attribute-list front removal was quadratic
+## 39. ✅ `:nth-child( An+B )` reads a sign separated from its digits by spaces
+
+**The hole.** The formula matcher (`src/css/StyleResolver.cpp`,
+`match_nth_formula`) parsed the offset part of an `<an+b>` formula with
+`std::stoi`. `"+ 1"` is not parseable by `stoi` — the sign must be attached
+to the digits — so the `catch` branch silently defaulted the offset to `0`.
+`li:nth-child(2n + 1)` matched only the even items; with three items, only
+`b` turned red. Any formula written with a space between the sign and the
+number (`2n + 1`, `-n + 3`, `+ n + 1`, the common style in real pages) was
+read as `b = 0`, and `:nth-of-type()` shared the matcher and the bug.
+
+**The fix.** The `<an+b>` micro-syntax ignores whitespace tokens, exactly as
+the CSS parser does, so the matcher now erases CSS whitespace (Tab, LF, FF,
+CR, Space) between tokens before parsing: `2n + 1`, `2n+1` and
+`2n\t+\n1` are the same formula, and a sign may sit next to or away from the
+digits it signs (`+ 2n + 1` is `+2n+1`). The coefficient and the offset are
+parsed as strictly signed integers (`parse_b_integer`): an empty coefficient
+or a bare sign means `1`, and anything that is not a signed integer (`1.5n`,
+`xn`, `n++1`, `1+1`, `++1`) makes the formula **invalid**, so it matches
+nothing — as an invalid selector must — instead of falling back to `a = 1`
+or `b = 0` (both silent-default bugs found while fixing this one, both dead
+now). `:nth-of-type()` is fixed by the same change.
+
+**How verified.** The finding-35 repro now paints items 1 and 3 red and item
+2 dark:
+`printf '<ul><li>a</li><li>b</li><li>c</li></ul><style>li:nth-child(2n + 1){color:rgb(255,0,0)}</style>' > /tmp/nth.html && ./build/litebird /tmp/nth.html --dump-paint`.
+`make test` passes 133 suites including the new `nth_child_formula_parsing`
+(the sign-space matrix `2n + 1`, `2n+ 1`, `2n +1`, tab/newline/FF/CR between
+tokens, `2N+1`, `+ 2n + 1`, plus `odd`/`even`/exact/`0n+2`/negative steps,
+and an invalid list that must match nothing and never crash). The benchmark
+keeps its glued `+1` so it still measures the trimming cost, untouched.
+`make bench-css` passes 20/20 with dumps identical to the compact pages;
+`make conformance` is 1781/1792, `make dom-conformance` is 629/629,
+`make js-conformance` is 840/845 and `make url-conformance` is 1188/1188 —
+the corpora are unchanged.
+
+**What is still approximate.** The whitespace set is the five code points
+above, not the CSS whitespace production in general (finding 35 documents
+the same limit in the trim path); an empty token span such as `:nth-child()`
+or a comment inside the formula (`2n/*x*/+1`) matches nothing, as an invalid
+argument does. The grammar covered is the `<an+b>` subset of the micro-syntax
+(`odd`, `even`, an optional signed coefficient, `n`, an optional signed
+offset, a plain integer, and arbitrary whitespace between the tokens); it is
+deliberately not a general CSS tokenizer. A sign separated from its
+coefficient by whitespace (e.g. `- 2n + 1`) is accepted, which token-boundary
+purists may call generous; no valid formula is rejected.
+
+---
+
+## 40. ✅ Attribute-list front removal was quadratic
 
 **The hole.** `AttributeList` kept the attributes in a `std::vector` and,
 once a list was long enough to index, kept a parallel vector of the numbers
@@ -2188,16 +2236,16 @@ before and 51 ms after; the back loop stayed in the tens of milliseconds.
 The checked-in guard is `make bench-attributes`: six cases, three
 repetitions, expected checksums, 3,000 ms whole-process limit.
 
-**How verified.** `make test` passes 134 suites, including
+**How verified.** `make test` passes 135 suites, including
 `attribute_list_end_removals_keep_order_and_index` and
 `attribute_list_front_removal_is_linear_in_practice`. `make bench-attributes`
 passes 6 cases with 0 failures. The release run kept html5lib 1781/1792, JS
 840/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192;
 diff-trees/diff-xml have 0 differing; deep has 1332 runs/0 failed (slowest
-24.0 s); bench-css has 20 padded runs/0 failures; security-fetch has 3
+25.0 s); bench-css has 20 padded runs/0 failures; security-fetch has 3
 checks/0 failures; diff-strings is at the 95-difference ceiling. A generated
 out-of-corpus probe run through `tools/conformance/compare_with_jsdom.py`
-printed `4 lines, 4 the same` before and after. `make tsan` passed (JsString model/thread under ThreadSanitizer and under ASan+UBSan). `make asan` reported no sanitizer finding: 134/134 suites, JS 839/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192; ASan diff-xml 1000 documents/0 differ and round trip 1000/1000; fuzz 400 parser mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep 882 runs/0 failed (slowest 3.9 s).
+printed `4 lines, 4 the same` before and after. `make tsan` passed (JsString model/thread under ThreadSanitizer and under ASan+UBSan). `make asan` reported no sanitizer finding: 135/135 suites, JS 839/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192; ASan diff-xml 1000 documents/0 differ and round trip 1000/1000; fuzz 400 parser mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep 882 runs/0 failed (slowest 4.3 s).
 
 **What is still open.** This fixes end removals, not arbitrary middle
 removals: a middle erase still moves the vector tail. The HTML tokenizer's

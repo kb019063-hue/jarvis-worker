@@ -3196,6 +3196,9 @@ whose pull request named them, was merged.
 | Classes compiled to ES5 | Three programs in the corpus: Babel 7's helpers, Babel's newer ones (`_callSuper`), TypeScript's `__extends`. `main` stops at `Cannot redefine property: prototype` in the first two and at `call is not a function` in the third |
 | A page that is not in the corpus (`tools/conformance/compare_with_jsdom.py`) | `tests/dom-conformance/open/compiled-custom-elements.js`, custom elements compiled by Babel: 4 of 9 lines as jsdom prints them (1 on `main`). The other five are section 9 |
 | html5lib, XML, URL, `make diff-trees`, `make diff-xml` | 1781 / 1792, 1702 / 1702, 1188 / 1188, 0 of 6,000 trees and 0 of 4,000 documents differ: as on `main` |
+| `make deep` | `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])` |
+| `make asan` (ASan + UBSan) | 137 / 137; JavaScript 906 / 921 (one case of deep recursion needs more stack than a sanitizer build's frames leave, as before); DOM 640 / 640; URL 1188 / 1188; XML 1702 / 1702; web-platform-tests 4658 / 5192; 1,000 generated XML documents and 1,000 round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either sanitizer |
+| Two pages alive at once, one destroyed and collected while the other runs on | The chain questions get the same answers in each throughout, and the cell count comes back to where it started: a block of the last new unit suite, and the same sequence as a side harness in the sanitizer build, with no report |
 
 **What test262 found.** The corpus here is recorded from Node and was
 written with the change; test262 was written by neither. It was run in the

@@ -2273,3 +2273,12 @@ tree, in the sandbox.
   `make diff-strings` 95 of 50,580 results differ, `make bench`, `make
   bench-css` 20 runs and 0 failures, `make security-fetch` 3 checks and 0
   failures: all as on `main`.
+- `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])`.
+- `make asan`: 137 of 137 suites; JavaScript 906 of 921 (the one more is a
+  case of deep recursion that needs more stack than a sanitizer build's
+  frames leave, as before); DOM 640 of 640; URL 1188 of 1188; XML 1702 of
+  1702; web-platform-tests 4658 of 5192; 1,000 generated documents and 1,000
+  round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs
+  … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over
+  315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
+  sanitizer. It takes 19 minutes here.

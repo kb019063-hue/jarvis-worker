@@ -11306,6 +11306,550 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     EventLoop::default_loop().tick();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 43: new.target, and what a constructor makes (finding 49)
+// ---------------------------------------------------------------------------
+
+TEST(js_new_target_is_the_function_new_was_applied_to) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // Until Phase 43 `new.target` was the function that was running: a
+    // parent's constructor saw itself, never the class `new` was applied to.
+    js.eval_ast(R"(
+        var seen = [];
+        class Shape {
+            constructor() {
+                if (new.target === Shape) throw new TypeError('Shape is abstract');
+                seen.push('Shape:' + new.target.name);
+            }
+        }
+        class Circle extends Shape { constructor() { super(); seen.push('Circle:' + new.target.name); } }
+        class Dot extends Circle {}
+        function attempt(fn) { try { return String(fn()); } catch (e) { return e.name + ': ' + e.message; } }
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+    )");
+    assert(text("new Dot(); new Circle(); seen.join(' ')") ==
+           "Shape:Dot Circle:Dot Shape:Circle Circle:Circle");
+    assert(text("attempt(function () { new Shape(); return 'made'; })") ==
+           "TypeError: Shape is abstract");
+
+    // Reflect.construct names it, for a function and for a class, and the
+    // object has the prototype of the function that was named.
+    js.eval_ast(R"(
+        function F() { this.target = new.target; this.arrow = () => new.target; }
+        function G() {}
+        G.prototype.tag = 'G';
+        class K { constructor() { this.k = new.target.name; } }
+        class L extends K { constructor() { super(); this.l = new.target.name; } }
+        class Other {}
+        var o = Reflect.construct(F, [], G), p = Reflect.construct(L, [], Other);
+    )");
+    assert(text("[o.target === G, o.arrow() === G, o.tag, o instanceof G, o instanceof F].join()") ==
+           "true,true,G,true,false");
+    assert(text("[p.k, p.l, p instanceof Other, p instanceof L].join()") ==
+           "Other,Other,true,false");
+    assert(text("[new F().target === F, Reflect.construct(F, []).target === F, Reflect.construct(F, [], F).target === "
+                "F].join()") ==
+           "true,true,true");
+
+    // Undefined wherever the function was not entered with `new`.
+    assert(text("function probe() { return new.target === undefined; } [probe(), probe.call({}), probe.apply(null, "
+                "[]), Reflect.apply(probe, null, []), [0].map(function () { return new.target === undefined; })[0], "
+                "({ m() { return new.target === undefined; } }).m()].join()") ==
+           "true,true,true,true,true,true");
+
+    // A function inside a constructor has one of its own, and the
+    // constructor's is not changed by what it constructs on the way.
+    assert(text("function Outer() { function inner() { return new.target; } this.called = inner() === undefined; "
+                "this.made = new inner() instanceof inner; new K(); Reflect.construct(F, [], G); this.mine = "
+                "new.target === Outer; } var out = new Outer(); [out.called, out.made, out.mine].join()") ==
+           "true,false,true");
+
+    // In a parameter default, and in a constructor that makes more of itself.
+    assert(text("function D(a = new.target) { this.a = a; } [new D().a === D, Reflect.construct(D, [], G).a === "
+                "G].join()") ==
+           "true,true");
+    assert(text("var trail = []; class N { constructor(d) { trail.push(d + new.target.name); if (d < 2) new (d ? M : "
+                "N)(d + 1); trail.push(d + new.target.name); } } class M extends N {} new N(0); trail.join(' ')") ==
+           "0N 1N 2M 2M 1N 0N");
+
+    // A bound function constructs its target: new.target is the target, or
+    // what Reflect.construct names. What the target returns comes back as it is
+    // (until Phase 43 it was given the prototype of new.target).
+    js.eval_ast(R"(
+        var B = F.bind({ ignored: true });
+        var shared = { tag: 'shared' };
+        function Returns() { return shared; }
+    )");
+    assert(text("[new B().target === F, 'ignored' in new B(), Reflect.construct(B, [], G).target === G, "
+                "Reflect.construct(B, [], G) instanceof G].join()") ==
+           "true,false,true,true");
+    assert(text("var r = Reflect.construct(Returns.bind(null), [], G); [r === shared, Object.getPrototypeOf(r) === "
+                "Object.prototype].join()") ==
+           "true,true");
+
+    // A class that extends a bound function: `this` is the object the target
+    // was given, not a copy of it.
+    assert(text("var given; function T(x) { given = this; this.x = x; this.nt = new.target.name; } var BT = "
+                "T.bind(null, 7); BT.prototype = T.prototype; class DT extends BT { constructor() { super(); this.own "
+                "= 1; } } var dt = new DT(); [given === dt, dt.x, dt.own, dt.nt, dt instanceof DT].join()") ==
+           "true,7,1,DT,true");
+
+    // A built-in with another function as new.target: its own kind of object,
+    // with the other prototype. Without an object for a prototype it keeps its own.
+    assert(text("function S() {} S.prototype = Object.create(Array.prototype); var a = Reflect.construct(Array, [3], "
+                "S); [a instanceof S, Array.isArray(a), a.length].join()") ==
+           "true,true,3");
+    assert(text("var e = Reflect.construct(Error, ['boom'], G), m = Reflect.construct(Map, [], G); "
+                "Map.prototype.set.call(m, 1, 2); [e instanceof G, e.message, Object.prototype.toString.call(e), m "
+                "instanceof G, Map.prototype.get.call(m, 1)].join()") ==
+           "true,boom,[object Error],true,2");
+    assert(text("function NoProto() {} NoProto.prototype = null; [Object.getPrototypeOf(Reflect.construct(Array, [], "
+                "NoProto)) === Array.prototype, Object.getPrototypeOf(Reflect.construct(F, [], NoProto)) === "
+                "Object.prototype].join()") ==
+           "true,true");
+    assert(text("var fn = Reflect.construct(Function, ['a', 'return a * 2'], G); [typeof fn, fn(4), "
+                "Object.getPrototypeOf(fn) === G.prototype, fn.tag].join()") ==
+           "function,8,true,G");
+
+    // The prototype is read from new.target once. A script function is given
+    // its object before it runs; a built-in looks at its arguments first, so a
+    // Promise without an executor complains about that and reads nothing.
+    js.eval_ast(R"(
+        var reads = 0;
+        function counting() {
+            var nt = function () {}.bind(null);
+            Object.defineProperty(nt, 'prototype', { get: function () { reads++; return G.prototype; } });
+            return nt;
+        }
+        function Inside() { this.readsInside = reads; }
+    )");
+    assert(text("var i1 = Reflect.construct(Inside, [], counting()); [reads, i1.readsInside, i1.tag].join()") ==
+           "1,1,G");
+    assert(text("var a2 = Reflect.construct(Array, [2], counting()); [reads, a2.tag, a2.length].join()") ==
+           "2,G,2");
+    assert(text("var before = reads; [nameOf(function () { Reflect.construct(Promise, [], counting()); }), reads - "
+                "before].join()") ==
+           "TypeError,0");
+    assert(text("before = reads; var p2 = Reflect.construct(Promise, [function () {}], counting()); [reads - before, "
+                "p2.tag, p2 instanceof Promise].join()") ==
+           "1,G,false");
+
+    // What Reflect.construct refuses. Both functions have to be constructors,
+    // and that is found out before the list of arguments is looked at.
+    assert(text("[nameOf(function () { Reflect.construct(F, [], () => 1); }), nameOf(function () { "
+                "Reflect.construct(F, [], undefined); }), nameOf(function () { Reflect.construct(F, [], {}); }), "
+                "nameOf(function () { Reflect.construct(() => 1, []); }), nameOf(function () { Reflect.construct(F); "
+                "}), nameOf(function () { Reflect.construct(F, 5); }), nameOf(function () { Reflect.construct(() => "
+                "1, { get length() { throw new RangeError('read'); } }); }), nameOf(function () { "
+                "Reflect.construct(F, { get length() { throw new RangeError('read'); } }); }), nameOf(function () { "
+                "Reflect.construct(F, [], class {}); }), nameOf(function () { Reflect.construct(F, [], Array); "
+                "})].join()") ==
+           "TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,RangeError,no error,no error");
+
+    // The same through the engine's own calls. construct() takes new.target,
+    // and a native function is told the one that is not itself.
+    {
+        JsValue F = js.eval("F"), G = js.eval("G");
+        JsValue keep = js.eval("(function (name, value) { globalThis[name] = value; })");
+        auto remember = [&](const char* name, const JsValue& value) {
+            keep.call_with_this(JsValue::make_undefined(), {JsValue::make_string(name), value});
+        };
+        JsValue instance = JsValue::make_object();
+        F.construct({}, &instance, &G);
+        remember("viaConstruct", instance);
+        assert(text("viaConstruct.target === G && viaConstruct.arrow() === G") == "true");
+        JsValue plain = JsValue::make_object();
+        F.construct({}, &plain);
+        remember("viaPlain", plain);
+        assert(text("viaPlain.target === F") == "true");
+
+        bool was_construct = false, was_named = false;
+        JsValue named;
+        JsValue native = JsValue::make_native_function([&](const std::vector<JsValue>&) {
+            was_construct = JsValue::current_is_construct();
+            const JsValue* target = JsValue::current_new_target();
+            was_named = target != nullptr;
+            named = target ? *target : JsValue::make_undefined();
+            return JsValue::make_object();
+        });
+        JsValue built = js_construct(native, {}, &G);
+        assert(was_construct && was_named && named.identity() == G.identity());
+        remember("builtByNative", built);
+        assert(text("builtByNative.tag") == "G");       // its own object, given G.prototype afterwards
+        js_construct(native, {});
+        assert(was_construct && !was_named);            // new.target is the native itself: nothing to tell
+        native.call_with_this(JsValue::make_undefined(), {});
+        assert(!was_construct && !was_named);
+
+        // A native that asks for the object it is to construct on, as the
+        // constructor of a DOM interface does, is given one that has the
+        // prototype of new.target, made when it asks. Without a new.target,
+        // or with one that has no object for a prototype, there is none.
+        bool offered = false;
+        JsValue asking = JsValue::make_native_function([&](const std::vector<JsValue>&) {
+            const JsValue* derived = JsValue::current_derived_this();
+            offered = derived != nullptr;
+            if (!derived) return JsValue::make_object();
+            JsValue self = *derived;
+            self.set_property("byNative", JsValue::make_boolean(true));
+            return self;
+        });
+        JsValue on_offer = js_construct(asking, {}, &G);
+        assert(offered);
+        remember("onOffer", on_offer);
+        assert(text("[onOffer.tag, onOffer.byNative, Object.getPrototypeOf(onOffer) === G.prototype].join()") ==
+               "G,true,true");
+        js_construct(asking, {});
+        assert(!offered);
+        JsValue no_proto = js.eval("NoProto");
+        js_construct(asking, {}, &no_proto);
+        assert(!offered);
+    }
+}
+
+TEST(js_super_binds_this_to_what_the_parent_made) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // `super(...)` binds `this` to what the parent made. Until Phase 43 that
+    // was always the object `new` had made beforehand, so an object the parent's
+    // constructor returned was lost: the child went on with the other one.
+    js.eval_ast(R"(
+        function attempt(fn) { try { return String(fn()); } catch (e) { return e.name; } }
+        var registry = [];
+        function Parent() { var o = { from: 'parent' }; registry.push(o); return o; }
+        class Child extends Parent {
+            field = 7;
+            #secret = 42;
+            constructor() { var s = super(); this.same = s === this; this.own = 2; }
+            static secretOf(o) { return o.#secret; }
+        }
+        var c = new Child();
+    )");
+    assert(text("[c === registry[0], c.from, c.field, c.own, c.same, c instanceof Child, Child.secretOf(c)].join()") ==
+           "true,parent,7,2,true,false,42");
+
+    // Through two levels of classes, and the value of `super(...)` is `this`
+    // whatever the parent is.
+    assert(text("var made = { tag: 'made' }; class A1 { constructor() { this.lost = true; return made; } } class B1 "
+                "extends A1 { constructor() { super(); this.b = 1; } } class C1 extends B1 { constructor() { super(); "
+                "this.c = 2; } } var c1 = new C1(); [c1 === made, c1.b, c1.c, 'lost' in c1, c1 instanceof C1].join()") ==
+           "true,1,2,false,false");
+    assert(text("class P0 { constructor() { this.a = 1; } } class S0 extends P0 { constructor() { var s = super(); "
+                "this.same = s === this; } } class M0 extends Map { constructor() { var s = super(); this.same = s "
+                "=== this; } } class E0 extends Error { constructor() { var s = super('m'); this.same = s === this; } "
+                "} [new S0().same, new M0().same, new E0().same, new M0() instanceof Map, new E0().message].join()") ==
+           "true,true,true,true,m");
+
+    // A function or an array can be what comes back; a primitive is ignored.
+    assert(text("function callable() { return 'called'; } class RF { constructor() { return callable; } } class SF "
+                "extends RF { extra = 1; } var sf = new SF(); [sf === callable, sf(), sf.extra].join()") ==
+           "true,called,1");
+    assert(text("class RA { constructor() { return [1, 2]; } } class SA extends RA { constructor() { super(); "
+                "this.push(3); } } var sa = new SA(); [Array.isArray(sa), sa.length, sa instanceof SA].join()") ==
+           "true,3,false");
+    assert(text("function RP() { this.p = 1; return 5; } class SP extends RP { constructor() { super(); this.c = 2; } "
+                "} var sp = new SP(); [sp.p, sp.c, sp instanceof SP, sp instanceof RP].join()") ==
+           "1,2,true,true");
+
+    // The parent that hands out one object: each `new` of the child runs the
+    // child's constructor on it again.
+    assert(text("var one = null, runs = 0; class Registry { constructor() { if (one) return one; one = this; "
+                "this.items = []; } } class AppRegistry extends Registry { constructor(n) { super(); runs++; "
+                "this.items.push(n); } } var r1 = new AppRegistry('a'), r2 = new AppRegistry('b'); [r1 === r2, "
+                "r1.items.join('+'), runs, r1 instanceof AppRegistry].join()") ==
+           "true,a+b,2,true");
+
+    // `this` is bound once. A second `super(...)` runs the parent again and
+    // then throws; a constructor that returns without one having finished throws;
+    // and a derived constructor may return an object or nothing.
+    assert(text("var ran = 0; class Twice0 { constructor() { ran++; } } class Twice extends Twice0 { constructor() { "
+                "super(); try { super(); this.second = 'no error'; } catch (e) { this.second = e.name; } } } var tw = "
+                "new Twice(); [ran, tw.second, tw instanceof Twice].join()") ==
+           "2,ReferenceError,true");
+    assert(text("class Base {} function returning(value) { class X extends Base { constructor() { super(); return "
+                "value; } } try { var x = new X(); return x instanceof X ? 'instance' : typeof x; } catch (e) { "
+                "return e.name; } } [returning(undefined), returning(null), returning(1), returning('s'), "
+                "returning(false), returning({}), returning(function () {})].join()") ==
+           "instance,TypeError,TypeError,TypeError,TypeError,object,function");
+    assert(text("class Never extends Base { constructor() {} } class Explicit extends Base { constructor() { return { "
+                "other: true }; } } class Above extends Never { constructor() { super(); } } [attempt(function () { "
+                "new Never(); return 'made'; }), attempt(function () { return new Explicit().other; }), "
+                "attempt(function () { Reflect.construct(Never, []); return 'made'; }), attempt(function () { new "
+                "Above(); return 'made'; })].join()") ==
+           "ReferenceError,true,ReferenceError,ReferenceError");
+    assert(text("class Fails { constructor() { throw new RangeError('no'); } } class Swallows extends Fails { "
+                "constructor() { try { super(); } catch (e) {} } } class Recovers extends Fails { constructor() { try "
+                "{ super(); } catch (e) { return { recovered: e.name }; } } } [attempt(function () { new Swallows(); "
+                "return 'made'; }), new Recovers().recovered].join()") ==
+           "ReferenceError,RangeError");
+    assert(text("var tries = 0; class Flaky { constructor() { if (++tries < 2) throw new Error('first'); this.ok = "
+                "true; } } class Retries extends Flaky { constructor() { try { super(); } catch (e) { super(); } "
+                "this.after = tries; } } var rt = new Retries(); [rt.ok, rt.after, rt instanceof Retries].join()") ==
+           "true,2,true");
+
+    // Through an arrow function it is the constructor's `this` that is bound,
+    // also after the constructor has returned something else.
+    assert(text("var later; class AP { constructor(v) { this.a = v; } } class AB extends AP { constructor() { var "
+                "init = (v) => super(v); var made = init(5); this.same = made === this; } } class AC extends AP { "
+                "constructor() { later = () => super(9); return { early: true }; } } var ab = new AB(), ac = new "
+                "AC(), lateMade = later(); [ab.a, ab.same, ac.early, lateMade.a, lateMade instanceof AC, "
+                "attempt(function () { later(); return 'twice'; })].join()") ==
+           "5,true,true,9,true,ReferenceError");
+
+    // A class that extends null has no parent to call.
+    assert(text("[attempt(function () { class Z extends null {} new Z(); return 'made'; }), attempt(function () { "
+                "class Z extends null { constructor() {} } new Z(); return 'made'; }), attempt(function () { class Z "
+                "extends null { constructor() { return Object.create(new.target.prototype); } hi() { return 'hi'; } } "
+                "return new Z().hi(); })].join()") ==
+           "TypeError,ReferenceError,hi");
+
+    // What compilers emit. Babel: `Reflect.construct(Super, arguments,
+    // NewTarget)` and the result returned; TypeScript: `_super.call(this) || this`.
+    js.eval_ast(R"(
+        function _inherits(subClass, superClass) {
+            subClass.prototype = Object.create(superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+            Object.setPrototypeOf(subClass, superClass);
+        }
+        function _createSuper(Derived) {
+            return function () {
+                var Super = Object.getPrototypeOf(Derived), NewTarget = Object.getPrototypeOf(this).constructor;
+                return Reflect.construct(Super, arguments, NewTarget);
+            };
+        }
+        var Animal = function Animal(name) { this.name = name; this.madeAs = new.target.name; };
+        var Dog = (function (_Animal) {
+            _inherits(Dog, _Animal);
+            var _super = _createSuper(Dog);
+            function Dog(name) { var _this = _super.call(this, name); _this.tricks = 0; return _this; }
+            return Dog;
+        })(Animal);
+        var Puppy = (function (_Dog) {
+            _inherits(Puppy, _Dog);
+            var _super = _createSuper(Puppy);
+            function Puppy() { var _this = _super.apply(this, arguments); _this.age = 0; return _this; }
+            return Puppy;
+        })(Dog);
+        var puppy = new Puppy('Rex');
+        var Cached = (function (_super) {
+            Object.setPrototypeOf(Cached, _super);
+            function Cached() { var _this = _super.call(this) || this; _this.fromStore = _this === Cached.store; return _this; }
+            Cached.store = { stored: true };
+            return Cached;
+        })(function () { return Cached.store; });
+    )");
+    assert(text("[puppy.name, puppy.madeAs, puppy.age, puppy.tricks, puppy instanceof Puppy, puppy instanceof Dog, "
+                "puppy instanceof Animal, new Dog('x').madeAs].join()") ==
+           "Rex,Puppy,0,0,true,true,true,Dog");
+    assert(text("var cached = new Cached(); [cached.fromStore, cached.stored].join()") ==
+           "true,true");
+}
+
+TEST(js_new_target_and_returned_objects_are_collected) {
+    using namespace litebird;
+
+    // new.target is held by the scope of the constructor it was bound in and
+    // by nothing else. When the objects go, so does everything a construction
+    // made on the way: the object `new` made and a parent replaced, the one
+    // a built-in was offered and did not use.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function Parent() { this.handler = () => new.target; }
+            function Target() {}
+            class Child extends Parent { constructor() { super(); this.self = () => this; this.nt = new.target; } }
+            class Returns extends (function () { return { made: 1 }; }) { field = [1, 2, 3]; }
+            class Listy extends Array { constructor() { super(); this.nt = new.target; } }
+            function round() {
+                for (var i = 0; i < 300; i++) {
+                    new Child(); Reflect.construct(Parent, [], Target); Reflect.construct(Child, [], Target);
+                    new Returns(); new Listy(); Reflect.construct(Array, [2], Target); Reflect.construct(Error, ['m'], Target);
+                }
+            }
+            var keep = new Child();
+            round();
+        )");
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        const size_t settled = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("round(); round();");
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells <= settled + 8);
+        // What was kept still answers, after the collections.
+        assert(js.eval("keep.handler() === Child && keep.nt === Child && keep.self() === keep").to_string() == "true");
+    }
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+}
+
+TEST(js_compiled_custom_elements_are_constructed) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // A custom element as code written for ES5 makes it: the constructor is a
+    // function, and the element comes from `Reflect.construct(HTMLElement, [],
+    // new.target)`. Until Phase 43 that was "Illegal constructor": HTMLElement
+    // was run without the object it builds on, which only `super()` handed it.
+    js.eval_ast(R"(
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+        function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+        Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+        Object.setPrototypeOf(Old, HTMLElement);
+        customElements.define('x-old', Old);
+        var a = document.createElement('x-old'), b = new Old();
+    )");
+    assert(text("[a instanceof Old, a instanceof HTMLElement, a.made, a.localName, a.constructor === Old, "
+                "b.localName, b.made, a !== b, b.ownerDocument === document].join()") ==
+           "true,true,true,x-old,true,x-old,true,true,true");
+
+    // A class on top of it: `super()` returns the element, which is `this`
+    // from there on, and the class's fields go on it.
+    js.eval_ast(R"(
+        class Modern extends Old {
+            label = 'field';
+            constructor() { var s = super(); this.same = s === this; this.kind = new.target.name; }
+        }
+        customElements.define('x-modern', Modern);
+        var m = document.createElement('x-modern');
+    )");
+    assert(text("[m instanceof Modern, m instanceof Old, m.made, m.same, m.kind, m.label, m.localName, new "
+                "Modern().kind].join()") ==
+           "true,true,true,true,Modern,field,x-modern,Modern");
+
+    // What Babel emits: the interface wrapped in a function that constructs
+    // it with the class as new.target, and the class constructing the wrapper.
+    js.eval_ast(R"(
+        function _wrapNativeSuper(Class) {
+            function Wrapper() { return Reflect.construct(Class, arguments, Object.getPrototypeOf(this).constructor); }
+            Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, writable: true, configurable: true } });
+            return Object.setPrototypeOf(Wrapper, Class);
+        }
+        var Greeter = (function (_HTMLElement) {
+            function Greeter() {
+                var _this = Reflect.construct(Object.getPrototypeOf(Greeter), arguments, Object.getPrototypeOf(this).constructor);
+                _this.greeting = 'hello';
+                return _this;
+            }
+            Greeter.prototype = Object.create(_HTMLElement.prototype, { constructor: { value: Greeter, writable: true, configurable: true } });
+            Object.setPrototypeOf(Greeter, _HTMLElement);
+            Greeter.prototype.connectedCallback = function () { this.textContent = this.greeting + ' ' + this.getAttribute('name'); };
+            return Greeter;
+        })(_wrapNativeSuper(HTMLElement));
+        customElements.define('x-greeter', Greeter);
+        var g = document.createElement('x-greeter');
+        g.setAttribute('name', 'you');
+        document.getElementById('host').appendChild(g);
+    )");
+    assert(text("[g instanceof Greeter, g instanceof HTMLElement, g.greeting, g.textContent, new Greeter().localName, "
+                "g.constructor === Greeter].join()") ==
+           "true,true,hello,hello you,x-greeter,true");
+
+    // new.target in the parent class of a custom element is the class that
+    // was defined, for createElement and for `new`.
+    assert(text("var seen = []; class Widget extends HTMLElement { constructor() { super(); "
+                "seen.push(new.target.name); } } class Button extends Widget {} customElements.define('x-button', "
+                "Button); document.createElement('x-button'); new Button(); seen.join()") ==
+           "Button,Button");
+
+    // The other interfaces: an event and an event target with a new.target.
+    js.eval_ast(R"(
+        class Sub extends Event {}
+        var e = Reflect.construct(Event, ['ping', { bubbles: true }], Sub);
+        function Bus() {}
+        Bus.prototype = Object.create(EventTarget.prototype);
+        var bus = Reflect.construct(EventTarget, [], Bus), heard = [];
+        bus.addEventListener('ping', function (ev) { heard.push(ev instanceof Sub, ev.target === bus); });
+        bus.dispatchEvent(e);
+        class AppEvent extends Event { constructor(type) { super(type); this.kind = new.target.name; } }
+        class Saved extends AppEvent {}
+    )");
+    assert(text("[e instanceof Sub, e instanceof Event, e.type, e.bubbles, Object.getPrototypeOf(e) === "
+                "Sub.prototype, bus instanceof Bus, bus instanceof EventTarget, heard.join()].join()") ==
+           "true,true,ping,true,true,true,true,true,true");
+    assert(text("[new Saved('s').kind, Reflect.construct(AppEvent, ['y'], Saved).kind, new AppEvent('x').kind, "
+                "Reflect.construct(AppEvent, ['y'], Saved) instanceof Saved].join()") ==
+           "Saved,Saved,AppEvent,true");
+
+    // What is refused stays refused: a class nothing was defined for, the
+    // wrong interface, no new.target at all, a call.
+    assert(text("function Plain() {} Plain.prototype = Object.create(HTMLElement.prototype); [nameOf(function () { "
+                "Reflect.construct(HTMLElement, [], Plain); }), nameOf(function () { "
+                "Reflect.construct(HTMLDivElement, [], Old); }), nameOf(function () { Reflect.construct(HTMLElement, "
+                "[]); }), nameOf(function () { Reflect.construct(HTMLElement, [], Object); }), nameOf(function () { "
+                "HTMLElement.call(document.createElement('div')); }), nameOf(function () { Reflect.construct(Old, [], "
+                "Old); })].join()") ==
+           "TypeError,TypeError,TypeError,TypeError,TypeError,no error");
+
+    // The prototype comes from new.target, read once, when the interface
+    // makes its object; with nothing usable there the interface's own is
+    // used. Both are Web IDL's answers and not jsdom's, which reads the
+    // property twice and, finding no object, makes something that is not an
+    // event (tests/dom-conformance/README.md).
+    assert(text("var reads = 0, nt = function () {}.bind(null); Object.defineProperty(nt, 'prototype', { get: "
+                "function () { reads++; return Sub.prototype; } }); var once = Reflect.construct(Event, ['z'], nt); "
+                "[reads, once instanceof Sub, once.type].join()") ==
+           "1,true,z");
+    assert(text("function NoProto() {} NoProto.prototype = null; var np = Reflect.construct(Event, ['x'], NoProto); "
+                "[Object.getPrototypeOf(np) === Event.prototype, np.type, np instanceof Event].join()") ==
+           "true,x,true");
+}
+
+TEST(js_a_page_with_compiled_custom_elements_is_collected) {
+    using namespace litebird;
+
+    // The object an interface was offered, and the element it became, go
+    // with the page like everything else of its realm.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    for (int round = 0; round < 3; ++round) {
+        {
+            auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'></div></body>");
+            JsInterpreter js(doc);
+            js.eval_ast(R"(
+                function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+                Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+                Object.setPrototypeOf(Old, HTMLElement);
+                customElements.define('x-old', Old);
+                class Modern extends Old { constructor() { super(); this.kind = new.target.name; this.self = () => this; } }
+                customElements.define('x-modern', Modern);
+                var host = document.getElementById('host'), kinds = [];
+                for (var i = 0; i < 50; i++) {
+                    var el = i % 2 ? document.createElement('x-modern') : new Old();
+                    kinds.push(el.kind || 'old');
+                    if (i % 5 === 0) host.appendChild(el);
+                }
+                class Sub extends Event {}
+                var e = Reflect.construct(Event, ['x'], Sub);
+            )");
+            assert(js.eval("[host.children.length, kinds[0], kinds[1], e instanceof Sub].join()").to_string() ==
+                   "10,old,Modern,true");
+            Heap::default_heap().collect_garbage();
+            assert(js.eval("host.lastChild instanceof Old && host.children[1].self() === host.children[1]").to_string() ==
+                   "true");
+        }
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -11486,6 +12030,13 @@ int main() {
     RUN_TEST(worker_options_module_policy_and_global_scope);
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
+
+    // Phase 43: new.target, and what a constructor makes.
+    RUN_TEST(js_new_target_is_the_function_new_was_applied_to);
+    RUN_TEST(js_super_binds_this_to_what_the_parent_made);
+    RUN_TEST(js_new_target_and_returned_objects_are_collected);
+    RUN_TEST(js_compiled_custom_elements_are_constructed);
+    RUN_TEST(js_a_page_with_compiled_custom_elements_is_collected);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -34,7 +34,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 135 suites, all passing | `make test` |
+| Engine unit tests | 137 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -46,13 +46,14 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 135 engine suites
+make test            # 137 engine suites
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
 make bench           # string-heavy scripts timed against Node; fails if one is wrong or takes over 3 s
 make bench-css       # CSS whitespace runs: same paint as compact pages, each under 3 s
 make bench-attributes # attribute-list end removals: expected DOM checksums, each under 3 s
+make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
@@ -637,7 +638,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 135 engine test suites
+# Run the 137 engine test suites
 make test
 ```
 
@@ -702,14 +703,14 @@ make test
 make test
 ```
 
-Output (135 suites; the first and last lines shown):
+Output (137 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 135 engine test suites passed successfully!
+All 137 engine test suites passed successfully!
 ```
 
 ```bash
@@ -755,8 +756,29 @@ attributes (front, back, alternating ends, front-half update/reinsert,
 namespaces, short-list churn), checks their checksums, and fails over 3 s.
 On the verification machine the front case went from about 6.3 s to 0.09 s
 whole-process. This is a cost fix, not the open `Attr`/namespace representation
-or tokenizer repeated-name work. Details and repro are in `ARCHITECTURE.md`,
+or named-property work; the tokenizer repeated-name cost is fixed as of
+Phase 39. Details and repro are in `ARCHITECTURE.md`,
 Phase 35, and `AUDIT.md`, finding 40.
+
+
+### The tokenizer's repeated attribute names (Phase 39)
+
+The HTML tokenizer drops a repeated attribute name — the first one wins — by
+comparing each name with every attribute it has already accepted. That is the
+square of the count: one element with 50,000 attributes spent about 2.9 s in
+the parser, and an end tag with that many paid the same. A tag with 32 or more
+accepted attributes now keeps a hash set of their names; shorter tags keep the
+scan, which is cheaper than building a table. The set holds views of the names
+inside the token, so no name is stored twice, and it is rebuilt when the
+attribute vector grows under it. `make bench-tokenizer-attributes` parses seven
+page shapes at 50,000 attribute occurrences (distinct names, every name twice,
+uppercase repeats, long names, the four value spellings, many small tags, an
+end tag), compares each tree dump with the tree the markup must produce, and
+fails over 1 s. On the verification machine the wide cases went from 3.5 s to
+0.09 s and the many-small-tags case did not change. First-wins, ASCII case
+folding, order and every value spelling are unchanged; this is a cost fix, not
+a parser conformance change. Details and repro are in `ARCHITECTURE.md`,
+Phase 39, and `AUDIT.md`, finding 44.
 
 
 ### Page resource origin (Phase 33)

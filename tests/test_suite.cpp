@@ -10,6 +10,7 @@
 #include "litebird/net/DataUrl.hpp"
 #include <fstream>
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/html/HtmlTokenizer.hpp"
 #include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
@@ -59,6 +60,7 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <cstdio>
 #include <algorithm>
 #include <functional>
+#include <set>
 #include <sstream>
 #include <vector>
 #include <cassert>
@@ -9262,6 +9264,270 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     assert(script_seconds < 10.0);
 }
 
+// --- Phase 39: the HTML tokenizer's repeated attribute names -----------------
+
+namespace {
+
+using WrittenAttributes = std::vector<std::pair<std::string, std::string>>;
+
+/// The first tag token of `markup`, or the EOF token when the tokenizer
+/// dropped the tag (EOF inside it).
+litebird::HtmlToken first_tag_token(const std::string& markup) {
+    litebird::HtmlTokenizer tokenizer(markup);
+    while (tokenizer.has_more()) {
+        litebird::HtmlToken token = tokenizer.next_token();
+        if (token.type == litebird::HtmlTokenType::StartTag ||
+            token.type == litebird::HtmlTokenType::EndTag) return token;
+        if (token.type == litebird::HtmlTokenType::EndOfFile) break;
+    }
+    return litebird::HtmlToken::make_eof();
+}
+
+std::string ascii_lower_name(const std::string& name) {
+    std::string out = name;
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+}
+
+std::string ascii_upper_name(const std::string& name) {
+    std::string out = name;
+    for (char& c : out) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    }
+    return out;
+}
+
+/// What the standard says a tag's attributes are: in the order written, the
+/// first of each ASCII-lower-cased name kept with its value, every later one
+/// dropped. A set, not the tokenizer's own scan or index.
+WrittenAttributes first_attribute_wins(const WrittenAttributes& written) {
+    WrittenAttributes kept;
+    std::set<std::string> names;
+    for (const auto& [name, value] : written) {
+        std::string lowered = ascii_lower_name(name);
+        if (names.insert(lowered).second) kept.emplace_back(std::move(lowered), value);
+    }
+    return kept;
+}
+
+/// One attribute as markup. `form` 3 is valueless, so its value must be "".
+std::string write_attribute(const std::string& name, const std::string& value, unsigned form) {
+    switch (form % 4) {
+        case 0: return name + "=\"" + value + "\"";
+        case 1: return name + "='" + value + "'";
+        case 2: return name + "=" + value;
+        default: return name;
+    }
+}
+
+} // namespace
+
+TEST(tokenizer_repeated_attribute_names_keep_the_first) {
+    using namespace litebird;
+
+    // Every spelling of a duplicate: the first one wins, the name is
+    // lower-cased before the comparison, and the order is the order of the
+    // first occurrences. These tags are all below the size where the
+    // tokenizer builds an index, so this is the short-tag path.
+    struct Case { const char* markup; WrittenAttributes expected; bool self_closing; };
+    const Case cases[] = {
+        {"<div a=1 A=2 a=3 b=4 B=5>", {{"a", "1"}, {"b", "4"}}, false},
+        {"<div a=\"first\" a a='third' a=fourth>", {{"a", "first"}}, false},
+        {"<div a a=\"later\">", {{"a", ""}}, false},
+        {"<div TITLE=\"x\" title=\"y\">", {{"title", "x"}}, false},
+        // "=" starts a name, and after a name a "=" still opens that name's
+        // value: <div bare =q=1> is one attribute "bare" with the value "q=1".
+        {"<div =x=y =X=z =a =a=\"later\">", {{"=x", "y"}, {"=a", "a=\"later\""}}, false},
+        {"<div bare =q=1>", {{"bare", "q=1"}}, false},
+        {"<div bare / =q=1>", {{"bare", ""}, {"=q", "1"}}, false},
+        {"<div a=\"&amp;&quot;&#65;\" a=\"&lt;\">", {{"a", "&\"A"}}, false},
+        // Case folding is ASCII-only: Ä and ä are two different names.
+        {"<div \xC3\x84=1 \xC3\xA4=2 \xC3\x84=3>", {{"\xC3\x84", "1"}, {"\xC3\xA4", "2"}}, false},
+        {"<div a-b=1 A-B=2 a:b=3 A:B=4>", {{"a-b", "1"}, {"a:b", "3"}}, false},
+        {"<div a=1 / a=2 />", {{"a", "1"}}, true},
+        {"<div a=\"x>y\" a=z>", {{"a", "x>y"}}, false},
+        {"<div a=\"x\"  a='y'\tb='z'\nB='w'>", {{"a", "x"}, {"b", "z"}}, false},
+        {"<input disabled DISABLED type=text TYPE=hidden>", {{"disabled", ""}, {"type", "text"}}, false},
+        {"<div a=\"\" a=\"full\">", {{"a", ""}}, false},
+        {"<div a=1 b=2>", {{"a", "1"}, {"b", "2"}}, false},
+    };
+    for (const Case& one : cases) {
+        const HtmlToken token = first_tag_token(one.markup);
+        assert(token.type == HtmlTokenType::StartTag);
+        assert(token.attributes == one.expected);
+        assert(token.self_closing == one.self_closing);
+    }
+
+    // An end tag's attributes are tokenized the same way (the tree builder
+    // is what drops them), and EOF inside a tag still drops the whole token.
+    const HtmlToken end = first_tag_token("</div a=1 A=2 b=3>");
+    assert(end.type == HtmlTokenType::EndTag);
+    assert(end.name == "div");
+    assert((end.attributes == WrittenAttributes{{"a", "1"}, {"b", "3"}}));
+    assert(first_tag_token("<div a=1 a=2").type == HtmlTokenType::EndOfFile);
+    assert(first_tag_token("<div a=1 a=2 ").type == HtmlTokenType::EndOfFile);
+
+    // Around the size where the index is built, and around every growth of
+    // the attribute vector after it: a duplicate of the first and of the
+    // last name, in the other case, must still be dropped.
+    for (int n : {1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257}) {
+        WrittenAttributes written;
+        std::string markup = "<div";
+        for (int i = 0; i < n; ++i) {
+            // Every third name is longer than std::string's own buffer, so
+            // the name's bytes move when the vector grows.
+            const std::string name = (i % 3 == 0)
+                ? "long-attribute-name-" + std::to_string(i) + "-" + std::string(48, 'x')
+                : "n" + std::to_string(i);
+            const unsigned form = static_cast<unsigned>(i);
+            const std::string value = (form % 4 == 3) ? "" : "v" + std::to_string(i);
+            written.emplace_back(name, value);
+            markup += " " + write_attribute(name, value, form);
+        }
+        const std::string first_name = written.front().first;
+        const std::string last_name = written.back().first;
+        written.emplace_back(first_name, "dup-first");
+        markup += " " + ascii_upper_name(first_name) + "=\"dup-first\"";
+        written.emplace_back(last_name, "dup-last");
+        markup += " " + ascii_upper_name(last_name) + "=\"dup-last\"";
+        markup += ">x</div>";
+        const HtmlToken token = first_tag_token(markup);
+        assert(token.type == HtmlTokenType::StartTag);
+        assert(token.attributes == first_attribute_wins(written));
+        assert(token.attributes.size() == static_cast<std::size_t>(n));
+    }
+
+    // Random tags against the model: names short and long, ASCII and not,
+    // plain and starting with '=', quoted, unquoted and valueless, with
+    // duplicates in both cases. The pool size moves the tag across the
+    // index threshold and across several vector growths.
+    for (unsigned round = 0; round < 60; ++round) {
+        std::mt19937 rng(20261114u + round);
+        const int pool_size = 1 + static_cast<int>(rng() % 300);
+        std::vector<std::string> pool;
+        for (int i = 0; i < pool_size; ++i) {
+            switch (i % 5) {
+                case 0: pool.push_back("a" + std::to_string(i)); break;
+                case 1: pool.push_back("data-very-long-attribute-" + std::to_string(i) + "-" + std::string(60, 'y')); break;
+                case 2: pool.push_back("ns:b" + std::to_string(i)); break;
+                case 3: pool.push_back("=eq" + std::to_string(i)); break;
+                default: pool.push_back((i % 2 ? "\xC3\x84" : "\xC3\xA4") + std::to_string(i)); break;
+            }
+        }
+        const bool end_tag = (round % 7 == 0);
+        WrittenAttributes written;
+        std::string markup = end_tag ? "</div" : "<div";
+        const int count = 1 + static_cast<int>(rng() % 400);
+        for (int k = 0; k < count; ++k) {
+            std::string name = pool[rng() % pool.size()];
+            // A valueless attribute followed by "=" takes what comes after
+            // it as its value (the after-attribute-name state), so a name
+            // that starts with "=" may not follow one.
+            if (!written.empty() && written.back().second.empty() && name.front() == '=') name[0] = 'e';
+            if (rng() % 2) name = ascii_upper_name(name);
+            const unsigned form = rng() % 4;
+            const std::string value = (form == 3) ? "" : "v" + std::to_string(k);
+            written.emplace_back(name, value);
+            markup += " " + write_attribute(name, value, form);
+        }
+        markup += ">";
+        const HtmlToken token = first_tag_token(markup);
+        assert(token.type == (end_tag ? HtmlTokenType::EndTag : HtmlTokenType::StartTag));
+        assert(token.attributes == first_attribute_wins(written));
+    }
+
+    // The same shapes through the parser and the DOM, which is where a page
+    // meets this: the element keeps the first value and the first position.
+    auto document = HtmlParser::parse("<!DOCTYPE html><body><p id=p b=2 A=1 a=3 B=4 c>x</p></body>");
+    const std::shared_ptr<Element> p = document->get_element_by_id("p");
+    assert(p != nullptr);
+    assert(p->get_attribute("a") == "1");
+    assert(p->get_attribute("b") == "2");
+    assert(p->get_attribute("c") == "");
+    assert(p->attributes().size() == 4);
+    assert(p->outer_html() == "<p id=\"p\" b=\"2\" a=\"1\" c=\"\">x</p>");
+}
+
+TEST(tokenizer_duplicate_attribute_check_is_linear) {
+    using namespace litebird;
+
+    // One element with 50,000 attributes took about 2.9 s in the parser when
+    // every name was compared with every accepted attribute: the square of
+    // the count. These are generous wall-clock regression guards, not
+    // microbenchmarks; the reproducible comparison against an older binary
+    // is tools/bench/bench_tokenizer_attributes.py / make
+    // bench-tokenizer-attributes.
+    constexpr int kWide = 50000;
+
+    std::string distinct = "<div";
+    for (int i = 0; i < kWide; ++i) distinct += " a" + std::to_string(i) + "=\"v" + std::to_string(i) + "\"";
+    distinct += ">x</div>";
+    auto start = std::chrono::steady_clock::now();
+    const HtmlToken wide = first_tag_token(distinct);
+    const double distinct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(wide.type == HtmlTokenType::StartTag);
+    assert(wide.attributes.size() == static_cast<std::size_t>(kWide));
+    for (int i = 0; i < kWide; ++i) {
+        assert(wide.attributes[static_cast<std::size_t>(i)].first == "a" + std::to_string(i));
+        assert(wide.attributes[static_cast<std::size_t>(i)].second == "v" + std::to_string(i));
+    }
+    assert(distinct_seconds < 2.0);
+
+    // Half of them repeats, in the other case and with names longer than
+    // std::string's buffer: the index must survive the vector growing under
+    // it, and must still drop the second value of every name.
+    std::string repeated = "<div";
+    WrittenAttributes written;
+    for (int i = 0; i < kWide; ++i) {
+        const std::string name = "attribute-" + std::to_string(i / 2) + "-" + std::string(40, 'n');
+        const bool second = (i % 2 != 0);
+        const std::string value = second ? "dup" + std::to_string(i) : "v" + std::to_string(i / 2);
+        written.emplace_back(second ? ascii_upper_name(name) : name, value);
+        repeated += " " + write_attribute(written.back().first, value, static_cast<unsigned>(i));
+    }
+    repeated += ">x</div>";
+    const WrittenAttributes expected = first_attribute_wins(written);
+    start = std::chrono::steady_clock::now();
+    const HtmlToken folded = first_tag_token(repeated);
+    const double repeated_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(folded.attributes == expected);
+    assert(folded.attributes.size() == static_cast<std::size_t>(kWide / 2));
+    assert(repeated_seconds < 2.0);
+
+    // An end tag pays the same check; the tree builder drops its attributes
+    // afterwards, so nothing but the tokenizer's time is left.
+    std::string end_markup = "</div";
+    for (int i = 0; i < kWide; ++i) end_markup += " a" + std::to_string(i) + "=v" + std::to_string(i);
+    end_markup += ">";
+    start = std::chrono::steady_clock::now();
+    const HtmlToken end = first_tag_token(end_markup);
+    const double end_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(end.type == HtmlTokenType::EndTag);
+    assert(end.attributes.size() == static_cast<std::size_t>(kWide));
+    assert(end.attributes.back().first == "a" + std::to_string(kWide - 1));
+    assert(end_seconds < 2.0);
+
+    // Ordinary markup must not pay for the index: many tags of four
+    // attributes each, one of them a repeat.
+    std::string small;
+    for (int i = 0; i < 5000; ++i) small += "<div a0=\"0\" a1=\"1\" a2=\"2\" A0=\"dup\">t</div>";
+    start = std::chrono::steady_clock::now();
+    HtmlTokenizer tokenizer(small);
+    int tags = 0;
+    while (tokenizer.has_more()) {
+        const HtmlToken token = tokenizer.next_token();
+        if (token.type == HtmlTokenType::EndOfFile) break;
+        if (token.type != HtmlTokenType::StartTag) continue;
+        assert((token.attributes == WrittenAttributes{{"a0", "0"}, {"a1", "1"}, {"a2", "2"}}));
+        ++tags;
+    }
+    const double small_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(tags == 5000);
+    assert(small_seconds < 5.0);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -9403,6 +9669,10 @@ int main() {
     // Phase 35: attribute-list end removals.
     RUN_TEST(attribute_list_end_removals_keep_order_and_index);
     RUN_TEST(attribute_list_front_removal_is_linear_in_practice);
+
+    // Phase 39: the HTML tokenizer's repeated attribute names.
+    RUN_TEST(tokenizer_repeated_attribute_names_keep_the_first);
+    RUN_TEST(tokenizer_duplicate_attribute_check_is_linear);
 
     // Phase 33: page resource loads are origin-aware.
     RUN_TEST(resource_loader_page_requests_are_origin_aware);

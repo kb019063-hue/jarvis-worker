@@ -135,7 +135,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css bench-attributes security-fetch help
+.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes security-fetch help
 
 all: $(TARGET)
 
@@ -317,6 +317,13 @@ bench-css: $(TARGET)
 bench-attributes: $(TARGET)
 	@python3 tools/bench/bench_attributes.py --reps 3 --max-ms 3000
 
+## The HTML tokenizer's repeated attribute names. Seven page shapes at 50,000
+## attribute occurrences each; every tree dump must equal the tree the markup
+## means, and no case may take a second. Comparing each name with every
+## accepted attribute took 3.5 s on the wide cases.
+bench-tokenizer-attributes: $(TARGET)
+	@python3 tools/bench/bench_tokenizer_attributes.py --reps 3 --max-ms 1000
+
 ## Page fetch() must not read arbitrary local files. Generates a marker file
 ## and checks web, file:-base-smuggled, and local file: documents.
 security-fetch: $(TARGET)
@@ -326,4 +333,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, security-fetch, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, security-fetch, clean"

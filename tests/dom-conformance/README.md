@@ -13,10 +13,11 @@ python3 tools/conformance/run_dom_conformance.py --reference   # check the corpu
 python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside the corpus: where do jsdom and Litebird differ?
 ```
 
-629 cases in 23 files, and Litebird passes all of them. Of the 572 that
+640 cases in 24 files, and Litebird passes all of them. Of the 572 that
 Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
 57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
-none.
+none; of the 11 that Phase 34 wrote (`interfaces.dat`), the engine before it
+passes none.
 
 ## Where the expectations come from
 
@@ -93,6 +94,7 @@ leaves the text so that what it writes can be read back.
 | An HTML response, `responseType = 'document'` | Parsed with scripting off: a `<noscript>` in the head holds elements. An empty one is a document too | Parsed with scripting on; an empty one is null |
 | A synchronous request | `readystatechange`, `load`, `loadend`; the total is 0 with no `Content-Length` | A `progress` event as well, and the total is what was loaded |
 | `abort()` while the response is arriving | `readystatechange`, `abort`, `loadend`, and nothing after | One more `progress` |
+| `Object.getPrototypeOf(EventTarget) === Function.prototype`, `HTMLDivElement instanceof Function`, `Object.getPrototypeOf(DOMException) === Function.prototype` | `true`, all three: an interface object is a function of the realm its script runs in | `false`, all three: jsdom's interface objects are made in Node's realm and the script runs in another, so they are functions whose `Function.prototype` is not the script's. `interfaces.dat` asks for `typeof` and for the walk from one interface object to the next, which are the same in both |
 
 Do not "fix" a failing case by recording such an answer. If Litebird and jsdom
 disagree, read the standard first.
@@ -132,6 +134,7 @@ case that dies early fails because its output is cut short.
 | `document.dat`, `window.dat`, `loading.dat` | The document, the global object, location, history, storage, timers, the load events |
 | `events.dat`, `forms.dat` | Dispatch, the event classes, handlers; form controls, their state, validation and submission |
 | `components.dat` | Custom elements and shadow trees |
+| `interfaces.dat` | The interface objects as functions with prototypes of their own: `Object.getPrototypeOf(HTMLDivElement)` is `HTMLElement`, then `Element`, `Node`, `EventTarget`; the same for events and for nodes that are not elements; constants inherited along the way (`HTMLElement.ELEMENT_NODE`); a class and an ES5 constructor that extend an interface |
 | `errors.dat` | Which exception each misuse throws, and what a page sees of an uncaught one |
 | `xml.dat` | `DOMParser` with the XML types and what it gives when the text is not well formed, namespaces, CDATA sections and processing instructions, `createDocument`, `XMLSerializer`, `innerHTML` in an XML document, which names are names |
 | `xhr.dat` | `XMLHttpRequest` for `data:` URLs: states and events, `responseXML`, `responseType`, `overrideMimeType`, encodings, what may be called when, `abort()` |
@@ -158,6 +161,7 @@ fixed. They are not cases and the runner does not read them:
 | :--- | :--- |
 | `open/inline-style.html`, `.js` | `el.style`: shorthands kept whole, `length` and `item()`, values not rewritten in CSSOM's form. 27 lines, 15 differ; a few of those are jsdom's (it drops the quotes of a font family) |
 | `open/dates-and-svg.html`, `.js` | Date and time inputs, the SVG DOM. 7 lines, all differ. (Until Phase 28 the file was `dates-and-xml` and had three lines more, for `DOMParser` with an XML type; those are cases in `xml.dat` now) |
+| `open/compiled-custom-elements.html`, `.js` | A custom element as Babel 7 compiles `class Greeter extends HTMLElement` for older browsers, the same written by hand with `Reflect.construct(HTMLElement, [], Old)`, and `Reflect.construct` of `Event` and `EventTarget` with a subclass. 9 lines, 5 differ: the constructor is `Illegal constructor`, because `new.target` inside a function is the function that is running and not the class `Reflect.construct` was given (ARCHITECTURE.md, Phase 34, section 9). Before Phase 34, 8 differed |
 
 ```bash
 python3 tools/conformance/compare_with_jsdom.py tests/dom-conformance/open/inline-style.html tests/dom-conformance/open/inline-style.js

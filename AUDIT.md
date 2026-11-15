@@ -2276,6 +2276,11 @@ All of it is the same on `main`. The first seven have a failing case each in
   function captured.
 - **An object a parent's constructor returns does not become `this`** in the
   child, and `super.x` in a class that extends null is `undefined`.
+- **Not about functions, found by running all of test262:** `Promise.all`,
+  `any` and `race` read an iterable to its end before they look at an
+  element, so with one that never ends the process grows until it is killed.
+  Three tests end that way in both builds, and a fourth on an array index
+  near 2^32 (arrays have no holes). A row of the task table.
 
 ### What the numbers do not say
 
@@ -2284,8 +2289,15 @@ one for each thing above that a case could be recorded for. The 67 are what
 somebody thought to ask.
 
 **10,835 of 15,686** test262 tests in the directories about functions,
-classes and objects, 10,727 before. That is 69%, and the rest of test262 was
-not run; the number that matters is that 108 more pass and none fewer.
+classes and objects, 10,727 before. That is 69%, and of the whole suite 54%
+pass (26,012 of 47,967; 25,893 before). The number that matters is the
+difference: 108 more and none fewer in those directories. In the whole
+suite it is 122 more and three fewer, and the three are not noise. They ask
+that the prototype of an async function, of a generator function and of an
+async generator function is an object that cannot be called. It is
+`Function.prototype` itself here, before and now, and the tests passed for
+as long as `Function.prototype` was not callable. The fault they are about
+is the fourth of the list above; the tests stay failing until it is fixed.
 
 **640 of 640** DOM cases is what jsdom answers. The 11 new ones ask what the
 prototype of an interface object is and whether its constants are inherited,
@@ -2307,7 +2319,9 @@ tree, in the sandbox.
   76.
 - `python3 tools/conformance/run_test262.py --binary main=… --binary
   now=build/litebird`: 15,686 tests, `main` 10,727 pass, now 10,835; 108
-  pass now and not on `main`, 0 the other way.
+  pass now and not on `main`, 0 the other way. With `--timeout 4 built-ins
+  language annexB` added: 47,967 tests, `main` 25,893, now 26,012; 122 pass
+  now and not on `main`, 3 the other way (named above).
 - `make wpt`: `Web Platform Tests: 4658/5192 subtests pass in 76 files; 534
   fail as listed, 0 fail and are not listed`. On `main`: 4640, 552 listed.
 - `make dom-conformance`: `640/640` in 24 files, and the same from jsdom

@@ -7,8 +7,9 @@
 
 test262 (https://github.com/tc39/test262) is the conformance suite of the
 language's standard. It is not a scoreboard here: Litebird passes about two
-thirds of the directories below, the rest of the suite has not been run, and
-whole features it tests do not exist (BigInt, Proxy, typed arrays, modules).
+thirds of the directories below and a little over half of `built-ins`,
+`language` and `annexB` together, and whole features the suite tests do not
+exist (BigInt, Proxy, typed arrays, modules).
 
 What this is for is the difference between two builds. `tests/js-conformance`
 was written alongside the engine; these tests were written by nobody who has
@@ -26,6 +27,8 @@ How a test is run:
     test that could run both ways is run once);
   - `module` tests and tests that need a harness file that does not exist
     are skipped; `raw` tests get no harness;
+  - a test with a U+0000 in its source (seven in the suite, none in the
+    default directories) cannot be one argument and is counted as `skip`;
   - a negative test passes when the run fails and names the expected error;
   - an async test passes when it prints Test262:AsyncTestComplete;
   - `$262` (other realms, agents, detached buffers) is not provided, so
@@ -181,7 +184,9 @@ def run_one(binary: str, code: str, meta: dict, timeout: float) -> tuple[str, st
         done = subprocess.run([binary, "--run-js", code], capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout", ""
-    except OSError as error:           # a script too long for one argument
+    except (OSError, ValueError) as error:
+        # A script that cannot be one argument: too long, or with a U+0000 in
+        # it (a few tests have one in their source).
         return "skip", str(error)
     out = done.stdout.decode("utf-8", "replace")
     err = done.stderr.decode("utf-8", "replace")

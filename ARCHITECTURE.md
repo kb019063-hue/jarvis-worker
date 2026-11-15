@@ -3193,6 +3193,7 @@ whose pull request named them, was merged.
 | JavaScript corpus (`make js-conformance`) | 907 / 921 in 23 files. `prototypes.dat` is new: 76 cases, 67 pass, and the 9 that do not are in section 9. The binary of `main` passes 7 of the 76 |
 | The corpus in Node (`--reference "node -e"`) | 921 / 921 |
 | test262, the 21 directories this change touches (`tools/conformance/run_test262.py`) | 15,686 tests: 10,835 pass, 10,727 in the binary of `main`. 108 that failed pass; none that passed fails |
+| test262, all of `built-ins`, `language` and `annexB` (the same runner with those three names) | 47,967 tests: 26,012 pass, 25,893 in the binary of `main`. 122 that failed pass. Three that passed fail, for a reason that is in section 9 (below) |
 | web-platform-tests (`make wpt`) | 4658 / 5192; the 18 `function-as-prototype` subtests pass and are off the list, which has 534 left, 495 of them frames |
 | DOM corpus (`make dom-conformance`) | 640 / 640 in 24 files; `interfaces.dat` is new, 11 cases. The binary of `main` passes none of the 11. In jsdom (`--reference`): 640 / 640 |
 | Unit tests (`make test`) | 138 / 138; five are new (a function as a prototype, in the interpreter and in the VM; classes and their parents collected; classes compiled to ES5; a class that extends a DOM interface; interface objects collected with their page) |
@@ -3213,6 +3214,18 @@ not.) The first run had two tests that passed on `main` and failed
 here, and both were true: the `instanceof` and the `__proto__:` of section
 5, each a fault that only showed once a function could be got back from a
 link. Both are cases of `prototypes.dat` now.
+
+The rest of the suite was run once after that. Three tests that pass on
+`main` fail: `AsyncFunctionPrototype-is-not-callable.js` and the same
+question for generator and async generator functions. They ask that the
+prototype of an async function is an object that cannot be called. Here it
+is `Function.prototype` itself, on `main` as now, and the tests passed for as
+long as `Function.prototype` was not callable. They stay failing: what they
+ask for is three objects the engine does not have (section 9). Four more
+tests end with the process out of memory in both builds, which is two older
+faults: `Promise.all`, `any` and `race` read an iterable to its end before
+they look at an element, so one that never ends is never left; and an index
+near 2^32 makes an array that long, since arrays have no holes.
 
 ### 8. What it costs
 
@@ -3303,7 +3316,10 @@ seven of these. Everything in the list is the same on `main`:
 - **What a function's own properties are.** `Object.getOwnPropertyNames(f)`
   lacks `length`, `name` and a `prototype` nothing has read; `f.name = 'x'`
   takes effect. An async function and a generator function have
-  `Function.prototype` itself as their prototype.
+  `Function.prototype` itself as their prototype, where the language has an
+  object of its own for each kind between the two. `typeof` of that
+  prototype is therefore `function` now and was `object` before, and three
+  test262 tests that ask for `object` passed on `main` and fail here.
 - **Which built-ins are constructors.** Nothing tells `Math.max` from `Map`:
   `new Math.max()` makes an object, and `class X extends f.bind(null)` is
   accepted for any `f`.
@@ -3417,7 +3433,8 @@ on `main`, and all are rows of the task table now:
    no `Symbol.species` and `instanceof` does not ask `Symbol.hasInstance`,
    and nothing tells a built-in that is a constructor from one that is not
    (Phase 34, section 9). Of 15,686 test262 tests on functions, classes and
-   objects, 10,835 pass (`make test262`).
+   objects, 10,835 pass (`make test262`); of the 47,967 in all of its
+   `built-ins`, `language` and `annexB`, 26,012.
 11. **A page can still be slow by being long.** Depth no longer ends the
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which

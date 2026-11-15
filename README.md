@@ -71,11 +71,13 @@ Read the number for what it is:
   covers the language and library features ordinary scripts use (syntax,
   closures, classes, destructuring, generators, promises and async functions,
   strings, arrays, regular expressions, dates, JSON), not every clause of the
-  specification. The official suite scores far lower: of the 15,686 tests in
-  its directories on functions, classes and objects, 10,835 pass (69%), and
-  the rest of it has not been run. `make test262` runs those directories. It
-  is used for what a change moved between two builds (Phase 34: 108 more
-  pass, none fewer), not as a score.
+  specification. The official suite scores far lower: of the 47,967 tests in
+  its `built-ins`, `language` and `annexB` directories that are not modules,
+  26,012 pass (54%); of the 15,686 on functions, classes and objects, 10,835
+  (69%). `make test262` runs the latter. It is used for what a change moved
+  between two builds, not as a score (Phase 34: 108 more pass and none fewer
+  in those directories; in the whole suite 122 more and three fewer, the
+  three being tests that passed for the wrong reason).
 - **Five of the 14 failures are whole features that do not exist**: BigInt
   (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine are
   in `prototypes.dat` and were recorded to fail: what classes still lack

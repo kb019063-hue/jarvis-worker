@@ -68,8 +68,9 @@ python3 tools/conformance/run_test262.py --show 20 language/expressions/super
 It is not a scoreboard and has no floor: two thirds of those directories
 pass (of the 4,851 tests that do not, 1,259 write an identifier with a
 Unicode escape, which the lexer does not read, and 1,027 are scripts that
-should be refused before they run), and the rest of the suite has not been
-run. What it is for is the second form: build
+should be refused before they run). Of the whole suite, 26,012 of 47,967
+pass (`run_test262.py --timeout 4 built-ins language annexB`, a quarter of
+an hour for two builds). What it is for is the second form: build
 `main` somewhere (`git worktree add /tmp/main origin/main`, `make` there),
 give the runner both binaries, and it lists every test that passes in the
 first and not in the second and exits 1 if there is one. A change to how

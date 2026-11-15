@@ -8765,6 +8765,54 @@ TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length) {
     }
 }
 
+TEST(many_sized_floats_pack_without_escaping_the_box) {
+    using namespace litebird;
+
+    // Finding 28 measured 46 s for 10,000 floats of 100 by 10 pixels in an
+    // 800-pixel box, and placing every float past the first 1,024 (row 128)
+    // wherever the 512-step slide gave up, running out of the box to the
+    // right. The placement now sweeps the band edges: the float lands on the
+    // exact bottom edge of whatever is in the way, or at the top of the box
+    // if it is wider than the containing block.
+    std::string html = R"(<body style="margin:0"><div id="box" style="width:800px">)";
+    for (int i = 0; i < 1056; ++i) {
+        html += "<div id=\"f" + std::to_string(i) + "\" style=\"float:left; width:100px; height:10px\"></div>";
+    }
+    html += "</div></body>";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto box = find_box_by_id(root, "box");
+    assert(box);
+    for (const auto& child : box->children) {
+        const float x = child->dimensions.content.x - box->dimensions.content.x;
+        assert(x >= 0.0f && x + 100.0f <= 800.0f);
+    }
+    // Floats past row 128 used to be placed in one row that ran out of the
+    // box to the right. Rows of eight 100px floats still tile exactly:
+    // row r sits at y = top + r * 10.
+    for (int row = 128; row < 132; ++row) {
+        for (int k = 0; k < 8; ++k) {
+            auto f = find_box_by_id(root, "f" + std::to_string(row * 8 + k));
+            assert(f);
+            assert(f->dimensions.content.y == box->dimensions.content.y + row * 10.0f);
+            assert(f->dimensions.content.x == box->dimensions.content.x + k * 100.0f);
+        }
+    }
+    // A float wider than the containing block does not spin: it is placed and
+    // overflows to the left, the way CSS 2.1 9.5.1 puts it.
+    auto wide_doc = HtmlParser::parse(R"(<body style="margin:0"><div id="widebox" style="width:800px">
+        <div id="wide" style="float:left; width:900px; height:10px"></div>
+    </div></body>)");
+    StyleResolver wide_resolver;
+    auto wide_root = LayoutTree::build(wide_doc, wide_resolver, 800.0f, 600.0f);
+    auto wide_box = find_box_by_id(wide_root, "widebox");
+    auto wide = find_box_by_id(wide_root, "wide");
+    assert(wide_box && wide);
+    assert(wide->dimensions.content.x == wide_box->dimensions.content.x);
+}
+
 TEST(floats_of_no_height_cost_nothing_and_still_count) {
     using namespace litebird;
 
@@ -8827,10 +8875,10 @@ TEST(floats_of_no_height_cost_nothing_and_still_count) {
         assert(cleared->dimensions.content.y == box->dimensions.content.y + 40.0f);
     }
     {
-        // A box that contains its floats is as high as the lowest of them,
-        // and here the lowest is the float with no height: B ends at 89.5,
-        // and C, which is moved down a pixel at a time until it fits, lands
-        // at 90.
+        // A box that contains its floats is as high as the lowest of them.
+        // The float with no height is placed as high as it fits: flush with
+        // the bottom edge of B, at 89.5. (Before the placement swept the
+        // band edges it slid in one-pixel steps and landed at 90.)
         auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; overflow:hidden">
             <div style="float:left; width:200px; height:50px">A</div>
             <div style="float:right; width:80px; height:89.5px">B</div>
@@ -8838,8 +8886,8 @@ TEST(floats_of_no_height_cost_nothing_and_still_count) {
         auto box = find_box_by_id(root, "box");
         auto c = find_box_by_id(root, "c");
         assert(box && c);
-        assert(c->dimensions.content.y == box->dimensions.content.y + 90.0f);
-        assert(box->dimensions.content.height == 90.0f);
+        assert(c->dimensions.content.y == box->dimensions.content.y + 89.5f);
+        assert(box->dimensions.content.height == 89.5f);
         assert(box->float_bands.size() == 2);
     }
 
@@ -11611,6 +11659,7 @@ int main() {
     RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
     RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
+    RUN_TEST(many_sized_floats_pack_without_escaping_the_box);
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_owes_a_trailing_high_half_until_it_is_read);

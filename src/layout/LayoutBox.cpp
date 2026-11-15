@@ -7,8 +7,102 @@
 #include <sstream>
 #include <numeric>
 #include <unordered_map>
+#include <set>
+#include <vector>
 
 namespace litebird {
+
+namespace {
+
+/// Where a float is placed and how much of each side it takes intruded at
+/// that position (the running maxima at the placement y, not before it).
+struct FloatPlacement {
+    float top{0.0f};
+    float left_intrusion{0.0f};
+    float right_intrusion{0.0f};
+};
+
+/// CSS 2.1, 9.5.1, rule 2: the float's top may not be higher than the current
+/// vertical position; rule 3: it may not be higher than the top of any earlier
+/// float; rule 6: it must be as far left/right as possible. The placement is
+/// the smallest y >= y0 for which the room beside the already-placed floats
+/// fits the float's margin-box width.
+///
+/// This replaced a loop that slid the float down by a fraction of its own
+/// height per step, scanning every band at every step, and gave up after 512
+/// steps (a float past row ~128 of a full box was placed wherever it stood,
+/// running out of the box to the right). Capacity only changes at a band's
+/// top and bottom edge, so the answer is found by sweeping those boundaries
+/// once: between two consecutive edges the room is constant, and an edge that
+/// fits decides the placement. Wider than the containing block: the float
+/// stays at y0 and overflows, as CSS 2.1 9.5.1 rule 5 allows.
+FloatPlacement place_float(const std::vector<FloatBand>& bands, float y0, float margin_box_w,
+                           float content_width) {
+    struct Event { float y; bool opens; float left; float right; };
+
+    // The floats covering y0 are the starting state. Bands starting exactly at
+    // y0 are applied by the sweep below; bands ending exactly at y0 cover
+    // nothing at y0.
+    std::multiset<float> active_left, active_right;
+    std::vector<Event> events;
+    events.reserve(bands.size() * 2);
+    for (const auto& band : bands) {
+        if (band.top <= y0 && y0 < band.bottom) {
+            active_left.insert(band.left);
+            active_right.insert(band.right);
+        }
+        events.push_back({band.top, true, band.left, band.right});
+        events.push_back({band.bottom, false, band.left, band.right});
+    }
+    auto intrusions = [&](FloatPlacement& out) {
+        out.left_intrusion = active_left.empty() ? 0.0f : *active_left.rbegin();
+        out.right_intrusion = active_right.empty() ? 0.0f : *active_right.rbegin();
+    };
+
+    std::sort(events.begin(), events.end(),
+              [](const Event& a, const Event& b) { return a.y < b.y; });
+
+    size_t next = 0;
+    while (next < events.size() && events[next].y <= y0) ++next;
+
+    FloatPlacement placement;
+    placement.top = y0;
+    intrusions(placement);
+    if (content_width - placement.left_intrusion - placement.right_intrusion >= margin_box_w) {
+        return placement;
+    }
+
+    while (next < events.size()) {
+        const float y = events[next].y;
+        // Apply every edge at this y before judging the room: a band ending
+        // at y covers nothing at y, and a band opening at y covers all of it.
+        while (next < events.size() && events[next].y == y) {
+            const Event& ev = events[next];
+            if (ev.opens) {
+                active_left.insert(ev.left);
+                active_right.insert(ev.right);
+            } else {
+                const auto left = active_left.find(ev.left);
+                if (left != active_left.end()) active_left.erase(left);
+                const auto right = active_right.find(ev.right);
+                if (right != active_right.end()) active_right.erase(right);
+            }
+            ++next;
+        }
+        placement.top = y;
+        intrusions(placement);
+        if (content_width - placement.left_intrusion - placement.right_intrusion >= margin_box_w) {
+            return placement;
+        }
+    }
+    // Nothing fits (a float wider than the containing block, or inside a
+    // stack of full-width floats): keep it at y0 and let it overflow.
+    placement.top = y0;
+    intrusions(placement);
+    return placement;
+}
+
+} // namespace
 
 void LayoutBox::apply_style_edges() {
     dimensions.margin = style.margin;
@@ -225,18 +319,13 @@ void LayoutBox::layout_block(float containing_width) {
             const float inset_x = child->dimensions.margin.left + child->dimensions.border.left +
                                   child->dimensions.padding.left;
 
-            // Slide down until the float fits horizontally next to the others.
-            float float_top = y_cursor;
-            float left_intrusion = 0.0f;
-            float right_intrusion = 0.0f;
-            for (int guard = 0; guard < 512; ++guard) {
-                band_at(float_bands, float_top, left_intrusion, right_intrusion);
-                const float room = dimensions.content.width - left_intrusion - right_intrusion;
-                if (room >= margin_box_w || float_top > 100000.0f) break;
-                float_top += std::max(1.0f, margin_box_h * 0.25f);
-                left_intrusion = right_intrusion = 0.0f;
-                band_at(float_bands, float_top, left_intrusion, right_intrusion);
-            }
+            // Place as high as possible: the sweep goes straight to the
+            // bottom edge of whichever float is in the way (CSS 2.1 9.5.1).
+            const FloatPlacement placement = place_float(float_bands, y_cursor, margin_box_w,
+                                                         dimensions.content.width);
+            const float float_top = placement.top;
+            const float left_intrusion = placement.left_intrusion;
+            const float right_intrusion = placement.right_intrusion;
 
             float float_x;
             if (child->style.float_type == FloatType::Left) {

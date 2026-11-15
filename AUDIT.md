@@ -41,7 +41,7 @@ The rest are documented with enough detail to act on.
 | 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
 | 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
-| 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
+| 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | ✅ Fixed: block-in-inline split in Phase 36; float placement rewritten (band-edge sweep, exact landing, no step cap). The remaining inputs are smaller loops |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
 | 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1,188 of 1,188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
@@ -1292,6 +1292,21 @@ right (float 1,100 lands at x = 7,500). It needs a placement that goes
 straight to the bottom edge of the float in the way. That can move a float
 (today it lands on a multiple of a quarter of its height) and is a change of
 its own.
+
+**The float placement was rewritten.** A float is now placed by a sweep of
+the band edges: capacity below the flow is constant between two consecutive
+band edges, so the smallest position at which the float fits is found by
+closing and opening bands in y order, which is also exactly flush with the
+bottom edge of the float in the way (CSS 2.1 9.5.1, rule 6), and never past
+a fixed step cap. The quarter-height sliding loop and its 512-step limit are
+gone. On the audit's input (floats of 100 by 10 pixels in an 800-pixel box):
+every float lands inside the box again, in its row of eight, and the
+10,000-float parse-plus-layout-plus-dump end to end takes about 5 s on a
+two-core machine. A float wider than the containing block is placed at the
+top and overflows, the way CSS 2.1 9.5.1 handles it. One pre-existing
+expectation codified the old quantization: a 250-pixel float C below floats
+that end at 89.5 used to land at 90 (the slide's one-pixel step) and now
+lands exactly at 89.5.
 
 Removing the first child moves every other child up, because children are a
 vector. The spaces were trimmed one character at a time from the front of a

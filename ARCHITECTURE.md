@@ -1601,13 +1601,15 @@ In its first two runs that job took 8 and 12 minutes, 7 and 10 of them in
 AUDIT.md, finding 28, has the list with measurements. In short:
 
 - **A block inside an inline box is not laid out**
-  (`<a href="#">x<p>y</p></a>` paints only "x"). This was so before; the
-  nesting limit makes it easier to meet.
-- **Many floats with a size in one box** cost far more than their number:
-  10,000 take 46 s. Past 512 steps down, a float is placed where it stands:
-  1,100 floats of 100 by 10 pixels fill 128 rows correctly, and the rest go
-  into one row that runs out of the box to the right. Float placement needs
-  to be redone, not patched.
+  (`<a href="#">x<p>y</p></a>` paints only "x"). Fixed in Phase 36: the inline
+  is split around the block, so the block paints. The nesting limit makes it
+  easier to meet.
+- **Many floats with a size in one box** used to cost far more than their
+  number: 10,000 took 46 s, and past 512 slide steps a float was placed
+  where it stood, running out of the box to the right. Float placement was
+  rewritten as a sweep of the band edges: the float lands at the exact bottom
+  edge of the float in the way, at any row, with no step cap; 10,000 sized
+  floats run end to end in about 5 s. (AUDIT.md, finding 28.)
 - **A tree a script built deeper than the stack reaches** is laid out as far
   as the stack goes.
 - **Smaller quadratic loops**: removing the first child of very many, one at a
@@ -3810,7 +3812,9 @@ html5lib `<select>` cases), and the XML parser were not touched. Finding 28's
 other costs — a block inside an inline box, 10,000 sized floats in one box —
 and finding 40's middle erases are still open, as are the
 `Attr`-is-not-a-`Node`, one-qualified-name-in-two-namespaces and collection
-named-property rows.
+named-property rows. (Since then: the finding-28 layout costs were both
+fixed, the block inside an inline box in Phase 36 and the sized floats by the
+band-edge sweep; finding 40's middle erases remain.)
 
 ---
 
@@ -4139,10 +4143,11 @@ depth 10,000 (0 failed, slowest 4.5 s), and `make tsan` under both sanitizers.
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which
    means a tree a script built deeper than that is laid out only so far.
-   Length is bounded for what `make deep` generates, not in general. 10,000
-   floats with a size in one box take 46 s, and past 128 rows of them the
-   rest are placed in one row that runs out of the box; removing the first
-   child of 50,000, one at a time, takes a second. The CSS whitespace cost
+   Length is bounded for what `make deep` generates, not in general.
+   Sized floats in one box are placed by a band-edge sweep: a float lands
+   on the exact bottom edge of the float in the way, so 10,000 of them run
+   in seconds and none run out of the box (AUDIT.md, finding 28); removing
+   the first child of 50,000, one at a time, takes a second. The CSS whitespace cost
    was removed in Phase 31. At the nesting limit, misnested formatting tags
    can leave content out of its written order. Measurements are in AUDIT.md,
    finding 28.

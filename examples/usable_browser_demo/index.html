@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Litebird Multi-File Workspace</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="app-shell">
+  <header class="hero">
+    <div class="hero-brand">
+      <img src="badge.svg" width="44" height="44" alt="Litebird SVG">
+      <div>
+        <h1>Litebird Phase 36 — Multi-File Web App</h1>
+        <p class="subtitle">External CSS &amp; deferred JS • PNG &amp; SVG subresources • TrueType UTF-8 AA • Live getBoundingClientRect()</p>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <button id="btn-theme" class="btn">Toggle Accent</button>
+      <button id="btn-measure" class="btn primary">Re-Measure Layout</button>
+    </div>
+  </header>
+
+  <section class="toolbar-row">
+    <div class="tabs">
+      <button id="tab-all" class="tab active" data-cat="all">All Subsystems (4)</button>
+      <button id="tab-net" class="tab" data-cat="net">Networking &amp; TLS</button>
+      <button id="tab-layout" class="tab" data-cat="layout">Layout &amp; Typography</button>
+    </div>
+    <div class="search-box">
+      <input id="filter-input" type="text" placeholder="Click here &amp; type to filter cards...">
+    </div>
+  </section>
+
+  <section id="cards-grid" class="cards-grid">
+    <a href="details.html" id="card-link-1" class="card-link" data-cat="net">
+      <div class="card" id="card-net">
+        <div class="card-tag">HTTP/1.1 + TLS 1.3</div>
+        <h3>External CSS, Deferred JS &amp; Gzip/Chunked Fetch</h3>
+        <p>Loads external stylesheets in cascade order, executes classic &amp; defer scripts, verifies TLS peers via OpenSSL 3, and enforces CORS.</p>
+        <span class="card-cta">Open Architecture Details →</span>
+      </div>
+    </a>
+
+    <div class="card" id="card-geom" data-cat="layout">
+      <div class="card-tag">CSSOM View Geometry</div>
+      <h3>Live Reflow &amp; getBoundingClientRect()</h3>
+      <p id="geom-readout">Measuring live DOM box coordinates...</p>
+      <button id="btn-grow" class="btn">Expand Card Padding (+12px)</button>
+    </div>
+
+    <div class="card" id="card-font" data-cat="layout">
+      <div class="card-tag">TrueType Vector Engine</div>
+      <h3>Anti-Aliased UTF-8 Glyphs &amp; Block-in-Inline</h3>
+      <p>Proportional metrics &amp; 4× supersampled curves: Café • Zürich • Δx → ∞ • €49 — crisp at 12px, 16px, and 28px.</p>
+    </div>
+
+    <div class="card" id="card-xhr" data-cat="net">
+      <div class="card-tag">Live Subresource Status</div>
+      <h3>Fetch &amp; XMLHttpRequest Telemetry</h3>
+      <p id="net-readout">Initializing subresource probe...</p>
+      <button id="btn-ping" class="btn">Run XHR Probe</button>
+    </div>
+  </section>
+  </main>
+</body>
+</html>

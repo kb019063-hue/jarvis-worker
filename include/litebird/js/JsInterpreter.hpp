@@ -335,6 +335,9 @@ public:
     void load_page(std::string_view html, bool scripting = true,
                    const std::function<void(const std::string& source)>& before = nullptr);
 
+    /// Dispatches a `resize` event on `window`.
+    void notify_window_resized();
+
 private:
     using EnvPtr = std::shared_ptr<JsEnvironment>;
 

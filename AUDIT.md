@@ -49,12 +49,13 @@ The rest are documented with enough detail to act on.
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout costs remain open (its tokenizer cost was fixed in Phase 39) |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
-| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS remain open |
+| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS landed in Phase 36 (preflight `OPTIONS` open) |
 | 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases remain (the tokenizer repeated-name cost was fixed in Phase 39) |
 | 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
-| 44 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
+| 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
+| 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 
 ---
 
@@ -1881,7 +1882,7 @@ of them by reading the code.
 - **The HTML tokenizer searched for a repeated attribute name** by comparing
   it with every accepted one: one element with 50,000 attributes took 2.9 s in
   the HTML parser (10.4 s before the attribute list had an index). Fixed in
-  Phase 39 (finding 44): 0.09 s whole-process.
+  Phase 39 (finding 46): 0.09 s whole-process.
 
 ### What the numbers do not say
 
@@ -2254,7 +2255,7 @@ printed `4 lines, 4 the same` before and after. `make tsan` passed (JsString mod
 **What is still open.** This fixes end removals, not arbitrary middle
 removals: a middle erase still moves the vector tail. The HTML tokenizer's
 repeated-name search for one element with 50,000 attributes was fixed in
-Phase 39 (finding 44). The `Attr`-is-not-a-`Node`, one-qualified-name-in-two-
+Phase 39 (finding 46). The `Attr`-is-not-a-`Node`, one-qualified-name-in-two-
 namespaces and collection named-property rows remain open. No parser, layout,
 CSS or JavaScript engine file was changed.
 
@@ -2527,7 +2528,78 @@ tree, in the sandbox.
   `drawImage(HTMLImageElement)` (only `ImageData` / canvas-to-canvas is wired),
   and remaining Porter-Duff / blend modes beyond the existing set.
 
-## 44. ✅ The tokenizer's repeated-attribute-name check was quadratic
+---
+
+## 44. ✅ `<img src>` bypassed document-origin security, and unloaded images without dimensions laid out as 100×100 boxes
+
+**The hole.** Phase 33 moved `fetch()` and `Worker` behind
+`ResourceLoader::load_for_page`, but `LayoutTree::build_element` (`src/layout/LayoutTree.cpp`)
+still passed an `<img>` element's raw `src` attribute straight to
+`ImageDecoder::decode_file(src)`. `decode_file` opened any non-`data:` string
+with `std::ifstream(path, std::ios::binary)`. Consequently, a remote web
+document (`https://attacker.example/page.html`, or one smuggling
+`<base href="file:///...">`) could embed `<img src="/path/to/local.png">` or
+`<img src="file:///path/to/local.bmp">`, read local disk images in-process, and
+observe their decoded intrinsic pixel dimensions via layout or
+`getBoundingClientRect()`/`offsetWidth`/`offsetHeight` side channels.
+
+In addition, when an `<img>` without explicit `width`/`height` attributes or
+CSS dimensions failed to decode (or was blocked by origin policy),
+`LayoutBox::layout_image` (`src/layout/LayoutBox.cpp`) sized the box to a
+hardcoded `100×100` placeholder, pushing surrounding content down by 100 px,
+and inline-formatted `<img>` boxes (`InlineFormattingContext`) never wrote their
+laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
+`img.getBoundingClientRect()` returned `0×0` even for valid inline images.
+
+**The fix.**
+1. `LayoutTree` now resolves and loads every `<img src>` through
+   `ResourceLoader::load_for_page(src, doc.base_uri(), doc.url(), /*enforce_cors=*/false)`
+   and caches decoded bitmaps per resolved URL on `Document`
+   (`lookup_decoded_image` / `cache_decoded_image`). Web documents (`http:`,
+   `https:`, `data:`) cannot read `file:` URLs or local filesystem paths, even
+   when `<base href="file:///...">` is present; trusted local `file:` documents
+   keep relative local image loading.
+2. `ImageDecoder::decode_bytes` now decodes PNG (`decode_png` / `encode_png`,
+   backed by the pure-C++20 RFC 1950/1951/1952 `Deflate` engine with 64 MiB
+   decompression and 16384×16384 / 64M-pixel bounds), wires Phase 38's
+   `JpegDecoder` and `GifDecoder`, and rasterizes SVG subresources alongside
+   BMP, PPM, and `data:image/*;base64,...` URLs.
+3. Unloaded or blocked `<img>` elements without explicit `width`/`height` now
+   lay out as `0×0` instead of `100×100` (explicit HTML `width`/`height`
+   attributes or CSS `width`/`height` are still honoured), and
+   `InlineFormattingContext` writes laid-out `ImageNode` border-box coordinates
+   back to the `Element` so `getBoundingClientRect()`/`offsetWidth` report live
+   inline image geometry.
+
+**How verified.**
+```bash
+./build/test_suite
+make security-fetch
+```
+`make test` passes **153/153** suites (and **153/153** under ASan+UBSan),
+including `img_subresources_enforce_document_origin_security` (proving a web
+page at `https://app.example/index.html` — with and without
+`<base href="file:///...">` — is denied local PNG access and lays out the
+blocked `<img>` at `0×0`, while a local `file:` document decodes the same PNG
+at its `24×18` intrinsic size and reports `24×18` from
+`img.getBoundingClientRect()`). `make security-fetch` passes `3 checks; 0 failure(s)`.
+
+**What is still approximate.**
+- WebP, AVIF, and ICO `<img>` payloads are not decoded yet (PNG, JPEG, GIF, SVG,
+  BMP, and PPM are decoded).
+- `HTMLImageElement` script properties and events (`naturalWidth`,
+  `naturalHeight`, `complete`, `decode()`, `load`/`error` events on `<img>`,
+  `srcset`, and `<picture>`) are not implemented yet.
+- Unloaded `<img>` elements with non-empty `alt` text and no explicit
+  dimensions collapse to `0×0` rather than synthesizing an inline `alt`-text
+  fallback box.
+- Cross-origin `<img>` loads follow the standard default `no-cors` subresource
+  model, but `<canvas>` taint tracking (`crossorigin="anonymous"`) is not
+  enforced yet because `drawImage` does not yet take `HTMLImageElement` bitmaps.
+
+---
+
+## 46. ✅ The tokenizer's repeated-attribute-name check was quadratic
 
 **The hole.** `HtmlTokenizer::consume_tag` drops a repeated attribute name —
 the standard's *duplicate-attribute* parse error, where the first attribute
@@ -2586,7 +2658,7 @@ in the release build and 102 ms under ASan/UBSan. `make
 bench-tokenizer-attributes` is the checked-in guard: seven cases, three
 repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 2.7 s).
 
-**How it was verified.** `make test` passes 147 suites; the two new ones are
+**How it was verified.** `make test` passes 155 suites; the two new ones are
 `tokenizer_repeated_attribute_names_keep_the_first` and
 `tokenizer_duplicate_attribute_check_is_linear`. Both were checked against
 mutants: with the old scan restored the correctness suite still passes and
@@ -2612,7 +2684,7 @@ diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
 page was 15.7 MB before and 15.9 MB after: the index is freed when the tag
 ends and the dump reuses its memory.
 
-The sanitizer run on the same tree reported nothing: ASan/UBSan 147/147
+The sanitizer run on the same tree reported nothing: ASan/UBSan 155/155
 suites, JS 906/921 (one fewer than release: a deep-recursion case needs more
 stack than a sanitizer build's frames leave, as before), DOM
 640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192; ASan diff-xml 1,000

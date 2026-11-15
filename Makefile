@@ -353,8 +353,8 @@ bench-tokenizer-attributes: $(TARGET)
 ## A string built half a surrogate pair at a time, at two sizes a doubling
 ## apart. The character the halves spell starts inside the text already
 ## written, so every pair used to copy the whole string: 20,000 pairs took
-## 5.6 s and 40,000 took 21 s (AUDIT.md, finding 47). They now take about 20
-## and 40 ms; the limit is a second, so this fails on a cost that grows with
+## 5.6 s and 40,000 took 23 s (AUDIT.md, finding 47). They now take about 20
+## and 35 ms; the limit is a second, so this fails on a cost that grows with
 ## the square of the length and not on a slow runner. Results face Node.js.
 bench-surrogates: $(TARGET)
 	@python3 tools/bench/bench_strings.py --only surrogate --reps 3 --max-ms 1000

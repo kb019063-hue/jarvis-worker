@@ -2821,18 +2821,22 @@ history of moves, so the next append copied too. Building a string one half at
 a time (`s += '\uD83D'; s += '\uDE00'`) therefore copied the whole text at every
 pair. Whole-process times on the verification machine, release build:
 
-| Pairs appended | Half at a time, before | Half at a time, after | A pair at a time |
-| ---: | ---: | ---: | ---: |
-| 5,000 | 0.31 s | 0.008 s | — |
-| 10,000 | 1.28 s | 0.011 s | — |
-| 20,000 | 5.60 s | 0.018 s | 0.009 s |
-| 40,000 | 20.97 s | 0.041 s | 0.015 s |
+| Pairs appended | Half at a time, before | Half at a time, after | Speedup | A pair at a time, before and after |
+| ---: | ---: | ---: | ---: | ---: |
+| 5,000 | 325 ms | 7 ms | 43.5× | — |
+| 10,000 | 1,390 ms | 11 ms | 127.1× | — |
+| 20,000 | 5,583 ms | 18 ms | 308.0× | 11 ms |
+| 40,000 | 23,252 ms | 30 ms | 782.1× | 15 ms |
 
-Four times the time for twice the input, against a pair at a time being linear.
-One case of the corpus, `pairs made a half at a time in a long string`
+Best of three, idle machine, `--run-js`, whole process. The baseline is this
+tree built with `main`'s `JsString`, kept as `build/litebird-surrogate-baseline`,
+so the only difference is this change. Four times the time for twice the input
+before; in step with the input after, and the same as a pair at a time. One case
+of the corpus, `pairs made a half at a time in a long string`
 (`tests/js-conformance/long-strings.dat`), does this 60,000 times: it took
-5.68 s of the 10 s a case is allowed, so it timed out on a busy machine. That is
-why the JavaScript floor in CI sat at 906 while the corpus scored 907.
+5.545 s of the 10 s a case is allowed, so it timed out on a busy machine. That
+is why the JavaScript floor in CI sat at 906 while the corpus scored 907. It
+now takes 0.035 s and prints the same line.
 
 **The fix.** Only `src/js/JsString.cpp` and `include/litebird/js/JsString.hpp`
 changed. A join no longer writes a high half that ends its result. The handle
@@ -2849,9 +2853,16 @@ makes, so two threads settling at once cannot both win; the loser copies. A
 settled handle is an ordinary range of a block, and nothing about it is new.
 
 The handle grew from 24 bytes to 32 (one word of padding for the fifth field)
-and `JsValue` from 88 to 96. Across the 39 string benchmarks that is a wash:
-2,661 ms before, 2,452 ms after, median case 0.92×, worst 1.33× (`append, then
-read the end, non-ASCII`, 36 → 48 ms), best 0.61×.
+and `JsValue` from 88 to 96. That has a small cost, and it is measured rather
+than assumed: across the 39 string benchmarks that were already there, best of
+three on an idle machine, 2,521 ms before and 2,640 ms after (1.05×), median
+case 1.04×, mean 1.03×, nine of 39 more than 15% slower. The worst is `read:
+for-of, 200k non-ASCII` at 42 → 64 ms and `read: charCodeAt, 200k ASCII` at
+97 → 133 ms; the best are `build: obj.s += x` and `build: append, then read the
+end` at 0.60×. An earlier run of the same two binaries came out the other way
+(2,661 → 2,452 ms, median 0.92×), so on this two-core machine the difference is
+close to the run-to-run spread; the slowest case is still a fifth of the three
+seconds `make bench` allows.
 
 **Measured.** `make bench-surrogates` is the checked-in guard: the two sizes a
 doubling apart plus the keep-each-prefix shape, best of three, results compared
@@ -2863,16 +2874,16 @@ make bench-surrogates
 
 | Case | Before (`main`) | After | Node.js |
 | :--- | ---: | ---: | ---: |
-| half a pair at a time, 20,000 | 5,546 ms | 16 ms | 41 ms |
-| half a pair at a time, 40,000 | over 8 s | 36 ms | 45 ms |
-| half a pair, keeping each prefix, 20,000 | 3,856 ms | 15 ms | 36 ms |
+| half a pair at a time, 20,000 | 5,546 ms | 18 ms | 47 ms |
+| half a pair at a time, 40,000 | over 8 s | 33 ms | 51 ms |
+| half a pair, keeping each prefix, 20,000 | 3,856 ms | 22 ms | 46 ms |
 
 The guard fails on all three cases against `main`'s binary and passes on this
 one. Counting work rather than timing it (`JsString::stats`), 20,000 pairs built
 half at a time copy 399,370 bytes into 152 blocks for 100,000 bytes of text;
 20,000 pairs built a pair at a time copy 399,220 bytes into 22. The old path
 copied the text so far at each of the 20,000 pairs, about a thousand million
-bytes. The corpus case itself went from 5.68 s to 0.032 s, printing the same
+bytes. The corpus case itself went from 5.545 s to 0.035 s, printing the same
 line.
 
 **How it was verified.** `make test` passes 161 suites; the two new ones are
@@ -2895,7 +2906,36 @@ Out-of-corpus: 40 surrogate-heavy programs (kept prefixes, slicing a pending
 string, splitting a pair, `for...of`, `indexOf` across the boundary, JSON,
 property keys, `repeat`, `replace`, template literals, regular expressions,
 numbers on either side) run in Node.js and in both binaries: 0 mismatches
-against Node, and the two binaries print the same for all 40.
+against Node, and the two binaries print the same for all 40. Two pages' worth
+of DOM text built the same way — `textContent`, attributes, comments,
+`splitText`, `normalize`, `cloneNode`, `insertAdjacentHTML`, `innerHTML` round
+trips — through `tools/conformance/compare_with_jsdom.py` printed `11 lines, 11
+the same` and `12 lines, 12 the same`, on both binaries.
+
+The new settle path is shared state, so it was also run on its own under the
+sanitizers: 200 rounds of seven threads settling copies of one handle that owes
+a half, reading one handle from several threads at once, taking pieces and
+appending, while another thread appends to the same block so the room is
+sometimes free and sometimes taken. `0 failure(s)` under ThreadSanitizer and
+under ASan/UBSan with leak checking on — no race, no leak, and every answer the
+text it was given.
+
+The release run on this tree kept every scoreboard: 161 suites; html5lib
+1781/1792 (57 files); JS 907/921 with 0 crashes and 0 timeouts; DOM 640/640;
+URL 1188/1188; XML 1702/1702; WPT 4658/5192 (534 listed, 0 unlisted);
+diff-trees 6,000 pages and diff-xml 4,000 documents with 0 differing;
+diff-strings at its 95-difference ceiling; deep 1,332 runs over 465 pages at
+depth 200,000 on an 8 MB stack, 0 failed (slowest 26.0 s); bench 42 cases,
+bench-surrogates 3, bench-css 20, bench-attributes 6,
+bench-tokenizer-attributes 7, security-fetch 3 and security-worker 17, all
+with 0 failures; verify-media 35 checks. The sanitizer run: 161 suites,
+JS 906/921 (one fewer, a deep-recursion case that needs more stack than a
+sanitizer build's frames leave), XML 1702/1702, WPT 4658/5192, 1,000 generated
+XML documents with 0 differing and 1,000 round trips, fuzz 400 / pipeline 400 /
+XML 600 mutations with 0 findings, 1,800 media fuzz cases clean, and 882 deep
+runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest 4.5 s).
+`make tsan` passed both the model and the thread test, under ThreadSanitizer
+and under ASan with leak checking.
 
 **What this does not change.** A high half that is *already in a block* — from
 a literal, from `String.fromCharCode`, from a piece — still copies when the low

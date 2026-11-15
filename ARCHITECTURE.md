@@ -3960,24 +3960,27 @@ Whole-process times, release build, idle machine, `--run-js`. The baseline is
 this tree built with `main`'s `JsString`, kept as
 `build/litebird-surrogate-baseline`.
 
-| Pairs appended | Half at a time, before | Half at a time, after | A pair at a time |
-| ---: | ---: | ---: | ---: |
-| 5,000 | 0.31 s | 0.008 s | — |
-| 10,000 | 1.28 s | 0.011 s | — |
-| 20,000 | 5.60 s | 0.018 s | 0.009 s |
-| 40,000 | 20.97 s | 0.041 s | 0.015 s |
+| Pairs appended | Half at a time, before | Half at a time, after | Speedup | A pair at a time, both |
+| ---: | ---: | ---: | ---: | ---: |
+| 5,000 | 325 ms | 7 ms | 43.5× | — |
+| 10,000 | 1,390 ms | 11 ms | 127.1× | — |
+| 20,000 | 5,583 ms | 18 ms | 308.0× | 11 ms |
+| 40,000 | 23,252 ms | 30 ms | 782.1× | 15 ms |
 
 `make bench-surrogates` is the checked-in guard (three cases, best of three,
-results compared with Node.js, one-second limit): 16 ms, 36 ms and 15 ms,
+results compared with Node.js, one-second limit): 18 ms, 33 ms and 22 ms,
 against 5,546 ms, over 8 s and 3,856 ms for `main`'s binary, which fails all
 three. Counting work instead of timing it, 20,000 pairs built half at a time
 copy 399,370 bytes into 152 blocks for 100,000 bytes of text; a pair at a time
-copies 399,220 bytes into 22 blocks. The corpus case went from 5.68 s to
-0.032 s, printing the same line.
+copies 399,220 bytes into 22 blocks. The corpus case went from 5.545 s to
+0.035 s, printing the same line.
 
-The wider handle costs nothing measurable across the 39 string benchmarks:
-2,661 ms before, 2,452 ms after, median case 0.92×, worst 1.33×, best 0.61×
-(`python3 tools/bench/bench_strings.py --binary … --reference '' --reps 3`).
+The wider handle is not free, and the cost is measured: across the 39 string
+benchmarks that were already there, 2,521 ms before and 2,640 ms after (1.05×),
+median case 1.04×, worst 1.52× (`read: for-of, 200k non-ASCII`, 42 → 64 ms),
+best 0.60×. An earlier run of the same two binaries came out at 2,661 → 2,452 ms
+(median 0.92×), so the difference is close to this machine's run-to-run spread.
+Repro: `python3 tools/bench/bench_strings.py --binary … --reference '' --reps 3`.
 
 ### 4. Verification
 
@@ -3999,7 +4002,29 @@ between; it passes unchanged.
 The JavaScript corpus scores 907/921 with 0 timeouts, `long-strings.dat`
 34/34. The floor in CI is now that score, 907, as the comment above it said to
 do when this row was fixed. Out-of-corpus, 40 surrogate-heavy programs run in
-Node.js and in both binaries print the same: 0 mismatches.
+Node.js and in both binaries print the same: 0 mismatches; and two pages' worth
+of DOM text built half a pair at a time through
+`tools/conformance/compare_with_jsdom.py` print `11 lines, 11 the same` and
+`12 lines, 12 the same` on both binaries.
+
+The settle path is shared state, so it was run on its own under the sanitizers
+too: 200 rounds of seven threads settling copies of one handle that owes a
+half, reading one handle from several threads at once and taking pieces, while
+another thread appends to the same block so the room is sometimes free and
+sometimes taken. No race, no leak, every answer right, under ThreadSanitizer
+and under ASan/UBSan with leak checking on.
+
+The full chain on this tree: release — 161 suites, html5lib 1781/1792, JS
+907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192 (534 listed,
+0 unlisted), diff-trees and diff-xml 0 differing, diff-strings at its ceiling,
+deep 1,332 runs over 465 pages at depth 200,000 (0 failed, slowest 26.0 s),
+bench 42 / bench-surrogates 3 / bench-css 20 / bench-attributes 6 /
+bench-tokenizer-attributes 7 / security-fetch 3 / security-worker 17 with 0
+failures, verify-media 35 checks. Sanitizers — 161 suites, JS 906/921 (one
+fewer: deep recursion), XML 1702/1702, WPT 4658/5192, 1,000 generated XML
+documents and 1,000 round trips, fuzz 400 / pipeline 400 / XML 600 mutations
+with 0 findings, 1,800 media fuzz cases clean, deep 882 runs over 315 pages at
+depth 10,000 (0 failed, slowest 4.5 s), and `make tsan` under both sanitizers.
 
 ### 5. What is still open
 
@@ -4015,6 +4040,10 @@ Node.js and in both binaries print the same: 0 mismatches.
   5,000/10,000/20,000). Making that linear needs text that can be read without
   being flattened — a rope, or UTF-16 storage — which is a change of
   representation, not of this path. It is a row of the task table.
+- The handle is a word wider. Packing the owed half into the spare high bits of
+  the four length and offset fields would keep it at 24 bytes, at the cost of
+  masking every read of them; that was not done, and the measured cost of not
+  doing it is in section 3.
 
 ---
 

@@ -821,10 +821,12 @@ character is written where the block's text ends when the low half arrives.
 Anything that reads the text settles the handle first, writing three bytes
 into the free room or copying once into a block the handle's own block keeps
 alive. `make bench-surrogates` runs the two sizes a doubling apart and the
-keep-each-prefix shape against Node.js with a one-second limit: 16 ms, 36 ms
-and 15 ms, where `main`'s binary fails all three. The corpus case that used to
-take 5.7 s of its 10-second budget takes 0.03 s, so the JavaScript floor in CI
-is now the score, 907 of 921. Reading a half-owed string before completing the
+keep-each-prefix shape against Node.js with a one-second limit: 18 ms, 33 ms
+and 22 ms, where `main`'s binary fails all three (5.5 s, over 8 s, 3.9 s). The
+corpus case that used to take 5.5 s of its 10-second budget takes 0.035 s, so
+the JavaScript floor in CI is now the score, 907 of 921. The handle is a word
+wider, which costs about 5% across the string benchmarks that were already
+there. Reading a half-owed string before completing the
 pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
 

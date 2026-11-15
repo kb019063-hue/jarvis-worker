@@ -138,8 +138,10 @@ public:
         if (m_pending) return settled().view();
         return m_buffer ? std::string_view(m_buffer->bytes() + m_offset, m_bytes) : std::string_view();
     }
-    /// An owned copy of the bytes. This is the one read here whose cost grows
-    /// with the text; code that runs once per character must not call it.
+    /// An owned copy of the bytes. This is the one read here that always costs
+    /// the length of the text; code that runs once per character must not call
+    /// it. `view()` costs nothing except the first read of a handle that owes
+    /// a half, which settles it (see below).
     std::string str() const;
     /// How many bytes `view()` holds, the pending half included.
     size_t size() const noexcept { return m_bytes + (m_pending ? 3 : 0); }

@@ -61,7 +61,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 
 | # | Phase | Size |
 | :--- | :--- | :--- |
-| 12 | **Two known-wrong layout bugs** — a block inside an inline box is not laid out (`<a>x<p>y</p></a>`); floats escape the box past 1,024 and take 46 s. | M |
+| 12 | **Two known-wrong layout bugs** — block-in-inline is split correctly (Phase 36); sized floats are placed by a band-edge sweep, landing on the exact bottom edge of the float in the way (10,000 sized floats in seconds; nothing escapes the box). **Done.** | M |
 | 13 | **Flexbox/Grid gap closure** vs WPT `css/flex` and `css/grid`. | M–L |
 | 14 | **Selectors level 4** — `:is()/:where()/:has()/:focus-visible`, cascade `@layer`, `@supports`, `@container`, CSS nesting, `::part`. | M–L |
 | 15 | **Media & container queries** — evaluation inside the cascade (parsing exists). | S–M |

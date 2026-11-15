@@ -11866,6 +11866,196 @@ TEST(js_compiled_custom_elements_are_constructed) {
            "1,true,q,true");
 }
 
+TEST(js_compiled_custom_elements_are_upgraded) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><x-old id='parsed' start='3'>text</x-old><x-modern id='m'></x-modern>"
+        "<x-greeter id='g' name='page'></x-greeter><button is='fancy-b' id='fancy'>b</button>"
+        "<x-twice id='twice'></x-twice><x-nested id='outer'></x-nested><x-throws id='throws'></x-throws>"
+        "<div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // An element of the page, there before its class is defined. The upgrade
+    // runs the constructor on the element's own object; a constructor written
+    // for ES5 does not pass `this` on but asks HTMLElement for its element
+    // with new.target, and is given that object (JsValue.cpp, "Constructions
+    // in place"). Until Phase 43 it was given nothing: "Illegal constructor".
+    // What it is told afterwards comes in the order of the standard: the
+    // attributes it observes, then that it is connected.
+    js.eval_ast(R"(
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+        function inherit(C, Parent) {
+            C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+            return Object.setPrototypeOf(C, Parent);
+        }
+        var $ = function (id) { return document.getElementById(id); }, host = $('host'), log = [];
+        var Old = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.made = true;
+            log.push('constructed ' + self.id + ' ' + self.getAttribute('start') + ' ' + self.childNodes.length + ' ' + self.isConnected);
+            return self;
+        }, HTMLElement);
+        Old.prototype.connectedCallback = function () { log.push('connected ' + this.id); };
+        Old.prototype.attributeChangedCallback = function (name, before, after) { log.push(name + ':' + before + '>' + after); };
+        Old.observedAttributes = ['start'];
+        var e = $('parsed'), before = [e instanceof Old, e.made, e.matches(':defined')].join();
+        customElements.define('x-old', Old);
+    )");
+    assert(text("before") ==
+           "false,,false");
+    assert(text("[e instanceof Old, e.made, e.constructor === Old, e.matches(':defined'), e === "
+                "$('parsed'), e.textContent].join()") ==
+           "true,true,true,true,true,text");
+    assert(text("log.join('|')") ==
+           "constructed parsed 3 1 true|start:null>3|connected parsed");
+
+    // Elements the fragment parser makes, and a clone: each is upgraded by
+    // the same constructor, the clone while it is in no document.
+    js.eval_ast(R"(
+        log.length = 0;
+        host.innerHTML = '<x-old id="one"></x-old><p><x-old id="two" start="5"></x-old></p>';
+        var one = $('one'), two = $('two'), copy = one.cloneNode(true);
+    )");
+    assert(text("[one instanceof Old, one.made, two.made, copy instanceof Old, copy.made, copy !== one, "
+                "copy.isConnected].join()") ==
+           "true,true,true,true,true,true,false");
+    assert(text("log.join('|')") ==
+           "constructed one null 0 true|connected one|constructed two 5 0 true|start:null>5|connected "
+           "two|constructed one null 0 false");
+
+    // Elements made before the definition: the one in the document is
+    // upgraded by define(), the one in a loose tree by upgrade().
+    js.eval_ast(R"(
+        var Late = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.late = true; return self; }, HTMLElement);
+        var tree = document.createElement('section');
+        tree.appendChild(document.createElement('x-late'));
+        host.appendChild(document.createElement('x-late'));
+        customElements.define('x-late', Late);
+        var loose = [tree.firstChild instanceof Late, tree.firstChild.late].join();
+        customElements.upgrade(tree);
+    )");
+    assert(text("[host.lastChild instanceof Late, host.lastChild.late, loose, tree.firstChild instanceof "
+                "Late, tree.firstChild.late].join()") ==
+           "true,true,false,,true,true");
+
+    // A class on top of the function: its `super()` reaches the function
+    // with the element as `this` and the class as new.target, the function
+    // gets the element back from HTMLElement, and the class's field goes on
+    // it.
+    js.eval_ast(R"(
+        class Modern extends Old {
+            field = 7;
+            constructor() { var s = super(); this.same = s === this; this.top = new.target === Modern; }
+        }
+        customElements.define('x-modern', Modern);
+        var m = $('m');
+    )");
+    assert(text("[m instanceof Modern, m instanceof Old, m.made, m.field, m.same, m.top, m === "
+                "$('m')].join()") ==
+           "true,true,true,7,true,true,true");
+
+    // What Babel emits, two classes deep: every level constructs the next
+    // with `Reflect.construct(Super, arguments, NewTarget)`, and only
+    // new.target says which element this is about.
+    js.eval_ast(R"(
+        function _wrapNativeSuper(Class) {
+            function Wrapper() { return Reflect.construct(Class, arguments, Object.getPrototypeOf(this).constructor); }
+            Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, writable: true, configurable: true } });
+            return Object.setPrototypeOf(Wrapper, Class);
+        }
+        function _createSuper(Derived) {
+            return function () { return Reflect.construct(Object.getPrototypeOf(Derived), arguments, Object.getPrototypeOf(this).constructor); };
+        }
+        var Greeter = (function (_HTMLElement) {
+            inherit(Greeter, _HTMLElement);
+            var _super = _createSuper(Greeter);
+            function Greeter() { var _this = _super.call(this); _this.greeting = 'hello'; return _this; }
+            Greeter.prototype.connectedCallback = function () { this.textContent = this.greeting + ' ' + this.getAttribute('name'); };
+            return Greeter;
+        })(_wrapNativeSuper(HTMLElement));
+        var Loud = (function (_Greeter) {
+            inherit(Loud, _Greeter);
+            var _super = _createSuper(Loud);
+            function Loud() { var _this = _super.call(this); _this.loud = true; return _this; }
+            return Loud;
+        })(Greeter);
+        customElements.define('x-greeter', Greeter);
+        customElements.define('x-loud', Loud);
+        var g = $('g');
+        host.innerHTML = '<x-loud name="inner"></x-loud>';
+    )");
+    assert(text("[g instanceof Greeter, g.greeting, g.textContent, g.constructor === Greeter].join()") ==
+           "true,hello,hello page,true");
+    assert(text("[host.firstChild instanceof Loud, host.firstChild instanceof Greeter, "
+                "host.firstChild.loud, host.firstChild.greeting, host.firstChild.textContent, "
+                "host.firstChild.cloneNode(false).loud].join()") ==
+           "true,true,true,hello,hello inner,true");
+
+    // A customized built-in: the interface is HTMLButtonElement.
+    js.eval_ast(R"(
+        var Fancy = inherit(function () { var self = Reflect.construct(HTMLButtonElement, [], new.target); self.fancy = true; return self; }, HTMLButtonElement);
+        customElements.define('fancy-b', Fancy, { extends: 'button' });
+        var fancy = $('fancy');
+    )");
+    assert(text("[fancy instanceof Fancy, fancy instanceof HTMLButtonElement, fancy.fancy, "
+                "fancy.localName, document.createElement('button', { is: 'fancy-b' }).fancy, "
+                "document.createElement('button').fancy].join()") ==
+           "true,true,true,button,true,");
+
+    // The element is handed out once. A constructor that asks again during
+    // an upgrade is refused (the standard's "already constructed" marker);
+    // under `new` nothing is being upgraded and each request makes an
+    // element.
+    js.eval_ast(R"(
+        var seen = [];
+        var Twice = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target), other;
+            try { other = Reflect.construct(HTMLElement, [], new.target); seen.push('another ' + (other !== self) + ' ' + other.localName); }
+            catch (err) { seen.push(err.name); }
+            return self;
+        }, HTMLElement);
+        customElements.define('x-twice', Twice);
+        var twice = $('twice'), again = new Twice();
+    )");
+    assert(text("[twice instanceof Twice, again instanceof Twice, again !== twice, seen.join('|')].join()") ==
+           "true,true,true,TypeError|another true x-twice");
+
+    // An instance of the same class made inside the constructor, before the
+    // constructor asked for its own element, takes the element that is being
+    // upgraded; the constructor's own request is then the second one. (The
+    // constructor returns the inner instance, so the upgrade succeeds.)
+    js.eval_ast(R"(
+        var depth = 0, steps = [];
+        var Nested = inherit(function () {
+            var inner = null, self;
+            if (depth++ === 0) inner = new Nested();
+            try { self = Reflect.construct(HTMLElement, [], new.target); }
+            catch (err) { steps.push('own ' + err.name); return inner; }
+            steps.push('made ' + (self.id || 'no id'));
+            return self;
+        }, HTMLElement);
+        customElements.define('x-nested', Nested);
+        var outer = $('outer');
+    )");
+    assert(text("[steps.join('|'), outer instanceof Nested, outer.matches(':defined')].join()") ==
+           "made outer|own TypeError,true,true");
+
+    // A constructor that throws after it got its element: the upgrade fails,
+    // and nothing of it is left behind. The next constructions get elements
+    // of their own, also for the class whose upgrade failed.
+    js.eval_ast(R"(
+        var Throws = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.half = true; throw new RangeError('no'); }, HTMLElement);
+        customElements.define('x-throws', Throws);
+        var failed = $('throws'), fresh = Reflect.construct(HTMLElement, [], Old);
+    )");
+    assert(text("[failed.matches(':defined'), nameOf(function () { new Throws(); }), nameOf(function () { "
+                "document.createElement('x-old'); }), fresh instanceof Old, fresh !== e, fresh.localName, "
+                "fresh.isConnected, nameOf(function () { new Twice(); })].join()") ==
+           "false,RangeError,no error,true,true,x-old,false,no error");
+}
+
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     using namespace litebird;
 
@@ -11877,7 +12067,9 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
     for (int round = 0; round < 3; ++round) {
         {
-            auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'></div></body>");
+            auto doc = HtmlParser::parse(
+                "<!DOCTYPE html><body><x-old id='first'></x-old><x-modern id='second'></x-modern>"
+                "<x-throws></x-throws><div id='host'></div></body>");
             JsInterpreter js(doc);
             js.eval_ast(R"(
                 function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
@@ -11886,6 +12078,11 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
                 customElements.define('x-old', Old);
                 class Modern extends Old { constructor() { super(); this.kind = new.target.name; this.self = () => this; } }
                 customElements.define('x-modern', Modern);
+                // An upgrade that ends in an exception, with its element handed out.
+                function Throws() { var self = Reflect.construct(HTMLElement, [], new.target); self.keeps = [self]; throw new Error('no'); }
+                Throws.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Throws, writable: true, configurable: true } });
+                Object.setPrototypeOf(Throws, HTMLElement);
+                customElements.define('x-throws', Throws);
                 var host = document.getElementById('host'), kinds = [];
                 for (var i = 0; i < 50; i++) {
                     var el = i % 2 ? document.createElement('x-modern') : new Old();
@@ -11897,9 +12094,15 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
             )");
             assert(js.eval("[host.children.length, kinds[0], kinds[1], e instanceof Sub].join()").to_string() ==
                    "10,old,Modern,true");
+            // The two elements of the page were upgraded where they stood.
+            assert(js.eval("var first = document.getElementById('first'), second = document.getElementById('second'); "
+                           "[first.made, second.made, second.kind, second.self() === second].join()").to_string() ==
+                   "true,true,Modern,true");
             Heap::default_heap().collect_garbage();
             assert(js.eval("host.lastChild instanceof Old && host.children[1].self() === host.children[1]").to_string() ==
                    "true");
+            assert(js.eval("[first.made, second.self() === second, document.querySelector('x-throws').keeps.length].join()")
+                       .to_string() == "true,true,1");
         }
         Heap::default_heap().collect_garbage();
         Heap::default_heap().collect_garbage();
@@ -12094,6 +12297,7 @@ int main() {
     RUN_TEST(js_super_binds_this_to_what_the_parent_made);
     RUN_TEST(js_new_target_and_returned_objects_are_collected);
     RUN_TEST(js_compiled_custom_elements_are_constructed);
+    RUN_TEST(js_compiled_custom_elements_are_upgraded);
     RUN_TEST(js_a_page_with_compiled_custom_elements_is_collected);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run

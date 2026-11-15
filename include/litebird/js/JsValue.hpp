@@ -354,6 +354,13 @@ public:
     /// case but two: `super(...)` hands on the new.target of the constructor
     /// it stands in, and `Reflect.construct(F, args, NewTarget)` names one.
     /// It has to stay alive for the duration of the call.
+    ///
+    /// A `this_val` that is a platform object already (an element) makes this
+    /// a construction in place: the constructor is to turn that object into
+    /// what it constructs. `super(...)` carries the object to a native parent;
+    /// for a constructor that reaches the native with
+    /// `Reflect.construct(Native, [], new.target)` instead, construct_for()
+    /// finds it by new.target (see "Constructions in place" in JsValue.cpp).
     JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr,
                       const JsValue* new_target = nullptr) const;
     /// `super(...args)` in a class whose parent is a native constructor.
@@ -366,8 +373,10 @@ public:
                                const JsValue* new_target = nullptr) const;
     /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,
     /// another function as new.target, and no object to hand it yet. A native
-    /// that asks for current_derived_this() gets one with the prototype
-    /// `new_target` has at that moment, and it is left in `made`; when
+    /// that asks for current_derived_this() gets the object `new_target` is
+    /// being constructed in place on, if it is (once: a second request
+    /// throws); otherwise one with the prototype
+    /// `new_target` has at that moment. Either is left in `made`; when
     /// `new_target` has no object for a prototype the native gets none and
     /// `made` is null. A native that never asks builds its own, `made` stays
     /// undefined, and nothing was read from `new_target`. Both have to

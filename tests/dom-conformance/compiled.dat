@@ -207,12 +207,221 @@ TypeError
 #name createElement and cloneNode construct a compiled custom element once each
 #code
 var made = 0;
-function Tag() { var self = Reflect.construct(HTMLElement, [], new.target); made++; return self; }
+function Tag() { var self = Reflect.construct(HTMLElement, [], new.target); self.n = ++made; return self; }
 Tag.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Tag, writable: true, configurable: true } });
 Object.setPrototypeOf(Tag, HTMLElement);
 customElements.define('x-tag', Tag);
 var a = document.createElement('x-tag'), b = document.createElement('x-tag');
 var copy = a.cloneNode(false);
-console.log(made, a instanceof Tag, b instanceof Tag, a !== b, copy instanceof Tag, copy !== a);
+console.log(made, a.n, b.n, copy.n, a instanceof Tag, b instanceof Tag, a !== b, copy instanceof Tag, copy !== a);
 #expect
-3 true true true true true
+3 1 2 3 true true true true true
+
+#name an element of the page is upgraded by an ES5 constructor
+#html
+<html><head><title>Upgrade</title></head><body><x-old id="parsed" start="3">text</x-old><x-old id="bare"></x-old><div id="host"></div></body></html>
+#code
+var log = [];
+function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; log.push('constructed ' + self.id + ' ' + self.getAttribute('start') + ' ' + self.childNodes.length + ' ' + self.isConnected); return self; }
+Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+Old.prototype.connectedCallback = function () { log.push('connected ' + this.id); };
+Old.prototype.attributeChangedCallback = function (name, before, after) { log.push(this.id + ' ' + name + ':' + before + '>' + after); };
+Old.observedAttributes = ['start'];
+Object.setPrototypeOf(Old, HTMLElement);
+var e = document.getElementById('parsed');
+console.log(e instanceof HTMLElement, e.constructor === HTMLElement, e.made, e.matches(':defined'));
+customElements.define('x-old', Old);
+console.log(e instanceof Old, e.constructor === Old, e.made, e.matches(':defined'), document.getElementById('bare').made, e === document.getElementById('parsed'));
+console.log(log.join(' | '));
+e.setAttribute('start', '4');
+console.log(log[log.length - 1], e.textContent, document.querySelectorAll('x-old:defined').length);
+#expect
+true true undefined false
+true true true true true true
+constructed parsed 3 1 true | parsed start:null>3 | connected parsed | constructed bare null 0 true | connected bare
+parsed start:3>4 text 2
+
+#name innerHTML and cloneNode make elements that an ES5 constructor upgrades
+#code
+var log = [];
+function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.n = log.length; log.push('constructed ' + self.id + ' ' + self.isConnected); return self; }
+Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+Old.prototype.connectedCallback = function () { log.push('connected ' + this.id); };
+Object.setPrototypeOf(Old, HTMLElement);
+customElements.define('x-old', Old);
+var host = document.getElementById('host');
+host.innerHTML = '<x-old id="one"></x-old><p><x-old id="two"></x-old></p>';
+var one = document.getElementById('one'), two = document.getElementById('two');
+console.log(one instanceof Old, one.n, two instanceof Old, two.n);
+var copy = one.cloneNode(true), deep = host.cloneNode(true);
+console.log(copy instanceof Old, copy.n, copy !== one, copy.id, deep.querySelector('p x-old') instanceof Old, typeof deep.querySelector('p x-old').n);
+console.log(log.join(' | '));
+host.appendChild(copy);
+console.log(log[log.length - 1], host.querySelectorAll('x-old').length);
+#expect
+true 0 true 2
+true 4 true one true number
+constructed one true | connected one | constructed two true | connected two | constructed one false | constructed one false | constructed two false
+connected one 3
+
+#name customElements.upgrade and whenDefined with an ES5 constructor
+#html
+<html><head><title>Upgrade</title></head><body><x-late id="late"></x-late><div id="host"></div></body></html>
+#code
+var late = document.getElementById('late'), order = [];
+customElements.whenDefined('x-late').then(function (ctor) { order.push('whenDefined ' + (ctor === Late) + ' ' + late.made); console.log(order.join(' | ')); });
+function Late() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; order.push('constructed'); return self; }
+Late.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Late, writable: true, configurable: true } });
+Object.setPrototypeOf(Late, HTMLElement);
+var tree = document.createElement('section');
+tree.innerHTML = '<x-late></x-late><b><x-late></x-late></b>';
+customElements.define('x-late', Late);
+console.log(late instanceof Late, late.made, tree.firstChild instanceof Late, tree.firstChild.made);
+customElements.upgrade(tree);
+console.log(tree.firstChild instanceof Late, tree.firstChild.made, tree.querySelector('b x-late').made, order.length);
+customElements.upgrade(tree);
+console.log(order.length, document.querySelectorAll(':defined').length > 0);
+#expect
+true true false undefined
+true true true 3
+3 true
+constructed | constructed | constructed | whenDefined true true
+
+#name a class on a compiled constructor upgrades an element of the page
+#html
+<html><head><title>Upgrade</title></head><body><x-modern id="m" label="from the page"></x-modern><div id="host"></div></body></html>
+#code
+function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = new.target.name; return self; }
+Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+Old.prototype.hello = function () { return 'hello ' + this.getAttribute('label'); };
+Object.setPrototypeOf(Old, HTMLElement);
+class Modern extends Old {
+  field = 7;
+  #secret = 'kept';
+  constructor() { var s = super(); this.same = s === this; this.top = new.target === Modern; }
+  get secret() { return this.#secret; }
+}
+customElements.define('x-modern', Modern);
+var m = document.getElementById('m');
+console.log(m instanceof Modern, m instanceof Old, m.made, m.field, m.same, m.top, m.secret, m.hello());
+var host = document.getElementById('host');
+host.innerHTML = '<x-modern label="inner"></x-modern>';
+console.log(host.firstChild.field, host.firstChild.secret, host.firstChild.hello(), host.firstChild.cloneNode(false).made);
+#expect
+true true Modern 7 true true kept hello from the page
+7 kept hello inner Modern
+
+#name a customized built-in written for ES5: in the page, from innerHTML, by createElement
+#html
+<html><head><title>Upgrade</title></head><body><button is="fancy-b" id="fancy">b</button><button id="plain">p</button><div id="host"></div></body></html>
+#code
+function Fancy() { var self = Reflect.construct(HTMLButtonElement, [], new.target); self.fancy = true; return self; }
+Fancy.prototype = Object.create(HTMLButtonElement.prototype, { constructor: { value: Fancy, writable: true, configurable: true } });
+Fancy.prototype.press = function () { return this.localName + ' pressed'; };
+Object.setPrototypeOf(Fancy, HTMLButtonElement);
+customElements.define('fancy-b', Fancy, { extends: 'button' });
+var e = document.getElementById('fancy'), p = document.getElementById('plain');
+console.log(e instanceof Fancy, e instanceof HTMLButtonElement, e.fancy, e.localName, e.press(), p instanceof Fancy, p.fancy);
+var made = document.createElement('button', { is: 'fancy-b' });
+console.log(made instanceof Fancy, made.fancy, made.localName, made.type);
+var host = document.getElementById('host');
+host.innerHTML = '<button is="fancy-b">x</button><button>y</button>';
+console.log(host.firstChild.fancy, host.lastChild.fancy, host.firstChild.cloneNode(true).fancy, new Fancy().localName);
+#expect
+true true true button button pressed false undefined
+true true button submit
+true undefined true button
+
+#name a constructor asks for its element once: a second request in an upgrade is refused, under new it makes another
+#html
+<html><head><title>Upgrade</title></head><body><x-twice id="twice"></x-twice><div id="host"></div></body></html>
+#code
+var seen = [];
+function Twice() {
+  var self = Reflect.construct(HTMLElement, [], new.target), other;
+  try { other = Reflect.construct(HTMLElement, [], new.target); seen.push('second: ' + (other !== self) + ' ' + other.localName + ' ' + (other.id || 'no id')); }
+  catch (e) { seen.push('second: ' + e.name); }
+  return self;
+}
+Twice.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Twice, writable: true, configurable: true } });
+Object.setPrototypeOf(Twice, HTMLElement);
+customElements.define('x-twice', Twice);
+var e = document.getElementById('twice');
+console.log(e instanceof Twice, seen.join(' | '));
+seen.length = 0;
+var n = new Twice();
+console.log(n instanceof Twice, n !== e, seen.join(' | '));
+seen.length = 0;
+document.getElementById('host').innerHTML = '<x-twice></x-twice>';
+var c = document.createElement('x-twice');
+console.log(seen.join(' | '), c instanceof Twice);
+#expect
+true second: TypeError
+true true second: true x-twice no id
+second: TypeError | second: true x-twice no id true
+
+#name an instance made inside an upgrade, before the constructor asked, is the element being upgraded
+#html
+<html><head><title>Upgrade</title></head><body><x-nested id="outer"></x-nested><div id="host"></div></body></html>
+#code
+var seen = [], depth = 0;
+function Nested() {
+  var inner = null, self;
+  if (depth++ === 0) inner = new Nested();
+  try { self = Reflect.construct(HTMLElement, [], new.target); }
+  catch (e) { seen.push('own: ' + e.name); return inner; }
+  seen.push('made ' + (self.id || 'no id'));
+  return self;
+}
+Nested.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Nested, writable: true, configurable: true } });
+Object.setPrototypeOf(Nested, HTMLElement);
+customElements.define('x-nested', Nested);
+var e = document.getElementById('outer');
+console.log(seen.join(' | '), e instanceof Nested, e.matches(':defined'));
+seen.length = 0; depth = 0;
+var fresh = new Nested();
+console.log(seen.join(' | '), fresh instanceof Nested, fresh !== e, fresh.localName);
+#expect
+made outer | own: TypeError true true
+made no id | made no id true true x-nested
+
+#name elements of the page are upgraded by what Babel emits
+#html
+<html><head><title>Upgrade</title></head><body><x-greeter id="g" name="page"></x-greeter><x-loud id="l" name="loud"></x-loud><div id="host"></div></body></html>
+#code
+function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+function _setPrototypeOf(o, p) { return Object.setPrototypeOf(o, p); }
+function _inherits(subClass, superClass) { subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.defineProperty(subClass, "prototype", { writable: false }); if (superClass) _setPrototypeOf(subClass, superClass); }
+function _possibleConstructorReturn(self, call) { if (call && (typeof call === "object" || typeof call === "function")) { return call; } else if (call !== void 0) { throw new TypeError("Derived constructors may only return object or undefined"); } if (self === void 0) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return self; }
+function _createSuper(Derived) { return function _createSuperInternal() { var Super = _getPrototypeOf(Derived), NewTarget = _getPrototypeOf(this).constructor; return _possibleConstructorReturn(this, Reflect.construct(Super, arguments, NewTarget)); }; }
+function _construct(Parent, args, Class) { return Reflect.construct(Parent, args, Class); }
+function _wrapNativeSuper(Class) { function Wrapper() { return _construct(Class, arguments, _getPrototypeOf(this).constructor); } Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, enumerable: false, writable: true, configurable: true } }); return _setPrototypeOf(Wrapper, Class); }
+var Greeter = (function (_HTMLElement) {
+  _inherits(Greeter, _HTMLElement);
+  var _super = _createSuper(Greeter);
+  function Greeter() { var _this; _this = _super.call(this); _this.made = true; return _this; }
+  Greeter.prototype.connectedCallback = function () { this.textContent = 'hello ' + (this.getAttribute('name') || 'nobody'); };
+  return Greeter;
+})(_wrapNativeSuper(HTMLElement));
+var Loud = (function (_Greeter) {
+  _inherits(Loud, _Greeter);
+  var _super2 = _createSuper(Loud);
+  function Loud() { var _this2; _this2 = _super2.call(this); _this2.loud = true; return _this2; }
+  Loud.prototype.shout = function () { return this.textContent.toUpperCase() + '!'; };
+  return Loud;
+})(Greeter);
+var g = document.getElementById('g'), l = document.getElementById('l');
+console.log(g instanceof Greeter, g.made, JSON.stringify(g.textContent));
+customElements.define('x-greeter', Greeter);
+customElements.define('x-loud', Loud);
+console.log(g instanceof Greeter, g.made, g.textContent, g.constructor === Greeter, g instanceof Loud);
+console.log(l instanceof Loud, l instanceof Greeter, l.made, l.loud, l.shout(), Object.getPrototypeOf(l) === Loud.prototype);
+var host = document.getElementById('host');
+host.innerHTML = '<x-loud name="inner"></x-loud>';
+var copy = host.firstChild.cloneNode(true);
+console.log(host.firstChild.loud, host.firstChild.shout(), copy.made, copy.loud, copy !== host.firstChild, copy.isConnected);
+#expect
+false undefined ""
+true true hello page true false
+true true true true HELLO LOUD! true
+true HELLO INNER! true true true false

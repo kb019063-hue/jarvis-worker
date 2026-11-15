@@ -353,6 +353,56 @@ bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
 }
 
+// ---------------------------------------------------------------------------
+// Constructions in place
+// ---------------------------------------------------------------------------
+//
+// construct(args, this) with a `this` that is a platform object already asks
+// the constructor to make that very object what it constructs: this is how an
+// element that exists is upgraded to a custom element. A class gets there by
+// itself, because `super()` hands `this` up and the interface's constructor
+// finds it in current_derived_this(). A constructor compiled for older
+// browsers does not pass `this` on. It calls
+// `Reflect.construct(HTMLElement, [], new.target)` and uses what comes back,
+// and the one thing that ties that call to the construction it is part of is
+// new.target. So a construction in place is noted here for as long as it
+// runs, under the function `new` is being applied to, and construct_for()
+// offers its object to the native that asks, once. This is the HTML
+// standard's "construction stack": there each definition has one, and a
+// definition is found by its constructor, which is new.target.
+
+namespace {
+
+struct InPlaceConstruction {
+    const void* new_target;     // identity of the function being constructed
+    JsValue object;             // what it is constructed on
+    bool handed_out{false};     // the standard's "already constructed" marker
+};
+
+thread_local std::vector<InPlaceConstruction> t_in_place;
+
+struct InPlaceScope {
+    bool noted{false};
+    InPlaceScope(const JsValue& callee, const JsValue* this_val, const JsValue* new_target) {
+        if (!this_val || this_val->type != JsType::Object || !this_val->object_val ||
+            !this_val->object_val->dom_node) {
+            return;
+        }
+        // `super(...)` constructs the parent on the same object with the same
+        // new.target: it is one construction, noted once.
+        if (!t_in_place.empty() && t_in_place.back().object.object_val.get() == this_val->object_val.get()) return;
+        t_in_place.push_back({(new_target ? *new_target : callee).identity(), *this_val});
+        noted = true;
+    }
+    ~InPlaceScope() {
+        if (noted) t_in_place.pop_back();
+    }
+    InPlaceScope(const InPlaceScope&) = delete;
+    InPlaceScope& operator=(const InPlaceScope&) = delete;
+};
+
+}  // namespace
+
 const JsValue* JsValue::current_derived_this() {
     if (t_call_context.derived_this || !t_call_context.derived_slot) return t_call_context.derived_this;
     // construct_for(): the native asks, so the object is made now, with the
@@ -363,6 +413,18 @@ const JsValue* JsValue::current_derived_this() {
     const JsValue* new_target = t_call_context.new_target;
     t_call_context.derived_slot = nullptr;          // asked once
     if (!new_target) return nullptr;
+    // Is this function being constructed in place right now? Then the object
+    // it runs on is the one, whatever prototype it has, and only once: a
+    // constructor that asks a second time, or makes another instance of its
+    // own class while it runs, is refused, as the standard has it.
+    for (auto entry = t_in_place.rbegin(); entry != t_in_place.rend(); ++entry) {
+        if (entry->new_target != new_target->identity()) continue;
+        if (entry->handed_out) js_throw_type_error("This instance is already constructed");
+        entry->handed_out = true;
+        *slot = entry->object;
+        t_call_context.derived_this = slot;
+        return slot;
+    }
     const JsValue proto = new_target->get_property("prototype");
     // Nothing usable there: the native's own prototype is the right one, and
     // it gets that by building its object as if none had been offered. Null
@@ -496,6 +558,7 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
     static const JsValue undefined_this;
     if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
+    InPlaceScope in_place(*this, this_val, new_target);
     if (fn) {
         CallContextScope scope(this_val ? *this_val : undefined_this, true, this);
         t_call_context.new_target = new_target;

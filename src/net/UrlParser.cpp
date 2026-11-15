@@ -7,6 +7,7 @@
 // every part, so nothing is lost by not decoding.
 
 #include "litebird/net/UrlParser.hpp"
+#include "litebird/net/Idna.hpp"
 
 #include <algorithm>
 #include <array>
@@ -377,14 +378,16 @@ bool parse_host(std::string_view input, bool opaque, std::string& out) {
         out = encode(input, EncodeSet::C0Control);
         return true;
     }
+    // WHATWG domain to ASCII (UTS #46, nontransitional) then the forbidden
+    // domain code point check on the result.
     std::string domain = utf8_or_replacement(percent_decode(input));
-    for (char& c : domain) c = lower(c);
-    if (domain.empty()) return false;
-    for (unsigned char c : domain) {
+    std::string ascii;
+    if (!domain_to_ascii(domain, ascii)) return false;
+    for (unsigned char c : ascii) {
         if (is_forbidden_domain_char(c)) return false;
     }
-    if (ends_in_a_number(domain)) return parse_ipv4(domain, out);
-    out = std::move(domain);
+    if (ends_in_a_number(ascii)) return parse_ipv4(ascii, out);
+    out = std::move(ascii);
     return true;
 }
 

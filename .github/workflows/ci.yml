@@ -27,6 +27,13 @@ jobs:
         # A web document must not read a marker file by path, file: URL, or
         # relative reference; a file: document keeps local access.
         run: make security-fetch
+      - name: JPEG, GIF, and SVG differential verification and mutation fuzzing
+        # Verifies Baseline/Progressive JPEG and GIF87a/89a decoding pixel-by-pixel
+        # against ImageMagick/libjpeg when available, real-world SVG rendering,
+        # and runs 1,800 mutated JPEG/GIF/SVG inputs through media_check.
+        run: |
+          make verify-media
+          make fuzz-media
 
   conformance:
     name: DOM conformance (html5lib corpus)

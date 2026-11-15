@@ -2992,6 +2992,87 @@ loading are unchanged/open.
 
 ---
 
+## Phase 38 Architecture: Real-Web JPEG/GIF Decoding, SVG & Canvas 2D
+
+Phase 38 replaces Litebird's toy vector/canvas rasterizers and fills the missing
+real-web raster image decoders (JPEG and GIF) with zero-dependency C++20
+implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
+
+### 1. Standalone ITU-T T.81 JPEG Decoder (`JpegDecoder.hpp`, `src/render/JpegDecoder.cpp`)
+
+- **Markers & frame modes:** `SOI`/`EOI`, `DQT` (8-bit and 16-bit), `DHT`
+  (9-bit fast lookup table with 16-bit bit-by-bit fallback and over-subscription
+  checks), `DRI` / `RST0`–`RST7`, `APP0` (JFIF), `APP14` (Adobe color transform),
+  `SOF0` (Baseline DCT), `SOF1` (Extended Sequential DCT), and `SOF2`
+  (Progressive DCT).
+- **Progressive scans:** Maintains per-component DCT coefficient buffers across
+  arbitrary scan scripts: interleaved/non-interleaved DC first (`Ah=0`) and DC
+  refinement (`Ah>0`), AC first with EOB runs (`EOB0`–`EOB14`, `ZRL`), and AC
+  successive-approximation refinement.
+- **IDCT, chroma upsampling & color:** Separable double-precision 8×8 IDCT with
+  DC-only row/column fast paths, centered `[3/4, 1/4]` triangle chroma
+  upsampling (4:4:4, 4:2:2, 4:2:0, 4:4:0, odd dimensions), and Grayscale,
+  YCbCr, RGB, CMYK, and Adobe YCCK conversions.
+- **Security bounds:** Rejects streams exceeding `kMaxDecodedPixels` (16M px) or
+  `kMaxScans` (64), checks all segment lengths and Huffman trees, and verifies
+  against `RasterBudget`.
+
+### 2. Standalone GIF87a / GIF89a Decoder (`GifDecoder.hpp`, `src/render/GifDecoder.cpp`)
+
+- **LZW & palettes:** Full 2..8-bit variable-width LZW (up to 12-bit codes) with
+  deferred clear-code support when the 4096-entry table fills, Global and Local
+  Color Tables, and 4-pass GIF interlacing.
+- **Animation & disposal:** Graphic Control Extensions (transparency index,
+  centisecond frame delays, all four disposal methods: `None`, `DoNotDispose`,
+  `RestoreBackground`, `RestorePrevious`), `NETSCAPE2.0` loop count, and
+  sub-rectangle compositing onto a persistent canvas buffer.
+- **Bounds:** Enforces `kMaxDecodedPixels` and `kMaxFrames` (default 256).
+
+### 3. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
+
+- **Transform & state stack:** Full 2D affine Current Transformation Matrix
+  (`TransformMatrix2D`) with `save()`/`restore()`, `translate()`, `rotate()`,
+  `scale()`, `transform()`, `setTransform()`, `resetTransform()`, `globalAlpha`,
+  and an intersectable alpha clip mask (`clip()`).
+- **Scanline rasterizer & stroking:** 4× vertical + analytical horizontal
+  anti-aliased scanline fill supporting `FillRule::NonZero` and
+  `FillRule::EvenOdd`; polygon-ribbon thick stroking with `butt`/`round`/
+  `square` caps, `miter`/`bevel`/`round` joins, dash arrays (`setLineDash`/
+  `getLineDash`/`lineDashOffset`), and `stroke_gradient`.
+- **Paths, gradients, pixels & JS:** `roundRect`, `ellipse`, `arcTo`, `rect`,
+  `isPointInPath`, inverse-CTM linear/radial gradients with `Pad`/`Reflect`/
+  `Repeat` spread modes, `createImageData`/`getImageData`/`putImageData`,
+  CTM-aware `drawImage`, and real JS property accessors via
+  `JsValue::define_accessor` (`globalAlpha`, `lineCap`, `lineJoin`,
+  `miterLimit`, `lineDashOffset`).
+
+### 4. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
+
+- **DOM & CSS integration:** Iterative ID indexing (safe on 200,000-deep DOMs),
+  `<defs>` exclusion, presentation attributes + inline `style` parsing,
+  `#RGBA`/`#RRGGBBAA`/`rgba()` colors, `currentColor` inheritance, `opacity` /
+  `fill-opacity` / `stroke-opacity`, `fill-rule`, `display:none` /
+  `visibility:hidden`.
+- **Geometry & paint servers:** Full SVG path grammar including W3C F.6.5/F.6.6
+  `A/a` elliptical arcs, `S/s`/`T/t` smooth curves, compact arc flags, and
+  scientific notation; `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`);
+  full `transform` list stack; `<linearGradient>`/`<radialGradient>` with `href`
+  inheritance, `objectBoundingBox`/`userSpaceOnUse`, `gradientTransform`, and
+  `spreadMethod`; `<use>` (with recursion/cycle guard) + `<symbol>`;
+  `<clipPath>`; rounded `<rect rx ry>`; nested `<svg>`.
+
+### 5. Verification & what remains open
+
+`make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
+PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
+(exact `max_diff = 0` on every frame), and 5 SVG feature suites. `make fuzz-media`
+mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
+ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
+is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
+and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and

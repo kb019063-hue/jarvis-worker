@@ -1,24 +1,471 @@
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/RasterBudget.hpp"
+#include "litebird/common/Geometry.hpp"
 #include "litebird/common/StackLimit.hpp"
-#include <sstream>
-#include <cmath>
-#include <cctype>
-#include <vector>
+
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace litebird {
 
 namespace {
 
-struct SvgStyle {
-    Color fill{Color::black()};
-    bool has_fill{true};
-    Color stroke{Color::transparent()};
-    bool has_stroke{false};
-    float stroke_width{1.0f};
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kTwoPi = 6.28318530717958647692;
+constexpr int kMaxUseDepth = 16;
+constexpr int kMaxGradientHrefDepth = 8;
+
+std::string to_lower_ascii(std::string_view sv) {
+    std::string out(sv);
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    }
+    return out;
+}
+
+std::string_view trim_wsp(std::string_view sv) {
+    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
+    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
+    return sv;
+}
+
+bool get_attr_ci(const std::shared_ptr<Element>& el, std::string_view name, std::string& out) {
+    if (!el) return false;
+    std::string exact(name);
+    if (el->has_attribute(exact)) {
+        out = el->get_attribute(exact);
+        return true;
+    }
+    std::string lower = to_lower_ascii(name);
+    if (lower != exact && el->has_attribute(lower)) {
+        out = el->get_attribute(lower);
+        return true;
+    }
+    return false;
+}
+
+bool get_href_attr(const std::shared_ptr<Element>& el, std::string& out) {
+    if (get_attr_ci(el, "href", out)) return true;
+    if (get_attr_ci(el, "xlink:href", out)) return true;
+    return false;
+}
+
+std::string extract_fragment_id(std::string_view ref) {
+    ref = trim_wsp(ref);
+    if (ref.starts_with("#")) {
+        return std::string(ref.substr(1));
+    }
+    return {};
+}
+
+// Parses #RGB, #RGBA, #RRGGBB, #RRGGBBAA, rgb(...), rgba(...), and named colors.
+bool parse_svg_color(std::string_view raw, Color& out) {
+    std::string_view s = trim_wsp(raw);
+    if (s.empty()) return false;
+
+    auto hex_nibble = [](char c, uint8_t& val) -> bool {
+        if (c >= '0' && c <= '9') { val = static_cast<uint8_t>(c - '0'); return true; }
+        if (c >= 'a' && c <= 'f') { val = static_cast<uint8_t>(c - 'a' + 10); return true; }
+        if (c >= 'A' && c <= 'F') { val = static_cast<uint8_t>(c - 'A' + 10); return true; }
+        return false;
+    };
+
+    if (s.starts_with("#")) {
+        std::string_view h = s.substr(1);
+        if (h.size() == 3 || h.size() == 4) {
+            uint8_t r = 0, g = 0, b = 0, a = 15;
+            if (!hex_nibble(h[0], r) || !hex_nibble(h[1], g) || !hex_nibble(h[2], b)) return false;
+            if (h.size() == 4 && !hex_nibble(h[3], a)) return false;
+            out = Color(static_cast<uint8_t>(r * 17), static_cast<uint8_t>(g * 17),
+                        static_cast<uint8_t>(b * 17), static_cast<uint8_t>(a * 17));
+            return true;
+        }
+        if (h.size() == 6 || h.size() == 8) {
+            uint8_t vals[8]{};
+            for (size_t i = 0; i < h.size(); ++i) {
+                if (!hex_nibble(h[i], vals[i])) return false;
+            }
+            const uint8_t r = static_cast<uint8_t>((vals[0] << 4) | vals[1]);
+            const uint8_t g = static_cast<uint8_t>((vals[2] << 4) | vals[3]);
+            const uint8_t b = static_cast<uint8_t>((vals[4] << 4) | vals[5]);
+            const uint8_t a = (h.size() == 8) ? static_cast<uint8_t>((vals[6] << 4) | vals[7]) : 255;
+            out = Color(r, g, b, a);
+            return true;
+        }
+        return false;
+    }
+
+    std::string lower = to_lower_ascii(s);
+    if ((lower.starts_with("rgb(") || lower.starts_with("rgba(")) && lower.ends_with(")")) {
+        const size_t open = lower.find('(');
+        std::string inner = lower.substr(open + 1, lower.size() - open - 2);
+        for (char& ch : inner) {
+            if (ch == ',' || ch == '/') ch = ' ';
+        }
+        std::stringstream ss(inner);
+        std::string t0, t1, t2, t3;
+        if (ss >> t0 >> t1 >> t2) {
+            auto parse_chan = [](const std::string& tok) -> uint8_t {
+                bool pct = !tok.empty() && tok.back() == '%';
+                double v = std::strtod(tok.c_str(), nullptr);
+                if (pct) v = v * 2.55;
+                return static_cast<uint8_t>(std::clamp(std::lround(v), 0l, 255l));
+            };
+            uint8_t a = 255;
+            if (ss >> t3) {
+                bool pct = !t3.empty() && t3.back() == '%';
+                double av = std::strtod(t3.c_str(), nullptr);
+                if (pct) av /= 100.0;
+                a = static_cast<uint8_t>(std::clamp(std::lround(av * 255.0), 0l, 255l));
+            }
+            out = Color(parse_chan(t0), parse_chan(t1), parse_chan(t2), a);
+            return true;
+        }
+        return false;
+    }
+
+    if (lower == "transparent") {
+        out = Color(0, 0, 0, 0);
+        return true;
+    }
+    unsigned named = 0;
+    if (Color::named_color_value(lower, named)) {
+        out = Color(static_cast<uint8_t>((named >> 16) & 0xFF),
+                    static_cast<uint8_t>((named >> 8) & 0xFF),
+                    static_cast<uint8_t>(named & 0xFF), 255);
+        return true;
+    }
+    return false;
+}
+
+bool parse_float_value(std::string_view raw, float& out, float pct_ref = 100.0f) {
+    std::string_view s = trim_wsp(raw);
+    if (s.empty()) return false;
+    std::string tmp(s);
+    char* end = nullptr;
+    const double val = std::strtod(tmp.c_str(), &end);
+    if (end == tmp.c_str() || !std::isfinite(val)) return false;
+
+    std::string_view unit = trim_wsp(std::string_view(end));
+    std::string u = to_lower_ascii(unit);
+    double scale = 1.0;
+    if (u == "%") {
+        out = static_cast<float>(val * 0.01 * static_cast<double>(pct_ref));
+        return true;
+    }
+    if (u == "pt") scale = 96.0 / 72.0;
+    else if (u == "pc") scale = 16.0;
+    else if (u == "in") scale = 96.0;
+    else if (u == "cm") scale = 96.0 / 2.54;
+    else if (u == "mm") scale = 96.0 / 25.4;
+    else if (u == "em" || u == "rem") scale = 16.0;
+    out = static_cast<float>(val * scale);
+    return true;
+}
+
+bool parse_length_or_pct_unit(std::string_view raw, float& out, float ref, bool& is_pct) {
+    std::string_view s = trim_wsp(raw);
+    is_pct = false;
+    if (s.empty()) return false;
+    if (s.ends_with("%")) {
+        is_pct = true;
+        return parse_float_value(s, out, ref);
+    }
+    return parse_float_value(s, out, ref);
+}
+
+// Parses a list of SVG floating-point numbers separated by whitespace/commas (supporting exponents).
+std::vector<float> parse_number_list(std::string_view str) {
+    std::vector<float> nums;
+    size_t i = 0;
+    const size_t n = str.size();
+    while (i < n) {
+        while (i < n && (std::isspace(static_cast<unsigned char>(str[i])) || str[i] == ',')) ++i;
+        if (i >= n) break;
+
+        size_t start = i;
+        if (str[i] == '+' || str[i] == '-') ++i;
+        bool has_digits = false;
+        while (i < n && std::isdigit(static_cast<unsigned char>(str[i]))) { has_digits = true; ++i; }
+        if (i < n && str[i] == '.') {
+            ++i;
+            while (i < n && std::isdigit(static_cast<unsigned char>(str[i]))) { has_digits = true; ++i; }
+        }
+        if (has_digits && i < n && (str[i] == 'e' || str[i] == 'E')) {
+            size_t exp_pos = i++;
+            if (i < n && (str[i] == '+' || str[i] == '-')) ++i;
+            bool exp_digits = false;
+            while (i < n && std::isdigit(static_cast<unsigned char>(str[i]))) { exp_digits = true; ++i; }
+            if (!exp_digits) i = exp_pos;
+        }
+        if (has_digits) {
+            std::string tok(str.substr(start, i - start));
+            const double v = std::strtod(tok.c_str(), nullptr);
+            if (std::isfinite(v)) nums.push_back(static_cast<float>(v));
+        } else {
+            ++i;
+        }
+    }
+    return nums;
+}
+
+TransformMatrix2D parse_svg_transform(std::string_view str) {
+    TransformMatrix2D result = TransformMatrix2D::identity();
+    size_t i = 0;
+    const size_t n = str.size();
+    while (i < n) {
+        while (i < n && (std::isspace(static_cast<unsigned char>(str[i])) || str[i] == ',')) ++i;
+        if (i >= n) break;
+
+        const size_t name_start = i;
+        while (i < n && std::isalpha(static_cast<unsigned char>(str[i]))) ++i;
+        std::string name = to_lower_ascii(str.substr(name_start, i - name_start));
+
+        while (i < n && std::isspace(static_cast<unsigned char>(str[i]))) ++i;
+        if (i >= n || str[i] != '(') break;
+        ++i;
+        const size_t args_start = i;
+        while (i < n && str[i] != ')') ++i;
+        std::string_view args_sv = str.substr(args_start, i - args_start);
+        if (i < n && str[i] == ')') ++i;
+
+        auto args = parse_number_list(args_sv);
+        TransformMatrix2D m = TransformMatrix2D::identity();
+
+        if (name == "matrix" && args.size() >= 6) {
+            m = TransformMatrix2D(args[0], args[1], args[2], args[3], args[4], args[5]);
+        } else if (name == "translate" && !args.empty()) {
+            const float tx = args[0];
+            const float ty = (args.size() >= 2) ? args[1] : 0.0f;
+            m = TransformMatrix2D::translation(tx, ty);
+        } else if (name == "scale" && !args.empty()) {
+            const float sx = args[0];
+            const float sy = (args.size() >= 2) ? args[1] : sx;
+            m = TransformMatrix2D::scale(sx, sy);
+        } else if (name == "rotate" && !args.empty()) {
+            const float rad = static_cast<float>(args[0] * kPi / 180.0);
+            if (args.size() >= 3) {
+                m = TransformMatrix2D::translation(args[1], args[2])
+                        .multiply(TransformMatrix2D::rotation(rad))
+                        .multiply(TransformMatrix2D::translation(-args[1], -args[2]));
+            } else {
+                m = TransformMatrix2D::rotation(rad);
+            }
+        } else if (name == "skewx" && !args.empty()) {
+            const float rad = static_cast<float>(args[0] * kPi / 180.0);
+            m = TransformMatrix2D::skew(rad, 0.0f);
+        } else if (name == "skewy" && !args.empty()) {
+            const float rad = static_cast<float>(args[0] * kPi / 180.0);
+            m = TransformMatrix2D::skew(0.0f, rad);
+        }
+
+        result = result.multiply(m);
+    }
+    return result;
+}
+
+struct PaintServer {
+    enum class Kind { None, Solid, CurrentColor, Url } kind{Kind::None};
+    Color color{Color::black()};
+    std::string url_id;
+    bool has_fallback{false};
+    Color fallback{Color::black()};
 };
+
+bool parse_url_ref(std::string_view raw, std::string& out_id, std::string_view& remainder) {
+    std::string_view s = trim_wsp(raw);
+    if (s.size() < 6) return false;
+    std::string prefix = to_lower_ascii(s.substr(0, 4));
+    if (prefix != "url(") return false;
+    const size_t close = s.find(')');
+    if (close == std::string_view::npos) return false;
+    std::string_view inner = trim_wsp(s.substr(4, close - 4));
+    if (inner.size() >= 2 && ((inner.front() == '"' && inner.back() == '"') ||
+                              (inner.front() == '\'' && inner.back() == '\''))) {
+        inner = trim_wsp(inner.substr(1, inner.size() - 2));
+    }
+    if (!inner.starts_with("#")) return false;
+    out_id = std::string(inner.substr(1));
+    remainder = trim_wsp(s.substr(close + 1));
+    return !out_id.empty();
+}
+
+bool parse_paint_server(std::string_view raw, PaintServer& out) {
+    std::string_view s = trim_wsp(raw);
+    if (s.empty()) return false;
+    std::string lower = to_lower_ascii(s);
+    if (lower == "none") {
+        out.kind = PaintServer::Kind::None;
+        return true;
+    }
+    if (lower == "currentcolor") {
+        out.kind = PaintServer::Kind::CurrentColor;
+        return true;
+    }
+    std::string id;
+    std::string_view rem;
+    if (parse_url_ref(s, id, rem)) {
+        out.kind = PaintServer::Kind::Url;
+        out.url_id = std::move(id);
+        out.has_fallback = false;
+        if (!rem.empty() && to_lower_ascii(rem) != "none") {
+            Color fb;
+            if (parse_svg_color(rem, fb)) {
+                out.has_fallback = true;
+                out.fallback = fb;
+            }
+        }
+        return true;
+    }
+    Color c;
+    if (parse_svg_color(s, c)) {
+        out.kind = PaintServer::Kind::Solid;
+        out.color = c;
+        return true;
+    }
+    return false;
+}
+
+struct SvgStyle {
+    Color color{Color::black()};
+    PaintServer fill{PaintServer::Kind::Solid, Color::black(), {}, false, Color::black()};
+    PaintServer stroke{PaintServer::Kind::None, Color::transparent(), {}, false, Color::black()};
+    float stroke_width{1.0f};
+    std::string stroke_linecap{"butt"};
+    std::string stroke_linejoin{"miter"};
+    float stroke_miterlimit{4.0f};
+    std::vector<float> stroke_dasharray;
+    float stroke_dashoffset{0.0f};
+    float opacity{1.0f}; // Effective cumulative opacity (multiplied down <g>)
+    float fill_opacity{1.0f};
+    float stroke_opacity{1.0f};
+    FillRule fill_rule{FillRule::NonZero};
+    bool display_none{false};
+    bool visible{true};
+};
+
+void apply_style_property(SvgStyle& style, std::string_view prop_raw, std::string_view val_raw, float ref_size) {
+    std::string prop = to_lower_ascii(trim_wsp(prop_raw));
+    std::string_view val = trim_wsp(val_raw);
+    if (prop.empty() || val.empty()) return;
+
+    // Strip trailing !important if present
+    if (val.size() >= 10) {
+        std::string lower_tail = to_lower_ascii(val.substr(val.size() - 10));
+        if (lower_tail == "!important") {
+            val = trim_wsp(val.substr(0, val.size() - 10));
+        }
+    }
+    std::string val_lower = to_lower_ascii(val);
+    if (val_lower == "inherit") return;
+
+    if (prop == "color") {
+        Color c;
+        if (parse_svg_color(val, c)) style.color = c;
+    } else if (prop == "fill") {
+        parse_paint_server(val, style.fill);
+    } else if (prop == "stroke") {
+        parse_paint_server(val, style.stroke);
+    } else if (prop == "stroke-width") {
+        float w = 1.0f;
+        if (parse_float_value(val, w, ref_size) && w >= 0.0f) style.stroke_width = w;
+    } else if (prop == "stroke-linecap") {
+        if (val_lower == "butt" || val_lower == "round" || val_lower == "square") {
+            style.stroke_linecap = val_lower;
+        }
+    } else if (prop == "stroke-linejoin") {
+        if (val_lower == "miter" || val_lower == "round" || val_lower == "bevel") {
+            style.stroke_linejoin = val_lower;
+        }
+    } else if (prop == "stroke-miterlimit") {
+        float m = 4.0f;
+        if (parse_float_value(val, m, 1.0f) && m >= 1.0f) style.stroke_miterlimit = m;
+    } else if (prop == "stroke-dasharray") {
+        if (val_lower == "none") {
+            style.stroke_dasharray.clear();
+        } else {
+            auto nums = parse_number_list(val);
+            bool ok = !nums.empty();
+            for (float d : nums) {
+                if (d < 0.0f) ok = false;
+            }
+            if (ok) style.stroke_dasharray = std::move(nums);
+        }
+    } else if (prop == "stroke-dashoffset") {
+        float off = 0.0f;
+        if (parse_float_value(val, off, ref_size)) style.stroke_dashoffset = off;
+    } else if (prop == "opacity") {
+        float op = 1.0f;
+        if (parse_float_value(val, op, 1.0f)) {
+            style.opacity *= std::clamp(op, 0.0f, 1.0f);
+        }
+    } else if (prop == "fill-opacity") {
+        float op = 1.0f;
+        if (parse_float_value(val, op, 1.0f)) style.fill_opacity = std::clamp(op, 0.0f, 1.0f);
+    } else if (prop == "stroke-opacity") {
+        float op = 1.0f;
+        if (parse_float_value(val, op, 1.0f)) style.stroke_opacity = std::clamp(op, 0.0f, 1.0f);
+    } else if (prop == "fill-rule") {
+        if (val_lower == "evenodd") style.fill_rule = FillRule::EvenOdd;
+        else if (val_lower == "nonzero") style.fill_rule = FillRule::NonZero;
+    } else if (prop == "display") {
+        if (val_lower == "none") style.display_none = true;
+    } else if (prop == "visibility") {
+        if (val_lower == "hidden" || val_lower == "collapse") style.visible = false;
+        else if (val_lower == "visible") style.visible = true;
+    }
+}
+
+void parse_inline_style_attr(SvgStyle& style, std::string_view css_text, float ref_size) {
+    size_t i = 0;
+    const size_t n = css_text.size();
+    while (i < n) {
+        const size_t semi = css_text.find(';', i);
+        const std::string_view decl = (semi == std::string_view::npos)
+            ? css_text.substr(i)
+            : css_text.substr(i, semi - i);
+        const size_t colon = decl.find(':');
+        if (colon != std::string_view::npos) {
+            apply_style_property(style, decl.substr(0, colon), decl.substr(colon + 1), ref_size);
+        }
+        if (semi == std::string_view::npos) break;
+        i = semi + 1;
+    }
+}
+
+SvgStyle resolve_element_style(
+    const std::shared_ptr<Element>& el,
+    const SvgStyle& parent_style,
+    float ref_size
+) {
+    SvgStyle style = parent_style;
+    static constexpr const char* kPresAttrs[] = {
+        "color", "fill", "stroke", "stroke-width", "stroke-linecap",
+        "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray",
+        "stroke-dashoffset", "opacity", "fill-opacity", "stroke-opacity",
+        "fill-rule", "display", "visibility"
+    };
+    std::string attr_val;
+    for (const char* name : kPresAttrs) {
+        if (get_attr_ci(el, name, attr_val)) {
+            apply_style_property(style, name, attr_val, ref_size);
+        }
+    }
+    if (get_attr_ci(el, "style", attr_val)) {
+        parse_inline_style_attr(style, attr_val, ref_size);
+    }
+    return style;
+}
 
 struct ViewBox {
     float min_x{0.0f};
@@ -28,432 +475,997 @@ struct ViewBox {
     bool valid{false};
 };
 
-ViewBox parse_viewbox(const std::string& str) {
+ViewBox parse_viewbox(std::string_view str) {
     ViewBox vb;
-    // Replace commas with spaces
-    std::string cleaned = str;
-    for (char& c : cleaned) {
-        if (c == ',') c = ' ';
-    }
-    std::stringstream ss2(cleaned);
-    if (ss2 >> vb.min_x >> vb.min_y >> vb.width >> vb.height) {
-        if (vb.width > 0.0f && vb.height > 0.0f) {
-            vb.valid = true;
-        }
+    auto nums = parse_number_list(str);
+    if (nums.size() >= 4 && nums[2] > 0.0f && nums[3] > 0.0f) {
+        vb.min_x = nums[0];
+        vb.min_y = nums[1];
+        vb.width = nums[2];
+        vb.height = nums[3];
+        vb.valid = true;
     }
     return vb;
 }
 
-SvgStyle parse_style(const std::shared_ptr<Element>& el, const SvgStyle& parent_style) {
-    SvgStyle style = parent_style;
-
-    if (el->has_attribute("fill")) {
-        std::string f = el->get_attribute("fill");
-        if (f == "none" || f == "transparent") {
-            style.has_fill = false;
-        } else {
-            style.fill = Color::parse(f);
-            style.has_fill = true;
-        }
-    }
-
-    if (el->has_attribute("stroke")) {
-        std::string s = el->get_attribute("stroke");
-        if (s == "none" || s == "transparent") {
-            style.has_stroke = false;
-        } else {
-            style.stroke = Color::parse(s);
-            style.has_stroke = true;
-        }
-    }
-
-    if (el->has_attribute("stroke-width")) {
-        try {
-            style.stroke_width = std::stof(el->get_attribute("stroke-width"));
-        } catch (...) {}
-    }
-
-    return style;
-}
-
-std::vector<float> parse_numbers(std::string_view str) {
-    std::vector<float> nums;
-    size_t i = 0;
-    while (i < str.size()) {
-        while (i < str.size() && (std::isspace(str[i]) || str[i] == ',')) i++;
-        if (i >= str.size()) break;
-
-        size_t start = i;
-        if (str[i] == '+' || str[i] == '-') i++;
-        bool has_dot = false;
-        while (i < str.size() && (std::isdigit(str[i]) || (!has_dot && str[i] == '.'))) {
-            if (str[i] == '.') has_dot = true;
-            i++;
-        }
-        if (i > start) {
-            try {
-                nums.push_back(std::stof(std::string(str.substr(start, i - start))));
-            } catch (...) {}
-        } else {
-            i++;
-        }
-    }
-    return nums;
-}
-
-struct PointF {
-    float x{0.0f};
-    float y{0.0f};
-};
-
-PointF transform_point(float x, float y, const ViewBox& vb, float dest_w, float dest_h) {
-    if (!vb.valid || vb.width <= 0.0f || vb.height <= 0.0f) {
-        return {x, y};
-    }
-    float tx = (x - vb.min_x) / vb.width * dest_w;
-    float ty = (y - vb.min_y) / vb.height * dest_h;
-    return {tx, ty};
-}
-
-void parse_and_draw_path(
-    CanvasRenderingContext2D& ctx,
-    const std::string& d,
+TransformMatrix2D compute_viewbox_matrix(
     const ViewBox& vb,
     float dest_w,
-    float dest_h
+    float dest_h,
+    std::string_view preserve_aspect_ratio
 ) {
-    ctx.begin_path();
+    if (!vb.valid || vb.width <= 0.0f || vb.height <= 0.0f || dest_w <= 0.0f || dest_h <= 0.0f) {
+        return TransformMatrix2D::identity();
+    }
 
-    size_t i = 0;
-    char current_cmd = ' ';
-    float cur_x = 0.0f;
-    float cur_y = 0.0f;
-    float start_x = 0.0f;
-    float start_y = 0.0f;
+    std::string par = to_lower_ascii(trim_wsp(preserve_aspect_ratio));
+    if (par.empty()) par = "xmidymid meet";
 
-    auto next_token_or_cmd = [&]() -> char {
-        while (i < d.size() && (std::isspace(d[i]) || d[i] == ',')) i++;
-        if (i >= d.size()) return '\0';
-        if (std::isalpha(d[i])) {
-            return d[i++];
-        }
-        return ' ';
+    std::stringstream ss(par);
+    std::string align, meet_or_slice;
+    ss >> align >> meet_or_slice;
+    if (align == "defer") {
+        align = meet_or_slice;
+        meet_or_slice.clear();
+        ss >> meet_or_slice;
+    }
+
+    if (align == "none") {
+        const float sx = dest_w / vb.width;
+        const float sy = dest_h / vb.height;
+        return TransformMatrix2D::scale(sx, sy)
+            .multiply(TransformMatrix2D::translation(-vb.min_x, -vb.min_y));
+    }
+
+    const float sx_raw = dest_w / vb.width;
+    const float sy_raw = dest_h / vb.height;
+    const float s = (meet_or_slice == "slice") ? std::max(sx_raw, sy_raw) : std::min(sx_raw, sy_raw);
+
+    const float extra_x = dest_w - vb.width * s;
+    const float extra_y = dest_h - vb.height * s;
+
+    float tx = extra_x * 0.5f;
+    float ty = extra_y * 0.5f;
+    if (align.find("xmin") != std::string::npos) tx = 0.0f;
+    else if (align.find("xmax") != std::string::npos) tx = extra_x;
+
+    if (align.find("ymin") != std::string::npos) ty = 0.0f;
+    else if (align.find("ymax") != std::string::npos) ty = extra_y;
+
+    return TransformMatrix2D::translation(tx, ty)
+        .multiply(TransformMatrix2D::scale(s, s))
+        .multiply(TransformMatrix2D::translation(-vb.min_x, -vb.min_y));
+}
+
+struct BBox {
+    float min_x{std::numeric_limits<float>::infinity()};
+    float min_y{std::numeric_limits<float>::infinity()};
+    float max_x{-std::numeric_limits<float>::infinity()};
+    float max_y{-std::numeric_limits<float>::infinity()};
+
+    void include(float x, float y) {
+        if (!std::isfinite(x) || !std::isfinite(y)) return;
+        min_x = std::min(min_x, x);
+        min_y = std::min(min_y, y);
+        max_x = std::max(max_x, x);
+        max_y = std::max(max_y, y);
+    }
+
+    bool valid() const {
+        return std::isfinite(min_x) && std::isfinite(min_y) &&
+               std::isfinite(max_x) && std::isfinite(max_y);
+    }
+    float width() const { return valid() ? std::max(0.0f, max_x - min_x) : 0.0f; }
+    float height() const { return valid() ? std::max(0.0f, max_y - min_y) : 0.0f; }
+};
+
+// SVG 1.1 Implementation Notes F.6.5 & F.6.6: endpoint-to-center elliptical arc conversion.
+void emit_svg_arc(
+    CanvasRenderingContext2D& ctx,
+    BBox& bbox,
+    double x1, double y1,
+    double rx, double ry,
+    double x_rot_deg,
+    bool large_arc,
+    bool sweep,
+    double x2, double y2
+) {
+    if (std::abs(x1 - x2) < 1e-7 && std::abs(y1 - y2) < 1e-7) return;
+    rx = std::abs(rx);
+    ry = std::abs(ry);
+    if (rx < 1e-7 || ry < 1e-7) {
+        ctx.line_to(static_cast<float>(x2), static_cast<float>(y2));
+        bbox.include(static_cast<float>(x2), static_cast<float>(y2));
+        return;
+    }
+
+    const double phi = x_rot_deg * kPi / 180.0;
+    const double cos_phi = std::cos(phi);
+    const double sin_phi = std::sin(phi);
+
+    // Step 1: transform midpoint to prime frame
+    const double dx2 = (x1 - x2) * 0.5;
+    const double dy2 = (y1 - y2) * 0.5;
+    const double x1p = cos_phi * dx2 + sin_phi * dy2;
+    const double y1p = -sin_phi * dx2 + cos_phi * dy2;
+
+    // Step 2: ensure radii are large enough
+    const double x1p2 = x1p * x1p;
+    const double y1p2 = y1p * y1p;
+    double rx2 = rx * rx;
+    double ry2 = ry * ry;
+    const double lambda = x1p2 / rx2 + y1p2 / ry2;
+    if (lambda > 1.0) {
+        const double s = std::sqrt(lambda);
+        rx *= s;
+        ry *= s;
+        rx2 = rx * rx;
+        ry2 = ry * ry;
+    }
+
+    // Step 3: compute center in prime frame
+    const double denom = rx2 * y1p2 + ry2 * x1p2;
+    double sq = 0.0;
+    if (denom > 1e-12) {
+        const double num = std::max(0.0, rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2);
+        sq = std::sqrt(num / denom);
+    }
+    if (large_arc == sweep) sq = -sq;
+
+    const double cxp = sq * (rx * y1p / ry);
+    const double cyp = sq * (-ry * x1p / rx);
+
+    // Step 4: compute center in user space
+    const double cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) * 0.5;
+    const double cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) * 0.5;
+
+    // Step 5: compute start angle and sweep angle
+    auto vec_angle = [](double ux, double uy, double vx, double vy) -> double {
+        const double dot = ux * vx + uy * vy;
+        const double len = std::hypot(ux, uy) * std::hypot(vx, vy);
+        double ang = (len > 1e-12) ? std::acos(std::clamp(dot / len, -1.0, 1.0)) : 0.0;
+        if (ux * vy - uy * vx < 0.0) ang = -ang;
+        return ang;
     };
 
-    auto next_number = [&]() -> float {
-        while (i < d.size() && (std::isspace(d[i]) || d[i] == ',')) i++;
-        if (i >= d.size()) return 0.0f;
-        size_t start = i;
-        if (d[i] == '+' || d[i] == '-') i++;
-        bool has_dot = false;
-        while (i < d.size() && (std::isdigit(d[i]) || (!has_dot && d[i] == '.'))) {
-            if (d[i] == '.') has_dot = true;
-            i++;
+    const double vx1 = (x1p - cxp) / rx;
+    const double vy1 = (y1p - cyp) / ry;
+    const double vx2 = (-x1p - cxp) / rx;
+    const double vy2 = (-y1p - cyp) / ry;
+
+    const double theta1 = vec_angle(1.0, 0.0, vx1, vy1);
+    double dtheta = vec_angle(vx1, vy1, vx2, vy2);
+    if (!sweep && dtheta > 0.0) dtheta -= kTwoPi;
+    else if (sweep && dtheta < 0.0) dtheta += kTwoPi;
+
+    const int segs = std::clamp(static_cast<int>(std::ceil(std::abs(dtheta) / (kPi / 18.0))), 4, 72);
+    for (int i = 1; i <= segs; ++i) {
+        const double t = theta1 + dtheta * (static_cast<double>(i) / static_cast<double>(segs));
+        const double ct = std::cos(t);
+        const double st = std::sin(t);
+        const double px = cx + cos_phi * rx * ct - sin_phi * ry * st;
+        const double py = cy + sin_phi * rx * ct + cos_phi * ry * st;
+        ctx.line_to(static_cast<float>(px), static_cast<float>(py));
+        bbox.include(static_cast<float>(px), static_cast<float>(py));
+    }
+}
+
+class PathStream {
+public:
+    explicit PathStream(std::string_view d) : m_d(d) {}
+
+    void skip_wsp() {
+        while (m_pos < m_d.size() && std::isspace(static_cast<unsigned char>(m_d[m_pos]))) ++m_pos;
+    }
+
+    void skip_wsp_comma() {
+        skip_wsp();
+        if (m_pos < m_d.size() && m_d[m_pos] == ',') {
+            ++m_pos;
+            skip_wsp();
         }
-        if (i > start) {
-            try {
-                return std::stof(d.substr(start, i - start));
-            } catch (...) {
-                return 0.0f;
+    }
+
+    bool eof() const { return m_pos >= m_d.size(); }
+
+    bool peek_is_command() {
+        skip_wsp();
+        return m_pos < m_d.size() && std::isalpha(static_cast<unsigned char>(m_d[m_pos]));
+    }
+
+    char read_command() {
+        skip_wsp();
+        if (m_pos < m_d.size() && std::isalpha(static_cast<unsigned char>(m_d[m_pos]))) {
+            return m_d[m_pos++];
+        }
+        return '\0';
+    }
+
+    bool read_flag(bool& out) {
+        skip_wsp_comma();
+        if (m_pos >= m_d.size()) return false;
+        if (m_d[m_pos] == '0') { out = false; ++m_pos; return true; }
+        if (m_d[m_pos] == '1') { out = true; ++m_pos; return true; }
+        return false;
+    }
+
+    bool read_number(float& out) {
+        skip_wsp_comma();
+        if (m_pos >= m_d.size()) return false;
+        const size_t start = m_pos;
+        const size_t n = m_d.size();
+
+        if (m_d[m_pos] == '+' || m_d[m_pos] == '-') ++m_pos;
+        bool has_digits = false;
+        while (m_pos < n && std::isdigit(static_cast<unsigned char>(m_d[m_pos]))) {
+            has_digits = true;
+            ++m_pos;
+        }
+        if (m_pos < n && m_d[m_pos] == '.') {
+            ++m_pos;
+            while (m_pos < n && std::isdigit(static_cast<unsigned char>(m_d[m_pos]))) {
+                has_digits = true;
+                ++m_pos;
             }
         }
-        return 0.0f;
-    };
+        if (!has_digits) {
+            m_pos = start;
+            return false;
+        }
+        if (m_pos < n && (m_d[m_pos] == 'e' || m_d[m_pos] == 'E')) {
+            const size_t exp_start = m_pos++;
+            if (m_pos < n && (m_d[m_pos] == '+' || m_d[m_pos] == '-')) ++m_pos;
+            bool exp_digits = false;
+            while (m_pos < n && std::isdigit(static_cast<unsigned char>(m_d[m_pos]))) {
+                exp_digits = true;
+                ++m_pos;
+            }
+            if (!exp_digits) m_pos = exp_start;
+        }
 
-    while (i < d.size()) {
-        char cmd = next_token_or_cmd();
-        if (cmd == '\0') break;
-        if (cmd != ' ') current_cmd = cmd;
+        std::string tok(m_d.substr(start, m_pos - start));
+        const double val = std::strtod(tok.c_str(), nullptr);
+        if (!std::isfinite(val)) return false;
+        out = static_cast<float>(val);
+        return true;
+    }
 
-        switch (current_cmd) {
-            case 'M': { // moveto absolute
-                float x = next_number();
-                float y = next_number();
-                cur_x = x; cur_y = y;
-                start_x = cur_x; start_y = cur_y;
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.move_to(pt.x, pt.y);
-                current_cmd = 'L'; // subsequent coordinates are lineto
-                break;
-            }
-            case 'm': { // moveto relative
-                float dx = next_number();
-                float dy = next_number();
-                cur_x += dx; cur_y += dy;
-                start_x = cur_x; start_y = cur_y;
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.move_to(pt.x, pt.y);
-                current_cmd = 'l';
-                break;
-            }
-            case 'L': { // lineto absolute
-                float x = next_number();
-                float y = next_number();
-                cur_x = x; cur_y = y;
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'l': { // lineto relative
-                float dx = next_number();
-                float dy = next_number();
-                cur_x += dx; cur_y += dy;
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'H': { // horizontal lineto absolute
-                cur_x = next_number();
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'h': { // horizontal lineto relative
-                cur_x += next_number();
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'V': { // vertical lineto absolute
-                cur_y = next_number();
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'v': { // vertical lineto relative
-                cur_y += next_number();
-                auto pt = transform_point(cur_x, cur_y, vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
-                break;
-            }
-            case 'C': { // cubic bezier absolute
-                float x1 = next_number();
-                float y1 = next_number();
-                float x2 = next_number();
-                float y2 = next_number();
-                float x = next_number();
-                float y = next_number();
+private:
+    std::string_view m_d;
+    size_t m_pos{0};
+};
 
-                float p0x = cur_x, p0y = cur_y;
-                for (int step = 1; step <= 8; ++step) {
-                    float t = static_cast<float>(step) / 8.0f;
-                    float u = 1.0f - t;
-                    float bx = u * u * u * p0x + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x;
-                    float by = u * u * u * p0y + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y;
-                    auto pt = transform_point(bx, by, vb, dest_w, dest_h);
-                    ctx.line_to(pt.x, pt.y);
+void build_svg_path(CanvasRenderingContext2D& ctx, std::string_view d, BBox& bbox) {
+    PathStream ps(d);
+    char cmd = '\0';
+    char prev_cmd = '\0';
+    float cur_x = 0.0f, cur_y = 0.0f;
+    float start_x = 0.0f, start_y = 0.0f;
+    float last_cubic_x = 0.0f, last_cubic_y = 0.0f;
+    float last_quad_x = 0.0f, last_quad_y = 0.0f;
+
+    constexpr int kMaxPathOps = 200000;
+    int ops = 0;
+
+    while (!ps.eof() && ++ops <= kMaxPathOps) {
+        if (ps.peek_is_command()) {
+            cmd = ps.read_command();
+        } else if (cmd == '\0') {
+            break;
+        }
+
+        switch (cmd) {
+            case 'M':
+            case 'm': {
+                float x = 0.0f, y = 0.0f;
+                if (!ps.read_number(x) || !ps.read_number(y)) return;
+                if (cmd == 'm') { cur_x += x; cur_y += y; }
+                else { cur_x = x; cur_y = y; }
+                start_x = cur_x;
+                start_y = cur_y;
+                ctx.move_to(cur_x, cur_y);
+                bbox.include(cur_x, cur_y);
+                prev_cmd = cmd;
+                // Per SVG spec, subsequent coordinate pairs after M/m are implicit L/l
+                cmd = (cmd == 'm') ? 'l' : 'L';
+                break;
+            }
+            case 'L':
+            case 'l': {
+                float x = 0.0f, y = 0.0f;
+                if (!ps.read_number(x) || !ps.read_number(y)) return;
+                if (cmd == 'l') { cur_x += x; cur_y += y; }
+                else { cur_x = x; cur_y = y; }
+                ctx.line_to(cur_x, cur_y);
+                bbox.include(cur_x, cur_y);
+                prev_cmd = cmd;
+                break;
+            }
+            case 'H':
+            case 'h': {
+                float x = 0.0f;
+                if (!ps.read_number(x)) return;
+                cur_x = (cmd == 'h') ? (cur_x + x) : x;
+                ctx.line_to(cur_x, cur_y);
+                bbox.include(cur_x, cur_y);
+                prev_cmd = cmd;
+                break;
+            }
+            case 'V':
+            case 'v': {
+                float y = 0.0f;
+                if (!ps.read_number(y)) return;
+                cur_y = (cmd == 'v') ? (cur_y + y) : y;
+                ctx.line_to(cur_x, cur_y);
+                bbox.include(cur_x, cur_y);
+                prev_cmd = cmd;
+                break;
+            }
+            case 'C':
+            case 'c': {
+                float x1 = 0, y1 = 0, x2 = 0, y2 = 0, x = 0, y = 0;
+                if (!ps.read_number(x1) || !ps.read_number(y1) ||
+                    !ps.read_number(x2) || !ps.read_number(y2) ||
+                    !ps.read_number(x) || !ps.read_number(y)) return;
+                if (cmd == 'c') {
+                    x1 += cur_x; y1 += cur_y;
+                    x2 += cur_x; y2 += cur_y;
+                    x += cur_x; y += cur_y;
                 }
-                cur_x = x; cur_y = y;
+                ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
+                bbox.include(x1, y1);
+                bbox.include(x2, y2);
+                bbox.include(x, y);
+                last_cubic_x = x2;
+                last_cubic_y = y2;
+                cur_x = x;
+                cur_y = y;
+                prev_cmd = cmd;
                 break;
             }
-            case 'c': { // cubic bezier relative
-                float dx1 = next_number();
-                float dy1 = next_number();
-                float dx2 = next_number();
-                float dy2 = next_number();
-                float dx = next_number();
-                float dy = next_number();
-
-                float x1 = cur_x + dx1, y1 = cur_y + dy1;
-                float x2 = cur_x + dx2, y2 = cur_y + dy2;
-                float x = cur_x + dx, y = cur_y + dy;
-
-                float p0x = cur_x, p0y = cur_y;
-                for (int step = 1; step <= 8; ++step) {
-                    float t = static_cast<float>(step) / 8.0f;
-                    float u = 1.0f - t;
-                    float bx = u * u * u * p0x + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x;
-                    float by = u * u * u * p0y + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y;
-                    auto pt = transform_point(bx, by, vb, dest_w, dest_h);
-                    ctx.line_to(pt.x, pt.y);
+            case 'S':
+            case 's': {
+                float x2 = 0, y2 = 0, x = 0, y = 0;
+                if (!ps.read_number(x2) || !ps.read_number(y2) ||
+                    !ps.read_number(x) || !ps.read_number(y)) return;
+                float x1 = cur_x, y1 = cur_y;
+                if (prev_cmd == 'C' || prev_cmd == 'c' || prev_cmd == 'S' || prev_cmd == 's') {
+                    x1 = 2.0f * cur_x - last_cubic_x;
+                    y1 = 2.0f * cur_y - last_cubic_y;
                 }
-                cur_x = x; cur_y = y;
+                if (cmd == 's') {
+                    x2 += cur_x; y2 += cur_y;
+                    x += cur_x; y += cur_y;
+                }
+                ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
+                bbox.include(x1, y1);
+                bbox.include(x2, y2);
+                bbox.include(x, y);
+                last_cubic_x = x2;
+                last_cubic_y = y2;
+                cur_x = x;
+                cur_y = y;
+                prev_cmd = cmd;
                 break;
             }
-            case 'Q': { // quadratic bezier absolute
-                float x1 = next_number();
-                float y1 = next_number();
-                float x = next_number();
-                float y = next_number();
-
-                float p0x = cur_x, p0y = cur_y;
-                for (int step = 1; step <= 6; ++step) {
-                    float t = static_cast<float>(step) / 6.0f;
-                    float u = 1.0f - t;
-                    float bx = u * u * p0x + 2 * u * t * x1 + t * t * x;
-                    float by = u * u * p0y + 2 * u * t * y1 + t * t * y;
-                    auto pt = transform_point(bx, by, vb, dest_w, dest_h);
-                    ctx.line_to(pt.x, pt.y);
+            case 'Q':
+            case 'q': {
+                float x1 = 0, y1 = 0, x = 0, y = 0;
+                if (!ps.read_number(x1) || !ps.read_number(y1) ||
+                    !ps.read_number(x) || !ps.read_number(y)) return;
+                if (cmd == 'q') {
+                    x1 += cur_x; y1 += cur_y;
+                    x += cur_x; y += cur_y;
                 }
-                cur_x = x; cur_y = y;
+                ctx.quadratic_curve_to(x1, y1, x, y);
+                bbox.include(x1, y1);
+                bbox.include(x, y);
+                last_quad_x = x1;
+                last_quad_y = y1;
+                cur_x = x;
+                cur_y = y;
+                prev_cmd = cmd;
                 break;
             }
-            case 'q': { // quadratic bezier relative
-                float dx1 = next_number();
-                float dy1 = next_number();
-                float dx = next_number();
-                float dy = next_number();
-
-                float x1 = cur_x + dx1, y1 = cur_y + dy1;
-                float x = cur_x + dx, y = cur_y + dy;
-
-                float p0x = cur_x, p0y = cur_y;
-                for (int step = 1; step <= 6; ++step) {
-                    float t = static_cast<float>(step) / 6.0f;
-                    float u = 1.0f - t;
-                    float bx = u * u * p0x + 2 * u * t * x1 + t * t * x;
-                    float by = u * u * p0y + 2 * u * t * y1 + t * t * y;
-                    auto pt = transform_point(bx, by, vb, dest_w, dest_h);
-                    ctx.line_to(pt.x, pt.y);
+            case 'T':
+            case 't': {
+                float x = 0, y = 0;
+                if (!ps.read_number(x) || !ps.read_number(y)) return;
+                float x1 = cur_x, y1 = cur_y;
+                if (prev_cmd == 'Q' || prev_cmd == 'q' || prev_cmd == 'T' || prev_cmd == 't') {
+                    x1 = 2.0f * cur_x - last_quad_x;
+                    y1 = 2.0f * cur_y - last_quad_y;
                 }
-                cur_x = x; cur_y = y;
+                if (cmd == 't') {
+                    x += cur_x; y += cur_y;
+                }
+                ctx.quadratic_curve_to(x1, y1, x, y);
+                bbox.include(x1, y1);
+                bbox.include(x, y);
+                last_quad_x = x1;
+                last_quad_y = y1;
+                cur_x = x;
+                cur_y = y;
+                prev_cmd = cmd;
+                break;
+            }
+            case 'A':
+            case 'a': {
+                float rx = 0, ry = 0, x_rot = 0, x = 0, y = 0;
+                bool large_arc = false, sweep = false;
+                if (!ps.read_number(rx) || !ps.read_number(ry) || !ps.read_number(x_rot) ||
+                    !ps.read_flag(large_arc) || !ps.read_flag(sweep) ||
+                    !ps.read_number(x) || !ps.read_number(y)) return;
+                if (cmd == 'a') {
+                    x += cur_x;
+                    y += cur_y;
+                }
+                emit_svg_arc(ctx, bbox, cur_x, cur_y, rx, ry, x_rot, large_arc, sweep, x, y);
+                cur_x = x;
+                cur_y = y;
+                prev_cmd = cmd;
                 break;
             }
             case 'Z':
-            case 'z': { // closepath
+            case 'z': {
                 ctx.close_path();
-                cur_x = start_x; cur_y = start_y;
+                cur_x = start_x;
+                cur_y = start_y;
+                prev_cmd = cmd;
+                cmd = '\0'; // Require explicit next command after Z/z
                 break;
             }
             default:
-                i++;
-                break;
+                return;
+        }
+    }
+}
+
+struct SvgDocumentContext {
+    std::unordered_map<std::string, std::shared_ptr<Element>> by_id;
+    float viewport_w{300.0f};
+    float viewport_h{150.0f};
+
+    void index_tree(const std::shared_ptr<Element>& root) {
+        if (!root) return;
+        std::vector<std::shared_ptr<Element>> stack;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            auto el = std::move(stack.back());
+            stack.pop_back();
+            std::string id;
+            if (get_attr_ci(el, "id", id) && !id.empty()) {
+                by_id.emplace(std::move(id), el);
+            }
+            for (auto it = el->children().rbegin(); it != el->children().rend(); ++it) {
+                if (auto child = std::dynamic_pointer_cast<Element>(*it)) {
+                    stack.push_back(std::move(child));
+                }
+            }
+        }
+    }
+};
+
+std::shared_ptr<CanvasGradient> build_svg_gradient(
+    const SvgDocumentContext& doc_ctx,
+    const std::string& id,
+    const BBox& shape_bbox,
+    float extra_opacity
+) {
+    auto it = doc_ctx.by_id.find(id);
+    if (it == doc_ctx.by_id.end()) return nullptr;
+
+    // Collect inheritance chain via href / xlink:href (child first, ancestors after)
+    std::vector<std::shared_ptr<Element>> chain;
+    std::unordered_set<std::string> visited;
+    std::shared_ptr<Element> cur = it->second;
+    visited.insert(id);
+    for (int hop = 0; hop < kMaxGradientHrefDepth && cur; ++hop) {
+        std::string tag = to_lower_ascii(cur->tag_name());
+        if (tag != "lineargradient" && tag != "radialgradient") break;
+        chain.push_back(cur);
+        std::string href;
+        if (!get_href_attr(cur, href)) break;
+        std::string next_id = extract_fragment_id(href);
+        if (next_id.empty() || !visited.insert(next_id).second) break;
+        auto next_it = doc_ctx.by_id.find(next_id);
+        if (next_it == doc_ctx.by_id.end()) break;
+        cur = next_it->second;
+    }
+    if (chain.empty()) return nullptr;
+
+    auto find_attr = [&](std::string_view name, std::string& out) -> bool {
+        for (const auto& node : chain) {
+            if (get_attr_ci(node, name, out)) return true;
+        }
+        return false;
+    };
+
+    const std::string root_tag = to_lower_ascii(chain.front()->tag_name());
+    auto grad = std::make_shared<CanvasGradient>();
+    grad->type = (root_tag == "radialgradient") ? CanvasGradient::Type::Radial : CanvasGradient::Type::Linear;
+
+    std::string units_str;
+    bool user_space = false;
+    if (find_attr("gradientUnits", units_str) && to_lower_ascii(trim_wsp(units_str)) == "userspaceonuse") {
+        user_space = true;
+    }
+
+    std::string spread_str;
+    if (find_attr("spreadMethod", spread_str)) {
+        std::string sp = to_lower_ascii(trim_wsp(spread_str));
+        if (sp == "reflect") grad->spread = GradientSpread::Reflect;
+        else if (sp == "repeat") grad->spread = GradientSpread::Repeat;
+    }
+
+    auto read_coord = [&](std::string_view attr_name, float def_val, float ref_size) -> float {
+        std::string raw;
+        if (!find_attr(attr_name, raw)) return def_val;
+        float v = def_val;
+        bool is_pct = false;
+        if (parse_length_or_pct_unit(raw, v, user_space ? ref_size : 1.0f, is_pct)) {
+            return v;
+        }
+        return def_val;
+    };
+
+    if (grad->type == CanvasGradient::Type::Linear) {
+        grad->x0 = read_coord("x1", 0.0f, doc_ctx.viewport_w);
+        grad->y0 = read_coord("y1", 0.0f, doc_ctx.viewport_h);
+        grad->x1 = read_coord("x2", user_space ? doc_ctx.viewport_w : 1.0f, doc_ctx.viewport_w);
+        grad->y1 = read_coord("y2", 0.0f, doc_ctx.viewport_h);
+    } else {
+        const float def_c = user_space ? (doc_ctx.viewport_w * 0.5f) : 0.5f;
+        const float def_r = user_space ? (std::min(doc_ctx.viewport_w, doc_ctx.viewport_h) * 0.5f) : 0.5f;
+        grad->x1 = read_coord("cx", def_c, doc_ctx.viewport_w);
+        grad->y1 = read_coord("cy", user_space ? (doc_ctx.viewport_h * 0.5f) : 0.5f, doc_ctx.viewport_h);
+        grad->r1 = std::max(0.0f, read_coord("r", def_r, std::min(doc_ctx.viewport_w, doc_ctx.viewport_h)));
+        grad->x0 = read_coord("fx", grad->x1, doc_ctx.viewport_w);
+        grad->y0 = read_coord("fy", grad->y1, doc_ctx.viewport_h);
+        grad->r0 = std::max(0.0f, read_coord("fr", 0.0f, std::min(doc_ctx.viewport_w, doc_ctx.viewport_h)));
+    }
+
+    // Build mapping from user-space coordinates into gradient coordinate space
+    TransformMatrix2D grad_to_user = TransformMatrix2D::identity();
+    if (!user_space) {
+        if (shape_bbox.valid() && shape_bbox.width() > 1e-5f && shape_bbox.height() > 1e-5f) {
+            grad_to_user = TransformMatrix2D::translation(shape_bbox.min_x, shape_bbox.min_y)
+                .multiply(TransformMatrix2D::scale(shape_bbox.width(), shape_bbox.height()));
+        }
+    }
+    std::string gtf_str;
+    if (find_attr("gradientTransform", gtf_str)) {
+        grad_to_user = grad_to_user.multiply(parse_svg_transform(gtf_str));
+    }
+    if (!grad_to_user.is_identity()) {
+        grad->transform = grad_to_user.inverse();
+    }
+
+    // Find first element in chain that owns <stop> children
+    for (const auto& node : chain) {
+        bool found_stops = false;
+        for (const auto& ch : node->children()) {
+            auto stop_el = std::dynamic_pointer_cast<Element>(ch);
+            if (!stop_el || to_lower_ascii(stop_el->tag_name()) != "stop") continue;
+            found_stops = true;
+
+            float offset = 0.0f;
+            std::string off_str;
+            if (get_attr_ci(stop_el, "offset", off_str)) {
+                bool is_pct = false;
+                parse_length_or_pct_unit(off_str, offset, 1.0f, is_pct);
+            }
+            offset = std::clamp(offset, 0.0f, 1.0f);
+
+            Color stop_color = Color::black();
+            float stop_opacity = 1.0f;
+            std::string val;
+            if (get_attr_ci(stop_el, "stop-color", val)) parse_svg_color(val, stop_color);
+            if (get_attr_ci(stop_el, "stop-opacity", val)) {
+                float op = 1.0f;
+                if (parse_float_value(val, op, 1.0f)) stop_opacity = std::clamp(op, 0.0f, 1.0f);
+            }
+            if (get_attr_ci(stop_el, "style", val)) {
+                size_t p = 0;
+                while (p < val.size()) {
+                    size_t semi = val.find(';', p);
+                    std::string_view decl = (semi == std::string::npos) ? std::string_view(val).substr(p)
+                                                                        : std::string_view(val).substr(p, semi - p);
+                    size_t colon = decl.find(':');
+                    if (colon != std::string_view::npos) {
+                        std::string k = to_lower_ascii(trim_wsp(decl.substr(0, colon)));
+                        std::string_view v = trim_wsp(decl.substr(colon + 1));
+                        if (k == "stop-color") parse_svg_color(v, stop_color);
+                        else if (k == "stop-opacity") {
+                            float op = 1.0f;
+                            if (parse_float_value(v, op, 1.0f)) stop_opacity = std::clamp(op, 0.0f, 1.0f);
+                        }
+                    }
+                    if (semi == std::string::npos) break;
+                    p = semi + 1;
+                }
+            }
+
+            const float combined_alpha = (static_cast<float>(stop_color.a) / 255.0f) *
+                                         stop_opacity * std::clamp(extra_opacity, 0.0f, 1.0f);
+            stop_color.a = static_cast<uint8_t>(std::clamp(std::lround(combined_alpha * 255.0f), 0l, 255l));
+            grad->add_color_stop(offset, stop_color);
+        }
+        if (found_stops) break;
+    }
+
+    if (grad->stops.empty()) return nullptr;
+    return grad;
+}
+
+bool build_shape_geometry(
+    CanvasRenderingContext2D& ctx,
+    const std::shared_ptr<Element>& el,
+    float ref_w,
+    float ref_h,
+    BBox& bbox,
+    bool& allow_fill
+) {
+    const std::string tag = to_lower_ascii(el->tag_name());
+    allow_fill = true;
+
+    auto attr_f = [&](std::string_view name, float def_val, float pct_ref) -> float {
+        std::string s;
+        if (!get_attr_ci(el, name, s)) return def_val;
+        float v = def_val;
+        return parse_float_value(s, v, pct_ref) ? v : def_val;
+    };
+
+    if (tag == "rect") {
+        const float x = attr_f("x", 0.0f, ref_w);
+        const float y = attr_f("y", 0.0f, ref_h);
+        const float w = attr_f("width", 0.0f, ref_w);
+        const float h = attr_f("height", 0.0f, ref_h);
+        if (w <= 0.0f || h <= 0.0f) return false;
+
+        std::string rx_s, ry_s;
+        const bool has_rx = get_attr_ci(el, "rx", rx_s);
+        const bool has_ry = get_attr_ci(el, "ry", ry_s);
+        float rx = 0.0f, ry = 0.0f;
+        if (has_rx) parse_float_value(rx_s, rx, ref_w);
+        if (has_ry) parse_float_value(ry_s, ry, ref_h);
+        if (has_rx && !has_ry) ry = rx;
+        if (has_ry && !has_rx) rx = ry;
+        rx = std::clamp(rx, 0.0f, w * 0.5f);
+        ry = std::clamp(ry, 0.0f, h * 0.5f);
+
+        if (rx > 0.0f && ry > 0.0f) {
+            if (std::abs(rx - ry) < 1e-4f) {
+                ctx.round_rect(x, y, w, h, rx);
+            } else {
+                // Elliptical rounded rectangle
+                ctx.move_to(x + rx, y);
+                ctx.line_to(x + w - rx, y);
+                ctx.ellipse(x + w - rx, y + ry, rx, ry, 0.0f, -static_cast<float>(kPi * 0.5), 0.0f, false);
+                ctx.line_to(x + w, y + h - ry);
+                ctx.ellipse(x + w - rx, y + h - ry, rx, ry, 0.0f, 0.0f, static_cast<float>(kPi * 0.5), false);
+                ctx.line_to(x + rx, y + h);
+                ctx.ellipse(x + rx, y + h - ry, rx, ry, 0.0f, static_cast<float>(kPi * 0.5), static_cast<float>(kPi), false);
+                ctx.line_to(x, y + ry);
+                ctx.ellipse(x + rx, y + ry, rx, ry, 0.0f, static_cast<float>(kPi), static_cast<float>(kPi * 1.5), false);
+                ctx.close_path();
+            }
+        } else {
+            ctx.rect(x, y, w, h);
+        }
+        bbox.include(x, y);
+        bbox.include(x + w, y + h);
+        return true;
+    }
+
+    if (tag == "circle") {
+        const float cx = attr_f("cx", 0.0f, ref_w);
+        const float cy = attr_f("cy", 0.0f, ref_h);
+        const float r = attr_f("r", 0.0f, std::hypot(ref_w, ref_h) / 1.41421356f);
+        if (r <= 0.0f) return false;
+        ctx.arc(cx, cy, r, 0.0f, static_cast<float>(kTwoPi), false);
+        ctx.close_path();
+        bbox.include(cx - r, cy - r);
+        bbox.include(cx + r, cy + r);
+        return true;
+    }
+
+    if (tag == "ellipse") {
+        const float cx = attr_f("cx", 0.0f, ref_w);
+        const float cy = attr_f("cy", 0.0f, ref_h);
+        const float rx = attr_f("rx", 0.0f, ref_w);
+        const float ry = attr_f("ry", 0.0f, ref_h);
+        if (rx <= 0.0f || ry <= 0.0f) return false;
+        ctx.ellipse(cx, cy, rx, ry, 0.0f, 0.0f, static_cast<float>(kTwoPi), false);
+        ctx.close_path();
+        bbox.include(cx - rx, cy - ry);
+        bbox.include(cx + rx, cy + ry);
+        return true;
+    }
+
+    if (tag == "line") {
+        const float x1 = attr_f("x1", 0.0f, ref_w);
+        const float y1 = attr_f("y1", 0.0f, ref_h);
+        const float x2 = attr_f("x2", 0.0f, ref_w);
+        const float y2 = attr_f("y2", 0.0f, ref_h);
+        ctx.move_to(x1, y1);
+        ctx.line_to(x2, y2);
+        bbox.include(x1, y1);
+        bbox.include(x2, y2);
+        allow_fill = false;
+        return true;
+    }
+
+    if (tag == "polyline" || tag == "polygon") {
+        std::string pts_str;
+        if (!get_attr_ci(el, "points", pts_str)) return false;
+        auto nums = parse_number_list(pts_str);
+        if (nums.size() < 4) return false;
+        ctx.move_to(nums[0], nums[1]);
+        bbox.include(nums[0], nums[1]);
+        for (size_t k = 2; k + 1 < nums.size(); k += 2) {
+            ctx.line_to(nums[k], nums[k + 1]);
+            bbox.include(nums[k], nums[k + 1]);
+        }
+        if (tag == "polygon") {
+            ctx.close_path();
+        }
+        return true;
+    }
+
+    if (tag == "path") {
+        std::string d;
+        if (!get_attr_ci(el, "d", d) || d.empty()) return false;
+        build_svg_path(ctx, d, bbox);
+        return true;
+    }
+
+    return false;
+}
+
+void apply_clip_path_element(
+    CanvasRenderingContext2D& ctx,
+    const std::shared_ptr<Element>& clip_el,
+    float ref_w,
+    float ref_h
+) {
+    if (!clip_el) return;
+    ctx.begin_path();
+    FillRule rule = FillRule::NonZero;
+    for (const auto& child : clip_el->children()) {
+        auto child_el = std::dynamic_pointer_cast<Element>(child);
+        if (!child_el) continue;
+        const TransformMatrix2D saved_ctm = ctx.current_transform();
+        std::string tf_str;
+        if (get_attr_ci(child_el, "transform", tf_str)) {
+            ctx.set_transform(saved_ctm.multiply(parse_svg_transform(tf_str)));
+        }
+        std::string cr;
+        if (get_attr_ci(child_el, "clip-rule", cr) && to_lower_ascii(trim_wsp(cr)) == "evenodd") {
+            rule = FillRule::EvenOdd;
+        }
+        BBox dummy;
+        bool allow_fill = true;
+        build_shape_geometry(ctx, child_el, ref_w, ref_h, dummy, allow_fill);
+        ctx.set_transform(saved_ctm);
+    }
+    ctx.clip(rule);
+}
+
+void paint_shape(
+    CanvasRenderingContext2D& ctx,
+    const SvgDocumentContext& doc_ctx,
+    const SvgStyle& style,
+    const BBox& bbox,
+    bool allow_fill
+) {
+    auto resolve_paint = [&](const PaintServer& ps, float paint_opacity,
+                             Color& out_color, std::shared_ptr<CanvasGradient>& out_grad) -> bool {
+        out_grad = nullptr;
+        const float eff_op = std::clamp(style.opacity * paint_opacity, 0.0f, 1.0f);
+        if (eff_op <= 0.0f) return false;
+
+        if (ps.kind == PaintServer::Kind::None) return false;
+        if (ps.kind == PaintServer::Kind::Solid) {
+            out_color = ps.color;
+            out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+            return out_color.a > 0;
+        }
+        if (ps.kind == PaintServer::Kind::CurrentColor) {
+            out_color = style.color;
+            out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+            return out_color.a > 0;
+        }
+        if (ps.kind == PaintServer::Kind::Url) {
+            out_grad = build_svg_gradient(doc_ctx, ps.url_id, bbox, eff_op);
+            if (out_grad) return true;
+            if (ps.has_fallback) {
+                out_color = ps.fallback;
+                out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+                return out_color.a > 0;
+            }
+            return false;
+        }
+        return false;
+    };
+
+    ctx.global_alpha = 1.0f; // Opacity already folded into color/gradient alpha
+
+    if (allow_fill) {
+        Color fc;
+        std::shared_ptr<CanvasGradient> fg;
+        if (resolve_paint(style.fill, style.fill_opacity, fc, fg)) {
+            ctx.fill_style = fc;
+            ctx.fill_gradient = fg;
+            ctx.fill(style.fill_rule);
+        }
+    }
+
+    if (style.stroke_width > 0.0f) {
+        Color sc;
+        std::shared_ptr<CanvasGradient> sg;
+        if (resolve_paint(style.stroke, style.stroke_opacity, sc, sg)) {
+            ctx.stroke_style = sc;
+            ctx.stroke_gradient = sg;
+            ctx.line_width = style.stroke_width;
+            ctx.line_cap = style.stroke_linecap;
+            ctx.line_join = style.stroke_linejoin;
+            ctx.miter_limit = style.stroke_miterlimit;
+            ctx.set_line_dash(style.stroke_dasharray);
+            ctx.line_dash_offset = style.stroke_dashoffset;
+            ctx.stroke();
         }
     }
 }
 
 void render_element(
     CanvasRenderingContext2D& ctx,
+    const SvgDocumentContext& doc_ctx,
     const std::shared_ptr<Element>& el,
     const SvgStyle& parent_style,
-    const ViewBox& vb,
-    float dest_w,
-    float dest_h
+    float ref_w,
+    float ref_h,
+    int use_depth,
+    std::unordered_set<std::string>& active_use_ids
 ) {
-    if (!el) return;
-    // One call per level of <g> nesting, over a tree a script can make as deep
-    // as it likes: stop where the stack does. What is nested deeper than that
-    // is not drawn.
-    if (stack_is_exhausted()) return;
-    std::string tag = el->tag_name();
-    SvgStyle style = parse_style(el, parent_style);
+    if (!el || stack_is_exhausted()) return;
 
-    ctx.fill_style = style.fill;
-    ctx.stroke_style = style.stroke;
-    ctx.line_width = style.stroke_width;
-
-    if (tag == "g") {
-        for (const auto& child : el->children()) {
-            if (auto child_el = std::dynamic_pointer_cast<Element>(child)) {
-                render_element(ctx, child_el, style, vb, dest_w, dest_h);
-            }
-        }
+    const std::string tag = to_lower_ascii(el->tag_name());
+    if (tag == "defs" || tag == "clippath" || tag == "mask" || tag == "symbol" ||
+        tag == "lineargradient" || tag == "radialgradient" ||
+        tag == "title" || tag == "desc" || tag == "metadata" ||
+        tag == "style" || tag == "script") {
         return;
     }
 
-    if (tag == "rect") {
-        float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
-        try {
-            if (el->has_attribute("x")) x = std::stof(el->get_attribute("x"));
-            if (el->has_attribute("y")) y = std::stof(el->get_attribute("y"));
-            if (el->has_attribute("width")) w = std::stof(el->get_attribute("width"));
-            if (el->has_attribute("height")) h = std::stof(el->get_attribute("height"));
-        } catch (...) {}
+    const float ref_size = std::hypot(ref_w, ref_h) / 1.41421356f;
+    SvgStyle style = resolve_element_style(el, parent_style, ref_size);
+    if (style.display_none || style.opacity <= 0.0f) return;
 
-        auto p0 = transform_point(x, y, vb, dest_w, dest_h);
-        auto p1 = transform_point(x + w, y + h, vb, dest_w, dest_h);
-        float rw = p1.x - p0.x;
-        float rh = p1.y - p0.y;
+    ctx.save();
 
-        if (style.has_fill) {
-            ctx.fill_rect(p0.x, p0.y, rw, rh);
-        }
-        if (style.has_stroke && style.stroke_width > 0) {
-            ctx.stroke_rect(p0.x, p0.y, rw, rh);
-        }
-    } else if (tag == "circle") {
-        float cx = 0.0f, cy = 0.0f, r = 0.0f;
-        try {
-            if (el->has_attribute("cx")) cx = std::stof(el->get_attribute("cx"));
-            if (el->has_attribute("cy")) cy = std::stof(el->get_attribute("cy"));
-            if (el->has_attribute("r")) r = std::stof(el->get_attribute("r"));
-        } catch (...) {}
+    // Apply element transform
+    std::string tf_str;
+    if (get_attr_ci(el, "transform", tf_str)) {
+        ctx.set_transform(ctx.current_transform().multiply(parse_svg_transform(tf_str)));
+    }
 
-        auto pt = transform_point(cx, cy, vb, dest_w, dest_h);
-        float scale = (vb.valid && vb.width > 0.0f) ? (dest_w / vb.width) : 1.0f;
-        float r_scaled = r * scale;
-
-        ctx.begin_path();
-        ctx.arc(pt.x, pt.y, r_scaled, 0.0f, 6.2831853f);
-        if (style.has_fill) ctx.fill();
-        if (style.has_stroke && style.stroke_width > 0) ctx.stroke();
-    } else if (tag == "ellipse") {
-        float cx = 0.0f, cy = 0.0f, rx = 0.0f, ry = 0.0f;
-        try {
-            if (el->has_attribute("cx")) cx = std::stof(el->get_attribute("cx"));
-            if (el->has_attribute("cy")) cy = std::stof(el->get_attribute("cy"));
-            if (el->has_attribute("rx")) rx = std::stof(el->get_attribute("rx"));
-            if (el->has_attribute("ry")) ry = std::stof(el->get_attribute("ry"));
-        } catch (...) {}
-
-        auto center = transform_point(cx, cy, vb, dest_w, dest_h);
-        float scale_x = (vb.valid && vb.width > 0.0f) ? (dest_w / vb.width) : 1.0f;
-        float scale_y = (vb.valid && vb.height > 0.0f) ? (dest_h / vb.height) : 1.0f;
-        float rx_scaled = rx * scale_x;
-        float ry_scaled = ry * scale_y;
-
-        ctx.begin_path();
-        for (int step = 0; step <= 32; ++step) {
-            float angle = static_cast<float>(step) / 32.0f * 6.2831853f;
-            float px = center.x + rx_scaled * std::cos(angle);
-            float py = center.y + ry_scaled * std::sin(angle);
-            if (step == 0) ctx.move_to(px, py);
-            else ctx.line_to(px, py);
-        }
-        ctx.close_path();
-        if (style.has_fill) ctx.fill();
-        if (style.has_stroke && style.stroke_width > 0) ctx.stroke();
-    } else if (tag == "line") {
-        float x1 = 0.0f, y1 = 0.0f, x2 = 0.0f, y2 = 0.0f;
-        try {
-            if (el->has_attribute("x1")) x1 = std::stof(el->get_attribute("x1"));
-            if (el->has_attribute("y1")) y1 = std::stof(el->get_attribute("y1"));
-            if (el->has_attribute("x2")) x2 = std::stof(el->get_attribute("x2"));
-            if (el->has_attribute("y2")) y2 = std::stof(el->get_attribute("y2"));
-        } catch (...) {}
-
-        auto p1 = transform_point(x1, y1, vb, dest_w, dest_h);
-        auto p2 = transform_point(x2, y2, vb, dest_w, dest_h);
-
-        ctx.begin_path();
-        ctx.move_to(p1.x, p1.y);
-        ctx.line_to(p2.x, p2.y);
-        if (style.has_stroke) ctx.stroke();
-    } else if (tag == "polyline" || tag == "polygon") {
-        std::string pts_str = el->get_attribute("points");
-        auto nums = parse_numbers(pts_str);
-        if (nums.size() >= 2) {
-            ctx.begin_path();
-            auto first = transform_point(nums[0], nums[1], vb, dest_w, dest_h);
-            ctx.move_to(first.x, first.y);
-            for (size_t k = 2; k + 1 < nums.size(); k += 2) {
-                auto pt = transform_point(nums[k], nums[k + 1], vb, dest_w, dest_h);
-                ctx.line_to(pt.x, pt.y);
+    // Apply clip-path="url(#id)" if present
+    std::string clip_attr;
+    if (get_attr_ci(el, "clip-path", clip_attr)) {
+        std::string clip_id;
+        std::string_view rem;
+        if (parse_url_ref(clip_attr, clip_id, rem)) {
+            auto cit = doc_ctx.by_id.find(clip_id);
+            if (cit != doc_ctx.by_id.end() && to_lower_ascii(cit->second->tag_name()) == "clippath") {
+                apply_clip_path_element(ctx, cit->second, ref_w, ref_h);
             }
-            if (tag == "polygon") {
-                ctx.close_path();
-                if (style.has_fill) ctx.fill();
-            }
-            if (style.has_stroke && style.stroke_width > 0) ctx.stroke();
-        }
-    } else if (tag == "path") {
-        std::string d = el->get_attribute("d");
-        if (!d.empty()) {
-            parse_and_draw_path(ctx, d, vb, dest_w, dest_h);
-            if (style.has_fill) ctx.fill();
-            if (style.has_stroke && style.stroke_width > 0) ctx.stroke();
         }
     }
+
+    if (tag == "g" || tag == "a") {
+        for (const auto& child : el->children()) {
+            if (auto child_el = std::dynamic_pointer_cast<Element>(child)) {
+                render_element(ctx, doc_ctx, child_el, style, ref_w, ref_h, use_depth, active_use_ids);
+            }
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (tag == "svg") {
+        // Nested <svg> element
+        float nx = 0.0f, ny = 0.0f, nw = ref_w, nh = ref_h;
+        std::string s;
+        if (get_attr_ci(el, "x", s)) parse_float_value(s, nx, ref_w);
+        if (get_attr_ci(el, "y", s)) parse_float_value(s, ny, ref_h);
+        if (get_attr_ci(el, "width", s)) parse_float_value(s, nw, ref_w);
+        if (get_attr_ci(el, "height", s)) parse_float_value(s, nh, ref_h);
+        if (nw > 0.0f && nh > 0.0f) {
+            ctx.translate(nx, ny);
+            float sub_ref_w = nw, sub_ref_h = nh;
+            std::string vb_str, par_str;
+            if (get_attr_ci(el, "viewBox", vb_str)) {
+                ViewBox sub_vb = parse_viewbox(vb_str);
+                if (sub_vb.valid) {
+                    get_attr_ci(el, "preserveAspectRatio", par_str);
+                    ctx.set_transform(ctx.current_transform().multiply(
+                        compute_viewbox_matrix(sub_vb, nw, nh, par_str)));
+                    sub_ref_w = sub_vb.width;
+                    sub_ref_h = sub_vb.height;
+                }
+            }
+            for (const auto& child : el->children()) {
+                if (auto child_el = std::dynamic_pointer_cast<Element>(child)) {
+                    render_element(ctx, doc_ctx, child_el, style, sub_ref_w, sub_ref_h, use_depth, active_use_ids);
+                }
+            }
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (tag == "use") {
+        if (use_depth < kMaxUseDepth) {
+            std::string href;
+            if (get_href_attr(el, href)) {
+                std::string target_id = extract_fragment_id(href);
+                auto it = doc_ctx.by_id.find(target_id);
+                if (!target_id.empty() && it != doc_ctx.by_id.end() &&
+                    active_use_ids.find(target_id) == active_use_ids.end()) {
+                    float ux = 0.0f, uy = 0.0f;
+                    std::string s;
+                    if (get_attr_ci(el, "x", s)) parse_float_value(s, ux, ref_w);
+                    if (get_attr_ci(el, "y", s)) parse_float_value(s, uy, ref_h);
+                    if (ux != 0.0f || uy != 0.0f) ctx.translate(ux, uy);
+
+                    active_use_ids.insert(target_id);
+                    auto target = it->second;
+                    std::string target_tag = to_lower_ascii(target->tag_name());
+                    if (target_tag == "symbol") {
+                        float uw = ref_w, uh = ref_h;
+                        if (get_attr_ci(el, "width", s)) parse_float_value(s, uw, ref_w);
+                        if (get_attr_ci(el, "height", s)) parse_float_value(s, uh, ref_h);
+                        float sym_ref_w = uw, sym_ref_h = uh;
+                        std::string vb_str, par_str;
+                        if (get_attr_ci(target, "viewBox", vb_str)) {
+                            ViewBox sym_vb = parse_viewbox(vb_str);
+                            if (sym_vb.valid && uw > 0.0f && uh > 0.0f) {
+                                get_attr_ci(target, "preserveAspectRatio", par_str);
+                                ctx.set_transform(ctx.current_transform().multiply(
+                                    compute_viewbox_matrix(sym_vb, uw, uh, par_str)));
+                                sym_ref_w = sym_vb.width;
+                                sym_ref_h = sym_vb.height;
+                            }
+                        }
+                        for (const auto& ch : target->children()) {
+                            if (auto ch_el = std::dynamic_pointer_cast<Element>(ch)) {
+                                render_element(ctx, doc_ctx, ch_el, style, sym_ref_w, sym_ref_h,
+                                               use_depth + 1, active_use_ids);
+                            }
+                        }
+                    } else {
+                        render_element(ctx, doc_ctx, target, style, ref_w, ref_h,
+                                       use_depth + 1, active_use_ids);
+                    }
+                    active_use_ids.erase(target_id);
+                }
+            }
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (style.visible) {
+        ctx.begin_path();
+        BBox bbox;
+        bool allow_fill = true;
+        if (build_shape_geometry(ctx, el, ref_w, ref_h, bbox, allow_fill)) {
+            paint_shape(ctx, doc_ctx, style, bbox, allow_fill);
+        }
+    }
+
+    ctx.restore();
 }
 
 } // anonymous namespace
@@ -467,17 +1479,20 @@ std::shared_ptr<ImageData> SvgRenderer::render(
 
     float w = target_width;
     float h = target_height;
+    std::string attr;
 
-    if (w <= 0.0f && svg_element->has_attribute("width")) {
-        try { w = std::stof(svg_element->get_attribute("width")); } catch (...) {}
+    if (w <= 0.0f && get_attr_ci(svg_element, "width", attr)) {
+        float parsed = 0.0f;
+        if (parse_float_value(attr, parsed, 300.0f)) w = parsed;
     }
-    if (h <= 0.0f && svg_element->has_attribute("height")) {
-        try { h = std::stof(svg_element->get_attribute("height")); } catch (...) {}
+    if (h <= 0.0f && get_attr_ci(svg_element, "height", attr)) {
+        float parsed = 0.0f;
+        if (parse_float_value(attr, parsed, 150.0f)) h = parsed;
     }
 
     ViewBox vb;
-    if (svg_element->has_attribute("viewBox")) {
-        vb = parse_viewbox(svg_element->get_attribute("viewBox"));
+    if (get_attr_ci(svg_element, "viewBox", attr)) {
+        vb = parse_viewbox(attr);
         if (w <= 0.0f && vb.valid) w = vb.width;
         if (h <= 0.0f && vb.valid) h = vb.height;
     }
@@ -488,24 +1503,41 @@ std::shared_ptr<ImageData> SvgRenderer::render(
 
     // An <svg> that is too large to draw into a bitmap, or that comes when
     // the page's other bitmaps have used up the budget, keeps its box and
-    // stays blank (RasterBudget.hpp). The comparison is made on the floats:
-    // converting 1e12 to int would be undefined.
-    if (w > static_cast<float>(RasterBudget::kMaxSide) || h > static_cast<float>(RasterBudget::kMaxSide)) return nullptr;
-    int img_w = std::max(1, static_cast<int>(std::round(w)));
-    int img_h = std::max(1, static_cast<int>(std::round(h)));
+    // stays blank (RasterBudget.hpp).
+    if (w > static_cast<float>(RasterBudget::kMaxSide) ||
+        h > static_cast<float>(RasterBudget::kMaxSide)) {
+        return nullptr;
+    }
+    const int img_w = std::max(1, static_cast<int>(std::round(w)));
+    const int img_h = std::max(1, static_cast<int>(std::round(h)));
 
     CanvasRenderingContext2D ctx(img_w, img_h);
     if (!ctx.has_backing_store()) return nullptr;
-    SvgStyle root_style;
-    root_style.fill = Color::black();
-    root_style.has_fill = true;
-    root_style.stroke = Color::transparent();
-    root_style.has_stroke = false;
-    root_style.stroke_width = 1.0f;
 
+    SvgDocumentContext doc_ctx;
+    doc_ctx.viewport_w = vb.valid ? vb.width : w;
+    doc_ctx.viewport_h = vb.valid ? vb.height : h;
+    doc_ctx.index_tree(svg_element);
+
+    std::string par_str;
+    get_attr_ci(svg_element, "preserveAspectRatio", par_str);
+    if (vb.valid) {
+        ctx.set_transform(compute_viewbox_matrix(vb, w, h, par_str));
+    }
+
+    // Root <svg> can itself specify presentation attributes (fill, stroke, color, opacity, style)
+    SvgStyle default_style;
+    const float root_ref_size = std::hypot(doc_ctx.viewport_w, doc_ctx.viewport_h) / 1.41421356f;
+    SvgStyle root_style = resolve_element_style(svg_element, default_style, root_ref_size);
+    if (root_style.display_none || root_style.opacity <= 0.0f) {
+        return ctx.image_data();
+    }
+
+    std::unordered_set<std::string> active_use_ids;
     for (const auto& child : svg_element->children()) {
         if (auto child_el = std::dynamic_pointer_cast<Element>(child)) {
-            render_element(ctx, child_el, root_style, vb, w, h);
+            render_element(ctx, doc_ctx, child_el, root_style,
+                           doc_ctx.viewport_w, doc_ctx.viewport_h, 0, active_use_ids);
         }
     }
 

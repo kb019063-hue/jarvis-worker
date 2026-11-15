@@ -347,6 +347,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 31** | **CSS whitespace trimming is linear:** the parser and resolver scan outer whitespace once and shift the surviving text at most once; `nth-child` no longer copies and lowercases padding per child. 300,000 spaces in the measured `:nth-child`, grid, filter, duration and transform paths went from seconds to tens or hundreds of milliseconds with the same layout/paint. | ✅ Completed (117/117 unit suites; `make bench-css` compares 20 padded runs with compact pages) |
 | **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
+| **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (134/134 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 
 ---
 
@@ -2314,12 +2315,17 @@ without a namespace, `xml` and `xmlns` with the wrong one.
 A script tests for it with `getElementsByTagName('parsererror')`.
 
 **The attribute list** (`include/litebird/dom/AttributeList.hpp`). An
-element's attributes are a vector in the order they were added (Phase 27),
+element's attributes are a vector with a logical start offset in the order they were added (Phase 27),
 and every lookup was a scan of it. That is right for the handful an element
 has and the square of the count for one that has many: 50,000 `setAttribute`
 calls on one element took 6.3 s. The list now builds an index the first time
-an element with many attributes is searched. Namespaces are kept beside the
-list, for the few attributes that have one, with indexes of their own. The
+an element with many attributes is searched. The items and the index's
+ascending numbers are vectors with a logical start offset; a front erase
+advances the offset and compacts only when the dead prefix reaches the live
+tail, so end removals are linear and an empty list allocates nothing (Phase
+35). A middle removal still moves the tail. Namespaces
+are kept beside the list, for the few attributes that have one, with indexes
+of their own. The
 HTML parser now gives the attributes of inline SVG and MathML their
 namespaces ("adjust foreign attributes") and keeps their names:
 `getAttribute('xlink:href')` and `getAttributeNS('http://www.w3.org/1999/xlink',
@@ -2502,7 +2508,7 @@ Release build, on the machine the checks ran on; "before" is `main`
 | `setAttribute` 50,000 times on one element | 6.3 s | 49 ms |
 | `setAttributeNS` 20,000 times on one element | 0.7 s | 41 ms |
 | `removeAttribute` of 25,000 of 50,000, from the back | 2.5 s | 22 ms |
-| `removeAttribute` of all 50,000, from the front | 8.2 s | 9.0 s: each one moves the rest of a vector, as before |
+| `removeAttribute` of all 50,000, from the front | 8.2 s | 9.0 s at Phase 28: each one moved the rest of a vector; fixed in Phase 35 (0.09 s whole-process) |
 | The HTML parser, one element with 50,000 attributes | 10.4 s | 2.9 s: the tokenizer's search for a repeated name is what is left |
 | An XML document 200,000 deep: parsed, serialized | | 130 ms, 37 ms |
 | An XML element with 50,000 attributes: parsed, serialized | | 40 ms, 4 ms |
@@ -2534,8 +2540,8 @@ Release build, on the machine the checks ran on; "before" is `main`
   engine: `Object.getPrototypeOf(TypeError) !== Error`, and for a class,
   `Object.getPrototypeOf(Derived) !== Base`. 18 subtests fail on it, each an
   `assert_throws_js`. Not a DOM fault.
-- **Removing attributes from the front** of a very long list costs the
-  square of its length, as it did (the table above).
+- **Removing attributes from the front** of a very long list was quadratic
+  at Phase 28; fixed in Phase 35 (vectors with a logical start offset).
 - **`responseType = 'arraybuffer'`** gives null: the engine has no
   `ArrayBuffer`.
 - **SVG elements still have no SVG DOM** (`className.baseVal`, `viewBox`),
@@ -2989,6 +2995,95 @@ schemes are not fetched; cross-origin HTTP `fetch()` is not CORS-checked. A
 files, so opening untrusted local HTML is still a trust decision. Worker
 script MIME checks, module workers, and external `<script src>`/`<link>`
 loading are unchanged/open.
+
+---
+
+## Phase 35 Architecture: Attribute-List End Removals Are Linear
+
+### 1. What was wrong
+
+`AttributeList` kept the attributes in a `std::vector` and, once a list was
+long enough to index, kept a parallel `std::vector<std::size_t>` of the
+numbers each name was given. The number index avoided rebuilding positions
+on every erase, but `erase(iterator)` still erased from both vectors at the
+same offset. Removing the first attribute moved every remaining string pair
+and every remaining number: draining 50,000 attributes from the front was
+quadratic. The recorded script loop took about 6 s (9 s in the older
+measurement); the same removals from the back were tens of milliseconds.
+
+### 2. What changed
+
+Only `include/litebird/dom/AttributeList.hpp` changed. The items and
+`Index::numbers` remain `std::vector`s, but each has a logical start offset.
+The public iterator aliases are still vector iterators, so
+`attributes.begin() + index` in the `NamedNodeMap` bindings and
+`found - list.begin()` in callers/tests still work. The lazy index is
+unchanged in shape: lists shorter than 32 are scanned; longer lists build a
+name-to-number map and an ascending number sequence, and `position()`
+bisects the live number range. A back erase pops the vector; a front erase
+advances the start and leaves a dead prefix. `compact()` drops that prefix
+only when it is at least as large as the live tail, which makes repeated
+front erases amortized O(1) and a full drain linear, while an empty list
+still allocates nothing. A middle erase removes the name from the map,
+erases the parallel number, and moves the vector tail. Copy copies only the
+live range and drops the index; move resets the source start so a moved-from
+list is empty; `clear`, value update in place, insertion order,
+`operator[]`, `find/count/erase` and order-insensitive equality keep their
+semantics. `AttributeNamespaces` is a separate side table and was not
+changed.
+
+### 3. Measured
+
+Whole-process times, best of three, same machine and hour; baseline is the
+pre-change binary saved as `build/litebird-attributes-baseline`:
+
+```bash
+python3 tools/bench/bench_attributes.py \
+  --baseline build/litebird-attributes-baseline --reps 3 --max-ms 3000
+```
+
+| Case (50,000 attributes unless noted) | Baseline | Current | Speedup |
+| :--- | ---: | ---: | ---: |
+| front: remove a0..aN | 7,132 ms | 90 ms | 79.0× |
+| back: remove aN..a0 | 115 ms | 114 ms | 1.0× |
+| ends: alternate front/back | 3,481 ms | 113 ms | 30.8× |
+| front half, then update/reinsert | 5,293 ms | 69 ms | 76.8× |
+| namespaces: front removal | 8,465 ms | 197 ms | 43.0× |
+| short lists: churn below index | 79 ms | 73 ms | 1.1× |
+
+Every case prints the same expected DOM checksum in both binaries. A
+script-only `Date.now()` probe measured the front removal loop at 6,078 ms
+before and 51 ms after; the back loop stayed in the tens of milliseconds.
+The checked-in guard is `make bench-attributes`: six cases, three
+repetitions, expected checksums, 3,000 ms whole-process limit. It fails on a
+crash, timeout, wrong checksum or slow case.
+
+### 4. Verification
+
+`make test` passes 134 suites. The two new suites are
+`attribute_list_end_removals_keep_order_and_index` (model comparison across
+the scan/index boundary, both erase overloads, reinsert/update, copy/move,
+moved-from emptiness, late index build after a dead prefix, clear and
+random-access iterators) and
+`attribute_list_front_removal_is_linear_in_practice` (50,000 direct and
+script front removals with generous wall-clock guards). `make
+bench-attributes` passes 6 cases with 0 failures. A generated out-of-corpus
+probe run through `tools/conformance/compare_with_jsdom.py` printed `4 lines,
+4 the same` before and after. The release run kept html5lib 1781/1792, JS
+840/845, DOM 629/629, URL 1150/1188, XML 1702/1702, WPT 4640/5192,
+diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed (slowest 22.0 s),
+bench-css 20 padded runs/0 failures, security-fetch 3 checks/0 failures, and
+diff-strings at the 95-difference ceiling. The sanitizer scoreboards are
+recorded in AUDIT.md, finding 39.
+
+### 5. What is still open
+
+This fixes end removals, not arbitrary middle removals: a middle erase still
+moves the vector tail. The HTML tokenizer's repeated-name search for
+one element with 50,000 attributes remains open (about 2.9 s), as do the
+`Attr`-is-not-a-`Node`, one-qualified-name-in-two-namespaces and collection
+named-property rows. No parser, layout, CSS or JavaScript engine file was
+changed.
 
 ---
 

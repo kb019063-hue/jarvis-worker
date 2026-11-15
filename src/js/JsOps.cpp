@@ -765,15 +765,22 @@ JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, cons
     // arguments, which is the order the language has
     // (`Reflect.construct(Promise, [], NewTarget)` complains about the
     // executor before `NewTarget.prototype` is read).
+    // Either way `NewTarget.prototype` is read once, and where it is not an
+    // object the built-in's own prototype stays.
     JsValue asked_for;
     JsValue result = ctor.construct_for(args, *new_target, asked_for);
     if (!result.is_object_like()) return result;
-    if (asked_for.is_object_like() && result.identity() == asked_for.identity()) return result;
-    JsValue proto = new_target->get_property("prototype");
-    if (proto.is_object_like()) {
+    JsObject* target = nullptr;
+    if (asked_for.is_object()) {
+        if (result.identity() == asked_for.identity()) return result;
+        target = asked_for.object_val->prototype;       // asked for and then not used: what was read then
+    } else if (asked_for.is_undefined()) {
+        JsValue proto = new_target->get_property("prototype");
+        if (proto.is_object_like()) target = proto.as_prototype();
+    }
+    if (target) {
         JsObject* cell = result.is_function() ? result.function_cell() : result.object_val.get();
-        JsObject* target = proto.as_prototype();
-        if (cell && target) js_set_prototype(cell, target);
+        if (cell) js_set_prototype(cell, target);
     }
     return result;
 }

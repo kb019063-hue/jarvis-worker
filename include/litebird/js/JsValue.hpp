@@ -367,9 +367,11 @@ public:
     /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,
     /// another function as new.target, and no object to hand it yet. A native
     /// that asks for current_derived_this() gets one with the prototype
-    /// `new_target` has at that moment, and it is left in `made`. A native
-    /// that never asks builds its own, `made` stays undefined, and nothing
-    /// was read from `new_target`. Both have to outlive the call.
+    /// `new_target` has at that moment, and it is left in `made`; when
+    /// `new_target` has no object for a prototype the native gets none and
+    /// `made` is null. A native that never asks builds its own, `made` stays
+    /// undefined, and nothing was read from `new_target`. Both have to
+    /// outlive the call.
     JsValue construct_for(const std::vector<JsValue>& args, const JsValue& new_target, JsValue& made) const;
 
     // --- Call context ---------------------------------------------------------

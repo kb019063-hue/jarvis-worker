@@ -11485,6 +11485,11 @@ TEST(js_new_target_is_the_function_new_was_applied_to) {
     assert(text("before = reads; var p2 = Reflect.construct(Promise, [function () {}], counting()); [reads - before, "
                 "p2.tag, p2 instanceof Promise].join()") ==
            "1,G,false");
+    assert(text("var badReads = 0, bad = function () {}.bind(null); Object.defineProperty(bad, 'prototype', { get: "
+                "function () { badReads++; return 5; } }); var a3 = Reflect.construct(Array, [], bad), o3 = "
+                "Reflect.construct(Inside, [], bad); [badReads, Object.getPrototypeOf(a3) === Array.prototype, "
+                "Object.getPrototypeOf(o3) === Object.prototype].join()") ==
+           "2,true,true");
 
     // What Reflect.construct refuses. Both functions have to be constructors,
     // and that is found out before the list of arguments is looked at.
@@ -11855,6 +11860,10 @@ TEST(js_compiled_custom_elements_are_constructed) {
     assert(text("function NoProto() {} NoProto.prototype = null; var np = Reflect.construct(Event, ['x'], NoProto); "
                 "[Object.getPrototypeOf(np) === Event.prototype, np.type, np instanceof Event].join()") ==
            "true,x,true");
+    assert(text("var badReads = 0, bad = function () {}.bind(null); Object.defineProperty(bad, 'prototype', { get: "
+                "function () { badReads++; return 5; } }); var ev = Reflect.construct(Event, ['q'], bad); "
+                "[badReads, ev instanceof Event, ev.type, Object.getPrototypeOf(ev) === Event.prototype].join()") ==
+           "1,true,q,true");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {

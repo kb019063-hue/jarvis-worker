@@ -365,9 +365,13 @@ const JsValue* JsValue::current_derived_this() {
     if (!new_target) return nullptr;
     const JsValue proto = new_target->get_property("prototype");
     // Nothing usable there: the native's own prototype is the right one, and
-    // it gets that by building its object as if none had been offered.
+    // it gets that by building its object as if none had been offered. Null
+    // in the slot says that the property was read and what was found.
     JsObject* target = proto.is_object_like() ? proto.as_prototype() : nullptr;
-    if (!target) return nullptr;
+    if (!target) {
+        *slot = JsValue::make_null();
+        return nullptr;
+    }
     *slot = JsValue::make_object();
     slot->object_val->prototype = target;
     t_call_context.derived_this = slot;

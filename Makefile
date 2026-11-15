@@ -119,12 +119,12 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. (906 pass there today, 907 in the normal
+# case that the normal build passes. (954 pass there today, 955 in the normal
 # build; the CI floor says why it is one below that.)
-JS_ASAN_FLOOR ?= 905
+JS_ASAN_FLOOR ?= 953
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 640
+DOM_ASAN_FLOOR ?= 650
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.

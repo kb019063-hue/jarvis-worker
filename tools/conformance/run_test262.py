@@ -7,13 +7,14 @@
 
 test262 (https://github.com/tc39/test262) is the conformance suite of the
 language's standard. It is not a scoreboard here: Litebird passes about two
-thirds of the directories below and far less of the whole suite, because
-whole features are missing (BigInt, Proxy, typed arrays, modules). What this
-is for is the difference between two builds. `tests/js-conformance` was
-written alongside the engine; these tests were written by nobody who has seen
-it, so a change to how functions, classes or properties work can be checked
-against them: with two --binary arguments the run lists every test that
-passes in the first and not in the second, and exits 1 if there is one.
+thirds of the directories below, the rest of the suite has not been run, and
+whole features it tests do not exist (BigInt, Proxy, typed arrays, modules).
+
+What this is for is the difference between two builds. `tests/js-conformance`
+was written alongside the engine; these tests were written by nobody who has
+seen it, so a change to how functions, classes or properties work can be
+checked against them: with two --binary arguments the run lists every test
+that passes in the first and not in the second, and exits 1 if there is one.
 
 The suite is downloaded once from GitHub, at a pinned commit, and unpacked
 under build/test262/. Nothing of it is vendored.

@@ -2166,7 +2166,7 @@ of the calls in this table.
 | `typeof Function.prototype`; `Function.prototype()` | `object`; `TypeError` | `function`; `undefined` |
 | `Object.getPrototypeOf(Object.create(f))()` | `TypeError: p is not a function` | what `f` returns |
 | `Reflect.construct(F, [], G) instanceof G` | `false` | `true` |
-| `Object.defineProperty(F, 'prototype', { writable: false })` | `TypeError: Cannot redefine property: prototype` | accepted |
+| `F.prototype.m = …`, then `Object.defineProperty(F, 'prototype', { writable: false })`: how a compiled class ends | `TypeError: Cannot redefine property: prototype` | accepted |
 | `Object.getPrototypeOf(Derived).call(this, x)` in a compiled constructor | `TypeError: Function.prototype.call called on a non-function` | calls `Base` |
 | A class with a parent, compiled by Babel 7, by Babel's newer helpers, by TypeScript | stops at its first class, all three | prints what Node prints, all three |
 | `Object.getPrototypeOf(HTMLElement) === Element`; `HTMLElement.ELEMENT_NODE` | `false`; `undefined` | `true`; `1` |

@@ -66,14 +66,16 @@ python3 tools/conformance/run_test262.py --show 20 language/expressions/super
 ```
 
 It is not a scoreboard and has no floor: two thirds of those directories
-pass, and far less of the whole suite would, because BigInt, `Proxy`, typed
-arrays and modules do not exist. What it is for is the second form: build
+pass (of the 4,851 tests that do not, 1,259 write an identifier with a
+Unicode escape, which the lexer does not read, and 1,027 are scripts that
+should be refused before they run), and the rest of the suite has not been
+run. What it is for is the second form: build
 `main` somewhere (`git worktree add /tmp/main origin/main`, `make` there),
 give the runner both binaries, and it lists every test that passes in the
 first and not in the second and exits 1 if there is one. A change to how
 functions, classes or properties work should be run through it before it is
-called done: Phase 34 passed its own 74 cases and still failed two tests
-that `main` passed. Both became corpus cases.
+called done: Phase 34 passed every case it had written for itself and still
+failed two tests that `main` passed. Both became corpus cases.
 
 The runner says in its first lines how a test is run (strict or not, the
 harness files, negative and async tests) and what it leaves out (`module`

@@ -9389,6 +9389,42 @@ TEST(js_interface_objects_are_collected_with_their_page) {
         Heap::default_heap().collect_garbage();
         assert(Heap::default_heap().stats().alive_cells == permanent_cells);
     }
+
+    // Two pages at once. Each realm has a Function.prototype and an Error of
+    // its own, and the questions about chains get the same answers in each,
+    // whichever ran last, and after the other is gone and collected.
+    const char* questions =
+        "[Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype,"
+        " Object.getPrototypeOf(function () {}) === Function.prototype,"
+        " Object.getPrototypeOf(Math.max) === Function.prototype,"
+        " Object.getPrototypeOf(HTMLElement) === Element, HTMLElement.ELEMENT_NODE,"
+        " Object.getPrototypeOf(Object.getPrototypeOf(class A extends Error {})) === Function.prototype].join()";
+    const std::string answers = "true,function,true,true,true,1,true";
+    {
+        auto first_doc = HtmlParser::parse("<!DOCTYPE html><body><div id='a'></div></body>");
+        JsInterpreter first(first_doc);
+        assert(first.eval(questions).to_string() == answers);
+        {
+            auto second_doc = HtmlParser::parse("<!DOCTYPE html><body><p>x</p></body>");
+            JsInterpreter second(second_doc);
+            assert(second.eval(questions).to_string() == answers);
+            assert(first.eval(questions).to_string() == answers);       // the second was the last to run
+            assert(second.eval(questions).to_string() == answers);
+            // An error type of the other page has the other page's Error above it.
+            first.global_env()->define("otherTypeError", second.eval("TypeError"));
+            assert(first.eval("Object.getPrototypeOf(otherTypeError) === Error").to_string() == "false");
+            assert(first.eval("Object.getPrototypeOf(otherTypeError).name").to_string() == "Error");
+        }
+        Heap::default_heap().collect_garbage();
+        assert(first.eval(questions).to_string() == answers);
+        // What the first page kept of the second is still a function with a
+        // function above it.
+        assert(first.eval("typeof otherTypeError + ':' + typeof Object.getPrototypeOf(otherTypeError)").to_string() ==
+               "function:function");
+    }
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
 }
 
 int main() {

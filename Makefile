@@ -184,8 +184,7 @@ dom-conformance: $(TARGET)
 ## what a change to functions, classes, prototypes or property definition
 ## can move. Downloaded the first time into build/test262, at a pinned
 ## commit; needs the network once. It is not a scoreboard and has no floor
-## (about two thirds pass: BigInt, Proxy and typed arrays do not exist). It
-## is for the difference between two builds,
+## (about two thirds pass). It is for the difference between two builds,
 ##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
 ## which lists every test that passes in the first and not in the second,
 ## and fails if there is one. About three minutes for two builds.

@@ -3021,7 +3021,7 @@ and on `main` three things stood in for one:
 | `class B extends A {}` with `static get tag() { return this.name; }` in `A`: `B.tag` | `A` | `B` |
 | `var o = Object.create(f)`; `Object.getPrototypeOf(o) === f`; `Object.getPrototypeOf(o)()` | `false`; `TypeError: p is not a function` | `true`; what `f` returns |
 | `Reflect.construct(F, [], G) instanceof G` | `false` | `true` |
-| `Object.defineProperty(F, 'prototype', { writable: false })`, the last thing a compiled class does | `TypeError: Cannot redefine property: prototype` | accepted, and `F.prototype = 5` then changes nothing |
+| `F.prototype.m = …`, then `Object.defineProperty(F, 'prototype', { writable: false })`: how a compiled class ends | `TypeError: Cannot redefine property: prototype` (and with `prototype` never read before, it became `undefined`) | accepted, and `F.prototype = 5` then changes nothing |
 | `Object.getPrototypeOf(Derived).call(this, x)`, the first thing a compiled constructor does | `TypeError: Function.prototype.call called on a non-function` | calls `Base` |
 | `class C extends A { constructor() { super(); } }`; `Object.setPrototypeOf(C, B)`; `new C()` | runs `A` | runs `B` |
 | `class X extends (() => 1) {}`; `Reflect.construct(F, [], () => 1)` | accepted; accepted | `TypeError`; `TypeError` |
@@ -3072,8 +3072,8 @@ A function has three properties it does not store: `name`, `length`, and
 for a constructor `prototype`, an object made the first time it is asked
 for. They are answered where the function is the receiver, and now also
 where a chain runs through a function's cell (`lookup_chain`, `has_property`
-in `src/js/JsValue.cpp`), so `Derived.length` read through three parents
-finds the `length` of the right one. `prototype` is an own property before
+in `src/js/JsValue.cpp`), so `Object.create(f).name` is the name of `f`.
+`prototype` is an own property before
 anything has read it (`hasOwnProperty`, `getOwnPropertyDescriptor`, `delete`
 and `defineProperty` agree: writable, not enumerable, not configurable), and
 an assignment to it keeps those flags, so a loop that copies the static
@@ -3137,8 +3137,8 @@ undefined, its cell is the one every function's chain already ended in
 constructor: `new Function.prototype()` throws, and so does `super()` in a
 class that extends null, whose parent it is. The mark is a bit of the cell
 (`JsObject::not_constructor`, in the padding beside the other flags). It
-was a hidden property for one commit, and every function then answered
-`true` to `'%not-a-constructor' in f`.
+was a hidden property at first, and every function then answered `true` to
+`'%not-a-constructor' in f`.
 
 ### 5. `Object`, `Reflect`, `bind`, the error types
 
@@ -3180,8 +3180,8 @@ The VM has an `Object` of its own with three functions (`create`,
 `object_val->prototype` directly. They make the same three calls the
 interpreter's do.
 
-Both files were named in this phase's pull request only after Phase 33,
-which had `src/js/VM.cpp`, was merged.
+Both files were added to this phase's pull request only after Phase 33,
+whose pull request named them, was merged.
 
 ### 7. How this is verified
 
@@ -3199,12 +3199,14 @@ which had `src/js/VM.cpp`, was merged.
 
 **What test262 found.** The corpus here is recorded from Node and was
 written with the change; test262 was written by neither. It was run in the
-binary of `main` and in this one, for the difference and not for the score
-(69% of these directories: a third of them are features that do not exist
-here). The first run had two tests that passed on `main` and failed here, and
-both were true: the `instanceof` and the `__proto__:` of section 5, each a
-fault that only showed once a function could be got back from a link. Both
-are cases of `prototypes.dat` now.
+binary of `main` and in this one, for the difference and not for the score.
+(69% of these directories pass. Of the 4,851 tests that do not, 1,259 write
+an identifier with a Unicode escape, `\u{6F}`, which the lexer does not
+read, and 1,027 are scripts that should be refused before they run and are
+not.) The first run had two tests that passed on `main` and failed
+here, and both were true: the `instanceof` and the `__proto__:` of section
+5, each a fault that only showed once a function could be got back from a
+link. Both are cases of `prototypes.dat` now.
 
 ### 8. What it costs
 
@@ -3263,7 +3265,7 @@ In memory:
 ### 9. What is still open here
 
 Nine cases of `prototypes.dat` fail, each recorded for one of the first
-seven of these. All of the list is the same on `main`:
+seven of these. Everything in the list is the same on `main`:
 
 - **`new.target` is the function that is running**, not the one `new` was
   applied to. `if (new.target === Shape) throw …` in a parent's constructor,
@@ -3294,14 +3296,14 @@ seven of these. All of the list is the same on `main`:
   accepted for any `f`.
 - **A property of a prototype that cannot be written does not stop an
   assignment** to the object that inherits it.
-- **An object that a parent's constructor returns does not become `this`**
-  in the child: after `super()` the child still has the object `new` made.
-  And `super.x` in a class that extends null is `undefined`, not a
-  `TypeError`.
 - **A function bound to an object that holds it is not collected**:
   `o.b = f.bind(o)` 2,000 times leaves 2,000 cells after `gc()`. The
   collector cannot see into what a native function captured. It is part of
   "no leak audit has been done" in Known gaps, 4.
+- **An object that a parent's constructor returns does not become `this`**
+  in the child: after `super()` the child still has the object `new` made.
+  And `super.x` in a class that extends null is `undefined`, not a
+  `TypeError`. (Found by test262; no case here yet.)
 
 Three things were found on the way that are not about prototypes. All are
 on `main`, and all are rows of the task table now:

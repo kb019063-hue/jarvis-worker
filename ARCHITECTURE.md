@@ -350,6 +350,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
+| **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 
 ---
@@ -2509,7 +2510,7 @@ Release build, on the machine the checks ran on; "before" is `main`
 | `setAttributeNS` 20,000 times on one element | 0.7 s | 41 ms |
 | `removeAttribute` of 25,000 of 50,000, from the back | 2.5 s | 22 ms |
 | `removeAttribute` of all 50,000, from the front | 8.2 s | 9.0 s at Phase 28: each one moved the rest of a vector; fixed in Phase 35 (0.09 s whole-process) |
-| The HTML parser, one element with 50,000 attributes | 10.4 s | 2.9 s: the tokenizer's search for a repeated name is what is left |
+| The HTML parser, one element with 50,000 attributes | 10.4 s | 2.9 s at Phase 28: the tokenizer compared every name with every accepted one; fixed in Phase 39 (0.09 s whole-process) |
 | An XML document 200,000 deep: parsed, serialized | | 130 ms, 37 ms |
 | An XML element with 50,000 attributes: parsed, serialized | | 40 ms, 4 ms |
 | The unit tests in the sanitizer build, highest memory | killed at 3.8 GB (this branch before `give_memory_back()`) | 2.6 GB |
@@ -3590,10 +3591,10 @@ recorded in AUDIT.md, finding 40.
 ### 5. What is still open
 
 This fixes end removals, not arbitrary middle removals: a middle erase still
-moves the vector tail. The HTML tokenizer's repeated-name search for
-one element with 50,000 attributes remains open (about 2.9 s), as do the
+moves the vector tail. The HTML tokenizer's repeated-name search for one
+element with 50,000 attributes was fixed in Phase 39 (finding 46). The
 `Attr`-is-not-a-`Node`, one-qualified-name-in-two-namespaces and collection
-named-property rows. No parser, layout, CSS or JavaScript engine file was
+named-property rows remain open. No parser, layout, CSS or JavaScript engine file was
 changed.
 
 ---
@@ -3676,6 +3677,140 @@ mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
 ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
 is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
 and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
+
+---
+
+## Phase 39 Architecture: The Tokenizer's Repeated Attribute Names Are Linear
+
+### 1. What was wrong
+
+`HtmlTokenizer::consume_tag` drops a repeated attribute name — the standard's
+*duplicate-attribute* parse error, where the first attribute with that name
+wins — by comparing the name with every attribute the token has already
+accepted (`std::any_of` over `token.attributes` in the `flush_attribute`
+lambda). Every attribute of a tag therefore costs as much as the attributes
+before it: the square of the count. Phase 28 indexed the element's own
+attribute list, which took one element with 50,000 attributes from 10.4 s to
+2.9 s in the parser; the tokenizer's own search was what was left. An end tag
+paid it too, and its attributes are then thrown away by the tree builder. The
+XML parser had already solved the same problem with a set (`XmlParser.cpp`,
+the duplicate-name checks).
+
+### 2. What changed
+
+Only `src/html/HtmlTokenizer.cpp` changed. `consume_tag` keeps a
+`std::unordered_set<std::string_view>` of the accepted names, built the first
+time a tag reaches 32 accepted attributes. Below that the scan stays: for the
+handful of attributes an ordinary element has, comparing a few short strings
+in a contiguous vector costs less than hashing into a table, and no table is
+allocated at all.
+
+The set holds views of the names **inside** `token.attributes`, so no
+attribute name is stored twice. That is only safe while those strings stay
+put: appending to the vector can reallocate it, and a short name lives inside
+its `std::string` object, so it moves with it. The index therefore records the
+vector's capacity and is rebuilt whenever it changes; between rebuilds no
+accepted name moves. Capacity grows geometrically, so the rebuilds together
+cost O(n) over the tag, and the whole check is linear. Nothing else about the
+state machine changed: names are ASCII-lower-cased before they reach the
+check (which is what makes it the standard's case-insensitive comparison),
+the first value wins, order is the order of first occurrence, valueless and
+quoted and unquoted forms behave as before, `=` may still start a name, an
+end tag's attributes are still tokenized, and EOF inside a tag still drops
+the token.
+
+### 3. Measured
+
+Whole-process times (`--dump-dom-webplatform`: parse and tree dump, no layout,
+no scripts), best of three, idle machine, same hour. The baseline is this
+merged tree built with `main`'s tokenizer, kept as
+`build/litebird-final-baseline`, so the only difference is this change:
+
+```bash
+python3 tools/bench/bench_tokenizer_attributes.py \
+  --baseline build/litebird-final-baseline --reps 3 --max-ms 1000
+```
+
+| Case (50,000 attribute occurrences) | Baseline | Current | Speedup |
+| :--- | ---: | ---: | ---: |
+| distinct names | 3,474 ms | 93 ms | 37.2× |
+| each name twice | 1,150 ms | 39 ms | 29.6× |
+| uppercase repeats | 1,320 ms | 35 ms | 37.6× |
+| long names, each twice | 3,810 ms | 71 ms | 53.5× |
+| quoted, bare, unquoted | 772 ms | 27 ms | 28.2× |
+| many small tags | 39 ms | 40 ms | 1.0× |
+| end tag with attributes | 3,170 ms | 25 ms | 125.5× |
+
+Every dump equals the tree the markup must produce, computed by the bench
+from the markup rather than recorded from a binary, and equals the baseline
+binary's dump byte for byte. The square is gone: the distinct-names case at
+25,000/50,000/100,000/200,000 attributes now takes tens to hundreds of
+milliseconds (45/93/183/344 ms measured across runs), against 628 ms at
+25,000 and 3,474 ms at 50,000 before: twice the input cost 5.5× before and
+about 2× now. Tokenizing alone, 50,000 attributes cost 28 ms in the release
+build and 102 ms under ASan/UBSan. The checked-in guard is
+`make bench-tokenizer-attributes`: seven cases, three repetitions, expected
+trees, 1,000 ms whole-process limit — far
+below the 3.5 s the scan costs, and far above what a shared runner needs.
+
+### 4. Verification
+
+`make test` passes 159 suites. The two new suites are
+`tokenizer_repeated_attribute_names_keep_the_first` (the fixed shapes:
+first-wins, ASCII-only folding, `Ä`/`ä` distinct, `=`-starting names and the
+after-attribute-name `=`, entities in values, `/` in a tag, end tags, EOF
+dropping the token; every size around the index threshold and around each
+vector growth from 1 to 257; 60 random tags against a set-based model; the
+same shapes through the parser and the DOM) and
+`tokenizer_duplicate_attribute_check_is_linear` (50,000 distinct attributes,
+50,000 occurrences of 25,000 long names in both cases, an end tag with 50,000
+attributes, and 5,000 ordinary four-attribute tags, each with a 2 s wall-clock
+guard). Both were checked against mutants: with the old scan restored the
+correctness suite passes and the timing suite fails at `distinct_seconds <
+2.0`; with the capacity rebuild removed the correctness suite fails on the
+first size past a vector growth, which is the dangling-view bug the rebuild
+exists to prevent.
+
+Out-of-corpus pages run through `tools/conformance/compare_with_jsdom.py`
+before and after printed the same counts: `16 lines, 16 the same` (duplicates
+through `innerHTML`, `DOMParser`, `insertAdjacentHTML`, SVG foreign
+attributes, table cells, a 300-attribute element), `20 lines, 20 the same`
+(the sizes around the threshold and every growth, whitespace forms, form
+controls) and `6 lines, 6 the same` (`=`-starting names). No corpus
+expectation was re-recorded.
+
+The release run on the merged tree kept every scoreboard: html5lib
+1781/1792, JS 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
+4658/5192 (534 listed, 0 unlisted); diff-trees 6,000 pages and diff-xml 4,000
+documents with 0 differing, XML round trip 3000/3000; deep 1,332 runs over
+465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 19.3 s);
+bench-css 20 padded runs, bench-attributes 6 cases,
+bench-tokenizer-attributes 7 cases, security-fetch 3 checks and
+security-worker 17 checks, all with 0 failures; verify-media 35 checks and
+fuzz-media 1,800 cases clean;
+diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
+page was 16.1 MB in both binaries: the index is freed when the tag ends and
+the dump reuses its memory.
+
+The sanitizer run on the same tree reported nothing: ASan/UBSan 159/159
+suites, JS 906/921 (one fewer than release: a deep-recursion case needs more
+stack than a sanitizer build's frames leave, as before), DOM
+640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192; ASan diff-xml 1,000
+documents with 0 differing and 1,000/1,000 round trips; fuzz 400 parser
+mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep
+882 runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest
+2.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
+ASan with leak checking).
+
+### 5. What is still open
+
+This is a cost fix in one function, not a parser conformance change: the
+tokenizer's other states, the tree builder (including the eleven remaining
+html5lib `<select>` cases), and the XML parser were not touched. Finding 28's
+other costs — a block inside an inline box, 10,000 sized floats in one box —
+and finding 40's middle erases are still open, as are the
+`Attr`-is-not-a-`Node`, one-qualified-name-in-two-namespaces and collection
+named-property rows.
 
 ---
 

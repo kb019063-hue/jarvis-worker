@@ -54,7 +54,9 @@ The rest are documented with enough detail to act on.
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases remain (the tokenizer repeated-name cost was fixed in Phase 39) |
 | 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
+| 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch wired in Phase 36; WebP/AVIF & text remain open |
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
+| 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 
 ---
@@ -2599,6 +2601,107 @@ at its `24×18` intrinsic size and reports `24×18` from
 
 ---
 
+## 45. ✅ Worker MIME/module policy, EventTarget error dispatch, and shutdown `SIGSEGV`
+
+**What was wrong.**
+1. **No MIME or HTTP-status check on worker scripts:** `src/js/Worker.cpp` ran
+   any response returned by `ResourceLoader::load_for_page` as classic
+   JavaScript regardless of its `Content-Type` (`text/plain`, `text/html`,
+   `application/json`, default `data:,...`, missing `Content-Type`, or HTTP
+   `3xx` responses where `resp.success` was true).
+2. **`WorkerOptions` ignored:** `new Worker(url, { type: "module" })` silently
+   ignored the options argument and executed the script as classic JavaScript;
+   invalid `type` values did not throw `TypeError`; `options.name` was dropped;
+   calling `Worker(...)` without `new` did not throw `TypeError`.
+3. **Broken `EventTarget` error dispatch:** `WorkerObject::add_event_listener`
+   stored `"error"` listeners in `m_error_listeners`, but `post_error()` only
+   ever called `m_onerror`, silently dropping all `addEventListener("error")`
+   listeners. There was no `removeEventListener`, deduplication, `{ once }`,
+   `handleEvent`, `preventDefault()`, `stopImmediatePropagation()`,
+   `self.onerror`/`self.location`/`self.name`, or `importScripts(...)`, and
+   `WorkerObject::create_js_instance()` did not wire `onmessage`/`onerror`.
+4. **Exit-time `SIGSEGV` (4/30 runs on `main`) & reference-cycle leak:**
+   `create_constructor()` stored `[inst, worker]` inside `worker->m_onmessage`
+   while `inst` stored `worker` inside its method closures, creating a strong
+   reference cycle. Because `Heap::default_heap()` is intentionally never
+   destroyed at exit, active `WorkerObject` threads were never terminated or
+   joined before `main()` returned. Reproducing with
+   `for (var i = 0; i < 4; i++) new Worker("data:text/javascript,postMessage(1)");`
+   crashed with `SIGSEGV` (`rc = -11`) in **4 of 30 runs** on `main`; a
+   captured backtrace showed worker threads still inside
+   `WorkerObject::worker_thread_main` → `JsInterpreter::JsInterpreter` →
+   `install_object_builtins` → `js_symbol_for_key` dereferencing
+   `symbol_registry()`'s `static std::unordered_map` after `__run_exit_handlers`
+   had already destroyed it. Nested workers also had no parent-loop wake
+   mechanism or child teardown before the parent's `EventLoop` was destroyed.
+
+**What changed.**
+- `include/litebird/js/Worker.hpp` and `src/js/Worker.cpp`:
+  - Added `WorkerObject::is_javascript_mime_type()` implementing WHATWG MIME
+    Sniffing §4.3 (the 16 JavaScript MIME essences, parameter stripping, ASCII
+    HTTP whitespace trimming, case-insensitive matching, no MIME sniffing) and
+    required HTTP `2xx` + a JavaScript MIME type in `load_worker_script()` for
+    both `new Worker(...)` and `importScripts(...)`.
+  - Added `WorkerType` / `WorkerOptions` parsing (`new` check, `type` enum
+    validation, `{ type: "module" }` rejected cleanly via an `ErrorEvent`
+    instead of running classic JS, `name` exposed on `self.name` and global
+    `name`, plus `self.location` and `importScripts(...)`).
+  - Replaced ad-hoc callbacks with unified `ListenerMap` / `EventControl`
+    dispatch on both `Worker` and `self` (supporting `onerror`/`onmessage` +
+    `addEventListener` + `removeEventListener` + deduplication + `{ once }` +
+    `{ handleEvent }` + `preventDefault()` + `stopImmediatePropagation()` +
+    `ErrorEvent` metadata, and shared across `create_constructor` and
+    `create_js_instance`).
+  - Isolated owner-thread `JsValue` state into `WorkerOwnerJsState` (released
+    on `terminate()` and on the worker's final exit task to eliminate both
+    cross-thread non-atomic `handle_count` races and the `inst` ↔ `WorkerObject`
+    cycle).
+  - Added a lifetime-guarded `WorkerOwnerLoopState` with parent-wake support
+    for nested workers and guaranteed child teardown before parent `EventLoop`
+    destruction.
+  - Serialized worker `JsInterpreter` initialization and registered an immortal
+    `WorkerRegistry` with a `std::atexit` hook (installed after warming up
+    `JsLexer`'s keyword table, `JsOps`'s `symbol_registry()`, and
+    `DomBindings`'s interface table) so all active worker threads are woken
+    and joined cleanly before static destructors run.
+- Added 4 unit test suites in `tests/test_suite.cpp` (suites 154–157) and
+  `tools/security/verify_worker_policy.py` (`make security-worker`, wired into
+  CI `build-and-test` and `make asan-core`).
+
+**How it was verified.**
+- `make test`: **157/157** unit suites pass in Release (`-O2`) and
+  **157/157** under ASan+UBSan (`build-asan/test_suite`, `ASAN_OPTIONS=detect_leaks=0`).
+- `make security-worker`: **17/17** checks pass in Release (loopback HTTP
+  `text/javascript`, `text/plain`, `text/html`, `application/json`, missing
+  `Content-Type`, HTTP `404`, `data:` MIME checks, `{type:"module"}` refusal,
+  `{type:"classic", name}`, invalid `type` `TypeError`, `importScripts` MIME
+  and Phase 33 local-file boundary, and **60/60** concurrent 4-worker
+  startup/exit runs) and **17/17** under ASan+UBSan (**60/60** stress runs).
+- Extended startup/exit stress check: **200/200** consecutive CLI runs of
+  4 concurrent `new Worker(...)` with immediate exit pass (**0 crashes**,
+  down from 4/30 `SIGSEGV` before; also resolves the 7/60 `SIGSEGV` /
+  `heap-use-after-free` worker startup exit bug noted in finding 41).
+- Existing conformance suites unchanged on latest `main`: `make conformance`
+  1781/1792, `make js-conformance` 906/921, `make dom-conformance` 640/640,
+  `make url-conformance` 1188/1188, `make wpt` 4658/5192, `make security-fetch`
+  3/3, `make verify-media` 35/35, `make bench-attributes` 6/6, `make bench-css`
+  20/20.
+
+**What is still open.**
+- **ES module workers:** `{ type: "module" }` is now explicitly refused with an
+  error event instead of silently running classic JS; actual module worker
+  execution waits for an ES module loader in the JS engine.
+- **Structured clone & messaging ports:** `postMessage` still serializes via
+  JSON (no `ArrayBuffer`, transferables, cyclic object graphs, `MessagePort`,
+  or `SharedWorker`).
+- **Defense-in-depth for process-wide registries:** `symbol_registry()` in
+  `src/js/JsOps.cpp` and `s_registry` in `src/js/DomBindings.cpp` are still
+  destroyed at static teardown; Phase 40 warms them before registering
+  `atexit_shutdown_workers()` so worker threads are always joined first, and a
+  small follow-up can heap-allocate both like `Heap::default_heap()`.
+
+---
+
 ## 46. ✅ The tokenizer's repeated-attribute-name check was quadratic
 
 **The hole.** `HtmlTokenizer::consume_tag` drops a repeated attribute name —
@@ -2658,7 +2761,7 @@ in the release build and 102 ms under ASan/UBSan. `make
 bench-tokenizer-attributes` is the checked-in guard: seven cases, three
 repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 3.9 s).
 
-**How it was verified.** `make test` passes 155 suites; the two new ones are
+**How it was verified.** `make test` passes 159 suites; the two new ones are
 `tokenizer_repeated_attribute_names_keep_the_first` and
 `tokenizer_duplicate_attribute_check_is_linear`. Both were checked against
 mutants: with the old scan restored the correctness suite still passes and
@@ -2684,7 +2787,7 @@ diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
 page was 16.1 MB in both binaries: the index is freed when the tag ends and
 the dump reuses its memory.
 
-The sanitizer run on the same tree reported nothing: ASan/UBSan 155/155
+The sanitizer run on the same tree reported nothing: ASan/UBSan 159/159
 suites, JS 906/921 (one fewer than release: a deep-recursion case needs more
 stack than a sanitizer build's frames leave, as before), DOM
 640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192; ASan diff-xml 1,000

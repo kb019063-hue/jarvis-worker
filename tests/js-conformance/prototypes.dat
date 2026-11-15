@@ -1052,3 +1052,58 @@ try { new Math.max(); r.push('constructed'); } catch (e) { r.push(e.name); }
 console.log(r.join(' '));
 #expect
 TypeError TypeError TypeError
+
+#name instanceof throws when the prototype of its right side is there and is not an object
+#code
+function tryIt(fn) { try { return String(fn()); } catch (e) { return e.name; } }
+function F() {}
+var o = new F();
+var out = [];
+F.prototype = 5;     out.push(tryIt(function () { return o instanceof F; }), tryIt(function () { return ({}) instanceof F; }));
+F.prototype = null;  out.push(tryIt(function () { return o instanceof F; }));
+F.prototype = 'p';   out.push(tryIt(function () { return [] instanceof F; }));
+F.prototype = true;  out.push(tryIt(function () { return F instanceof F; }));
+console.log(out.join(' '));
+// A value that is not an object is answered before the prototype is looked at.
+console.log(tryIt(function () { return 1 instanceof F; }), tryIt(function () { return 'a' instanceof F; }), tryIt(function () { return null instanceof F; }), tryIt(function () { return undefined instanceof F; }));
+// An object again, and the answer is back.
+F.prototype = {};
+var p = new F();
+console.log(tryIt(function () { return p instanceof F; }), tryIt(function () { return o instanceof F; }));
+// What is not a function at all.
+console.log(tryIt(function () { return o instanceof {}; }), tryIt(function () { return o instanceof 5; }), tryIt(function () { return o instanceof null; }));
+// Function.prototype is a function with no prototype property of its own; given one that is not an object, it throws like any other.
+Function.prototype.prototype = '';
+console.log(tryIt(function () { return [] instanceof Function.prototype; }));
+delete Function.prototype.prototype;
+#expect
+TypeError TypeError TypeError TypeError TypeError
+false false false false
+true false
+TypeError TypeError TypeError
+TypeError
+
+#name a function written after __proto__: in a literal is not named after it
+#code
+// `__proto__: value` in a literal sets the prototype. It is not a property, so a function written there gets no name from it.
+var a = { __proto__: function () {} };
+var b = { __proto__: class {} };
+var c = { __proto__: () => 1 };
+console.log(JSON.stringify(Object.getPrototypeOf(a).name), JSON.stringify(Object.getPrototypeOf(b).name), JSON.stringify(Object.getPrototypeOf(c).name));
+console.log(typeof Object.getPrototypeOf(a), Object.keys(a).length, a.hasOwnProperty('__proto__'));
+// A name the function has is kept.
+var d = { __proto__: function named() {} };
+console.log(Object.getPrototypeOf(d).name);
+// With a computed key, a quoted key is still the prototype, and a computed one is a property that names its function.
+var e = { '__proto__': function () {} };
+var f = { ['__proto__']: function () {} };
+console.log(JSON.stringify(Object.getPrototypeOf(e).name), typeof Object.getPrototypeOf(e), Object.getPrototypeOf(f) === Object.prototype, f.hasOwnProperty('__proto__'), Object.getOwnPropertyDescriptor(f, '__proto__').value.name);
+// Any other key names an anonymous function.
+var g = { plain: function () {}, arrow: () => 1 };
+console.log(g.plain.name, g.arrow.name);
+#expect
+"" "" ""
+function 0 false
+named
+"" function true true __proto__
+plain arrow

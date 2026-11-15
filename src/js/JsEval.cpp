@@ -1839,9 +1839,12 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             continue;
         }
 
-        JsValue value = evaluate_named(prop.value.get(), env, key);
-        if (key == "__proto__" && !prop.computed_key && !prop.shorthand) {
-            // `{ __proto__: base }` sets the prototype rather than a property.
+        // `{ __proto__: base }` sets the prototype rather than a property, so
+        // a function or a class written there is not named after the key.
+        const bool sets_prototype = key == "__proto__" && !prop.computed_key && !prop.shorthand;
+        JsValue value = sets_prototype ? evaluate(prop.value.get(), env)
+                                       : evaluate_named(prop.value.get(), env, key);
+        if (sets_prototype) {
             if (value.is_object_like()) {
                 if (JsObject* target = value.as_prototype()) object.object_val->prototype = target;
             } else if (value.type == JsType::Null) {

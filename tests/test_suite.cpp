@@ -9119,6 +9119,21 @@ TEST(js_a_function_is_the_prototype_of_a_function) {
     assert(text("child.name + ':' + child.length + ':' + (child.prototype === Proto.prototype)") == "Proto:0:true");
     assert(text("var o = { __proto__: Proto }; Object.getPrototypeOf(o) === Proto") == "true");
     assert(text("function C() {} C.prototype = Proto; Object.getPrototypeOf(new C()) === Proto") == "true");
+    // `__proto__:` in a literal sets a prototype and defines no property, so
+    // a function written there is not named after it. It was, on `main` too,
+    // and nothing could see it: the function could not be got back.
+    assert(text("Object.getPrototypeOf({ __proto__: function () {} }).name === ''") == "true");
+    assert(text("({ p: function () {} }).p.name") == "p");
+
+    // Function.prototype is callable now, so `x instanceof Function.prototype`
+    // no longer stops at "not callable". With a `prototype` that is there and
+    // is not an object, instanceof throws, as it does for any function; with
+    // none it answers false (js_instance_of says why it does not throw).
+    assert(text("var r; try { r = String([] instanceof Function.prototype); } catch (e) { r = e.name; } r") == "false");
+    assert(text("function N() {} N.prototype = 5; var r; try { r = String(({}) instanceof N); } catch (e) { r = e.name; } r") ==
+           "TypeError");
+    assert(text("N.prototype = 5; 1 instanceof N") == "false");       // a primitive is answered first
+    assert(text("N.prototype = {}; new N() instanceof N") == "true");
 
     // A built-in function gets a cell the first time it needs one, and keeps
     // what it had: its name, its length, its text, and what it does.

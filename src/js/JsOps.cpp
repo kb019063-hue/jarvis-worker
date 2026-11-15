@@ -683,6 +683,17 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor) {
     if (!constructor.is_function()) js_throw_type_error("Right-hand side of 'instanceof' is not callable");
     if (!value.is_object_like()) return false;
     JsValue proto = constructor.get_property("prototype");
+    // A `prototype` that is there and is not an object is a TypeError, as the
+    // language has it. One that is not there at all still answers false. The
+    // language throws for that too, but two kinds of function here have none
+    // and must not start to throw: a bound function, which should be asked
+    // for its target's and cannot be told from another built-in, and some of
+    // the host's constructors (`r instanceof Response`).
+    if (!proto.is_object_like()) {
+        if (proto.type == JsType::Undefined) return false;
+        js_throw_type_error("Function has non-object prototype '" + js_describe_thrown(proto) +
+                            "' in instanceof check");
+    }
     // The cell of an object, or of a function (`C.prototype = someFunction`).
     // A function with no cell is in nobody's chain.
     const JsObject* target = proto.property_cell();

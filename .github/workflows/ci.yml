@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets anyone with a token that can read the repository start this workflow
+  # by hand (Actions UI or `gh workflow run ci.yml --ref main`), e.g. to
+  # re-check main after a flaky job, instead of pushing an empty commit.
+  # Runs the same jobs as a push to main; nothing about the checks changes.
+  workflow_dispatch:
 
 jobs:
   build-and-test:

@@ -68,6 +68,11 @@ struct NewTargetForEntry {
 };
 thread_local const JsValue* NewTargetForEntry::pending = nullptr;
 
+/// In the scope of a derived class's constructor: has `super(...)` returned?
+/// That is the moment `this` is bound, and it happens once. (A name no script
+/// can write: `%` is not part of an identifier, and a scope is not an object.)
+const char* const kThisIsBound = "%this.bound";
+
 // ---------------------------------------------------------------------------
 // Active scopes
 // ---------------------------------------------------------------------------
@@ -402,6 +407,7 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
             // another. Undefined in a plain call.
             env->define("%new.target", !is_construct ? JsValue::make_undefined() : new_target ? *new_target : callee);
         }
+        if (node->is_derived_constructor) env->define(kThisIsBound, JsValue::make_boolean(false));
         if (node->uses_super && callee.is_function()) {
             env->define("%home", callee.get_property("%home"));
         }
@@ -437,7 +443,18 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     // which need not be the object it was entered with: a parent's
     // constructor can return another (eval_super_call). Whoever called
     // construct() uses an object that comes back in preference to its own.
+    // It may return an object of its choice instead, or nothing; and if it
+    // returns nothing, `super(...)` has to have run.
     if (is_construct && node->is_derived_constructor && !result.is_object_like()) {
+        if (!result.is_undefined()) {
+            js_throw_type_error("Derived constructors may only return object or undefined");
+        }
+        const auto* bound = env->find_own(kThisIsBound);
+        if (bound && !bound->value.is_truthy()) {
+            js_throw_error(JsErrorKind::ReferenceError,
+                           "Must call super constructor in derived class before accessing 'this' or returning from "
+                           "derived constructor");
+        }
         if (const auto* self = env->find_own("this"); self && self->value.is_object_like()) return self->value;
     }
     return result;
@@ -854,15 +871,14 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     }
 
     std::vector<JsValue> args = eval_arguments(expr->args, env);
-    if (parent_fd && parent_fd->node) {
+    JsValue made;       // an object the parent gave back in place of `this`
+    if ((parent_fd && parent_fd->node) || parent.forwards_construct()) {
         // A script parent initialises the same `this` object, unless its
         // constructor returns another: then that one is `this` from here on,
-        // as it is, with the prototype it has.
-        JsValue made = parent.construct(args, &this_val, new_target);
-        if (made.is_object_like() && made.identity() != this_val.identity()) {
-            this_val = made;
-            if (auto* self = env->lookup("this")) self->value = made;
-        }
+        // as it is, with the prototype it has. A bound function constructs
+        // its target on an object of its own, which comes back the same way.
+        made = parent.construct(args, &this_val, new_target);
+        if (!made.is_object_like() || made.identity() == this_val.identity()) made = JsValue::make_undefined();
     } else {
         // A built-in parent (Error, Array, Map, ...) builds its own object;
         // take over its state so `this` becomes that kind of object. A host
@@ -888,6 +904,18 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             to->has_legacy_getters = to->has_legacy_getters || from->has_legacy_getters;
             if (from->dom_node) to->dom_node = from->dom_node;
         }
+    }
+    // The parent has run; now `this` is bound, and that happens once. (Looked
+    // up only now: the parent's constructor may have added to this scope.)
+    if (auto* bound = env->lookup(kThisIsBound)) {
+        if (bound->value.is_truthy()) {
+            js_throw_error(JsErrorKind::ReferenceError, "Super constructor may only be called once");
+        }
+        bound->value = JsValue::make_boolean(true);
+    }
+    if (made.is_object_like()) {
+        this_val = made;
+        if (auto* self = env->lookup("this")) self->value = made;
     }
     initialize_fields(ctor, this_val);
     return this_val;        // `super(...)` is an expression, and its value is `this`

@@ -577,6 +577,7 @@ void install_object_builtins(JsIntrinsics& realm) {
             if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
             return target.call_with_this(bound_this, all);
         });
+        bound.set_forwards_construct();
         double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());
         bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
                               PropertyMap::Configurable);

@@ -199,6 +199,11 @@ public:
         /// functions never have one, and a cell is only reclaimed by the
         /// collector.
         CellRef cell;
+        /// A native function that, constructed, constructs another function
+        /// in its place and hands new.target on to it: a bound function. What
+        /// comes back is finished, whichever object it is: js_construct() and
+        /// `super(...)` give it neither a prototype nor a state to take over.
+        bool forwards_construct{false};
         using Payload = std::variant<std::monostate, FunctionData, NativeFn,
                                      std::shared_ptr<Node>,
                                      std::shared_ptr<CanvasRenderingContext2D>,
@@ -224,6 +229,10 @@ public:
     bool function_is_async() const;
     bool function_is_generator() const;
     const NativeFn& native_function() const;
+    /// See Extra::forwards_construct. Set it while building the function,
+    /// before the value is copied.
+    bool forwards_construct() const { return m_extra && m_extra->forwards_construct; }
+    void set_forwards_construct() { mutable_extra().forwards_construct = true; }
     /// The node this value is the script object of; empty for anything else.
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;

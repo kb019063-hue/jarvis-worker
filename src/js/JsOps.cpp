@@ -755,16 +755,21 @@ JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, cons
     }
     // A built-in constructor makes its own object.
     if (!new_target) return ctor.construct(args, nullptr);
-    // With another function as new.target it is handed an object that has
-    // that function's prototype, the way `super(...)` hands it the subclass's
-    // (construct_as_super). A host constructor makes that object the thing it
-    // constructs: this is how `Reflect.construct(HTMLElement, [], Derived)`
-    // makes an element. The others ignore it and build their own (an array,
-    // an error), which then gets the prototype.
+    // A bound function constructs its target with this new.target, and what
+    // that makes or returns is the answer as it stands. So is what a built-in
+    // makes when new.target has no object for a `prototype`: it keeps the
+    // prototype the built-in gave it.
+    if (ctor.forwards_construct() || !proto_cell) return ctor.construct(args, nullptr, new_target);
+    // Otherwise it is handed an object that has new.target's prototype, the
+    // way `super(...)` hands it the subclass's (construct_as_super). A host
+    // constructor makes that object the thing it constructs: this is how
+    // `Reflect.construct(HTMLElement, [], Derived)` makes an element. The
+    // others ignore it and build their own (an array, an error), which then
+    // gets the prototype.
     JsValue instance = JsValue::make_object();
-    if (proto_cell) instance.object_val->prototype = proto_cell;
+    instance.object_val->prototype = proto_cell;
     JsValue result = ctor.construct_as_super(args, instance, new_target);
-    if (result.is_object_like() && result.identity() != instance.identity() && proto_cell) {
+    if (result.is_object_like() && result.identity() != instance.identity()) {
         JsObject* cell = result.is_function() ? result.function_cell() : result.object_val.get();
         if (cell) js_set_prototype(cell, proto_cell);
     }

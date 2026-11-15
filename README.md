@@ -800,8 +800,8 @@ attribute vector grows under it. `make bench-tokenizer-attributes` parses seven
 page shapes at 50,000 attribute occurrences (distinct names, every name twice,
 uppercase repeats, long names, the four value spellings, many small tags, an
 end tag), compares each tree dump with the tree the markup must produce, and
-fails over 1 s. On the verification machine the wide cases went from 3.9 s to
-0.10 s and the many-small-tags case did not change. First-wins, ASCII case
+fails over 1 s. On the verification machine the wide cases went from 3.5 s to
+0.09 s and the many-small-tags case did not change. First-wins, ASCII case
 folding, order and every value spelling are unchanged; this is a cost fix, not
 a parser conformance change. Details and repro are in `ARCHITECTURE.md`,
 Phase 39, and `AUDIT.md`, finding 46.

@@ -2744,22 +2744,22 @@ python3 tools/bench/bench_tokenizer_attributes.py \
 
 | Case (50,000 attribute occurrences) | Baseline | Current | Speedup |
 | :--- | ---: | ---: | ---: |
-| distinct names | 3,868 ms | 95 ms | 40.7× |
-| each name twice | 1,166 ms | 34 ms | 34.3× |
-| uppercase repeats | 1,091 ms | 42 ms | 26.1× |
-| long names, each twice | 3,260 ms | 71 ms | 45.9× |
-| quoted, bare, unquoted | 545 ms | 18 ms | 30.9× |
-| many small tags | 33 ms | 34 ms | 1.0× |
-| end tag with attributes | 3,153 ms | 21 ms | 149.7× |
+| distinct names | 3,474 ms | 93 ms | 37.2× |
+| each name twice | 1,150 ms | 39 ms | 29.6× |
+| uppercase repeats | 1,320 ms | 35 ms | 37.6× |
+| long names, each twice | 3,810 ms | 71 ms | 53.5× |
+| quoted, bare, unquoted | 772 ms | 27 ms | 28.2× |
+| many small tags | 39 ms | 40 ms | 1.0× |
+| end tag with attributes | 3,170 ms | 25 ms | 125.5× |
 
 Every dump equals the tree the markup must produce — computed by the bench
 from the markup, not recorded from a binary — and equals the baseline
 binary's dump byte for byte. The square is gone: distinct names at
-25,000/50,000/100,000/200,000 attributes take 45/95/183/344 ms (before: 628 ms
-at 25,000, 3,868 ms at 50,000). Tokenizing alone, 50,000 attributes cost 28 ms
+25,000/50,000/100,000/200,000 attributes take 45/93/183/344 ms across runs
+(before: 628 ms at 25,000, 3,474 ms at 50,000). Tokenizing alone, 50,000 attributes cost 28 ms
 in the release build and 102 ms under ASan/UBSan. `make
 bench-tokenizer-attributes` is the checked-in guard: seven cases, three
-repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 3.9 s).
+repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 3.5 s).
 
 **How it was verified.** `make test` passes 159 suites; the two new ones are
 `tokenizer_repeated_attribute_names_keep_the_first` and
@@ -2779,10 +2779,11 @@ The release run on the merged tree kept every scoreboard: html5lib
 1781/1792, JS 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
 4658/5192 (534 listed, 0 unlisted); diff-trees 6,000 pages and diff-xml 4,000
 documents with 0 differing, XML round trip 3000/3000; deep 1,332 runs over
-465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 26.4 s);
+465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 19.3 s);
 bench-css 20 padded runs, bench-attributes 6 cases,
-bench-tokenizer-attributes 7 cases and security-fetch 3 checks, all with 0
-failures; verify-media 35 checks and fuzz-media 1,800 cases clean;
+bench-tokenizer-attributes 7 cases, security-fetch 3 checks and
+security-worker 17 checks, all with 0 failures; verify-media 35 checks and
+fuzz-media 1,800 cases clean;
 diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
 page was 16.1 MB in both binaries: the index is freed when the tag ends and
 the dump reuses its memory.
@@ -2794,7 +2795,7 @@ stack than a sanitizer build's frames leave, as before), DOM
 documents with 0 differing and 1,000/1,000 round trips; fuzz 400 parser
 mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep
 882 runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest
-3.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
+2.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
 ASan with leak checking).
 
 **What is still open.** A cost fix in one function, not a parser conformance

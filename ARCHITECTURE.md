@@ -350,7 +350,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
-| **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,868 ms to 95 ms whole-process, an end tag with that many from 3,153 ms to 21 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
+| **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 
 ---
@@ -3733,24 +3733,25 @@ python3 tools/bench/bench_tokenizer_attributes.py \
 
 | Case (50,000 attribute occurrences) | Baseline | Current | Speedup |
 | :--- | ---: | ---: | ---: |
-| distinct names | 3,868 ms | 95 ms | 40.7× |
-| each name twice | 1,166 ms | 34 ms | 34.3× |
-| uppercase repeats | 1,091 ms | 42 ms | 26.1× |
-| long names, each twice | 3,260 ms | 71 ms | 45.9× |
-| quoted, bare, unquoted | 545 ms | 18 ms | 30.9× |
-| many small tags | 33 ms | 34 ms | 1.0× |
-| end tag with attributes | 3,153 ms | 21 ms | 149.7× |
+| distinct names | 3,474 ms | 93 ms | 37.2× |
+| each name twice | 1,150 ms | 39 ms | 29.6× |
+| uppercase repeats | 1,320 ms | 35 ms | 37.6× |
+| long names, each twice | 3,810 ms | 71 ms | 53.5× |
+| quoted, bare, unquoted | 772 ms | 27 ms | 28.2× |
+| many small tags | 39 ms | 40 ms | 1.0× |
+| end tag with attributes | 3,170 ms | 25 ms | 125.5× |
 
 Every dump equals the tree the markup must produce, computed by the bench
 from the markup rather than recorded from a binary, and equals the baseline
 binary's dump byte for byte. The square is gone: the distinct-names case at
-25,000/50,000/100,000/200,000 attributes now takes 45/95/183/344 ms, against
-628 ms at 25,000 and 3,868 ms at 50,000 before (6.2× for twice the input,
-now 2.1×). Tokenizing alone, 50,000 attributes cost 28 ms in the release
+25,000/50,000/100,000/200,000 attributes now takes tens to hundreds of
+milliseconds (45/93/183/344 ms measured across runs), against 628 ms at
+25,000 and 3,474 ms at 50,000 before: twice the input cost 5.5× before and
+about 2× now. Tokenizing alone, 50,000 attributes cost 28 ms in the release
 build and 102 ms under ASan/UBSan. The checked-in guard is
 `make bench-tokenizer-attributes`: seven cases, three repetitions, expected
 trees, 1,000 ms whole-process limit — far
-below the 3.9 s the scan costs, and far above what a shared runner needs.
+below the 3.5 s the scan costs, and far above what a shared runner needs.
 
 ### 4. Verification
 
@@ -3782,10 +3783,11 @@ The release run on the merged tree kept every scoreboard: html5lib
 1781/1792, JS 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
 4658/5192 (534 listed, 0 unlisted); diff-trees 6,000 pages and diff-xml 4,000
 documents with 0 differing, XML round trip 3000/3000; deep 1,332 runs over
-465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 26.4 s);
+465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 19.3 s);
 bench-css 20 padded runs, bench-attributes 6 cases,
-bench-tokenizer-attributes 7 cases and security-fetch 3 checks, all with 0
-failures; verify-media 35 checks and fuzz-media 1,800 cases clean;
+bench-tokenizer-attributes 7 cases, security-fetch 3 checks and
+security-worker 17 checks, all with 0 failures; verify-media 35 checks and
+fuzz-media 1,800 cases clean;
 diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
 page was 16.1 MB in both binaries: the index is freed when the tag ends and
 the dump reuses its memory.
@@ -3797,7 +3799,7 @@ stack than a sanitizer build's frames leave, as before), DOM
 documents with 0 differing and 1,000/1,000 round trips; fuzz 400 parser
 mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep
 882 runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest
-3.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
+2.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
 ASan with leak checking).
 
 ### 5. What is still open

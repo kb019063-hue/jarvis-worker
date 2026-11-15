@@ -346,7 +346,7 @@ bench-attributes: $(TARGET)
 ## The HTML tokenizer's repeated attribute names. Seven page shapes at 50,000
 ## attribute occurrences each; every tree dump must equal the tree the markup
 ## means, and no case may take a second. Comparing each name with every
-## accepted attribute took 3.9 s on the wide cases.
+## accepted attribute took 3.5 s on the wide cases.
 bench-tokenizer-attributes: $(TARGET)
 	@python3 tools/bench/bench_tokenizer_attributes.py --reps 3 --max-ms 1000
 

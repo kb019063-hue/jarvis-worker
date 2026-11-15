@@ -32,6 +32,7 @@ The runner sets `TZ=UTC` for both engines so date cases are stable.
 | `deep-nesting.dat` | Input nested or chained far deeper than the native stack: 200,000 nested parentheses, blocks or functions, a million-node linked list, a 100,000-link promise chain. Too deep must be a `RangeError` the script can catch, never the end of the process. Engines differ on where "too deep" begins, so these cases accept either a result or a `RangeError` and print which invariant held |
 | `long-strings.dat` | Strings of 100,000 characters and more: read one character at a time, built with `+=`, eaten from the front by a tokenizer, searched by a regular expression. Each script does work proportional to its input, so it takes milliseconds unless reading, appending or slicing a string costs its whole length, in which case it takes minutes and the 10 s limit ends it. The rest of the file is what sharing text must not change: every earlier value of a string that was appended to, the two halves of a surrogate pair meeting, order by code unit, `RangeError` for a string too long to exist |
 | `gc-safety.dat` | Scripts that run a collection in the middle of everything: inside callbacks, half-built expressions, loops, suspended generators and async functions. The result must not change |
+| `prototypes.dat` | A function in a prototype chain: the parent of a class (`Object.getPrototypeOf(Derived) === Base`, static members through any number of parents, `super()` after the parent was replaced), the prototype of an object (`Object.create(fn)`), `Function.prototype` itself, the error types, `Reflect.construct` with a third argument, what `Object.defineProperty` allows on a property that cannot be configured, and three whole programs as Babel and TypeScript compile classes for older browsers. Eleven cases collect in the middle and check that a class reachable only as a prototype keeps what it closed over. Nine cases fail and were recorded to: what classes still lack (ARCHITECTURE.md, Phase 34, section 9) |
 
 ## Beside the corpus: a grid compared with Node
 
@@ -50,6 +51,33 @@ python3 tools/conformance/diff_strings.py --only split # only expressions that c
 It has no expectations to maintain, since Node answers at run time, so it is
 not part of `make js-conformance`. When it finds something a page could meet,
 that becomes a corpus case.
+
+## Beside the corpus: test262, for the difference between two builds
+
+The corpus was written alongside the engine. test262, the suite of the
+language's standard, was not, and `tools/conformance/run_test262.py` runs
+directories of it (downloaded the first time, at a pinned commit, into
+`build/test262`; nothing of it is in the repository).
+
+```bash
+make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 10,835 pass
+python3 tools/conformance/run_test262.py --binary before=/tmp/litebird-main --binary now=build/litebird
+python3 tools/conformance/run_test262.py --show 20 language/expressions/super
+```
+
+It is not a scoreboard and has no floor: two thirds of those directories
+pass, and far less of the whole suite would, because BigInt, `Proxy`, typed
+arrays and modules do not exist. What it is for is the second form: build
+`main` somewhere (`git worktree add /tmp/main origin/main`, `make` there),
+give the runner both binaries, and it lists every test that passes in the
+first and not in the second and exits 1 if there is one. A change to how
+functions, classes or properties work should be run through it before it is
+called done: Phase 34 passed its own 74 cases and still failed two tests
+that `main` passed. Both became corpus cases.
+
+The runner says in its first lines how a test is run (strict or not, the
+harness files, negative and async tests) and what it leaves out (`module`
+tests; `$262`, so nothing that needs another realm passes).
 
 ## Format
 

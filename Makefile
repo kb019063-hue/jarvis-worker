@@ -136,7 +136,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css security-fetch help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css security-fetch help
 
 all: $(TARGET)
 
@@ -179,6 +179,18 @@ js-conformance: $(TARGET)
 ## and the network: jsdom is installed into build/jsdom.
 dom-conformance: $(TARGET)
 	@$(DOM_CONFORMANCE)
+
+## Twenty-one directories of test262, the suite of the language's standard:
+## what a change to functions, classes, prototypes or property definition
+## can move. Downloaded the first time into build/test262, at a pinned
+## commit; needs the network once. It is not a scoreboard and has no floor
+## (about two thirds pass: BigInt, Proxy and typed arrays do not exist). It
+## is for the difference between two builds,
+##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
+## which lists every test that passes in the first and not in the second,
+## and fails if there is one. About three minutes for two builds.
+test262: $(TARGET)
+	@python3 tools/conformance/run_test262.py
 
 ## URL scoreboard: the web-platform-tests URL data (tests/url), run through
 ## `new URL()` and the setters of the object. Needs nothing but the binary.
@@ -321,4 +333,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, security-fetch, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, security-fetch, clean"

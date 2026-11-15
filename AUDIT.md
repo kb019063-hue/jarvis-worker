@@ -50,6 +50,7 @@ The rest are documented with enough detail to act on.
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
 | 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS remain open |
+| 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
 
 ---
 
@@ -1867,6 +1868,7 @@ of them by reading the code.
   one or the other and fail.
 - **In the JavaScript engine, a function cannot have a function as its
   prototype**: `Object.getPrototypeOf(TypeError) !== Error`. 18 subtests.
+  (Fixed in Phase 34, finding 41.)
 - **An `Attr` is not a `Node`**, two attributes of one element cannot share
   a qualified name in two namespaces, and collections do not list their
   names as own properties: 33 subtests.
@@ -2132,3 +2134,142 @@ Python UTS #46 mirror prints zero real divergences.
   drift only affects code points assigned after Unicode 14 — currently all
   unassigned PVALID code points, which need no bidi data anyway. The
   generated header states both versions.
+
+---
+
+## 41. ✅ A function could not be a prototype
+
+(Findings 39 and 40 belong to pull requests that were open while this one
+was written; this one took the next number.)
+
+**The hole.** A function is a value in this engine and an object is a heap
+cell, and a prototype link is a pointer to a cell. Nothing led from a cell
+back to a function, so nothing could have a function as its prototype and
+give it back. `Object.getPrototypeOf(Derived)` for `class Derived extends
+Base` was an object that was not `Base` and could not be called;
+`Object.getPrototypeOf(TypeError)` was not `Error`; `Function.prototype` was
+an object. A class kept its parent in a hidden property and a static member
+was looked for one step up and no further. Finding 34 listed it as known and
+not fixed, for the 18 web-platform-tests subtests that failed on it: every
+`assert_throws_js` walks up from the error type it was given with
+`Object.getPrototypeOf` until it reaches `Error`.
+
+What it broke outside a test suite is the code most pages ship: a class
+compiled for older browsers. The helpers Babel and TypeScript emit are made
+of the calls in this table.
+
+| A script | Before | Now, and in Node |
+| :--- | :--- | :--- |
+| `Object.getPrototypeOf(TypeError) === Error` | `false` | `true` |
+| `class Derived extends Base {}`; `Object.getPrototypeOf(Derived) === Base` | `false` | `true` |
+| `class C extends B {}`, `class B extends A {}`, `A` has `static s()`: `C.s()` | `TypeError: s is not a function` | runs |
+| `typeof Function.prototype`; `Function.prototype()` | `object`; `TypeError` | `function`; `undefined` |
+| `Object.getPrototypeOf(Object.create(f))()` | `TypeError: p is not a function` | what `f` returns |
+| `Reflect.construct(F, [], G) instanceof G` | `false` | `true` |
+| `Object.defineProperty(F, 'prototype', { writable: false })` | `TypeError: Cannot redefine property: prototype` | accepted |
+| `Object.getPrototypeOf(Derived).call(this, x)` in a compiled constructor | `TypeError: Function.prototype.call called on a non-function` | calls `Base` |
+| A class with a parent, compiled by Babel 7, by Babel's newer helpers, by TypeScript | stops at its first class, all three | prints what Node prints, all three |
+| `Object.getPrototypeOf(HTMLElement) === Element`; `HTMLElement.ELEMENT_NODE` | `false`; `undefined` | `true`; `1` |
+
+**The fix.** A function's cell can know the function it belongs to
+(`JsValue::as_prototype()` gives it a copy; `JsValue::make_object(cell)`
+gives the function back), every kind of function can have a cell, and the
+collector takes the pair apart, since the cell holds the function and the
+function holds the cell. The copy lives in a pointer the cell of a function
+had no use for, so no object and no value grew. Classes are linked to their
+parents, `super()` calls whatever the prototype is when it runs,
+`Function.prototype` is a function, `Reflect.construct` honours its third
+argument, `Object.defineProperty` follows the standard's
+ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have
+their parents as prototypes. ARCHITECTURE.md, Phase 34, has the design.
+
+### What each instrument found
+
+The change was written with a new file of the JavaScript corpus beside it,
+`prototypes.dat`, whose expected output is what Node prints. What follows was
+found by something else.
+
+| Found by | What |
+| :--- | :--- |
+| Two wrong collectors, built on purpose | With the function a cell stands for counted and not marked, a parent class reachable only as a prototype lost the variables it closed over, and every test passed: the cell keeps the function's name and properties, so checks of those see nothing. A test has to call the function it got back and read a variable it closed over. One suite and one corpus case do now |
+| test262, run in the binary of `main` and in this one | Two tests that passed on `main` and failed here, of 15,686. `[] instanceof Function.prototype` with a `prototype` that is a string threw on `main` only because `Function.prototype` was not callable; `instanceof` never looked at what kind of thing `prototype` is. And `{ __proto__: function () {} }` named the function `__proto__`, on `main` as well, where the function could not be got back to see its name. Both fixed, both corpus cases now |
+| Reading the whole diff once more before the documents | The mark that says `Function.prototype` is not a constructor was a hidden property, and `'%not-a-constructor' in f` was `true` for every function. It is a bit of the cell now. Looking for what else is stored that way found the row below |
+| The same reading | A script can read and write the engine's own slots, which are properties whose names begin with `%`: `el['%classList'] = 5` makes `el.classList` a number. Older than this change, not fixed, a row of the task table |
+| The sanitizer build, on a probe for classes in workers | A read of freed memory when a page ends while a worker is starting: 7 of 60 runs of `main`'s release build end in `SIGSEGV` on four `new Worker(...)` and nothing else. Not this change, not fixed, a row of the task table |
+| The corpus run on a busy machine | One case of `long-strings.dat` timed out. It builds a string half a surrogate pair at a time, which costs the square of the length (20,000 pairs: 4.3 s, and 5 ms a pair at a time), and takes 6 of the 10 seconds a case is allowed. Same on `main`. The CI floor is one below the score until it is fixed; a row of the task table |
+| jsdom, on the interface objects | Nothing wrong here, and three answers of jsdom's that are not the standard's, because its window is another realm than the one its script runs in: `Object.getPrototypeOf(EventTarget) === Function.prototype` is `false` there. `interfaces.dat` stays away from them |
+
+### What is known to be wrong and is not fixed
+
+All of it is the same on `main`. The first seven have a failing case each in
+`prototypes.dat` (nine cases), recorded from Node.
+
+- **`new.target` is the function that is running**, not the one `new` was
+  applied to. `if (new.target === Shape) throw …` in a parent's constructor
+  stops `new Circle()`. The DOM needs the same value:
+  `Reflect.construct(HTMLElement, [], Derived)` is `Illegal constructor`, so
+  a custom element compiled by Babel cannot be made
+  (`tests/dom-conformance/open/compiled-custom-elements.js`: 4 of 9 lines as
+  jsdom prints them).
+- **A built-in does not make the subclass it was called on**: `List.from`,
+  `new List().map(f)` and `P.resolve(1)` give a plain array and a plain
+  promise. No `Symbol.species`.
+- **`instanceof` does not ask `Symbol.hasInstance`**, answers `false` for a
+  right side with no `prototype` where it should throw, and does not ask a
+  bound function for its target.
+- **A function's own property names lack `length` and `name`**, `f.name =
+  'x'` takes effect, and async and generator functions have
+  `Function.prototype` itself as their prototype.
+- **Nothing tells a built-in that is a constructor from one that is not**:
+  `new Math.max()` makes an object, `class X extends f.bind(null)` is
+  accepted.
+- **A property of a prototype that cannot be written does not stop an
+  assignment** to an object that inherits it.
+- **A function bound to an object that holds it is never collected**, nor
+  what a pending timer holds: the collector cannot see into what a native
+  function captured.
+- **An object a parent's constructor returns does not become `this`** in the
+  child, and `super.x` in a class that extends null is `undefined`.
+
+### What the numbers do not say
+
+**67 of 76** in `prototypes.dat`: the nine that fail were written to fail,
+one for each thing above that a case could be recorded for. The 67 are what
+somebody thought to ask.
+
+**10,835 of 15,686** test262 tests in the directories about functions,
+classes and objects, 10,727 before. That is 69%, and the rest of test262 was
+not run; the number that matters is that 108 more pass and none fewer.
+
+**640 of 640** DOM cases is what jsdom answers. The 11 new ones ask what the
+prototype of an interface object is and whether its constants are inherited,
+and nothing about what an interface object does when it is called.
+
+**Every measure within a tenth of `main`** is 20 loops on one machine
+(ARCHITECTURE.md, Phase 34, section 8). The one that moved is `bind`.
+
+**How verified.** Every line is a command and what it printed on the merged
+tree, in the sandbox.
+
+- `make test`: `All 137 engine test suites passed successfully!`, five of
+  them new. Linked against the objects of `main`, with the lines that use
+  the new C++ interface cut, each of the five fails at least half of its
+  checks.
+- `make js-conformance`: `JS conformance, full corpus: 907/921 (98.5%) [23
+  files, 0 crashes, 0 timeouts]`; `prototypes.dat` 67 of 76. With
+  `--reference "node -e"`: 921 of 921. The binary of `main` passes 7 of the
+  76.
+- `python3 tools/conformance/run_test262.py --binary main=… --binary
+  now=build/litebird`: 15,686 tests, `main` 10,727 pass, now 10,835; 108
+  pass now and not on `main`, 0 the other way.
+- `make wpt`: `Web Platform Tests: 4658/5192 subtests pass in 76 files; 534
+  fail as listed, 0 fail and are not listed`. On `main`: 4640, 552 listed.
+- `make dom-conformance`: `640/640` in 24 files, and the same from jsdom
+  with `--reference`. The binary of `main` passes 629: none of the 11 new
+  cases.
+- `make conformance` 1781 of 1792, `make url-conformance` 1188 of 1188,
+  `make xml-conformance` 1702 of 1702, `make diff-trees` 0 of 6,000 trees
+  differ, `make diff-xml` 0 of 4,000 documents and 0 of 3,000 round trips,
+  `make diff-strings` 95 of 50,580 results differ, `make bench`, `make
+  bench-css` 20 runs and 0 failures, `make security-fetch` 3 checks and 0
+  failures: all as on `main`.

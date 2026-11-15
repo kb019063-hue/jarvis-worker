@@ -71,6 +71,7 @@ public:
     bool sealed{false};             // Object.seal: no adds or deletes
     bool has_accessors{false};      // some own property is a getter/setter
     bool has_legacy_getters{false}; // some own property is a "__get_<name>__" host getter
+    bool not_constructor{false};    // the cell of a built-in function that `new` refuses (js_is_constructor)
     ObjectClass klass{ObjectClass::Plain};
 
     /// Built-in state that is not a property: a Date's time value, a RegExp's

@@ -703,20 +703,16 @@ JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<Js
     return fn.call_with_this(this_val, args);
 }
 
-namespace {
-/// The mark on the one built-in function that is known not to be a
-/// constructor (see JsIntrinsics::JsIntrinsics). A property, not a comparison
-/// with the realm's Function.prototype: the function may be another realm's.
-const char* const kNotAConstructor = "%not-a-constructor";
-}
-
 bool js_is_constructor(const JsValue& value) {
     if (!value.is_function()) return false;
     const JsValue::FunctionData* fd = value.function_data();
     if (fd && fd->node) return fd->is_constructor;
-    if (const JsObject* cell = value.property_cell()) {
-        return cell->properties.find(kNotAConstructor) == cell->properties.end();
-    }
+    // A built-in is taken to be a constructor unless its cell says otherwise.
+    // Only one is marked (see JsIntrinsics::JsIntrinsics). The mark is on the
+    // cell, not a comparison with this realm's Function.prototype (the
+    // function may be another realm's) and not a property (a script could
+    // read a property, and every function would inherit it).
+    if (const JsObject* cell = value.property_cell()) return !cell->not_constructor;
     return true;
 }
 
@@ -1051,9 +1047,7 @@ JsIntrinsics::JsIntrinsics() {
         JsValue function = js_make_native("", 0, [](const std::vector<JsValue>&) { return JsValue::make_undefined(); });
         function.function_cell(function_proto);
         function_proto->set_function_value(function);
-        auto& mark = function_proto->properties.entry(kNotAConstructor);
-        mark.second = JsValue::make_boolean(true);
-        mark.flags = 0;         // not writable, not listed, not deletable
+        function_proto->not_constructor = true;
     }
     array_proto = make(object_proto);
     array_proto->is_array = true;

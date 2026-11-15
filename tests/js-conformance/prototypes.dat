@@ -1,0 +1,1109 @@
+#name the prototype of a derived class is its parent
+#code
+class Base {}
+class Derived extends Base {}
+console.log(Object.getPrototypeOf(Derived) === Base, typeof Object.getPrototypeOf(Derived), Derived.__proto__ === Base, Reflect.getPrototypeOf(Derived) === Base, Object.getPrototypeOf(Base) === Function.prototype);
+#expect
+true function true true true
+
+#name what getPrototypeOf gives for a class can be called with new
+#code
+class Base { constructor(x) { this.x = x; } static make(x) { return new this(x); } }
+class Derived extends Base {}
+var Parent = Object.getPrototypeOf(Derived);
+var p = new Parent(3);
+console.log(p.x, p instanceof Base, p instanceof Derived, Parent.make(4).x, Parent.name, Parent.length);
+#expect
+3 true false 4 Base 1
+
+#name three levels: the walk up from a class ends at Function.prototype
+#code
+class A {} class B extends A {} class C extends B {}
+var names = [], o = C;
+while (o !== Function.prototype) { names.push(o.name); o = Object.getPrototypeOf(o); }
+console.log(names.join(' > '), Object.getPrototypeOf(o) === Object.prototype, Object.getPrototypeOf(Object.prototype) === null);
+#expect
+C > B > A true true
+
+#name static members are inherited, not copied
+#code
+class Base { static s() { return 'static of Base'; } static f = 7; }
+class Derived extends Base {}
+console.log(Derived.s(), Derived.f, Derived.hasOwnProperty('s'), Derived.hasOwnProperty('f'), 's' in Derived, Derived.s === Base.s);
+Base.later = 'added later';
+console.log(Derived.later);
+Base.s = function () { return 'replaced'; };
+console.log(Derived.s());
+Derived.s = function () { return 'own'; };
+console.log(Derived.s(), Base.s());
+#expect
+static of Base 7 false false true true
+added later
+replaced
+own replaced
+
+#name a static getter and setter run with the subclass as this
+#code
+class A { static get who() { return this.name; } static set v(x) { this._v = x * 2; } static count() { this.n = (this.n || 0) + 1; return this.n; } }
+class B extends A {}
+B.v = 4;
+console.log(B.who, A.who, B._v, A._v, B.count(), B.count(), A.n, B.hasOwnProperty('n'));
+#expect
+B A 8 undefined 1 2 undefined true
+
+#name super in static methods over three levels
+#code
+class A { static a() { return 'a'; } static who() { return 'A:' + this.name; } }
+class B extends A { static b() { return 'b' + super.a(); } static who() { return 'B>' + super.who(); } }
+class C extends B { static c() { return 'c' + super.b(); } static who() { return 'C>' + super.who(); } }
+console.log(C.c(), C.a(), C.who(), B.who());
+#expect
+cba a C>B>A:C B>A:B
+
+#name super.x in a static method reads a field and a getter of the parent
+#code
+class A { static f = 1; static get g() { return 'g of ' + this.name; } }
+class B extends A { static read() { return [super.f, super.g, typeof super.nope].join(); } }
+console.log(B.read());
+#expect
+1,g of B,undefined
+
+#name Object.setPrototypeOf on a class changes what super() calls
+#code
+class A { constructor() { this.from = 'A'; } static s() { return 'sA'; } }
+class O { constructor() { this.from = 'O'; } static s() { return 'sO'; } }
+class B extends A { constructor() { super(); } }
+var first = new B();
+Object.setPrototypeOf(B, O);
+var second = new B();
+console.log(first.from, second.from, second instanceof A, second instanceof O, Object.getPrototypeOf(B) === O, B.s());
+#expect
+A O true false true sO
+
+#name super() when the parent has been taken away or is not a constructor
+#code
+class A {}
+class B extends A { constructor() { super(); } }
+var r = [];
+Object.setPrototypeOf(B, null);
+try { new B(); r.push('constructed'); } catch (e) { r.push(e.name); }
+r.push(typeof B.call, Object.getPrototypeOf(B) === null);
+Object.setPrototypeOf(B, () => 1);
+try { new B(); r.push('constructed'); } catch (e) { r.push(e.name); }
+Object.setPrototypeOf(B, {});
+try { new B(); r.push('constructed'); } catch (e) { r.push(e.name); }
+Object.setPrototypeOf(B, A);
+r.push(new B() instanceof A);
+console.log(r.join(' '));
+#expect
+TypeError undefined true TypeError TypeError true
+
+#name extends null
+#code
+class N extends null { static s() { return 1; } }
+var r = [Object.getPrototypeOf(N) === Function.prototype, Object.getPrototypeOf(N.prototype) === null, N.s()];
+try { new N(); r.push('constructed'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+true true 1 TypeError
+
+#name what cannot be extended
+#code
+var r = [];
+try { class Y extends (() => 1) {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class Z extends 5 {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class W extends ({}) {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class V extends (async function () {}) {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class U extends (function* () {}) {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class T extends ({ m() {} }).m {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class S extends undefined {} r.push('ok'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+TypeError TypeError TypeError TypeError TypeError TypeError TypeError
+
+#name extends an ES5 constructor function
+#code
+function Old(x) { this.x = x; }
+Old.make = function () { return new this(9); };
+Old.prototype.get = function () { return this.x; };
+class New extends Old { get() { return 'new ' + super.get(); } }
+console.log(New.make().get(), Object.getPrototypeOf(New) === Old, New.make() instanceof Old, New.hasOwnProperty('make'));
+#expect
+new 9 true true false
+
+#name a class made by a mixin function
+#code
+class Base { static kind() { return 'base'; } hello() { return 'hello'; } }
+var Serializable = function (B) { return class extends B { static kind() { return 'serializable ' + super.kind(); } save() { return 'saved ' + this.hello(); } }; };
+var Loud = function (B) { return class extends B { hello() { return super.hello().toUpperCase(); } }; };
+class Thing extends Loud(Serializable(Base)) {}
+var chain = [], o = Thing;
+while (o !== Function.prototype) { chain.push(o.name || '(anonymous)'); o = Object.getPrototypeOf(o); }
+console.log(Thing.kind(), new Thing().save(), chain.length, chain[0], chain[chain.length - 1], Base.isPrototypeOf(Thing));
+#expect
+serializable base saved HELLO 4 Thing Base true
+
+#name extends Error and TypeError
+#code
+class E extends Error { constructor(m) { super(m); this.name = 'E'; } }
+class T extends TypeError {}
+var e = new E('boom'), t = new T('x');
+console.log(e instanceof E, e instanceof Error, e.message, String(e), Object.getPrototypeOf(E) === Error);
+console.log(Object.getPrototypeOf(T) === TypeError, Object.getPrototypeOf(Object.getPrototypeOf(T)) === Error, t instanceof T, t instanceof TypeError, t instanceof Error, t.name, t.message);
+#expect
+true true boom E: boom true
+true true true true true TypeError x
+
+#name extends Array, Map and Promise: the parent's static methods are found
+#code
+class A extends Array { static make() { return new this(); } }
+class M extends Map { static make() { return new this([[1, 2]]); } }
+class P extends Promise {}
+console.log(Object.getPrototypeOf(A) === Array, typeof A.from, typeof A.of, A.isArray(A.make()), A.make() instanceof A, A.hasOwnProperty('isArray'));
+console.log(Object.getPrototypeOf(M) === Map, M.make().get(1), M.make() instanceof M, M.make() instanceof Map);
+console.log(Object.getPrototypeOf(P) === Promise, typeof P.resolve, typeof P.all, typeof P.reject, P.hasOwnProperty('resolve'));
+#expect
+true function function true true false
+true 2 true true
+true function function function false
+
+#name extends Object, Function, Date, RegExp, String, Number
+#code
+class O extends Object {} class D extends Date {} class R extends RegExp {} class S extends String {} class N extends Number {}
+console.log(Object.getPrototypeOf(O) === Object, O.keys({ a: 1 }).join(), typeof D.now, typeof D.UTC, S.fromCharCode(65), N.isInteger(3), N.MAX_SAFE_INTEGER === Number.MAX_SAFE_INTEGER, N.parseFloat('1.5'));
+console.log(Object.getPrototypeOf(D) === Date, Object.getPrototypeOf(R) === RegExp, Object.getPrototypeOf(S) === String, Object.getPrototypeOf(N) === Number, new S('ab').length, new N(5) + 1, new R('a+').test('caat'));
+#expect
+true a function function A true true 1.5
+true true true true 2 6 true
+
+#name the six error constructors have Error as their prototype
+#code
+var names = ['TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError'];
+console.log(names.map(function (n) {
+  var C = globalThis[n];
+  return [Object.getPrototypeOf(C) === Error, Error.isPrototypeOf(C), C.name === n, C.length, C.prototype.constructor === C, Object.getPrototypeOf(C.prototype) === Error.prototype, new C('m') instanceof Error, new C('m') instanceof C, new C('m').message].join(' ');
+}).join('\n'));
+console.log(Object.getPrototypeOf(Error) === Function.prototype, Error.name, Error.length, typeof Object.getPrototypeOf(TypeError), Object.getPrototypeOf(TypeError).name);
+#expect
+true true true 1 true true true true m
+true true true 1 true true true true m
+true true true 1 true true true true m
+true true true 1 true true true true m
+true true true 1 true true true true m
+true true true 1 true true true true m
+true Error 1 function Error
+
+#name the text of an error constructor, and calling one found by getPrototypeOf
+#code
+console.log(String(TypeError), String(Error));
+var Parent = Object.getPrototypeOf(RangeError);
+var made = new Parent('m'), called = Parent('n');
+console.log(made instanceof Error, made instanceof RangeError, made.message, called instanceof Error, called.message, Parent === Error);
+#expect
+function TypeError() { [native code] } function Error() { [native code] }
+true false m true n true
+
+#name how testharness.js checks that a constructor is an error type
+#code
+function is_error_type(constructor) {
+  if (typeof constructor !== 'function') return false;
+  var obj = constructor, steps = 0;
+  while (obj) {
+    if (typeof obj === 'function' && obj.name === 'Error') break;
+    obj = Object.getPrototypeOf(obj);
+    steps++;
+  }
+  return obj != null ? 'yes after ' + steps : 'no after ' + steps;
+}
+class Mine extends TypeError {}
+class Unrelated {}
+console.log([TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError, Error, Mine, Unrelated, function () {}, Object, Array].map(is_error_type).join(' | '));
+#expect
+yes after 1 | yes after 1 | yes after 1 | yes after 1 | yes after 1 | yes after 1 | yes after 0 | yes after 2 | no after 3 | no after 3 | no after 3 | no after 3
+
+#name classes compiled to ES5 with helpers in the shape Babel 7 emits (_inherits, _createSuper, _wrapNativeSuper)
+#code
+function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (o) { return typeof o; } : function (o) { return o && "function" == typeof Symbol && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o; }, _typeof(o); }
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+function _defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, _toPropertyKey(descriptor.key), descriptor); } }
+function _createClass(Constructor, protoProps, staticProps) { if (protoProps) _defineProperties(Constructor.prototype, protoProps); if (staticProps) _defineProperties(Constructor, staticProps); Object.defineProperty(Constructor, "prototype", { writable: false }); return Constructor; }
+function _toPropertyKey(t) { var i = _toPrimitive(t, "string"); return "symbol" == _typeof(i) ? i : String(i); }
+function _toPrimitive(t, r) { if ("object" != _typeof(t) || !t) return t; var e = t[Symbol.toPrimitive]; if (void 0 !== e) { var i = e.call(t, r || "default"); if ("object" != _typeof(i)) return i; throw new TypeError("@@toPrimitive must return a primitive value."); } return ("string" === r ? String : Number)(t); }
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function"); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.defineProperty(subClass, "prototype", { writable: false }); if (superClass) _setPrototypeOf(subClass, superClass); }
+function _setPrototypeOf(o, p) { _setPrototypeOf = Object.setPrototypeOf ? Object.setPrototypeOf.bind() : function _setPrototypeOf(o, p) { o.__proto__ = p; return o; }; return _setPrototypeOf(o, p); }
+function _createSuper(Derived) { var hasNativeReflectConstruct = _isNativeReflectConstruct(); return function _createSuperInternal() { var Super = _getPrototypeOf(Derived), result; if (hasNativeReflectConstruct) { var NewTarget = _getPrototypeOf(this).constructor; result = Reflect.construct(Super, arguments, NewTarget); } else { result = Super.apply(this, arguments); } return _possibleConstructorReturn(this, result); }; }
+function _possibleConstructorReturn(self, call) { if (call && (_typeof(call) === "object" || typeof call === "function")) { return call; } else if (call !== void 0) { throw new TypeError("Derived constructors may only return object or undefined"); } return _assertThisInitialized(self); }
+function _assertThisInitialized(self) { if (self === void 0) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return self; }
+function _isNativeReflectConstruct() { if (typeof Reflect === "undefined" || !Reflect.construct) return false; if (Reflect.construct.sham) return false; if (typeof Proxy === "function") return true; try { Boolean.prototype.valueOf.call(Reflect.construct(Boolean, [], function () {})); return true; } catch (e) { return false; } }
+function _getPrototypeOf(o) { _getPrototypeOf = Object.setPrototypeOf ? Object.getPrototypeOf.bind() : function _getPrototypeOf(o) { return o.__proto__ || Object.getPrototypeOf(o); }; return _getPrototypeOf(o); }
+function _wrapNativeSuper(Class) { var _cache = typeof Map === "function" ? new Map() : undefined; _wrapNativeSuper = function _wrapNativeSuper(Class) { if (Class === null || !_isNativeFunction(Class)) return Class; if (typeof Class !== "function") { throw new TypeError("Super expression must either be null or a function"); } if (typeof _cache !== "undefined") { if (_cache.has(Class)) return _cache.get(Class); _cache.set(Class, Wrapper); } function Wrapper() { return _construct(Class, arguments, _getPrototypeOf(this).constructor); } Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, enumerable: false, writable: true, configurable: true } }); return _setPrototypeOf(Wrapper, Class); }; return _wrapNativeSuper(Class); }
+function _construct(Parent, args, Class) { if (_isNativeReflectConstruct()) { _construct = Reflect.construct.bind(); } else { _construct = function _construct(Parent, args, Class) { var a = [null]; a.push.apply(a, args); var Constructor = Function.bind.apply(Parent, a); var instance = new Constructor(); if (Class) _setPrototypeOf(instance, Class.prototype); return instance; }; } return _construct.apply(null, arguments); }
+function _isNativeFunction(fn) { try { return Function.toString.call(fn).indexOf("[native code]") !== -1; } catch (e) { return typeof fn === "function"; } }
+function _get() { if (typeof Reflect !== "undefined" && Reflect.get) { _get = Reflect.get.bind(); } else { _get = function _get(target, property, receiver) { var base = _superPropBase(target, property); if (!base) return; var desc = Object.getOwnPropertyDescriptor(base, property); if (desc.get) { return desc.get.call(arguments.length < 3 ? target : receiver); } return desc.value; }; } return _get.apply(this, arguments); }
+function _superPropBase(object, property) { while (!Object.prototype.hasOwnProperty.call(object, property)) { object = _getPrototypeOf(object); if (object === null) break; } return object; }
+var Animal = /*#__PURE__*/function () {
+  function Animal(name) { _classCallCheck(this, Animal); this.name = name; }
+  _createClass(Animal, [{ key: "speak", value: function speak() { return this.name + " makes a sound"; } }, { key: "kind", get: function get() { return "animal"; } }], [{ key: "create", value: function create(name) { return new this(name); } }, { key: "registry", get: function get() { return this.name + " registry"; } }]);
+  return Animal;
+}();
+var Dog = /*#__PURE__*/function (_Animal) {
+  _inherits(Dog, _Animal);
+  var _super = _createSuper(Dog);
+  function Dog(name) { var _this; _classCallCheck(this, Dog); _this = _super.call(this, name); _this.tricks = ["sit"]; return _this; }
+  _createClass(Dog, [{ key: "speak", value: function speak() { return _get(_getPrototypeOf(Dog.prototype), "speak", this).call(this) + ", woof"; } }]);
+  return Dog;
+}(Animal);
+var Puppy = /*#__PURE__*/function (_Dog) {
+  _inherits(Puppy, _Dog);
+  var _super2 = _createSuper(Puppy);
+  function Puppy() { _classCallCheck(this, Puppy); return _super2.apply(this, arguments); }
+  return _createClass(Puppy);
+}(Dog);
+var MyError = /*#__PURE__*/function (_Error) {
+  _inherits(MyError, _Error);
+  var _super3 = _createSuper(MyError);
+  function MyError(message) { var _this2; _classCallCheck(this, MyError); _this2 = _super3.call(this, message); _this2.name = "MyError"; return _this2; }
+  return _createClass(MyError);
+}( /*#__PURE__*/_wrapNativeSuper(Error));
+var Stack = /*#__PURE__*/function (_Array) {
+  _inherits(Stack, _Array);
+  var _super4 = _createSuper(Stack);
+  function Stack() { _classCallCheck(this, Stack); return _super4.apply(this, arguments); }
+  _createClass(Stack, [{ key: "top", value: function top() { return this[this.length - 1]; } }]);
+  return Stack;
+}( /*#__PURE__*/_wrapNativeSuper(Array));
+var d = new Dog("Rex"), p = Puppy.create("Bit"), out = [];
+out.push(d.speak(), d.tricks.join(), d.kind, d instanceof Dog, d instanceof Animal, Object.getPrototypeOf(Dog) === Animal);
+out.push(p.speak(), p instanceof Puppy, p instanceof Dog, p.tricks.join(), Puppy.registry, Dog.registry, Object.getPrototypeOf(Puppy) === Dog);
+var e = new MyError("boom");
+out.push(e instanceof MyError, e instanceof Error, e.message, e.name, String(e), Object.prototype.toString.call(e));
+var s = new Stack(); s.push(1); s.push(2);
+out.push(s instanceof Stack, Array.isArray(s), s.length, s.top(), s.map(function (x) { return x * 2; }).join());
+try { Dog("x"); out.push("no error"); } catch (err) { out.push(err.name + ": " + err.message); }
+console.log(out.join(" | "));
+#expect
+Rex makes a sound, woof | sit | animal | true | true | true | Bit makes a sound, woof | true | true | sit | Puppy registry | Dog registry | true | true | true | boom | MyError | MyError: boom | [object Error] | true | true | 2 | 2 | 2,4 | TypeError: Cannot call a class as a function
+
+#name classes compiled to ES5 with the newer Babel helpers (_callSuper, _superPropGet)
+#code
+function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (o) { return typeof o; } : function (o) { return o && "function" == typeof Symbol && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o; }, _typeof(o); }
+function _classCallCheck(a, n) { if (!(a instanceof n)) throw new TypeError("Cannot call a class as a function"); }
+function _defineProperties(e, r) { for (var t = 0; t < r.length; t++) { var o = r[t]; o.enumerable = o.enumerable || !1, o.configurable = !0, "value" in o && (o.writable = !0), Object.defineProperty(e, _toPropertyKey(o.key), o); } }
+function _createClass(e, r, t) { return r && _defineProperties(e.prototype, r), t && _defineProperties(e, t), Object.defineProperty(e, "prototype", { writable: !1 }), e; }
+function _toPropertyKey(t) { var i = _toPrimitive(t, "string"); return "symbol" == _typeof(i) ? i : i + ""; }
+function _toPrimitive(t, r) { if ("object" != _typeof(t) || !t) return t; var e = t[Symbol.toPrimitive]; if (void 0 !== e) { var i = e.call(t, r || "default"); if ("object" != _typeof(i)) return i; throw new TypeError("@@toPrimitive must return a primitive value."); } return ("string" === r ? String : Number)(t); }
+function _callSuper(t, o, e) { return o = _getPrototypeOf(o), _possibleConstructorReturn(t, _isNativeReflectConstruct() ? Reflect.construct(o, e || [], _getPrototypeOf(t).constructor) : o.apply(t, e)); }
+function _possibleConstructorReturn(t, e) { if (e && ("object" == _typeof(e) || "function" == typeof e)) return e; if (void 0 !== e) throw new TypeError("Derived constructors may only return object or undefined"); return _assertThisInitialized(t); }
+function _assertThisInitialized(e) { if (void 0 === e) throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); return e; }
+function _isNativeReflectConstruct() { try { var t = !Boolean.prototype.valueOf.call(Reflect.construct(Boolean, [], function () {})); } catch (t) {} return (_isNativeReflectConstruct = function _isNativeReflectConstruct() { return !!t; })(); }
+function _superPropGet(t, o, e, r) { var p = _get(_getPrototypeOf(1 & r ? t.prototype : t), o, e); return 2 & r && "function" == typeof p ? function (t) { return p.apply(e, t); } : p; }
+function _get() { return _get = "undefined" != typeof Reflect && Reflect.get ? Reflect.get.bind() : function (e, t, r) { var p = _superPropBase(e, t); if (p) { var n = Object.getOwnPropertyDescriptor(p, t); return n.get ? n.get.call(arguments.length < 3 ? e : r) : n.value; } }, _get.apply(null, arguments); }
+function _superPropBase(t, o) { for (; !{}.hasOwnProperty.call(t, o) && null !== (t = _getPrototypeOf(t));); return t; }
+function _getPrototypeOf(t) { return _getPrototypeOf = Object.setPrototypeOf ? Object.getPrototypeOf.bind() : function (t) { return t.__proto__ || Object.getPrototypeOf(t); }, _getPrototypeOf(t); }
+function _inherits(t, e) { if ("function" != typeof e && null !== e) throw new TypeError("Super expression must either be null or a function"); t.prototype = Object.create(e && e.prototype, { constructor: { value: t, writable: !0, configurable: !0 } }), Object.defineProperty(t, "prototype", { writable: !1 }), e && _setPrototypeOf(t, e); }
+function _setPrototypeOf(t, e) { return _setPrototypeOf = Object.setPrototypeOf ? Object.setPrototypeOf.bind() : function (t, e) { return t.__proto__ = e, t; }, _setPrototypeOf(t, e); }
+var Model = /*#__PURE__*/function () {
+  function Model(attrs) { _classCallCheck(this, Model); this.attrs = attrs || {}; }
+  return _createClass(Model, [{ key: "get", value: function get(k) { return this.attrs[k]; } }, { key: "describe", value: function describe() { return "Model"; } }], [{ key: "table", get: function get() { return this.name.toLowerCase() + "s"; } }, { key: "build", value: function build(attrs) { return new this(attrs); } }, { key: "describe", value: function describe() { return "static Model"; } }]);
+}();
+var User = /*#__PURE__*/function (_Model) {
+  function User(attrs) { var _this; _classCallCheck(this, User); _this = _callSuper(this, User, [attrs]); _this.role = "user"; return _this; }
+  _inherits(User, _Model);
+  return _createClass(User, [{ key: "describe", value: function describe() { return "User<" + _superPropGet(User, "describe", this, 3)([]) + ">"; } }], [{ key: "describe", value: function describe() { return "static User<" + _superPropGet(User, "describe", this, 2)([]) + ">"; } }]);
+}(Model);
+var Admin = /*#__PURE__*/function (_User) {
+  function Admin() { var _this2; _classCallCheck(this, Admin); for (var _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++) { args[_key] = arguments[_key]; } _this2 = _callSuper(this, Admin, [].concat(args)); _this2.role = "admin"; return _this2; }
+  _inherits(Admin, _User);
+  return _createClass(Admin);
+}(User);
+var a = Admin.build({ name: "ann" }), u = new User({ name: "uma" });
+console.log([a.get("name"), a.role, a.describe(), a instanceof Admin, a instanceof User, a instanceof Model, Admin.table, User.table, Model.table, Admin.describe(), User.describe(), u.role, u.describe(), Object.getPrototypeOf(Admin) === User, Object.getPrototypeOf(User) === Model, Object.getPrototypeOf(Model) === Function.prototype].join(" | "));
+#expect
+ann | admin | User<Model> | true | true | true | admins | users | models | static User<static Model> | static User<static Model> | user | User<Model> | true | true | true
+
+#name classes compiled to ES5 by TypeScript (__extends)
+#code
+var __extends = (this && this.__extends) || (function () {
+    var extendStatics = function (d, b) {
+        extendStatics = Object.setPrototypeOf ||
+            ({ __proto__: [] } instanceof Array && function (d, b) { d.__proto__ = b; }) ||
+            function (d, b) { for (var p in b) if (Object.prototype.hasOwnProperty.call(b, p)) d[p] = b[p]; };
+        return extendStatics(d, b);
+    };
+    return function (d, b) {
+        if (typeof b !== "function" && b !== null)
+            throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
+        extendStatics(d, b);
+        function __() { this.constructor = d; }
+        d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+    };
+})();
+var Shape = /** @class */ (function () {
+    function Shape(name) { this.name = name; Shape.count++; }
+    Shape.prototype.area = function () { return 0; };
+    Shape.describe = function (s) { return s.name + " has area " + s.area(); };
+    Shape.make = function () { var args = []; for (var _i = 0; _i < arguments.length; _i++) { args[_i] = arguments[_i]; } return new (this.bind.apply(this, [void 0].concat(args)))(); };
+    Shape.count = 0;
+    return Shape;
+}());
+var Circle = /** @class */ (function (_super) {
+    __extends(Circle, _super);
+    function Circle(r) { var _this = _super.call(this, "circle") || this; _this.r = r; return _this; }
+    Circle.prototype.area = function () { return 3 * this.r * this.r; };
+    return Circle;
+}(Shape));
+var Disc = /** @class */ (function (_super) {
+    __extends(Disc, _super);
+    function Disc() { return _super !== null && _super.apply(this, arguments) || this; }
+    Disc.prototype.area = function () { return _super.prototype.area.call(this) + 1; };
+    return Disc;
+}(Circle));
+var HttpError = /** @class */ (function (_super) {
+    __extends(HttpError, _super);
+    function HttpError(status, message) {
+        var _newTarget = this.constructor;
+        var _this = _super.call(this, message) || this;
+        Object.setPrototypeOf(_this, _newTarget.prototype);
+        _this.status = status;
+        return _this;
+    }
+    HttpError.prototype.toJSON = function () { return { status: this.status, message: this.message }; };
+    return HttpError;
+}(Error));
+var NotFound = /** @class */ (function (_super) {
+    __extends(NotFound, _super);
+    function NotFound(what) { return _super.call(this, 404, what + " not found") || this; }
+    return NotFound;
+}(HttpError));
+var c = new Circle(2), d = Disc.make(3), e = new NotFound("page");
+console.log([Circle.describe(c), Disc.describe(d), d instanceof Disc, d instanceof Circle, d instanceof Shape, Shape.count, Disc.count, Object.prototype.hasOwnProperty.call(Disc, "count"), Object.getPrototypeOf(Disc) === Circle, Object.getPrototypeOf(Circle) === Shape, e instanceof NotFound, e instanceof HttpError, e instanceof Error, e.status, e.message, JSON.stringify(e), Object.getPrototypeOf(HttpError) === Error, Object.getPrototypeOf(NotFound) === HttpError].join(" | "));
+#expect
+circle has area 12 | circle has area 28 | true | true | true | 2 | 2 | false | true | true | true | true | true | 404 | page not found | {"status":404,"message":"page not found"} | true | true
+
+#name Reflect.construct gives the object the prototype of its third argument
+#code
+function A(x) { this.x = x; }
+function B() {}
+B.prototype = Object.create(A.prototype);
+B.prototype.hi = function () { return 'hi ' + this.x; };
+var o = Reflect.construct(A, [3], B), arr = Reflect.construct(Array, [1, 2, 3], B), plain = Reflect.construct(A, [4]);
+var r = [o instanceof B, o instanceof A, o.hi(), Object.getPrototypeOf(o) === B.prototype, arr instanceof B, Array.isArray(arr), arr.length, plain instanceof A, Object.getPrototypeOf(plain) === A.prototype];
+try { Reflect.construct(A, [], 5); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Reflect.construct(A, [], {}); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Reflect.construct(A, [], () => 1); r.push('no error'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+true true hi 3 true true true 3 true true TypeError TypeError TypeError
+
+#name Reflect.construct on a class, with a class and with an error type as the third argument
+#code
+class A { constructor(x) { this.x = x; } who() { return 'A'; } }
+class B extends A { who() { return 'B'; } }
+class E extends Error {}
+var o = Reflect.construct(A, [1], B), e = Reflect.construct(Error, ['m'], E), m = Reflect.construct(Map, [], B);
+Map.prototype.set.call(m, 1, 2);
+console.log(o.who(), o.x, o instanceof B, e instanceof E, e instanceof Error, e.message, m instanceof B, m instanceof Map, Object.getPrototypeOf(m) === B.prototype, Map.prototype.get.call(m, 1), typeof m.get);
+#expect
+B 1 true true true m true false true 2 undefined
+
+#name Object.defineProperty(Constructor, 'prototype', { writable: false }), as compiled classes end
+#code
+function F() {}
+Object.defineProperty(F, 'prototype', { writable: false });
+var d = Object.getOwnPropertyDescriptor(F, 'prototype');
+F.prototype = 5;
+console.log(d.writable, d.enumerable, d.configurable, typeof F.prototype, new F() instanceof F);
+function G() {}
+G.prototype = { a: 1 };
+Object.defineProperty(G, 'prototype', { writable: false });
+G.prototype = {};
+console.log(G.prototype.a, new G().a);
+#expect
+false false false object true
+1 1
+
+#name a constructor's prototype is an own property before anything reads it
+#code
+function F() {}
+var d = Object.getOwnPropertyDescriptor(F, 'prototype');
+console.log(typeof d, d.writable, d.enumerable, d.configurable, F.hasOwnProperty('prototype'), 'prototype' in F, delete F.prototype, typeof F.prototype);
+console.log((() => 1).hasOwnProperty('prototype'), ({ m() {} }).m.hasOwnProperty('prototype'), (async function () {}).hasOwnProperty('prototype'), Math.max.hasOwnProperty('prototype'));
+#expect
+object true false false true true false object
+false false false false
+
+#name an assigned prototype is not enumerable, so a loop that copies statics does not copy it
+#code
+function P() {}
+P.prototype = { m: function () { return 1; } };
+P.s = 1;
+function C() {}
+for (var p in P) if (Object.prototype.hasOwnProperty.call(P, p)) C[p] = P[p];
+var d = Object.getOwnPropertyDescriptor(P, 'prototype');
+console.log(Object.keys(P).join(), Object.keys(C).join(), C.prototype === P.prototype, d.writable, d.enumerable, d.configurable, delete P.prototype, typeof P.prototype);
+#expect
+s s false true false false false object
+
+#name the prototype of a class cannot be written or redefined, but the same flags are accepted
+#code
+class C {}
+var d = Object.getOwnPropertyDescriptor(C, 'prototype'), r = [d.writable, d.enumerable, d.configurable];
+try { Object.defineProperty(C, 'prototype', { writable: false }); r.push('ok'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(C, 'prototype', { value: C.prototype }); r.push('same value ok'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(C, 'prototype', { value: {} }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(C, 'prototype', { writable: true }); r.push('no error'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+false false false ok same value ok TypeError TypeError
+
+#name what a property that cannot be configured still allows
+#code
+var o = {};
+Object.defineProperty(o, 'x', { value: 1, writable: true, enumerable: false, configurable: false });
+var r = [];
+Object.defineProperty(o, 'x', { value: 2 }); r.push(o.x);
+Object.defineProperty(o, 'x', { writable: false }); r.push(Object.getOwnPropertyDescriptor(o, 'x').writable);
+try { Object.defineProperty(o, 'x', { value: 3 }); r.push('no error'); } catch (e) { r.push(e.name); }
+Object.defineProperty(o, 'x', { value: 2 }); r.push('same value ok');
+try { Object.defineProperty(o, 'x', { writable: true }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'x', { enumerable: true }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'x', { configurable: true }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'x', { get: function () {} }); r.push('no error'); } catch (e) { r.push(e.name); }
+Object.defineProperty(o, 'x', { enumerable: false, configurable: false, writable: false }); r.push('same flags ok');
+Object.defineProperty(o, 'x', {}); r.push('empty ok', o.x);
+console.log(r.join(' '));
+#expect
+2 false TypeError same value ok TypeError TypeError TypeError TypeError same flags ok empty ok 2
+
+#name defineProperty on frozen and sealed objects
+#code
+var o = Object.freeze({ x: 1 }), r = [];
+try { Object.defineProperty(o, 'x', { value: 2 }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'x', { value: 1 }); r.push('same value ok'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'y', { value: 1 }); r.push('no error'); } catch (e) { r.push(e.name); }
+var s = Object.seal({ x: 1 });
+try { Object.defineProperty(s, 'x', { value: 2 }); r.push('sealed value ok ' + s.x); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(s, 'x', { enumerable: false }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(s, 'x', { get: function () {} }); r.push('no error'); } catch (e) { r.push(e.name); }
+console.log(r.join(' | '));
+#expect
+TypeError | same value ok | TypeError | sealed value ok 2 | TypeError | TypeError
+
+#name an accessor that cannot be configured: the same functions are accepted, others are not
+#code
+var g = function () { return 1; }, s = function () {}, o = {}, r = [];
+Object.defineProperty(o, 'a', { get: g, set: s });
+try { Object.defineProperty(o, 'a', { get: g }); r.push('same getter ok'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'a', { get: function () {} }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'a', { set: undefined }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'a', { value: 1 }); r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(o, 'a', {}); r.push('empty ok'); } catch (e) { r.push(e.name); }
+r.push(o.a, typeof Object.getOwnPropertyDescriptor(o, 'a').set);
+var n = {};
+Object.defineProperty(n, 'n', { value: NaN }); Object.defineProperty(n, 'z', { value: 0 });
+try { Object.defineProperty(n, 'n', { value: NaN }); r.push('NaN ok'); } catch (e) { r.push(e.name); }
+try { Object.defineProperty(n, 'z', { value: -0 }); r.push('no error'); } catch (e) { r.push(e.name); }
+console.log(r.join(' | '));
+#expect
+same getter ok | TypeError | TypeError | TypeError | empty ok | 1 | function | NaN ok | TypeError
+
+#name Reflect.defineProperty reports a refusal, Object.defineProperties stops at it
+#code
+var o = {};
+Object.defineProperty(o, 'a', { value: 1 });
+var r = [];
+try { Object.defineProperties(o, { b: { value: 2 }, a: { value: 3 }, c: { value: 4 } }); } catch (e) { r.push(e.name); }
+r.push(o.a, o.b, typeof o.c);
+Object.preventExtensions(o);
+r.push(Reflect.defineProperty(o, 'a', { value: 1 }), Reflect.defineProperty(o, 'a', { value: 2 }), Reflect.defineProperty(o, 'z', { value: 2 }), o.a, typeof o.z);
+function F() {}
+r.push(Reflect.defineProperty(F, 'prototype', { writable: false }), Reflect.defineProperty(F, 'prototype', { writable: true }), Reflect.defineProperty(F, 'prototype', { value: 1 }));
+console.log(r.join(' '));
+#expect
+TypeError 1 2 undefined true false false 1 undefined true false false
+
+#name Object.create(fn): the function is the prototype
+#code
+function F(a, b) { return 'called'; }
+F.tag = 'f';
+var o = Object.create(F), P = Object.getPrototypeOf(o);
+console.log(P === F, typeof P, P(), F.isPrototypeOf(o), o.tag, o.name, o.length, o.prototype === F.prototype, 'name' in o, 'prototype' in o, o.hasOwnProperty('name'), typeof o.call);
+#expect
+true function called true f F 2 true true true false function
+
+#name an object whose prototype is a function is still an object
+#code
+function F() { return 1; }
+var o = Object.create(F), r = [typeof o, o instanceof Function, typeof o.call];
+try { o(); r.push('called'); } catch (e) { r.push(e.name); }
+try { new o(); r.push('constructed'); } catch (e) { r.push(e.name); }
+try { r.push(o.call(null)); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+object true function TypeError TypeError TypeError
+
+#name __proto__ in a literal and assigned, with a function
+#code
+function F() {} function G() {}
+F.f = 'from F'; G.g = 'from G';
+var o = { __proto__: F, own: 1 }, p = {};
+p.__proto__ = G;
+console.log(Object.getPrototypeOf(o) === F, o.__proto__ === F, o.f, Object.keys(o).join(), Object.getPrototypeOf(p) === G, p.g, p.hasOwnProperty('__proto__'));
+p.__proto__ = F;
+console.log(p.f, typeof p.g, Object.getPrototypeOf(p) === F);
+#expect
+true true from F own true from G false
+from F undefined true
+
+#name __proto__ of functions can be read and set
+#code
+function F() {} function G() {}
+var r = [F.__proto__ === Function.prototype, Math.max.__proto__ === Function.prototype, (() => 1).__proto__ === Function.prototype];
+F.__proto__ = G;
+r.push(Object.getPrototypeOf(F) === G, F.hasOwnProperty('__proto__'));
+var n = Math.abs;
+n.__proto__ = G;
+r.push(Object.getPrototypeOf(n) === G, Object.prototype.hasOwnProperty.call(n, '__proto__'), n(-2));
+n.__proto__ = Function.prototype;
+r.push(Object.getPrototypeOf(n) === Function.prototype, typeof n.call);
+F.__proto__ = 5;
+r.push(Object.getPrototypeOf(F) === G);
+console.log(r.join(' '));
+#expect
+true true true true false true false 2 true function true
+
+#name new with a function as the constructor's prototype property
+#code
+function F() {}
+F.tag = 'f';
+function C() {}
+C.prototype = F;
+var c = new C(), o = {};
+Object.setPrototypeOf(o, F);
+console.log(c.tag, c instanceof C, o instanceof C, Object.getPrototypeOf(c) === F, typeof Object.getPrototypeOf(c), c.name, o.tag, F instanceof C);
+#expect
+f true true true function F f false
+
+#name Reflect.setPrototypeOf and Reflect.getPrototypeOf with functions
+#code
+function F() {} function G() {}
+class Base {} class Derived extends Base {}
+var o = {};
+console.log(Reflect.setPrototypeOf(o, F), Reflect.getPrototypeOf(o) === F, Reflect.getPrototypeOf(Derived) === Base, Reflect.setPrototypeOf(G, F), Reflect.getPrototypeOf(G) === F, Reflect.setPrototypeOf(G, null), Reflect.getPrototypeOf(G) === null, typeof G.call);
+#expect
+true true true true true true true undefined
+
+#name ES5 inheritance of static members: calling the parent found with getPrototypeOf
+#code
+function Animal(n) { this.n = n; }
+Animal.kingdom = function () { return 'animals, asked through ' + this.name; };
+function Dog(n) { var Super = Object.getPrototypeOf(Dog); Super.call(this, n); }
+Object.setPrototypeOf(Dog, Animal);
+Dog.prototype = Object.create(Animal.prototype);
+console.log(new Dog('rex').n, Dog.kingdom(), Function.prototype.call.call(Object.getPrototypeOf(Dog).kingdom, Animal), Object.getPrototypeOf(Dog).kingdom.apply(Dog));
+#expect
+rex animals, asked through Dog animals, asked through Animal animals, asked through Dog
+
+#name instanceof and isPrototypeOf along classes
+#code
+class A {} class B extends A {} function F() {}
+console.log([B instanceof Function, B instanceof Object, B instanceof A, Function.prototype.isPrototypeOf(B), Object.prototype.isPrototypeOf(B), A.isPrototypeOf(B), B.isPrototypeOf(A), A.isPrototypeOf(new B()), F.isPrototypeOf(F), A.prototype.isPrototypeOf(new B()), B.isPrototypeOf(B), Function.prototype.isPrototypeOf(Function.prototype)].join(' '));
+#expect
+true true false true true true false false false true false false
+
+#name for-in, keys and JSON along a function
+#code
+function F() {}
+F.shown = 1;
+Object.defineProperty(F, 'hidden', { value: 2, enumerable: false });
+var o = Object.create(F);
+o.own = 3;
+var ks = [];
+for (var k in o) ks.push(k);
+console.log(ks.join(), Object.keys(o).join(), JSON.stringify(o), o.hidden, o.shown);
+#expect
+own,shown own {"own":3} 2 1
+
+#name for-in over a class shows the enumerable statics of its parents
+#code
+class A { static shown = 1; static hidden() {} }
+class B extends A { static own = 2; }
+var ks = [];
+for (var k in B) ks.push(k);
+console.log(ks.join(), Object.keys(B).join(), JSON.stringify(Object.assign({}, B)), Object.entries(B).join());
+#expect
+own,shown own {"own":2} own,2
+
+#name a getter and a setter on a parent function run with the child as this
+#code
+function P() {}
+var log = [];
+Object.defineProperty(P, 'me', { get: function () { return this; } });
+Object.defineProperty(P, 'v', { set: function (x) { log.push(this === F ? 'F' : this === P ? 'P' : 'other', x); }, get: function () { return 'got'; } });
+function F() {}
+Object.setPrototypeOf(F, P);
+var o = Object.create(F);
+F.v = 1; P.v = 2;
+console.log(F.me === F, o.me === o, P.me === P, log.join(), F.hasOwnProperty('v'), F.v);
+#expect
+true true true F,1,P,2 false got
+
+#name a prototype chain cannot be made into a loop
+#code
+function F() {} function G() {}
+Object.setPrototypeOf(F, G);
+var r = [];
+try { Object.setPrototypeOf(G, F); r.push('no error'); } catch (e) { r.push(e.name); }
+r.push(Reflect.setPrototypeOf(G, F));
+try { G.__proto__ = F; r.push('no error'); } catch (e) { r.push(e.name); }
+try { Object.setPrototypeOf(F, F); r.push('no error'); } catch (e) { r.push(e.name); }
+var o = Object.create(F);
+try { Object.setPrototypeOf(G, o); r.push('no error'); } catch (e) { r.push(e.name); }
+class A {} class B extends A {}
+try { Object.setPrototypeOf(A, B); r.push('no error'); } catch (e) { r.push(e.name); }
+r.push(Object.getPrototypeOf(G) === Function.prototype, Object.getPrototypeOf(A) === Function.prototype);
+console.log(r.join(' '));
+#expect
+TypeError false TypeError TypeError TypeError TypeError true true
+
+#name Object.setPrototypeOf: what it returns, what it refuses
+#code
+function F() {} function G() {}
+var r = [Object.setPrototypeOf(F, G) === F, Reflect.setPrototypeOf(F, null), Object.getPrototypeOf(F) === null];
+try { Object.setPrototypeOf(F, 5); r.push('ok'); } catch (e) { r.push(e.name); }
+try { Reflect.setPrototypeOf(F, 5); r.push('ok'); } catch (e) { r.push(e.name); }
+r.push(Object.setPrototypeOf(1, G), Object.setPrototypeOf('s', null));
+try { Object.setPrototypeOf(null, G); r.push('ok'); } catch (e) { r.push(e.name); }
+try { Object.setPrototypeOf(undefined, G); r.push('ok'); } catch (e) { r.push(e.name); }
+try { Reflect.setPrototypeOf(1, G); r.push('ok'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+true true true TypeError TypeError 1 s TypeError TypeError TypeError
+
+#name an object that is not extensible keeps its prototype
+#code
+var o = {}, p = {}, r = [];
+Object.preventExtensions(o);
+try { Object.setPrototypeOf(o, p); r.push('ok'); } catch (e) { r.push(e.name); }
+r.push(Reflect.setPrototypeOf(o, p), Reflect.setPrototypeOf(o, Object.prototype));
+try { o.__proto__ = p; r.push('ok'); } catch (e) { r.push(e.name); }
+r.push(Object.getPrototypeOf(o) === Object.prototype);
+var f = Object.freeze({});
+try { Object.setPrototypeOf(f, p); r.push('ok'); } catch (e) { r.push(e.name); }
+try { Object.setPrototypeOf(f, Object.prototype); r.push('same ok'); } catch (e) { r.push(e.name); }
+function F() {} function G() {}
+Object.preventExtensions(F);
+try { Object.setPrototypeOf(F, G); r.push('ok'); } catch (e) { r.push(e.name); }
+r.push(Reflect.setPrototypeOf(F, G), Reflect.setPrototypeOf(F, Function.prototype), Object.isExtensible(F));
+class A {}
+Object.freeze(A);
+class B extends A {}
+r.push(Object.getPrototypeOf(B) === A, Object.isFrozen(A), Object.isFrozen(B));
+console.log(r.join(' '));
+#expect
+TypeError false true TypeError true TypeError same ok TypeError false true false true true false
+
+#name what getPrototypeOf gives is the same value every time
+#code
+class A {} class B extends A {}
+var p1 = Object.getPrototypeOf(B), p2 = Reflect.getPrototypeOf(B), p3 = B.__proto__;
+var s = new Set([p1, p2, p3, A]), m = new Map([[A, 'a']]), w = new WeakMap([[A, 'w']]);
+p1.mark = 1;
+console.log(p1 === p2, p2 === p3, p3 === A, s.size, m.get(p1), w.get(p2), A.mark, p1 == A, Object.is(p1, A), [A].indexOf(p1), [A].includes(p2), p1 !== B);
+#expect
+true true true 1 a w 1 true true 0 true true
+
+#name the prototype of primitives and of the built-in constructors
+#code
+console.log([Object.getPrototypeOf(1) === Number.prototype, Object.getPrototypeOf('s') === String.prototype, Object.getPrototypeOf(true) === Boolean.prototype, Object.getPrototypeOf(Symbol()) === Symbol.prototype, Object.getPrototypeOf(Number) === Function.prototype, Object.getPrototypeOf(Symbol) === Function.prototype, Object.getPrototypeOf(Object) === Function.prototype, Object.getPrototypeOf(Array) === Function.prototype, Object.getPrototypeOf(Promise) === Function.prototype, Object.getPrototypeOf(Math.max) === Function.prototype, Object.getPrototypeOf(Function) === Function.prototype, Object.getPrototypeOf(Function.prototype) === Object.prototype].join(' '));
+#expect
+true true true true true true true true true true true true
+
+#name a class reaches Function.prototype and Object.prototype through its parents
+#code
+class A { static s(a, b) { return [this.name, a, b].join(); } }
+class B extends A {}
+console.log(typeof B.toString, B.toString === Function.prototype.toString, B.valueOf() === B, typeof B.hasOwnProperty, B.constructor === Function, Object.getPrototypeOf(B).constructor === Function);
+console.log(B.s.call(A, 1, 2), B.s.apply(B, [3, 4]), B.s.bind(B, 5)(6), A.s.length, B.s.name, typeof B.call, typeof B.bind, B.toString().slice(0, 7));
+#expect
+function true true function true true
+A,1,2 B,3,4 B,5,6 2 s function function class B
+
+#name a built-in constructor is unchanged by a class that extends it
+#code
+function look() { return [typeof Array.from, Array.isArray([]), Array.name, Array.length, String(Array), Object.prototype.hasOwnProperty.call(Array, 'from'), Array.prototype === Object.getPrototypeOf([]), new Array(3).length, Array.of(7)[0], Object.getPrototypeOf(Array) === Function.prototype].join(' '); }
+var before = look();
+class A2 extends Array {}
+class A3 extends A2 {}
+var after = look();
+console.log(before === after, after);
+#expect
+true function true Array 1 function Array() { [native code] } true true 3 7 true
+
+#name a property added to a built-in is seen through its subclasses, and goes away
+#code
+class A2 extends Array {}
+Array.zzz = 5;
+var r = [Array.zzz, A2.zzz, Object.keys(Array).join(), A2.hasOwnProperty('zzz')];
+delete Array.zzz;
+r.push(typeof Array.zzz, typeof A2.zzz, 'zzz' in Array, 'from' in A2, 'name' in A2, 'nope' in A2);
+console.log(r.join(' '));
+#expect
+5 5 zzz false undefined undefined false true true false
+
+#name the prototype of a built-in function can be changed and put back
+#code
+var f = Math.max, p = { tag: 'p' };
+Object.setPrototypeOf(f, p);
+var r = [f.tag, f(1, 5), Object.getPrototypeOf(f) === p, f.name, f.length, typeof f.call, typeof f];
+Object.setPrototypeOf(f, Function.prototype);
+r.push(typeof f.tag, typeof f.call, f(2, 3), Math.max === f, Math.max.call(null, 1, 9));
+console.log(r.join(' '));
+#expect
+p 5 true max 2 undefined function undefined function 3 true 9
+
+#name a built-in function as the prototype of an object
+#code
+var o = Object.create(Math.min), P = Object.getPrototypeOf(o);
+console.log(P === Math.min, typeof P, o.name, o.length, typeof o.call, Math.min.isPrototypeOf(o), P(4, 2), o.hasOwnProperty('name'), String(P) === String(Math.min));
+#expect
+true function min 2 function true 2 false true
+
+#name bound functions have the prototype of their target
+#code
+class A { static s() { return 's'; } }
+class B extends A {}
+function F() {}
+var bb = B.bind(null), bf = F.bind(null);
+console.log(Object.getPrototypeOf(bb) === A, bb.s(), bb.name, Object.getPrototypeOf(bf) === Function.prototype, new bb() instanceof B, typeof bb.call, bf.name);
+#expect
+true s bound B true true function bound F
+
+#name collect: 2,000 classes with parents are freed when nothing holds them
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+function make(i) { class Base { static s() { return i; } } class D extends Base {} return D; }
+var before = gc().alive_cells, ok = true;
+for (var round = 0; round < 3; round++) {
+  var keep = [];
+  for (var i = 0; i < 2000; i++) keep.push(make(i));
+  gc(); churn();
+  ok = ok && keep[1999].s() === 1999 && Object.getPrototypeOf(keep[5]).s() === 5 && Object.getPrototypeOf(keep[7]).name === 'Base';
+  keep = null;
+}
+var after = gc().alive_cells;
+console.log(ok, !(after - before > 100));
+#expect
+true true
+
+#name collect: a function that is reachable only as a prototype stays alive, with what it closed over
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var o = (function () { var secret = 'called'; function Hidden() { return secret; } Hidden.tag = 't'; return Object.create(Hidden); })();
+var inst = (function () {
+  var A = (function () { var hidden = { v: 'kept' }; return class A { constructor() { this.h = hidden.v; } }; })();
+  class B extends A {}
+  delete A.prototype.constructor;
+  return new B();
+})();
+var bound = (function () { var target = { v: 'bound kept' }; return Object.create(function () { return this.v; }.bind(target)); })();
+gc(); churn(); gc(); churn();
+var H = Object.getPrototypeOf(o), P = Object.getPrototypeOf(inst.constructor);
+console.log(typeof H, H(), o.tag, H.name, H.tag, Object.getPrototypeOf(o) === H, P.name, new P().h, inst.h, Object.getPrototypeOf(bound)());
+#expect
+function called t Hidden t true A kept kept bound kept
+
+#name collect: a parent class reachable only through an instance of its child
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var inst = (function () { class A { static s() { return 'static of A'; } a() { return 'a'; } } class B extends A { b() { return 'b' + super.a(); } } return new B(); })();
+gc(); churn(); gc(); churn();
+var Parent = Object.getPrototypeOf(inst.constructor);
+console.log(Parent.name, Parent.s(), inst.b(), new Parent().a(), inst instanceof Parent, Object.getPrototypeOf(Parent) === Function.prototype);
+#expect
+A static of A ba a true true
+
+#name collect inside super() and inside static super calls
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+class A { constructor(x) { gc(); churn(); this.x = x; } static make(x) { gc(); churn(); return new this(x); } static who() { return 'A'; } }
+class B extends A { constructor(x) { gc(); super(x + 1); churn(); this.y = x; } static who() { gc(); churn(); return 'B>' + super.who(); } }
+class C extends B { static who() { return 'C>' + super.who(); } }
+var c = C.make(1);
+console.log(c.x, c.y, c instanceof C, C.who(), Object.getPrototypeOf(C) === B);
+#expect
+2 1 true C>B>A true
+
+#name collect after a prototype was replaced: the old one goes, the new one stays
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+function F() {}
+var before = gc().alive_cells;
+for (var i = 0; i < 2000; i++) { Object.setPrototypeOf(F, function Temp() { return i; }); }
+Object.setPrototypeOf(F, (function () { function Last() { return 'last'; } Last.tag = 'kept'; return Last; })());
+gc(); churn(); gc();
+var after = gc().alive_cells;
+console.log(Object.getPrototypeOf(F).name, Object.getPrototypeOf(F)(), F.tag, !(after - before > 100));
+#expect
+Last last kept true
+
+#name collect: objects and functions that are each other's prototype and property
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var before = gc().alive_cells;
+for (var i = 0; i < 2000; i++) { var f = function () {}; var o = Object.create(f); f.o = o; o.f = f; var g = function () {}; Object.setPrototypeOf(g, o); o.g = g; g.leaf = Object.create(g); }
+f = null; o = null; g = null;
+gc(); churn();
+var after = gc().alive_cells;
+function G() {} var keep = Object.create(G); G.back = keep;
+gc(); churn();
+console.log(!(after - before > 100), Object.getPrototypeOf(keep) === G, G.back === keep, Object.getPrototypeOf(keep).back === keep);
+#expect
+true true true true
+
+#name collect: bound functions used as prototypes and given prototypes
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var before = gc().alive_cells;
+for (var i = 0; i < 2000; i++) { var b = function () { return 1; }.bind(null); var x = Object.create(b); var p = Object.create(Function.prototype); p.tag = i; Object.setPrototypeOf(b, p); var c = b.bind(null); }
+gc(); churn();
+var r = [typeof Object.getPrototypeOf(x), Object.getPrototypeOf(x)(), x.tag, c.tag, c()];
+b = null; x = null; c = null; p = null;
+gc(); churn();
+var after = gc().alive_cells;
+r.push(!(after - before > 100));
+console.log(r.join(' '));
+#expect
+function 1 1999 1999 1 true
+
+#name collect: a built-in function given a prototype and a subclass
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var p = { tag: 'p' };
+Object.setPrototypeOf(Math.hypot, p);
+p = null;
+class Sub extends Map {}
+gc(); churn(); gc(); churn();
+var r = [Math.hypot.tag, Math.hypot(3, 4), Object.getPrototypeOf(Sub) === Map, new Sub([[1, 2]]).get(1), typeof Sub.groupBy === typeof Map.groupBy];
+Object.setPrototypeOf(Math.hypot, Function.prototype);
+gc(); churn();
+r.push(typeof Math.hypot.tag, Math.hypot(6, 8), new Map([[3, 4]]).get(3));
+console.log(r.join(' '));
+#expect
+p 5 true 2 true undefined 10 4
+
+#name collect while compiled classes are being built and used
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+function _inherits(subClass, superClass) { subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.defineProperty(subClass, 'prototype', { writable: false }); gc(); if (superClass) Object.setPrototypeOf(subClass, superClass); }
+function _createSuper(Derived) { return function () { var Super = _getPrototypeOf(Derived); gc(); churn(); return Reflect.construct(Super, arguments, _getPrototypeOf(this).constructor); }; }
+var out = [];
+for (var round = 0; round < 20; round++) {
+  var A = function A(x) { this.x = x; };
+  A.prototype.hello = function () { return 'hello ' + this.x; };
+  A.count = function () { return 'count of ' + this.name; };
+  var B = (function (_A) { _inherits(B, _A); var _super = _createSuper(B); function B() { return _super.apply(this, arguments); } return B; })(A);
+  var b = new B(round);
+  gc(); churn();
+  if (!(b instanceof B && b instanceof A && b.hello() === 'hello ' + round && B.count() === 'count of B' && Object.getPrototypeOf(B) === A)) out.push(round);
+}
+console.log(out.length, b.hello());
+#expect
+0 hello 19
+
+#name a chain of 20,000 classes: static lookup, the walk up, and letting go of it
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+var C = class { static s() { return 'base'; } static get who() { return this === C; } };
+var N = 20000;
+for (var i = 0; i < N; i++) C = class extends C {};
+var depth = 0, o = C;
+while (o !== Function.prototype) { depth++; o = Object.getPrototypeOf(o); }
+gc(); churn();
+var before = gc().alive_cells;
+console.log(C.s(), C.who, depth, typeof C.nope);
+C = null; o = null;
+gc(); churn();
+var after = gc().alive_cells;
+console.log(!(before - after < 20000));
+#expect
+base true 20001 undefined
+true
+
+#name Function.prototype is itself a function
+#code
+class A {} class B extends A {}
+var kinds = [], o = B;
+while (o) { kinds.push(typeof o); o = Object.getPrototypeOf(o); }
+console.log(kinds.join(' '), typeof Function.prototype, Function.prototype(), Function.prototype.name === '', Function.prototype.length);
+#expect
+function function function object function undefined true 0
+
+#name the own property names of a function include length and name
+#code
+class A { static s() {} static get g() { return 1; } static f = 1; m() {} }
+class B extends A { static t() {} }
+function F(a) {}
+console.log(Object.getOwnPropertyNames(A).join(), '|', Object.getOwnPropertyNames(B).join(), '|', Object.getOwnPropertyNames(() => 1).join(), '|', Object.getOwnPropertyNames(Math.max).join());
+F.name = 'x'; F.length = 9;
+console.log(F.name, F.length, Object.keys(F).length);
+#expect
+length,name,prototype,s,g,f | length,name,prototype,t | length,name | length,name
+F 1 0
+
+#name the prototype of an async function and of a generator function
+#code
+var AsyncFunction = Object.getPrototypeOf(async function () {}), GeneratorFunction = Object.getPrototypeOf(function* () {});
+console.log(AsyncFunction !== Function.prototype, GeneratorFunction !== Function.prototype, Object.getPrototypeOf(AsyncFunction) === Function.prototype, Object.getPrototypeOf(GeneratorFunction) === Function.prototype, Object.prototype.toString.call(async function () {}), Object.prototype.toString.call(function* () {}));
+#expect
+true true true true [object AsyncFunction] [object GeneratorFunction]
+
+#name new.target is the class being constructed, also in a parent and through Reflect.construct
+#code
+function A() { this.nt = new.target === B ? 'B' : new.target === A ? 'A' : typeof new.target; }
+function B() {}
+class K { constructor() { this.nt = new.target.name; } }
+class L extends K {}
+class Abstract { constructor() { if (new.target === Abstract) throw new TypeError('abstract'); } }
+class Concrete extends Abstract {}
+var r = [Reflect.construct(A, [], B).nt, Reflect.construct(A, []).nt, new A().nt, new L().nt, Reflect.construct(K, [], L).nt, new K().nt];
+try { new Concrete(); r.push('concrete ok'); } catch (e) { r.push(e.name); }
+try { new Abstract(); r.push('abstract ok'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+B A A L L K concrete ok TypeError
+
+#name static methods of a built-in make the subclass they are called on (Array.from, Promise.resolve)
+#code
+class A extends Array {}
+class P extends Promise {}
+var p = P.resolve(1);
+console.log(A.from([1, 2]) instanceof A, A.of(1, 2) instanceof A, A.from([1, 2]).length, p instanceof P, P.all([1]) instanceof P, p.then(function () {}) instanceof P, p instanceof Promise);
+#expect
+true true 2 true true true true
+
+#name methods of a built-in make the subclass of the object they are called on (Symbol.species)
+#code
+class A extends Array {}
+class Plain extends Array { static get [Symbol.species]() { return Array; } }
+var a = new A(), q = new Plain();
+a.push(1, 2, 3); q.push(1);
+console.log(a.map(function (x) { return x; }) instanceof A, a.filter(Boolean) instanceof A, a.slice(1) instanceof A, a.concat([4]) instanceof A, q.map(function (x) { return x; }) instanceof Plain, typeof Array[Symbol.species]);
+#expect
+true true true true false function
+
+#name Symbol.hasInstance, own and inherited as a static
+#code
+var Even = { [Symbol.hasInstance](n) { return n % 2 === 0; } };
+class A { static [Symbol.hasInstance](x) { return x === 1; } }
+class B extends A {}
+console.log(typeof Symbol.hasInstance, 2 instanceof Even, 3 instanceof Even, 1 instanceof A, 1 instanceof B, new B() instanceof B, Function.prototype[Symbol.hasInstance].call(Array, []));
+#expect
+symbol true false true true false true
+
+#name an inherited property that cannot be written stops an assignment
+#code
+var p = {};
+Object.defineProperty(p, 'ro', { value: 1 });
+var o = Object.create(p);
+o.ro = 2;
+class A {}
+Object.defineProperty(A, 'ro', { value: 1, writable: false });
+class B extends A {}
+var strict = (function () { 'use strict'; try { B.ro = 2; return 'assigned'; } catch (e) { return e.name; } })();
+console.log(o.ro, o.hasOwnProperty('ro'), strict, B.ro, B.hasOwnProperty('ro'));
+#expect
+1 false TypeError 1 false
+
+#name collect: an object that holds a function bound to it is freed
+#code
+var gc = globalThis.gc || function(){ return {}; }; function churn(){ var junk = []; for (var i = 0; i < 400; i++) junk.push({i: i, s: "x" + i}); return junk.length; }
+
+class Widget { constructor() { this.onClick = this.onClick.bind(this); } onClick() { return this; } }
+var w = new Widget(), ok = w.onClick.call(null) === w;
+gc();
+var before = gc().alive_cells;
+for (var i = 0; i < 2000; i++) { new Widget(); var o = {}; o.self = function () { return this; }.bind(o); }
+o = null;
+gc(); churn();
+var after = gc().alive_cells;
+console.log(ok, !(after - before > 100));
+#expect
+true true
+
+#name a bound function cannot be extended: it has no prototype property
+#code
+function F() {}
+var r = [];
+try { class X extends (F.bind(null)) {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { class Y extends Math.max {} r.push('ok'); } catch (e) { r.push(e.name); }
+try { new Math.max(); r.push('constructed'); } catch (e) { r.push(e.name); }
+console.log(r.join(' '));
+#expect
+TypeError TypeError TypeError
+
+#name instanceof throws when the prototype of its right side is there and is not an object
+#code
+function tryIt(fn) { try { return String(fn()); } catch (e) { return e.name; } }
+function F() {}
+var o = new F();
+var out = [];
+F.prototype = 5;     out.push(tryIt(function () { return o instanceof F; }), tryIt(function () { return ({}) instanceof F; }));
+F.prototype = null;  out.push(tryIt(function () { return o instanceof F; }));
+F.prototype = 'p';   out.push(tryIt(function () { return [] instanceof F; }));
+F.prototype = true;  out.push(tryIt(function () { return F instanceof F; }));
+console.log(out.join(' '));
+// A value that is not an object is answered before the prototype is looked at.
+console.log(tryIt(function () { return 1 instanceof F; }), tryIt(function () { return 'a' instanceof F; }), tryIt(function () { return null instanceof F; }), tryIt(function () { return undefined instanceof F; }));
+// An object again, and the answer is back.
+F.prototype = {};
+var p = new F();
+console.log(tryIt(function () { return p instanceof F; }), tryIt(function () { return o instanceof F; }));
+// What is not a function at all.
+console.log(tryIt(function () { return o instanceof {}; }), tryIt(function () { return o instanceof 5; }), tryIt(function () { return o instanceof null; }));
+// Function.prototype is a function with no prototype property of its own; given one that is not an object, it throws like any other.
+Function.prototype.prototype = '';
+console.log(tryIt(function () { return [] instanceof Function.prototype; }));
+delete Function.prototype.prototype;
+#expect
+TypeError TypeError TypeError TypeError TypeError
+false false false false
+true false
+TypeError TypeError TypeError
+TypeError
+
+#name a function written after __proto__: in a literal is not named after it
+#code
+// `__proto__: value` in a literal sets the prototype. It is not a property, so a function written there gets no name from it.
+var a = { __proto__: function () {} };
+var b = { __proto__: class {} };
+var c = { __proto__: () => 1 };
+console.log(JSON.stringify(Object.getPrototypeOf(a).name), JSON.stringify(Object.getPrototypeOf(b).name), JSON.stringify(Object.getPrototypeOf(c).name));
+console.log(typeof Object.getPrototypeOf(a), Object.keys(a).length, a.hasOwnProperty('__proto__'));
+// A name the function has is kept.
+var d = { __proto__: function named() {} };
+console.log(Object.getPrototypeOf(d).name);
+// With a computed key, a quoted key is still the prototype, and a computed one is a property that names its function.
+var e = { '__proto__': function () {} };
+var f = { ['__proto__']: function () {} };
+console.log(JSON.stringify(Object.getPrototypeOf(e).name), typeof Object.getPrototypeOf(e), Object.getPrototypeOf(f) === Object.prototype, f.hasOwnProperty('__proto__'), Object.getOwnPropertyDescriptor(f, '__proto__').value.name);
+// Any other key names an anonymous function.
+var g = { plain: function () {}, arrow: () => 1 };
+console.log(g.plain.name, g.arrow.name);
+#expect
+"" "" ""
+function 0 false
+named
+"" function true true __proto__
+plain arrow

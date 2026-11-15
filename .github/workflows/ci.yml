@@ -117,12 +117,17 @@ jobs:
       - name: JavaScript scoreboard
         run: make js-conformance
       - name: Enforce the JavaScript floor
-        # The corpus is fixed and timers run on a virtual clock, so the score is
-        # deterministic. Raise the floor as the engine improves; it exists to
-        # catch regressions.
+        # The corpus is fixed and timers run on a virtual clock, so the score
+        # does not vary: 907 of 921 pass. The floor is one below that for one
+        # case that depends on the machine: `pairs made a half at a time in a
+        # long string` (long-strings.dat) does work that grows with the square
+        # of its input, takes 6 of the 10 seconds a case is allowed on a slow
+        # machine, and times out on a busy one. It is a row of the task table
+        # in AGENTS.md; when it is fixed the floor is the score. Raise the
+        # floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 834
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 906
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -168,7 +173,7 @@ jobs:
         # a regression.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 629
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 640
       - name: URL scoreboard (web-platform-tests data)
         # tests/url holds the URL parsing and setter cases browsers are tested
         # with. The floor in the Makefile is the number that pass today; the

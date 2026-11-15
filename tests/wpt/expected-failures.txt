@@ -9,14 +9,8 @@ dom/nodes/Document-createElement.html	glob:* in XML document*	frames
 dom/nodes/Document-createElement.html	glob:* in XHTML document*	frames
 dom/nodes/Document-createElementNS.html	glob:* in XML document*	frames
 dom/nodes/Document-createElementNS.html	glob:* in XHTML document*	frames
-dom/nodes/CharacterData-appendData.html	Text.appendData()	function-as-prototype
-dom/nodes/CharacterData-appendData.html	Comment.appendData()	function-as-prototype
-dom/nodes/CharacterData-substringData.html	Text.substringData() with too few arguments	function-as-prototype
-dom/nodes/CharacterData-substringData.html	Comment.substringData() with too few arguments	function-as-prototype
 dom/nodes/Comment-constructor.html	new Comment() should get the correct ownerDocument across globals	frames
 dom/nodes/Comment-constructor.html	(harness)	frames
-dom/nodes/DOMImplementation-createDocument.html	createDocument test: null,null,false,function "function TypeError() { [native code] }"	function-as-prototype
-dom/nodes/DOMImplementation-createDocument.html	createDocument with missing arguments	function-as-prototype
 dom/nodes/Document-adoptNode.html	Adopting an Element should adopt its Attr nodes.	attr-is-not-a-node
 dom/nodes/Document-adoptNode.html	Inserting an Element into another document should adopt its Attr nodes.	attr-is-not-a-node
 dom/nodes/Document-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	named-properties
@@ -29,28 +23,17 @@ dom/nodes/Element-removeAttribute.html	removeAttribute should remove the first a
 dom/nodes/Element-setAttribute.html	setAttribute should change the first attribute, irrespective of namespace	one-name-two-namespaces
 dom/nodes/Element-setAttributeNodeNS.html	Replacing an attribute prefix preserves name lookup order with namespacedFirst=false	one-name-two-namespaces
 dom/nodes/Element-setAttributeNodeNS.html	Replacing an attribute prefix preserves name lookup order with namespacedFirst=true	one-name-two-namespaces
-dom/nodes/Node-appendChild.html	WebIDL tests	function-as-prototype
-dom/nodes/Node-appendChild.html	Appending null to a text node	function-as-prototype
-dom/nodes/Node-appendChild.html	Appending null to a comment	function-as-prototype
-dom/nodes/Node-appendChild.html	Appending null to a doctype	function-as-prototype
 dom/nodes/Node-appendChild.html	Appending a document	frames
 dom/nodes/Node-appendChild.html	Adopting an orphan	frames
 dom/nodes/Node-appendChild.html	Adopting a non-orphan	frames
 dom/nodes/Node-childNodes.html	Iterator behavior of Node.childNodes	nodelist-iterator
 dom/nodes/Node-cloneNode.html	createAttribute	attr-is-not-a-node
 dom/nodes/Node-cloneNode.html	createAttributeNS	attr-is-not-a-node
-dom/nodes/Node-insertBefore.html	Calling insertBefore with a non-Node first argument must throw TypeError.	function-as-prototype
-dom/nodes/Node-insertBefore.html	Calling insertBefore with second argument missing, or other than Node, null, or undefined, must throw TypeError.	function-as-prototype
-dom/nodes/Node-insertBefore.html	Calling insertBefore with a non-Node first argument on a leaf node DocumentType must throw TypeError.	function-as-prototype
-dom/nodes/Node-insertBefore.html	Calling insertBefore with a non-Node first argument on a leaf node Text must throw TypeError.	function-as-prototype
-dom/nodes/Node-insertBefore.html	Calling insertBefore with a non-Node first argument on a leaf node Comment must throw TypeError.	function-as-prototype
-dom/nodes/Node-insertBefore.html	Calling insertBefore with a non-Node first argument on a leaf node ProcessingInstruction must throw TypeError.	function-as-prototype
 dom/nodes/Node-isSameNode.html	attributes should be compared on reference	attr-is-not-a-node
 dom/nodes/Node-lookupNamespaceURI.html	Disconnected Attr has no namespace URI matching "xml"	attr-is-not-a-node
 dom/nodes/Node-lookupNamespaceURI.html	Disconnected Attr has no namespace URI matching "xmlns"	attr-is-not-a-node
 dom/nodes/Node-lookupNamespaceURI.html	Connected Attr has namespace URI matching "xml"	attr-is-not-a-node
 dom/nodes/Node-lookupNamespaceURI.html	Connected Attr no namespace URI matching "xmlns"	attr-is-not-a-node
-dom/nodes/Node-replaceChild.html	Passing null to replaceChild should throw a TypeError.	function-as-prototype
 dom/nodes/Text-constructor.html	new Text() should get the correct ownerDocument across globals	frames
 dom/nodes/Text-constructor.html	(harness)	frames
 dom/nodes/attributes.html	toggleAttribute should set the first attribute with the given name	one-name-two-namespaces
@@ -67,7 +50,6 @@ dom/nodes/attributes.html	Own property names should only include all-lowercase q
 dom/nodes/attributes.html	Own property names should include all qualified names for a non-HTML element in an HTML document	named-properties
 dom/nodes/attributes.html	Own property names should include all qualified names for an HTML element in a non-HTML document	named-properties
 domparsing/DOMParser-parseFromString-encoding.html	(harness)	page-encoding
-domparsing/DOMParser-parseFromString-html.html	DOMParser throws on an invalid enum value	function-as-prototype
 domparsing/XMLSerializer-serializeToString.html	Check if an attribute with namespace and no prefix is serialized with the nearest-declared prefix even if the prefix is assigned to another namespace.	serializer-another-tree
 domparsing/XMLSerializer-serializeToString.html	Check if the prefix of an attribute is NOT preserved in a case where neither its prefix nor its namespace URI is not already used.	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization takes into account of the same prefix declared in an ancestor element	serializer-standard-moved

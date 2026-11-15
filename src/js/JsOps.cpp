@@ -683,10 +683,24 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor) {
     if (!constructor.is_function()) js_throw_type_error("Right-hand side of 'instanceof' is not callable");
     if (!value.is_object_like()) return false;
     JsValue proto = constructor.get_property("prototype");
-    if (!proto.object_val) return false;
+    // A `prototype` that is there and is not an object is a TypeError, as the
+    // language has it. One that is not there at all still answers false. The
+    // language throws for that too, but two kinds of function here have none
+    // and must not start to throw: a bound function, which should be asked
+    // for its target's and cannot be told from another built-in, and some of
+    // the host's constructors (`r instanceof Response`).
+    if (!proto.is_object_like()) {
+        if (proto.type == JsType::Undefined) return false;
+        js_throw_type_error("Function has non-object prototype '" + js_describe_thrown(proto) +
+                            "' in instanceof check");
+    }
+    // The cell of an object, or of a function (`C.prototype = someFunction`).
+    // A function with no cell is in nobody's chain.
+    const JsObject* target = proto.property_cell();
+    if (!target) return false;
     int guard = 0;
     for (JsObject* obj = value.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
-        if (obj == proto.object_val) return true;
+        if (obj == target) return true;
     }
     return false;
 }
@@ -700,20 +714,52 @@ JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<Js
     return fn.call_with_this(this_val, args);
 }
 
-JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args) {
+bool js_is_constructor(const JsValue& value) {
+    if (!value.is_function()) return false;
+    const JsValue::FunctionData* fd = value.function_data();
+    if (fd && fd->node) return fd->is_constructor;
+    // A built-in is taken to be a constructor unless its cell says otherwise.
+    // Only one is marked (see JsIntrinsics::JsIntrinsics). The mark is on the
+    // cell, not a comparison with this realm's Function.prototype (the
+    // function may be another realm's) and not a property (a script could
+    // read a property, and every function would inherit it).
+    if (const JsObject* cell = value.property_cell()) return !cell->not_constructor;
+    return true;
+}
+
+JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target) {
     if (!ctor.is_function()) js_throw_type_error(js_describe_thrown(ctor) + " is not a constructor");
     const JsValue::FunctionData* fd = ctor.function_data();
-    if (fd && fd->node) {
-        if (!fd->is_constructor) {
-            js_throw_type_error((fd->name.empty() ? std::string("function") : fd->name) + " is not a constructor");
+    if (!js_is_constructor(ctor)) {
+        js_throw_type_error((!fd || fd->name.empty() ? std::string("function") : fd->name) + " is not a constructor");
+    }
+    if (new_target) {
+        // It has to be something `new` could be used on as well.
+        if (!js_is_constructor(*new_target)) {
+            js_throw_type_error(js_describe_thrown(*new_target) + " is not a constructor");
         }
+        if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
+    }
+    if (fd && fd->node) {
         JsValue instance = JsValue::make_object();
-        JsValue proto = ctor.get_property("prototype");
-        if (proto.object_val && proto.is_object_like()) instance.object_val->prototype = proto.object_val;
+        JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) instance.object_val->prototype = target;
+        }
         JsValue result = ctor.construct(args, &instance);
         return result.is_object_like() ? result : instance;
     }
-    return ctor.construct(args, nullptr);
+    // A built-in constructor makes its own object. With another function as
+    // new.target that object is what the built-in makes (an array, an error)
+    // with the other function's prototype.
+    JsValue result = ctor.construct(args, nullptr);
+    if (new_target && result.type == JsType::Object && result.object_val) {
+        JsValue proto = new_target->get_property("prototype");
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) js_set_prototype(result.object_val, target);
+        }
+    }
+    return result;
 }
 
 JsValue js_bind_this(const JsValue& fn, const JsValue& receiver) {
@@ -1002,6 +1048,18 @@ JsIntrinsics::JsIntrinsics() {
     };
     object_proto = make(nullptr);
     function_proto = make(object_proto);
+    // Function.prototype is a function itself: it takes anything and returns
+    // undefined. So the prototype of every function is a function, `typeof
+    // Object.getPrototypeOf(f)` says so, and the cell knows its function the
+    // way the cell of a parent class does (JsValue::as_prototype).
+    // It is not a constructor: `new Function.prototype()` throws, and so does
+    // `super()` in a class that extends null, whose parent is this function.
+    {
+        JsValue function = js_make_native("", 0, [](const std::vector<JsValue>&) { return JsValue::make_undefined(); });
+        function.function_cell(function_proto);
+        function_proto->set_function_value(function);
+        function_proto->not_constructor = true;
+    }
     array_proto = make(object_proto);
     array_proto->is_array = true;
     array_proto->klass = ObjectClass::Array;

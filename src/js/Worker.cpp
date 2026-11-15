@@ -1,4 +1,5 @@
 #include "litebird/js/Worker.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsInterpreter.hpp"
@@ -335,12 +336,15 @@ void atexit_shutdown_workers() {
 void ensure_atexit_registered() {
     static std::once_flag once;
     std::call_once(once, [] {
-        // Warm up static tables used by worker threads (e.g. JsLexer's
-        // keyword_table) BEFORE registering std::atexit so LIFO teardown
-        // guarantees atexit_shutdown_workers() joins every worker thread
-        // before any static table destructor runs.
+        // Warm up static tables used by worker threads (JsLexer's keyword
+        // table, JsOps's symbol_registry, and DomBindings's interface table)
+        // BEFORE registering std::atexit so LIFO teardown guarantees
+        // atexit_shutdown_workers() joins every worker thread before any
+        // static table destructor runs.
         JsLexer warmup("var");
         (void)warmup.next_token();
+        (void)js_symbol_for_key("Symbol.iterator", "Symbol.iterator");
+        (void)dom::find_interface("Event");
         std::atexit(&atexit_shutdown_workers);
     });
 }

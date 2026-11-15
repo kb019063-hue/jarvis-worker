@@ -27,14 +27,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **840 / 845 (99.4%)** | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **629 / 629**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4640 / 5192 subtests**; the 552 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **JavaScript corpus** | **907 / 921 (98.5%)**; nine of the 14 that fail were recorded in Phase 34 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **DOM corpus** (what a script sees) | **640 / 640**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4658 / 5192 subtests**; the 534 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 143 suites, all passing | `make test` |
+| Engine unit tests | 148 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -43,12 +43,13 @@ suite and two other parsers, and brought in the tests browsers share (see
 ```bash
 make conformance     # HTML: per-file pass rate + failing-case diffs
 make js-conformance  # JavaScript: per-file pass rate
+make test262         # 21 directories of the standard's own suite, downloaded; for comparing two builds, not a score
 make dom-conformance # the DOM a script sees: per-file pass rate
 make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 143 engine suites
+make test            # 148 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -65,7 +66,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 845 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 921 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -76,9 +77,19 @@ Read the number for what it is:
   covers the language and library features ordinary scripts use (syntax,
   closures, classes, destructuring, generators, promises and async functions,
   strings, arrays, regular expressions, dates, JSON), not every clause of the
-  specification. A run of the official suite would score far lower.
-- **The five failures are whole features that do not exist**: BigInt (2
-  cases), `Proxy`, typed arrays, and holes in arrays.
+  specification. The official suite scores far lower: of the 47,967 tests in
+  its `built-ins`, `language` and `annexB` directories that are not modules,
+  26,012 pass (54%); of the 15,686 on functions, classes and objects, 10,835
+  (69%). `make test262` runs the latter. It is used for what a change moved
+  between two builds, not as a score (Phase 34: 108 more pass and none fewer
+  in those directories; in the whole suite 122 more and three fewer, the
+  three being tests that passed for the wrong reason).
+- **Five of the 14 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine are
+  in `prototypes.dat` and were recorded to fail: what classes still lack
+  after Phase 34 (`new.target` in a parent's constructor, `Symbol.species`,
+  `Symbol.hasInstance`, and six smaller things; ARCHITECTURE.md, Phase 34,
+  section 9).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -101,6 +112,12 @@ strings of 100,000 characters and more, work that used to grow with the
 square of the length: reading a string copied it. The engine before that fix
 passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 
+76 cases (`prototypes.dat`, Phase 34) are about a function that stands in a
+prototype chain: the parent of a class, the prototype of an object,
+`Function.prototype` itself. Three of them are whole programs as Babel and
+TypeScript compile classes for older browsers, which stopped at their first
+class before. 67 of the 76 pass; the engine before Phase 34 passes 7.
+
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
 0.6% is **11 cases, all of them about `<select>`**: the standard changed how
@@ -110,7 +127,7 @@ catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 629 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 640 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -127,7 +144,8 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | :--- | ---: |
 | Before Phase 27 (`main` at `6f08a70`) | 61 / 572; the everyday probe 13 / 68 |
 | Phase 27 | 572 / 572; the everyday probe 68 / 68 |
-| Now, with the 57 cases of Phase 28 (`xml.dat`, `xhr.dat`) | 629 / 629 |
+| Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
+| Now, with the 11 cases of Phase 34 (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -203,7 +221,7 @@ It was written against references, and each has a command:
 | The W3C XML Conformance Test Suite | 1702 / 1702 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
 | Expat 2.5.0 and libxml2 2.14.6, on 4,000 generated documents, half of them damaged | 3,958 read as both read them, 13 on which the two disagree, 29 with a version number outside the grammar (refused), 0 that differ | `make diff-xml` |
 | Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
-| web-platform-tests, `dom/nodes` and `domparsing` (76 files, with `testharness.js`) | 4640 / 5192 subtests; each of the 552 others is listed with a reason | `make wpt` |
+| web-platform-tests, `dom/nodes` and `domparsing` (76 files, with `testharness.js`) | 4658 / 5192 subtests; each of the 534 others is listed with a reason | `make wpt` |
 | jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
 | Nothing: the W3C suite's documents with bytes changed, cut short and pasted over, in the sanitizer build | 600 mutants and 1,927 documents as they are: no crash, no sanitizer report, and every document the same tree after it is written and read | `make asan` (`tools/fuzz/fuzz_xml.py`) |
 
@@ -234,12 +252,12 @@ Five things about these numbers:
   declares. Where two references
   disagree the standard was read, and the documents say which way it went
   (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
-- **552 web-platform-tests subtests fail**, and 495 of them for one reason:
+- **534 web-platform-tests subtests fail**, and 495 of them for one reason:
   the test loads an XML document into a frame, and Litebird has neither
-  frames with documents nor a way to load a page as XML. 18 fail on a fault
-  of the JavaScript engine (a function cannot have a function as its
-  prototype), 33 on what an `Attr` and a `NamedNodeMap` are here, 1 on the
-  page's encoding, and 5 are the ones above.
+  frames with documents nor a way to load a page as XML. 33 fail on what an
+  `Attr` and a `NamedNodeMap` are here, 1 on the page's encoding, and 5 are
+  the ones above. (18 more failed on a fault of the JavaScript engine, a
+  function that could not be a prototype, until Phase 34.)
 - **`XMLHttpRequest` answers `data:` URLs and nothing else.** No request
   leaves the process or reads a file, and a unit test asserts it. Requests
   over the network are open, and so is something found on the way:
@@ -643,7 +661,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 135 engine test suites
+# Run the 144 engine test suites
 make test
 ```
 
@@ -708,14 +726,14 @@ make test
 make test
 ```
 
-Output (139 suites; the first and last lines shown):
+Output (144 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 139 engine test suites passed successfully!
+All 144 engine test suites passed successfully!
 ```
 
 ```bash
@@ -781,6 +799,35 @@ fetch/worker, and relative-base suites. CORS, `XMLHttpRequest` over the network,
 and HTTPS remain open tasks; this is the local-file boundary, not a full Fetch
 implementation. Details and repro are in `ARCHITECTURE.md`, Phase 33, and
 `AUDIT.md`, finding 37.
+
+
+### A function as a prototype (Phase 34)
+
+`Object.getPrototypeOf(Derived)` for `class Derived extends Base` used to be
+an object that was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)`
+was not `Error`, a static member was found one parent up and no further, and
+`Function.prototype` was an object: a function is a value here, a prototype
+link points at a heap cell, and nothing led from the cell back to the
+function. Now something does. The helpers Babel and TypeScript emit for a
+class with a parent are made of exactly those calls, so compiled classes run
+(three whole programs in `tests/js-conformance/prototypes.dat`), every
+`assert_throws_js` of web-platform-tests passes (18 subtests), and the DOM's
+interface objects have their parents as prototypes
+(`Object.getPrototypeOf(HTMLElement) === Element`).
+
+```bash
+./build/litebird --run-js 'class A { static s() { return "A.s"; } } class B extends A {} class C extends B {}
+console.log(Object.getPrototypeOf(C) === B, C.s(), Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype)'
+# true A.s true function        (before: Uncaught TypeError: s is not a function)
+make js-conformance      # 907 / 921; prototypes.dat 67 / 76
+make test262             # the standard's own tests on functions, classes and objects: 10,835 of 15,686
+```
+
+What is still missing around classes (`new.target` in a parent's
+constructor, `Symbol.species`, `Symbol.hasInstance`, custom elements compiled
+by Babel) is in `ARCHITECTURE.md`, Phase 34, section 9, with a failing case
+each; the design and what it costs are in the same place, and `AUDIT.md`,
+finding 41, says what found what.
 
 
 ### Media & Vector Rendering (Phase 38)

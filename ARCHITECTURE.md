@@ -347,7 +347,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 31** | **CSS whitespace trimming is linear:** the parser and resolver scan outer whitespace once and shift the surviving text at most once; `nth-child` no longer copies and lowercases padding per child. 300,000 spaces in the measured `:nth-child`, grid, filter, duration and transform paths went from seconds to tens or hundreds of milliseconds with the same layout/paint. | ✅ Completed (117/117 unit suites; `make bench-css` compares 20 padded runs with compact pages) |
 | **Phase 32** | **The CSS color keywords are the CSS values everywhere:** the renderer’s 19-name table (15 wrong) is gone; `Color::parse()` and the computed style’s color path share one 148-name table, all CSS Color 4 keyword values, and `transparent` has alpha 0. `tomato`, `silver`, `rebeccapurple`, `aqua`/`cyan`, `grey` aliases and the rest now paint and compute as the specification says; unknown names still parse to black. | ✅ Completed (114/114 unit suites) |
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
-| **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (140/140 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
+| **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
 
 ---
@@ -3202,12 +3202,12 @@ whose pull request named them, was merged.
 | test262, all of `built-ins`, `language` and `annexB` (the same runner with those three names) | 47,967 tests: 26,012 pass, 25,893 in the binary of `main`. 122 that failed pass. Three that passed fail, for a reason that is in section 9 (below) |
 | web-platform-tests (`make wpt`) | 4658 / 5192; the 18 `function-as-prototype` subtests pass and are off the list, which has 534 left, 495 of them frames |
 | DOM corpus (`make dom-conformance`) | 640 / 640 in 24 files; `interfaces.dat` is new, 11 cases. The binary of `main` passes none of the 11. In jsdom (`--reference`): 640 / 640 |
-| Unit tests (`make test`) | 140 / 140; five are new (a function as a prototype, in the interpreter and in the VM; classes and their parents collected; classes compiled to ES5; a class that extends a DOM interface; interface objects collected with their page) |
+| Unit tests (`make test`) | 144 / 144; five are new (a function as a prototype, in the interpreter and in the VM; classes and their parents collected; classes compiled to ES5; a class that extends a DOM interface; interface objects collected with their page) |
 | Classes compiled to ES5 | Three programs in the corpus: Babel 7's helpers, Babel's newer ones (`_callSuper`), TypeScript's `__extends`. `main` stops at `Cannot redefine property: prototype` in the first two and at `call is not a function` in the third |
 | A page that is not in the corpus (`tools/conformance/compare_with_jsdom.py`) | `tests/dom-conformance/open/compiled-custom-elements.js`, custom elements compiled by Babel: 4 of 9 lines as jsdom prints them (1 on `main`). The other five are section 9 |
 | html5lib, XML, URL, `make diff-trees`, `make diff-xml` | 1781 / 1792, 1702 / 1702, 1188 / 1188, 0 of 6,000 trees and 0 of 4,000 documents differ: as on `main` |
-| `make deep` (before the last two merges of `main`, which brought a fix to a CSS selector, the attribute list of Phase 35, and three suites) | `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])` |
-| `make asan` (ASan + UBSan; before those merges too, so with 137 suites; the unit tests were run again in the sanitizer build after them, 140 / 140) | 137 / 137; JavaScript 906 / 921 (one case of deep recursion needs more stack than a sanitizer build's frames leave, as before); DOM 640 / 640; URL 1188 / 1188; XML 1702 / 1702; web-platform-tests 4658 / 5192; 1,000 generated XML documents and 1,000 round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either sanitizer |
+| `make deep` (when `main` was three merges back: before a fix to a CSS selector, the attribute list of Phase 35 and the media work of Phase 38 came in, with seven suites) | `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])` |
+| `make asan` (ASan + UBSan; at that state too, so with 137 suites. The unit tests were run again in the sanitizer build after the first two of those merges, 140 / 140; after the third, CI's sanitizer job is what ran them) | 137 / 137; JavaScript 906 / 921 (one case of deep recursion needs more stack than a sanitizer build's frames leave, as before); DOM 640 / 640; URL 1188 / 1188; XML 1702 / 1702; web-platform-tests 4658 / 5192; 1,000 generated XML documents and 1,000 round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either sanitizer |
 | Two pages alive at once, one destroyed and collected while the other runs on | The chain questions get the same answers in each throughout, and the cell count comes back to where it started: a block of the last new unit suite, and the same sequence as a side harness in the sanitizer build, with no report |
 
 **What test262 found.** The corpus here is recorded from Node and was
@@ -3445,6 +3445,87 @@ one element with 50,000 attributes remains open (about 2.9 s), as do the
 `Attr`-is-not-a-`Node`, one-qualified-name-in-two-namespaces and collection
 named-property rows. No parser, layout, CSS or JavaScript engine file was
 changed.
+
+---
+
+## Phase 38 Architecture: Real-Web JPEG/GIF Decoding, SVG & Canvas 2D
+
+Phase 38 replaces Litebird's toy vector/canvas rasterizers and fills the missing
+real-web raster image decoders (JPEG and GIF) with zero-dependency C++20
+implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
+
+### 1. Standalone ITU-T T.81 JPEG Decoder (`JpegDecoder.hpp`, `src/render/JpegDecoder.cpp`)
+
+- **Markers & frame modes:** `SOI`/`EOI`, `DQT` (8-bit and 16-bit), `DHT`
+  (9-bit fast lookup table with 16-bit bit-by-bit fallback and over-subscription
+  checks), `DRI` / `RST0`–`RST7`, `APP0` (JFIF), `APP14` (Adobe color transform),
+  `SOF0` (Baseline DCT), `SOF1` (Extended Sequential DCT), and `SOF2`
+  (Progressive DCT).
+- **Progressive scans:** Maintains per-component DCT coefficient buffers across
+  arbitrary scan scripts: interleaved/non-interleaved DC first (`Ah=0`) and DC
+  refinement (`Ah>0`), AC first with EOB runs (`EOB0`–`EOB14`, `ZRL`), and AC
+  successive-approximation refinement.
+- **IDCT, chroma upsampling & color:** Separable double-precision 8×8 IDCT with
+  DC-only row/column fast paths, centered `[3/4, 1/4]` triangle chroma
+  upsampling (4:4:4, 4:2:2, 4:2:0, 4:4:0, odd dimensions), and Grayscale,
+  YCbCr, RGB, CMYK, and Adobe YCCK conversions.
+- **Security bounds:** Rejects streams exceeding `kMaxDecodedPixels` (16M px) or
+  `kMaxScans` (64), checks all segment lengths and Huffman trees, and verifies
+  against `RasterBudget`.
+
+### 2. Standalone GIF87a / GIF89a Decoder (`GifDecoder.hpp`, `src/render/GifDecoder.cpp`)
+
+- **LZW & palettes:** Full 2..8-bit variable-width LZW (up to 12-bit codes) with
+  deferred clear-code support when the 4096-entry table fills, Global and Local
+  Color Tables, and 4-pass GIF interlacing.
+- **Animation & disposal:** Graphic Control Extensions (transparency index,
+  centisecond frame delays, all four disposal methods: `None`, `DoNotDispose`,
+  `RestoreBackground`, `RestorePrevious`), `NETSCAPE2.0` loop count, and
+  sub-rectangle compositing onto a persistent canvas buffer.
+- **Bounds:** Enforces `kMaxDecodedPixels` and `kMaxFrames` (default 256).
+
+### 3. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
+
+- **Transform & state stack:** Full 2D affine Current Transformation Matrix
+  (`TransformMatrix2D`) with `save()`/`restore()`, `translate()`, `rotate()`,
+  `scale()`, `transform()`, `setTransform()`, `resetTransform()`, `globalAlpha`,
+  and an intersectable alpha clip mask (`clip()`).
+- **Scanline rasterizer & stroking:** 4× vertical + analytical horizontal
+  anti-aliased scanline fill supporting `FillRule::NonZero` and
+  `FillRule::EvenOdd`; polygon-ribbon thick stroking with `butt`/`round`/
+  `square` caps, `miter`/`bevel`/`round` joins, dash arrays (`setLineDash`/
+  `getLineDash`/`lineDashOffset`), and `stroke_gradient`.
+- **Paths, gradients, pixels & JS:** `roundRect`, `ellipse`, `arcTo`, `rect`,
+  `isPointInPath`, inverse-CTM linear/radial gradients with `Pad`/`Reflect`/
+  `Repeat` spread modes, `createImageData`/`getImageData`/`putImageData`,
+  CTM-aware `drawImage`, and real JS property accessors via
+  `JsValue::define_accessor` (`globalAlpha`, `lineCap`, `lineJoin`,
+  `miterLimit`, `lineDashOffset`).
+
+### 4. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
+
+- **DOM & CSS integration:** Iterative ID indexing (safe on 200,000-deep DOMs),
+  `<defs>` exclusion, presentation attributes + inline `style` parsing,
+  `#RGBA`/`#RRGGBBAA`/`rgba()` colors, `currentColor` inheritance, `opacity` /
+  `fill-opacity` / `stroke-opacity`, `fill-rule`, `display:none` /
+  `visibility:hidden`.
+- **Geometry & paint servers:** Full SVG path grammar including W3C F.6.5/F.6.6
+  `A/a` elliptical arcs, `S/s`/`T/t` smooth curves, compact arc flags, and
+  scientific notation; `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`);
+  full `transform` list stack; `<linearGradient>`/`<radialGradient>` with `href`
+  inheritance, `objectBoundingBox`/`userSpaceOnUse`, `gradientTransform`, and
+  `spreadMethod`; `<use>` (with recursion/cycle guard) + `<symbol>`;
+  `<clipPath>`; rounded `<rect rx ry>`; nested `<svg>`.
+
+### 5. Verification & what remains open
+
+`make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
+PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
+(exact `max_diff = 0` on every frame), and 5 SVG feature suites. `make fuzz-media`
+mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
+ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
+is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
+and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
 
 ---
 

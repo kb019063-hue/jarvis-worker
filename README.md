@@ -34,8 +34,9 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 140 suites, all passing | `make test` |
-| Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
+| Engine unit tests | 144 suites, all passing | `make test` |
+| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
+| Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
@@ -47,7 +48,9 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 140 engine suites
+make test            # 144 engine suites
+make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
+make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
@@ -534,18 +537,19 @@ Litebird implements the complete modern browser rendering pipeline:
 
 ### 6. Multi-Backend Rendering, SVG Vector Graphics, Canvas 2D & Image Decoding (`include/litebird/render/`)
 - **Native SVG Vector Graphics Engine (`SvgRenderer`):**
-  - Direct rasterization of `<svg>` DOM trees into `ImageNode` layout boxes.
-  - Coordinate normalization via `viewBox` attribute scaling factors.
-  - Shape rasterization: `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, and `<path>` (commands `M`/`m`, `L`/`l`, `H`/`h`, `V`/`v`, `Z`/`z`).
-  - Native fill colors, stroke outlines, and stroke widths.
+  - Direct rasterization of `<svg>` DOM trees into `ImageNode` layout boxes with iterative ID indexing and recursion/cycle guards.
+  - `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`), full `transform` stacks (`matrix`, `translate`, `scale`, `rotate`, `skewX`, `skewY`), and nested `<svg>`.
+  - Shape & path rasterization: `<rect>` (including `rx`/`ry`), `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, and full SVG `<path>` grammar (`M/m`, `L/l`, `H/h`, `V/v`, `C/c`, `S/s`, `Q/q`, `T/t`, W3C F.6.5/F.6.6 `A/a` elliptical arcs, `Z/z`).
+  - Paint servers, styling, reuse & clipping: `<defs>`, `<linearGradient>`/`<radialGradient>` (`href` inheritance, `objectBoundingBox`/`userSpaceOnUse`, `gradientTransform`, `spreadMethod`), `<use>`/`<symbol>`, `<clipPath>`, inline `style`, `rgba()`/`#RGBA`/`#RRGGBBAA`, `currentColor`, `opacity`/`fill-opacity`/`stroke-opacity`, `fill-rule="evenodd"|"nonzero"`, `display:none`/`visibility:hidden`, and dashed/capped/joined strokes.
 - **HTML5 `<canvas>` 2D Context API (`CanvasRenderingContext2D`):**
-  - Vector path building: `beginPath()`, `moveTo()`, `lineTo()`, `closePath()`, `stroke()`, `fill()`.
-  - Geometric primitives: `fillRect()`, `clearRect()`, `strokeRect()`, `arc()`.
-  - **Gradients & Smooth Curves:** Linear and radial gradients (`createLinearGradient`, `createRadialGradient`, `addColorStop`), quadratic Bézier curves (`quadraticCurveTo`), and cubic Bézier curves (`bezierCurveTo`).
-  - Integer Bresenham line drawing and multi-node scanline polygon rasterization.
-  - Alpha blending and image blitting via `drawImage()`.
-  - Direct integration into the Layout Tree as an `ImageNode`.
-- **Native Image Decoders (`ImageDecoder`):** Decodes PNG (DEFLATE / uncompressed), JPEG baseline, Netpbm PPM, and BMP formats directly into 32-bit ARGB pixel buffers with bilinear filtering.
+  - 2D CTM stack (`save`/`restore`, `translate`, `rotate`, `scale`, `transform`, `setTransform`, `resetTransform`), `globalAlpha`, and `clip()`.
+  - 4× vertical + analytical horizontal anti-aliased scanline rasterization (`nonzero` and `evenodd` winding rules) and polygon-ribbon thick stroking (`lineWidth`, `lineCap`, `lineJoin`, `miterLimit`, `setLineDash`/`getLineDash`/`lineDashOffset`, `strokeGradient`).
+  - Geometric & path primitives: `fillRect`, `clearRect`, `strokeRect`, `rect`, `roundRect`, `arc`, `ellipse`, `arcTo`, `quadraticCurveTo`, `bezierCurveTo`, `isPointInPath`.
+  - Inverse-CTM linear/radial gradients (`Pad`/`Reflect`/`Repeat`), `createImageData`/`getImageData`/`putImageData`, CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
+- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `ImageDecoder`):**
+  - Standalone ITU-T T.81 Baseline/Extended/Progressive JPEG decoder (`JpegDecoder`: 4:4:4/4:2:2/4:2:0/4:4:0, Grayscale/YCbCr/RGB/CMYK/YCCK, restart markers, multi-scan progressive refinement).
+  - Standalone GIF87a/GIF89a single-frame & animated multi-frame decoder (`GifDecoder`: 2..8-bit LZW, GCT/LCT, 4-pass interlacing, transparency, all 4 disposal methods, loop count).
+  - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, and BMP (`JpegDecoder`/`GifDecoder` wiring into `ImageDecoder::decode` tracked as follow-up once PR #39 lands).
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
@@ -655,7 +659,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 140 engine test suites
+# Run the 144 engine test suites
 make test
 ```
 
@@ -720,14 +724,14 @@ make test
 make test
 ```
 
-Output (140 suites; the first and last lines shown):
+Output (144 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: html_parser... PASSED
 ...
-All 140 engine test suites passed successfully!
+All 144 engine test suites passed successfully!
 ```
 
 ```bash
@@ -822,3 +826,19 @@ constructor, `Symbol.species`, `Symbol.hasInstance`, custom elements compiled
 by Babel) is in `ARCHITECTURE.md`, Phase 34, section 9, with a failing case
 each; the design and what it costs are in the same place, and `AUDIT.md`,
 finding 41, says what found what.
+
+
+### Media & Vector Rendering (Phase 38)
+
+Phase 38 adds standalone zero-dependency C++20 decoders for ITU-T T.81
+Baseline/Extended/Progressive JPEG (`JpegDecoder`) and single/multi-frame
+GIF87a/GIF89a (`GifDecoder`), and upgrades `CanvasRenderingContext2D` and
+`SvgRenderer` with CTM stacks, anti-aliased scanline filling (`nonzero`/
+`evenodd`), thick capped/joined/dashed stroking, clipping masks, inverse-CTM
+gradients, full SVG path/elliptical-arc grammar, `<defs>`/`<use>`/`<symbol>`/
+`<clipPath>`, inline `style`, and opacity. `make verify-media` verifies 21 JPEG
+variants pixel-by-pixel against `libjpeg` (52–99 dB PSNR), 9 GIF variants
+bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, and 5 SVG feature
+suites; `make fuzz-media` runs 1,800 mutated JPEG/GIF/SVG inputs through
+`build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
+Phase 38, and `AUDIT.md`, finding 43.

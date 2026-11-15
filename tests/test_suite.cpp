@@ -9119,7 +9119,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         }
         assert(list.empty());
         list["after-clear"] = "ok";
-        assert(list.size() == 1 && list[0].first == "after-clear" && list[0].second == "ok");
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
     }
 
     // Copy and assignment preserve the visible order/values and remain
@@ -9147,7 +9147,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     move_assigned.clear();
     assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
     move_assigned["fresh"] = "1";
-    assert(move_assigned.size() == 1 && move_assigned[0].first == "fresh");
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
 
     // The index can be built after a dead prefix already exists: stay below
     // the scan threshold while erasing the front, grow past it, then search.
@@ -9155,7 +9155,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
     for (int i = 0; i < 10; ++i) late.erase(late.begin());
     for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
-    assert(late.size() == 41 && late[0].first == "l10");
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
     assert(late.count("l50") == 1); // builds the index with a nonzero start
     for (int i = 10; i < 51; ++i) {
         assert(late.erase("l" + std::to_string(i)) == 1);
@@ -9180,7 +9180,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     for (int i = 0; i < 50000; ++i) {
         assert(direct.erase("a" + std::to_string(i)) == 1);
         assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
-        if (i + 1 < 50000) assert(direct[0].first == "a" + std::to_string(i + 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
     }
     const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     assert(direct.empty());

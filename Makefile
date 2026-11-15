@@ -78,6 +78,8 @@ SRCS = src/dom/Node.cpp \
        src/net/ResourceLoader.cpp \
        src/net/UrlParser.cpp \
        src/net/DataUrl.cpp \
+       src/net/Idna.cpp \
+       src/net/IdnaTables.cpp \
        src/net/Fetch.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
@@ -105,9 +107,9 @@ XML_DIFF_COUNT ?= 4000
 XML_ROUNDTRIP_COUNT ?= 3000
 XML_ASAN_DIFF_COUNT ?= 1000
 XML_ASAN_ROUNDTRIP_COUNT ?= 1000
-# URL cases that must pass (tests/url). The 38 that do not are host names
-# outside ASCII.
-URL_FLOOR ?= 1150
+# URL cases that must pass (tests/url). The UTS #46 host handling makes all
+# of them pass.
+URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes.

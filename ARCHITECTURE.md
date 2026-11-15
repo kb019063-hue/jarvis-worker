@@ -340,7 +340,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 24** | **Strings that cost what they read:** a string value is a 24-byte handle on a shared block of UTF-8 (`JsString`) instead of text stored inside the value. Reading, passing and indexing a string no longer copy or re-scan it, `s += x` appends in place, a large slice is a range of its parent. Lookbehind in regular expressions is matched right to left. A loop over 200,000 characters went from **77 s to 91 ms**, 100,000 appends from **9.8 s to 49 ms**; short strings cost the same as before. | ✅ Completed (corpus 840 of 845 cases, 34 of them new long-string scripts; 88/88 unit suites; `make tsan`, `make bench`, `make diff-strings`) |
 | **Phase 25** | **Trees of any depth:** the HTML parser attaches nothing deeper than 512 levels (an element that would be deeper becomes a sibling; none is dropped, and the parser's state is untouched), every question about the stack of open elements is answered from an index, and nothing that walks the DOM recurses, so a script may nest as deep as it likes. Bitmaps of `<canvas>` and `<svg>` have a budget, `calc()` a nesting limit. `tools/fuzz/deep_pages.py` generates the pages a mutation fuzzer cannot: 300,000 nested `<div>` went from **`SIGSEGV` to rendering in 4 s**, a paragraph of 100,000 images from **35 s to 1.3 s**. | ✅ Completed (deep pages: 264 of 392 runs failed, now 0; 95/95 unit suites; html5lib 1771; `make deep` in CI) |
 | **Phase 26** | **The tree builder against pages nobody wrote:** random pages and fragments parsed by Litebird and by parse5, every difference cut down to a few tags and read against the standard. A void element written with a slash (`<br/>`) closed its parent; `innerHTML` parsed everything as the content of a `<body>`; an end tag could close an SVG or MathML element of the same name; 21 faults in all, 13 of them with no case in the corpus. **408 of 6,000 random pages got a wrong tree, now none.** | ✅ Completed (html5lib 1771 → 1781 of 1792, the 11 left all `<select>`; 103/103 unit suites; `make diff-trees` over four kinds of page) |
-| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1150 of 1188; 110/110 unit suites) |
+| **Phase 27** | **The DOM a script sees, rebuilt against an outside scoreboard:** a 572-case corpus with expected output recorded from jsdom (`make dom-conformance`, enforced in CI). A DOM node was a special kind of value whose members were a list of names inside `JsValue::get_property`; it is now an object with its interface's prototype, one per node. About 170 interfaces, a selector engine, the standard's serializer, form state and validation, events with default actions, mutation observers, custom elements, live ranges, a computed style with a real cascade, `location`/`history`, and the URL Standard's parser (web-platform-tests data, `make url-conformance`). A page's scripts run while it is parsed. | ✅ Completed (DOM corpus 61 → 572 of 572; URL data 2 → 1188 of 1188; 110/110 unit suites) |
 | **Phase 28** | **XML:** an XML 1.0 (Fifth Edition) parser with namespaces, written against the W3C XML Conformance Test Suite (`make xml-conformance`) and compared with Expat and libxml2 on generated documents (`make diff-xml`). It reads nothing outside the document and bounds what entities and attribute defaults may expand to. `DOMParser` with an XML type gives an XML document, or a `parsererror` document; it gave an HTML one. A document knows whether it is HTML, elements and attributes have namespaces, a long attribute list is indexed, CDATA sections and processing instructions are nodes. `XMLSerializer` and `innerHTML` in an XML document follow *DOM Parsing and Serialization* and are checked by writing trees made to break them and reading them back. `XMLHttpRequest` answers `data:` URLs, so `responseXML` exists. The web-platform-tests for `dom/nodes` and `domparsing` run with their own harness (`make wpt`). | ✅ Completed (W3C XML suite 1702 of 1702 counted; web-platform-tests 4640 of 5192 subtests, the others listed with reasons; DOM corpus 572 → 629 of 629; 129/129 unit suites) |
 | **Phase 29** | **Table spans and collapsed borders:** cells are placed into an occupancy grid before sizing, so `rowspan`/`colspan` reserve their slots (`rowspan="0"` spans to the end of the group); a spanning cell distributes its width requirement over the columns it covers; row heights grow from single-row cells first, then rowspan cells grow the last row they cover; `border-collapse: collapse` makes each cell paint half of a shared border and forces `border-spacing` to 0; `border-spacing: <h> <v>` moves cells in from the table edge and apart; percentage cell widths resolve against the table's width (`width_basis_override`); table cells and floats keep their style edges through `apply_style_edges()`. | ✅ Completed (html5lib 1781 of 1792 unchanged; 113/113 unit suites) |
 | **Phase 30** | **Deletion and front edits are linear:** the property map is now an insertion-ordered `std::list` with a hash index that is built once above 12 entries and erased in O(1), so `delete` does not rebuild an index; array storage is `std::deque`, so `shift()` and `unshift()` move no tail. 50,000 deletes went from 131,423 ms to 25–29 ms on the machine used to verify Phase 23; `shift()` until empty went from 8,228 ms to about 10 ms. | ✅ Completed (113/113 unit suites; JS corpus 840 of 845 unchanged) |
@@ -2110,17 +2110,17 @@ looked at, not of what is wrong.
 | :--- | :--- |
 | DOM corpus (`make dom-conformance`) | 572 / 572; 61 on `main`. The everyday probe 68 / 68; 13 on `main` |
 | The corpus in jsdom (`--reference`) | 572 / 572 |
-| URL data of web-platform-tests (`make url-conformance`): 904 parsing cases, 284 setter cases | 873 and 277, 1150 of 1188; 0 and 2 on `main`, where a URL object had no `username`. The 38 left are host names outside ASCII |
+| URL data of web-platform-tests (`make url-conformance`): 904 parsing cases, 284 setter cases | 873 and 277, 1150 of 1188; 0 and 2 on `main`, where a URL object had no `username`. All 1,188 since host names outside ASCII go through Unicode's UTS #46 |
 | Unit tests (`make test`) | 110 / 110; seven are new (the URL parser, URLs in the DOM, page scripts, where jsdom is not the standard, lookups by id, the computed style, ranges), and five old ones asserted what no browser does and were corrected |
 | html5lib tree construction (`make conformance`) | 1781 / 1792, as before |
 | JavaScript corpus (`make js-conformance`) | 840 / 845, as before |
 | `make diff-trees` | 4 × 1,500 random pages against parse5 8.1.1, 0 differ, as before |
 | `make fuzz` (in the sanitizer build) | 400 parser mutations and 400 pipeline runs, 0 findings |
 | `make deep` | 1,292 runs over 445 pages at 200,000 levels, 0 failed. The slowest takes 19 s of the 60 allowed; the same page takes 21 s with the binary of `main` |
-| `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages at 10,000 levels | 110 / 110; JavaScript 839 / 845, as before; DOM 572 / 572; URL 1150 / 1188; 400 + 400 runs; 842 runs over 295 pages, 0 failed. No report |
+| `make asan` (ASan + UBSan): unit tests, the three corpora, both fuzzers, the deep pages at 10,000 levels | 110 / 110; JavaScript 839 / 845, as before; DOM 572 / 572; URL 1,188 / 1,188; 400 + 400 runs; 842 runs over 295 pages, 0 failed. No report |
 
 The DOM corpus has a job of its own in CI (the reference check, the
-scoreboard with a floor of 572, the URL data with a floor of 1150), and
+scoreboard with a floor of 572, the URL data with a floor of 1188), and
 `make asan` runs both corpora in the sanitizer build.
 
 ### 12. What is still open here
@@ -2159,9 +2159,6 @@ scoreboard with a floor of 572, the URL data with a floor of 1150), and
 - **Nothing is fetched.** A `<script src>` or a stylesheet link is not
   loaded (a script inserted with a `src` gets an `error` event).
   `document.write` does nothing.
-- **Host names outside ASCII** are kept as written: `http://faß.example`
-  should become `xn--fa-hia.example` (Unicode's IDNA tables, the 38 URL
-  cases).
 - **Style sheets are not objects.** `document.styleSheets` lists the
   `<style>` elements and nothing more: no `cssRules`, no `insertRule`. A
   script that writes its rules that way changes nothing; one that appends
@@ -2731,7 +2728,7 @@ enumerate: order after delete and insert            4ms       23ms  a,c,d,b
 `make test` passes all 113 suites (the new one included). `make js-conformance`
 is unchanged at 840 of 845 (everyday probe 90 of 90; 839 of 845 in the ASan
 build, the same one deep-nesting case the sanitizer cannot fit); `make
-dom-conformance` is 572 of 572, `make url-conformance` is 1150 of 1188, and
+dom-conformance` is 572 of 572, `make url-conformance` is 1188 of 1188, and
 `make conformance` is 1781 of 1792, unchanged — the parser was not touched.
 `make fuzz` reports 0 findings in 400 parser mutations and 400 layout/render
 and image cases; `make deep` reports 0 failures in 1,292 runs over 445 pages;
@@ -2886,7 +2883,7 @@ the raw 148-entry value table does not contain, and the shared table alone
 would have dropped both. The normalizer now stores either keyword explicitly;
 the rerun is 572/572. `make conformance` is 1781/1792,
 `make js-conformance` is 840/845, `make dom-conformance` is 572/572,
-`make url-conformance` is 1150/1188, `make diff-trees` has 0 differing pages,
+`make url-conformance` is 1188/1188, `make diff-trees` has 0 differing pages,
 and `make asan` reports no sanitizer finding (ASan JS corpus 839/845; its
 ASan deep run covers 842 executions). The HTML and JS floors are
 unchanged.
@@ -3069,9 +3066,9 @@ random-access iterators) and
 script front removals with generous wall-clock guards). `make
 bench-attributes` passes 6 cases with 0 failures. A generated out-of-corpus
 probe run through `tools/conformance/compare_with_jsdom.py` printed `4 lines,
-4 the same` before and after. The release run kept html5lib 1781/1792, JS
-840/845, DOM 629/629, URL 1150/1188, XML 1702/1702, WPT 4640/5192,
-diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed (slowest 22.0 s),
+4 the same` before and after. The merged release run kept html5lib 1781/1792,
+JS 840/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192,
+diff-trees/diff-xml 0 differing, deep 1332 runs/0 failed (slowest 24.0 s),
 bench-css 20 padded runs/0 failures, security-fetch 3 checks/0 failures, and
 diff-strings at the 95-difference ceiling. The sanitizer scoreboards are
 recorded in AUDIT.md, finding 39.

@@ -32,7 +32,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | **web-platform-tests** (`dom/nodes`, `domparsing`) | **4640 / 5192 subtests**; the 552 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
-| **URL parsing and setters** | **1150 / 1188 (96.8%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
+| **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | Engine unit tests | 134 suites, all passing | `make test` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents and 1,927 whole ones written and read back: 0 findings | `make asan` (ASan + UBSan) |
@@ -164,8 +164,9 @@ Four things about the number:
   answer (`tests/dom-conformance/README.md` names the places).
 - **URLs are measured separately**, with the data browsers use:
   `tests/url/` is `urltestdata.json` and `setters_tests.json` from
-  web-platform-tests, 1,188 cases, of which 1,150 pass. The 38 others are
-  host names outside ASCII, which need Unicode's IDNA tables.
+  web-platform-tests, 1,188 cases, all of which pass. Host names with
+  characters outside ASCII go through Unicode's UTS #46 (`make url-conformance`
+  enforces 1,188); `tests/url/README.md` says exactly what is checked.
 
 ### XML
 

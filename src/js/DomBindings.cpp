@@ -219,9 +219,10 @@ JsObject* Realm::proto(const std::string& name) {
     });
     constructor.define_property("prototype", proto_value, 0);
     if (def->parent) {
-        // Statics are inherited: `HTMLElement.ELEMENT_NODE`, and the engine
-        // looks here for the parent of a class that extends this one.
-        constructor.define_property("%super", ctor(def->parent), PropertyMap::Hidden);
+        // The interface object of the parent is the prototype of this one, as
+        // Web IDL has it: `Object.getPrototypeOf(HTMLElement) === Element`,
+        // and statics are inherited (`HTMLElement.ELEMENT_NODE`).
+        js_set_prototype(constructor.function_cell(), ctor(def->parent).as_prototype());
     }
     ctors[name] = constructor;
 

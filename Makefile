@@ -103,7 +103,7 @@ XML_FLOOR ?= 1702
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 4640
+WPT_FLOOR ?= 4658
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -115,11 +115,12 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes.
-JS_ASAN_FLOOR ?= 833
+# case that the normal build passes. (906 pass there today, 907 in the normal
+# build; the CI floor says why it is one below that.)
+JS_ASAN_FLOOR ?= 905
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 629
+DOM_ASAN_FLOOR ?= 640
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -138,7 +139,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes security-fetch help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes security-fetch help
 
 all: $(TARGET)
 
@@ -185,6 +186,17 @@ js-conformance: $(TARGET)
 ## and the network: jsdom is installed into build/jsdom.
 dom-conformance: $(TARGET)
 	@$(DOM_CONFORMANCE)
+
+## Twenty-one directories of test262, the suite of the language's standard:
+## what a change to functions, classes, prototypes or property definition
+## can move. Downloaded the first time into build/test262, at a pinned
+## commit; needs the network once. It is not a scoreboard and has no floor
+## (about two thirds pass). It is for the difference between two builds,
+##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
+## which lists every test that passes in the first and not in the second,
+## and fails if there is one. About three minutes for two builds.
+test262: $(TARGET)
+	@python3 tools/conformance/run_test262.py
 
 ## URL scoreboard: the web-platform-tests URL data (tests/url), run through
 ## `new URL()` and the setters of the object. Needs nothing but the binary.
@@ -346,4 +358,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, security-fetch, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, security-fetch, clean"

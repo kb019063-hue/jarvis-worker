@@ -38,6 +38,15 @@ void JsObject::trace(Heap& heap) {
     if (trace_extra) trace_extra(heap);
     if (exotic) exotic->trace(heap);
     if (dom_node && trace_dom_node) trace_dom_node(heap, *this);
+    // The function this cell stands for. The copy is counted like a
+    // property, and its payload holds the one handle to this cell
+    // (count_value): that is what lets the pair be collected together.
+    if (const JsValue* function = function_value()) heap.mark_held_value(*function, internal.use_count());
+}
+
+void JsObject::set_function_value(const JsValue& function) {
+    klass = ObjectClass::Function;
+    internal = std::make_shared<JsValue>(function);
 }
 
 void JsObject::release_contents() {
@@ -127,26 +136,31 @@ void Heap::mark_value(const JsValue& val) {
     if (val.object_val) {
         mark_object(val.object_val);
     }
+    // A function keeps its own-property cell, if it has one, and the scopes
+    // it closed over.
+    if (JsObject* cell = val.payload_cell()) mark_object(cell);
     if (val.type == JsType::Function) {
-        // A function keeps its own-property cell and the scopes it closed over.
         if (const auto* fd = val.function_data()) {
-            if (fd->cell) mark_object(fd->cell);
             if (fd->closure) mark_environment(fd->closure.get());
         }
     }
-    // Native functions keep their properties in a shared table, not a cell.
+    // A native function keeps its properties in a shared table until it is
+    // given a cell.
     if (const PropertyMap* map = val.loose_properties()) mark_property_map(map);
 }
 
 void Heap::mark_shared_value(const std::shared_ptr<JsValue>& value) {
-    if (!value) return;
+    if (value) mark_held_value(*value, value.use_count());
+}
+
+void Heap::mark_held_value(const JsValue& value, long holders) {
     if (m_counting) {
         // Counted only when this is the one holder: a second holder may be
         // native code, which would keep the value alive without us knowing.
-        if (value.use_count() == 1) count_value(*value);
+        if (holders == 1) count_value(value);
         return;
     }
-    mark_value(*value);
+    mark_value(value);
 }
 
 // Counting pass: `val` is stored somewhere the collector can enumerate (a
@@ -166,8 +180,9 @@ void Heap::count_value(const JsValue& val) {
     info.owners = val.payload_owners();
     info.function = val.function_data();
     info.properties = val.payload_properties();
+    info.cell = val.payload_cell();
+    if (info.cell) ++info.cell->gc_seen;
     if (info.function) {
-        if (JsObject* cell = info.function->cell) ++cell->gc_seen;
         if (info.function->closure) {
             auto scope = m_scopes.find(info.function->closure.get());
             if (scope != m_scopes.end()) ++scope->second.seen;
@@ -178,8 +193,8 @@ void Heap::count_value(const JsValue& val) {
 
 // A payload native code holds a copy of: what it refers to is alive.
 void Heap::mark_payload(const PayloadInfo& info) {
+    if (info.cell) mark_object(info.cell);
     if (info.function) {
-        if (info.function->cell) mark_object(info.function->cell);
         if (info.function->closure) mark_environment(info.function->closure.get());
     }
     if (info.properties) mark_property_map(info.properties);

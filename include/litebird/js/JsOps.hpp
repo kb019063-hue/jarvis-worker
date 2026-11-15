@@ -182,8 +182,17 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor);
 
 /// Calls `fn` with `this`. Throws TypeError when `fn` is not callable.
 JsValue js_call(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args);
+/// What `new` can be used on, a class can extend and `super(...)` can call:
+/// a function that is not an arrow function, a method, an async or a
+/// generator function, and not Function.prototype. Of the built-in functions
+/// Function.prototype is the only one known not to be a constructor: nothing
+/// tells `Math.max` from `Map`, so `new Math.max()` still passes.
+bool js_is_constructor(const JsValue& value);
 /// `new ctor(...args)`. Throws TypeError when `ctor` is not a constructor.
-JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args);
+/// `new_target` is the third argument of `Reflect.construct`, when there is
+/// one: the object that is made gets the `prototype` of that function, not
+/// `ctor`'s. (Inside `ctor`, `new.target` is still `ctor`.)
+JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, const JsValue* new_target = nullptr);
 /// A function that calls `fn` with `this` fixed to `receiver`.
 JsValue js_bind_this(const JsValue& fn, const JsValue& receiver);
 

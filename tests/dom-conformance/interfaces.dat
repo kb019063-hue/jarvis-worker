@@ -1,0 +1,142 @@
+#fixture
+<html><head><title>Interfaces</title></head><body><div id="a"><p>x</p><input id="i"><svg id="s"></svg></div></body></html>
+
+#name the interface object of an element has its parent's as prototype, up to EventTarget
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+console.log(chain(HTMLDivElement));
+console.log(chain(HTMLInputElement));
+console.log(chain(HTMLUnknownElement));
+console.log(chain(SVGSVGElement));
+console.log(chain(document.createElement('video').constructor));
+console.log(chain(document.createElement('a').constructor), '|', chain(document.createElement('nosuch').constructor));
+#expect
+HTMLDivElement < HTMLElement < Element < Node < EventTarget
+HTMLInputElement < HTMLElement < Element < Node < EventTarget
+HTMLUnknownElement < HTMLElement < Element < Node < EventTarget
+SVGSVGElement < SVGGraphicsElement < SVGElement < Element < Node < EventTarget
+HTMLVideoElement < HTMLMediaElement < HTMLElement < Element < Node < EventTarget
+HTMLAnchorElement < HTMLElement < Element < Node < EventTarget | HTMLUnknownElement < HTMLElement < Element < Node < EventTarget
+
+#name the interface objects of nodes that are not elements
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+console.log(chain(Text), '|', chain(Comment), '|', chain(CDATASection), '|', chain(ProcessingInstruction));
+console.log(chain(Document), '|', chain(XMLDocument), '|', chain(DocumentFragment), '|', chain(ShadowRoot));
+console.log(chain(Attr), '|', chain(DocumentType), '|', chain(CharacterData));
+#expect
+Text < CharacterData < Node < EventTarget | Comment < CharacterData < Node < EventTarget | CDATASection < Text < CharacterData < Node < EventTarget | ProcessingInstruction < CharacterData < Node < EventTarget
+Document < Node < EventTarget | XMLDocument < Document < Node < EventTarget | DocumentFragment < Node < EventTarget | ShadowRoot < DocumentFragment < Node < EventTarget
+Attr < Node < EventTarget | DocumentType < Node < EventTarget | CharacterData < Node < EventTarget
+
+#name the interface objects of events
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+console.log(chain(MouseEvent), '|', chain(KeyboardEvent), '|', chain(CustomEvent));
+console.log(chain(PointerEvent), '|', chain(WheelEvent), '|', chain(FocusEvent), '|', chain(InputEvent));
+console.log(chain(SubmitEvent), '|', chain(ProgressEvent), '|', chain(HashChangeEvent), '|', chain(PopStateEvent));
+console.log(chain(ErrorEvent), '|', chain(MessageEvent), '|', chain(StorageEvent), '|', chain(CompositionEvent), '|', chain(TouchEvent));
+console.log(chain(CloseEvent), '|', chain(PageTransitionEvent), '|', chain(BeforeUnloadEvent), '|', chain(TransitionEvent), '|', chain(PromiseRejectionEvent));
+#expect
+MouseEvent < UIEvent < Event | KeyboardEvent < UIEvent < Event | CustomEvent < Event
+PointerEvent < MouseEvent < UIEvent < Event | WheelEvent < MouseEvent < UIEvent < Event | FocusEvent < UIEvent < Event | InputEvent < UIEvent < Event
+SubmitEvent < Event | ProgressEvent < Event | HashChangeEvent < Event | PopStateEvent < Event
+ErrorEvent < Event | MessageEvent < Event | StorageEvent < Event | CompositionEvent < UIEvent < Event | TouchEvent < UIEvent < Event
+CloseEvent < Event | PageTransitionEvent < Event | BeforeUnloadEvent < Event | TransitionEvent < Event | PromiseRejectionEvent < Event
+
+#name interface objects that are not nodes or events
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+console.log(chain(XMLHttpRequest), '|', chain(XMLHttpRequestUpload), '|', chain(AbortSignal));
+console.log(chain(RadioNodeList), '|', chain(HTMLFormControlsCollection), '|', chain(HTMLOptionsCollection), '|', chain(HTMLCollection), '|', chain(NodeList));
+console.log(chain(Range), '|', chain(DOMException), '|', chain(DOMRect), '|', chain(File), '|', chain(EventTarget), '|', chain(Event));
+console.log(chain(Window), '|', chain(Selection), '|', chain(MutationObserver), '|', chain(DOMTokenList), '|', chain(NamedNodeMap), '|', chain(DOMParser), '|', chain(XMLSerializer));
+#expect
+XMLHttpRequest < XMLHttpRequestEventTarget < EventTarget | XMLHttpRequestUpload < XMLHttpRequestEventTarget < EventTarget | AbortSignal < EventTarget
+RadioNodeList < NodeList | HTMLFormControlsCollection < HTMLCollection | HTMLOptionsCollection < HTMLCollection | HTMLCollection | NodeList
+Range < AbstractRange | DOMException | DOMRect < DOMRectReadOnly | File < Blob | EventTarget | Event
+Window < EventTarget | Selection | MutationObserver | DOMTokenList | NamedNodeMap | DOMParser | XMLSerializer
+
+#name an interface object with no parent has the prototype every function has
+#code
+var fp = Object.getPrototypeOf(EventTarget);
+console.log(typeof fp, fp === Object.getPrototypeOf(Event), fp === Object.getPrototypeOf(DOMException), fp === Object.getPrototypeOf(NodeList), fp === Object.getPrototypeOf(Range) || fp === Object.getPrototypeOf(Object.getPrototypeOf(Range)), typeof fp.call, typeof Object.getPrototypeOf(fp));
+#expect
+function true true true true function object
+
+#name constants are inherited along the interface objects
+#code
+console.log(HTMLElement.ELEMENT_NODE, Element.TEXT_NODE, HTMLDivElement.DOCUMENT_NODE, Text.COMMENT_NODE, Document.DOCUMENT_POSITION_CONTAINS, Attr.ATTRIBUTE_NODE);
+console.log(Node.hasOwnProperty('ELEMENT_NODE'), Element.hasOwnProperty('ELEMENT_NODE'), HTMLElement.hasOwnProperty('ELEMENT_NODE'), 'ELEMENT_NODE' in HTMLElement, 'ELEMENT_NODE' in EventTarget, 'ELEMENT_NODE' in Event);
+console.log(MouseEvent.AT_TARGET, KeyboardEvent.DOM_KEY_LOCATION_RIGHT, KeyboardEvent.hasOwnProperty('DOM_KEY_LOCATION_RIGHT'), CustomEvent.BUBBLING_PHASE, Event.hasOwnProperty('NONE'), PointerEvent.CAPTURING_PHASE, UIEvent.NONE);
+console.log(XMLHttpRequest.DONE, XMLHttpRequest.hasOwnProperty('DONE'), typeof XMLHttpRequestUpload.DONE, typeof EventTarget.DONE);
+#expect
+1 3 9 8 8 2
+true false false true false false
+2 2 true 3 true 1 0
+4 true undefined undefined
+
+#name what an interface object has of its own, and what every function has
+#code
+console.log(typeof HTMLElement.nope, typeof HTMLElement.call, typeof HTMLElement.bind, HTMLElement.name, HTMLElement.length, HTMLDivElement.name, typeof HTMLDivElement.prototype);
+console.log(HTMLDivElement.prototype.constructor === HTMLDivElement, HTMLElement.prototype.constructor === HTMLElement, Object.getPrototypeOf(HTMLDivElement.prototype) === HTMLElement.prototype, Object.getPrototypeOf(HTMLDivElement).prototype === Object.getPrototypeOf(HTMLDivElement.prototype));
+#expect
+undefined function function HTMLElement 0 HTMLDivElement object
+true true true true
+
+#name a class that extends an interface has the interface object as its prototype
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+class Card extends HTMLElement { static get observedAttributes() { return ['title']; } static make() { return document.createElement('x-card'); } }
+customElements.define('x-card', Card);
+var c = Card.make();
+console.log(Object.getPrototypeOf(Card) === HTMLElement, Card.ELEMENT_NODE, Card.hasOwnProperty('ELEMENT_NODE'), c instanceof Card, c.constructor === Card, Object.getPrototypeOf(Card.prototype) === HTMLElement.prototype);
+class Wide extends Card {}
+console.log(Object.getPrototypeOf(Wide) === Card, Wide.observedAttributes.join(), Wide.TEXT_NODE, chain(Wide));
+#expect
+true 1 false true true true
+true title 3 Wide < Card < HTMLElement < Element < Node < EventTarget
+
+#name classes that extend Event, CustomEvent and EventTarget
+#code
+function chain(c) { var names = []; while (typeof c === 'function' && c.name && names.length < 12) { names.push(c.name); c = Object.getPrototypeOf(c); } return names.join(' < '); }
+
+class MyEvent extends Event { constructor(type, extra) { super(type, { bubbles: true }); this.extra = extra; } }
+class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
+var bus = new Bus(), seen = [];
+bus.addEventListener('x', function (e) { seen.push(e.type, e.extra, e instanceof MyEvent, e instanceof Event, e.bubbles, e.eventPhase === MyEvent.AT_TARGET); });
+console.log(bus.emit('x'), seen.join(' '));
+console.log(Object.getPrototypeOf(MyEvent) === Event, Object.getPrototypeOf(Bus) === EventTarget, MyEvent.CAPTURING_PHASE, MyEvent.hasOwnProperty('CAPTURING_PHASE'), chain(MyEvent), '|', chain(Bus));
+class Detail extends CustomEvent {}
+var d = new Detail('y', { detail: 5 });
+console.log(d.detail, d instanceof CustomEvent, d instanceof Detail, Object.getPrototypeOf(Detail) === CustomEvent, chain(Detail));
+#expect
+true x 7 true true true true
+true true 1 false MyEvent < Event | Bus < EventTarget
+5 true true true Detail < CustomEvent < Event
+
+#name instanceof and isPrototypeOf with interface objects reached through getPrototypeOf
+#code
+var div = document.createElement('div'), P = Object.getPrototypeOf(HTMLDivElement), PP = Object.getPrototypeOf(P);
+console.log(div instanceof P, div instanceof PP, P === HTMLElement, PP.prototype === Element.prototype, P.prototype.isPrototypeOf(div), document.createTextNode('t') instanceof P, typeof P, P.name);
+console.log(HTMLElement.isPrototypeOf(HTMLDivElement), Node.isPrototypeOf(HTMLDivElement), HTMLDivElement.isPrototypeOf(HTMLElement), EventTarget.isPrototypeOf(Text), Event.isPrototypeOf(MouseEvent), Event.isPrototypeOf(Node));
+#expect
+true true true true true false function HTMLElement
+true true false true true false
+
+#name an ES5 constructor made a subclass of an interface by setPrototypeOf
+#code
+function Old() {}
+Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+Object.setPrototypeOf(Old, HTMLElement);
+console.log(Object.getPrototypeOf(Old) === HTMLElement, Old.ELEMENT_NODE, Old.hasOwnProperty('ELEMENT_NODE'), Object.getPrototypeOf(Old.prototype) === HTMLElement.prototype, Node.isPrototypeOf(Old), typeof Old.call);
+Object.setPrototypeOf(Old, Function.prototype);
+console.log(Object.getPrototypeOf(Old) === HTMLElement, typeof Old.ELEMENT_NODE, typeof Old.call);
+#expect
+true 1 false true true function
+false undefined function

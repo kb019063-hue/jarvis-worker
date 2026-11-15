@@ -871,23 +871,38 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     }
 
     std::vector<JsValue> args = eval_arguments(expr->args, env);
-    JsValue made;       // an object the parent gave back in place of `this`
+
+    // `this` is bound once. A second `super(...)` runs the parent all the
+    // same, as the language has it, and is refused when the parent comes
+    // back. It is given an object of its own to work on, so that what the
+    // first one made is left as it was.
+    JsValue spare;
+    if (auto* bound = env->lookup(kThisIsBound); bound && bound->value.is_truthy()) {
+        spare = JsValue::make_object();
+        const JsValue proto = new_target ? new_target->get_property("prototype") : JsValue::make_undefined();
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) spare.object_val->prototype = target;
+        }
+    }
+    const JsValue& receiver = spare.is_object() ? spare : this_val;
+
+    JsValue made;       // an object the parent gave back in place of the one it was given
     if ((parent_fd && parent_fd->node) || parent.forwards_construct()) {
-        // A script parent initialises the same `this` object, unless its
+        // A script parent initialises the object it is given, unless its
         // constructor returns another: then that one is `this` from here on,
         // as it is, with the prototype it has. A bound function constructs
         // its target on an object of its own, which comes back the same way.
-        made = parent.construct(args, &this_val, new_target);
-        if (!made.is_object_like() || made.identity() == this_val.identity()) made = JsValue::make_undefined();
+        made = parent.construct(args, &receiver, new_target);
+        if (!made.is_object_like() || made.identity() == receiver.identity()) made = JsValue::make_undefined();
     } else {
         // A built-in parent (Error, Array, Map, ...) builds its own object;
         // take over its state so `this` becomes that kind of object. A host
         // constructor (Event, HTMLElement) is handed `this` and makes it the
         // object it constructs, and then there is nothing to take over.
-        JsValue built = parent.construct_as_super(args, this_val, new_target);
-        if (built.object_val && this_val.object_val && built.object_val != this_val.object_val) {
+        JsValue built = parent.construct_as_super(args, receiver, new_target);
+        if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
             JsObject* from = built.object_val;
-            JsObject* to = this_val.object_val;
+            JsObject* to = receiver.object_val;
             for (const auto& entry : from->properties) {
                 auto& slot = to->properties.entry(entry.first);
                 slot.second = entry.second;
@@ -905,8 +920,9 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             if (from->dom_node) to->dom_node = from->dom_node;
         }
     }
-    // The parent has run; now `this` is bound, and that happens once. (Looked
-    // up only now: the parent's constructor may have added to this scope.)
+    // The parent has run; now `this` is bound. (The scope is looked at again:
+    // the parent's constructor may have added to it, or bound `this` itself
+    // through an arrow function it was passed.)
     if (auto* bound = env->lookup(kThisIsBound)) {
         if (bound->value.is_truthy()) {
             js_throw_error(JsErrorKind::ReferenceError, "Super constructor may only be called once");

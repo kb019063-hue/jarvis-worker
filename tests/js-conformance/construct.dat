@@ -727,3 +727,16 @@ var f = new F(), g = Reflect.construct(F, [], G);
 console.log(f.direct, f.arrow, g.direct, eval('typeof F'), new B().b, (function () { return eval('new.target'); })() === undefined);
 #expect
 true true false function 2 true
+
+#name a second super() leaves what the first one made as it was
+#code
+var runs = 0;
+class Counted { constructor() { this.items = [++runs]; } }
+class Twice extends Counted { constructor() { super(); this.items.push('mine'); try { super(); } catch (e) { this.err = e.name; } } }
+class M extends Map { constructor() { super([[1, 2]]); try { super(); } catch (e) { this.err = e.name; } } }
+class E extends Error { constructor() { super('first'); try { super('second'); } catch (e) { this.err = e.name; } } }
+class L extends Array { constructor() { super(); this.push(1, 2); try { super(); } catch (e) { this.err = e.name; } } }
+var t = new Twice(), m = new M(), e = new E(), l = new L();
+console.log(t.items.join('+'), runs, t.err, '|', m.get(1), m.size, m.err, '|', e.message, e.err, '|', l.length, l.err);
+#expect
+1+mine 2 ReferenceError | 2 1 ReferenceError | first ReferenceError | 2 ReferenceError

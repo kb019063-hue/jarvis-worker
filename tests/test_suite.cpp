@@ -10610,6 +10610,436 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     assert(c_img && c_img->width == 40 && c_img->height == 40);
 }
 
+// ============================================================================
+// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// ============================================================================
+
+TEST(worker_mime_policy_enforces_javascript_content_types) {
+    using namespace litebird;
+
+    // 1. Direct WHATWG MIME Sniffing §4.3 table checks (all 16 standard types,
+    //    case-insensitivity, parameters, and surrounding HTTP whitespace).
+    const char* allowed[] = {
+        "application/ecmascript",
+        "application/javascript",
+        "application/x-ecmascript",
+        "application/x-javascript",
+        "text/ecmascript",
+        "text/javascript",
+        "text/javascript1.0",
+        "text/javascript1.1",
+        "text/javascript1.2",
+        "text/javascript1.3",
+        "text/javascript1.4",
+        "text/javascript1.5",
+        "text/jscript",
+        "text/livescript",
+        "text/x-ecmascript",
+        "text/x-javascript",
+        "TEXT/JAVASCRIPT; charset=utf-8",
+        "  application/javascript ; charset=UTF-8 ",
+        "\ttext/javascript\t",
+    };
+    for (const char* ct : allowed) {
+        assert(WorkerObject::is_javascript_mime_type(ct));
+    }
+
+    const char* rejected[] = {
+        "",
+        "   ",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "text/html",
+        "application/json",
+        "application/octet-stream",
+        "image/png",
+        "image/svg+xml",
+        "text/javascript/extra",
+        "text/ javascript",
+        "application/javascript2",
+        ";charset=utf-8",
+    };
+    for (const char* ct : rejected) {
+        assert(!WorkerObject::is_javascript_mime_type(ct));
+    }
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    // 2. Real loopback HTTP server returning diverse Content-Type headers & status codes.
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(server >= 0);
+    int reuse = 1;
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(::bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    assert(::listen(server, 16) == 0);
+    socklen_t addr_len = sizeof(addr);
+    assert(::getsockname(server, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
+    const int port = ntohs(addr.sin_port);
+
+    std::atomic<bool> stop_server{false};
+    std::thread server_thread([server, &stop_server]() {
+        while (!stop_server.load(std::memory_order_acquire)) {
+            timeval tv{0, 50000};
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(server, &rfds);
+            if (::select(server + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+            const int client = ::accept(server, nullptr, nullptr);
+            if (client < 0) continue;
+            char buf[2048];
+            const ssize_t n = ::recv(client, buf, sizeof(buf) - 1, 0);
+            std::string req = (n > 0) ? std::string(buf, static_cast<size_t>(n)) : "";
+            std::string path = "/";
+            auto sp1 = req.find(' ');
+            if (sp1 != std::string::npos) {
+                auto sp2 = req.find(' ', sp1 + 1);
+                if (sp2 != std::string::npos) path = req.substr(sp1 + 1, sp2 - sp1 - 1);
+            }
+
+            std::string reply;
+            if (path == "/ok.js") {
+                std::string body = "postMessage('http-js-ok');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/legacy.js") {
+                std::string body = "postMessage('http-legacy-ok');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: application/x-javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/plain.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_PLAIN');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/html.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_HTML');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/missing-ct.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_NO_CT');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/redirect.js") {
+                std::string body = "redirecting";
+                reply = "HTTP/1.1 302 Found\r\nLocation: /ok.js\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/status300.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_300');";
+                reply = "HTTP/1.1 300 Multiple Choices\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else {
+                std::string body = "postMessage('MUST_NOT_RUN_404');";
+                reply = "HTTP/1.1 404 Not Found\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            }
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        }
+    });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    auto doc = std::make_shared<Document>();
+    doc->set_url(base + "/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.eval(
+        "var msgs = {}, errs = {};"
+        "function spawn(k, url) {"
+        "  var w = new Worker(url);"
+        "  w.onmessage = function(e) { msgs[k] = String(e.data); };"
+        "  w.addEventListener('error', function(e) { errs[k] = e.message; });"
+        "  return w;"
+        "}"
+        "var ws = ["
+        "  spawn('data_js', 'data:text/javascript,postMessage(\"data-js-ok\")'),"
+        "  spawn('data_app_js', 'data:application/javascript;charset=utf-8,postMessage(\"data-app-ok\")'),"
+        "  spawn('data_plain', 'data:text/plain,postMessage(\"BAD\")'),"
+        "  spawn('data_default', 'data:,postMessage(\"BAD\")'),"
+        "  spawn('data_html', 'data:text/html,postMessage(\"BAD\")'),"
+        "  spawn('http_ok', '" + base + "/ok.js'),"
+        "  spawn('http_legacy', '" + base + "/legacy.js'),"
+        "  spawn('http_plain', '" + base + "/plain.js'),"
+        "  spawn('http_html', '" + base + "/html.js'),"
+        "  spawn('http_no_ct', '" + base + "/missing-ct.js'),"
+        "  spawn('http_redirect', '" + base + "/redirect.js'),"
+        "  spawn('http_300', '" + base + "/status300.js'),"
+        "  spawn('http_404', '" + base + "/notfound.js')"
+        "];"
+    );
+
+    assert(wait_for(js,
+        "!!(msgs.data_js && msgs.data_app_js && msgs.http_ok && msgs.http_legacy && msgs.http_redirect && "
+        "errs.data_plain && errs.data_default && errs.data_html && "
+        "errs.http_plain && errs.http_html && errs.http_no_ct && errs.http_300 && errs.http_404)"));
+
+    assert(js.eval("msgs.data_js").to_string() == "data-js-ok");
+    assert(js.eval("msgs.data_app_js").to_string() == "data-app-ok");
+    assert(js.eval("msgs.http_ok").to_string() == "http-js-ok");
+    assert(js.eval("msgs.http_legacy").to_string() == "http-legacy-ok");
+    assert(js.eval("msgs.http_redirect").to_string() == "http-js-ok");
+    assert(js.eval("!msgs.data_plain && !msgs.data_default && !msgs.data_html").is_truthy());
+    assert(js.eval("!msgs.http_plain && !msgs.http_html && !msgs.http_no_ct && !msgs.http_300 && !msgs.http_404").is_truthy());
+    assert(js.eval("errs.data_plain").to_string().find("text/plain") != std::string::npos);
+    assert(js.eval("errs.http_html").to_string().find("text/html") != std::string::npos);
+    assert(js.eval("errs.http_no_ct").to_string().find("missing Content-Type") != std::string::npos);
+    assert(js.eval("errs.http_300").to_string().find("300") != std::string::npos);
+    assert(js.eval("errs.http_404").to_string().find("404") != std::string::npos);
+
+    js.eval("ws.forEach(function(w) { w.terminate(); });");
+    stop_server.store(true, std::memory_order_release);
+    server_thread.join();
+    ::close(server);
+
+    // 3. Local file document: .txt file is rejected by MIME policy even when local files are allowed.
+    const std::string suffix = std::to_string(static_cast<long>(::getpid()));
+    const std::string txt_path = "/tmp/litebird-worker-mime-" + suffix + ".txt";
+    {
+        std::ofstream f(txt_path);
+        f << "postMessage('MUST_NOT_RUN_TXT');";
+    }
+    auto file_doc = std::make_shared<Document>();
+    file_doc->set_url("file:///tmp/litebird-worker-mime-page-" + suffix + ".html");
+    JsInterpreter local(file_doc);
+    local.load_page("<!DOCTYPE html><body></body>");
+    local.eval(
+        "var localMsg = '', localErr = '';"
+        "var lw = new Worker('" + txt_path + "');"
+        "lw.onmessage = function(e) { localMsg = String(e.data); };"
+        "lw.addEventListener('error', function(e) { localErr = e.message; });"
+    );
+    assert(wait_for(local, "!!localErr"));
+    assert(local.eval("localMsg").to_string().empty());
+    assert(local.eval("localErr").to_string().find("text/plain") != std::string::npos);
+    local.eval("lw.terminate();");
+    std::remove(txt_path.c_str());
+}
+
+TEST(worker_options_module_policy_and_global_scope) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const std::string suffix = std::to_string(static_cast<long>(::getpid()));
+    const std::string secret_js = "/tmp/litebird-import-secret-" + suffix + ".js";
+    {
+        std::ofstream f(secret_js);
+        f << "var LEAKED_SECRET = 1;";
+    }
+
+    auto web_doc = std::make_shared<Document>();
+    web_doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(web_doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+
+    // 1. Constructor validation: missing `new`, missing arg, bad options, invalid type enum.
+    js.eval(
+        "var ctorErrs = {};"
+        "try { Worker('data:text/javascript,1'); } catch (e) { ctorErrs.noNew = e.name; }"
+        "try { new Worker(); } catch (e) { ctorErrs.noArg = e.name; }"
+        "try { new Worker('data:text/javascript,1', 42); } catch (e) { ctorErrs.badOpts = e.name; }"
+        "try { new Worker('data:text/javascript,1', { type: 'esm' }); } catch (e) { ctorErrs.badType = e.name; }"
+    );
+    assert(js.eval("ctorErrs.noNew").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.noArg").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
+
+    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
+    //    it queues an error event to both onerror and addEventListener('error').
+    js.eval(
+        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
+        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function() { modRan = true; };"
+        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
+    );
+    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
+    assert(!js.eval("modRan").is_truthy());
+    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
+    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
+    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    js.eval("wm.terminate();");
+
+    // 3. Classic options (name, self.location, null/undefined options) and importScripts().
+    js.eval(
+        "var classicInfo = null, nullOptsOk = false, importResult = null;"
+        "var wc = new Worker('data:text/javascript,postMessage({ name: self.name, globalName: name, sameSelf: self.self === self, proto: self.location.protocol })', { type: 'classic', name: 'compute-7' });"
+        "wc.onmessage = function(e) { classicInfo = e.data; };"
+        "var wn = new Worker('data:text/javascript,postMessage(123)', null);"
+        "wn.onmessage = function(e) { nullOptsOk = (e.data === 123); };"
+        "var wi = new Worker('data:text/javascript,"
+        "  importScripts(\"data:text/javascript,var helperVal = 40;\", \"data:application/javascript,helperVal += 2;\");"
+        "  var plainErr = \"\", localErr = \"\";"
+        "  try { importScripts(\"data:text/plain,helperVal = 999;\"); } catch (e) { plainErr = String(e); }"
+        "  try { importScripts(\"" + secret_js + "\"); } catch (e) { localErr = String(e); }"
+        "  postMessage({ val: helperVal, plainErr: plainErr, localErr: localErr });"
+        "');"
+        "wi.onmessage = function(e) { importResult = e.data; };"
+    );
+    assert(wait_for(js, "!!(classicInfo && nullOptsOk && importResult)"));
+    assert(js.eval("classicInfo.name").to_string() == "compute-7");
+    assert(js.eval("classicInfo.globalName").to_string() == "compute-7");
+    assert(js.eval("classicInfo.sameSelf").is_truthy());
+    assert(js.eval("classicInfo.proto").to_string() == "data:");
+    assert(js.eval("importResult.val").to_number() == 42.0);
+    assert(js.eval("importResult.plainErr").to_string().find("text/plain") != std::string::npos);
+    assert(!js.eval("importResult.localErr").to_string().empty());
+
+    js.eval("wc.terminate(); wn.terminate(); wi.terminate();");
+    std::remove(secret_js.c_str());
+}
+
+TEST(worker_event_target_error_and_message_dispatch) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    JsInterpreter js(nullptr);
+
+    // 1. addEventListener('error') alone (no onerror), plus onerror + multiple listeners,
+    //    dedup, removeEventListener, once, handleEvent, preventDefault, stopImmediatePropagation.
+    js.eval(
+        "var log = [];"
+        "var w1 = new Worker('data:text/javascript,throw new Error(\"boom-1\")');"
+        "function dupFn(e) { log.push('dup:' + e.type + ':' + (e.target === w1)); }"
+        "function removedFn() { log.push('REMOVED'); }"
+        "var objListener = { handleEvent: function(e) { log.push('obj:' + e.cancelable); e.preventDefault(); log.push('dp:' + e.defaultPrevented); } };"
+        "w1.onerror = function(e) { log.push('onerror:' + e.message.indexOf('boom-1')); };"
+        "w1.addEventListener('error', dupFn);"
+        "w1.addEventListener('error', dupFn);"
+        "w1.addEventListener('error', removedFn);"
+        "w1.removeEventListener('error', removedFn);"
+        "w1.addEventListener('error', objListener);"
+        "w1.addEventListener('error', function(e) { log.push('stop'); e.stopImmediatePropagation(); });"
+        "w1.addEventListener('error', function() { log.push('AFTER_STOP'); });"
+        ""
+        "var onlyListenerErr = '';"
+        "var w2 = new Worker('data:text/plain,not-js');"
+        "w2.addEventListener('error', function(e) { onlyListenerErr = e.message; });"
+        ""
+        "var onceCount = 0, allCount = 0;"
+        "var w3 = new Worker('data:text/javascript,self.addEventListener(\"message\", function(e) { postMessage(e.data * 10); });');"
+        "w3.addEventListener('message', function() { onceCount++; }, { once: true });"
+        "w3.addEventListener('message', function() { allCount++; });"
+        "w3.postMessage(1); w3.postMessage(2); w3.postMessage(3);"
+        ""
+        "var internalHandled = false, leakedToPage = false;"
+        "var w4 = new Worker('data:text/javascript,"
+        "  self.addEventListener(\"error\", function(e) { e.preventDefault(); postMessage(\"caught-inside\"); });"
+        "  self.onmessage = function() { throw new Error(\"inner\"); };"
+        "');"
+        "w4.onmessage = function(e) { if (e.data === 'caught-inside') internalHandled = true; };"
+        "w4.addEventListener('error', function() { leakedToPage = true; });"
+        "w4.postMessage('go');"
+    );
+
+    assert(wait_for(js, "log.length >= 5 && !!onlyListenerErr && allCount === 3 && internalHandled"));
+    assert(js.eval("log.join('|')").to_string() == "onerror:7|dup:error:true|obj:true|dp:true|stop");
+    assert(js.eval("onlyListenerErr").to_string().find("text/plain") != std::string::npos);
+    assert(js.eval("onceCount").to_number() == 1.0);
+    assert(js.eval("allCount").to_number() == 3.0);
+    assert(!js.eval("leakedToPage").is_truthy());
+
+    js.eval("w1.terminate(); w2.terminate(); w3.terminate(); w4.terminate();");
+
+    // 2. Direct C++ WorkerObject::create_js_instance also wires onmessage/onerror/addEventListener.
+    ResourceRequestContext ctx;
+    JsValue direct = WorkerObject::create_js_instance(
+        "data:text/javascript,postMessage('direct-ok')", ctx, WorkerOptions{WorkerType::Classic, "d"});
+    js.global_env()->define("directW", direct);
+    js.eval("var directMsg = ''; directW.onmessage = function(e) { directMsg = e.data; };");
+    assert(wait_for(js, "directMsg === 'direct-ok'"));
+    js.eval("directW.terminate();");
+}
+
+TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    JsInterpreter js(nullptr);
+
+    // 1. 8 concurrent workers starting simultaneously + self.close() cleanup.
+    js.eval(
+        "var sum = 0, done = 0;"
+        "for (var i = 1; i <= 8; i++) {"
+        "  (function(n) {"
+        "    var w = new Worker('data:text/javascript,postMessage(' + n + '); self.close();');"
+        "    w.onmessage = function(e) { sum += e.data; done++; };"
+        "  })(i);"
+        "}"
+    );
+    assert(wait_for(js, "done === 8"));
+    assert(js.eval("sum").to_number() == 36.0);
+
+    // 2. Nested worker (page -> parent worker -> child worker -> parent -> page)
+    //    and clean parent termination (child must be stopped before parent's EventLoop dies).
+    js.eval(R"js(
+        var nestedReply = '';
+        var childUrl = "data:text/javascript,self.onmessage = function(e) { postMessage(e.data + ':child'); };";
+        var parentUrl = "data:text/javascript,"
+            + "var child = new Worker(" + JSON.stringify(childUrl) + ");"
+            + "child.onmessage = function(e) { postMessage(e.data + ':parent'); };"
+            + "child.postMessage('ping');";
+        var parent = new Worker(parentUrl);
+        parent.onmessage = function(e) { nestedReply = e.data; };
+    )js");
+    assert(wait_for(js, "nestedReply === 'ping:child:parent'"));
+    js.eval("parent.terminate();");
+
+    // 3. Collect garbage after workers close/terminate to verify zero UAF/cycles.
+    EventLoop::default_loop().tick();
+    Heap::default_heap().collect_garbage();
+
+    // 4. Spawn 4 idle workers without calling terminate(), then verify shutdown_all_workers()
+    //    joins every thread deterministically.
+    js.eval(
+        "for (var j = 0; j < 4; j++) {"
+        "  new Worker('data:text/javascript,self.onmessage = function(e) { postMessage(e.data); };');"
+        "}"
+    );
+    WorkerObject::shutdown_all_workers();
+    EventLoop::default_loop().tick();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -10780,6 +11210,12 @@ int main() {
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
+
+    // Phase 40: Worker MIME/module policy, EventTarget dispatch, and lifecycle safety.
+    RUN_TEST(worker_mime_policy_enforces_javascript_content_types);
+    RUN_TEST(worker_options_module_policy_and_global_scope);
+    RUN_TEST(worker_event_target_error_and_message_dispatch);
+    RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

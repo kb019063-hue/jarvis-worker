@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 161 engine suites
+make test            # 162 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -821,8 +821,8 @@ character is written where the block's text ends when the low half arrives.
 Anything that reads the text settles the handle first, writing three bytes
 into the free room or copying once into a block the handle's own block keeps
 alive. `make bench-surrogates` runs the two sizes a doubling apart and the
-keep-each-prefix shape against Node.js with a one-second limit: 18 ms, 33 ms
-and 22 ms, where `main`'s binary fails all three (5.5 s, over 8 s, 3.9 s). The
+keep-each-prefix shape against Node.js with a one-second limit: 17 ms, 28 ms
+and 14 ms, where `main`'s binary fails all three (5.5 s, over 8 s, 3.9 s). The
 corpus case that used to take 5.5 s of its 10-second budget takes 0.035 s, so
 the JavaScript floor in CI is now the score, 907 of 921. The handle is a word
 wider, which costs about 5% across the string benchmarks that were already

@@ -2843,9 +2843,10 @@ pair. Whole-process times on the verification machine, release build:
 | 20,000 | 5,583 ms | 18 ms | 308.0× | 11 ms |
 | 40,000 | 23,252 ms | 30 ms | 782.1× | 15 ms |
 
-Best of three, idle machine, `--run-js`, whole process. The baseline is this
-tree built with `main`'s `JsString`, kept as `build/litebird-surrogate-baseline`,
-so the only difference is this change. Four times the time for twice the input
+Best of three, idle machine, `--run-js`, whole process. The baseline is the
+branch's base commit (`ce37948`), which is `main`'s `JsString`, kept as
+`build/litebird-surrogate-baseline`; these scripts run no layout, so the only
+difference on their path is this change. Four times the time for twice the input
 before; in step with the input after, and the same as a pair at a time. One case
 of the corpus, `pairs made a half at a time in a long string`
 (`tests/js-conformance/long-strings.dat`), does this 60,000 times: it took
@@ -2889,9 +2890,9 @@ make bench-surrogates
 
 | Case | Before (`main`) | After | Node.js |
 | :--- | ---: | ---: | ---: |
-| half a pair at a time, 20,000 | 5,546 ms | 18 ms | 47 ms |
-| half a pair at a time, 40,000 | over 8 s | 33 ms | 51 ms |
-| half a pair, keeping each prefix, 20,000 | 3,856 ms | 22 ms | 46 ms |
+| half a pair at a time, 20,000 | 5,546 ms | 17 ms | 36 ms |
+| half a pair at a time, 40,000 | over 8 s | 28 ms | 44 ms |
+| half a pair, keeping each prefix, 20,000 | 3,856 ms | 14 ms | 40 ms |
 
 The guard fails on all three cases against `main`'s binary and passes on this
 one. Counting work rather than timing it (`JsString::stats`), 20,000 pairs built
@@ -2901,7 +2902,7 @@ copied the text so far at each of the 20,000 pairs, about a thousand million
 bytes. The corpus case itself went from 5.545 s to 0.035 s, printing the same
 line.
 
-**How it was verified.** `make test` passes 161 suites; the two new ones are
+**How it was verified.** `make test` passes 162 suites; the two new ones are
 `js_string_owes_a_trailing_high_half_until_it_is_read` and
 `js_string_built_half_a_pair_at_a_time_costs_what_it_writes`. Both were checked
 against a mutant: with the deferral turned off (`ends_in_high_half` always
@@ -2935,20 +2936,21 @@ sometimes free and sometimes taken. `0 failure(s)` under ThreadSanitizer and
 under ASan/UBSan with leak checking on — no race, no leak, and every answer the
 text it was given.
 
-The release run on this tree kept every scoreboard: 161 suites; html5lib
+The release run on the merged tree (`main` at `e007fa2`, which brought PR #51's
+float placement) kept every scoreboard: 162 suites; html5lib
 1781/1792 (57 files); JS 907/921 with 0 crashes and 0 timeouts; DOM 640/640;
 URL 1188/1188; XML 1702/1702; WPT 4658/5192 (534 listed, 0 unlisted);
-diff-trees 6,000 pages and diff-xml 4,000 documents with 0 differing;
+diff-trees 6,000 pages and diff-xml 4,000 documents with 0 differing, XML round trip 3000/3000;
 diff-strings at its 95-difference ceiling; deep 1,332 runs over 465 pages at
-depth 200,000 on an 8 MB stack, 0 failed (slowest 26.0 s); bench 42 cases,
+depth 200,000 on an 8 MB stack, 0 failed (slowest 23.4 s); bench 42 cases,
 bench-surrogates 3, bench-css 20, bench-attributes 6,
 bench-tokenizer-attributes 7, security-fetch 3 and security-worker 17, all
-with 0 failures; verify-media 35 checks. The sanitizer run: 161 suites,
+with 0 failures; verify-media 35 checks. The sanitizer run: 162 suites,
 JS 906/921 (one fewer, a deep-recursion case that needs more stack than a
 sanitizer build's frames leave), XML 1702/1702, WPT 4658/5192, 1,000 generated
 XML documents with 0 differing and 1,000 round trips, fuzz 400 / pipeline 400 /
 XML 600 mutations with 0 findings, 1,800 media fuzz cases clean, and 882 deep
-runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest 4.5 s).
+runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest 3.6 s).
 `make tsan` passed both the model and the thread test, under ThreadSanitizer
 and under ASan with leak checking.
 

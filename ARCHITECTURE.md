@@ -3961,8 +3961,9 @@ the size was updated with the reason.
 ### 3. Measured
 
 Whole-process times, release build, idle machine, `--run-js`. The baseline is
-this tree built with `main`'s `JsString`, kept as
-`build/litebird-surrogate-baseline`.
+the branch's base commit (`ce37948`), which is `main`'s `JsString`, kept as
+`build/litebird-surrogate-baseline`; these scripts run no layout, so the only
+difference on their path is this change.
 
 | Pairs appended | Half at a time, before | Half at a time, after | Speedup | A pair at a time, both |
 | ---: | ---: | ---: | ---: | ---: |
@@ -3972,7 +3973,7 @@ this tree built with `main`'s `JsString`, kept as
 | 40,000 | 23,252 ms | 30 ms | 782.1× | 15 ms |
 
 `make bench-surrogates` is the checked-in guard (three cases, best of three,
-results compared with Node.js, one-second limit): 18 ms, 33 ms and 22 ms,
+results compared with Node.js, one-second limit): 17 ms, 28 ms and 14 ms,
 against 5,546 ms, over 8 s and 3,856 ms for `main`'s binary, which fails all
 three. Counting work instead of timing it, 20,000 pairs built half at a time
 copy 399,370 bytes into 152 blocks for 100,000 bytes of text; a pair at a time
@@ -3988,7 +3989,7 @@ Repro: `python3 tools/bench/bench_strings.py --binary … --reference '' --reps 
 
 ### 4. Verification
 
-`make test` passes 161 suites. The two new ones are
+`make test` passes 162 suites. The two new ones are
 `js_string_owes_a_trailing_high_half_until_it_is_read` (what script can see of
 the owed half: nothing is written when it is owed, the text reads as it always
 did, a handle kept before the completion still ends in a lone half, settling
@@ -4018,17 +4019,18 @@ another thread appends to the same block so the room is sometimes free and
 sometimes taken. No race, no leak, every answer right, under ThreadSanitizer
 and under ASan/UBSan with leak checking on.
 
-The full chain on this tree: release — 161 suites, html5lib 1781/1792, JS
+The full chain on the merged tree (`main` at `e007fa2`, PR #51's float
+placement included): release — 162 suites, html5lib 1781/1792, JS
 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192 (534 listed,
 0 unlisted), diff-trees and diff-xml 0 differing, diff-strings at its ceiling,
-deep 1,332 runs over 465 pages at depth 200,000 (0 failed, slowest 26.0 s),
+deep 1,332 runs over 465 pages at depth 200,000 (0 failed, slowest 23.4 s),
 bench 42 / bench-surrogates 3 / bench-css 20 / bench-attributes 6 /
 bench-tokenizer-attributes 7 / security-fetch 3 / security-worker 17 with 0
-failures, verify-media 35 checks. Sanitizers — 161 suites, JS 906/921 (one
+failures, verify-media 35 checks. Sanitizers — 162 suites, JS 906/921 (one
 fewer: deep recursion), XML 1702/1702, WPT 4658/5192, 1,000 generated XML
 documents and 1,000 round trips, fuzz 400 / pipeline 400 / XML 600 mutations
 with 0 findings, 1,800 media fuzz cases clean, deep 882 runs over 315 pages at
-depth 10,000 (0 failed, slowest 4.5 s), and `make tsan` under both sanitizers.
+depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
 
 ### 5. What is still open
 

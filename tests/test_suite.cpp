@@ -14,12 +14,17 @@
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/CssText.hpp"
+#include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
+#include "litebird/net/Deflate.hpp"
+#include "litebird/shell/WebBrowserServer.hpp"
+#include <filesystem>
 #include <array>
 #include <cstdint>
 #include <climits>
@@ -5161,9 +5166,15 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
              "var x = get('data:application/xml,' + encodeURIComponent(bomb));"
              "String(x.responseXML) + ' ' + (x.responseText === bomb) + ' ' + (Date.now() - t0 < 5000)") == "null true true");
     //     A large response is read in time that grows with its size.
-    assert(S("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
-             "var x = get('data:text/xml,' + big);"
-             "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < 5000)") == "200000 2800007 true");
+#if defined(__SANITIZE_ADDRESS__)
+    const char* big_xhr_budget = "15000";
+#else
+    const char* big_xhr_budget = "5000";
+#endif
+    assert(S(std::string("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
+                         "var x = get('data:text/xml,' + big);"
+                         "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
+             big_xhr_budget + ")") == "200000 2800007 true");
 
     settle();
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
@@ -9222,6 +9233,519 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
 }
 
+// =============================================================================
+// Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
+// =============================================================================
+
+TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits) {
+    using namespace litebird;
+
+    // 1. Zlib stored round-trip and Adler-32 integrity check
+    const std::string payload = "Litebird Phase 36 DEFLATE + zlib + gzip verification payload! Repeated payload!";
+    std::vector<uint8_t> zlib_bytes;
+    Deflate::compress_zlib_stored(reinterpret_cast<const uint8_t*>(payload.data()), payload.size(), zlib_bytes);
+    assert(zlib_bytes.size() > payload.size() + 6);
+
+    std::vector<uint8_t> inflated;
+    assert(Deflate::inflate_zlib(zlib_bytes.data(), zlib_bytes.size(), inflated));
+    assert(std::string(inflated.begin(), inflated.end()) == payload);
+
+    // Corrupting the Adler-32 trailer must fail verification.
+    std::vector<uint8_t> corrupted = zlib_bytes;
+    corrupted.back() ^= 0x55u;
+    std::vector<uint8_t> bad_out;
+    assert(!Deflate::inflate_zlib(corrupted.data(), corrupted.size(), bad_out));
+
+    // 2. Fixed-Huffman (BTYPE=1) and Dynamic-Huffman (BTYPE=2) gzip streams
+    const std::vector<uint8_t> fixed_gzip = {
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
+        0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x5c,
+        0x00, 0x3b, 0x7c, 0x8a, 0xdf, 0x12, 0x00, 0x00, 0x00
+    };
+    std::vector<uint8_t> gz_out;
+    assert(Deflate::inflate_gzip(fixed_gzip.data(), fixed_gzip.size(), gz_out));
+    assert(std::string(gz_out.begin(), gz_out.end()) == "hello hello hello\n");
+
+    const std::vector<uint8_t> dyn_gzip = {
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x35, 0x8f, 0xc1, 0x4e, 0xc3, 0x30,
+        0x0c, 0x86, 0x5f, 0xc5, 0xeb, 0x79, 0x5a, 0xd5, 0x03, 0x07, 0xa4, 0x2c, 0x07, 0xba, 0xa1, 0x09,
+        0x0d, 0x81, 0xe8, 0x2e, 0x1c, 0xbd, 0xc4, 0x59, 0xb3, 0xa5, 0x49, 0x64, 0x87, 0xa1, 0xbe, 0x3d,
+        0x11, 0x85, 0x8b, 0x65, 0xf9, 0xff, 0xf5, 0xe9, 0xb3, 0x5a, 0xed, 0xde, 0xfa, 0xd3, 0xe7, 0xfb,
+        0x1e, 0xc6, 0x32, 0x05, 0xad, 0xfe, 0x26, 0xa1, 0xd5, 0x2a, 0xf8, 0x78, 0x03, 0xa6, 0xb0, 0x6d,
+        0xa4, 0xcc, 0x81, 0x64, 0x24, 0x2a, 0x0d, 0x8c, 0x4c, 0xee, 0xff, 0xb2, 0x31, 0x22, 0x8d, 0x56,
+        0x62, 0xd8, 0xe7, 0x02, 0xc2, 0x66, 0xdb, 0x60, 0xce, 0x9b, 0xab, 0x34, 0x60, 0xc9, 0x11, 0x6b,
+        0xd5, 0x2e, 0x59, 0x5d, 0x16, 0xe6, 0x39, 0xd9, 0xb9, 0xf2, 0x3b, 0x7d, 0xf4, 0x85, 0xce, 0x9e,
+        0x2d, 0x3c, 0x71, 0xfa, 0x16, 0x62, 0xd8, 0xc7, 0x8b, 0x8f, 0x54, 0x7b, 0x9d, 0x56, 0x59, 0xef,
+        0xe6, 0x88, 0x93, 0x37, 0x70, 0xf8, 0x72, 0x6e, 0xc2, 0x08, 0x1f, 0xcf, 0x3d, 0x74, 0x8f, 0x0f,
+        0x1d, 0xdc, 0x89, 0xbd, 0xf3, 0x06, 0x8b, 0x4f, 0x11, 0xd0, 0x70, 0x12, 0xa9, 0x8e, 0x18, 0xe0,
+        0x70, 0x7a, 0x3d, 0xae, 0xa1, 0x1f, 0x86, 0x35, 0x60, 0xb4, 0xf0, 0x82, 0x77, 0x1c, 0x16, 0xaf,
+        0x8c, 0x73, 0x48, 0x68, 0x65, 0xa5, 0xda, 0x5c, 0x45, 0x16, 0x85, 0xf6, 0xf7, 0xd3, 0x1f, 0x1b,
+        0x99, 0x9e, 0x24, 0xff, 0x00, 0x00, 0x00
+    };
+    std::vector<uint8_t> dyn_out;
+    assert(Deflate::inflate_gzip(dyn_gzip.data(), dyn_gzip.size(), dyn_out));
+    assert(std::string(dyn_out.begin(), dyn_out.end()) ==
+           "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"styles.css\"><script src=\"app.js\" defer></script></head><body><h1>Litebird Browser Engine</h1><p>Dynamic Huffman RFC 1951 verification across real HTML, CSS, and JavaScript payloads!</p></body></html>");
+
+    // Multi-member concatenated gzip stream decodes both members seamlessly.
+    std::vector<uint8_t> multi_gz = fixed_gzip;
+    multi_gz.insert(multi_gz.end(), fixed_gzip.begin(), fixed_gzip.end());
+    std::vector<uint8_t> multi_out;
+    assert(Deflate::inflate_gzip(multi_gz.data(), multi_gz.size(), multi_out));
+    assert(std::string(multi_out.begin(), multi_out.end()) == "hello hello hello\nhello hello hello\n");
+
+    // 3. Decompression bomb output cap must fail deterministically before OOM.
+    std::vector<uint8_t> large_in(8192, 'A');
+    std::vector<uint8_t> large_z;
+    Deflate::compress_zlib_stored(large_in.data(), large_in.size(), large_z);
+    std::vector<uint8_t> capped_out;
+    assert(!Deflate::inflate_zlib(large_z.data(), large_z.size(), capped_out, 1024));
+}
+
+TEST(png_and_svg_subresource_decoding_and_roundtrip) {
+    using namespace litebird;
+
+    // 1. RGBA PNG lossless encode + decode pixel-exact round-trip
+    auto src_img = std::make_shared<ImageData>();
+    src_img->width = 16;
+    src_img->height = 12;
+    src_img->pixels.resize(16 * 12, 0);
+    for (int y = 0; y < 12; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            src_img->set_pixel(x, y, Color(
+                static_cast<uint8_t>(x * 15),
+                static_cast<uint8_t>(y * 20),
+                static_cast<uint8_t>((x + y) * 7),
+                static_cast<uint8_t>(120 + (x * 8))
+            ).to_argb());
+        }
+    }
+
+    std::vector<uint8_t> png_bytes = ImageDecoder::encode_png(*src_img);
+    assert(png_bytes.size() > 32);
+    assert(png_bytes[0] == 0x89 && png_bytes[1] == 'P' && png_bytes[2] == 'N' && png_bytes[3] == 'G');
+
+    auto decoded_png = ImageDecoder::decode_png(png_bytes.data(), png_bytes.size());
+    assert(decoded_png != nullptr);
+    assert(decoded_png->width == 16 && decoded_png->height == 12);
+    for (int y = 0; y < 12; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            Color a = src_img->get_pixel_color(x, y);
+            Color b = decoded_png->get_pixel_color(x, y);
+            assert(a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a);
+        }
+    }
+
+    // 2. SVG byte decoding and data:image/svg+xml URI decoding
+    const std::string svg_src =
+        R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="20"><rect x="0" y="0" width="24" height="20" fill="#2563eb"/></svg>)";
+    auto svg_img = ImageDecoder::decode_bytes(
+        reinterpret_cast<const uint8_t*>(svg_src.data()), svg_src.size(), "image/svg+xml"
+    );
+    assert(svg_img != nullptr);
+    assert(svg_img->width == 24 && svg_img->height == 20);
+    Color center = svg_img->get_pixel_color(12, 10);
+    assert(center.b > center.r && center.a == 255);
+
+    auto data_svg = ImageDecoder::decode_data_uri(
+        "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='%23ff0000'/></svg>"
+    );
+    assert(data_svg != nullptr && data_svg->width == 10 && data_svg->height == 10);
+    assert(data_svg->get_pixel_color(5, 5).r > 200);
+
+    // 3. Hostile PNG dimensions (50000 x 50000) rejected before allocation
+    std::vector<uint8_t> hostile_png = png_bytes;
+    // IHDR width at offset 16..19, height at 20..23
+    hostile_png[16] = 0x00; hostile_png[17] = 0x00; hostile_png[18] = 0xC3; hostile_png[19] = 0x50;
+    hostile_png[20] = 0x00; hostile_png[21] = 0x00; hostile_png[22] = 0xC3; hostile_png[23] = 0x50;
+    assert(ImageDecoder::decode_png(hostile_png.data(), hostile_png.size()) == nullptr);
+}
+
+TEST(img_subresources_enforce_document_origin_security) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    // Create a temporary local PNG file to verify Finding 40 origin isolation.
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_f40";
+    fs::create_directories(tmp_dir);
+    const fs::path secret_png = tmp_dir / "secret.png";
+
+    auto img = ImageDecoder::create_test_pattern(8, 8, Color(12, 200, 45, 255));
+    assert(img != nullptr && ImageDecoder::save_png(*img, secret_png.string()));
+
+    const std::string file_uri = "file://" + secret_png.string();
+
+    // 1. A local file: document CAN load a local relative or file: <img>.
+    {
+        auto doc = HtmlParser::parse("<img id='pic' src='secret.png'>");
+        doc->set_url("file://" + (tmp_dir / "index.html").string());
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+        assert(root != nullptr);
+        auto pic = doc->get_element_by_id("pic");
+        assert(pic != nullptr && pic->bounding_box().width == 8.0f && pic->bounding_box().height == 8.0f);
+    }
+
+    // 2. An https: web document CANNOT read local files via file://, absolute path, or <base href="file://...">.
+    for (const std::string& doc_url : {
+             std::string("https://attacker.example/page.html"),
+             std::string("http://attacker.example/page.html"),
+             std::string("data:text/html,<h1>opaque</h1>"),
+             std::string("about:blank")
+         }) {
+        const std::string html =
+            "<head><base href='file://" + tmp_dir.string() + "/'></head>"
+            "<body>"
+            "<img id='i1' src='" + file_uri + "'>"
+            "<img id='i2' src='" + secret_png.string() + "'>"
+            "<img id='i3' src='secret.png'>"
+            "</body>";
+        auto doc = HtmlParser::parse(html);
+        doc->set_url(doc_url);
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+        assert(root != nullptr);
+        assert(doc->get_element_by_id("i1")->bounding_box().width == 0.0f);
+        assert(doc->get_element_by_id("i2")->bounding_box().width == 0.0f);
+        assert(doc->get_element_by_id("i3")->bounding_box().width == 0.0f);
+    }
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(document_styles_load_external_links_base_href_media_and_imports) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_css";
+    fs::create_directories(tmp_dir / "assets");
+
+    {
+        std::ofstream f(tmp_dir / "assets" / "imported.css");
+        f << "@import 'cycle.css';\n";
+        f << "#box { width: 210px; height: 45px; }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "cycle.css");
+        f << "@import 'imported.css';\n#box { padding-left: 12px; }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "main.css");
+        f << "@import 'imported.css';\n#box { height: 70px; background-color: rgb(10, 20, 30); }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "mobile.css");
+        f << "#box { width: 99px; }\n";
+    }
+
+    const std::string html =
+        "<!DOCTYPE html><html><head>"
+        "<base href='file://" + (tmp_dir / "assets").string() + "/'>"
+        "<style>#box { width: 50px; height: 20px; border: 2px solid black; }</style>"
+        "<link rel='stylesheet' href='main.css'>"
+        "<link rel='stylesheet' href='mobile.css' media='(max-width: 500px)'>"
+        "<style>#box { border-top-width: 6px; }</style>"
+        "</head><body style='margin:0'><div id='box'>Styled</div></body></html>";
+
+    auto doc = HtmlParser::parse(html);
+    doc->set_url("file://" + (tmp_dir / "index.html").string());
+
+    StyleSheetCache cache;
+    StyleResolver desktop = DocumentStyles::build_resolver(*doc, &cache, 1024.0f, 768.0f);
+    const std::size_t fetches_after_first = cache.external_fetches;
+    assert(fetches_after_first >= 3);
+
+    // Rebuilding with the same cache performs zero redundant stylesheet loads.
+    StyleResolver desktop_cached = DocumentStyles::build_resolver(*doc, &cache, 1024.0f, 768.0f);
+    assert(cache.external_fetches == fetches_after_first);
+
+    auto box_el = doc->get_element_by_id("box");
+    assert(box_el != nullptr);
+    ComputedStyle st = desktop_cached.resolve_style(box_el);
+    assert(st.width == 210.0f);       // from imported.css (overrides earlier <style>, mobile.css skipped at 1024px)
+    assert(st.height == 70.0f);       // main.css overrides imported.css
+    assert(st.padding.left == 12.0f); // cycle.css loaded once without infinite recursion
+    assert(st.border_width.top == 6.0f); // trailing inline <style> wins in tree order
+
+    // Narrow viewport activates media='(max-width: 500px)'
+    StyleResolver mobile = DocumentStyles::build_resolver(*doc, &cache, 420.0f, 768.0f);
+    assert(mobile.resolve_style(box_el).width == 99.0f);
+
+    // Web documents cannot load local stylesheets via file://
+    auto web_doc = HtmlParser::parse(
+        "<link rel='stylesheet' href='file://" + (tmp_dir / "assets" / "main.css").string() + "'>"
+        "<div id='box'>Web</div>"
+    );
+    web_doc->set_url("https://example.org/");
+    StyleResolver web_res = DocumentStyles::build_resolver(*web_doc);
+    assert(web_res.resolve_style(web_doc->get_element_by_id("box")).height < 0.0f);
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(external_classic_and_deferred_scripts_execute_in_html_order) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_scripts";
+    fs::create_directories(tmp_dir);
+
+    {
+        std::ofstream f(tmp_dir / "sync1.js");
+        f << "window.log.push('sync1:' + (document.getElementById('after') !== null) + ':' + document.currentScript.getAttribute('src'));\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "defer1.js");
+        f << "window.log.push('defer1:' + document.readyState + ':' + (document.getElementById('after') !== null));\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "defer2.js");
+        f << "window.log.push('defer2:' + document.getElementById('after').textContent);\n";
+    }
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("file://" + (tmp_dir / "index.html").string());
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head>"
+        "<script>window.log = []; document.addEventListener('DOMContentLoaded', () => window.log.push('dcl'));"
+        "window.addEventListener('load', () => window.log.push('load'));</script>"
+        "<script src='defer1.js' defer></script>"
+        "<script src='sync1.js'></script>"
+        "<script src='defer2.js' defer></script>"
+        "</head><body>"
+        "<script>window.log.push('inline-body:' + (document.getElementById('after') !== null));</script>"
+        "<div id='after'>ready</div>"
+        "</body></html>"
+    );
+    js.notify_document_loaded();
+
+    assert(js.eval("window.log.join('|')").to_string() ==
+           "sync1:false:sync1.js|inline-body:false|defer1:interactive:true|defer2:ready|dcl|load");
+
+    // Cross-origin web page cannot execute a local file:// script.
+    auto web_doc = std::make_shared<Document>();
+    web_doc->set_url("https://example.org/app.html");
+    JsInterpreter web_js(web_doc);
+    web_js.load_page(
+        "<script>window.ranLocal = false;</script>"
+        "<script src='file://" + (tmp_dir / "sync1.js").string() + "'></script>"
+    );
+    web_js.notify_document_loaded();
+    assert(web_js.eval("typeof window.log").to_string() == "undefined");
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(live_dom_geometry_and_layout_invalidation) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example/dashboard");
+    doc->set_viewport_size(960.0f, 640.0f);
+
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "body { margin: 0; }"
+        "#panel { width: 200px; height: 80px; padding: 10px; border: 4px solid #333; }"
+        "#card-link { text-decoration: none; }"
+        "#card-inner { width: 240px; height: 60px; }"
+        "</style></head><body>"
+        "<div id='panel'>Hello</div>"
+        "<a id='card-link' href='/details'><div id='card-inner'>Block inside inline link</div></a>"
+        "<p style='margin:0'>Prefix <span id='chip'>inline-span</span> suffix</p>"
+        "</body></html>"
+    );
+    js.notify_document_loaded();
+
+    assert(js.eval("window.innerWidth").to_number() == 960.0);
+    assert(js.eval("window.innerHeight").to_number() == 640.0);
+
+    // Initial border-box: 200 + 20 padding + 8 border = 228 x 108; client box: 220 x 100; clientLeft/Top: 4
+    assert(js.eval("document.getElementById('panel').offsetWidth").to_number() == 228.0);
+    assert(js.eval("document.getElementById('panel').offsetHeight").to_number() == 108.0);
+    assert(js.eval("document.getElementById('panel').clientWidth").to_number() == 220.0);
+    assert(js.eval("document.getElementById('panel').clientHeight").to_number() == 100.0);
+    assert(js.eval("document.getElementById('panel').clientLeft").to_number() == 4.0);
+    assert(js.eval("document.getElementById('panel').getBoundingClientRect().width").to_number() == 228.0);
+
+    // Mutating inline style invalidates layout and reflows automatically on next geometry read!
+    js.eval("document.getElementById('panel').style.width = '340px';");
+    assert(js.eval("document.getElementById('panel').getBoundingClientRect().width").to_number() == 368.0);
+    assert(js.eval("document.getElementById('panel').offsetWidth").to_number() == 368.0);
+
+    // Block-in-inline <a><div>...</div></a> reports unioned non-zero geometry and remains clickable.
+    assert(js.eval("document.getElementById('card-link').getBoundingClientRect().width").to_number() == 240.0);
+    assert(js.eval("document.getElementById('card-link').getBoundingClientRect().height").to_number() == 60.0);
+
+    // Inline <span> inside IFC reports accurate non-zero text fragment bounds.
+    assert(js.eval("document.getElementById('chip').getBoundingClientRect().width > 20").is_truthy());
+    assert(js.eval("document.getElementById('chip').getClientRects().length === 1").is_truthy());
+
+    // Detached elements report 0x0 geometry.
+    js.eval("const p = document.getElementById('panel'); p.remove(); window.removedW = p.offsetWidth;");
+    assert(js.eval("window.removedW").to_number() == 0.0);
+}
+
+TEST(truetype_font_rasterizer_and_utf8_proportional_metrics) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // Proportional metrics: narrow glyphs ('iiii') measure substantially narrower than wide glyphs ('WWWW')
+    float narrow_w = fr.measure_text("iiii", 18.0f, 400);
+    float wide_w = fr.measure_text("WWWW", 18.0f, 400);
+    assert(narrow_w > 0.0f);
+    if (fr.has_truetype_font()) {
+        assert(narrow_w * 1.5f < wide_w);
+    }
+
+    // UTF-8 multi-byte text ("Café — Zürich • Δx → ∞") renders anti-aliased pixels cleanly
+    auto doc = HtmlParser::parse(
+        "<body style='margin:0;background:#ffffff'>"
+        "<div style='font-size:20px;font-weight:700;color:#112233;padding:8px'>Café — Zürich • Δx → ∞</div>"
+        "</body>"
+    );
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 360.0f, 80.0f);
+    DisplayList dl = DisplayList::build(root);
+    BitmapRenderer bmp(360, 80);
+    bmp.render(dl);
+
+    int ink_pixels = 0;
+    int aa_edge_pixels = 0;
+    for (int y = 0; y < 80; ++y) {
+        for (int x = 0; x < 360; ++x) {
+            Color c = bmp.get_pixel(x, y);
+            if (c.r < 250 || c.g < 250 || c.b < 250) {
+                ++ink_pixels;
+                if (c.r > 25 && c.r < 240) ++aa_edge_pixels;
+            }
+        }
+    }
+    assert(ink_pixels > 100);
+    if (fr.has_truetype_font()) {
+        assert(aa_edge_pixels > 20);
+    }
+}
+
+TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e) {
+    using namespace litebird;
+
+    WebBrowserServer server(1024.0f, 680.0f);
+    server.set_custom_handler([](const HttpServerRequest& req, HttpServerResponse& resp) -> bool {
+        if (req.path == "/test/redirect") {
+            resp.status = 302;
+            resp.status_text = "Found";
+            resp.headers.push_back({"Location", "/test/chunked-gzip"});
+            resp.body = "";
+            return true;
+        }
+        if (req.path == "/test/chunked-gzip") {
+            const uint8_t gz[] = {
+                0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
+                0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x5c,
+                0x00, 0x3b, 0x7c, 0x8a, 0xdf, 0x12, 0x00, 0x00, 0x00
+            };
+            resp.status = 200;
+            resp.content_type = "text/plain; charset=utf-8";
+            resp.headers.push_back({"Content-Encoding", "gzip"});
+            resp.chunked = true;
+            resp.body.assign(reinterpret_cast<const char*>(gz), sizeof(gz));
+            return true;
+        }
+        if (req.path == "/test/cors-open") {
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.headers.push_back({"Access-Control-Allow-Origin", "*"});
+            resp.body = "{\"cors\":true}";
+            return true;
+        }
+        if (req.path == "/test/cors-closed") {
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.body = "{\"secret\":1}";
+            return true;
+        }
+        return false;
+    });
+
+    assert(server.start_background(0, "127.0.0.1"));
+    const uint16_t port = server.bound_port();
+    assert(port > 0);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    // 1. HTTP/1.1 302 redirect -> chunked + gzip transfer decoding
+    {
+        ResourceResponse r = ResourceLoader::load_navigation(base + "/test/redirect");
+        assert(r.success && r.status_code == 200);
+        assert(r.url == base + "/test/chunked-gzip");
+        assert(r.body == "hello hello hello\n");
+    }
+
+    // 2. CORS enforcement on cross-origin XHR & fetch()
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://webapp.example/index.html");
+        JsInterpreter js(doc);
+        js.load_page("<script>window.openRes = ''; window.closedErr = false;</script>");
+        js.notify_document_loaded();
+
+        js.eval(
+            "const x1 = new XMLHttpRequest();"
+            "x1.open('GET', '" + base + "/test/cors-open', false);"
+            "x1.send();"
+            "window.openRes = x1.status + ':' + x1.responseText;"
+            "const x2 = new XMLHttpRequest();"
+            "x2.onerror = () => { window.closedErr = true; };"
+            "x2.open('GET', '" + base + "/test/cors-closed', false);"
+            "try { x2.send(); } catch (e) { window.closedErr = true; }"
+        );
+        assert(js.eval("window.openRes").to_string() == "200:{\"cors\":true}");
+        assert(js.eval("window.closedErr || x2.status === 0").is_truthy());
+    }
+
+    // 3. Drive the live `--gui` browser server end-to-end over HTTP/1.1
+    {
+        ResourceResponse nav_resp = ResourceLoader::load_http(
+            base + "/api/navigate",
+            "POST",
+            {{"Content-Type", "application/json"}},
+            "{\"url\":\"" + base + "/demo/index.html\"}"
+        );
+        assert(nav_resp.success && nav_resp.status_code == 200);
+        assert(nav_resp.body.find("Litebird Multi-File Workspace") != std::string::npos);
+
+        // Fetch rendered PNG viewport frame and verify it decodes to a rich 1024x680 bitmap
+        ResourceResponse frame_resp = ResourceLoader::load_navigation(base + "/api/frame.png");
+        assert(frame_resp.success && frame_resp.status_code == 200);
+        assert(frame_resp.content_type.find("image/png") != std::string::npos);
+        auto frame_img = ImageDecoder::decode_png(
+            reinterpret_cast<const uint8_t*>(frame_resp.body.data()), frame_resp.body.size()
+        );
+        assert(frame_img != nullptr);
+        assert(frame_img->width == 1024 && frame_img->height == 680);
+
+        // Serve the browser chrome HTML shell (uses relative URLs for proxy compatibility)
+        ResourceResponse ui_resp = ResourceLoader::load_navigation(base + "/");
+        assert(ui_resp.success && ui_resp.body.find("api/frame.png") != std::string::npos);
+
+        // Navigate to details page and test /api/back history restoration
+        ResourceResponse nav2 = ResourceLoader::load_http(
+            base + "/api/navigate",
+            "POST",
+            {{"Content-Type", "application/json"}},
+            "{\"url\":\"" + base + "/demo/details.html\"}"
+        );
+        assert(nav2.success && nav2.body.find("canBack\":true") != std::string::npos);
+
+        ResourceResponse back_resp = ResourceLoader::load_http(base + "/api/back", "POST", {}, "{}");
+        assert(back_resp.success && back_resp.body.find("/demo/index.html") != std::string::npos);
+    }
+
+    server.stop();
+}
+
 // ---------------------------------------------------------------------------
 // Phase 34: a function as the prototype of a function, and of an object
 // ---------------------------------------------------------------------------
@@ -10240,6 +10764,16 @@ int main() {
     RUN_TEST(js_classes_compiled_to_es5_run);
     RUN_TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype);
     RUN_TEST(js_interface_objects_are_collected_with_their_page);
+
+    // Phase 36: usable real-world browser & Finding 44 security tests.
+    RUN_TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits);
+    RUN_TEST(png_and_svg_subresource_decoding_and_roundtrip);
+    RUN_TEST(img_subresources_enforce_document_origin_security);
+    RUN_TEST(document_styles_load_external_links_base_href_media_and_imports);
+    RUN_TEST(external_classic_and_deferred_scripts_execute_in_html_order);
+    RUN_TEST(live_dom_geometry_and_layout_invalidation);
+    RUN_TEST(truetype_font_rasterizer_and_utf8_proportional_metrics);
+    RUN_TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e);
 
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);

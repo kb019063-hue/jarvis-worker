@@ -6,6 +6,7 @@
 #include "litebird/dom/Selector.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/net/DataUrl.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/UrlParser.hpp"
 #include "litebird/xml/XmlDom.hpp"
 #include "litebird/xml/XmlParser.hpp"
@@ -602,6 +603,7 @@ struct RequestState : JsExotic {
     double timeout{0};
     bool with_credentials{false};
     std::vector<std::pair<std::string, std::string>> request_headers;
+    std::string request_body;
     bool has_override{false};
     MimeType override_type;
     RequestResponse response;
@@ -657,26 +659,108 @@ void fire_progress(Realm& r, const JsValue& self, const char* type, std::size_t 
              true);
 }
 
-// The fetch. The one kind of address that is answered is a data: URL, which
-// holds its own response and needs neither a network nor a disk. Every other
-// request fails, the way a request does when the server cannot be reached:
-// the loader behind fetch() takes whatever is not `data:` or `http://` for a
-// path on this machine (AGENTS.md has the row), and that is no thing to hand
-// to a second interface.
-void perform(const RequestState& state, RequestResponse& out) {
+bool is_cors_safelisted_response_header(std::string_view lower_name) {
+    return lower_name == "cache-control" || lower_name == "content-language" ||
+           lower_name == "content-length" || lower_name == "content-type" ||
+           lower_name == "expires" || lower_name == "last-modified" || lower_name == "pragma";
+}
+
+bool header_exposed_by_cors(
+    std::string_view lower_name,
+    const std::unordered_map<std::string, std::string>& resp_headers,
+    bool with_credentials
+) {
+    if (is_cors_safelisted_response_header(lower_name)) return true;
+    auto it = resp_headers.find("access-control-expose-headers");
+    if (it == resp_headers.end()) return false;
+    std::string_view list = it->second;
+    std::size_t pos = 0;
+    while (pos < list.size()) {
+        auto comma = list.find(',', pos);
+        std::string_view item = (comma == std::string_view::npos) ? list.substr(pos) : list.substr(pos, comma - pos);
+        const std::string token = ascii_lower(strip_ascii_space(std::string(item)));
+        if (!with_credentials && token == "*") return true;
+        if (token == lower_name) return true;
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+// Performs an XMLHttpRequest load: `data:` URLs directly, and `http:` /
+// `https:` URLs through `ResourceLoader::load_for_page` with `RequestMode::Cors`
+// and `allow_local_files = false` (so XMLHttpRequest never reads local files).
+void perform(Realm& r, const RequestState& state, RequestResponse& out) {
     out = RequestResponse{};
-    if (state.url.protocol() != "data:") return;
-    MimeType type;
-    std::string body;
-    const std::string address = state.url.href(true);
-    if (!process_data_url(address, type, body)) return;
+    if (state.url.protocol() == "data:") {
+        MimeType type;
+        std::string body;
+        const std::string address = state.url.href(true);
+        if (!process_data_url(address, type, body)) return;
+        out.ok = true;
+        out.status = 200;
+        out.status_text = "OK";
+        out.headers.emplace_back("content-type", type.serialize());
+        out.url = state.url.href();
+        out.url_without_fragment = address;
+        out.bytes = std::move(body);
+        return;
+    }
+
+    if (state.url.protocol() != "http:" && state.url.protocol() != "https:") {
+        return;
+    }
+
+    ResourceRequestContext context;
+    context.document_url = r.document ? r.document->url() : "about:blank";
+    context.base_url = context.document_url;
+    if (r.document) {
+        Url base;
+        if (document_base_url(r, *r.document, base)) {
+            context.base_url = base.href();
+        }
+    }
+    context.mode = RequestMode::Cors;
+    context.include_credentials = state.with_credentials;
+    context.allow_local_files = false;
+
+    std::unordered_map<std::string, std::string> combined_headers;
+    for (const auto& [name, val] : state.request_headers) {
+        const std::string lower = ascii_lower(name);
+        if (lower == "host" || lower == "connection" || lower == "transfer-encoding" || lower == "content-length") {
+            continue;
+        }
+        auto existing = combined_headers.find(name);
+        if (existing != combined_headers.end()) {
+            existing->second += ", " + val;
+        } else {
+            combined_headers[name] = val;
+        }
+    }
+
+    const std::string upper_method = ascii_upper(state.method);
+    const std::string body = (upper_method == "GET" || upper_method == "HEAD") ? std::string() : state.request_body;
+    ResourceResponse net = ResourceLoader::load_for_page(
+        state.url.href(true), context, state.method, combined_headers, body
+    );
+    if (!net.network_ok) return;
+
     out.ok = true;
-    out.status = 200;
-    out.status_text = "OK";
-    out.headers.emplace_back("content-type", type.serialize());
-    out.url = state.url.href();
-    out.url_without_fragment = address;
-    out.bytes = std::move(body);
+    out.status = net.status_code;
+    out.status_text = net.status_text;
+    for (const auto& [hname, hval] : net.header_list) {
+        if (hname == "set-cookie" || hname == "set-cookie2") continue;
+        if (net.cross_origin && !header_exposed_by_cors(hname, net.headers, state.with_credentials)) {
+            continue;
+        }
+        out.headers.emplace_back(hname, hval);
+    }
+    out.url_without_fragment = net.url.empty() ? state.url.href(true) : net.url;
+    out.url = out.url_without_fragment;
+    if (!state.url.hash().empty() && out.url_without_fragment == state.url.href(true)) {
+        out.url += state.url.hash();
+    }
+    out.bytes = std::move(net.body);
 }
 
 // "Get a response MIME type": what Content-Type says, and text/xml when it
@@ -806,7 +890,7 @@ void deliver(Realm& r, const JsValue& self, unsigned generation) {
     if (!r.alive || !state || state->generation != generation || !state->send_flag) return;
     const auto current = [&]() { return state->generation == generation; };
     RequestResponse response;
-    perform(*state, response);
+    perform(r, *state, response);
     if (!response.ok) {
         state->ready_state = 4;
         state->send_flag = false;
@@ -944,6 +1028,7 @@ void setup_request(Iface& I) {
         state.url = url;
         state.synchronous = synchronous;
         state.request_headers.clear();
+        state.request_body.clear();
         forget_response(self, state);
         if (state.ready_state != 1) {
             state.ready_state = 1;
@@ -969,15 +1054,31 @@ void setup_request(Iface& I) {
         state.request_headers.emplace_back(name, std::move(value));
         return undefined();
     });
-    I.method("send", 0, [](Realm& r, Args) {
+    I.method("send", 0, [](Realm& r, Args args) {
         const JsValue self = JsValue::current_this();
         RequestState& state = this_request();
         if (state.ready_state != 1 || state.send_flag) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
+        const std::string upper_method = ascii_upper(state.method);
+        if (!args.empty() && !args[0].is_nullish() && upper_method != "GET" && upper_method != "HEAD") {
+            state.request_body = to_str(args[0]);
+            bool has_ct = false;
+            for (const auto& [hn, _] : state.request_headers) {
+                if (ascii_lower(hn) == "content-type") {
+                    has_ct = true;
+                    break;
+                }
+            }
+            if (!has_ct) {
+                state.request_headers.emplace_back("Content-Type", "text/plain;charset=UTF-8");
+            }
+        } else {
+            state.request_body.clear();
+        }
         state.send_flag = true;
         const unsigned generation = state.generation;
         if (state.synchronous) {
             RequestResponse response;
-            perform(state, response);
+            perform(r, state, response);
             state.ready_state = 4;
             state.send_flag = false;
             if (!response.ok) {
@@ -1132,8 +1233,19 @@ void setup_window(Iface& I) {
         require_window(r);
         return current_event(r);
     });
+    auto viewport_w_getter = [](Realm& r) {
+        require_window(r);
+        return num(r.document ? std::round(r.document->viewport_width()) : 1024.0);
+    };
+    auto viewport_h_getter = [](Realm& r) {
+        require_window(r);
+        return num(r.document ? std::round(r.document->viewport_height()) : 768.0);
+    };
+    I.getter("innerWidth", viewport_w_getter);
+    I.getter("outerWidth", viewport_w_getter);
+    I.getter("innerHeight", viewport_h_getter);
+    I.getter("outerHeight", viewport_h_getter);
     static const std::pair<const char*, double> kNumbers[] = {
-        {"innerWidth", 1024}, {"innerHeight", 768}, {"outerWidth", 1024}, {"outerHeight", 768},
         {"devicePixelRatio", 1}, {"scrollX", 0}, {"scrollY", 0}, {"pageXOffset", 0}, {"pageYOffset", 0},
         {"screenX", 0}, {"screenY", 0}, {"screenLeft", 0}, {"screenTop", 0},
     };
@@ -1332,11 +1444,52 @@ void run_inserted_script(Realm& realm, Element& script) {
     if (!slot(object, "runnable")) return;          // from markup, or it has run already
     if (!is_classic_script(script)) return;
     if (script.has_attribute("src")) {
-        // Nothing is fetched, so an external script never arrives.
         clear_slot(object, "runnable");
+        const std::string raw_src = strip_ascii_space(script.get_attribute("src"));
         Realm* r = &realm;
-        EventLoop::default_loop().post_task([r, object]() {
-            if (r->alive) fire(*r, object, "error");
+        std::shared_ptr<Element> script_ref = shared(script);
+        if (raw_src.empty()) {
+            EventLoop::default_loop().post_task([r, object]() {
+                if (r->alive) fire(*r, object, "error");
+            });
+            return;
+        }
+        ResourceRequestContext context;
+        context.document_url = realm.document->url();
+        context.base_url = context.document_url;
+        Url base;
+        if (document_base_url(realm, *realm.document, base)) {
+            context.base_url = base.href();
+        }
+        context.mode = script.has_attribute("crossorigin") ? RequestMode::Cors : RequestMode::NoCors;
+        if (context.mode == RequestMode::Cors &&
+            ascii_lower(strip_ascii_space(script.get_attribute("crossorigin"))) == "use-credentials") {
+            context.include_credentials = true;
+        }
+        const std::string attr_charset = script.get_attribute("charset");
+        EventLoop::default_loop().post_task([r, object, script_ref, raw_src, context, attr_charset]() {
+            if (!r->alive || !r->document) return;
+            ResourceResponse resp = ResourceLoader::load_for_page(raw_src, context);
+            if (!resp.success) {
+                if (r->alive) fire(*r, object, "error");
+                return;
+            }
+            std::string charset_label = attr_charset;
+            MimeType mime;
+            if (MimeType::parse(resp.content_type, mime)) {
+                if (const std::string* cs = mime.parameter("charset")) {
+                    charset_label = *cs;
+                }
+            }
+            const std::string source = decode_text(resp.body, encoding_name_for_label(charset_label));
+            WindowPart& part = r->part<WindowPart>();
+            if (part.run_script && document_of(*r, *script_ref) == r->document) {
+                auto previous = r->document->current_script();
+                r->document->set_current_script(script_ref);
+                part.run_script(source);
+                if (r->alive && r->document) r->document->set_current_script(previous);
+            }
+            if (r->alive) fire(*r, object, "load");
         });
         return;
     }

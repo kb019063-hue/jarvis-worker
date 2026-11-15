@@ -8,6 +8,7 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <memory>
+#include <vector>
 
 namespace litebird {
 
@@ -26,6 +27,15 @@ private:
         const StyleResolver& resolver,
         const ComputedStyle* parent_style,
         int depth = 0
+    );
+
+    static void build_boxes(
+        const std::shared_ptr<Node>& node,
+        const StyleResolver& resolver,
+        const ComputedStyle* parent_style,
+        int depth,
+        std::vector<std::shared_ptr<LayoutBox>>& out,
+        std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>>& split_inline_blocks
     );
 
     /// Fixed depth ceiling, used only where the native stack bounds cannot be

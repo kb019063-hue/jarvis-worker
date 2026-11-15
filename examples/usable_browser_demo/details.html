@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Architecture Details — Litebird</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-brand">
+      <img src="badge.svg" width="40" height="40" alt="Badge">
+      <div>
+        <h1>Multi-Page Navigation Target</h1>
+        <p class="subtitle">Reached by clicking a block-inside-inline &lt;a&gt;&lt;div class="card"&gt; link</p>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <a href="index.html" class="btn primary" style="text-decoration:none;">← Back to Workspace</a>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="card-tag">Phase 36 Usability Roadmap</div>
+    <h3>What Changed Under the Hood</h3>
+    <p>1. External &lt;link rel="stylesheet"&gt; + @import and classic/defer &lt;script src&gt; execute in document order.</p>
+    <p>2. HTTP/1.1 chunked transfer, RFC 1951/1952 gzip/deflate decompression, redirects, CORS, and OpenSSL 3 TLS SNI + peer verification.</p>
+    <p>3. Origin-safe &lt;img src&gt; subresources with full PNG &amp; SVG decoders (closing Finding 40).</p>
+    <p>4. Pure-C++20 TrueType vector glyph engine, live getBoundingClientRect() reflow, and block-in-inline splitting.</p>
+  </div>
+</body>
+</html>

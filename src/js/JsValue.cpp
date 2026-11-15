@@ -234,6 +234,7 @@ struct CallContext {
     JsValue this_val;
     const JsValue* callee{nullptr};   // the function being called; valid for the call's duration
     const JsValue* derived_this{nullptr};   // see JsValue::construct_as_super
+    const JsValue* new_target{nullptr};     // see JsValue::construct; null when it is the callee
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
 };
@@ -247,6 +248,7 @@ struct CallContextScope {
         t_call_context.this_val = this_val;
         t_call_context.callee = callee;
         t_call_context.derived_this = nullptr;
+        t_call_context.new_target = nullptr;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
     }
@@ -353,17 +355,28 @@ const JsValue* JsValue::current_derived_this() {
     return t_call_context.derived_this;
 }
 
-bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out) {
+const JsValue* JsValue::current_new_target() {
+    return t_call_context.is_construct ? t_call_context.new_target : nullptr;
+}
+
+bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out,
+                                JsValue* new_target_out) {
     if (!t_call_context.fresh) {
         this_out = JsValue::make_undefined();
         is_construct_out = false;
         if (callee_out) *callee_out = JsValue::make_undefined();
+        if (new_target_out) *new_target_out = JsValue::make_undefined();
         return false;
     }
     t_call_context.fresh = false;
     this_out = t_call_context.this_val;
     is_construct_out = t_call_context.is_construct;
     if (callee_out) *callee_out = t_call_context.callee ? *t_call_context.callee : JsValue::make_undefined();
+    if (new_target_out) {
+        if (!t_call_context.is_construct) *new_target_out = JsValue::make_undefined();
+        else if (t_call_context.new_target) *new_target_out = *t_call_context.new_target;
+        else *new_target_out = t_call_context.callee ? *t_call_context.callee : JsValue::make_undefined();
+    }
     return true;
 }
 
@@ -455,12 +468,14 @@ JsValue JsValue::call_with_this(const JsValue& this_val, const std::vector<JsVal
     return JsValue::make_undefined();
 }
 
-JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this_val) const {
+JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this_val,
+                           const JsValue* new_target) const {
     static const JsValue undefined_this;
     if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
     if (fn) {
         CallContextScope scope(this_val ? *this_val : undefined_this, true, this);
+        t_call_context.new_target = new_target;
         return fn(args);
     }
     if (type == JsType::Function && s_function_caller) {
@@ -469,16 +484,18 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
     return JsValue::make_undefined();
 }
 
-JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const {
+JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
+                                    const JsValue* new_target) const {
     static const JsValue undefined_this;
     if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
     if (fn) {
         CallContextScope scope(undefined_this, true, this);
         t_call_context.derived_this = &derived_this;
+        t_call_context.new_target = new_target;
         return fn(args);
     }
-    return construct(args, &derived_this);
+    return construct(args, &derived_this, new_target);
 }
 
 JsValue JsValue::make_object(JsObject* obj) {

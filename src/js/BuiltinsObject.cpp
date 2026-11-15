@@ -571,8 +571,10 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
             std::vector<JsValue> all = bound_args;
             all.insert(all.end(), call_args.begin(), call_args.end());
-            // `new boundFn()` constructs the target and ignores the bound `this`.
-            if (JsValue::current_is_construct()) return js_construct(target, all);
+            // `new boundFn()` constructs the target and ignores the bound
+            // `this`. Inside, new.target is the target, or whatever function
+            // Reflect.construct or a subclass's super() named instead.
+            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
             return target.call_with_this(bound_this, all);
         });
         double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());

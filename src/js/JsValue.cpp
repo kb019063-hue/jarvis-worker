@@ -235,6 +235,7 @@ struct CallContext {
     const JsValue* callee{nullptr};   // the function being called; valid for the call's duration
     const JsValue* derived_this{nullptr};   // see JsValue::construct_as_super
     const JsValue* new_target{nullptr};     // see JsValue::construct; null when it is the callee
+    JsValue* derived_slot{nullptr};         // see JsValue::construct_for: where derived_this is made on demand
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
 };
@@ -249,6 +250,7 @@ struct CallContextScope {
         t_call_context.callee = callee;
         t_call_context.derived_this = nullptr;
         t_call_context.new_target = nullptr;
+        t_call_context.derived_slot = nullptr;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
     }
@@ -352,7 +354,24 @@ bool JsValue::current_is_construct() {
 }
 
 const JsValue* JsValue::current_derived_this() {
-    return t_call_context.derived_this;
+    if (t_call_context.derived_this || !t_call_context.derived_slot) return t_call_context.derived_this;
+    // construct_for(): the native asks, so the object is made now, with the
+    // prototype new.target has at this moment. Reading that can run a getter,
+    // which is a call with a context of its own; this one is back when it
+    // returns.
+    JsValue* slot = t_call_context.derived_slot;
+    const JsValue* new_target = t_call_context.new_target;
+    t_call_context.derived_slot = nullptr;          // asked once
+    if (!new_target) return nullptr;
+    const JsValue proto = new_target->get_property("prototype");
+    // Nothing usable there: the native's own prototype is the right one, and
+    // it gets that by building its object as if none had been offered.
+    JsObject* target = proto.is_object_like() ? proto.as_prototype() : nullptr;
+    if (!target) return nullptr;
+    *slot = JsValue::make_object();
+    slot->object_val->prototype = target;
+    t_call_context.derived_this = slot;
+    return slot;
 }
 
 const JsValue* JsValue::current_new_target() {
@@ -496,6 +515,17 @@ JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsVa
         return fn(args);
     }
     return construct(args, &derived_this, new_target);
+}
+
+JsValue JsValue::construct_for(const std::vector<JsValue>& args, const JsValue& new_target, JsValue& made) const {
+    static const JsValue undefined_this;
+    if (stack_is_exhausted()) throw JsStackOverflow();
+    const NativeFn& fn = native_function();
+    if (!fn) return construct(args, nullptr, &new_target);
+    CallContextScope scope(undefined_this, true, this);
+    t_call_context.new_target = &new_target;
+    t_call_context.derived_slot = &made;
+    return fn(args);
 }
 
 JsValue JsValue::make_object(JsObject* obj) {

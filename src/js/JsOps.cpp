@@ -740,38 +740,40 @@ JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, cons
         }
         if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
     }
-    // The object gets the `prototype` of new.target, and inside `ctor`
-    // new.target is that function.
-    JsObject* proto_cell = nullptr;
-    if (new_target || (fd && fd->node)) {
-        JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
-        if (proto.is_object_like()) proto_cell = proto.as_prototype();
-    }
     if (fd && fd->node) {
+        // A script function is given the object: it has the `prototype` of
+        // new.target, and inside the function new.target is that function.
         JsValue instance = JsValue::make_object();
-        if (proto_cell) instance.object_val->prototype = proto_cell;
+        JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) instance.object_val->prototype = target;
+        }
         JsValue result = ctor.construct(args, &instance, new_target);
         return result.is_object_like() ? result : instance;
     }
     // A built-in constructor makes its own object.
     if (!new_target) return ctor.construct(args, nullptr);
     // A bound function constructs its target with this new.target, and what
-    // that makes or returns is the answer as it stands. So is what a built-in
-    // makes when new.target has no object for a `prototype`: it keeps the
-    // prototype the built-in gave it.
-    if (ctor.forwards_construct() || !proto_cell) return ctor.construct(args, nullptr, new_target);
-    // Otherwise it is handed an object that has new.target's prototype, the
-    // way `super(...)` hands it the subclass's (construct_as_super). A host
-    // constructor makes that object the thing it constructs: this is how
-    // `Reflect.construct(HTMLElement, [], Derived)` makes an element. The
-    // others ignore it and build their own (an array, an error), which then
-    // gets the prototype.
-    JsValue instance = JsValue::make_object();
-    instance.object_val->prototype = proto_cell;
-    JsValue result = ctor.construct_as_super(args, instance, new_target);
-    if (result.is_object_like() && result.identity() != instance.identity()) {
+    // that makes or returns is the answer as it stands.
+    if (ctor.forwards_construct()) return ctor.construct(args, nullptr, new_target);
+    // Any other built-in, with another function as new.target. A host
+    // constructor asks for the object it is to construct on, the way it does
+    // under `super(...)`, and is given one that has new.target's prototype:
+    // this is how `Reflect.construct(HTMLElement, [], Derived)` makes an
+    // element. The others build their own (an array, an error), and that
+    // gets the prototype afterwards: after the built-in has looked at its
+    // arguments, which is the order the language has
+    // (`Reflect.construct(Promise, [], NewTarget)` complains about the
+    // executor before `NewTarget.prototype` is read).
+    JsValue asked_for;
+    JsValue result = ctor.construct_for(args, *new_target, asked_for);
+    if (!result.is_object_like()) return result;
+    if (asked_for.is_object_like() && result.identity() == asked_for.identity()) return result;
+    JsValue proto = new_target->get_property("prototype");
+    if (proto.is_object_like()) {
         JsObject* cell = result.is_function() ? result.function_cell() : result.object_val.get();
-        if (cell) js_set_prototype(cell, proto_cell);
+        JsObject* target = proto.as_prototype();
+        if (cell && target) js_set_prototype(cell, target);
     }
     return result;
 }

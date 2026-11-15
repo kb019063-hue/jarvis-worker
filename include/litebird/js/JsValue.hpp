@@ -364,6 +364,13 @@ public:
     /// their own and the caller takes over its state.
     JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
                                const JsValue* new_target = nullptr) const;
+    /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,
+    /// another function as new.target, and no object to hand it yet. A native
+    /// that asks for current_derived_this() gets one with the prototype
+    /// `new_target` has at that moment, and it is left in `made`. A native
+    /// that never asks builds its own, `made` stays undefined, and nothing
+    /// was read from `new_target`. Both have to outlive the call.
+    JsValue construct_for(const std::vector<JsValue>& args, const JsValue& new_target, JsValue& made) const;
 
     // --- Call context ---------------------------------------------------------
     //
@@ -376,6 +383,8 @@ public:
     static bool current_is_construct();
     /// For a native constructor reached through `super()`: the subclass's
     /// object, which should become the thing constructed. Null otherwise.
+    /// Under construct_for() the object is made by this call, the first time,
+    /// which can run a getter of the script's.
     static const JsValue* current_derived_this();
     /// For a native function invoked with `new`: the function `new` was
     /// applied to, when that is not the native itself (it was reached through

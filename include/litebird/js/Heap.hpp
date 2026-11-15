@@ -71,10 +71,12 @@ public:
     bool sealed{false};             // Object.seal: no adds or deletes
     bool has_accessors{false};      // some own property is a getter/setter
     bool has_legacy_getters{false}; // some own property is a "__get_<name>__" host getter
+    bool not_constructor{false};    // the cell of a built-in function that `new` refuses (js_is_constructor)
     ObjectClass klass{ObjectClass::Plain};
 
     /// Built-in state that is not a property: a Date's time value, a RegExp's
     /// compiled program, a Map's storage. The owner knows the concrete type.
+    /// In the cell of a function it is the function: see function_value().
     std::shared_ptr<void> internal;
 
     /// Marks values this object keeps alive outside its property table, such
@@ -103,6 +105,24 @@ public:
     /// back to it.
     static inline void (*trace_dom_node)(Heap&, JsObject&) = nullptr;
     static inline void (*release_dom_node)(JsObject&) = nullptr;
+
+    /// For a function's cell that stands for the function in a prototype
+    /// chain: the function itself. Null for every other cell.
+    ///
+    /// A function is a value (a payload its copies share), not a cell, and a
+    /// prototype link is a pointer to a cell. This is the way back, so that
+    /// `Object.getPrototypeOf(Derived)` is `Base` and can be called. It is
+    /// set by JsValue::as_prototype() and read by JsValue::make_object().
+    ///
+    /// The cell then owns a copy of the function, and the function's payload
+    /// owns a handle to the cell: a cycle, which only the collector takes
+    /// apart. That is why a function's cell is not given one until the
+    /// function becomes a prototype. The copy is kept in `internal`, which a
+    /// function's cell has no other use for, so no object grows for it.
+    const JsValue* function_value() const {
+        return klass == ObjectClass::Function ? static_cast<const JsValue*>(internal.get()) : nullptr;
+    }
+    void set_function_value(const JsValue& function);
 
     void trace(Heap& heap) override;
     void release_contents() override;
@@ -159,6 +179,9 @@ public:
     /// Reports a value that several holders may share through a shared_ptr
     /// (an accessor's setter).
     void mark_shared_value(const std::shared_ptr<JsValue>& value);
+    /// The same for a value kept behind a pointer of another type; `holders`
+    /// is that pointer's use count.
+    void mark_held_value(const JsValue& value, long holders);
 
     /// For trace functions that walk storage several cells may share (a
     /// collection's entries after `class X extends Map`): true the first time
@@ -218,6 +241,7 @@ private:
         long owners{0};             // copies that exist in total
         const JsValue::FunctionData* function{nullptr};
         const PropertyMap* properties{nullptr};
+        JsObject* cell{nullptr};    // the function's cell, which the payload holds a handle to
     };
     struct ScopeInfo {
         long seen{0};               // closures and child scopes found inside the heap

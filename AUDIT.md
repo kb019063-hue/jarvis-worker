@@ -50,6 +50,10 @@ The rest are documented with enough detail to act on.
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
 | 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS landed in Phase 36 (preflight `OPTIONS` open) |
+| 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
+| 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
+| 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases and the tokenizer repeated-name cost remain |
+| 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 
 ---
@@ -1837,7 +1841,7 @@ of them by reading the code.
 
 | Found by | What |
 | :--- | :--- |
-| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front is still the square (below) |
+| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front was still the square then (fixed in Phase 35, finding 40) |
 | The same question asked of the DOCTYPE | 50,000 attributes declared for one element took 4.5 s. And one attribute default of a megabyte with 100,000 empty tags made 100 GB of attribute values from a 1.4 MB document: entity expansion was bounded and defaults were not. Both bounded now, and both are deep pages |
 | Expat and libxml2 on generated documents (`tools/fuzz/diff_xml.py`) | No fault of Litebird's in 64,000 documents, and one in the references: three runs of 20,000 reported 10 differences, and all ten were `version="1."`, which Expat and libxml2 accept and the grammar does not (`'1.' [0-9]+`). A document whose version is outside the grammar is now judged by the grammar |
 | web-platform-tests, on their first run | Three faults that were not about XML: attributes of inline `<svg>` had no namespace (the row with `xlink:href` above), a doctype a script inserted was not `document.doctype`, and `lookupNamespaceURI('xml')` answered for a node that has no namespaces. 607 jsdom-recorded cases had passed over all three |
@@ -1868,11 +1872,12 @@ of them by reading the code.
   one or the other and fail.
 - **In the JavaScript engine, a function cannot have a function as its
   prototype**: `Object.getPrototypeOf(TypeError) !== Error`. 18 subtests.
+  (Fixed in Phase 34, finding 41.)
 - **An `Attr` is not a `Node`**, two attributes of one element cannot share
   a qualified name in two namespaces, and collections do not list their
   names as own properties: 33 subtests.
-- **Removing all 50,000 attributes of an element from the front takes 9 s**,
-  as it did before; from the back, 22 ms of 25,000.
+- **Removing all 50,000 attributes of an element from the front took 9 s**
+  at Phase 28; from the back, 22 ms of 25,000. Fixed in Phase 35 (finding 40).
 - **The HTML tokenizer still searches for a repeated attribute name**: one
   element with 50,000 attributes takes 2.9 s in the HTML parser (10.4 s
   before the attribute list had an index).
@@ -2182,13 +2187,354 @@ purists may call generous; no valid formula is rejected.
 
 ---
 
+## 40. ✅ Attribute-list front removal was quadratic
+
+**The hole.** `AttributeList` kept the attributes in a `std::vector` and,
+once a list was long enough to index, kept a parallel vector of the numbers
+each name was given. The number index avoided rebuilding positions on every
+erase, but `erase(iterator)` still erased from both vectors at the same
+offset. Removing the first attribute moved every remaining string pair and
+every remaining number: draining 50,000 attributes from the front was
+quadratic. The recorded script loop took about 6 s (9 s in the older
+measurement); the same removals from the back were tens of milliseconds.
+
+**The fix.** Only `include/litebird/dom/AttributeList.hpp` changed. The
+items and `Index::numbers` remain vectors, but each has a logical start
+offset. A back erase pops the back. A front erase advances the start and
+leaves a dead prefix; `compact()` drops that prefix only when it is at least
+as large as the live tail, so repeated front erases are amortized O(1), a
+full drain is linear, and an empty list still allocates nothing. A
+`std::deque` was tried first and removed: libstdc++ allocates for an empty
+deque, which made every element pay even with no attributes and failed the
+deep-page memory limits. The public iterators are still random-access vector
+iterators (`attributes.begin() + index`, `found - list.begin()`). The lazy
+index still scans below 32 entries, then maps names to numbers and bisects
+the live ascending number range. Copy copies only the live range and drops
+the index; move resets the source start so a moved-from list is empty;
+`clear`, value update in place, insertion order, `operator[]`,
+`find/count/erase` and order-insensitive equality keep their semantics.
+`AttributeNamespaces` was not changed.
+
+**Measured.** Whole-process times, best of three, same machine and hour;
+baseline is the pre-change binary:
+
+```bash
+python3 tools/bench/bench_attributes.py \
+  --baseline build/litebird-attributes-baseline --reps 3 --max-ms 3000
+make bench-attributes
+```
+
+| Case (50,000 attributes unless noted) | Baseline | Current | Speedup |
+| :--- | ---: | ---: | ---: |
+| front: remove a0..aN | 7,132 ms | 90 ms | 79.0× |
+| back: remove aN..a0 | 115 ms | 114 ms | 1.0× |
+| ends: alternate front/back | 3,481 ms | 113 ms | 30.8× |
+| front half, then update/reinsert | 5,293 ms | 69 ms | 76.8× |
+| namespaces: front removal | 8,465 ms | 197 ms | 43.0× |
+| short lists: churn below index | 79 ms | 73 ms | 1.1× |
+
+Every case prints the same expected DOM checksum in both binaries. A
+script-only `Date.now()` probe measured the front removal loop at 6,078 ms
+before and 51 ms after; the back loop stayed in the tens of milliseconds.
+The checked-in guard is `make bench-attributes`: six cases, three
+repetitions, expected checksums, 3,000 ms whole-process limit.
+
+**How verified.** `make test` passes 135 suites, including
+`attribute_list_end_removals_keep_order_and_index` and
+`attribute_list_front_removal_is_linear_in_practice`. `make bench-attributes`
+passes 6 cases with 0 failures. The release run kept html5lib 1781/1792, JS
+840/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192;
+diff-trees/diff-xml have 0 differing; deep has 1332 runs/0 failed (slowest
+25.0 s); bench-css has 20 padded runs/0 failures; security-fetch has 3
+checks/0 failures; diff-strings is at the 95-difference ceiling. A generated
+out-of-corpus probe run through `tools/conformance/compare_with_jsdom.py`
+printed `4 lines, 4 the same` before and after. `make tsan` passed (JsString model/thread under ThreadSanitizer and under ASan+UBSan). `make asan` reported no sanitizer finding: 135/135 suites, JS 839/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192; ASan diff-xml 1000 documents/0 differ and round trip 1000/1000; fuzz 400 parser mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep 882 runs/0 failed (slowest 4.3 s).
+
+**What is still open.** This fixes end removals, not arbitrary middle
+removals: a middle erase still moves the vector tail. The HTML tokenizer's
+repeated-name search for one element with 50,000 attributes remains open
+(about 2.9 s), as do the `Attr`-is-not-a-`Node`, one-qualified-name-in-two-
+namespaces and collection named-property rows. No parser, layout, CSS or
+JavaScript engine file was changed.
+
+---
+
+## 41. ✅ A function could not be a prototype
+
+**The hole.** A function is a value in this engine and an object is a heap
+cell, and a prototype link is a pointer to a cell. Nothing led from a cell
+back to a function, so nothing could have a function as its prototype and
+give it back. `Object.getPrototypeOf(Derived)` for `class Derived extends
+Base` was an object that was not `Base` and could not be called;
+`Object.getPrototypeOf(TypeError)` was not `Error`; `Function.prototype` was
+an object. A class kept its parent in a hidden property and a static member
+was looked for one step up and no further. Finding 34 listed it as known and
+not fixed, for the 18 web-platform-tests subtests that failed on it: every
+`assert_throws_js` walks up from the error type it was given with
+`Object.getPrototypeOf` until it reaches `Error`.
+
+What it broke outside a test suite is the code most pages ship: a class
+compiled for older browsers. The helpers Babel and TypeScript emit are made
+of the calls in this table.
+
+| A script | Before | Now, and in Node |
+| :--- | :--- | :--- |
+| `Object.getPrototypeOf(TypeError) === Error` | `false` | `true` |
+| `class Derived extends Base {}`; `Object.getPrototypeOf(Derived) === Base` | `false` | `true` |
+| `class C extends B {}`, `class B extends A {}`, `A` has `static s()`: `C.s()` | `TypeError: s is not a function` | runs |
+| `typeof Function.prototype`; `Function.prototype()` | `object`; `TypeError` | `function`; `undefined` |
+| `Object.getPrototypeOf(Object.create(f))()` | `TypeError: p is not a function` | what `f` returns |
+| `Reflect.construct(F, [], G) instanceof G` | `false` | `true` |
+| `F.prototype.m = …`, then `Object.defineProperty(F, 'prototype', { writable: false })`: how a compiled class ends | `TypeError: Cannot redefine property: prototype` | accepted |
+| `Object.getPrototypeOf(Derived).call(this, x)` in a compiled constructor | `TypeError: Function.prototype.call called on a non-function` | calls `Base` |
+| A class with a parent, compiled by Babel 7, by Babel's newer helpers, by TypeScript | stops at its first class, all three | prints what Node prints, all three |
+| `Object.getPrototypeOf(HTMLElement) === Element`; `HTMLElement.ELEMENT_NODE` | `false`; `undefined` | `true`; `1` |
+
+**The fix.** A function's cell can know the function it belongs to
+(`JsValue::as_prototype()` gives it a copy; `JsValue::make_object(cell)`
+gives the function back), every kind of function can have a cell, and the
+collector takes the pair apart, since the cell holds the function and the
+function holds the cell. The copy lives in a pointer the cell of a function
+had no use for, so no object and no value grew. Classes are linked to their
+parents, `super()` calls whatever the prototype is when it runs,
+`Function.prototype` is a function, `Reflect.construct` honours its third
+argument, `Object.defineProperty` follows the standard's
+ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have
+their parents as prototypes. ARCHITECTURE.md, Phase 34, has the design.
+
+### What each instrument found
+
+The change was written with a new file of the JavaScript corpus beside it,
+`prototypes.dat`, whose expected output is what Node prints. What follows was
+found by something else.
+
+| Found by | What |
+| :--- | :--- |
+| Two wrong collectors, built on purpose | With the function a cell stands for counted and not marked, a parent class reachable only as a prototype lost the variables it closed over, and every test passed: the cell keeps the function's name and properties, so checks of those see nothing. A test has to call the function it got back and read a variable it closed over. One suite and one corpus case do now |
+| test262, run in the binary of `main` and in this one | Two tests that passed on `main` and failed here, of 15,686. `[] instanceof Function.prototype` with a `prototype` that is a string threw on `main` only because `Function.prototype` was not callable; `instanceof` never looked at what kind of thing `prototype` is. And `{ __proto__: function () {} }` named the function `__proto__`, on `main` as well, where the function could not be got back to see its name. Both fixed, both corpus cases now |
+| Reading the whole diff once more before the documents | The mark that says `Function.prototype` is not a constructor was a hidden property, and `'%not-a-constructor' in f` was `true` for every function. It is a bit of the cell now. Looking for what else is stored that way found the row below |
+| The same reading | A script can read and write the engine's own slots, which are properties whose names begin with `%`: `el['%classList'] = 5` makes `el.classList` a number. Older than this change, not fixed, a row of the task table |
+| The sanitizer build, on a probe for classes in workers | A read of freed memory when a page ends while a worker is starting: 7 of 60 runs of `main`'s release build end in `SIGSEGV` on four `new Worker(...)` and nothing else. Not this change, not fixed, a row of the task table |
+| The corpus run on a busy machine | One case of `long-strings.dat` timed out. It builds a string half a surrogate pair at a time, which costs the square of the length (20,000 pairs: 4.3 s, and 5 ms a pair at a time), and takes 6 of the 10 seconds a case is allowed. Same on `main`. The CI floor is one below the score until it is fixed; a row of the task table |
+| jsdom, on the interface objects | Nothing wrong here, and three answers of jsdom's that are not the standard's, because its window is another realm than the one its script runs in: `Object.getPrototypeOf(EventTarget) === Function.prototype` is `false` there. `interfaces.dat` stays away from them |
+
+### What is known to be wrong and is not fixed
+
+All of it is the same on `main`. The first seven have a failing case each in
+`prototypes.dat` (nine cases), recorded from Node.
+
+- **`new.target` is the function that is running**, not the one `new` was
+  applied to. `if (new.target === Shape) throw …` in a parent's constructor
+  stops `new Circle()`. The DOM needs the same value:
+  `Reflect.construct(HTMLElement, [], Derived)` is `Illegal constructor`, so
+  a custom element compiled by Babel cannot be made
+  (`tests/dom-conformance/open/compiled-custom-elements.js`: 4 of 9 lines as
+  jsdom prints them).
+- **A built-in does not make the subclass it was called on**: `List.from`,
+  `new List().map(f)` and `P.resolve(1)` give a plain array and a plain
+  promise. No `Symbol.species`.
+- **`instanceof` does not ask `Symbol.hasInstance`**, answers `false` for a
+  right side with no `prototype` where it should throw, and does not ask a
+  bound function for its target.
+- **A function's own property names lack `length` and `name`**, `f.name =
+  'x'` takes effect, and async and generator functions have
+  `Function.prototype` itself as their prototype.
+- **Nothing tells a built-in that is a constructor from one that is not**:
+  `new Math.max()` makes an object, `class X extends f.bind(null)` is
+  accepted.
+- **A property of a prototype that cannot be written does not stop an
+  assignment** to an object that inherits it.
+- **A function bound to an object that holds it is never collected**, nor
+  what a pending timer holds: the collector cannot see into what a native
+  function captured.
+- **An object a parent's constructor returns does not become `this`** in the
+  child, and `super.x` in a class that extends null is `undefined`.
+- **Not about functions, found by running all of test262:** `Promise.all`,
+  `any` and `race` read an iterable to its end before they look at an
+  element, so with one that never ends the process grows until it is killed.
+  Three tests end that way in both builds, and a fourth on an array index
+  near 2^32 (arrays have no holes). A row of the task table.
+
+### What the numbers do not say
+
+**67 of 76** in `prototypes.dat`: the nine that fail were written to fail,
+one for each thing above that a case could be recorded for. The 67 are what
+somebody thought to ask.
+
+**10,835 of 15,686** test262 tests in the directories about functions,
+classes and objects, 10,727 before. That is 69%, and of the whole suite 54%
+pass (26,012 of 47,967; 25,893 before). The number that matters is the
+difference: 108 more and none fewer in those directories. In the whole
+suite it is 122 more and three fewer, and the three are not noise. They ask
+that the prototype of an async function, of a generator function and of an
+async generator function is an object that cannot be called. It is
+`Function.prototype` itself here, before and now, and the tests passed for
+as long as `Function.prototype` was not callable. The fault they are about
+is the fourth of the list above; the tests stay failing until it is fixed.
+
+**640 of 640** DOM cases is what jsdom answers. The 11 new ones ask what the
+prototype of an interface object is and whether its constants are inherited,
+and nothing about what an interface object does when it is called.
+
+**Every measure within a tenth of `main`** is 20 loops on one machine
+(ARCHITECTURE.md, Phase 34, section 8). The one that moved is `bind`.
+
+**How verified.** Every line is a command and what it printed on the merged
+tree, in the sandbox.
+
+- `make test`: `All 144 engine test suites passed successfully!`, five of
+  them new. Linked against the objects of `main`, with the lines that use
+  the new C++ interface cut, each of the five fails at least half of its
+  checks.
+- `make js-conformance`: `JS conformance, full corpus: 907/921 (98.5%) [23
+  files, 0 crashes, 0 timeouts]`; `prototypes.dat` 67 of 76. With
+  `--reference "node -e"`: 921 of 921. The binary of `main` passes 7 of the
+  76.
+- `python3 tools/conformance/run_test262.py --binary main=… --binary
+  now=build/litebird`: 15,686 tests, `main` 10,727 pass, now 10,835; 108
+  pass now and not on `main`, 0 the other way. With `--timeout 4 built-ins
+  language annexB` added: 47,967 tests, `main` 25,893, now 26,012; 122 pass
+  now and not on `main`, 3 the other way (named above).
+- `make wpt`: `Web Platform Tests: 4658/5192 subtests pass in 76 files; 534
+  fail as listed, 0 fail and are not listed`. On `main`: 4640, 552 listed.
+- `make dom-conformance`: `640/640` in 24 files, and the same from jsdom
+  with `--reference`. The binary of `main` passes 629: none of the 11 new
+  cases.
+- `make conformance` 1781 of 1792, `make url-conformance` 1188 of 1188,
+  `make xml-conformance` 1702 of 1702, `make diff-trees` 0 of 6,000 trees
+  differ, `make diff-xml` 0 of 4,000 documents and 0 of 3,000 round trips,
+  `make diff-strings` 95 of 50,580 results differ, `make bench`, `make
+  bench-css` 20 runs and 0 failures, `make security-fetch` 3 checks and 0
+  failures: all as on `main`.
+- `make deep` and `make asan` were run when `main` was three merges back:
+  before a fix to a CSS selector, the attribute list of Phase 35 and the
+  media work of Phase 38 came in, with seven suites. The unit tests were run
+  again in the sanitizer build after the first two of those merges, 140 of
+  140; after the third, CI's sanitizer job is what ran them.
+- `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])`.
+- `make asan`: 137 of 137 suites; JavaScript 906 of 921 (the one more is a
+  case of deep recursion that needs more stack than a sanitizer build's
+  frames leave, as before); DOM 640 of 640; URL 1188 of 1188; XML 1702 of
+  1702; web-platform-tests 4658 of 5192; 1,000 generated documents and 1,000
+  round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs
+  … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over
+  315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
+  sanitizer. It takes 19 minutes here.
+
+---
+
+## 43. ✅ Real-Web Media & Vector Rendering: standalone JPEG/GIF decoders, upgraded SVG & Canvas 2D
+
+**What was missing.**
+- **JPEG & GIF:** `ImageDecoder` had no GIF decoder at all, and its JPEG path
+  (`ImageDecoder.cpp`, owned in parallel by PR #39) was a minimal stub that
+  could not decode real-world Baseline/Extended/Progressive JPEGs, chroma
+  subsampling (4:2:0 / 4:2:2 / 4:4:0), restart markers (`DRI`/`RST0`–`RST7`),
+  or CMYK/YCCK color spaces.
+- **SVG (`SvgRenderer`):** `<path>` ignored curves (`C/c`, `S/s`, `Q/q`, `T/t`)
+  and elliptical arcs (`A/a`), `<defs>` children were painted directly,
+  `transform` matrices, `preserveAspectRatio`, inline `style` declarations,
+  `opacity`/`fill-opacity`/`stroke-opacity`, `fill-rule="evenodd"`,
+  `currentColor`, `display:none`/`visibility:hidden`, `<linearGradient>` /
+  `<radialGradient>`, `<use>` / `<symbol>`, `<clipPath>`, and rounded
+  `<rect rx ry>` were missing.
+- **Canvas 2D (`CanvasRenderingContext2D`):** No Current Transformation Matrix
+  (`save`/`restore`/`translate`/`rotate`/`scale`/`transform`/`setTransform`),
+  no `clip()`, no `globalAlpha`, no `NonZero`/`EvenOdd` winding rules or
+  anti-aliased scanline fill, thin Bresenham-only stroking (no real stroke
+  width, caps, joins, dashes, or `strokeGradient`), no `roundRect`/`ellipse`/
+  `arcTo`/`isPointInPath`, and no `getImageData`/`putImageData`.
+
+**What changed (Phase 38, strictly disjoint from open PRs #36–#40).**
+- **Standalone ITU-T T.81 JPEG decoder (`JpegDecoder.hpp/.cpp`):** Zero-dependency
+  C++20 decoder for Baseline (`SOF0`), Extended Sequential (`SOF1`), and
+  Progressive (`SOF2`) DCT JPEGs. Supports 8/16-bit `DQT`, 9-bit fast-lookup +
+  16-bit canonical `DHT`, `DRI`/`RST0`–`RST7`, interleaved and non-interleaved
+  scans, progressive DC/AC spectral selection + successive approximation + EOB
+  runs, separable double-precision 8×8 IDCT with DC-only fast paths, centered
+  triangle `[3/4, 1/4]` chroma upsampling (4:4:4, 4:2:2, 4:2:0, 4:4:0, odd
+  dimensions), Grayscale / YCbCr / RGB / CMYK / Adobe YCCK, and strict
+  `kMaxDecodedPixels` / `kMaxScans` / `RasterBudget` bounds.
+- **Standalone GIF87a/GIF89a decoder (`GifDecoder.hpp/.cpp`):** Zero-dependency
+  single-frame and animated multi-frame decoder. Supports 2..8-bit LZW with
+  deferred clear-code handling, Global/Local Color Tables, 4-pass interlacing,
+  Graphic Control Extension transparency, delays, all 4 disposal methods
+  (`None`, `DoNotDispose`, `RestoreBackground`, `RestorePrevious`), `NETSCAPE2.0`
+  loop counts, sub-rectangle frame compositing, and strict frame/pixel bounds.
+- **Upgraded Canvas 2D (`Canvas2D.hpp/.cpp`):** Full 2D CTM stack (`save`/
+  `restore`, `translate`/`rotate`/`scale`/`transform`/`setTransform`/
+  `resetTransform`), 4× vertical + analytical horizontal anti-aliased scanline
+  rasterizer with `NonZero` and `EvenOdd` winding rules, CW-wound polygon-ribbon
+  thick stroking with `butt`/`round`/`square` caps, `miter`/`bevel`/`round`
+  joins, `setLineDash`/`getLineDash`/`lineDashOffset`, `stroke_gradient`,
+  inverse-CTM linear/radial gradients with `Pad`/`Reflect`/`Repeat` spread modes,
+  `globalAlpha` + alpha clip mask (`clip()`), `roundRect`/`ellipse`/`arcTo`/
+  `rect`/`isPointInPath`, `getImageData`/`putImageData`/`createImageData`,
+  CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
+- **Upgraded SVG renderer (`SvgRenderer.hpp/.cpp`):** Iterative ID index (no
+  native recursion on deep DOMs), `<defs>` skipping, full SVG path grammar
+  including W3C F.6.5/F.6.6 `A/a` elliptical arcs and compact flag syntax,
+  `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`), `transform` stack,
+  presentation attributes + inline `style` + `#RGBA`/`#RRGGBBAA`/`rgba()` +
+  `currentColor` + `opacity`/`fill-opacity`/`stroke-opacity` + `display:none`/
+  `visibility:hidden`, `<linearGradient>`/`<radialGradient>` with `href`
+  inheritance / `objectBoundingBox` / `userSpaceOnUse` / `gradientTransform` /
+  `spreadMethod`, `<use>` with depth/cycle guard + `<symbol>`, `<clipPath>`,
+  rounded `<rect rx ry>`, nested `<svg>`, and recursion/budget caps.
+- **Verification & fuzzing tools:** `tools/media_check.cpp`,
+  `tools/conformance/verify_media_render.py`, `tools/fuzz/fuzz_media.py`, and
+  `Makefile` targets `verify-media` and `fuzz-media` (wired into CI and `asan-core`).
+
+**How verified.**
+- `make test`: **139/139** engine unit test suites pass (4 new suites:
+  `jpeg_decoder_baseline_progressive_and_guards`,
+  `gif_decoder_87a_89a_interlaced_and_animation`,
+  `canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings`,
+  `svg_real_world_paths_arcs_gradients_use_clip_and_guards`), both in Release
+  (`-O2`) and under strict ASan+UBSan (`-fsanitize=address,undefined -fno-sanitize-recover=all`).
+- `make verify-media`: **35/35** checks pass (both Release and ASan+UBSan+LSan
+  `detect_leaks=1`): 21 JPEG variants vs ImageMagick/`libjpeg` achieve
+  **52.06–99.00 dB PSNR** (`MAE 0.000–0.389`, `max_diff 0–3`), 9 GIF variants
+  (including 4-pass interlaced and animated Dispose None/Background/Previous/Optimize)
+  achieve **bit-for-bit exact `max_diff = 0`** against ImageMagick `-coalesce`,
+  and 5 SVG feature suites pass deterministic pixel assertions.
+- `make fuzz-media`: **1,800** mutated JPEG/GIF/SVG cases in Release and
+  **4,500** cases under ASan+UBSan+LSan (`detect_leaks=1`) — 0 crashes, 0 UB,
+  0 leaks, 0 timeouts.
+- Deep-page stress checks (`tools/fuzz/deep_pages.py --only svg/canvas/images`):
+  39/39 Release runs at depth 200,000 (8 MB stack) and 36/36 ASan+UBSan runs
+  at depth 10,000 (2 MB stack) pass with 0 failures.
+- Existing conformance corpora unchanged: `make conformance` 1781/1792,
+  `make js-conformance` 840/845, `make dom-conformance` 629/629,
+  `make url-conformance` 1188/1188, `make wpt` 4640/5192, `make bench-css` 20/20,
+  `make security-fetch` 3/3.
+
+**What is still open.**
+- **`ImageDecoder::decode()` dispatch wiring:** `include/litebird/render/ImageDecoder.hpp`
+  and `src/render/ImageDecoder.cpp` were left untouched because PR #39 owns them
+  in parallel; once PR #39 merges, wire `JpegDecoder::decode()` and
+  `GifDecoder::decode()` into `ImageDecoder::decode()` (and optionally expose
+  animated GIF frames to the shell).
+- **Other image formats:** WebP, AVIF, and animated APNG/ICO are not implemented.
+  JPEG arithmetic coding (`SOF9`/`SOF10`), lossless JPEG (`SOF3`), and 12-bit
+  precision (`P=12`) are rejected cleanly as unsupported.
+- **SVG features still missing:** `<text>`/`<tspan>`, `<style>` CSS stylesheet
+  rules targeting SVG elements, `<pattern>`, `<mask>`, `<filter>` (`feGaussianBlur`,
+  etc.), `<marker>`, `<image>` inside `<svg>`, and SMIL/CSS animations on SVG.
+- **Canvas 2D features still missing:** `fillText`/`strokeText`/`measureText`,
+  shadows (`shadowBlur`/`shadowColor`), `createPattern`, `Path2D`,
+  `drawImage(HTMLImageElement)` (only `ImageData` / canvas-to-canvas is wired),
+  and remaining Porter-Duff / blend modes beyond the existing set.
+
+---
+
 ## 44. ✅ `<img src>` bypassed document-origin security, and unloaded images without dimensions laid out as 100×100 boxes
 
 **The hole.** Phase 33 moved `fetch()` and `Worker` behind
 `ResourceLoader::load_for_page`, but `LayoutTree::build_element` (`src/layout/LayoutTree.cpp`)
 still passed an `<img>` element's raw `src` attribute straight to
-`ImageDecoder::load_image(src)`. `load_image` fell through any non-`data:`
-string to `std::ifstream(path, std::ios::binary)`. Consequently, a remote web
+`ImageDecoder::decode_file(src)`. `decode_file` opened any non-`data:` string
+with `std::ifstream(path, std::ios::binary)`. Consequently, a remote web
 document (`https://attacker.example/page.html`, or one smuggling
 `<base href="file:///...">`) could embed `<img src="/path/to/local.png">` or
 `<img src="file:///path/to/local.bmp">`, read local disk images in-process, and
@@ -2211,9 +2557,10 @@ laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
    `https:`, `data:`) cannot read `file:` URLs or local filesystem paths, even
    when `<base href="file:///...">` is present; trusted local `file:` documents
    keep relative local image loading.
-2. `ImageDecoder` now decodes PNG (`decode_png` / `encode_png`, backed by the
-   pure-C++20 RFC 1950/1951/1952 `Deflate` engine with 64 MiB decompression and
-   16384×16384 / 64M-pixel bounds) and rasterizes SVG subresources alongside
+2. `ImageDecoder::decode_bytes` now decodes PNG (`decode_png` / `encode_png`,
+   backed by the pure-C++20 RFC 1950/1951/1952 `Deflate` engine with 64 MiB
+   decompression and 16384×16384 / 64M-pixel bounds), wires Phase 38's
+   `JpegDecoder` and `GifDecoder`, and rasterizes SVG subresources alongside
    BMP, PPM, and `data:image/*;base64,...` URLs.
 3. Unloaded or blocked `<img>` elements without explicit `width`/`height` now
    lay out as `0×0` instead of `100×100` (explicit HTML `width`/`height`
@@ -2227,7 +2574,7 @@ laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
 ./build/test_suite
 make security-fetch
 ```
-`make test` passes **141/141** suites (and **141/141** under ASan+UBSan),
+`make test` passes **152/152** suites (and **152/152** under ASan+UBSan),
 including `img_subresources_enforce_document_origin_security` (proving a web
 page at `https://app.example/index.html` — with and without
 `<base href="file:///...">` — is denied local PNG access and lays out the
@@ -2236,8 +2583,8 @@ at its `24×18` intrinsic size and reports `24×18` from
 `img.getBoundingClientRect()`). `make security-fetch` passes `3 checks; 0 failure(s)`.
 
 **What is still approximate.**
-- Only PNG, SVG, BMP, and PPM `<img>` payloads are decoded in this branch; JPEG,
-  GIF, WebP, and AVIF are not decoded here.
+- WebP, AVIF, and ICO `<img>` payloads are not decoded yet (PNG, JPEG, GIF, SVG,
+  BMP, and PPM are decoded).
 - `HTMLImageElement` script properties and events (`naturalWidth`,
   `naturalHeight`, `complete`, `decode()`, `load`/`error` events on `<img>`,
   `srcset`, and `<picture>`) are not implemented yet.

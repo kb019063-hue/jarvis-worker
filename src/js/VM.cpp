@@ -201,25 +201,30 @@ void VM::init_builtins() {
 
     // Object built-ins
     JsValue object_obj = JsValue::make_object();
+    // A prototype can be a function as well as an object, and a function has
+    // a prototype: the same three calls the interpreter's Object makes
+    // (JsValue::as_prototype, prototype_object, js_set_prototype).
     object_obj.set_property("create", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         JsValue obj = JsValue::make_object();
-        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val) {
-            obj.object_val->prototype = args[0].object_val;
+        if (!args.empty() && args[0].is_object_like()) {
+            if (JsObject* proto = args[0].as_prototype()) obj.object_val->prototype = proto;
         }
         return obj;
     }));
     object_obj.set_property("getPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (!args.empty() && args[0].type == JsType::Object && args[0].object_val && args[0].object_val->prototype) {
-            return JsValue::make_object(args[0].object_val->prototype);
+        if (!args.empty() && args[0].is_object_like()) {
+            if (JsObject* proto = args[0].prototype_object()) return JsValue::make_object(proto);
         }
         return JsValue::make_null();
     }));
     object_obj.set_property("setPrototypeOf", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        if (args.size() >= 2 && args[0].type == JsType::Object && args[0].object_val) {
-            if (args[1].type == JsType::Object && args[1].object_val) {
-                args[0].object_val->prototype = args[1].object_val;
-            } else if (args[1].type == JsType::Null) {
-                args[0].object_val->prototype = nullptr;
+        if (args.size() >= 2 && args[0].is_object_like()) {
+            JsObject* target = args[0].is_function() ? args[0].function_cell() : args[0].property_cell();
+            // A link that would close a loop is not made (js_set_prototype says no).
+            if (target && args[1].is_object_like()) {
+                js_set_prototype(target, args[1].as_prototype());
+            } else if (target && args[1].type == JsType::Null) {
+                js_set_prototype(target, nullptr);
             }
         }
         return args.empty() ? JsValue::make_undefined() : args[0];

@@ -33,6 +33,8 @@ SRCS = src/dom/Node.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
        src/render/FontRenderer.cpp \
+       src/render/JpegDecoder.cpp \
+       src/render/GifDecoder.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -93,6 +95,7 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
+MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -104,7 +107,7 @@ XML_FLOOR ?= 1702
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 4640
+WPT_FLOOR ?= 4658
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -116,11 +119,12 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below the CI scoreboard
 # floor: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes.
-JS_ASAN_FLOOR ?= 833
+# case that the normal build passes. (906 pass there today, 907 in the normal
+# build; the CI floor says why it is one below that.)
+JS_ASAN_FLOOR ?= 905
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 629
+DOM_ASAN_FLOOR ?= 640
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -139,7 +143,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz deep asan asan-core asan-deep tsan bench bench-css security-fetch help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes security-fetch help
 
 all: $(TARGET)
 
@@ -162,6 +166,10 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
+$(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
+
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
 
@@ -182,6 +190,17 @@ js-conformance: $(TARGET)
 ## and the network: jsdom is installed into build/jsdom.
 dom-conformance: $(TARGET)
 	@$(DOM_CONFORMANCE)
+
+## Twenty-one directories of test262, the suite of the language's standard:
+## what a change to functions, classes, prototypes or property definition
+## can move. Downloaded the first time into build/test262, at a pinned
+## commit; needs the network once. It is not a scoreboard and has no floor
+## (about two thirds pass). It is for the difference between two builds,
+##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
+## which lists every test that passes in the first and not in the second,
+## and fails if there is one. About three minutes for two builds.
+test262: $(TARGET)
+	@python3 tools/conformance/run_test262.py
 
 ## URL scoreboard: the web-platform-tests URL data (tests/url), run through
 ## `new URL()` and the setters of the object. Needs nothing but the binary.
@@ -245,6 +264,7 @@ fuzz:
 	@python3 tools/fuzz/fuzz_parser.py
 	@python3 tools/fuzz/fuzz_pipeline.py
 	@python3 tools/fuzz/fuzz_xml.py
+	@$(MAKE) fuzz-media
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -272,6 +292,7 @@ asan: asan-core
 asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_url_conformance.py --binary build-asan/litebird --timeout 600 --min-pass $(URL_FLOOR)
@@ -279,7 +300,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(WPT) --binary build-asan/litebird --quiet --timeout 600 --min-pass $(WPT_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/diff_xml.py --binary build-asan/litebird --count $(XML_ASAN_DIFF_COUNT) --timeout 120 --expat-only
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan fuzz
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
 ## memory errors on those pages, not for recursion: that is found at full
@@ -315,13 +336,30 @@ bench: $(TARGET)
 bench-css: $(TARGET)
 	@python3 tools/bench/bench_css_whitespace.py --sizes 30000,300000 --reps 3 --max-ms 3000
 
+## Attribute-list end removals through the DOM. Each case must print the
+## expected checksum and stay under the limit; the old vector front erase
+## shifted both tails and took seconds at 50,000 attributes.
+bench-attributes: $(TARGET)
+	@python3 tools/bench/bench_attributes.py --reps 3 --max-ms 3000
+
 ## Page fetch() must not read arbitrary local files. Generates a marker file
 ## and checks web, file:-base-smuggled, and local file: documents.
 security-fetch: $(TARGET)
 	@python3 tools/security/check_fetch_origin.py
 
+## Verifies JPEG (baseline, subsampled, progressive, grayscale, CMYK, restart
+## markers) and GIF (87a/89a, transparent, interlaced, multi-frame disposal)
+## decoding pixel-by-pixel against ImageMagick/libjpeg when available, plus
+## real-world SVG path/arc/transform/gradient rendering.
+verify-media: $(MEDIA_CHECK_TARGET)
+	@python3 tools/conformance/verify_media_render.py --binary $(MEDIA_CHECK_TARGET)
+
+## Mutation fuzzing of the JPEG, GIF, and SVG decoders/renderer.
+fuzz-media: $(MEDIA_CHECK_TARGET)
+	@python3 tools/fuzz/fuzz_media.py --binary $(MEDIA_CHECK_TARGET)
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, security-fetch, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, security-fetch, clean"

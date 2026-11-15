@@ -65,12 +65,11 @@ this directory are not touched.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**4,640 of 5,192 subtests pass. 552 are listed:**
+**4,658 of 5,192 subtests pass. 534 are listed:**
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
 | `frames` | 495 | The test loads a document into an `<iframe>` and works in it; most of them load an XML or an XHTML document (`createElement` and `createElementNS` in three kinds of document, of which the HTML one passes). Litebird has no frames with documents in them, and its command line does not load XML pages |
-| `function-as-prototype` | 18 | Every `assert_throws_js(TypeError, …)`. The harness checks that `TypeError` is an error type by walking `Object.getPrototypeOf`, and the JavaScript engine gives back an object that is not the function when a prototype is a function. Not a DOM fault; the same fault breaks `Object.getPrototypeOf(Derived) === Base` for classes. See `AGENTS.md` |
 | `one-name-two-namespaces` | 14 | Two attributes of one element with the same qualified name and different namespaces (`setAttributeNS('ab', 'attr', …)` then `setAttributeNS('kl', 'attr', …)`). An element keeps its attributes under their qualified names, so the second replaces the first. Only a script can make such a pair; no parser can |
 | `attr-is-not-a-node` | 10 | An `Attr` is an object and not a `Node`: `attr.cloneNode()`, `attr.lookupNamespaceURI()`, `importNode(attr)`, an `Attr` adopted with its element |
 | `named-properties` | 8 | `Object.getOwnPropertyNames` and property descriptors of a `NamedNodeMap` and an `HTMLCollection`; assigning to an index of an `HTMLCollection` in strict mode |

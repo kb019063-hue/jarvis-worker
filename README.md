@@ -89,16 +89,16 @@ Read the number for what it is:
   covers the language and library features ordinary scripts use (syntax,
   closures, classes, destructuring, generators, promises and async functions,
   strings, arrays, regular expressions, dates, JSON), not every clause of the
-  specification. The official suite scores lower: of the @@T262_ALL_TOTAL@@ tests in
+  specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  @@T262_ALL_NOW@@ pass (@@T262_ALL_PCT@@%; 26,012 / 54.2% before Phase 44); of the @@T262_DEF_TOTAL@@
-  on functions, classes and objects, @@T262_DEF_NOW@@ pass (@@T262_DEF_PCT@@%; 10,835 / 69.1%
+  27,872 pass (58.1%; 26,012 / 54.2% before Phase 44); of the 15,686
+  on functions, classes and objects, 12,316 pass (78.5%; 10,835 / 69.1%
   before Phase 44). `make test262` runs the latter. It is used for what a
   change moved between two builds, not as a score (Phase 34: 108 more pass
   and none fewer in those directories; Phase 44: 1,440 more pass and none
   fewer in those 21 directories, plus 374/374 = 100.0% in
   `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: @@T262_ALL_GAINED@@ more in the whole suite and @@T262_ALL_LOST_WORD@@ fewer).
+  Phase 43: 43 more in the whole suite and none fewer).
 - **Five of the 15 failures are whole features that do not exist**: BigInt
   (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
@@ -923,7 +923,7 @@ interface objects have their parents as prototypes
 console.log(Object.getPrototypeOf(C) === B, C.s(), Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype)'
 # true A.s true function        (before: Uncaught TypeError: s is not a function)
 make js-conformance      # 974 / 989; prototypes.dat 68 / 76
-make test262             # the standard's own tests on functions, classes and objects: @@T262_DEF_NOW@@ of @@T262_DEF_TOTAL@@
+make test262             # the standard's own tests on functions, classes and objects: 12,316 of 15,686
 ```
 
 What is still missing around classes (`Symbol.species`,
@@ -1043,9 +1043,12 @@ make js-conformance      # 974 / 989; construct.dat 47 / 49
 make dom-conformance     # 669 / 669; compiled.dat 25 / 25
 ```
 
-What is still missing: `this` can be used before `super()` has run, `eval`
-inside a function sees nothing of the function, and a private name is a
-property that `obj['#p']` reads. Those and what else was found on the way
+What is still missing: an upgrade still runs the constructor on the element
+itself, where the standard hands the element over when the constructor asks
+for it (a constructor written as a function can tell, and one that never
+reaches `HTMLElement` is accepted); `this` can be used before `super()` has
+run; `eval` inside a function sees nothing of the function; and a private
+name is a property that `obj['#p']` reads. Those and what else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.

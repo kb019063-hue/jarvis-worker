@@ -354,7 +354,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
-| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (191/191 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (191/191 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 43 more and none fewer of 47,967) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
 | **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 179/179 unit suites) |
 | **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
@@ -4503,9 +4503,59 @@ table.
 
 ### 6. How this is verified
 
-@@VERIFY_TABLE@@
+In the sandbox, and on two trees, because `main` moved while this was
+measured. **The rows that compare with `main`** are from this branch with
+`main` at `95d7fb2` merged in (commit `357b861`), against a release build of
+that `main`: "the binary of `main`". Since then this branch has changed no
+source file of the engine; what came is `main`'s. **The rows that only
+check** are from the tree as it is merged, four pull requests of `main`
+later (`a4952ed`: text on a canvas, `<select>` in the HTML parser, the
+attribute model, CSS colours). None of the four touches how a function is
+called or constructed. The attribute model moved the web-platform-tests from
+7,968 to 7,998 and the parser work moved html5lib to all 1,792, so those two
+are not the numbers this change was developed against.
 
-**What test262 found.** @@T262_TEXT@@
+| Check | Tree | Result |
+| :--- | :--- | :--- |
+| JavaScript corpus (`make js-conformance`) | merged | 974 / 989 in 25 files. `construct.dat` is new: 49 cases, 47 pass, and the two that do not are in section 8. `prototypes.dat` is at 68 / 76: the case on `new.target` in a parent's constructor, recorded to fail in Phase 34, passes |
+| The same corpus in the binary of `main`, and in Node (`--reference "node -e"`) | `357b861` | `main`: 939 of the 989, 13 of the 49 of `construct.dat`, 67 of the 76 of `prototypes.dat`. Node: 989 / 989 |
+| Two probes outside the corpus, in Node, in the binary of `main` and here: 20 rows on what `new.target` is, 24 on when `this` is bound (`super(...)` in an arrow function, twice, after the parent threw, in a class declared inside a constructor) | `357b861` | The same output as Node on all 44. The binary of `main` differs on 19 of the 20 and 14 of the 24 |
+| test262, the 21 directories on functions, classes and objects (`make test262`) | `357b861` | 15,686 tests: 12,316 pass, 12,275 in the binary of `main`. 41 that failed pass; none that passed fails |
+| test262, all of `built-ins`, `language` and `annexB` (the same runner with those three names) | `357b861` | 47,967 tests: 27,872 pass, 27,829 in the binary of `main`. 43 that failed pass; none that passed fails |
+| DOM corpus (`make dom-conformance`) | merged | 669 / 669 in 25 files; `compiled.dat` is new, 25 cases, each recorded from jsdom 31 |
+| The same corpus in the binary of `main`, and in jsdom (`--reference`) | `357b861` | `main`: 646 of the 669, 2 of the 25 of `compiled.dat`. jsdom: 669 / 669 |
+| Unit tests (`make test`) | merged | 191 / 191; six are new: `new.target` (32 assertions), `super(...)` and `this` (16), the collector on both (3), compiled custom elements constructed (10) and upgraded (24, with a frame, a generator, and parents that are no elements), and a page of them collected (6) |
+| Pages that are not in the corpus (`tools/conformance/compare_with_jsdom.py`): lines as jsdom prints them, here and in the binary of `main` | `357b861` | Classes and compiled constructors mixed on one page: 9 of 9, and 1. A constructor that reaches its interface from a generator and from an async function: 6 of 6, and 0; 5 of 5, and 3. An element adopted from another document: 8 of 8, and 3. Constructors written as functions: 7 of 7, and 0. A constructor that makes a second instance of its class: 3 of 4, and 2. Classes that are no elements, given to `customElements.define`: 5 of 13, and 3; the lines that differ there, the one on the page before it, and four of the five of `tests/dom-conformance/open/compiled-custom-elements.js` (1 of 5, and 0) are what `run_upgrade` does (section 5, "What is left") |
+| web-platform-tests, html5lib, URL, XML (`make wpt`, `make conformance`, `make url-conformance`, `make xml-conformance`) | merged | 7998 / 8009 subtests in 103 files, 11 listed and none failing that is not; 1792 / 1792; 1188 / 1188; 1718 / 1718: what `main` has |
+| `make diff-trees`, `make diff-xml`, `make diff-strings`, `make verify-promise-iterators` | merged | 0 of 6,000 trees differ from parse5's; 0 of 4,000 documents and 0 of 3,000 round trips differ from Expat's; 95 of 50,580 string results differ from Node's, as on `main`; 34 of 34 cases |
+| `make deep`, one page at a time (two at a time, as the target runs them, need more than the 3.9 GB of the sandbox) | `648692a`, three pull requests of `main` before the merged tree | `deep pages: 1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 21.6 s (table [dumps])` |
+| `make asan` (ASan + UBSan; `make fuzz` runs in that build) | `b740984`, the last commit that changed the engine; five pull requests of `main` have come since | Exit 0 and no report from either sanitizer: 183 / 183 suites, JavaScript 973 / 989 (one fewer than the normal build, as on `main`: `d(2000)` recursing needs more stack than a sanitizer build's frames leave), DOM 669 / 669, URL 1188 / 1188, XML 1718 / 1718, WPT 7968 / 8009 with the 41 that were listed then, 1,000 generated XML documents and 1,000 round trips, 400 + 400 + 600 fuzz runs and 1,800 of media with 0 findings, 882 deep runs over 315 pages. On the merged tree CI's sanitizer job is what runs it |
+| CI | | The runs are listed in the pull request. Its sanitizer job failed twice on this branch with nothing to read, passed once, and failed a third time when it could say why: AUDIT.md, finding 49, has what it said and what was changed |
+
+**What test262 found.** The corpus here is recorded from Node and was
+written with the change; test262 was written by neither. It is run in the
+binary of `main` and in this one, for the difference and not for the score
+(58.1% of the suite passes).
+
+The first whole run, when only `new.target` was done, had one test that
+passed on `main` and failed here:
+`built-ins/Promise/get-prototype-abrupt-executor-not-callable.js`. That
+version made the object for a built-in before it ran the built-in, and so
+read `NewTarget.prototype` before `Promise` had looked at its executor; the
+test has a getter there that throws, and asks which error comes first. It is
+why `construct_for` makes the object when the built-in asks for it (section
+4), and it is a case of `construct.dat` now.
+
+In the run of the table 43 tests that fail on `main` pass and none that
+passes fails. 32 of them are in `language/statements/class`: the
+`super-must-be-called` test of every built-in a class can extend, and what
+a derived constructor may return. The others are in
+`language/expressions/super` (4), `language/expressions/new.target` and
+`built-ins/Function/internals/Construct` (2 each), and one each under
+`arrow-function`, `class/elements` and `optional-chaining`. Six tests end
+differently in the two builds without passing in either: they ask for an
+array or a list near 2^32 entries long and are stopped by memory or by the
+clock, whichever comes first that time.
 
 **What jsdom is not right about here.** Two answers of jsdom 31 differ from
 Web IDL, and the unit suite asserts the standard's instead (both are rows of
@@ -4517,7 +4567,83 @@ undefined), where the standard falls back to `Event.prototype`.
 
 ### 7. What it costs
 
-@@COST_TEXT@@
+Release builds of `357b861` and of `main` at `95d7fb2`. Each measure in two
+copies of the binary of `main`, to see how far one binary is from itself,
+and in this one, turn about, five processes each; in a process the best of
+five loops of 15,000 to 60,000 operations, with a collection after each loop
+(without one a loop of this kind fills the machine: Known gaps, 4).
+Nanoseconds for one operation. The ratio is to the faster of the two copies.
+The last column is what the first version of this change measured, as the
+same ratio.
+
+| | `main` | `main` again | Now | Now / `main` | First version / `main` |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| Call a function | 701 | 693 | 701 | 1.01 | 1.03 |
+| Call a method | 627 | 609 | 634 | 1.04 | 1.05 |
+| Call an arrow function | 502 | 508 | 508 | 1.01 | 1.03 |
+| `array.map` with a callback, for each element | 391 | 380 | 414 | 1.09 | 1.05 |
+| An object literal | 300 | 315 | 309 | 1.03 | 0.99 |
+| `new` on a function | 904 | 871 | 898 | 1.03 | 1.09 |
+| `new` on a class | 1054 | 1042 | 1085 | 1.04 | 1.07 |
+| `new` on a class with a parent | 2193 | 2143 | 2238 | 1.04 | 1.14 |
+| `new` on a class three levels deep | 3187 | 3159 | 3242 | 1.03 | 1.20 |
+| `new` through default constructors, four levels | 4368 | 4375 | 4462 | 1.02 | 1.24 |
+| `new` on a class with a parent and two fields | 2362 | 2403 | 2438 | 1.03 | 1.12 |
+| `new` on a subclass of `Map` | 1384 | 1400 | 1428 | 1.03 | 1.33 |
+| `new` on a subclass of `Error` | 2074 | 2139 | 2145 | 1.03 | 1.14 |
+| `new Map()` | 350 | 354 | 341 | 0.97 | 0.99 |
+| A function that reads `new.target` | 989 | 944 | 1003 | 1.06 | 1.05 |
+| A class on a function that returns another object | 2068 | 2047 | 2169 | 1.06 | 1.25 |
+| `new` on a bound function | 1033 | 1013 | 1022 | 1.01 | 1.06 |
+| `Reflect.construct(F, [1])` | 1088 | 1081 | 1104 | 1.02 | 1.10 |
+| `Reflect.construct(F, [1], G)` | 1124 | 1125 | 1172 | 1.04 | 1.07 |
+| `Reflect.construct(Array, [], G)` | 626 | 642 | 675 | 1.08 | 1.08 |
+| `createElement` of a custom element (a class) | 1807 | 1833 | 1858 | 1.03 | 1.28 |
+| `new` on a custom element class | 1426 | 1378 | 1491 | 1.08 | 1.31 |
+| `new` on a custom element class two levels deep | 2328 | 2298 | 2427 | 1.06 | 1.39 |
+| `innerHTML` with 200 custom elements, parsed and upgraded: for each | 3696 | 3614 | 3912 | 1.08 | 1.18 |
+| `innerHTML` with 200 `div` elements: for each | 1343 | 1358 | 1317 | 0.98 | 1.02 |
+| `createElement` of a `div` | 684 | 702 | 703 | 1.03 | 1.03 |
+| `new` on a subclass of `Event` | 1919 | 1918 | 1999 | 1.04 | 1.13 |
+| `new Event()` | 732 | 761 | 704 | 0.96 | 1.02 |
+
+**What the first version cost, and why.** A third of a microsecond for every
+`super(...)`: `new` on a class three levels deep was 20% slower, on a
+subclass of `Map` 33%, on a custom element class two levels deep 39%. Two
+things did it, and both were there because the header that declares
+`invoke_function` and the scope belonged to another open pull request when
+they were written. `new.target` went into a function through a thread-local
+slot, which every call wrote and cleared, with a copy of the function for
+every construction. And whether `this` was bound was a binding with a name,
+declared each time a derived constructor was entered and looked up by that
+name three times before the constructor returned, in a scope that keeps its
+bindings in a vector of names. That pull request has merged; `new.target` is
+an argument that points at what the caller holds, the flag is a field of the
+scope, and a derived constructor's `this` is read back from the scope only
+when `super(...)` gave it another object.
+
+**What it costs now.** In the run of the table the 28 measures stand between
+0.96 and 1.09 of `main`, and the two copies of `main` are up to 5% apart
+from each other. A run of the same code an hour before, in which the two
+copies were within 3%, had them between 1.00 and 1.10: `new` on functions
+and classes at 1.04 to 1.06, a subclass of `Map` at 1.09, a class on a
+function that returns another object at 1.10, `Reflect.construct` at 1.06 to
+1.08, the custom-element measures at 1.08 to 1.09, plain calls at 1.02 to
+1.04. A third, between the two, had a subclass of `Error` at 1.11, which the
+table has at 1.03. Three of the measures run none of the changed code (an
+object literal, `new Map()`, `new Event()`); over the four runs made while
+this was written they stand between 0.96 and 1.04, and that much is the
+machine and where the linker put things. So no row says much by itself. What
+the runs have in common is that `new` on a custom element class, `innerHTML`
+with custom elements and `Reflect.construct(Array, [], G)` are at 1.06 to
+1.09 in each, and that nothing is above 1.11: carrying `new.target` and
+binding `this` once costs a construction about a tenth at most, and this
+machine cannot say how much less.
+
+A construction in place (an upgrade) takes a lock to note itself and one
+each time an interface asks which object it is to build on. While none is
+running no construction takes a lock: the count of those that are running
+is read first.
 
 ### 8. What is still open here
 
@@ -5044,9 +5170,9 @@ raster pipeline.
    (Phase 34, section 9), `this` can be used before `super()` has run, `let`
    and `const` have no dead zone, `eval` inside a function is global code,
    and a private name is a property that `obj['#p']` reads (Phase 43,
-   section 8). Of @@T262_DEF_TOTAL@@ test262 tests on functions, classes and
-   objects, @@T262_DEF_NOW@@ pass (`make test262`; 10,835 before Phase 44); of
-   the @@T262_ALL_TOTAL@@ in all of its `built-ins`, `language` and `annexB`, @@T262_ALL_NOW@@.
+   section 8). Of 15,686 test262 tests on functions, classes and
+   objects, 12,316 pass (`make test262`; 10,835 before Phase 44); of
+   the 47,967 in all of its `built-ins`, `language` and `annexB`, 27,872.
 11. **A page can still be slow by being long.** Depth no longer ends the
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which

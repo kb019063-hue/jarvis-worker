@@ -48,12 +48,12 @@ Edition, so:
 
 | | Documents |
 | :--- | ---: |
-| **Counted**: must be accepted (`valid`, `invalid`) or rejected (`not-wf`); 261 of them also have a canonical form that must match | 1,702 |
+| **Counted**: must be accepted (`valid`, `invalid`) or rejected (`not-wf`); 261 of them also have a canonical form that must match | 1,718 |
 | An edition before the fifth, where the fifth changed the answer (which characters a name may hold) | 310 |
 | XML 1.1 and Namespaces 1.1 | 274 |
 | The answer needs an external entity to be read | 247 |
 | `error`: a parser may report it or not | 27 |
-| An encoding this build cannot read (EUC-JP, Shift_JIS, ISO-2022-JP and the like) | 16 |
+| An encoding this build cannot read (EUC-JP, Shift_JIS, ISO-2022-JP and the like) | 0 (16 until Phase 47; every WHATWG encoding is read now, so they are counted) |
 | Not namespace-well-formed on purpose (`NAMESPACE="no"`) | 9 |
 
 Every one of the 2,585 is run, counted or not: none may crash the parser or

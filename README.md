@@ -29,12 +29,13 @@ suite and two other parsers, and brought in the tests browsers share (see
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **926 / 940 (98.5%)**; nine of the 14 that fail were recorded in Phase 34 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **644 / 644**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`) | **5421 / 5463 subtests** across 87 files; the 42 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
-| **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7968 / 8009 subtests** across 103 files; the 41 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
+| **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 175 suites, all passing | `make test` |
+| Engine unit tests | 178 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +50,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 175 engine suites
+make test            # 178 engine suites
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
@@ -227,10 +228,10 @@ It was written against references, and each has a command:
 
 | Reference | Result | Command |
 | :--- | :--- | :--- |
-| The W3C XML Conformance Test Suite | 1702 / 1702 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
+| The W3C XML Conformance Test Suite | 1718 / 1718 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
 | Expat 2.5.0 and libxml2 2.14.6, on 4,000 generated documents, half of them damaged | 3,958 read as both read them, 13 on which the two disagree, 29 with a version number outside the grammar (refused), 0 that differ | `make diff-xml` |
 | Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
-| web-platform-tests, `dom/nodes` and `domparsing` (87 files, with `testharness.js`) | 5421 / 5463 subtests; each of the 42 others is listed with a reason | `make wpt` |
+| web-platform-tests, `dom/nodes`, `domparsing` and `encoding` (103 files, with `testharness.js`) | 7968 / 8009 subtests; each of the 41 others is listed with a reason | `make wpt` |
 | jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
 | Nothing: the W3C suite's documents with bytes changed, cut short and pasted over, in the sanitizer build | 600 mutants and 1,927 documents as they are: no crash, no sanitizer report, and every document the same tree after it is written and read | `make asan` (`tools/fuzz/fuzz_xml.py`) |
 
@@ -244,11 +245,12 @@ python3 tools/fuzz/diff_xml.py --count 20000 --seed 1
 
 Five things about these numbers:
 
-- **1,702 is what applies, and the rest is said.** Not counted: 310
+- **1,718 is what applies, and the rest is said.** Not counted: 310
   documents whose answer changed with the Fifth Edition, 274 for XML 1.1, 247
   that need an external entity read, 27 where a parser may report an error
-  or not, 16 in encodings this build cannot read, 9 that are not
-  namespace-well-formed on purpose (`tests/xml/README.md`). The suite is
+  or not, 9 that are not namespace-well-formed on purpose
+  (`tests/xml/README.md`). The 16 that were skipped until Phase 47 for their
+  encoding are read now, and each is still answered as the suite says. The suite is
   downloaded and checked against a pinned SHA-256; it is not in the
   repository, because its licence does not allow passing it on in another
   form.
@@ -261,12 +263,13 @@ Five things about these numbers:
   declares. Where two references
   disagree the standard was read, and the documents say which way it went
   (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
-- **42 web-platform-tests subtests fail** across 87 files (down from 534 once
+- **41 web-platform-tests subtests fail** across 103 files (down from 534 once
   Phase 42 added nested frame documents and XML/XHTML frame loading, resolving
-  all 495 `frames` failures): 33 fail on what an `Attr` and a `NamedNodeMap`
-  are here, 1 on the page's encoding, 1 on an upstream WPT `.xhtml` test
-  checking the parent frame's `DOMException` constructor (`innerhtml-05.xhtml`),
-  and 7 on serializer edge cases documented above (`tests/wpt/README.md`).
+  all 495 `frames` failures, and from 42 once Phase 47 read every legacy
+  encoding the `encoding/` tests write in): 33 fail on what an `Attr` and a
+  `NamedNodeMap` are here, 1 on an upstream WPT `.xhtml` test checking the
+  parent frame's `DOMException` constructor (`innerhtml-05.xhtml`), and 7 on
+  serializer edge cases documented above (`tests/wpt/README.md`).
   (18 more failed on a fault of the JavaScript engine, a function that could
   not be a prototype, until Phase 34.)
 - **`XMLHttpRequest` answers `data:` URLs and nothing else.** No request
@@ -672,7 +675,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 175 engine test suites
+# Run the 178 engine test suites
 make test
 ```
 
@@ -739,14 +742,14 @@ make test
 make test
 ```
 
-Output (175 suites; the first and last lines shown):
+Output (178 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 175 engine test suites passed successfully!
+All 178 engine test suites passed successfully!
 ```
 
 ```bash
@@ -991,3 +994,36 @@ bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, and 5 SVG feature
 suites; `make fuzz-media` runs 1,800 mutated JPEG/GIF/SVG inputs through
 `build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
 Phase 38, and `AUDIT.md`, finding 43.
+
+### The encodings pages are written in (Phase 47)
+
+Every page and XML document used to be read as UTF-8, with UTF-16 and
+Latin-1 accepted in an XML declaration: a file in Shift_JIS, EUC-KR or
+windows-1252 arrived as `U+FFFD`s, `<meta charset>` was text nobody read,
+and `document.characterSet` did not exist. Phase 47 implements the WHATWG
+Encoding Standard: **40 encodings and their 228 labels**, generated from
+`whatwg/encoding` (pinned in the header), with the index tables every byte
+of them (`index-iso-8859-6`'s holes included), the Big5 pointers that stand
+for two code points, `gb18030`'s four-byte ranges, BOM sniffing, and the
+standard's two decoder modes — replacement (one `U+FFFD` per error, as a
+page expects) and fatal (an error stops the decode, as XML expects).
+
+An HTML page picks its encoding the way the standard says: the BOM, then
+`Content-Type`, then a `<meta charset>` prescan of the first 1,024 bytes
+(HTML §13.2.3.2), and `document.characterSet`, `document.charset` and
+`document.inputEncoding` report what it found. XML validates the
+declaration's `[81] EncName` before looking it up, refuses `replacement`,
+and decodes the rest. The same tables serve `data:` URLs,
+`XMLHttpRequest`, `<script src>`, `<iframe>` subdocuments and CSS
+`@charset`. `--content-type=<mime>` (and a `<file>.headers` sidecar for
+`--map-origin` files) lets the conformance runner hand a page the type a
+server would, which is what the `encoding/` tests need.
+
+Measured: the W3C XML suite's **1,718/1,718** (the 16 documents skipped
+until now for their encoding are read, and each is still answered as the
+suite says); web-platform-tests **7,968/8,009** across 103 files, of which
+16 new `encoding/` files pass 2,543/2,543 subtests (2,547 more than before,
+with `big5-decode-extra.html` alone at 2,472); unit suites 174 → 177. The
+Fuji Xerox XML documents in EUC-JP, Shift_JIS, ISO-2022-JP and UTF-16 now
+serialize to the same canonical bytes as their UTF-8 translation.
+Details are in `ARCHITECTURE.md`, Phase 47, and `AUDIT.md`, finding 53.

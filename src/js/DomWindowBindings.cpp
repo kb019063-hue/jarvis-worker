@@ -933,13 +933,18 @@ std::string final_charset(const RequestState& state) {
 const std::string& text_response(RequestState& state) {
     if (state.has_text) return state.text;
     std::string charset = final_charset(state);
-    if (state.response_type.empty() && charset.empty() && final_mime(state).is_xml()) {
-        // An XML document says what it is encoded in, and responseText
-        // listens to it (responseType "text" does not). When what it says
-        // cannot be followed, the text is read as UTF-8.
-        std::string encoding;
-        xml::XmlError error;
-        if (xml::xml_encoding(state.response.bytes, encoding, error)) charset = encoding;
+    if (state.response_type.empty() && charset.empty()) {
+        const MimeType fm = final_mime(state);
+        if (fm.is_html()) {
+            charset = HtmlParser::prescan_meta_charset(state.response.bytes);
+        } else if (fm.is_xml()) {
+            // An XML document says what it is encoded in, and responseText
+            // listens to it (responseType "text" does not). When what it says
+            // cannot be followed, the text is read as UTF-8.
+            std::string encoding;
+            xml::XmlError error;
+            if (xml::xml_encoding(state.response.bytes, encoding, error)) charset = encoding;
+        }
     }
     // Whatever the encoding, bytes that are no text in it become U+FFFD.
     state.text = decode_text(state.response.bytes, charset);
@@ -958,10 +963,11 @@ JsValue document_response(Realm& r, const RequestState& state) {
     const std::string charset = final_charset(state);
     std::shared_ptr<Document> document;
     if (html) {
-        // Scripts in a document made this way never run. The encoding is
-        // the type's, or UTF-8: a <meta charset> is not looked for, here as
-        // for a page.
-        document = HtmlParser::parse(decode_text(state.response.bytes, charset), false);
+        // Scripts in a document made this way never run.
+        std::string resolved_cs;
+        const std::string html_utf8 = HtmlParser::decode_bytes(state.response.bytes, charset, "UTF-8", &resolved_cs);
+        document = HtmlParser::parse(html_utf8, false);
+        document->set_character_set(resolved_cs);
         for (const auto& child : document->children()) child->set_owner_document(document);
     } else {
         std::string utf8, encoding;
@@ -969,6 +975,7 @@ JsValue document_response(Realm& r, const RequestState& state) {
         if (!xml::decode_xml(state.response.bytes, utf8, encoding, error, charset)) return null();
         document = std::make_shared<Document>();
         document->set_content_type(type.essence());
+        document->set_character_set(encoding);
         if (!xml::parse_xml_document(document, utf8, error)) return null();
     }
     document->set_url(state.response.url);
@@ -1711,14 +1718,20 @@ void run_inserted_script(Realm& realm, Element& script) {
                 if (r->alive) fire(*r, object, "error");
                 return;
             }
-            std::string charset_label = attr_charset;
+            std::string chosen_charset;
             MimeType mime;
             if (MimeType::parse(resp.content_type, mime)) {
                 if (const std::string* cs = mime.parameter("charset")) {
-                    charset_label = *cs;
+                    chosen_charset = encoding_name_for_label(*cs);
                 }
             }
-            const std::string source = decode_text(resp.body, encoding_name_for_label(charset_label));
+            if (chosen_charset.empty()) {
+                chosen_charset = encoding_name_for_label(attr_charset);
+            }
+            if (chosen_charset.empty() && r->document) {
+                chosen_charset = r->document->character_set();
+            }
+            const std::string source = decode_text(resp.body, chosen_charset);
             WindowPart& part = r->part<WindowPart>();
             if (part.run_script && document_of(*r, *script_ref) == r->document) {
                 auto previous = r->document->current_script();
@@ -2070,16 +2083,26 @@ void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initi
 
         MimeType mime;
         const bool parsed_mime = MimeType::parse(resp.content_type, mime);
+        std::string charset_label;
+        if (parsed_mime) {
+            if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+        }
         if (parsed_mime && mime.is_xml()) {
-            child_interp->load_xml_page(resp.body, mime.essence(), sandbox.allow_scripts);
+            child_interp->load_xml_page(resp.body, mime.essence(), sandbox.allow_scripts, nullptr, charset_label);
         } else {
-            std::string charset_label;
-            if (parsed_mime) {
-                if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+            std::string fallback_cs = "UTF-8";
+            if (pr->document && same_effective_origin(*pr, child_interp->dom_realm())) {
+                const std::string& parent_cs = pr->document->character_set();
+                if (!parent_cs.empty() &&
+                    parent_cs != "UTF-16BE" &&
+                    parent_cs != "UTF-16LE" &&
+                    parent_cs != "replacement") {
+                    fallback_cs = parent_cs;
+                }
             }
-            const std::string html_text = charset_label.empty()
-                                              ? resp.body
-                                              : decode_text(resp.body, encoding_name_for_label(charset_label));
+            std::string resolved_cs;
+            const std::string html_text = HtmlParser::decode_bytes(resp.body, charset_label, fallback_cs, &resolved_cs);
+            new_doc->set_character_set(resolved_cs);
             child_interp->load_page(html_text, sandbox.allow_scripts);
         }
         child_interp->notify_document_loaded();

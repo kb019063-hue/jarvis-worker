@@ -82,12 +82,20 @@ void BrowserShell::show_page(const std::string& html, const std::string& content
                         (parsed_mime && ((mime.type == "application" && (mime.subtype == "xml" || mime.subtype == "xhtml+xml")) ||
                                          (mime.type == "text" && mime.subtype == "xml")));
 
+    std::string transport_charset;
+    if (parsed_mime) {
+        if (const std::string* cs = mime.parameter("charset")) {
+            transport_charset = *cs;
+        }
+    }
+
     if (is_xml) {
         m_document->set_content_type(mime.essence());
         std::string xml_text;
         std::string xml_enc;
         xml::XmlError xml_err;
-        if (xml::decode_xml(html, xml_text, xml_enc, xml_err)) {
+        if (xml::decode_xml(html, xml_text, xml_enc, xml_err, transport_charset)) {
+            m_document->set_character_set(xml_enc);
             if (!xml::parse_xml_document(m_document, xml_text, xml_err)) {
                 m_document = std::make_shared<Document>();
                 m_document->set_url(ResourceLoader::address_of(m_current_url));
@@ -105,12 +113,9 @@ void BrowserShell::show_page(const std::string& html, const std::string& content
         m_js_engine = std::make_unique<JsInterpreter>(m_document);
         m_js_engine->load_page(img_html, false);
     } else {
-        std::string decoded_html = html;
-        if (parsed_mime) {
-            if (const std::string* cs = mime.parameter("charset")) {
-                decoded_html = decode_text(html, *cs);
-            }
-        }
+        std::string resolved_cs;
+        const std::string decoded_html = HtmlParser::decode_bytes(html, transport_charset, "UTF-8", &resolved_cs);
+        m_document->set_character_set(resolved_cs);
         m_js_engine = std::make_unique<JsInterpreter>(m_document);
         m_js_engine->load_page(decoded_html);
     }

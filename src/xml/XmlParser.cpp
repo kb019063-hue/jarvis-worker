@@ -4,6 +4,7 @@
 
 #include "litebird/xml/XmlParser.hpp"
 #include "litebird/html/EntityTable.hpp"
+#include "litebird/net/TextEncoding.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -1348,50 +1349,54 @@ private:
 // Encodings
 // ---------------------------------------------------------------------------
 
-enum class Encoding { Utf8, Utf16LE, Utf16BE, Windows1252 };
-
-bool encoding_from_label(std::string_view label, Encoding& out, bool& generic_utf16) {
-    std::string lower;
-    for (const char c : label) lower += c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c;
-    generic_utf16 = false;
-    if (lower == "utf-8" || lower == "utf8") out = Encoding::Utf8;
-    else if (lower == "utf-16") { out = Encoding::Utf16LE; generic_utf16 = true; }
-    else if (lower == "utf-16le") out = Encoding::Utf16LE;
-    else if (lower == "utf-16be") out = Encoding::Utf16BE;
-    // The Encoding Standard reads all of these as windows-1252.
-    else if (lower == "iso-8859-1" || lower == "iso8859-1" || lower == "latin1" || lower == "l1" || lower == "us-ascii" ||
-             lower == "ascii" || lower == "windows-1252" || lower == "cp1252" || lower == "iso_8859-1") out = Encoding::Windows1252;
-    else return false;
+bool is_valid_xml_enc_name(std::string_view name) {
+    if (name.empty()) return false;
+    const char first = name[0];
+    if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))) return false;
+    for (std::size_t i = 1; i < name.size(); ++i) {
+        const char c = name[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok) return false;
+    }
     return true;
 }
 
-const char* encoding_name(Encoding encoding) {
-    switch (encoding) {
-        case Encoding::Utf8: return "UTF-8";
-        case Encoding::Utf16LE: return "UTF-16LE";
-        case Encoding::Utf16BE: return "UTF-16BE";
-        case Encoding::Windows1252: return "windows-1252";
+bool xml_encoding_from_label(std::string_view label, EncodingId& out, bool& generic_utf16) {
+    generic_utf16 = false;
+    if (!get_encoding_from_label(label, out) || out == EncodingId::Replacement) {
+        return false;
     }
-    return "UTF-8";
+    std::string lower;
+    lower.reserve(label.size());
+    for (char c : label) {
+        if (c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ') continue;
+        lower.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c);
+    }
+    generic_utf16 = (lower == "utf-16");
+    return true;
 }
 
 // The name in `encoding="..."` of an XML declaration at the start of `ascii`.
-std::string declared_encoding(const std::string& ascii) {
+bool declared_encoding(const std::string& ascii, std::string& out_value) {
+    out_value.clear();
     // "<?xml " and not "<?xml-stylesheet".
-    if (ascii.compare(0, 5, "<?xml") != 0 || ascii.size() < 6 || !is_space(ascii[5])) return std::string();
+    if (ascii.compare(0, 5, "<?xml") != 0 || ascii.size() < 6 || !is_space(ascii[5])) return false;
     const auto end = ascii.find("?>");
     const std::string head = ascii.substr(0, end == std::string::npos ? ascii.size() : end);
     auto at = head.find("encoding");
-    if (at == std::string::npos) return std::string();
+    if (at == std::string::npos) return false;
     at += 8;
     while (at < head.size() && is_space(head[at])) ++at;
-    if (at >= head.size() || head[at] != '=') return std::string();
+    if (at >= head.size() || head[at] != '=') return false;
     ++at;
     while (at < head.size() && is_space(head[at])) ++at;
-    if (at >= head.size() || (head[at] != '"' && head[at] != '\'')) return std::string();
+    if (at >= head.size() || (head[at] != '"' && head[at] != '\'')) return false;
     const char quote = head[at++];
     const auto close = head.find(quote, at);
-    return close == std::string::npos ? std::string() : head.substr(at, close - at);
+    if (close == std::string::npos) return false;
+    out_value = head.substr(at, close - at);
+    return true;
 }
 
 } // namespace
@@ -1418,10 +1423,10 @@ namespace {
 // out to be (4.3.3: a fatal error otherwise). With one it has no say: that
 // sentence of 4.3.3 begins "In the absence of information provided by an
 // external transport protocol".
-bool find_encoding(std::string_view bytes, std::string_view transport_charset, Encoding& found, std::size_t& skip,
+bool find_encoding(std::string_view bytes, std::string_view transport_charset, EncodingId& found, std::size_t& skip,
                    XmlError& error) {
     const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    found = Encoding::Utf8;
+    found = EncodingId::Utf8;
     skip = 0;
     bool wide = false;          // the bytes are 16-bit code units
     bool from_mark = false;     // a byte order mark said so
@@ -1429,25 +1434,25 @@ bool find_encoding(std::string_view bytes, std::string_view transport_charset, E
         from_mark = true;
         skip = 3;
     } else if (bytes.size() >= 2 && byte(0) == 0xFE && byte(1) == 0xFF) {
-        found = Encoding::Utf16BE;
+        found = EncodingId::Utf16BE;
         wide = from_mark = true;
         skip = 2;
     } else if (bytes.size() >= 2 && byte(0) == 0xFF && byte(1) == 0xFE) {
-        found = Encoding::Utf16LE;
+        found = EncodingId::Utf16LE;
         wide = from_mark = true;
         skip = 2;
     } else if (bytes.size() >= 4 && byte(0) == 0 && byte(1) == '<' && byte(2) == 0 && byte(3) == '?') {
-        found = Encoding::Utf16BE;
+        found = EncodingId::Utf16BE;
         wide = true;
     } else if (bytes.size() >= 4 && byte(0) == '<' && byte(1) == 0 && byte(2) == '?' && byte(3) == 0) {
-        found = Encoding::Utf16LE;
+        found = EncodingId::Utf16LE;
         wide = true;
     }
 
     {
-        Encoding named = Encoding::Utf8;
+        EncodingId named = EncodingId::Utf8;
         bool generic = false;
-        if (!transport_charset.empty() && encoding_from_label(transport_charset, named, generic)) {
+        if (!transport_charset.empty() && xml_encoding_from_label(transport_charset, named, generic)) {
             // "UTF-16" with no mark is little-endian on the web (the
             // Encoding Standard), which is what `named` holds for it.
             if (!from_mark) found = named;
@@ -1458,23 +1463,30 @@ bool find_encoding(std::string_view bytes, std::string_view transport_charset, E
     // The start of the text as ASCII, enough to read an XML declaration.
     std::string head;
     const std::size_t step = wide ? 2 : 1;
-    const std::size_t offset = wide && found == Encoding::Utf16BE ? 1 : 0;
+    const std::size_t offset = wide && found == EncodingId::Utf16BE ? 1 : 0;
     for (std::size_t i = skip; i + step <= bytes.size() && head.size() < 512; i += step) {
         head += static_cast<char>(byte(i + offset) < 0x80 ? byte(i + offset) : '?');
     }
-    const std::string declared = declared_encoding(head);
-    if (declared.empty()) return true;
+    std::string declared;
+    if (!declared_encoding(head, declared)) return true;
 
-    Encoding named = Encoding::Utf8;
+    // XML 1.0 [81] EncName must be syntactically valid before encoding lookup;
+    // an invalid EncName is a fatal well-formedness error, not an unsupported encoding.
+    if (!is_valid_xml_enc_name(declared)) {
+        error.message = "'" + declared + "' is not the name of an encoding";
+        return false;
+    }
+
+    EncodingId named = EncodingId::Utf8;
     bool generic = false;
-    if (!encoding_from_label(declared, named, generic)) {
+    if (!xml_encoding_from_label(declared, named, generic)) {
         error.message = "the encoding '" + declared + "' is not supported";
         error.unsupported_encoding = true;
         return false;
     }
-    const bool named_wide = named == Encoding::Utf16LE || named == Encoding::Utf16BE;
+    const bool named_wide = named == EncodingId::Utf16LE || named == EncodingId::Utf16BE;
     if (from_mark) {
-        if (named_wide != wide || (!wide && named != Encoding::Utf8) || (wide && !generic && named != found)) {
+        if (named_wide != wide || (!wide && named != EncodingId::Utf8) || (wide && !generic && named != found)) {
             error.message = "the encoding declaration '" + declared + "' contradicts the byte order mark";
             return false;
         }
@@ -1492,67 +1504,29 @@ bool find_encoding(std::string_view bytes, std::string_view transport_charset, E
 } // namespace
 
 bool xml_encoding(std::string_view bytes, std::string& encoding, XmlError& error, std::string_view transport_charset) {
-    Encoding found = Encoding::Utf8;
+    EncodingId found = EncodingId::Utf8;
     std::size_t skip = 0;
     if (!find_encoding(bytes, transport_charset, found, skip, error)) return false;
-    encoding = encoding_name(found);
+    encoding = std::string(canonical_encoding_name(found));
     return true;
 }
 
 bool decode_xml(std::string_view bytes, std::string& utf8, std::string& encoding, XmlError& error,
                 std::string_view transport_charset) {
-    const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    Encoding found = Encoding::Utf8;
+    EncodingId found = EncodingId::Utf8;
     std::size_t skip = 0;
     if (!find_encoding(bytes, transport_charset, found, skip, error)) return false;
 
-    encoding = encoding_name(found);
+    encoding = std::string(canonical_encoding_name(found));
     utf8.clear();
     utf8.reserve(bytes.size());
-    if (found == Encoding::Utf8) {
+    if (found == EncodingId::Utf8) {
         utf8.assign(bytes.data() + skip, bytes.size() - skip);
         return true;
     }
-    if (found == Encoding::Windows1252) {
-        static const char32_t kHigh[32] = {
-            0x20AC, 0x81,   0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
-            0x2039, 0x0152, 0x8D,   0x017D, 0x8F,   0x90,   0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
-            0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D,   0x017E, 0x0178,
-        };
-        for (std::size_t i = skip; i < bytes.size(); ++i) {
-            const unsigned char b = byte(i);
-            if (b < 0x80) utf8 += static_cast<char>(b);
-            else append_utf8(utf8, b < 0xA0 ? kHigh[b - 0x80] : b);
-        }
-        return true;
-    }
-    if ((bytes.size() - skip) % 2 != 0) {
-        error.message = "the document is UTF-16 and ends in half a character";
+    if (!decode_with_encoding(bytes.substr(skip), found, utf8, true)) {
+        error.message = "the document contains bytes that are not valid in " + encoding;
         return false;
-    }
-    const auto unit = [&](std::size_t i) -> char32_t {
-        return found == Encoding::Utf16LE ? static_cast<char32_t>(byte(i) | (byte(i + 1) << 8))
-                                          : static_cast<char32_t>((byte(i) << 8) | byte(i + 1));
-    };
-    for (std::size_t i = skip; i + 1 < bytes.size(); i += 2) {
-        char32_t c = unit(i);
-        if (c >= 0xD800 && c <= 0xDBFF) {
-            if (i + 3 >= bytes.size()) {
-                error.message = "the document is UTF-16 and ends in half a character";
-                return false;
-            }
-            const char32_t low = unit(i + 2);
-            if (low < 0xDC00 || low > 0xDFFF) {
-                error.message = "the document is UTF-16 and has half a surrogate pair";
-                return false;
-            }
-            c = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
-            i += 2;
-        } else if (c >= 0xDC00 && c <= 0xDFFF) {
-            error.message = "the document is UTF-16 and has half a surrogate pair";
-            return false;
-        }
-        append_utf8(utf8, c);
     }
     return true;
 }

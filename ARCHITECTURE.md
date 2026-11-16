@@ -353,8 +353,9 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
-| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (183/183 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (184/184 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
 
 ---
 
@@ -737,7 +738,8 @@ struct FloatBand {
 That single predicate drives all three consumers:
 
 - **Float placement.** A floated child is laid out with a shrink-to-fit width
-  (`layout_float`), then slid down until the remaining band width can hold it.
+  (`layout_float`), then placed at the first indexed band edge where the
+  remaining width can hold it (Phase 48).
   Left floats pack from the left intrusion outward; right floats pack from the
   right edge inward, so `float: left` and `float: right` can share a row.
 - **Line-box shrinking.** `layout_inline_formatting_context` queries the band at
@@ -4908,3 +4910,54 @@ arrives in pieces.
    finding 28.
 
 ---
+
+## Phase 48 Architecture: Sized-Float Placement Index
+
+`LayoutBox::layout_block` builds a per-block `FloatPlacementIndex` lazily when
+the first float needs placement. Ordered edges partition vertical space into
+intervals of constant maximum left/right intrusion. A randomized balanced
+treap keyed by each interval's top caches the maximum remaining width in its
+subtree, so placement checks the interval containing `y_cursor`, then finds
+the earliest later edge with sufficient capacity without sweeping earlier
+rows. Inserting a float splits the partition at its top and bottom and
+updates only intersecting intervals, with logarithmic index maintenance per
+touched interval. A float whose width never fits retains the old y0 overflow
+behavior. Negative intrusions are retained rather than clamped to zero.
+
+The index is not the source of `float_bands`: inline layout still receives
+the original bands, and `clear` and containing-height accounting still use
+the existing side-specific lowest bottoms, including zero-height floats.
+The partition can still cost O(n²) when n new bands span n distinct prior
+intervals; it removes the repeated global sort and sweep for the common
+packed-row case, not all possible overlapping-float complexity.
+
+Reproduce the before/after comparison by saving a pre-change `build/litebird`
+as `build/litebird-floats-before`, then running:
+
+```sh
+python3 tools/bench/bench_sized_floats.py build/litebird-floats-before --out build/floats-before --sizes 1000 3000 10000
+python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
+for f in build/floats-before/*.layout; do cmp "$f" "build/floats-after/${f##*/}"; done
+```
+
+The fixed-seed generator makes three independently generated patterns at each
+size: packed rows, mixed left/right widths/heights with negative horizontal
+margins, and mixed floats with clearance and negative top margins. On this
+branch all nine full layout dumps were byte-identical. End-to-end CLI times
+(seconds; one local machine, no speedup claim for unrelated workloads):
+
+| Floats | Packed rows before → after | Mixed before → after | Clear before → after |
+| :--- | ---: | ---: | ---: |
+| 1,000 | 0.076 → 0.013 | 0.129 → 0.016 | 0.037 → 0.015 |
+| 3,000 | 0.494 → 0.031 | 1.134 → 0.039 | 0.261 → 0.037 |
+| 10,000 | 5.244 → 0.096 | 12.505 → 0.125 | 2.621 → 0.120 |
+
+`make bench-floats` runs the 1k and 10k patterns under a generous
+four-second-per-page CI wall-time guard (the old 10k row page exceeds it);
+timing is not used as a pixel oracle.
+
+The CSS parser and tree building are included in these times. The baseline
+was the already-correct band-edge sweep, **not** the old 46-second capped
+slide that let floats escape. Unit tests cover mixed sides, `clear:left` and
+`clear:right`, negative margins including a negative intrusion, and the
+existing rows beyond 1,024 and zero-height band behavior.

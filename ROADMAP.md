@@ -30,7 +30,7 @@ a row from Open tasks over anything here, take that row.
 ## Where Litebird stands today (the honest baseline)
 
 WPT-grade HTML/DOM/XML parsing for the covered corpora; JavaScript interpreted
-on a tree-walking evaluator (plus a half-finished bytecode VM), 969/984 on its
+on a tree-walking evaluator (plus a half-finished bytecode VM), 974/989 on its
 recorded corpus; layout with an 8×8 bitmap font; a terminal/ANSI renderer;
 `http://` only — no TLS at all; XHR for `data:` URLs only; no typed arrays,
 `Proxy`, BigInt or ES modules; pixels are **unmeasured** by any scoreboard.
@@ -52,7 +52,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
-| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), array-hole semantics, and the recursive matcher of finding 26 (no catastrophic backtracking). | M |
+| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), and array-hole semantics. (The recursive matcher of finding 26 was replaced by an iterative heap-stack bytecode VM in Phase 37.) | M |
 | 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
 | 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, property escapes, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
@@ -63,8 +63,8 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | :--- | :--- | :--- |
 | 12 | **Two known-wrong layout bugs** — block-in-inline is split correctly (Phase 36); sized floats are placed by a band-edge sweep, landing on the exact bottom edge of the float in the way (10,000 sized floats in seconds; nothing escapes the box). **Done.** | M |
 | 13 | **Flexbox/Grid gap closure** vs WPT `css/flex` and `css/grid`. | M–L |
-| 14 | **Selectors level 4** — `:is()/:where()/:has()/:focus-visible`, cascade `@layer`, `@supports`, `@container`, CSS nesting, `::part`. | M–L |
-| 15 | **Media & container queries** — evaluation inside the cascade (parsing exists). | S–M |
+| 14 | **Selectors level 4** — `:has()`, `:focus-visible`, `@container`, CSS nesting, `::part`. (`:is()`, `:where()`, `:not()` selector lists, combinators `>`/`+`/`~`, `@layer`, and `@supports` landed in Phase 37.) | M–L |
+| 15 | **Container queries** — `@container` evaluation inside the cascade. (Media Queries Level 4 range syntax and boolean operators landed in Phase 37.) | S–M |
 | 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. | M |
 | 17 | **Table completeness** — `border-collapse` widest-wins (the wider border of a shared edge wins, its colour included; style and positional priorities are not modelled — this engine has a single solid border style — and row borders are not painted), `table-layout: fixed` (the first row decides; later rows cannot resize a column), `caption-side`, `empty-cells` (inherited, separate borders only). **Done.** | S–M |
 | 18 | **Multicol + fragmentation** — columns, `break-inside`. | M–L |
@@ -78,7 +78,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 21 | **HTTP/1.1 complete** — redirects, `Set-Cookie` → jar (exists — wire it), auth, chunked, gzip/br decode. | M |
 | 22 | **HTTPS** — TLS with certificate validation (adopt a stack or platform APIs). This phase *is* the project, not a detail. | L–XL |
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
-| 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. | M |
+| 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. **Decoding done (Phase 47)**: 40 encodings and 228 labels from `whatwg/encoding`, `<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR and subresources (WPT 7,968/8,009 across 103 files, the XML suite 1,718/1,718). Open: `TextDecoder`/`TextEncoder` in script, encoders, and streaming. | M |
 | 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
@@ -106,7 +106,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 
 | # | Phase | Size |
 | :--- | :--- | :--- |
-| 37 | **WPT everywhere** — extend the vendored runner beyond `dom/nodes`+`domparsing` to `html/`, `url/`, `fetch/`, `encoding/`, `css-*`, same "listed failures" protocol. | M |
+| 37 | **WPT everywhere** — extend the vendored runner beyond `dom/nodes`+`domparsing` to `html/`, `url/`, `fetch/`, `encoding/`, `css-*`, same "listed failures" protocol. **`encoding/` landed in Phase 47** (16 files, 2,543 subtests). | M |
 | 38 | **Render conformance** — reftest / screenshot-diff harness against a reference engine; today *pixels* are unmeasured. | L |
 | 39 | **Interop dashboard + CI benches** — extend `bench-css`: JS, layout, memory, network fixtures. | M |
 | 40 | **Fuzzing expansion** — layout/render fuzzers (parser/XML ones exist) + a mock-server network fuzzer. | M |

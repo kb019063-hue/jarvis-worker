@@ -8,6 +8,7 @@
 #include "litebird/xml/XmlTools.hpp"
 #include "litebird/xml/XmlDom.hpp"
 #include "litebird/net/DataUrl.hpp"
+#include "litebird/net/TextEncoding.hpp"
 #include <fstream>
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/html/HtmlTokenizer.hpp"
@@ -1390,6 +1391,70 @@ TEST(js_async_promises_and_json) {
     EventLoop::default_loop().run_microtasks();
     auto result_code = interp.eval("_code");
     assert(result_code.to_number() == 200.0);
+}
+
+TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var combinator_trace = [];
+        var saved_resolve = Promise.resolve;
+        function check(method) {
+            var steps = 0;
+            var iterable = {
+                next: function() {
+                    combinator_trace.push('next');
+                    if (steps++ === 0) return {value: 7, done: false};
+                    throw Error('advanced beyond the first value');
+                },
+                return: function() { combinator_trace.push('close'); return {done: true}; }
+            };
+            iterable[Symbol.iterator] = function() { return this; };
+            Promise.resolve = function(value) {
+                combinator_trace.push('resolve:' + value);
+                throw Error('stop');
+            };
+            Promise[method](iterable).catch(function(e) {
+                combinator_trace.push(method + ':' + e.message);
+            });
+        }
+        check('all'); check('allSettled'); check('any'); check('race');
+        Promise.resolve = saved_resolve;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("combinator_trace.join('|')").to_string() ==
+           "next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|"
+           "all:stop|allSettled:stop|any:stop|race:stop");
+
+    // Getting resolve is a single operation, before asking for the iterator.
+    js.eval_ast(R"JS(
+        var order = [];
+        Object.defineProperty(Promise, 'resolve', {configurable:true, get:function() {
+            order.push('get');
+            return function(value) { order.push('resolve:' + value); return saved_resolve.call(Promise, value); };
+        }});
+        var items = {i:0, next:function() {
+            order.push('next');
+            return this.i++ < 2 ? {value:this.i, done:false} : {done:true};
+        }};
+        items[Symbol.iterator] = function() { order.push('iterator'); return this; };
+        Promise.all(items);
+        Object.defineProperty(Promise, 'resolve', {value:saved_resolve, writable:true, configurable:true});
+    )JS");
+    assert(js.eval("order.join('|')").to_string() == "get|iterator|next|resolve:1|next|resolve:2|next");
+
+    // The returned promise's own then getter can throw. This happens *during*
+    // iteration, so IteratorClose must call return before rejecting.
+    js.eval_ast(R"JS(
+        var then_trace = [], item = Promise.resolve(1);
+        Object.defineProperty(item, 'then', {get:function() { then_trace.push('then'); throw Error('getter'); }});
+        var forever = {next:function() { then_trace.push('next'); return {value:item, done:false}; },
+                       return:function() { then_trace.push('close'); return {done:true}; }};
+        forever[Symbol.iterator] = function() { return this; };
+        Promise.any(forever).catch(function(e) { then_trace.push(e.message); });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
 }
 
 TEST(css_flex_wrapping_and_grid_layout) {
@@ -4970,10 +5035,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         assert(encoding_name_for_label("utf-16be") == "UTF-16BE");
         assert(encoding_name_for_label("ascii") == "windows-1252" && encoding_name_for_label("ISO-8859-1") == "windows-1252" &&
                encoding_name_for_label("cp819") == "windows-1252");
-        // Any other name is no name: one the standard has and this build
-        // cannot read, like one nobody has.
+        // Any non-WHATWG label is empty; Shift_JIS and EUC-JP are now supported.
+        assert(encoding_name_for_label("shift_jis") == "Shift_JIS");
         assert(encoding_name_for_label("").empty() && encoding_name_for_label("bogus").empty() &&
-               encoding_name_for_label("shift_jis").empty() && encoding_name_for_label("utf-32").empty() &&
+               encoding_name_for_label("ebcdic-cp-us").empty() && encoding_name_for_label("utf-32").empty() &&
                encoding_name_for_label("\"utf-8\"").empty());
     }
 
@@ -4999,7 +5064,8 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         // With nothing from outside: a mark, then the declaration, then UTF-8.
         assert(encoding_of("<a/>") == "UTF-8" && encoding_of(latin1) == "windows-1252");
         assert(encoding_of("\xEF\xBB\xBF<a/>") == "UTF-8" && encoding_of("\xFF\xFE" + le) == "UTF-16LE" && encoding_of("\xFE\xFF" + be) == "UTF-16BE");
-        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "unsupported");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "EUC-JP");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?><a/>") == "unsupported");
         //   A declaration that the bytes contradict is an error of form.
         assert(encoding_of("<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>") == "error");
         assert(encoding_of("\xEF\xBB\xBF" + latin1) == "error");
@@ -5010,11 +5076,11 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         assert(encoding_of(le, "UTF-16LE") == "UTF-16LE" && encoding_of(be, "UTF-16BE") == "UTF-16BE");
         assert(decoded(le, "UTF-16LE") == "<a/>" && decoded(be, "UTF-16BE") == "<a/>" && decoded(le, "utf-16") == "<a/>");
         assert(encoding_of(latin1, "UTF-8") == "UTF-8" && encoding_of("<a/>", "windows-1252") == "windows-1252");
-        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>", "UTF-8") == "UTF-8");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?><a/>", "UTF-8") == "UTF-8");
         assert(encoding_of("\xEF\xBB\xBF<a/>", "windows-1252") == "UTF-8" && encoding_of("\xFF\xFE" + le, "UTF-8") == "UTF-16LE");
         assert(encoding_of("\xEF\xBB\xBF" + latin1, "UTF-8") == "UTF-8");
         //   A name this build does not know is no word from the transport.
-        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "shift_jis") == "UTF-8");
+        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "ebcdic-cp-us") == "UTF-8");
         // Bytes that are no text in the encoding: no document (4.3.3).
         assert(decoded(std::string("<\0a\0>\0\x3D\xD8<\0/\0a\0>\0", 16), "UTF-16LE") == "error");
         assert(decoded(std::string("<\0a\0/\0>", 7), "UTF-16LE") == "error");
@@ -5096,8 +5162,8 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("get('data:text/xml;charset=utf-8,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%C3%A9%3C/a%3E').responseXML.documentElement.textContent.charCodeAt(0)") == "233");
     //    UTF-16 with a byte order mark.
     assert(S("var x = get('data:text/xml,%FF%FE%3C%00a%00/%00%3E%00'); x.responseXML.documentElement.nodeName + ' ' + x.responseText") == "a <a/>");
-    //    An encoding this build cannot read: no document, and the text as UTF-8.
-    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EUC-JP\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 43");
+    //    An encoding outside WHATWG (e.g. EBCDIC-CP-US): no document, and the text as UTF-8.
+    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 49");
     //    Bytes that are no text in the document's encoding: XML calls that
     //    fatal (4.3.3), so there is no document; jsdom puts U+FFFD in their
     //    place and gives one. responseText has the U+FFFD in both.
@@ -9643,6 +9709,184 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
 }
 
+TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
+        var mDeep = deepNonCap.exec("zzabczz");
+        var veryDeepResult = "";
+        try {
+            var r5k = new RegExp("(?:".repeat(5000) + "abc" + ")".repeat(5000));
+            veryDeepResult = r5k.exec("zzabczz")[0];
+        } catch (e) {
+            veryDeepResult = e.name === "SyntaxError" ? "abc" : e.name;
+        }
+        var s = "ab".repeat(60000);
+        var mLong = /^(?:a|b)+$/.test(s);
+        var mCap = /(?:a|b)*c/.exec(s + "c");
+        var mNamed = /^(?<part>[a-z]+)-\k<part>$/.exec("hello-hello");
+        var mLookbehind = /(?<=(x+)y)\1z/.exec("xxxyxxxz");
+        var out = [
+            mDeep ? mDeep[0] : "",
+            veryDeepResult,
+            String(mLong),
+            String(mCap ? mCap[0].length : -1),
+            mNamed ? mNamed.groups.part : "",
+            mLookbehind ? mLookbehind[0] + ":" + mLookbehind[1] : ""
+        ].join("|");
+    )JS");
+    assert(js.eval("out").to_string() == "abc|abc|true|120001|hello|xxxz:xxx");
+}
+
+TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(R"HTML(<!DOCTYPE html><html><head><style>
+        :root { font-size: 20px; --pad: 12px 24px; }
+        @layer base, theme;
+        @layer base {
+            .card > p.lead { color: rgb(255, 0, 0); background-color: rgb(10, 20, 30) !important; }
+        }
+        @layer theme {
+            .card > p { color: rgb(0, 128, 0); background-color: rgb(200, 200, 200) !important; }
+        }
+        .sibling + .target { margin-top: clamp(10px, 5vw, 30px); padding: var(--pad); }
+        .sibling ~ .later { width: 50dvh; border-radius: 50%; font-size: 150%; line-height: 1.5; }
+        ul > li:nth-child(2n + 1) { font-weight: bold; }
+        @media (400px <= width <= 1000px) and (height >= 500px) {
+            :is(#mq, #mq2) { display: flex; }
+        }
+        @supports (display: grid) and (not (bogus-prop: 1)) {
+            :where(#sup) { display: grid; }
+        }
+    </style></head><body>
+        <div class="card"><p class="lead">lead</p></div>
+        <div class="sibling">s</div><div class="target">t</div><div class="later">l</div>
+        <ul><li>1</li><li>2</li><li>3</li></ul>
+        <div id="mq"></div><div id="sup"></div>
+    </body></html>)HTML");
+
+    StyleResolver resolver;
+    resolver.set_viewport(800.0f, 600.0f);
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto root = doc->document_element();
+    auto root_style = resolver.resolve_style(root, nullptr);
+    assert(root_style.font_size == 20.0f);
+
+    auto body = doc->body();
+    auto body_style = resolver.resolve_style(body, &root_style);
+
+    auto card = doc->query_selector(".card");
+    auto card_style = resolver.resolve_style(card, &body_style);
+    auto lead = doc->query_selector(".lead");
+    auto lead_style = resolver.resolve_style(lead, &card_style);
+    // Cascade layers: later layer (theme) beats earlier layer (base) even with lower specificity,
+    // while for !important earlier layer (base) beats later layer (theme).
+    assert(lead_style.color.r == 0 && lead_style.color.g == 128 && lead_style.color.b == 0);
+    assert(lead_style.background_color.r == 10 && lead_style.background_color.g == 20 && lead_style.background_color.b == 30);
+
+    auto target = doc->query_selector(".target");
+    auto target_style = resolver.resolve_style(target, &body_style);
+    // 5vw of 800 = 40px clamped to 30px; var(--pad) expanded before shorthand padding.
+    assert(target_style.margin.top == 30.0f);
+    assert(target_style.padding.top == 12.0f && target_style.padding.right == 24.0f);
+
+    auto later = doc->query_selector(".later");
+    auto later_style = resolver.resolve_style(later, &body_style);
+    assert(later_style.width == 300.0f); // 50dvh of 600px
+    assert(later_style.border_radius_percent == 50.0f);
+    assert(later_style.font_size == 24.0f); // 150% of inherited 16px body font-size
+    assert(later_style.effective_line_height() == 36.0f); // 1.5 * 24px
+
+    auto lis = doc->get_elements_by_tag_name("li");
+    assert(lis.size() == 3);
+    assert(resolver.resolve_style(lis[0], &body_style).font_weight == 700);
+    assert(resolver.resolve_style(lis[1], &body_style).font_weight == 400);
+    assert(resolver.resolve_style(lis[2], &body_style).font_weight == 700);
+
+    assert(resolver.resolve_style(doc->get_element_by_id("mq"), &body_style).display == Display::Flex);
+    assert(resolver.resolve_style(doc->get_element_by_id("sup"), &body_style).display == Display::Grid);
+}
+
+TEST(inline_style_cssom_shorthands_and_aliases) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var el = document.createElement('div');
+        el.style.fontFamily = '"Helvetica Neue", Arial';
+        el.style.flex = '2 1 10px';
+        el.style.overflow = 'hidden auto';
+        el.style.inset = '1px 2px 3px 4px';
+        el.style.gap = '4px 8px';
+        el.style.borderRadius = '6px';
+        el.style.webkitTransform = 'translateX(10px)';
+        el.style.webkitTransition = 'opacity 200ms ease';
+        el.style.setProperty('--accent', 'rgb(1, 2, 3)');
+        var summary = [
+            el.style.fontFamily,
+            el.style.flexGrow, el.style.flexShrink, el.style.flexBasis,
+            el.style.overflowX, el.style.overflowY,
+            el.style.top, el.style.right, el.style.bottom, el.style.left,
+            el.style.rowGap, el.style.columnGap,
+            el.style.borderTopLeftRadius,
+            el.style.transform,
+            el.style.transitionDuration,
+            el.style.getPropertyValue('--accent')
+        ].join('|');
+    )JS");
+    assert(js.eval("summary").to_string() ==
+           "\"Helvetica Neue\", Arial|2|1|10px|hidden|auto|1px|2px|3px|4px|4px|8px|6px|translateX(10px)|200ms|rgb(1, 2, 3)");
+}
+
+TEST(html5_date_time_inputs_validation_and_stepping) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+        var negMonth = inp('month');
+        negMonth.valueAsNumber = -1;
+        var invalidLeap = inp('date', '2025-02-29').value;
+        var validLeap = inp('date', '2024-02-29').value;
+        var badMonth = inp('month', '2026-13').value;
+        var badWeek = inp('week', '2025-W53').value;
+        var okWeek = inp('week', '2026-W53').value;
+        var dtSpace = inp('datetime-local', '2026-03-04 05:06').value;
+        var d = inp('date', '2026-03-04'); d.stepUp(2); d.min = '2026-03-10';
+        var t = inp('time', '12:30'); t.step = '0.5'; t.stepUp();
+        var w = inp('week', '2025-W52'); w.stepUp();
+        var errs = [];
+        try { inp('text').valueAsDate = 'bad'; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('datetime-local').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = Infinity; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = 5; } catch (e) { errs.push(e.name); }
+        var result = [
+            negMonth.value, invalidLeap, validLeap, badMonth, badWeek, okWeek, dtSpace,
+            d.value, String(d.validity.rangeUnderflow), t.value, w.value, errs.join(',')
+        ].join('|');
+    )JS");
+    assert(js.eval("result").to_string() ==
+           "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
+}
+
 // =============================================================================
 // Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
 // =============================================================================
@@ -10700,6 +10944,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     JsInterpreter js(doc);
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
+
     start = std::chrono::steady_clock::now();
     assert(js.eval(
         "var e = document.createElement('div');"
@@ -13147,6 +13392,222 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     }
 }
 
+// ============================================================================
+// Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
+// ============================================================================
+
+TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders) {
+    using namespace litebird;
+    // 1. All 40 canonical names and 228 labels resolve cleanly; non-WHATWG labels fail.
+    for (std::size_t i = 0; i < 40; ++i) {
+        auto id = static_cast<EncodingId>(i);
+        std::string_view canon = canonical_encoding_name(id);
+        assert(!canon.empty());
+    }
+    for (std::size_t i = 0; i < 228; ++i) {
+        EncodingId resolved = EncodingId::Utf8;
+        std::string padded = std::string(" \t\r\n\f") + encoding_tables::kLabels[i].label + " \t";
+        assert(get_encoding_from_label(padded, resolved));
+        assert(resolved == encoding_tables::kLabels[i].id);
+    }
+    EncodingId dummy = EncodingId::Utf8;
+    assert(!get_encoding_from_label("", dummy));
+    assert(!get_encoding_from_label("utf-32", dummy));
+    assert(!get_encoding_from_label("utf-32be", dummy));
+    assert(!get_encoding_from_label("utf-7", dummy));
+    assert(encoding_name_for_label("  LATIN1 ") == "windows-1252");
+    assert(encoding_name_for_label("Shift-JIS") == "Shift_JIS");
+    assert(encoding_name_for_label("csEUCKR") == "EUC-KR");
+    assert(encoding_name_for_label("zh_cn") == "");
+
+    // 2. BOM sniffing strips at most one BOM.
+    EncodingId actual = EncodingId::Windows1252;
+    assert(whatwg_decode(std::string("\xEF\xBB\xBF\xEF\xBB\xBF", 6), EncodingId::Windows1252, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf8);
+    assert(whatwg_decode(std::string("\xFE\xFF\xFE\xFF", 4), EncodingId::Utf8, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf16BE);
+    assert(whatwg_decode(std::string("\xFF\xFE\xFF\xFE", 4), EncodingId::Utf8, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf16LE);
+
+    // 3. Single-byte encodings + unmapped byte holes in replacement vs fatal modes.
+    std::string out;
+    assert(decode_with_encoding("\xF0\xD2\xC9\xD7\xC5\xD4", EncodingId::Koi8R, out, true));
+    assert(out == "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82"); // "Привет"
+    // ISO-8859-6 byte 0xA1 is unmapped (null in index-iso-8859-6).
+    assert(!decode_with_encoding("\xA1", EncodingId::Iso8859_6, out, true));
+    assert(decode_with_encoding("A\xA1Z", EncodingId::Iso8859_6, out, false));
+    assert(out == "A\xEF\xBF\xBDZ");
+
+    // 4. gb18030 & GBK: 0x80 -> Euro, 2-byte BMP, 4-byte SMP, pointer 7457 -> U+E7C7, ASCII pushback.
+    assert(decode_with_encoding("\x80", EncodingId::Gbk, out, true) && out == "\xE2\x82\xAC");
+    assert(decode_with_encoding("\x90\x30\x81\x30", EncodingId::Gb18030, out, true) && out == "\xF0\x90\x80\x80"); // U+10000
+    assert(decode_with_encoding("\x81\x35\xF4\x37", EncodingId::Gb18030, out, true) && out == "\xEE\x9F\x87"); // pointer 7457 -> U+E7C7
+    // Invalid 4th byte restores second ('0'), third (0x81), and fourth byte:
+    // 0x81 '@' (0x40, pointer 0) re-parses as 2-byte U+4E02 (\xE4\xB8\x82), whereas 0x81 '!' (0x21) errors and restores '!'.
+    assert(decode_with_encoding("\x81\x30\x81@", EncodingId::Gb18030, out, false) && out == "\xEF\xBF\xBD" "0\xE4\xB8\x82");
+    assert(decode_with_encoding("\x81\x30\x81!", EncodingId::Gb18030, out, false) && out == "\xEF\xBF\xBD" "0\xEF\xBF\xBD!");
+
+    // 5. Big5: two-code-point HKSCS entries (1133, 1135, 1164, 1166) and ASCII pushback.
+    assert(decode_with_encoding("\x88\x62", EncodingId::Big5, out, true) && out == "\xC3\x8A\xCC\x84"); // ptr 1133 -> U+00CA U+0304
+    assert(decode_with_encoding("\x88\x64", EncodingId::Big5, out, true) && out == "\xC3\x8A\xCC\x8C"); // ptr 1135 -> U+00CA U+030C
+    assert(decode_with_encoding("\x88\xA3", EncodingId::Big5, out, true) && out == "\xC3\xAA\xCC\x84"); // ptr 1164 -> U+00EA U+0304
+    assert(decode_with_encoding("\x88\xA5", EncodingId::Big5, out, true) && out == "\xC3\xAA\xCC\x8C"); // ptr 1166 -> U+00EA U+030C
+    assert(decode_with_encoding("\x81!", EncodingId::Big5, out, false) && out == "\xEF\xBF\xBD!");
+
+    // 6. EUC-JP (JIS X 0208, 0x8E katakana, 0x8F JIS X 0212), Shift_JIS (EUDC), ISO-2022-JP, EUC-KR.
+    assert(decode_with_encoding("\xA4\xA2\x8E\xB1", EncodingId::EucJp, out, true) && out == "\xE3\x81\x82\xEF\xBD\xB1"); // あｱ
+    assert(decode_with_encoding("\xF0\x40", EncodingId::ShiftJis, out, true) && out == "\xEE\x80\x80"); // EUDC U+E000
+    assert(decode_with_encoding("\x1B(J\\\x7E\x1B(B", EncodingId::Iso2022Jp, out, true) && out == "\xC2\xA5\xE2\x80\xBE"); // ¥‾
+    // ISO-2022-JP back-to-back state switches with no output emit U+FFFD; incomplete ESC $ at EOF restores '$'.
+    assert(decode_with_encoding("\x1B(J\x1B(B", EncodingId::Iso2022Jp, out, false) && out == "\xEF\xBF\xBD");
+    assert(decode_with_encoding("\x1B$", EncodingId::Iso2022Jp, out, false) && out == "\xEF\xBF\xBD$");
+    assert(decode_with_encoding("\xB0\xA1", EncodingId::EucKr, out, true) && out == "\xEA\xB0\x80"); // 가
+
+    // 7. replacement and x-user-defined.
+    assert(decode_with_encoding("", EncodingId::Replacement, out, true) && out.empty());
+    assert(!decode_with_encoding("abc", EncodingId::Replacement, out, true));
+    assert(decode_with_encoding("abc", EncodingId::Replacement, out, false) && out == "\xEF\xBF\xBD");
+    assert(decode_with_encoding("A\x80\xFF", EncodingId::XUserDefined, out, true) && out == "A\xEF\x9E\x80\xEF\x9F\xBF");
+}
+
+TEST(html_meta_charset_prescan_and_xml_encname_multibyte_decoding) {
+    using namespace litebird;
+    // 1. HTML §13.2.3.2 prescan rules: comments, quoted `>`, pragma, UTF-16 -> UTF-8, x-user-defined -> windows-1252, 1024-byte cap.
+    assert(HtmlParser::prescan_meta_charset("<!-- <meta charset='koi8-r'> --><meta charset='windows-1251'>") == "windows-1251");
+    assert(HtmlParser::prescan_meta_charset("<!---> <meta charset=shift_jis>") == "Shift_JIS");
+    assert(HtmlParser::prescan_meta_charset("<head data-x=\"><meta charset='koi8-r'>\"><meta charset=\"euc-jp\">") == "EUC-JP");
+    assert(HtmlParser::prescan_meta_charset("<meta http-equiv='Content-Type' content='text/html; charset = \"big5\"'>") == "Big5");
+    assert(HtmlParser::prescan_meta_charset("<meta content='text/html; charset=koi8-u'>") == ""); // missing http-equiv
+    assert(HtmlParser::prescan_meta_charset("<meta charset='utf-16le'>") == "UTF-8");
+    assert(HtmlParser::prescan_meta_charset("<meta charset='x-user-defined'>") == "windows-1252");
+    assert(HtmlParser::prescan_meta_charset("<meta charset='csiso2022kr'>") == "replacement");
+    std::string beyond_1024(1030, ' ');
+    beyond_1024 += "<meta charset='koi8-r'>";
+    assert(HtmlParser::prescan_meta_charset(beyond_1024).empty());
+
+    // 2. HTML §13.2.3.1 precedence: BOM > transport > <meta> > fallback.
+    std::string resolved;
+    std::string body_bom = std::string("\xEF\xBB\xBF<meta charset='koi8-r'>\xC3\xA9", 28);
+    assert(HtmlParser::decode_bytes(body_bom, "windows-1251", "ISO-8859-2", &resolved) == "<meta charset='koi8-r'>\xC3\xA9");
+    assert(resolved == "UTF-8");
+
+    std::string body_meta = "<meta charset='koi8-r'>\xF0";
+    assert(HtmlParser::decode_bytes(body_meta, "windows-1252", "UTF-8", &resolved) == "<meta charset='koi8-r'>\xC3\xB0");
+    assert(resolved == "windows-1252");
+    assert(HtmlParser::decode_bytes(body_meta, "", "UTF-8", &resolved) == "<meta charset='koi8-r'>\xD0\x9F");
+    assert(resolved == "KOI8-R");
+
+    // 3. XML 1.0 [81] EncName validation + CJK XML fatal decoding.
+    std::string utf8, enc;
+    xml::XmlError err;
+    for (const char* bad_decl : {
+             "<?xml version='1.0' encoding=' utf-8'?><r/>",
+             "<?xml version='1.0' encoding='_UTF-8'?><r/>",
+             "<?xml version='1.0' encoding='8-UTF'?><r/>",
+             "<?xml version='1.0' encoding='utf:8'?><r/>",
+             "<?xml version='1.0' encoding=''?><r/>",
+         }) {
+        err = xml::XmlError{};
+        assert(!xml::decode_xml(bad_decl, utf8, enc, err));
+        assert(!err.unsupported_encoding);
+    }
+
+    // Valid Shift_JIS, EUC-JP, and ISO-2022-JP XML decode to identical canonical XML `<doc>あ</doc>`.
+    const std::string sjis_xml = "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><doc>\x82\xA0</doc>";
+    const std::string eucjp_xml = "<?xml version=\"1.0\" encoding=\"euc-jp\"?><doc>\xA4\xA2</doc>";
+    const std::string iso2022_xml = "<?xml version=\"1.0\" encoding=\"ISO-2022-JP\"?><doc>\x1B$B$\"\x1B(B</doc>";
+    std::string c1, c2, c3;
+    assert(xml::decode_xml(sjis_xml, utf8, enc, err) && enc == "Shift_JIS" && xml::xml_canonical_form(utf8, c1, err));
+    assert(xml::decode_xml(eucjp_xml, utf8, enc, err) && enc == "EUC-JP" && xml::xml_canonical_form(utf8, c2, err));
+    assert(xml::decode_xml(iso2022_xml, utf8, enc, err) && enc == "ISO-2022-JP" && xml::xml_canonical_form(utf8, c3, err));
+    assert(c1 == "<doc>\xE3\x81\x82</doc>" && c1 == c2 && c2 == c3);
+
+    // Truncated Shift_JIS lead byte in XML fails in fatal mode.
+    err = xml::XmlError{};
+    assert(!xml::decode_xml("<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><doc>\x82</doc>", utf8, enc, err));
+}
+
+TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase47_encoding_test";
+    fs::remove_all(tmp_dir);
+    fs::create_directories(tmp_dir);
+
+    auto write_bin = [&](const fs::path& p, std::string_view bytes) {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+
+    // Unlabelled child HTML containing raw KOI8-R byte 0xF0 ('П' in KOI8-R, 'ð' in windows-1252).
+    write_bin(tmp_dir / "child_unlabelled.html", "<!DOCTYPE html><p id='t'>\xF0</p>");
+    // External Shift_JIS script (`window.sjisWord = "あ";` encoded in Shift_JIS).
+    write_bin(tmp_dir / "ext_sjis.js", "window.sjisWord = \"\x82\xA0\";\n");
+    // External CSS stylesheet with `@charset "koi8-r";` setting `--word` or valid selector/rule + Shift_JIS XHR doc.
+    write_bin(tmp_dir / "sheet_at_charset.css", "@charset \"koi8-r\";\n#styled { width: 137px; }\n");
+    write_bin(tmp_dir / "xhr_meta.html", "<!DOCTYPE html><meta charset=\"koi8-r\"><span id=\"w\">\xF0</span>");
+    write_bin(tmp_dir / "xhr_sjis.xml", "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><item>\x82\xA0</item>");
+
+    ResourceLoader::set_origin_root_for_testing("https://enc.example.test", tmp_dir.string());
+
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://enc.example.test/index.html");
+        doc->set_character_set("KOI8-R");
+        doc->set_viewport_size(400.0f, 300.0f);
+
+        JsInterpreter js(doc);
+        const std::string page_html = R"html(<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="sheet_at_charset.css">
+  <script src="ext_sjis.js" charset="shift_jis"></script>
+</head>
+<body>
+  <div id="styled" style="height:20px"></div>
+  <iframe id="same" src="child_unlabelled.html"></iframe>
+  <iframe id="sdoc" srcdoc="<!DOCTYPE html><meta charset='windows-1252'><p>ok</p>"></iframe>
+  <iframe id="dataf" src="data:text/html,<meta charset='windows-1252'><p>%F0</p>"></iframe>
+  <script>
+    const htmlParsed = new DOMParser().parseFromString("<meta charset='iso-8859-2'><p>x</p>", "text/html");
+    const xmlParsed = new DOMParser().parseFromString("<?xml version='1.0' encoding='Shift_JIS'?><x/>", "text/xml");
+    window.domParserCs = htmlParsed.characterSet + "," + xmlParsed.characterSet;
+
+    const xhrHtml = new XMLHttpRequest();
+    xhrHtml.open("GET", "xhr_meta.html", false);
+    xhrHtml.send();
+    window.xhrHtmlText = xhrHtml.responseText.includes("\u041F");
+
+    const xhrXml = new XMLHttpRequest();
+    xhrXml.open("GET", "xhr_sjis.xml", false);
+    xhrXml.send();
+    window.xhrXmlInfo = xhrXml.responseXML.characterSet + ":" + xhrXml.responseXML.documentElement.textContent;
+  </script>
+</body>
+</html>)html";
+
+        js.load_page(page_html, true);
+        js.notify_document_loaded();
+        EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+        assert(js.eval("document.characterSet === 'KOI8-R' && document.charset === 'KOI8-R' && document.inputEncoding === 'KOI8-R'").is_truthy());
+        assert(js.eval("window.sjisWord").to_string() == "\xE3\x81\x82");
+        assert(js.eval("window.domParserCs").to_string() == "UTF-8,UTF-8");
+        assert(js.eval("window.xhrHtmlText").is_truthy());
+        assert(js.eval("window.xhrXmlInfo").to_string() == "Shift_JIS:\xE3\x81\x82");
+
+        // Same-origin unlabelled iframe inherits parent KOI8-R -> 0xF0 decodes to U+041F ('П').
+        assert(js.eval("document.getElementById('same').contentDocument.characterSet").to_string() == "KOI8-R");
+        assert(js.eval("document.getElementById('same').contentDocument.getElementById('t').textContent.codePointAt(0)").to_number() == 0x041F);
+        // srcdoc iframe always stays UTF-8 despite internal <meta charset>.
+        assert(js.eval("document.getElementById('sdoc').contentDocument.characterSet").to_string() == "UTF-8");
+        assert(js.eval("document.getElementById('styled').offsetWidth").to_number() == 137);
+    }
+
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(tmp_dir);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -13174,6 +13635,7 @@ int main() {
     RUN_TEST(javascript_prototype_chain_and_arrays);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
+    RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
@@ -13320,6 +13782,12 @@ int main() {
     RUN_TEST(truetype_font_rasterizer_and_utf8_proportional_metrics);
     RUN_TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e);
 
+    // Phase 37: RegExp VM, modern CSS cascade/units/MQ L4, inline-style CSSOM, HTML5 date/time inputs.
+    RUN_TEST(regexp_vm_handles_deep_nesting_and_long_inputs);
+    RUN_TEST(css_cascade_layers_supports_combinators_and_mq_l4);
+    RUN_TEST(inline_style_cssom_shorthands_and_aliases);
+    RUN_TEST(html5_date_time_inputs_validation_and_stepping);
+
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
@@ -13349,6 +13817,11 @@ int main() {
     RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);
     RUN_TEST(js_escaped_keywords_and_contextual_rules);
     RUN_TEST(js_strict_async_generator_identifier_context_and_line_terminators);
+
+    // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK.
+    RUN_TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders);
+    RUN_TEST(html_meta_charset_prescan_and_xml_encname_multibyte_decoding);
+    RUN_TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

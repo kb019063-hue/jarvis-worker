@@ -240,3 +240,15 @@ while ((r = g.exec(str)) && at.length < 9) { at.push(r.index); g.lastIndex = r.i
 console.log(a, b, c, m.index, m[0].length, d.lastIndex, at.join("/"), [...str.matchAll(/(?:)/gu)].length, [...str.matchAll(/(?:)/g)].length);
 #expect
 true false 0 0 2 2 0/1/1/1/1/1/1/1/1 4 5
+
+#name deep alternation, groups and long-input RegExp VM
+#code
+var r1 = /^(?:a|b)+$/;
+var r2 = /(?:a|b)*c/;
+var s = "ab".repeat(50000);
+var m3 = /^(?<head>a+)-(?<tail>\k<head>)$/.exec("aaa-aaa");
+var m4 = /(?<=(a+)b)\1c/.exec("aabaac");
+var m5 = new RegExp("(".repeat(120) + "x" + ")".repeat(120)).exec("x");
+console.log(r1.test(s), r2.exec(s + "c")[0].length, m3.groups.head, m3.groups.tail, m4 && m4[0], m4 && m4[1], m5 && m5.length);
+#expect
+true 100001 aaa aaa aac aa 121

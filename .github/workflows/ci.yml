@@ -125,9 +125,9 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 969 of 984 pass, and the floor is that score (raised by
-        # 14 in finding 50 with identifiers.dat and by 48 in finding 49, most of
-        # them construct.dat). It used to sit one below for
+        # does not vary: 974 of 989 pass, and the floor is that score (raised by
+        # 14 in finding 50, 4 in finding 51, 1 in finding 42, and 48 in finding
+        # 49, most of them construct.dat). It used to sit one below for
         # `pairs made a half at a time in a long string` (long-strings.dat),
         # which copied the whole string at every pair and took 6 of the 10
         # seconds a case is allowed, so it timed out on a busy machine. Finding
@@ -135,7 +135,7 @@ jobs:
         # engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 969
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 974
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -147,6 +147,11 @@ jobs:
         # a limit of one second: 20,000 pairs take about 20 ms and 40,000 about
         # 35 ms, where copying the text at every pair took 5.6 s and 23 s.
         run: make bench-surrogates
+      - name: Promise combinators resolve before advancing the iterator
+        # Four reference-checked adversarial cases in async.dat: an unbounded
+        # iterator must be closed when resolve/then throws; the old walk
+        # advanced forever before it looked at the first yielded value.
+        run: make verify-promise-iterators
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on
@@ -186,7 +191,7 @@ jobs:
         # a regression.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 665
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 669
       - name: URL scoreboard (web-platform-tests data)
         # tests/url holds the URL parsing and setter cases browsers are tested
         # with. The floor in the Makefile is the number that pass today; the
@@ -219,7 +224,7 @@ jobs:
           path: build/xml-conformance/xmlts20130923.zip
           key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
       - name: XML scoreboard (W3C XML Conformance Test Suite)
-        # 1,702 documents apply to a parser that does not validate, knows
+        # 1,718 documents apply to a parser that does not validate, knows
         # namespaces, reads no external entity and follows XML 1.0 Fifth
         # Edition. Each must be accepted or refused as the suite says, 261
         # with the canonical form the suite gives. All of them pass; the
@@ -237,10 +242,12 @@ jobs:
         run: |
           python3 -m pip install --quiet lxml
           make diff-xml
-      - name: Web Platform Tests (dom/nodes, domparsing)
-        # The tests browsers are tested with, 76 files run with their own
-        # testharness.js. The floor in the Makefile is the number of subtests
-        # that pass today; each that does not is listed with its reason in
+      - name: Web Platform Tests (dom/nodes, domparsing, encoding)
+        # The tests browsers are tested with, 103 files run with their own
+        # testharness.js (the encoding/ ones say what a byte means in each
+        # legacy encoding, so this is where the WHATWG tables are checked).
+        # The floor in the Makefile is the number of subtests that pass today;
+        # each that does not is listed with its reason in
         # tests/wpt/expected-failures.txt. The step also fails on a failure
         # that is not listed and on a listed subtest that has begun to pass.
         run: make wpt
@@ -289,14 +296,27 @@ jobs:
           path: build/xml-conformance/xmlts20130923.zip
           key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
       - name: Sanitizer build, tests, the corpora (JavaScript, DOM, URL, XML, web-platform-tests) and a fuzz smoke run
+        # The output is also kept in a file: the last step of this job says
+        # from it what failed.
         env:
           ASAN_OPTIONS: detect_leaks=0
           GITHUB_TOKEN: ${{ github.token }}
-        run: make -j"$(nproc)" asan-core
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-core 2>&1 | tee "$RUNNER_TEMP/asan-core.log"
       - name: Deep and oversized pages in the sanitizer build
         # For memory errors on these pages. They are a twentieth as deep as in
         # the deep-pages job, which is the one that looks for recursion: a
         # sanitizer build is several times slower.
         env:
           ASAN_OPTIONS: detect_leaks=0
-        run: make asan-deep
+        run: |
+          set -o pipefail
+          make asan-deep 2>&1 | tee "$RUNNER_TEMP/asan-deep.log"
+      - name: What failed, as annotations
+        # This job takes a quarter of an hour and has failed with nothing but
+        # `exit code 2` to go by where the log could not be fetched (finding
+        # 49). The annotations of a job are served by the API itself:
+        #   gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$RUNNER_TEMP/asan-core.log" "$RUNNER_TEMP/asan-deep.log"

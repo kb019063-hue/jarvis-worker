@@ -71,15 +71,36 @@ bool media_matches_or_needs_wrapper(std::string_view raw_media, std::string& wra
     return true;
 }
 
+// CSS Syntax Level 3 §3.2: exact `@charset "<label>";` byte prefix within the first 1024 bytes.
+std::string sniff_css_at_charset(std::string_view bytes) {
+    static constexpr std::string_view kPrefix = "@charset \"";
+    const std::string_view head = bytes.substr(0, std::min<std::size_t>(bytes.size(), 1024));
+    if (head.size() < kPrefix.size() + 2 || head.compare(0, kPrefix.size(), kPrefix) != 0) {
+        return {};
+    }
+    const std::size_t end = head.find("\";", kPrefix.size());
+    if (end == std::string_view::npos) {
+        return {};
+    }
+    std::string canon = encoding_name_for_label(head.substr(kPrefix.size(), end - kPrefix.size()));
+    if (canon == "UTF-16BE" || canon == "UTF-16LE") {
+        canon = "UTF-8";
+    }
+    return canon;
+}
+
 bool load_css_resource(
     const std::string& raw_href,
     const ResourceRequestContext& ctx,
+    const std::string& env_charset,
     StyleSheetCache* cache,
     std::string& css_out,
-    std::string& final_url_out
+    std::string& final_url_out,
+    std::string& sheet_charset_out
 ) {
     css_out.clear();
     final_url_out.clear();
+    sheet_charset_out = "UTF-8";
     const std::string resolved_key = ResourceLoader::resolve_url(ctx.base_url, raw_href);
     if (resolved_key.empty()) return false;
 
@@ -118,14 +139,24 @@ bool load_css_resource(
         }
     }
 
-    std::string charset_label;
+    std::string chosen_charset;
     MimeType mime;
     if (MimeType::parse(resp.content_type, mime)) {
-        if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+        if (const std::string* cs = mime.parameter("charset")) {
+            chosen_charset = encoding_name_for_label(*cs);
+        }
     }
-    css_out = charset_label.empty()
-                  ? resp.body
-                  : decode_text(resp.body, encoding_name_for_label(charset_label));
+    if (chosen_charset.empty()) {
+        chosen_charset = sniff_css_at_charset(resp.body);
+    }
+    if (chosen_charset.empty() && !env_charset.empty()) {
+        chosen_charset = encoding_name_for_label(env_charset);
+    }
+    if (chosen_charset.empty()) {
+        chosen_charset = "UTF-8";
+    }
+    sheet_charset_out = chosen_charset;
+    css_out = decode_text(resp.body, chosen_charset);
     final_url_out = resp.url.empty() ? resolved_key : resp.url;
     if (cache) {
         cache->by_url[resolved_key] = StyleSheetCache::Entry{true, final_url_out, css_out};
@@ -140,6 +171,7 @@ std::string expand_css_imports(
     const std::string& css,
     const std::string& document_url,
     const std::string& sheet_base_url,
+    const std::string& sheet_charset,
     StyleSheetCache* cache,
     std::unordered_set<std::string>& visited,
     int depth
@@ -228,9 +260,10 @@ std::string expand_css_imports(
                 if (!resolved.empty() && visited.insert(resolved).second) {
                     std::string sub_css;
                     std::string sub_final_url;
-                    if (load_css_resource(href, sub_ctx, cache, sub_css, sub_final_url)) {
+                    std::string sub_charset;
+                    if (load_css_resource(href, sub_ctx, sheet_charset, cache, sub_css, sub_final_url, sub_charset)) {
                         std::string expanded = expand_css_imports(
-                            sub_css, document_url, sub_final_url, cache, visited, depth + 1
+                            sub_css, document_url, sub_final_url, sub_charset, cache, visited, depth + 1
                         );
                         if (!wrapped_media.empty()) {
                             imported_prefix += "@media " + wrapped_media + " {\n" + expanded + "\n}\n";
@@ -329,15 +362,18 @@ StyleResolver DocumentStyles::build_resolver(
                 const std::string href = std::string(trim_ascii(extract_pi_attr(pi.data(), "href")));
                 const std::string alternate = ascii_lower_str(extract_pi_attr(pi.data(), "alternate"));
                 const std::string media = extract_pi_attr(pi.data(), "media");
+                std::string pi_env_cs = encoding_name_for_label(extract_pi_attr(pi.data(), "charset"));
+                if (pi_env_cs.empty()) pi_env_cs = doc.character_set();
                 std::string wrapped_media;
                 if (!href.empty() && alternate != "yes" && is_css_type_attr(type) &&
                     media_matches_or_needs_wrapper(media, wrapped_media)) {
                     std::string css_text;
                     std::string final_url;
-                    if (load_css_resource(href, base_ctx, cache, css_text, final_url)) {
+                    std::string sheet_cs;
+                    if (load_css_resource(href, base_ctx, pi_env_cs, cache, css_text, final_url, sheet_cs)) {
                         std::unordered_set<std::string> visited{final_url};
                         std::string expanded = expand_css_imports(
-                            css_text, base_ctx.document_url, final_url, cache, visited, 0
+                            css_text, base_ctx.document_url, final_url, sheet_cs, cache, visited, 0
                         );
                         if (!wrapped_media.empty()) {
                             expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
@@ -363,7 +399,7 @@ StyleResolver DocumentStyles::build_resolver(
             std::string css_text = el.text_content();
             std::unordered_set<std::string> visited;
             std::string expanded = expand_css_imports(
-                css_text, base_ctx.document_url, base_ctx.base_url, cache, visited, 0
+                css_text, base_ctx.document_url, base_ctx.base_url, doc.character_set(), cache, visited, 0
             );
             if (!wrapped_media.empty()) {
                 expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
@@ -390,12 +426,16 @@ StyleResolver DocumentStyles::build_resolver(
                 }
             }
 
+            std::string link_env_cs = encoding_name_for_label(el.get_attribute("charset"));
+            if (link_env_cs.empty()) link_env_cs = doc.character_set();
+
             std::string css_text;
             std::string final_url;
-            if (load_css_resource(href, link_ctx, cache, css_text, final_url)) {
+            std::string sheet_cs;
+            if (load_css_resource(href, link_ctx, link_env_cs, cache, css_text, final_url, sheet_cs)) {
                 std::unordered_set<std::string> visited{final_url};
                 std::string expanded = expand_css_imports(
-                    css_text, link_ctx.document_url, final_url, cache, visited, 0
+                    css_text, link_ctx.document_url, final_url, sheet_cs, cache, visited, 0
                 );
                 if (!wrapped_media.empty()) {
                     expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";

@@ -190,29 +190,88 @@ std::pair<JsValue, JsValue> make_resolving_functions(const std::shared_ptr<Promi
     return {resolve_fn, reject_fn};
 }
 
+// GetPromiseResolve happens before GetIterator, but the returned method is
+// called once *per value*, while the iterator is still open. The constructor
+// fallback keeps the long-standing native `Promise.all` call-without-this API.
+std::pair<JsValue, JsValue> combinator_resolve(const JsValue& default_constructor) {
+    JsValue constructor = JsValue::current_this();
+    if (!constructor.is_object_like()) constructor = default_constructor;
+    JsValue resolve = constructor.get_property("resolve");
+    if (!resolve.is_function()) js_throw_type_error("Promise resolve is not a function");
+    return {constructor, resolve};
+}
+
+// Invoke(nextPromise, "then", ...), not PromiseResolve(nextPromise). A custom
+// resolve can return an object whose `then` getter/call throws; that abrupt
+// completion must reach js_iterate's visitor while it can close the iterator.
+// Keep the native subscription for an unmodified native promise: it gives the
+// pending-promise registry explicit roots for values captured by the reaction.
+void subscribe_combinator_item(const JsValue& next_promise,
+                               std::function<void(bool, const JsValue&)> reaction,
+                               const std::shared_ptr<PromiseData>& result,
+                               JsRootSet keep_alive = nullptr) {
+    JsValue then_fn = next_promise.get_property("then");
+    if (!then_fn.is_function()) js_throw_type_error("Promise result has no callable then");
+    const JsValue builtin_then = js_object_value(JsIntrinsics::get().promise_proto).get_property("then");
+    if (auto data = next_promise.promise_value(); data && strict_equals(then_fn, builtin_then)) {
+        Promise::subscribe(data, std::move(reaction), std::move(keep_alive));
+        return;
+    }
+
+    // A user-supplied then() can retain the callbacks indefinitely. Its
+    // native closures are opaque to the collector; keep their captured JS
+    // values in the result's registered reaction until it settles instead.
+    if (keep_alive && result->state == PromiseState::Pending) {
+        const bool first = result->handlers.empty();
+        PromiseHandler roots;
+        roots.native = [](bool, const JsValue&) {};
+        roots.keep_alive = std::move(keep_alive);
+        result->handlers.push_back(std::move(roots));
+        if (first) pending_registry().add(result);
+    }
+    auto called = std::make_shared<bool>(false);
+    auto callback = [called, reaction = std::move(reaction)](bool rejected, Args args) {
+        if (!*called) {
+            *called = true;
+            reaction(rejected, arg_or_undefined(args, 0));
+        }
+        return JsValue::make_undefined();
+    };
+    JsValue fulfilled = js_make_native("", 1, [callback](Args args) { return callback(false, args); });
+    JsValue rejected = js_make_native("", 1, [callback](Args args) { return callback(true, args); });
+    // The resolve/reject element functions have [[Call]], not [[Construct]].
+    // Built-in functions otherwise default to constructible in this engine.
+    fulfilled.function_cell()->not_constructor = true;
+    rejected.function_cell()->not_constructor = true;
+    then_fn.call_with_this(next_promise, {fulfilled, rejected});
+}
+
 /// Shared by all(), allSettled() and any(): walks the iterable, subscribing to
-/// each element, and settles `result` through `on_item`.
+/// each element as it is yielded, and settles `result` through `on_item`.
 template <typename OnItem, typename OnEmpty>
-JsValue combine(Args args, OnItem on_item, OnEmpty on_done) {
+JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, OnEmpty on_done) {
     auto result = std::make_shared<PromiseData>();
     auto values = std::make_shared<std::vector<JsValue>>();
-    // Starts at 1 so the combinator cannot finish while elements are still
-    // being collected.
+    // Starts at 1 so a synchronous custom then() cannot finish the combinator
+    // before the iterator has reported its end.
     auto remaining = std::make_shared<size_t>(1);
 
     JsValue thrown;
     const bool ok = js_capture_throw([&] {
+        auto [constructor, resolve] = combinator_resolve(default_constructor);
         size_t index = 0;
         js_iterate(js_arg(args, 0), [&](const JsValue& item) {
             const size_t i = index++;
+            // Resolve before subscribing and before asking for the next item.
+            JsValue next_promise = resolve.call_with_this(constructor, {item});
             values->push_back(JsValue::make_undefined());
             ++*remaining;
-            Promise::subscribe(Promise::to_promise(item),
+            subscribe_combinator_item(next_promise,
                 [result, values, remaining, i, on_item, on_done](bool rejected, const JsValue& value) {
                     if (result->state != PromiseState::Pending) return;
                     if (!on_item(result, *values, i, rejected, value)) return;
                     if (--*remaining == 0) on_done(result, *values);
-                }, values);
+                }, result, values);
             return true;
         });
     }, thrown);
@@ -424,7 +483,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
     });
 
     js_define_method(ctor, "all", 1, [](Args args) {
-        return combine(args,
+        return combine(args, Promise::create_constructor(),
             [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values, size_t i,
                bool rejected, const JsValue& value) {
                 if (rejected) {
@@ -440,7 +499,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
     });
 
     js_define_method(ctor, "allSettled", 1, [](Args args) {
-        return combine(args,
+        return combine(args, Promise::create_constructor(),
             [](const std::shared_ptr<PromiseData>&, std::vector<JsValue>& values, size_t i,
                bool rejected, const JsValue& value) {
                 JsValue entry = JsValue::make_object();
@@ -455,7 +514,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
     });
 
     js_define_method(ctor, "any", 1, [](Args args) {
-        return combine(args,
+        return combine(args, Promise::create_constructor(),
             [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values, size_t i,
                bool rejected, const JsValue& value) {
                 if (!rejected) {
@@ -477,11 +536,13 @@ void install_promise_builtins(JsIntrinsics& realm) {
         auto result = std::make_shared<PromiseData>();
         JsValue thrown;
         const bool ok = js_capture_throw([&] {
+            auto [constructor, resolve] = combinator_resolve(Promise::create_constructor());
             js_iterate(js_arg(args, 0), [&](const JsValue& item) {
-                Promise::subscribe(Promise::to_promise(item), [result](bool rejected, const JsValue& value) {
+                JsValue next_promise = resolve.call_with_this(constructor, {item});
+                subscribe_combinator_item(next_promise, [result](bool rejected, const JsValue& value) {
                     if (rejected) Promise::reject(result, value);
                     else Promise::resolve(result, value);
-                });
+                }, result);
                 return true;
             });
         }, thrown);

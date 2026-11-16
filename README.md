@@ -27,14 +27,15 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **969 / 984 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **665 / 665**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`) | **5421 / 5463 subtests** across 87 files; the 42 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
-| **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
+| **JavaScript corpus** | **974 / 989 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7968 / 8009 subtests** across 103 files; the 41 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
+| **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 175 suites, all passing | `make test` |
+| Engine unit tests | 183 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +50,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 175 engine suites
+make test            # 183 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -60,6 +61,7 @@ make bench-css       # CSS whitespace runs: same paint as compact pages, each un
 make bench-attributes # attribute-list end removals: expected DOM checksums, each under 3 s
 make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
 make bench-surrogates # a string built half a surrogate pair at a time: results face Node, each under 1 s
+make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
@@ -68,7 +70,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 984 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 989 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -139,7 +141,7 @@ catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 665 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 669 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -157,8 +159,9 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Before Phase 27 (`main` at `6f08a70`) | 61 / 572; the everyday probe 13 / 68 |
 | Phase 27 | 572 / 572; the everyday probe 68 / 68 |
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
-| Phase 34, with 11 more cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
-| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 665 / 665 |
+| Phase 34, with 11 cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
+| Phase 37, with 4 more cases (`forms.dat` date/time inputs, `style.dat` CSSOM `el.style` shorthands) | 644 / 644 |
+| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -190,11 +193,11 @@ Four things about the number:
   (`compare_with_jsdom.py`), and became fifteen cases. A full score says
   that nothing is known to be wrong among what was asked.
 - **It is 100% of what the corpus asks, not of the DOM.** jsdom does no layout
-  and loads no other page, so nothing here checks `getBoundingClientRect()`
-  (zero while scripts run), scrolling or navigation. What is known to be
-  missing or wrong is listed in ARCHITECTURE.md (Phase 27, section 12, and
-  Phase 28, section 10): date and time inputs are text inputs, `el.style`
-  keeps most shorthands whole, and more.
+  and loads no other page, so nothing here checks `getComputedStyle(el).width`
+  layout resolution, scrolling or navigation. What is known to be
+  missing or wrong is listed in ARCHITECTURE.md (Phase 27, section 12,
+  Phase 28, section 10, and Phase 37): `sheet.cssRules`, `document.write`,
+  the SVG DOM (`className.baseVal`, `viewBox`, `getBBox()`), and more.
 - **jsdom is the reference, not the authority.** Where it differs from the
   standards, the corpus stays away and a unit test asserts the standard's
   answer (`tests/dom-conformance/README.md` names the places).
@@ -231,10 +234,10 @@ It was written against references, and each has a command:
 
 | Reference | Result | Command |
 | :--- | :--- | :--- |
-| The W3C XML Conformance Test Suite | 1702 / 1702 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
+| The W3C XML Conformance Test Suite | 1718 / 1718 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
 | Expat 2.5.0 and libxml2 2.14.6, on 4,000 generated documents, half of them damaged | 3,958 read as both read them, 13 on which the two disagree, 29 with a version number outside the grammar (refused), 0 that differ | `make diff-xml` |
 | Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
-| web-platform-tests, `dom/nodes` and `domparsing` (87 files, with `testharness.js`) | 5421 / 5463 subtests; each of the 42 others is listed with a reason | `make wpt` |
+| web-platform-tests, `dom/nodes`, `domparsing` and `encoding` (103 files, with `testharness.js`) | 7968 / 8009 subtests; each of the 41 others is listed with a reason | `make wpt` |
 | jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
 | Nothing: the W3C suite's documents with bytes changed, cut short and pasted over, in the sanitizer build | 600 mutants and 1,927 documents as they are: no crash, no sanitizer report, and every document the same tree after it is written and read | `make asan` (`tools/fuzz/fuzz_xml.py`) |
 
@@ -248,11 +251,12 @@ python3 tools/fuzz/diff_xml.py --count 20000 --seed 1
 
 Five things about these numbers:
 
-- **1,702 is what applies, and the rest is said.** Not counted: 310
+- **1,718 is what applies, and the rest is said.** Not counted: 310
   documents whose answer changed with the Fifth Edition, 274 for XML 1.1, 247
   that need an external entity read, 27 where a parser may report an error
-  or not, 16 in encodings this build cannot read, 9 that are not
-  namespace-well-formed on purpose (`tests/xml/README.md`). The suite is
+  or not, 9 that are not namespace-well-formed on purpose
+  (`tests/xml/README.md`). The 16 that were skipped until Phase 47 for their
+  encoding are read now, and each is still answered as the suite says. The suite is
   downloaded and checked against a pinned SHA-256; it is not in the
   repository, because its licence does not allow passing it on in another
   form.
@@ -265,12 +269,13 @@ Five things about these numbers:
   declares. Where two references
   disagree the standard was read, and the documents say which way it went
   (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
-- **42 web-platform-tests subtests fail** across 87 files (down from 534 once
+- **41 web-platform-tests subtests fail** across 103 files (down from 534 once
   Phase 42 added nested frame documents and XML/XHTML frame loading, resolving
-  all 495 `frames` failures): 33 fail on what an `Attr` and a `NamedNodeMap`
-  are here, 1 on the page's encoding, 1 on an upstream WPT `.xhtml` test
-  checking the parent frame's `DOMException` constructor (`innerhtml-05.xhtml`),
-  and 7 on serializer edge cases documented above (`tests/wpt/README.md`).
+  all 495 `frames` failures, and from 42 once Phase 47 read every legacy
+  encoding the `encoding/` tests write in): 33 fail on what an `Attr` and a
+  `NamedNodeMap` are here, 1 on an upstream WPT `.xhtml` test checking the
+  parent frame's `DOMException` constructor (`innerhtml-05.xhtml`), and 7 on
+  serializer edge cases documented above (`tests/wpt/README.md`).
   (18 more failed on a fault of the JavaScript engine, a function that could
   not be a prototype, until Phase 34.)
 - **`XMLHttpRequest` answers `data:` URLs and nothing else.** No request
@@ -676,7 +681,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 175 engine test suites
+# Run the 183 engine test suites
 make test
 ```
 
@@ -743,14 +748,14 @@ make test
 make test
 ```
 
-Output (175 suites; the first and last lines shown):
+Output (183 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 175 engine test suites passed successfully!
+All 183 engine test suites passed successfully!
 ```
 
 ```bash
@@ -837,11 +842,38 @@ alive. `make bench-surrogates` runs the two sizes a doubling apart and the
 keep-each-prefix shape against Node.js with a one-second limit: 17 ms, 28 ms
 and 14 ms, where `main`'s binary fails all three (5.5 s, over 8 s, 3.9 s). The
 corpus case that used to take 5.5 s of its 10-second budget takes 0.035 s, so
-the JavaScript floor in CI is now the score, 907 of 921. The handle is a word
+the JavaScript floor in CI rose to the score at that phase, 907 of 921
+(Phase 45 raises it again). The handle is a word
 wider, which costs about 5% across the string benchmarks that were already
 there. Reading a half-owed string before completing the
 pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
+
+
+### Promise combinators must resolve before the next item (Phase 45)
+
+`Promise.all`, `any`, `race` and `allSettled` used to walk an iterable
+until it ended without calling `Promise.resolve` on any element. If it did not
+end, they never reached the first value. Now each step calls the receiver's
+`resolve` (the method is looked up once, before the iterator), reads the
+result's `then`, and subscribes before asking for the next value. If any of
+those operations throws, the iterator's `return()` runs and the returned
+promise rejects. A custom `then` is invoked while the iterator is open.
+
+`make verify-promise-iterators` prints `34/34` async cases with a 3-second
+limit; four new cases use hostile iterators and expectations independently
+checked with Node. The old binary passes 30/34, with timeouts. The full JS
+score is now 925/939 after merging Phase 44's identifiers (911/925 before
+that merge); `make test` passes 170 suites (163 on the original base). A page
+outside the corpus, through `tools/conformance/compare_with_jsdom.py`, prints
+`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator is still
+ignored by `js_iterate`'s array fast path, and subclassed Promises still
+make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
+The full release and sanitizer chain passed on the base tree, again after
+merging main's frames/table work, and again with Phase 44's Unicode identifiers:
+170/170 suites, JS 925/939 (924/939 ASan), WPT 5421/5463, 0 unlisted;
+`make fuzz` and `make tsan` passed. The CI JS floor is now 925 and the ASan
+floor is 923 (both raised, neither lowered).
 
 
 ### Page resource origin (Phase 33)
@@ -880,7 +912,7 @@ interface objects have their parents as prototypes
 ./build/litebird --run-js 'class A { static s() { return "A.s"; } } class B extends A {} class C extends B {}
 console.log(Object.getPrototypeOf(C) === B, C.s(), Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype)'
 # true A.s true function        (before: Uncaught TypeError: s is not a function)
-make js-conformance      # 969 / 984; prototypes.dat 68 / 76
+make js-conformance      # 974 / 989; prototypes.dat 68 / 76
 make test262             # the standard's own tests on functions, classes and objects: @@T262_DEF_NOW@@ of @@T262_DEF_TOTAL@@
 ```
 
@@ -925,6 +957,36 @@ and HarfBuzz/bidi shaping, CORS preflight `OPTIONS`, and `ArrayBuffer`. Full
 details are in `ARCHITECTURE.md`, Phase 36, and `AUDIT.md`, finding 44.
 
 
+### Iterative RegExp VM, Modern CSS Cascade/Units, CSSOM `el.style`, and HTML5 Date/Time Inputs (Phase 37)
+
+Phase 37 closes four cross-subsystem gaps (`AUDIT.md`, finding 42):
+
+- **Iterative bytecode RegExp VM (`src/js/BuiltinsRegExp.cpp`):** Replaces the
+  recursive CPS matcher and recursive AST destructor with an iterative bytecode
+  VM, explicit heap backtracking stack (`kMaxMatchSteps = 30,000,000`), and
+  iterative teardown (`regexp.dat` 39/39; `/(?:a|b)+/` on 120,000 chars and
+  250+ nested groups execute cleanly without `RangeError`).
+- **Modern CSS cascade, selectors, units & L4 media queries (`CssParser`,
+  `StyleSheet`, `StyleResolver`):** Adds child/sibling combinators (`>`, `+`,
+  `~`), `:is()` / `:where()` / selector-list `:not()` / `:host`, `@layer`
+  statement/block ordering, `@supports` evaluation, Media Queries Level 4
+  ranges (`<=`, `<`, `>=`, `>`) and `not`/`and`/`or`, `min()`/`max()`/`clamp()`,
+  `dvh`/`dvw`/`vmax`, percentage `border-radius`, `:root` `rem` inheritance, and
+  O(1) ancestor-depth pruning + `AllDescendant` DP prefix memoization (depth
+  200,000 in `< 0.1 s`).
+- **CSSOM `el.style` shorthand expansion & aliases (`DomStyleBindings.cpp`):**
+  Expands `flex`, `overflow`, `inset`, `gap`, `borderRadius`, `background`,
+  `transition`, `textDecoration`, `listStyle`, `outline`, `margin`/`padding`/
+  `border` on inline styles, canonicalizes `cssText`/`length`/`item()`/
+  `removeProperty`/`!important`/custom properties `--*`, and maps `-webkit-`/
+  `-moz-`/`-ms-` aliases (26/27 checks on `tests/dom-conformance/open/inline-style.js`).
+- **HTML5 date/time `<input>` semantics (`FormState`, `DomFormBindings`):**
+  Value sanitization, `valueAsDate`, `valueAsNumber`, `stepUp()`/`stepDown()`,
+  and `min`/`max`/`step` validity for `date`, `time`, `month`, `week`, and
+  `datetime-local` (`6/6` date checks on `tests/dom-conformance/open/dates-and-svg.js`,
+  `forms.dat` + `style.dat` bringing `make dom-conformance` to `644/644`).
+
+
 ### Media & Vector Rendering (Phase 38)
 
 Phase 38 adds standalone zero-dependency C++20 decoders for ITU-T T.81
@@ -967,8 +1029,8 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 969 / 984; construct.dat 47 / 49
-make dom-conformance     # 665 / 665; compiled.dat 25 / 25
+make js-conformance      # 974 / 989; construct.dat 47 / 49
+make dom-conformance     # 669 / 669; compiled.dat 25 / 25
 ```
 
 What is still missing: `this` can be used before `super()` has run, `eval`
@@ -977,3 +1039,36 @@ property that `obj['#p']` reads. Those and what else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.
+
+### The encodings pages are written in (Phase 47)
+
+Every page and XML document used to be read as UTF-8, with UTF-16 and
+Latin-1 accepted in an XML declaration: a file in Shift_JIS, EUC-KR or
+windows-1252 arrived as `U+FFFD`s, `<meta charset>` was text nobody read,
+and `document.characterSet` did not exist. Phase 47 implements the WHATWG
+Encoding Standard: **40 encodings and their 228 labels**, generated from
+`whatwg/encoding` (pinned in the header), with the index tables every byte
+of them (`index-iso-8859-6`'s holes included), the Big5 pointers that stand
+for two code points, `gb18030`'s four-byte ranges, BOM sniffing, and the
+standard's two decoder modes — replacement (one `U+FFFD` per error, as a
+page expects) and fatal (an error stops the decode, as XML expects).
+
+An HTML page picks its encoding the way the standard says: the BOM, then
+`Content-Type`, then a `<meta charset>` prescan of the first 1,024 bytes
+(HTML §13.2.3.2), and `document.characterSet`, `document.charset` and
+`document.inputEncoding` report what it found. XML validates the
+declaration's `[81] EncName` before looking it up, refuses `replacement`,
+and decodes the rest. The same tables serve `data:` URLs,
+`XMLHttpRequest`, `<script src>`, `<iframe>` subdocuments and CSS
+`@charset`. `--content-type=<mime>` (and a `<file>.headers` sidecar for
+`--map-origin` files) lets the conformance runner hand a page the type a
+server would, which is what the `encoding/` tests need.
+
+Measured: the W3C XML suite's **1,718/1,718** (the 16 documents skipped
+until now for their encoding are read, and each is still answered as the
+suite says); web-platform-tests **7,968/8,009** across 103 files, of which
+16 new `encoding/` files pass 2,543/2,543 subtests (2,547 more than before,
+with `big5-decode-extra.html` alone at 2,472); unit suites 174 → 177. The
+Fuji Xerox XML documents in EUC-JP, Shift_JIS, ISO-2022-JP and UTF-16 now
+serialize to the same canonical bytes as their UTF-8 translation.
+Details are in `ARCHITECTURE.md`, Phase 47, and `AUDIT.md`, finding 53.

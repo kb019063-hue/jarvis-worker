@@ -350,7 +350,8 @@ public:
     /// (inline CDATA/text and external `src`, honoring `defer`).
     bool load_xml_page(std::string_view xml_bytes, const std::string& content_type,
                        bool scripting = true,
-                       const std::function<void(const std::string& source)>& before = nullptr);
+                       const std::function<void(const std::string& source)>& before = nullptr,
+                       std::string_view transport_charset = {});
 
     /// Dispatches a `resize` event on `window`.
     void notify_window_resized();

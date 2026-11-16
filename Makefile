@@ -83,6 +83,8 @@ SRCS = src/dom/Node.cpp \
        src/net/Deflate.cpp \
        src/net/UrlParser.cpp \
        src/net/DataUrl.cpp \
+       src/net/TextEncoding.cpp \
+       src/net/TextEncodingTables.cpp \
        src/net/Idna.cpp \
        src/net/IdnaTables.cpp \
        src/net/Fetch.cpp \
@@ -103,11 +105,11 @@ XML_CONFORMANCE = python3 tools/conformance/run_xml_conformance.py
 WPT = python3 tools/conformance/run_wpt.py
 # Documents of the W3C XML suite that must be read as the suite says: every
 # one that applies to a parser of this kind (tests/xml/README.md says which).
-XML_FLOOR ?= 1702
+XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 5421
+WPT_FLOOR ?= 7968
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -117,14 +119,15 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 # URL cases that must pass (tests/url). The UTS #46 host handling makes all
 # of them pass.
 URL_FLOOR ?= 1188
-# Cases that must pass in the sanitizer build. One below what the normal build
+# Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. (968 pass there today, 969 in the normal
-# build, which is what the CI floor requires since findings 49 and 50.)
-JS_ASAN_FLOOR ?= 967
+# case that the normal build passes. With Phases 37, 43, 44 and 45 together
+# 973 of 989 pass under ASan and 974 in Release, which is what the CI floor
+# requires. Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 972
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 665
+DOM_ASAN_FLOOR ?= 669
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -143,7 +146,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -183,6 +186,12 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## The four Promise combinators must resolve each yielded element before next().
+## The hostile iterators in async.dat never end normally; old code skipped
+## resolve(), overran the iterator or timed out. All 34 cases must pass.
+verify-promise-iterators: $(TARGET)
+	@$(JS_CONFORMANCE) --filter async --quiet --timeout 3 --min-pass 34
 
 ## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
 ## Running it needs nothing but the binary. Checking or recording the
@@ -384,4 +393,5 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
+	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
 	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

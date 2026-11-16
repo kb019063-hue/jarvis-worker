@@ -73,14 +73,68 @@ struct Node {
     int last_group{-1};             //         cleared at the start of each iteration
 };
 
+enum class RegExpOp : uint8_t {
+    Accept,
+    MatchChar,
+    MatchAny,
+    MatchClass,
+    LineStart,
+    LineEnd,
+    WordBoundary,
+    NotWordBoundary,
+    BackRef,
+    BeginGroup,
+    EndGroup,
+    Jump,
+    Split,
+    RepeatEnter,
+    RepeatStep,
+    RepeatBody,
+    RepeatNext,
+    SimpleRepeat,
+    LookAround
+};
+
+struct RegExpInsn {
+    RegExpOp op{RegExpOp::Accept};
+    uint8_t atom_kind{0}; // 0=Char, 1=Any, 2=Class (for SimpleRepeat)
+    bool flag1{false};    // backward (Match*/BackRef/SimpleRepeat/LookAround) or greedy (RepeatStep)
+    bool flag2{false};    // greedy (SimpleRepeat) or negate (LookAround)
+    size_t a{0};          // ch / class_idx / group / slot / target
+    size_t b{0};          // target2 / first_group / skip_pc / step_pc
+    int32_t last_group{-1};
+    size_t min{0};
+    size_t max{0};
+};
+
 struct Program {
     std::unique_ptr<Node> root;
+    std::vector<RegExpInsn> code;
+    std::vector<CharClass> classes;
+    size_t entry_pc{0};
+    size_t repeat_count{0};
+    bool has_literal_start{false};
+    uint32_t literal_start_ch{0};
     int group_count{1};             // including group 0, the whole match
     std::vector<std::pair<std::string, size_t>> names;
     std::string source;
     std::string flags;
     bool global{false}, ignore_case{false}, multiline{false}, dot_all{false};
     bool unicode{false}, sticky{false}, has_indices{false};
+
+    ~Program() {
+        if (!root) return;
+        std::vector<std::unique_ptr<Node>> stack;
+        stack.push_back(std::move(root));
+        while (!stack.empty()) {
+            auto node = std::move(stack.back());
+            stack.pop_back();
+            for (auto& child : node->children) {
+                if (child) stack.push_back(std::move(child));
+            }
+            node->children.clear();
+        }
+    }
 };
 
 bool is_line_terminator(uint32_t c) {
@@ -209,7 +263,7 @@ public:
             fail(m_pattern[m_pos] == ')' ? "Unmatched ')'" : "Unexpected character");
         }
         m_program.group_count = m_next_group;
-        resolve_named(m_program.root.get());
+        resolve_named_iterative(m_program.root.get());
     }
 
 private:
@@ -648,17 +702,268 @@ private:
         return node;
     }
 
-    void resolve_named(Node* node) {
-        if (!node) return;
-        if (node->type == Node::Type::BackReference && node->group < 0) {
-            for (const auto& [name, index] : m_program.names) {
-                if (name == node->name) node->group = static_cast<int>(index);
+    void resolve_named_iterative(Node* root) {
+        if (!root) return;
+        std::vector<Node*> stack;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            Node* node = stack.back();
+            stack.pop_back();
+            if (node->type == Node::Type::BackReference && node->group < 0) {
+                for (const auto& [name, index] : m_program.names) {
+                    if (name == node->name) node->group = static_cast<int>(index);
+                }
+                if (node->group < 0) fail("Invalid named capture referenced");
             }
-            if (node->group < 0) fail("Invalid named capture referenced");
+            for (auto& child : node->children) {
+                if (child) stack.push_back(child.get());
+            }
         }
-        for (auto& child : node->children) resolve_named(child.get());
     }
 
+    void free_ast_iterative(std::unique_ptr<Node>& root) {
+        if (!root) return;
+        std::vector<std::unique_ptr<Node>> stack;
+        stack.push_back(std::move(root));
+        while (!stack.empty()) {
+            auto node = std::move(stack.back());
+            stack.pop_back();
+            for (auto& child : node->children) {
+                if (child) stack.push_back(std::move(child));
+            }
+            node->children.clear();
+        }
+    }
+
+    static bool is_single(const Node* node) {
+        return node->type == Node::Type::Char || node->type == Node::Type::Any || node->type == Node::Type::Class;
+    }
+
+    void compile_node(const Node* node, bool backward) {
+        if (stack_is_exhausted()) js_throw_range_error("Regular expression too complex: nesting limit exceeded");
+        auto& code = m_program.code;
+        switch (node->type) {
+            case Node::Type::Empty:
+                break;
+
+            case Node::Type::Char: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::MatchChar;
+                insn.flag1 = backward;
+                insn.a = node->ch;
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::Any: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::MatchAny;
+                insn.flag1 = backward;
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::Class: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::MatchClass;
+                insn.flag1 = backward;
+                insn.a = m_program.classes.size();
+                m_program.classes.push_back(node->klass);
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::LineStart: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::LineStart;
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::LineEnd: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::LineEnd;
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::WordBoundary:
+            case Node::Type::NotWordBoundary: {
+                RegExpInsn insn;
+                insn.op = (node->type == Node::Type::WordBoundary) ? RegExpOp::WordBoundary : RegExpOp::NotWordBoundary;
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::Sequence: {
+                const size_t n = node->children.size();
+                for (size_t i = 0; i < n; ++i) {
+                    const Node* item = backward ? node->children[n - 1 - i].get() : node->children[i].get();
+                    compile_node(item, backward);
+                }
+                break;
+            }
+
+            case Node::Type::Alternation: {
+                const size_t n = node->children.size();
+                if (n == 0) break;
+                if (n == 1) {
+                    compile_node(node->children[0].get(), backward);
+                    break;
+                }
+                std::vector<size_t> end_jumps;
+                for (size_t i = 0; i + 1 < n; ++i) {
+                    size_t split_pc = code.size();
+                    RegExpInsn split;
+                    split.op = RegExpOp::Split;
+                    split.a = split_pc + 1;
+                    code.push_back(split);
+
+                    compile_node(node->children[i].get(), backward);
+
+                    size_t jmp_pc = code.size();
+                    RegExpInsn jmp;
+                    jmp.op = RegExpOp::Jump;
+                    code.push_back(jmp);
+                    end_jumps.push_back(jmp_pc);
+
+                    code[split_pc].b = code.size();
+                }
+                compile_node(node->children[n - 1].get(), backward);
+                const size_t end_pc = code.size();
+                for (size_t j : end_jumps) code[j].a = end_pc;
+                break;
+            }
+
+            case Node::Type::Group: {
+                if (node->group < 0) {
+                    compile_node(node->children[0].get(), backward);
+                    break;
+                }
+                RegExpInsn begin_insn;
+                begin_insn.op = RegExpOp::BeginGroup;
+                begin_insn.a = static_cast<size_t>(node->group);
+                code.push_back(begin_insn);
+
+                compile_node(node->children[0].get(), backward);
+
+                RegExpInsn end_insn;
+                end_insn.op = RegExpOp::EndGroup;
+                end_insn.a = static_cast<size_t>(node->group);
+                code.push_back(end_insn);
+                break;
+            }
+
+            case Node::Type::Repeat: {
+                const Node* atom = node->children[0].get();
+                if (is_single(atom)) {
+                    RegExpInsn insn;
+                    insn.op = RegExpOp::SimpleRepeat;
+                    insn.flag1 = backward;
+                    insn.flag2 = node->greedy;
+                    insn.min = node->min;
+                    insn.max = node->max;
+                    if (atom->type == Node::Type::Char) {
+                        insn.atom_kind = 0;
+                        insn.a = atom->ch;
+                    } else if (atom->type == Node::Type::Any) {
+                        insn.atom_kind = 1;
+                    } else {
+                        insn.atom_kind = 2;
+                        insn.a = m_program.classes.size();
+                        m_program.classes.push_back(atom->klass);
+                    }
+                    code.push_back(insn);
+                    break;
+                }
+
+                const size_t slot = m_program.repeat_count++;
+
+                RegExpInsn enter_insn;
+                enter_insn.op = RegExpOp::RepeatEnter;
+                enter_insn.a = slot;
+                code.push_back(enter_insn);
+
+                const size_t step_pc = code.size();
+                RegExpInsn step_insn;
+                step_insn.op = RegExpOp::RepeatStep;
+                step_insn.a = slot;
+                step_insn.min = node->min;
+                step_insn.max = node->max;
+                step_insn.flag1 = node->greedy;
+                code.push_back(step_insn);
+
+                RegExpInsn body_insn;
+                body_insn.op = RegExpOp::RepeatBody;
+                body_insn.a = slot;
+                body_insn.b = static_cast<size_t>(node->first_group);
+                body_insn.last_group = node->last_group;
+                code.push_back(body_insn);
+
+                compile_node(atom, backward);
+
+                RegExpInsn next_insn;
+                next_insn.op = RegExpOp::RepeatNext;
+                next_insn.a = slot;
+                next_insn.b = step_pc;
+                next_insn.min = node->min;
+                code.push_back(next_insn);
+
+                code[step_pc].b = code.size(); // skip_pc
+                break;
+            }
+
+            case Node::Type::BackReference: {
+                RegExpInsn insn;
+                insn.op = RegExpOp::BackRef;
+                insn.flag1 = backward;
+                insn.a = static_cast<size_t>(node->group);
+                code.push_back(insn);
+                break;
+            }
+
+            case Node::Type::LookAhead:
+            case Node::Type::LookBehind: {
+                const size_t jmp_over = code.size();
+                RegExpInsn jmp;
+                jmp.op = RegExpOp::Jump;
+                code.push_back(jmp);
+
+                const size_t sub_pc = code.size();
+                compile_node(node->children[0].get(), node->type == Node::Type::LookBehind);
+                code.push_back(RegExpInsn{RegExpOp::Accept});
+
+                code[jmp_over].a = code.size();
+
+                RegExpInsn insn;
+                insn.op = RegExpOp::LookAround;
+                insn.a = sub_pc;
+                insn.flag1 = (node->type == Node::Type::LookBehind);
+                insn.flag2 = node->negate;
+                code.push_back(insn);
+                break;
+            }
+        }
+    }
+
+public:
+    void finalize_bytecode() {
+        resolve_named_iterative(m_program.root.get());
+        const Node* first = m_program.root.get();
+        while (first && first->type == Node::Type::Sequence && !first->children.empty()) {
+            first = first->children[0].get();
+        }
+        if (first && first->type == Node::Type::Char && !m_program.ignore_case && first->ch < 0x10000) {
+            m_program.has_literal_start = true;
+            m_program.literal_start_ch = first->ch;
+        }
+        m_program.entry_pc = 0;
+        compile_node(m_program.root.get(), false);
+        m_program.code.push_back(RegExpInsn{RegExpOp::Accept});
+        free_ast_iterative(m_program.root);
+    }
+
+private:
     const std::u16string& m_pattern;
     Program& m_program;
     size_t m_pos{0};
@@ -667,14 +972,17 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Matcher
+// Matcher (heap-backed iterative backtracking VM)
 // ---------------------------------------------------------------------------
 
 class Matcher {
 public:
     Matcher(const Program& program, const Utf16View& subject)
         : m_program(program), m_subject(subject),
-          m_captures(static_cast<size_t>(program.group_count) * 2, -1) {}
+          m_captures(static_cast<size_t>(program.group_count) * 2, -1),
+          m_group_starts(static_cast<size_t>(program.group_count), -1),
+          m_rep_counts(program.repeat_count, 0),
+          m_rep_starts(program.repeat_count, 0) {}
 
     /// In unicode mode the subject is a sequence of code points, so no match
     /// may begin between the two halves of a surrogate pair.
@@ -687,34 +995,58 @@ public:
     /// hold [start, end) pairs in UTF-16 units, -1 for unmatched groups.
     bool match_at(size_t start) {
         std::fill(m_captures.begin(), m_captures.end(), -1);
-        struct Final : Continuation {
-            Matcher* m;
-            size_t start;
-            bool run(size_t end) override {
-                m->m_captures[0] = static_cast<long>(start);
-                m->m_captures[1] = static_cast<long>(end);
-                return true;
-            }
-        } final_step;
-        final_step.m = this;
-        final_step.start = start;
-        return match(m_program.root.get(), start, final_step);
+        std::fill(m_group_starts.begin(), m_group_starts.end(), -1);
+        std::fill(m_rep_counts.begin(), m_rep_counts.end(), 0);
+        std::fill(m_rep_starts.begin(), m_rep_starts.end(), 0);
+        m_bt.clear();
+        m_trail.clear();
+        m_ends_pool.clear();
+
+        size_t pos = start;
+        if (!exec_vm(m_program.entry_pc, pos, 0)) return false;
+        m_captures[0] = static_cast<long>(start);
+        m_captures[1] = static_cast<long>(pos);
+        return true;
     }
 
     const std::vector<long>& captures() const { return m_captures; }
     void reset_budget() { m_steps = 0; }
 
 private:
-    struct Continuation {
-        virtual ~Continuation() = default;
-        virtual bool run(size_t pos) = 0;
+    enum class BtKind : uint8_t {
+        Choice,
+        SimpleGreedyAscii,
+        SimpleGreedyUnicode,
+        SimpleLazy
+    };
+
+    struct BtFrame {
+        BtKind kind{BtKind::Choice};
+        size_t pc{0};
+        size_t pos{0};
+        size_t trail_mark{0};
+        size_t start_or_insn{0};
+        size_t min_count{0};
+        size_t cur_count{0};
+        bool backward{false};
+    };
+
+    enum class TrailKind : uint8_t {
+        Capture,
+        GroupStart,
+        RepCount,
+        RepStart
+    };
+
+    struct TrailEntry {
+        TrailKind kind;
+        size_t index;
+        long old_long{0};
+        size_t old_size{0};
     };
 
     void charge() {
         if (++m_steps > kMaxSteps) js_throw_range_error("Regular expression too complex: step limit exceeded");
-        if ((m_steps & 63) == 0 && stack_is_exhausted()) {
-            js_throw_range_error("Regular expression too complex: recursion limit exceeded");
-        }
     }
 
     /// The code point at `pos` and how many units it occupies.
@@ -745,21 +1077,6 @@ private:
         return c;
     }
 
-    /// Where a match that consumed `width` units from `pos` now stands.
-    size_t step(size_t pos, size_t width) const { return m_backward ? pos - width : pos + width; }
-
-    /// The body of a lookbehind is matched right to left, as the language
-    /// defines it: the last term first, each character read from before the
-    /// position. A lookahead inside it goes left to right again. Lookarounds
-    /// run to completion before their continuation, so the direction is plain
-    /// state that this scope sets and puts back.
-    struct Direction {
-        Matcher& m;
-        bool previous;
-        Direction(Matcher& matcher, bool backward) : m(matcher), previous(matcher.m_backward) { m.m_backward = backward; }
-        ~Direction() { m.m_backward = previous; }
-    };
-
     bool same_char(uint32_t a, uint32_t b) const {
         if (a == b) return true;
         return m_program.ignore_case && fold_case(a) == fold_case(b);
@@ -771,260 +1088,406 @@ private:
         return hit != set.negated;
     }
 
-    /// Matches one character-consuming atom at `pos`: the character after it,
-    /// or the one before it when matching backward.
-    bool single(const Node* node, size_t pos, size_t& width) const {
+    bool match_simple_atom(const RegExpInsn& insn, size_t pos, size_t& width) const {
         uint32_t c;
-        if (m_backward) {
+        if (insn.flag1) {
             if (pos == 0) return false;
             c = code_point_before(pos, width);
         } else {
             if (pos >= m_subject.size()) return false;
             c = code_point_at(pos, width);
         }
-        switch (node->type) {
-            case Node::Type::Char: return same_char(c, node->ch);
-            case Node::Type::Any: return m_program.dot_all || !is_line_terminator(c);
-            case Node::Type::Class: return class_matches(node->klass, c);
+        switch (insn.atom_kind) {
+            case 0: return same_char(c, static_cast<uint32_t>(insn.a));
+            case 1: return m_program.dot_all || !is_line_terminator(c);
+            case 2: return class_matches(m_program.classes[insn.a], c);
             default: return false;
         }
     }
 
-    static bool is_single(const Node* node) {
-        return node->type == Node::Type::Char || node->type == Node::Type::Any || node->type == Node::Type::Class;
-    }
-
-    bool match_sequence(const std::vector<std::unique_ptr<Node>>& items, size_t index, size_t pos, Continuation& k) {
-        if (index == items.size()) return k.run(pos);
-        struct Rest : Continuation {
-            Matcher* m;
-            const std::vector<std::unique_ptr<Node>>* items;
-            size_t next;
-            Continuation* k;
-            bool run(size_t p) override { return m->match_sequence(*items, next, p, *k); }
-        } rest;
-        rest.m = this;
-        rest.items = &items;
-        rest.next = index + 1;
-        rest.k = &k;
-        const Node* item = m_backward ? items[items.size() - 1 - index].get() : items[index].get();
-        return match(item, pos, rest);
-    }
-
-    void clear_groups(int first, int last) {
-        for (int g = first; g <= last; ++g) {
-            m_captures[static_cast<size_t>(g) * 2] = -1;
-            m_captures[static_cast<size_t>(g) * 2 + 1] = -1;
+    void unwind_trail(size_t mark) {
+        while (m_trail.size() > mark) {
+            const TrailEntry& e = m_trail.back();
+            switch (e.kind) {
+                case TrailKind::Capture: m_captures[e.index] = e.old_long; break;
+                case TrailKind::GroupStart: m_group_starts[e.index] = e.old_long; break;
+                case TrailKind::RepCount: m_rep_counts[e.index] = e.old_size; break;
+                case TrailKind::RepStart: m_rep_starts[e.index] = e.old_size; break;
+            }
+            m_trail.pop_back();
         }
     }
 
-    bool match_repeat(const Node* node, size_t pos, size_t count, Continuation& k) {
-        charge();
-        const Node* atom = node->children[0].get();
+    bool exec_vm(size_t pc, size_t& io_pos, size_t bt_base) {
+        const auto& code = m_program.code;
+        size_t pos = io_pos;
 
-        if (count >= node->max) return k.run(pos);
+        auto backtrack = [&]() -> bool {
+            while (m_bt.size() > bt_base) {
+                BtFrame f = m_bt.back();
+                m_bt.pop_back();
+                unwind_trail(f.trail_mark);
 
-        struct Iteration : Continuation {
-            Matcher* m;
-            const Node* node;
-            size_t count;
-            size_t start;
-            Continuation* k;
-            bool run(size_t end) override {
-                // An iteration that consumed nothing cannot make progress; stop
-                // here instead of looping forever on patterns like (a*)*.
-                if (end == start && count >= node->min) return false;
-                return m->match_repeat(node, end, count + 1, *k);
-            }
-        } iteration;
-        iteration.m = this;
-        iteration.node = node;
-        iteration.count = count;
-        iteration.start = pos;
-        iteration.k = &k;
+                switch (f.kind) {
+                    case BtKind::Choice:
+                        pc = f.pc;
+                        pos = f.pos;
+                        return true;
 
-        const bool has_groups = node->last_group >= node->first_group;
-        std::vector<long> saved;
-        auto save_groups = [&]() {
-            if (!has_groups) return;
-            saved.assign(m_captures.begin() + node->first_group * 2, m_captures.begin() + (node->last_group + 1) * 2);
-        };
-        auto restore_groups = [&]() {
-            if (!has_groups) return;
-            std::copy(saved.begin(), saved.end(), m_captures.begin() + node->first_group * 2);
-        };
+                    case BtKind::SimpleGreedyAscii: {
+                        charge();
+                        const size_t try_count = f.cur_count;
+                        if (try_count > f.min_count) {
+                            m_bt.push_back({BtKind::SimpleGreedyAscii, f.pc, f.pos, f.trail_mark,
+                                            f.start_or_insn, f.min_count, try_count - 1, f.backward});
+                        }
+                        pos = f.backward ? f.start_or_insn - try_count : f.start_or_insn + try_count;
+                        pc = f.pc;
+                        return true;
+                    }
 
-        if (count < node->min) {
-            save_groups();
-            clear_groups(node->first_group, node->last_group);
-            if (match(atom, pos, iteration)) return true;
-            restore_groups();
-            return false;
-        }
-        if (node->greedy) {
-            save_groups();
-            clear_groups(node->first_group, node->last_group);
-            if (match(atom, pos, iteration)) return true;
-            restore_groups();
-            return k.run(pos);
-        }
-        if (k.run(pos)) return true;
-        save_groups();
-        clear_groups(node->first_group, node->last_group);
-        if (match(atom, pos, iteration)) return true;
-        restore_groups();
-        return false;
-    }
+                    case BtKind::SimpleGreedyUnicode: {
+                        charge();
+                        const size_t try_i = f.cur_count;
+                        const size_t next_pos = m_ends_pool[f.start_or_insn][try_i];
+                        if (try_i > f.min_count) {
+                            m_bt.push_back({BtKind::SimpleGreedyUnicode, f.pc, 0, f.trail_mark,
+                                            f.start_or_insn, f.min_count, try_i - 1, f.backward});
+                        }
+                        pos = next_pos;
+                        pc = f.pc;
+                        return true;
+                    }
 
-    /// Repetition of a single-character atom, done with a loop so that `.*`
-    /// over a long string does not recurse once per character.
-    bool match_simple_repeat(const Node* node, size_t pos, Continuation& k) {
-        const Node* atom = node->children[0].get();
-        size_t width = 1;
-
-        if (!node->greedy) {
-            size_t p = pos;
-            for (size_t count = 0;; ++count) {
-                if (count >= node->min && k.run(p)) return true;
-                if (count >= node->max || !single(atom, p, width)) return false;
-                p = step(p, width);
-                charge();
-            }
-        }
-
-        if (!m_program.unicode) {
-            // Every match is exactly one unit wide.
-            size_t count = 0;
-            while (count < node->max && single(atom, step(pos, count), width)) ++count;
-            if (count < node->min) return false;
-            for (size_t i = count + 1; i-- > node->min;) {
-                charge();
-                if (k.run(step(pos, i))) return true;
-            }
-            return false;
-        }
-
-        std::vector<size_t> ends;
-        ends.push_back(pos);
-        size_t p = pos;
-        while (ends.size() - 1 < node->max && single(atom, p, width)) {
-            p = step(p, width);
-            ends.push_back(p);
-        }
-        if (ends.size() - 1 < node->min) return false;
-        for (size_t i = ends.size(); i-- > node->min;) {
-            charge();
-            if (k.run(ends[i])) return true;
-        }
-        return false;
-    }
-
-    bool match(const Node* node, size_t pos, Continuation& k) {
-        charge();
-        switch (node->type) {
-            case Node::Type::Empty:
-                return k.run(pos);
-
-            case Node::Type::Char:
-            case Node::Type::Any:
-            case Node::Type::Class: {
-                size_t width = 1;
-                return single(node, pos, width) && k.run(step(pos, width));
-            }
-
-            case Node::Type::LineStart:
-                if (pos == 0 || (m_program.multiline && is_line_terminator(m_subject[pos - 1]))) return k.run(pos);
-                return false;
-
-            case Node::Type::LineEnd:
-                if (pos == m_subject.size() || (m_program.multiline && is_line_terminator(m_subject[pos]))) return k.run(pos);
-                return false;
-
-            case Node::Type::WordBoundary:
-            case Node::Type::NotWordBoundary: {
-                bool before = pos > 0 && is_word_char(m_subject[pos - 1]);
-                bool after = pos < m_subject.size() && is_word_char(m_subject[pos]);
-                bool boundary = before != after;
-                if (boundary == (node->type == Node::Type::WordBoundary)) return k.run(pos);
-                return false;
-            }
-
-            case Node::Type::Sequence:
-                return match_sequence(node->children, 0, pos, k);
-
-            case Node::Type::Alternation:
-                for (const auto& alternative : node->children) {
-                    if (match(alternative.get(), pos, k)) return true;
+                    case BtKind::SimpleLazy: {
+                        const RegExpInsn& insn = code[f.start_or_insn];
+                        size_t width = 1;
+                        if (f.cur_count < insn.max && match_simple_atom(insn, f.pos, width)) {
+                            charge();
+                            const size_t next_pos = f.backward ? f.pos - width : f.pos + width;
+                            const size_t next_count = f.cur_count + 1;
+                            if (next_count < insn.max) {
+                                m_bt.push_back({BtKind::SimpleLazy, f.pc, next_pos, f.trail_mark,
+                                                f.start_or_insn, 0, next_count, f.backward});
+                            }
+                            pos = next_pos;
+                            pc = f.pc;
+                            return true;
+                        }
+                        break;
+                    }
                 }
-                return false;
+            }
+            return false;
+        };
 
-            case Node::Type::Group: {
-                if (node->group < 0) return match(node->children[0].get(), pos, k);
-                struct Capture : Continuation {
-                    Matcher* m;
-                    size_t slot;
-                    size_t start;
-                    Continuation* k;
-                    bool run(size_t end) override {
-                        long old_start = m->m_captures[slot];
-                        long old_end = m->m_captures[slot + 1];
-                        m->m_captures[slot] = static_cast<long>(std::min(start, end));
-                        m->m_captures[slot + 1] = static_cast<long>(std::max(start, end));
-                        if (k->run(end)) return true;
-                        m->m_captures[slot] = old_start;
-                        m->m_captures[slot + 1] = old_end;
+        for (;;) {
+            charge();
+            const RegExpInsn& insn = code[pc];
+            switch (insn.op) {
+                case RegExpOp::Accept:
+                    io_pos = pos;
+                    m_bt.resize(bt_base);
+                    return true;
+
+                case RegExpOp::MatchChar: {
+                    size_t width = 1;
+                    uint32_t c = 0;
+                    bool ok = true;
+                    if (insn.flag1) {
+                        if (pos == 0) ok = false;
+                        else c = code_point_before(pos, width);
+                    } else {
+                        if (pos >= m_subject.size()) ok = false;
+                        else c = code_point_at(pos, width);
+                    }
+                    if (!ok || !same_char(c, static_cast<uint32_t>(insn.a))) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    pos = insn.flag1 ? pos - width : pos + width;
+                    ++pc;
+                    break;
+                }
+
+                case RegExpOp::MatchAny: {
+                    size_t width = 1;
+                    uint32_t c = 0;
+                    bool ok = true;
+                    if (insn.flag1) {
+                        if (pos == 0) ok = false;
+                        else c = code_point_before(pos, width);
+                    } else {
+                        if (pos >= m_subject.size()) ok = false;
+                        else c = code_point_at(pos, width);
+                    }
+                    if (!ok || (!m_program.dot_all && is_line_terminator(c))) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    pos = insn.flag1 ? pos - width : pos + width;
+                    ++pc;
+                    break;
+                }
+
+                case RegExpOp::MatchClass: {
+                    size_t width = 1;
+                    uint32_t c = 0;
+                    bool ok = true;
+                    if (insn.flag1) {
+                        if (pos == 0) ok = false;
+                        else c = code_point_before(pos, width);
+                    } else {
+                        if (pos >= m_subject.size()) ok = false;
+                        else c = code_point_at(pos, width);
+                    }
+                    if (!ok || !class_matches(m_program.classes[insn.a], c)) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    pos = insn.flag1 ? pos - width : pos + width;
+                    ++pc;
+                    break;
+                }
+
+                case RegExpOp::LineStart:
+                    if (pos == 0 || (m_program.multiline && is_line_terminator(m_subject[pos - 1]))) {
+                        ++pc;
+                    } else if (!backtrack()) {
                         return false;
                     }
-                } capture;
-                capture.m = this;
-                capture.slot = static_cast<size_t>(node->group) * 2;
-                capture.start = pos;
-                capture.k = &k;
-                return match(node->children[0].get(), pos, capture);
-            }
+                    break;
 
-            case Node::Type::Repeat:
-                if (is_single(node->children[0].get())) return match_simple_repeat(node, pos, k);
-                return match_repeat(node, pos, 0, k);
+                case RegExpOp::LineEnd:
+                    if (pos == m_subject.size() || (m_program.multiline && is_line_terminator(m_subject[pos]))) {
+                        ++pc;
+                    } else if (!backtrack()) {
+                        return false;
+                    }
+                    break;
 
-            case Node::Type::BackReference: {
-                size_t slot = static_cast<size_t>(node->group) * 2;
-                if (slot + 1 >= m_captures.size() || m_captures[slot] < 0) return k.run(pos);     // unset group matches empty
-                size_t start = static_cast<size_t>(m_captures[slot]);
-                size_t length = static_cast<size_t>(m_captures[slot + 1]) - start;
-                if (m_backward ? length > pos : pos + length > m_subject.size()) return false;
-                const size_t at = m_backward ? pos - length : pos;
-                for (size_t i = 0; i < length; ++i) {
-                    if (!same_char(m_subject[start + i], m_subject[at + i])) return false;
+                case RegExpOp::WordBoundary:
+                case RegExpOp::NotWordBoundary: {
+                    bool before = pos > 0 && is_word_char(m_subject[pos - 1]);
+                    bool after = pos < m_subject.size() && is_word_char(m_subject[pos]);
+                    bool boundary = before != after;
+                    if (boundary == (insn.op == RegExpOp::WordBoundary)) {
+                        ++pc;
+                    } else if (!backtrack()) {
+                        return false;
+                    }
+                    break;
                 }
-                return k.run(step(pos, length));
-            }
 
-            case Node::Type::LookAhead:
-            case Node::Type::LookBehind: {
-                struct Accept : Continuation {
-                    bool run(size_t) override { return true; }
-                } accept;
-                std::vector<long> saved = m_captures;
-                bool found;
-                {
-                    Direction direction(*this, node->type == Node::Type::LookBehind);
-                    found = match(node->children[0].get(), pos, accept);
+                case RegExpOp::BackRef: {
+                    size_t slot = insn.a * 2;
+                    if (slot + 1 >= m_captures.size() || m_captures[slot] < 0) {
+                        ++pc;
+                        break;
+                    }
+                    size_t start = static_cast<size_t>(m_captures[slot]);
+                    size_t length = static_cast<size_t>(m_captures[slot + 1]) - start;
+                    if (insn.flag1 ? length > pos : pos + length > m_subject.size()) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    const size_t at = insn.flag1 ? pos - length : pos;
+                    bool ok = true;
+                    for (size_t i = 0; i < length; ++i) {
+                        if (!same_char(m_subject[start + i], m_subject[at + i])) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (!ok) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    pos = insn.flag1 ? pos - length : pos + length;
+                    ++pc;
+                    break;
                 }
-                if (node->negate) {
-                    m_captures = saved;
-                    return !found && k.run(pos);
+
+                case RegExpOp::BeginGroup:
+                    m_trail.push_back({TrailKind::GroupStart, insn.a, m_group_starts[insn.a], 0});
+                    m_group_starts[insn.a] = static_cast<long>(pos);
+                    ++pc;
+                    break;
+
+                case RegExpOp::EndGroup: {
+                    size_t slot = insn.a * 2;
+                    long g_start = m_group_starts[insn.a];
+                    long g_end = static_cast<long>(pos);
+                    m_trail.push_back({TrailKind::Capture, slot, m_captures[slot], 0});
+                    m_trail.push_back({TrailKind::Capture, slot + 1, m_captures[slot + 1], 0});
+                    m_captures[slot] = std::min(g_start, g_end);
+                    m_captures[slot + 1] = std::max(g_start, g_end);
+                    ++pc;
+                    break;
                 }
-                if (!found) {
-                    m_captures = saved;
-                    return false;
+
+                case RegExpOp::Jump:
+                    pc = insn.a;
+                    break;
+
+                case RegExpOp::Split:
+                    m_bt.push_back({BtKind::Choice, insn.b, pos, m_trail.size(), 0, 0, 0, false});
+                    pc = insn.a;
+                    break;
+
+                case RegExpOp::RepeatEnter:
+                    m_trail.push_back({TrailKind::RepCount, insn.a, 0, m_rep_counts[insn.a]});
+                    m_rep_counts[insn.a] = 0;
+                    ++pc;
+                    break;
+
+                case RegExpOp::RepeatStep: {
+                    size_t count = m_rep_counts[insn.a];
+                    if (count >= insn.max) {
+                        pc = insn.b;
+                    } else if (count < insn.min) {
+                        ++pc;
+                    } else if (insn.flag1) {
+                        m_bt.push_back({BtKind::Choice, insn.b, pos, m_trail.size(), 0, 0, 0, false});
+                        ++pc;
+                    } else {
+                        m_bt.push_back({BtKind::Choice, pc + 1, pos, m_trail.size(), 0, 0, 0, false});
+                        pc = insn.b;
+                    }
+                    break;
                 }
-                if (k.run(pos)) return true;
-                m_captures = saved;
-                return false;
+
+                case RegExpOp::RepeatBody:
+                    m_trail.push_back({TrailKind::RepStart, insn.a, 0, m_rep_starts[insn.a]});
+                    m_rep_starts[insn.a] = pos;
+                    if (insn.last_group >= static_cast<int32_t>(insn.b)) {
+                        for (int g = static_cast<int>(insn.b); g <= insn.last_group; ++g) {
+                            size_t slot = static_cast<size_t>(g) * 2;
+                            if (m_captures[slot] != -1) {
+                                m_trail.push_back({TrailKind::Capture, slot, m_captures[slot], 0});
+                                m_captures[slot] = -1;
+                            }
+                            if (m_captures[slot + 1] != -1) {
+                                m_trail.push_back({TrailKind::Capture, slot + 1, m_captures[slot + 1], 0});
+                                m_captures[slot + 1] = -1;
+                            }
+                        }
+                    }
+                    ++pc;
+                    break;
+
+                case RegExpOp::RepeatNext:
+                    if (pos == m_rep_starts[insn.a] && m_rep_counts[insn.a] >= insn.min) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    m_trail.push_back({TrailKind::RepCount, insn.a, 0, m_rep_counts[insn.a]});
+                    ++m_rep_counts[insn.a];
+                    pc = insn.b;
+                    break;
+
+                case RegExpOp::SimpleRepeat: {
+                    if (!insn.flag2) {
+                        size_t p = pos;
+                        size_t count = 0;
+                        size_t width = 1;
+                        while (count < insn.min) {
+                            if (!match_simple_atom(insn, p, width)) {
+                                count = insn.min + 1; // signal failure
+                                break;
+                            }
+                            p = insn.flag1 ? p - width : p + width;
+                            ++count;
+                            charge();
+                        }
+                        if (count > insn.min) {
+                            if (!backtrack()) return false;
+                            continue;
+                        }
+                        if (count < insn.max) {
+                            m_bt.push_back({BtKind::SimpleLazy, pc + 1, p, m_trail.size(), pc, 0, count, insn.flag1});
+                        }
+                        pos = p;
+                        ++pc;
+                        break;
+                    }
+
+                    if (!m_program.unicode) {
+                        size_t count = 0;
+                        size_t width = 1;
+                        size_t p = pos;
+                        while (count < insn.max && match_simple_atom(insn, p, width)) {
+                            p = insn.flag1 ? p - 1 : p + 1;
+                            ++count;
+                            charge();
+                        }
+                        if (count < insn.min) {
+                            if (!backtrack()) return false;
+                            continue;
+                        }
+                        if (count > insn.min) {
+                            m_bt.push_back({BtKind::SimpleGreedyAscii, pc + 1, pos, m_trail.size(),
+                                            pos, insn.min, count - 1, insn.flag1});
+                        }
+                        pos = p;
+                        ++pc;
+                        break;
+                    }
+
+                    std::vector<size_t> ends;
+                    ends.push_back(pos);
+                    size_t p = pos;
+                    size_t width = 1;
+                    while (ends.size() - 1 < insn.max && match_simple_atom(insn, p, width)) {
+                        p = insn.flag1 ? p - width : p + width;
+                        ends.push_back(p);
+                        charge();
+                    }
+                    if (ends.size() - 1 < insn.min) {
+                        if (!backtrack()) return false;
+                        continue;
+                    }
+                    if (ends.size() - 1 > insn.min) {
+                        const size_t pool_idx = m_ends_pool.size();
+                        m_ends_pool.push_back(std::move(ends));
+                        const auto& ref = m_ends_pool[pool_idx];
+                        m_bt.push_back({BtKind::SimpleGreedyUnicode, pc + 1, 0, m_trail.size(),
+                                        pool_idx, insn.min, ref.size() - 2, insn.flag1});
+                        pos = ref.back();
+                    } else {
+                        pos = ends.back();
+                    }
+                    ++pc;
+                    break;
+                }
+
+                case RegExpOp::LookAround: {
+                    if (stack_is_exhausted()) {
+                        js_throw_range_error("Regular expression too complex: recursion limit exceeded");
+                    }
+                    const size_t mark = m_trail.size();
+                    const size_t sub_bt_base = m_bt.size();
+                    size_t sub_pos = pos;
+                    const bool found = exec_vm(insn.a, sub_pos, sub_bt_base);
+                    if (insn.flag2) { // negate
+                        unwind_trail(mark);
+                        if (found) {
+                            if (!backtrack()) return false;
+                            continue;
+                        }
+                        ++pc;
+                    } else {
+                        if (!found) {
+                            unwind_trail(mark);
+                            if (!backtrack()) return false;
+                            continue;
+                        }
+                        ++pc;
+                    }
+                    break;
+                }
             }
         }
-        return false;
     }
 
     const Program& m_program;
@@ -1032,8 +1495,13 @@ private:
     // through the UTF-16 form its string keeps. Nothing is converted per match.
     const Utf16View& m_subject;
     std::vector<long> m_captures;
+    std::vector<long> m_group_starts;
+    std::vector<size_t> m_rep_counts;
+    std::vector<size_t> m_rep_starts;
+    std::vector<BtFrame> m_bt;
+    std::vector<TrailEntry> m_trail;
+    std::vector<std::vector<size_t>> m_ends_pool;
     uint64_t m_steps{0};
-    bool m_backward{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -1068,6 +1536,7 @@ std::shared_ptr<Program> compile(const std::string& pattern, const std::string& 
     std::u16string wide = js_utf8_to_utf16(pattern);
     PatternParser parser(wide, *program);
     parser.parse();
+    parser.finalize_bytecode();
     return program;
 }
 
@@ -1100,15 +1569,9 @@ MatchResult run_match(const Program& program, const Utf16View& subject, size_t f
     if (from > subject.size()) return result;
     Matcher matcher(program, subject);
 
-    // Skip straight to positions that can start a match when the pattern
-    // begins with a literal character.
-    const Node* first = program.root.get();
-    while (first && first->type == Node::Type::Sequence && !first->children.empty()) first = first->children[0].get();
-    const bool literal_start = first && first->type == Node::Type::Char && !program.ignore_case && first->ch < 0x10000;
-
     for (size_t start = from; start <= subject.size(); ++start) {
-        if (literal_start && !sticky) {
-            size_t found = subject.find(static_cast<char16_t>(first->ch), start);
+        if (program.has_literal_start && !sticky) {
+            size_t found = subject.find(static_cast<char16_t>(program.literal_start_ch), start);
             if (found == Utf16View::npos) return result;
             start = found;
         }

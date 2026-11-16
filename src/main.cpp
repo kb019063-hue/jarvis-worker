@@ -137,6 +137,7 @@ int main(int argc, char* argv[]) {
     std::string run_script_file;
     bool run_script = false;
     std::string page_url;
+    std::string cli_content_type;
     // "canonical" or "events": read the file as XML and print that form.
     std::string xml_dump;
 
@@ -212,6 +213,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg.rfind("--url=", 0) == 0) {
             page_url = arg.substr(std::string("--url=").size());
+        } else if (arg.rfind("--content-type=", 0) == 0) {
+            cli_content_type = arg.substr(std::string("--content-type=").size());
         } else if (arg.rfind("--map-origin=", 0) == 0) {
             const std::string spec = arg.substr(std::string("--map-origin=").size());
             const auto eq = spec.find('=');
@@ -300,7 +303,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string html_content;
-    std::string nav_content_type = "text/html";
+    std::string nav_content_type = cli_content_type.empty() ? std::string("text/html") : cli_content_type;
     std::string effective_url;
     const bool is_remote_or_scheme =
         input_file.rfind("http://", 0) == 0 ||
@@ -408,14 +411,23 @@ int main(int argc, char* argv[]) {
         std::cout << "\n";
     };
 
+    std::string transport_charset;
+    if (parsed_nav_mime) {
+        if (const std::string* cs = nav_mime.parameter("charset")) transport_charset = *cs;
+    }
+
     if (is_xml_nav) {
         const std::string essence = (parsed_nav_mime && nav_mime.is_xml())
                                         ? nav_mime.essence()
                                         : (url_is_svg ? "image/svg+xml"
                                                       : (url_is_xhtml ? "application/xhtml+xml" : "application/xml"));
-        js_engine.load_xml_page(html_content, essence, scripting, maybe_disassemble);
+        js_engine.load_xml_page(html_content, essence, scripting, maybe_disassemble, transport_charset);
     } else {
-        js_engine.load_page(html_content, scripting, maybe_disassemble);
+        std::string resolved_cs;
+        const std::string decoded_html =
+            litebird::HtmlParser::decode_bytes(html_content, transport_charset, "UTF-8", &resolved_cs);
+        doc->set_character_set(resolved_cs);
+        js_engine.load_page(decoded_html, scripting, maybe_disassemble);
     }
 
     // --run-script: one more script, run the way a deferred script is: the

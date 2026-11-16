@@ -13,7 +13,7 @@ python3 tools/conformance/run_dom_conformance.py --reference   # check the corpu
 python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside the corpus: where do jsdom and Litebird differ?
 ```
 
-665 cases in 25 files, and Litebird passes all of them. Of the 572 that
+669 cases in 25 files, and Litebird passes all of them. Of the 572 that
 Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
 57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
 none; of the 11 that Phase 34 wrote (`interfaces.dat`), the engine before it

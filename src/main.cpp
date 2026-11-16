@@ -62,6 +62,7 @@ void print_help(const char* prog) {
     std::cout << "                         let the page finish loading and its timers run, and\n";
     std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
     std::cout << "  --url=URL              The address the page is said to come from\n";
+    std::cout << "  --map-origin=ORIG=DIR  Serve requests to HTTP(S) origin ORIG from local DIR\n";
     std::cout << "  --xml-canonical <file> Read <file> as XML and print its canonical form (the\n";
     std::cout << "                         one the XML conformance suite compares). Exits 0 for\n";
     std::cout << "                         a well-formed document, 1 for one that is not, 3 for\n";
@@ -211,6 +212,15 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg.rfind("--url=", 0) == 0) {
             page_url = arg.substr(std::string("--url=").size());
+        } else if (arg.rfind("--map-origin=", 0) == 0) {
+            const std::string spec = arg.substr(std::string("--map-origin=").size());
+            const auto eq = spec.find('=');
+            if (eq != std::string::npos && eq > 0 && eq + 1 < spec.size()) {
+                litebird::ResourceLoader::set_origin_root_for_testing(spec.substr(0, eq), spec.substr(eq + 1));
+            } else {
+                std::cerr << "Error: --map-origin expects ORIGIN=DIR\n";
+                return 1;
+            }
         } else if (arg == "--repl") {
             repl_mode = true;
         } else if (arg[0] != '-') {
@@ -368,35 +378,44 @@ int main(int argc, char* argv[]) {
 
     litebird::MimeType nav_mime;
     const bool parsed_nav_mime = litebird::MimeType::parse(nav_content_type, nav_mime);
+    auto url_path_has_ext = [](std::string_view u, std::string_view ext) -> bool {
+        if (const auto q = u.find_first_of("?#"); q != std::string_view::npos) u = u.substr(0, q);
+        if (u.size() < ext.size()) return false;
+        const std::string_view tail = u.substr(u.size() - ext.size());
+        for (std::size_t i = 0; i < ext.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(tail[i])) != ext[i]) return false;
+        }
+        return true;
+    };
+    const std::string& check_addr = doc->url();
+    const bool url_is_svg = input_file.ends_with(".svg") || url_path_has_ext(check_addr, ".svg");
+    const bool url_is_xhtml = input_file.ends_with(".xhtml") || input_file.ends_with(".xht") ||
+                              url_path_has_ext(check_addr, ".xhtml") || url_path_has_ext(check_addr, ".xht");
+    const bool url_is_xml = input_file.ends_with(".xml") || url_path_has_ext(check_addr, ".xml");
     const bool is_xml_nav =
-        !run_script &&
-        ((parsed_nav_mime && ((nav_mime.type == "image" && nav_mime.subtype == "svg+xml") ||
-                              (nav_mime.type == "application" && (nav_mime.subtype == "xml" || nav_mime.subtype == "xhtml+xml")) ||
-                              (nav_mime.type == "text" && nav_mime.subtype == "xml"))) ||
-         input_file.ends_with(".svg") || input_file.ends_with(".xhtml"));
+        (parsed_nav_mime && nav_mime.is_xml()) || url_is_svg || url_is_xhtml || url_is_xml;
 
     litebird::JsInterpreter js_engine(doc);
-    if (is_xml_nav) {
-        const std::string essence = parsed_nav_mime ? nav_mime.essence() : (input_file.ends_with(".svg") ? "image/svg+xml" : "application/xhtml+xml");
-        doc->set_content_type(essence);
-        std::string xml_text, xml_enc;
-        litebird::xml::XmlError xml_err;
-        if (litebird::xml::decode_xml(html_content, xml_text, xml_enc, xml_err)) {
-            litebird::xml::parse_xml_document(doc, xml_text, xml_err);
+    auto maybe_disassemble = [&](const std::string& script) {
+        if (!dump_bytecode) return;
+        std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
+        try {
+            auto fn = js_engine.compile_to_bytecode(script);
+            fn->chunk.disassemble(std::cout, "Inline <script>");
+        } catch (const std::exception& ex) {
+            std::cout << "(not compiled: " << ex.what() << ")";
         }
-        doc->install_default_layout_updater();
+        std::cout << "\n";
+    };
+
+    if (is_xml_nav) {
+        const std::string essence = (parsed_nav_mime && nav_mime.is_xml())
+                                        ? nav_mime.essence()
+                                        : (url_is_svg ? "image/svg+xml"
+                                                      : (url_is_xhtml ? "application/xhtml+xml" : "application/xml"));
+        js_engine.load_xml_page(html_content, essence, scripting, maybe_disassemble);
     } else {
-        js_engine.load_page(html_content, scripting, [&](const std::string& script) {
-            if (!dump_bytecode) return;
-            std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-            try {
-                auto fn = js_engine.compile_to_bytecode(script);
-                fn->chunk.disassemble(std::cout, "Inline <script>");
-            } catch (const std::exception& ex) {
-                std::cout << "(not compiled: " << ex.what() << ")";
-            }
-            std::cout << "\n";
-        });
+        js_engine.load_page(html_content, scripting, maybe_disassemble);
     }
 
     // --run-script: one more script, run the way a deferred script is: the

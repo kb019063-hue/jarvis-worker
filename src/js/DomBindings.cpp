@@ -144,8 +144,11 @@ Realm* realm_if_any(const Node& node) {
     if (node.script_object()) {
         if (Realm* realm = find_realm(node.script_realm())) return realm;
     }
-    if (node.is_document()) return nullptr;
+    if (node.is_document()) {
+        return find_realm(static_cast<const Document&>(node).browsing_realm_id());
+    }
     if (auto owner = node.owner_document()) {
+        if (Realm* realm = find_realm(owner->browsing_realm_id())) return realm;
         if (owner->script_object()) return find_realm(owner->script_realm());
     }
     return nullptr;
@@ -205,6 +208,12 @@ JsObject* Realm::proto(const std::string& name) {
     Realm* realm = this;
     JsValue constructor = js_make_native(def->name, def->length, [realm, def](Args args) -> JsValue {
         if (!realm->alive) return JsValue::make_undefined();
+        JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
+        if (realm->intrinsics) JsIntrinsics::set_current(realm->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* prev;
+            ~RestoreIntrinsics() { JsIntrinsics::set_current(prev); }
+        } restore_intrinsics{prev_intrinsics};
         if (!JsValue::current_is_construct()) {
             js_throw_type_error(std::string("Class constructor ") + def->name + " cannot be invoked without 'new'");
         }
@@ -263,8 +272,8 @@ JsValue Realm::make(const char* name, std::shared_ptr<JsExotic> state, const JsV
 
 namespace {
 
-JsObject* existing_object(const Realm& realm, const Node& node) {
-    if (!node.script_object() || node.script_realm() != realm.id) return nullptr;
+JsObject* existing_object(const Node& node) {
+    if (!node.script_object() || !find_realm(node.script_realm())) return nullptr;
     return static_cast<JsObject*>(node.script_object());
 }
 
@@ -303,8 +312,8 @@ JsObject* create_object(Realm& realm, const std::shared_ptr<Node>& node) {
     return cell;
 }
 
-void mark_object_of(Heap& heap, const Node* node, uint64_t realm) {
-    if (node && node->script_object() && node->script_realm() == realm) {
+void mark_object_of(Heap& heap, const Node* node) {
+    if (node && node->script_object() && find_realm(node->script_realm())) {
         heap.mark_object(static_cast<JsObject*>(node->script_object()));
     }
 }
@@ -314,37 +323,36 @@ void mark_object_of(Heap& heap, const Node* node, uint64_t realm) {
 // because a node that has an object, its parent has one (see DomBindings.hpp).
 void trace_wrapper(Heap& heap, JsObject& cell) {
     Node* node = cell.dom_node.get();
-    if (!node || node->script_object() != &cell) return;        // the node has moved on to another realm
-    const uint64_t realm = node->script_realm();
+    if (!node || node->script_object() != &cell) return;
 
-    if (auto parent = node->parent()) mark_object_of(heap, parent.get(), realm);
-    for (const auto& child : node->children()) mark_object_of(heap, child.get(), realm);
+    if (auto parent = node->parent()) mark_object_of(heap, parent.get());
+    for (const auto& child : node->children()) mark_object_of(heap, child.get());
 
     switch (node->type()) {
         case NodeType::Element: {
             auto& element = static_cast<Element&>(*node);
-            mark_object_of(heap, element.m_shadow_root.get(), realm);
-            mark_object_of(heap, element.m_template_contents.get(), realm);
+            mark_object_of(heap, element.m_shadow_root.get());
+            mark_object_of(heap, element.m_template_contents.get());
             break;
         }
         case NodeType::DocumentFragment:
             if (auto* shadow = dynamic_cast<ShadowRoot*>(node)) {
-                if (auto host = shadow->host()) mark_object_of(heap, host.get(), realm);
+                if (auto host = shadow->host()) mark_object_of(heap, host.get());
             }
             break;
         case NodeType::Document:
-            mark_object_of(heap, static_cast<Document&>(*node).existing_doctype_node(), realm);
+            mark_object_of(heap, static_cast<Document&>(*node).existing_doctype_node());
             break;
         case NodeType::DocumentType:
             if (auto document = static_cast<DocumentTypeNode&>(*node).document()) {
-                mark_object_of(heap, document.get(), realm);
+                mark_object_of(heap, document.get());
             }
             break;
         default:
             break;
     }
     if (!node->is_document()) {
-        if (auto owner = node->owner_document()) mark_object_of(heap, owner.get(), realm);
+        if (auto owner = node->owner_document()) mark_object_of(heap, owner.get());
     }
 }
 
@@ -355,7 +363,9 @@ void release_wrapper(JsObject& cell) {
 
 // A node that has an object was put under a parent that has none.
 void hook_wrapper_needs_parent(Node& parent, const Node& child) {
-    if (Realm* realm = find_realm(child.script_realm())) wrap(*realm, parent.shared_from_this());
+    Realm* realm = realm_if_any(parent);
+    if (!realm) realm = find_realm(child.script_realm());
+    if (realm) wrap(*realm, parent.shared_from_this());
 }
 
 void hook_children_changed(Node& parent, const NodeVector& added, const NodeVector& removed,
@@ -442,18 +452,24 @@ void install_tree_hooks() {
 
 JsValue wrap(Realm& realm, const std::shared_ptr<Node>& node) {
     if (!node) return JsValue::make_null();
-    if (JsObject* cell = existing_object(realm, *node)) return JsValue::make_object(cell);
-    if (!realm.alive) return JsValue::make_null();
+    if (JsObject* cell = existing_object(*node)) return JsValue::make_object(cell);
+    Realm* preferred = realm_if_any(*node);
+    Realm& target = (preferred && preferred->alive) ? *preferred : realm;
+    if (!target.alive) return JsValue::make_null();
 
     // The ancestors that have no object yet get theirs first, from the top
     // down. A loop, not recursion: a tree can be as deep as memory allows.
     std::vector<std::shared_ptr<Node>> chain;
     chain.push_back(node);
-    for (auto up = wrapping_parent(*node); up && !existing_object(realm, *up); up = wrapping_parent(*up)) {
+    for (auto up = wrapping_parent(*node); up && !existing_object(*up); up = wrapping_parent(*up)) {
         chain.push_back(up);
     }
     JsObject* cell = nullptr;
-    for (auto it = chain.rbegin(); it != chain.rend(); ++it) cell = create_object(realm, *it);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        Realm* node_realm = realm_if_any(**it);
+        Realm& r = (node_realm && node_realm->alive) ? *node_realm : target;
+        cell = create_object(r, *it);
+    }
     return JsValue::make_object(cell);
 }
 
@@ -799,7 +815,12 @@ bool parse_html_non_negative_integer(const std::string& text, unsigned long& out
 
 bool document_base_url(Realm& realm, const Node& node, Url& out) {
     auto document = document_of(realm, node);
-    if (!Url::parse(document ? document->url() : std::string("about:blank"), nullptr, out)) return false;
+    std::string fallback = document ? document->url() : std::string("about:blank");
+    if (document && (fallback == "about:srcdoc" || fallback == "about:blank") &&
+        !document->fallback_base_url().empty()) {
+        fallback = document->fallback_base_url();
+    }
+    if (!Url::parse(fallback, nullptr, out)) return false;
     // A <base href> changes what relative addresses are relative to. One
     // that is not a URL changes nothing.
     if (document) {

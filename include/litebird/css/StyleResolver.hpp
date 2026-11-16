@@ -32,7 +32,8 @@ enum class Display {
     Table,
     TableRow,
     TableCell,
-    TableRowGroup
+    TableRowGroup,
+    TableCaption
 };
 
 /// CSS `overflow` values (only "does this establish a BFC" matters to layout).
@@ -48,6 +49,24 @@ enum class Overflow {
 enum class BorderCollapse {
     Separate,
     Collapse
+};
+
+/// CSS `table-layout` (CSS 2.1 17.5.2).
+enum class TableLayout {
+    Auto,
+    Fixed
+};
+
+/// CSS `empty-cells` (CSS 2.1 17.5.1.2).
+enum class EmptyCells {
+    Show,
+    Hide
+};
+
+/// CSS `caption-side` (CSS 2.1 17.4.1, `top` and `bottom` only).
+enum class CaptionSide {
+    Top,
+    Bottom
 };
 
 /// CSS `float` values.
@@ -178,6 +197,9 @@ struct ComputedStyle {
     BorderCollapse border_collapse{BorderCollapse::Separate};
     float border_spacing_x{0.0f};
     float border_spacing_y{0.0f};
+    TableLayout table_layout{TableLayout::Auto};
+    EmptyCells empty_cells{EmptyCells::Show};
+    CaptionSide caption_side{CaptionSide::Top};
 
     // Positioning properties
     Position position{Position::Static};
@@ -283,6 +305,7 @@ struct ComputedStyle {
     bool is_table() const { return display == Display::Table; }
     bool is_table_row() const { return display == Display::TableRow; }
     bool is_table_cell() const { return display == Display::TableCell; }
+    bool is_table_caption() const { return display == Display::TableCaption; }
     bool is_table_row_group() const { return display == Display::TableRowGroup; }
     bool is_table_internal() const {
         return is_table_row() || is_table_cell() || is_table_row_group();

@@ -117,6 +117,18 @@ public:
     /// creates (createHTMLDocument, DOMParser) and for template_document().
     bool has_window() const { return m_has_window; }
     void set_has_window(bool value) { m_has_window = value; }
+    /// The id of the DOM Realm whose Window currently shows this document (0 if none).
+    uint64_t browsing_realm_id() const { return m_browsing_realm_id; }
+    void set_browsing_realm_id(uint64_t id) { m_browsing_realm_id = id; }
+    /// True when sandboxed without `allow-same-origin` (unique opaque origin `"null"`).
+    bool has_opaque_origin() const { return m_opaque_origin; }
+    void set_opaque_origin(bool value) { m_opaque_origin = value; }
+    /// Creator/container origin URL inherited by `about:blank` and `about:srcdoc` frames.
+    const std::string& inherited_origin_url() const { return m_inherited_origin_url; }
+    void set_inherited_origin_url(std::string url) { m_inherited_origin_url = std::move(url); }
+    /// Fallback base URL for `iframe srcdoc` and `about:blank` child documents (HTML §4.2.3).
+    const std::string& fallback_base_url() const { return m_fallback_base_url; }
+    void set_fallback_base_url(std::string url) { m_fallback_base_url = std::move(url); }
 
     /// "text/html" for a document the HTML parser made and for one made by
     /// createHTMLDocument(); an XML type ("application/xml",
@@ -201,6 +213,10 @@ private:
     std::weak_ptr<Element> m_current_script;
     std::shared_ptr<Document> m_template_document;
     bool m_has_window{false};
+    uint64_t m_browsing_realm_id{0};
+    bool m_opaque_origin{false};
+    std::string m_inherited_origin_url;
+    std::string m_fallback_base_url;
     std::string m_content_type{"text/html"};
     bool m_is_html{true};
     bool m_xml_document_object{false};

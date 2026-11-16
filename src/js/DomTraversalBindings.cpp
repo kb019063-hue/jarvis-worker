@@ -759,7 +759,41 @@ void setup_range(Iface& I) {
             context = std::make_shared<Element>("body");
             if (auto document = document_of(r, *node)) context->set_owner_document(document);
         }
-        return wrap(r, parse_fragment(r, *context, to_str(args[0])));
+        auto fragment = parse_fragment(r, *context, to_str(args[0]));
+        if (fragment && !in_html_document(*context)) {
+            auto is_strippable_html_shell = [](const Node& candidate) -> bool {
+                if (!candidate.is_element()) return false;
+                const auto& el = static_cast<const Element&>(candidate);
+                if (el.element_namespace() != ElementNamespace::HTML) return false;
+                const std::string& tag = el.tag_name();
+                return tag == "html" || tag == "head" || tag == "body";
+            };
+            bool stripped = true;
+            while (stripped) {
+                stripped = false;
+                const auto children_snapshot = fragment->children();
+                for (const auto& ch : children_snapshot) {
+                    if (!is_strippable_html_shell(*ch)) continue;
+                    stripped = true;
+                    for (const auto& grandchild : ch->take_children()) {
+                        fragment->insert_before(grandchild, ch);
+                    }
+                    fragment->remove_child(ch);
+                }
+            }
+        }
+        if (fragment) {
+            for_each_descendant(*fragment, [&](Node& descendant) {
+                if (descendant.is_element()) {
+                    const auto& el = static_cast<const Element&>(descendant);
+                    if (el.element_namespace() == ElementNamespace::HTML && el.tag_name() == "script") {
+                        set_slot(wrap(r, descendant.shared_from_this()), "runnable", boolean(true));
+                    }
+                }
+                return true;
+            });
+        }
+        return wrap(r, fragment);
     });
     I.method("getBoundingClientRect", 0, [](Realm& r, Args) {
         this_range();

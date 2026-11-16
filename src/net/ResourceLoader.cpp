@@ -31,6 +31,59 @@ namespace {
 std::mutex g_ca_mutex;
 std::string g_test_ca_bundle;
 
+std::mutex g_origin_map_mutex;
+std::unordered_map<std::string, std::string> g_origin_roots;
+
+std::string lookup_origin_root(const std::string& origin) {
+    {
+        std::lock_guard<std::mutex> lock(g_origin_map_mutex);
+        auto it = g_origin_roots.find(origin);
+        if (it != g_origin_roots.end()) return it->second;
+    }
+    if (const char* env = std::getenv("LITEBIRD_ORIGIN_MAP"); env && *env) {
+        std::string_view rest(env);
+        while (!rest.empty()) {
+            const auto semi = rest.find(';');
+            const std::string_view pair = (semi == std::string_view::npos) ? rest : rest.substr(0, semi);
+            rest = (semi == std::string_view::npos) ? std::string_view{} : rest.substr(semi + 1);
+            const auto eq = pair.find('=');
+            if (eq == std::string_view::npos) continue;
+            Url u;
+            if (Url::parse(std::string(pair.substr(0, eq)), nullptr, u) && u.origin() == origin) {
+                return std::string(pair.substr(eq + 1));
+            }
+        }
+    }
+    return {};
+}
+
+bool percent_decode_url_path(std::string_view in, std::string& out) {
+    out.clear();
+    out.reserve(in.size());
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            const int hi = hex(in[i + 1]);
+            const int lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                const char decoded = static_cast<char>((hi << 4) | lo);
+                if (decoded == '\0') return false;
+                out.push_back(decoded);
+                i += 2;
+                continue;
+            }
+        }
+        if (in[i] == '\0') return false;
+        out.push_back(in[i]);
+    }
+    return true;
+}
+
 std::string get_test_ca_bundle() {
     std::lock_guard<std::mutex> lock(g_ca_mutex);
     if (!g_test_ca_bundle.empty()) return g_test_ca_bundle;
@@ -782,6 +835,55 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         resp.error_message = "Unsupported protocol: expected http:// or https://";
         return resp;
     }
+
+    if (const std::string mapped_root = lookup_origin_root(parsed_url.origin()); !mapped_root.empty()) {
+        resp.url = parsed_url.href(true);
+        std::string rel_path;
+        if (!percent_decode_url_path(parsed_url.pathname(), rel_path)) {
+            resp.status_code = 400;
+            resp.status_text = "Bad Request";
+            resp.network_ok = true;
+            resp.error_message = "Malformed URL path";
+            return resp;
+        }
+        while (!rel_path.empty() && rel_path.front() == '/') rel_path.erase(rel_path.begin());
+
+        std::error_code ec;
+        const auto canonical_root = std::filesystem::weakly_canonical(mapped_root, ec);
+        if (ec) {
+            resp.error_message = "Invalid mapped origin directory";
+            return resp;
+        }
+        const auto target_candidate = rel_path.empty() ? (canonical_root / "index.html") : (canonical_root / rel_path);
+        const auto canonical_target = std::filesystem::weakly_canonical(target_candidate, ec);
+        const std::string root_prefix = canonical_root.string();
+        const std::string target_str = canonical_target.string();
+        const bool inside_root =
+            !ec && target_str.size() >= root_prefix.size() &&
+            target_str.compare(0, root_prefix.size(), root_prefix) == 0 &&
+            (target_str.size() == root_prefix.size() || root_prefix.back() == '/' ||
+             target_str[root_prefix.size()] == '/');
+        if (!inside_root || !std::filesystem::is_regular_file(canonical_target, ec)) {
+            resp.status_code = 404;
+            resp.status_text = "Not Found";
+            resp.network_ok = true;
+            resp.success = false;
+            resp.error_message = "Mapped origin resource not found";
+            return resp;
+        }
+        ResourceResponse file_resp = load_file(target_str);
+        if (!file_resp.success) {
+            resp.status_code = 404;
+            resp.status_text = "Not Found";
+            resp.network_ok = true;
+            resp.success = false;
+            resp.error_message = file_resp.error_message;
+            return resp;
+        }
+        file_resp.url = parsed_url.href(true);
+        return file_resp;
+    }
+
     const bool use_tls = (parsed_url.scheme == "https");
 
     const std::string req_method = method.empty() ? "GET" : method;
@@ -1171,6 +1273,19 @@ ResourceResponse ResourceLoader::load_http_single_hop(
     resp.network_ok = (resp.status_code >= 100 && resp.status_code <= 599);
     resp.success = resp.network_ok && (resp.status_code >= 200 && resp.status_code < 400);
     return resp;
+}
+
+void ResourceLoader::set_origin_root_for_testing(const std::string& origin, std::string directory_path) {
+    Url u;
+    const std::string key = Url::parse(origin, nullptr, u) ? u.origin() : origin;
+    std::lock_guard<std::mutex> lock(g_origin_map_mutex);
+    if (directory_path.empty()) g_origin_roots.erase(key);
+    else g_origin_roots[key] = std::move(directory_path);
+}
+
+void ResourceLoader::clear_origin_roots_for_testing() {
+    std::lock_guard<std::mutex> lock(g_origin_map_mutex);
+    g_origin_roots.clear();
 }
 
 } // namespace litebird

@@ -15,6 +15,10 @@
 
 namespace litebird {
 
+namespace dom {
+struct Realm;
+}
+
 /// One lexical scope: a function activation, a block, or the global scope.
 ///
 /// Bindings live in a small vector because most scopes hold a handful of
@@ -300,8 +304,14 @@ public:
 
     std::shared_ptr<JsEnvironment> global_env() const { return m_global_env; }
     const JsValue& global_object() const { return m_global_object; }
+    const std::shared_ptr<Document>& document() const { return m_document; }
+    JsIntrinsics& intrinsics() { return *m_realm; }
+    dom::Realm& dom_realm();
     VM& vm() { return m_vm; }
     void set_document(std::shared_ptr<Document> doc);
+    /// Navigates this browsing context to a new `Document` while keeping the
+    /// same `WindowProxy` global object identity (`m_global_object`).
+    void navigate_document(std::shared_ptr<Document> doc);
 
     std::shared_ptr<class History> history() const { return m_history; }
 
@@ -334,6 +344,13 @@ public:
     /// it runs.
     void load_page(std::string_view html, bool scripting = true,
                    const std::function<void(const std::string& source)>& before = nullptr);
+
+    /// Parses an XML / XHTML / SVG document into `m_document` and, when
+    /// `scripting` is true, executes classic `<script>` elements in tree order
+    /// (inline CDATA/text and external `src`, honoring `defer`).
+    bool load_xml_page(std::string_view xml_bytes, const std::string& content_type,
+                       bool scripting = true,
+                       const std::function<void(const std::string& source)>& before = nullptr);
 
     /// Dispatches a `resize` event on `window`.
     void notify_window_resized();

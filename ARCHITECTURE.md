@@ -349,7 +349,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
-| **Phase 37** | **Iterative RegExp VM, modern CSS cascade/units, CSSOM `el.style`, and HTML5 date/time inputs:** replaces recursive CPS regex matching and recursive AST destruction with an iterative bytecode VM and heap backtracking stack; adds CSS child/sibling combinators (`>`, `+`, `~`), `:is()`/`:where()`/selector-list `:not()`/`:host`, `@layer`, `@supports`, MQ L4 range/boolean evaluation, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`, iterative CSS block/selector parsing + `min_ancestors` / `AllDescendant` DP caching; expands `el.style` shorthands, canonical CSSOM values, and vendor aliases; and implements `date`/`time`/`month`/`week`/`datetime-local` input sanitization, `valueAsDate`/`valueAsNumber`, `stepUp()`/`stepDown()`, and constraint validation. | ✅ Completed (166/166 unit suites; JS corpus 908/922, `regexp.dat` 39/39; DOM corpus 644/644) |
+| **Phase 37** | **Iterative RegExp VM, modern CSS cascade/units, CSSOM `el.style`, and HTML5 date/time inputs:** replaces recursive CPS regex matching and recursive AST destruction with an iterative bytecode VM and heap backtracking stack; adds CSS child/sibling combinators (`>`, `+`, `~`), `:is()`/`:where()`/selector-list `:not()`/`:host`, `@layer`, `@supports`, MQ L4 range/boolean evaluation, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`, iterative CSS block/selector parsing + `min_ancestors` / `AllDescendant` DP caching; expands `el.style` shorthands, canonical CSSOM values, and vendor aliases; and implements `date`/`time`/`month`/`week`/`datetime-local` input sanitization, `valueAsDate`/`valueAsNumber`, `stepUp()`/`stepDown()`, and constraint validation. | ✅ Completed (170/170 unit suites; JS corpus 908/922, `regexp.dat` 39/39; DOM corpus 644/644) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
@@ -3652,18 +3652,18 @@ DOM gaps documented in `AUDIT.md` (finding 42):
   `TypeError`/`InvalidStateError` checks).
 
 ### 5. Verification (Merged Tree)
-- **Release:** `make test` `166/166`; `make js-conformance` `908/922` (`regexp.dat`
+- **Release:** `make test` `170/170`; `make js-conformance` `908/922` (`regexp.dat`
   `39/39`, probe `90/90`, `--reference "node -e"` `922/922`);
   `make dom-conformance` `644/644` (probe `68/68`, `--reference` `644/644`);
   `dates-and-svg.js` matches `jsdom` on `6/6` date checks; `inline-style.js`
   matches on `26/27` lines; `make conformance` `1781/1792`, `make diff-trees`
   `6000/6000`, `make url-conformance` `1188/1188`, `make xml-conformance`
   `1702/1702`, `make diff-xml` `0 DIFFER` (`4000`) & `3000/3000`, `make wpt`
-  `4658/5192`, `make deep` `1332/1332` (depth `200,000`, slowest `25.0 s`).
-- **ASan+UBSan (`detect_leaks=0`):** `166/166` suites, JS `907/922`, DOM
-  `644/644`, URL `1188/1188`, XML `1702/1702`, WPT `4658/5192`, `fuzz` `0`
+  `5421/5463`, `make deep` `1332/1332` (depth `200,000`, slowest `26.9 s`).
+- **ASan+UBSan (`detect_leaks=0`):** `170/170` suites, JS `907/922`, DOM
+  `644/644`, URL `1188/1188`, XML `1702/1702`, WPT `5421/5463`, `fuzz` `0`
   findings (`400`+`400`+`1927`/`600`+`1800`), `make asan-deep` `882/882` (slowest
-  `4.2 s`), and `make tsan` clean.
+  `3.6 s`), and `make tsan` clean.
 
 ---
 
@@ -4119,6 +4119,72 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
 
 ---
 
+## Phase 42 — Nested Browsing Contexts (`<iframe>`), Cross-Realm DOM Wrappers, Origin Isolation, and `.xhtml` Execution
+
+### 1. Per-Frame `JsInterpreter`, `WindowProxy`, and Load Ordering
+
+- Connecting an HTML `<iframe>` (`DomWindowBindings.cpp::note_iframe_connected`)
+  synchronously initializes a child browsing context (`Document` +
+  `JsInterpreter` + `dom::Realm`, nesting depth cap `8`) on an initial
+  `about:blank` document inheriting the parent document's effective origin and
+  `Document::browsing_realm_id()`.
+- Asynchronous navigation runs through `JsInterpreter::navigate_document(...)`
+  for `srcdoc` (`about:srcdoc` with `fallback_base_url` set to the parent
+  document's base URL) and `src` (`http:`/`https:`/`file:`/`data:`/`about:blank`,
+  dispatching HTML vs. XML/XHTML/SVG MIME types). `JsInterpreter::init_builtins()`
+  reuses `m_global_object` across navigations so `WindowProxy` object identity
+  (`before === iframe.contentWindow`) is preserved while resetting JS/DOM realm
+  bindings.
+- Recursive `delaying_load_count` holds parent `window` `load` events until
+  nested frame navigations finish and dispatches `load` (or `error` on HTTP
+  `>= 400` / network failure) on the `<iframe>` element. Detaching an `<iframe>`
+  stamps own property `closed = true` onto the detached `WindowProxy` before
+  shutting down the child realm so cyclic parent↔child references reclaim to
+  zero leaked heap cells on GC.
+
+### 2. Multi-Realm DOM Wrappers, Constructors, and `WindowProxy` Security
+
+- `DomBindings` tracks a single wrapper per DOM `Node` keyed via
+  `Document::browsing_realm_id()` with RAII `JsIntrinsics` guards in
+  `JsInterpreter`, `make_function`, and `Realm::proto`, ensuring cross-realm
+  calls never corrupt active intrinsics or duplicate wrappers.
+- Constructor bindings (`Document`, `DOMParser`, `Comment`, `Text`, `Range`,
+  `MutationObserver`) resolve their target realm through `caller_realm_or(...)`
+  (`current_callable_realm_id()`), and `DomParserState` captures the relevant
+  document so `new childWin.DOMParser().parseFromString(...)` inherits the child
+  document's URL, fallback base URL, and `history.pushState` URL updates.
+- `HTMLIFrameElement` exposes `src`, `srcdoc`, `name`, `width`, `height`,
+  `sandbox` (`DOMTokenList`), `contentWindow`, `contentDocument`, and
+  `getSVGDocument()`. `sandbox` enforces opaque origins (unless
+  `allow-same-origin`) and disables script execution in `load_page` /
+  `load_xml_page` (unless `allow-scripts`).
+- `WindowExotic::get` and `WindowExotic::set` enforce HTML §7.2.3 cross-origin
+  `WindowProxy` property checks before consulting `realm->global_scope` or the
+  prototype chain, throwing `DOMException("SecurityError")` for non-safelisted
+  cross-origin accesses while allowing `window`, `self`, `frames`, `length`,
+  `top`, `parent`, `opener`, `closed`, `postMessage`, `close`, `focus`, `blur`,
+  `location`, symbols, and indexed child frames. `window.postMessage` validates
+  `targetOrigin` (`"*"`, `"/"`, or exact origin; `"null"` never matches opaque
+  origins) and queues `MessageEvent` (`data`, `origin`, `source`) on the target
+  realm.
+
+### 3. `<iframe>` Subdocument Layout/Rasterization, Origin Mapping, and `.xhtml` WPT
+
+- `LayoutTree` lays out `<iframe>` as a `300×150` replaced `ImageNode` (overridden
+  by `width`/`height` attributes or CSS) and recursively lays out and rasterizes
+  `element->content_document()` (`BitmapRenderer` -> `0xAARRGGBB` `ImageData`,
+  depth cap `8`, bounded by `RasterBudget::allows` and `RasterReservation`).
+- `ResourceLoader` supports containment-checked test origin mapping
+  (`set_origin_root_for_testing`, `LITEBIRD_ORIGIN_MAP`, and CLI
+  `--map-origin=ORIGIN=DIR`, returning HTTP `404` on `weakly_canonical` root
+  escape), and `JsInterpreter::load_xml_page` + `src/main.cpp` execute `<script>`
+  elements in XML/XHTML/SVG documents.
+- Verification: `make test` passes **165/165** suites (Release and ASan+UBSan),
+  and `make wpt` passes **5,421/5,463** subtests across **87** files (`WPT_FLOOR`
+  raised from `4,658` to `5,421`, **0** `frames` failures remaining).
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -4187,22 +4253,24 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 4,658 of
-   the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
-   only ask what jsdom can answer and what somebody thought to ask, and the
+   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 5,421 of
+   the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
+   can only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
-   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`.
-   Phase 37 added `el.style` shorthand expansion/aliases and HTML5 date/time
-   `<input>` semantics. Still missing: `getComputedStyle(el).width` layout
-   metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG DOM
-   (`className.baseVal`, `viewBox`, `getBBox()`), frames with documents
-   (`iframe.contentDocument`), CORS preflight `OPTIONS`, and four text encodings
-   only. Absent: `TextEncoder`, `crypto`, `indexedDB`, `MessageChannel`, XPath,
-   Web Animations, `ElementInternals`, and what needs typed arrays
-   (`ArrayBuffer`). The full lists are in Phase 27, section 12, Phase 28,
-   section 10, and Phase 36, section 9.
+   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 37
+   added `el.style` shorthand expansion/aliases and HTML5 date/time `<input>`
+   semantics; Phase 42 added nested browsing contexts (`<iframe>`
+   `contentDocument`/`contentWindow`/`srcdoc`/`sandbox`, cross-origin
+   `WindowProxy` checks, `postMessage`, subdocument layout/rasterization, and
+   `.xhtml` script execution). Still missing: `getComputedStyle(el).width`
+   layout metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG
+   DOM (`className.baseVal`, `viewBox`, `getBBox()`), CORS preflight `OPTIONS`,
+   and four text encodings only. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
+   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
+   Phase 28, section 10, Phase 36, section 9, and Phase 42.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10. Around classes: `new.target` is the

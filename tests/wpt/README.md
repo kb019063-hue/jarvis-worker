@@ -74,9 +74,10 @@ for the subtest and `TIMEOUT` for the file. In a sanitizer build on a busy
 machine the long files come close (under ASan here `big5-decode-extra.html`
 needs 6 seconds to its load event and `Node-compareDocumentPosition.html`
 3.5, each alone on a core), and CI's sanitizer job failed that way: `1 fail
-and are not listed`, with all 7,968 passing. That is what one failed run
-said; the same step had failed three times before, when a failed job could
-not yet say anything (AUDIT.md, finding 49). So the
+and are not listed`, with none fewer passing than the day before. That is
+what one failed run said; the same step had failed four times before (twice
+on the branch of that change, once on `main`, once on another branch), when
+a failed job could not yet say anything (AUDIT.md, finding 49). So the
 reporter scales the harness's limit with the runner's: it calls
 `setup({timeout_multiplier: SECONDS / 60})`, which is what wptrunner does
 for slow builds, and calls nothing when that is 1. No test here uses

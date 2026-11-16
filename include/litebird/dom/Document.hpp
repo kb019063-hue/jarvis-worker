@@ -139,6 +139,9 @@ public:
         m_content_type = std::move(type);
         m_is_html = m_content_type == "text/html";
     }
+    /// Canonical WHATWG encoding name (`document.characterSet`), `"UTF-8"` by default.
+    const std::string& character_set() const { return m_character_set; }
+    void set_character_set(std::string cs) { m_character_set = std::move(cs); }
     /// The DOM standard's "HTML document". In one, the names of HTML
     /// elements and of their attributes are matched without regard to case
     /// and shown in upper case; in an XML document a name is what it is.
@@ -218,6 +221,7 @@ private:
     std::string m_inherited_origin_url;
     std::string m_fallback_base_url;
     std::string m_content_type{"text/html"};
+    std::string m_character_set{"UTF-8"};
     bool m_is_html{true};
     bool m_xml_document_object{false};
 

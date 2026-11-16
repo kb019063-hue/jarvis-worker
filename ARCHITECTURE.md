@@ -355,7 +355,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
-| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 175/175 unit suites) |
+| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 179/179 unit suites) |
+| **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
 
 ---
 
@@ -738,7 +739,8 @@ struct FloatBand {
 That single predicate drives all three consumers:
 
 - **Float placement.** A floated child is laid out with a shrink-to-fit width
-  (`layout_float`), then slid down until the remaining band width can hold it.
+  (`layout_float`), then placed at the first indexed band edge where the
+  remaining width can hold it (Phase 48).
   Left floats pack from the left intrusion outward; right floats pack from the
   right edge inward, so `float: left` and `float: right` can share a row.
 - **Line-box shrinking.** `layout_inline_formatting_context` queries the band at
@@ -4328,6 +4330,107 @@ test; the subclass construction is separate work.
 
 ---
 
+## Phase 47 Architecture: The WHATWG Encoding Standard, the `<meta charset>` Prescan, and XML/WPT Encodings
+
+### 1. The hole
+
+There was one text decoder, `utf8_decode` in `src/net/DataUrl.cpp`, and an XML
+declaration that could also say UTF-16 or Latin-1. Everything else that
+arrived as bytes was assumed to be UTF-8: an HTML page named its encoding
+only in `<meta charset>`, which nothing read, `document.characterSet` did not
+exist, the `CharacterSet` labels of an HTTP `Content-Type` were dropped by the
+loader, and CSS `@charset` was a comment. The cost showed up in two
+scoreboards: 16 documents of the W3C XML suite were skipped as "an encoding
+this build cannot read", and web-platform-tests' `encoding/` directory — the
+place where the tables are checked byte by byte — could not run at all.
+
+### 2. The tables, generated and pinned
+
+`include/litebird/net/TextEncoding.hpp` is the standard's model: an
+`EncodingId` for each of the **40 encodings**, a label map of **228 labels**
+(normalised per §2, so `latin1`, `ISO-8859-1` and `L1` are one entry), the
+`Decoder`/`Encoder` flag of each so `replacement` is refused where the
+standard refuses it, and two decode entry points:
+
+- `decode_with_encoding(bytes, EncodingId, out, fatal)` — the standard's
+  algorithm. Non-fatal mode emits one `U+FFFD` per *error* (not per byte:
+  `EUC-JP`'s three-byte errors, `ISO-2022-JP`'s escape state and the shared
+  UTF-16 decoder's single end-of-stream error are all reproduced), fatal mode
+  stops at the first one and returns false.
+- `decode_text(bytes, label)` — BOM sniffing, then the label, then the
+  fallback window-1252 that HTML requires for an unknown label.
+
+`src/net/TextEncodingTables.cpp` (881 KB) holds the indexes and ranges,
+generated from `whatwg/encoding` at
+`be17ac5c49881336538acfc7b40dba3c8009144b` and recorded in the header, so the
+bytes on disk are auditable against a pinned commit rather than retyped. All
+of them except `big5` (`max` pointer `0x2f9d4`) fit in `uint16_t`, with `0` as
+the `null` marker the standard uses; `ISO-8859-8-I` shares
+`index-iso-8859-8`. Three details are not a table lookup and are written out
+in code: the four `Big5` pointers (1133, 1135, 1164, 1166) that stand for a
+letter plus a combining mark, `gb18030`'s ranges (pointer 7457 is `U+E7C7`
+even though it lies inside a null gap, and two ranges above 39419 are null),
+and `gb18030`'s rule that a failed four-byte sequence hands its second byte
+back to the stream (`0x81 0x30 0x81 0x40` is `U+FFFD`, `'0'`, then the two
+bytes `0x81 0x40` = `U+4E02`).
+
+### 3. How a document chooses its encoding
+
+- **HTML**: `HtmlParser::decode_bytes` applies the standard's order (§13.2.3.1)
+  — BOM, transport `Content-Type`, `<meta>`, fallback — and
+  `HtmlParser::prescan_meta_charset` is the §13.2.3.2 prescan: the first 1,024
+  bytes, `<meta charset>` and `<meta http-equiv="content-type">`, comments,
+  `<script>`/`<style>` and the attribute quoting rules, and the "UTF-16 that
+  is not the BOM becomes UTF-8" corrections. `Document` stores the answer
+  and `document.characterSet`/`charset`/`inputEncoding` report it.
+- **XML**: `XmlParser.cpp` validates the declaration's `[81] EncName` (so
+  `UTF8!` is rejected as a grammar error, not silently accepted as a label),
+  refuses `replacement`, and decodes with the fatal mode, because XML has no
+  error-recovery text. A navigated `.xml` page sets `characterSet` before
+  parsing and, on a fatal error, gets the `<parsererror>` element browsers
+  show instead of an empty document.
+- **Everything else**: `data:` URLs (`;charset=`), `XMLHttpRequest`
+  (`overrideMimeType`), `<script src>` and `<iframe>` subdocuments, and CSS
+  `@charset` all funnel through the same two functions, so a page and its
+  subresources cannot disagree about what a byte means. `--content-type=<mime>`
+  on the command line, and an optional `<file>.headers` sidecar next to a
+  `--map-origin` file, let the conformance runner give a page the type a
+  server would.
+
+### 4. What it moved
+
+| Scoreboard | Before | After |
+| :--- | ---: | ---: |
+| W3C XML suite (documents that apply) | 1702/1702, 16 skipped for encoding | **1718/1718**, 0 skipped |
+| Fuji Xerox XML: EUC-JP, Shift_JIS, ISO-2022-JP, UTF-16, UTF-16LE | 5 refused | **5 canonical forms equal to the UTF-8 translation's 2,822 bytes** |
+| web-platform-tests | 5421/5463 across 87 files | **7968/8009 across 103 files**, 0 unlisted |
+| — of which `encoding/` | not run | **2543/2543 in 16 files** (`big5-decode-extra` 2472) |
+| Unit suites | 174 | **177** |
+
+`tests/wpt/` gained 37 vendored files at `wpt`
+`f2b7b7add021b5f40e30c65dd348135058996249`, fetched as raw blobs because the
+UTF-32 ones are not UTF-8 and the contents API would have transcoded them.
+`tools/conformance/run_wpt.py` now stages each page as `bytes` and forwards
+its `<page>.headers` `Content-Type` to `--content-type`, which is how
+`bom-handling.html` and `utf-32-from-win1252.html` can assert what they
+assert. `tests/wpt/expected-failures.txt` went from 42 to 41 entries: the one
+that went away was `DOMParser-parseFromString-encoding.html`, which passes 4/4
+now that `DOMParser` honours a `Content-Type` charset.
+
+### 5. What is still open
+
+Encoders are not implemented — this is a decoder, and nothing here needs
+to write legacy bytes — so the standard's encoder-side special cases (Big5's
+`U+00CA`/`U+00EA`, `gb18030`'s ranges in the other direction) are untested.
+`TextDecoder` and `TextEncoder` are not exposed to script at all, and the
+`encoding/` tests that need those globals are not vendored; the ones vendored
+are the byte-level pages that iframe a document and read the text it decodes
+to. `document.characterSet` is not consulted by `XMLSerializer` when it
+writes a declaration, an `encoding` change on an already-parsed document
+(the standard's "change the encoding") is not modelled, and the prescan
+stops at 1,024 bytes with none of the streaming a browser needs when a page
+arrives in pieces.
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -4396,10 +4499,11 @@ test; the subclass construction is separate work.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 5,421 of
-   the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
-   can only ask what jsdom can answer and what somebody thought to ask, and the
-   rest of web-platform-tests has not been run. Phase 36 added on-demand layout
+   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 7,968 of
+   the 8,009 subtests of `dom/nodes`, `domparsing` and `encoding` across 103
+   files; the corpus can only ask what jsdom can answer and what somebody
+   thought to ask, and the rest of web-platform-tests has not been run.
+   Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
    document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 37
@@ -4407,10 +4511,12 @@ test; the subclass construction is separate work.
    semantics; Phase 42 added nested browsing contexts (`<iframe>`
    `contentDocument`/`contentWindow`/`srcdoc`/`sandbox`, cross-origin
    `WindowProxy` checks, `postMessage`, subdocument layout/rasterization, and
-   `.xhtml` script execution). Still missing: `getComputedStyle(el).width`
-   layout metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG
-   DOM (`className.baseVal`, `viewBox`, `getBBox()`), CORS preflight `OPTIONS`,
-   and four text encodings only. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `.xhtml` script execution); Phase 47 added the WHATWG Encoding Standard's 40
+   decoders and 228 labels for pages, XML and subresources. Still missing:
+   `getComputedStyle(el).width` layout metrics, `document.write`, style sheet
+   objects (`sheet.cssRules`), SVG DOM (`className.baseVal`, `viewBox`,
+   `getBBox()`), CORS preflight `OPTIONS`, and `TextDecoder`/`TextEncoder` (the
+   encodings themselves are read since Phase 47). Absent: `crypto`, `indexedDB`,
    `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
    typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
    Phase 28, section 10, Phase 36, section 9, and Phase 42.
@@ -4519,18 +4625,18 @@ script that measured its own strings threw `TypeError`.
 ### 3. How it is verified
 
 ```
-make test          # 175 engine suites, all passing (one new)
+make test          # 179 engine suites, all passing (one new)
 make conformance   # html5lib 1781/1792, unchanged
 make js-conformance # 926/940, unchanged
 make dom-conformance # 644/644, unchanged
 make url-conformance # 1188/1188, unchanged
-make xml-conformance # 1702/1702, unchanged
-make wpt           # 5421/5463, the 42 listed failures, 0 unlisted
+make xml-conformance # 1718/1718, unchanged
+make wpt           # 7968/8009, the 41 listed failures, 0 unlisted
 make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
 make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed
-make asan          # ASan/UBSan: 175/175 suites, corpora, fuzz (0 findings),
-                   # 882 deep runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed
+make asan          # ASan/UBSan: 179/179 suites, corpora, fuzz and deep pages (re-run on
+                   # this tree; see AUDIT.md finding 52)
 ```
 
 (Numbers as run on this branch; see AUDIT.md finding 52 for what each one
@@ -4549,4 +4655,56 @@ baseline with the gradient applied across the run.
 `ROADMAP.md` row 6 now reads path/hit-test gaps; the AGENTS.md row was
 rewritten to what is left (WebP/AVIF, SVG `<text>`). No expectation was
 re-recorded, no `.dat` corpus file was touched, and no floor was lowered;
-the unit scoreboard went from 174 to 175 suites.
+the unit scoreboard went from 178 to 179 suites.
+
+---
+## Phase 48 Architecture: Sized-Float Placement Index
+
+`LayoutBox::layout_block` builds a per-block `FloatPlacementIndex` lazily when
+the first float needs placement. Ordered edges partition vertical space into
+intervals of constant maximum left/right intrusion. A randomized balanced
+treap keyed by each interval's top caches the maximum remaining width in its
+subtree, so placement checks the interval containing `y_cursor`, then finds
+the earliest later edge with sufficient capacity without sweeping earlier
+rows. Inserting a float splits the partition at its top and bottom and
+updates only intersecting intervals, with logarithmic index maintenance per
+touched interval. A float whose width never fits retains the old y0 overflow
+behavior. Negative intrusions are retained rather than clamped to zero.
+
+The index is not the source of `float_bands`: inline layout still receives
+the original bands, and `clear` and containing-height accounting still use
+the existing side-specific lowest bottoms, including zero-height floats.
+The partition can still cost O(n²) when n new bands span n distinct prior
+intervals; it removes the repeated global sort and sweep for the common
+packed-row case, not all possible overlapping-float complexity.
+
+Reproduce the before/after comparison by saving a pre-change `build/litebird`
+as `build/litebird-floats-before`, then running:
+
+```sh
+python3 tools/bench/bench_sized_floats.py build/litebird-floats-before --out build/floats-before --sizes 1000 3000 10000
+python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
+for f in build/floats-before/*.layout; do cmp "$f" "build/floats-after/${f##*/}"; done
+```
+
+The fixed-seed generator makes three independently generated patterns at each
+size: packed rows, mixed left/right widths/heights with negative horizontal
+margins, and mixed floats with clearance and negative top margins. On this
+branch all nine full layout dumps were byte-identical. End-to-end CLI times
+(seconds; one local machine, no speedup claim for unrelated workloads):
+
+| Floats | Packed rows before → after | Mixed before → after | Clear before → after |
+| :--- | ---: | ---: | ---: |
+| 1,000 | 0.076 → 0.013 | 0.129 → 0.016 | 0.037 → 0.015 |
+| 3,000 | 0.494 → 0.031 | 1.134 → 0.039 | 0.261 → 0.037 |
+| 10,000 | 5.244 → 0.096 | 12.505 → 0.125 | 2.621 → 0.120 |
+
+`make bench-floats` runs the 1k and 10k patterns under a generous
+four-second-per-page CI wall-time guard (the old 10k row page exceeds it);
+timing is not used as a pixel oracle.
+
+The CSS parser and tree building are included in these times. The baseline
+was the already-correct band-edge sweep, **not** the old 46-second capped
+slide that let floats escape. Unit tests cover mixed sides, `clear:left` and
+`clear:right`, negative margins including a negative intrusion, and the
+existing rows beyond 1,024 and zero-height band behavior.

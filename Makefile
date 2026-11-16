@@ -5,7 +5,8 @@ BUILD_DIR ?= build
 ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
-SRCS = src/dom/Node.cpp \
+SRCS = src/common/Color.cpp \
+       src/dom/Node.cpp \
        src/dom/Selector.cpp \
        src/dom/FormState.cpp \
        src/dom/Document.cpp \
@@ -96,6 +97,7 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
+COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -143,7 +145,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -169,6 +171,10 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
+
+$(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
 
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
@@ -271,6 +277,7 @@ fuzz:
 	@python3 tools/fuzz/fuzz_pipeline.py
 	@python3 tools/fuzz/fuzz_xml.py
 	@$(MAKE) fuzz-media
+	@$(MAKE) fuzz-color
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -299,6 +306,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
@@ -386,9 +394,20 @@ verify-media: $(MEDIA_CHECK_TARGET)
 fuzz-media: $(MEDIA_CHECK_TARGET)
 	@python3 tools/fuzz/fuzz_media.py --binary $(MEDIA_CHECK_TARGET)
 
+## Verifies CSS Color 4/5 space conversions (all 15 spaces against an
+## independent exact-rational Python oracle), §13.2 OKLCH gamut mapping,
+## and upstream WPT CSS Color 4/5 valid/invalid computed vectors.
+verify-color: $(COLOR_CHECK_TARGET)
+	@python3 tools/verify_color.py --binary $(COLOR_CHECK_TARGET)
+
+## Adversarial grammar + mutation fuzzing of the CSS Color 4/5 parser, math
+## evaluator, color-mix(), relative colors, and space conversions.
+fuzz-color: $(COLOR_CHECK_TARGET)
+	@python3 tools/verify_color.py --binary $(COLOR_CHECK_TARGET) --fuzz 5000
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

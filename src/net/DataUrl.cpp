@@ -1,4 +1,5 @@
 #include "litebird/net/DataUrl.hpp"
+#include "litebird/net/TextEncoding.hpp"
 
 #include <cstddef>
 
@@ -120,164 +121,6 @@ bool forgiving_base64_decode(std::string_view text, std::string& out) {
     }
     // What is left of the last group is less than a byte and is dropped.
     return true;
-}
-
-void put_utf8(std::string& out, char32_t c) {
-    if (c < 0x80) {
-        out += static_cast<char>(c);
-    } else if (c < 0x800) {
-        out += static_cast<char>(0xC0 | (c >> 6));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    } else if (c < 0x10000) {
-        out += static_cast<char>(0xE0 | (c >> 12));
-        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (c >> 18));
-        out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    }
-}
-
-const char kReplacement[] = "\xEF\xBF\xBD";
-
-// The UTF-8 decoder of the Encoding Standard: one U+FFFD for each sequence
-// that goes wrong, and the byte that ended it is read again.
-std::string decode_utf8(std::string_view bytes) {
-    std::string out;
-    out.reserve(bytes.size());
-    const std::size_t n = bytes.size();
-    std::size_t i = 0;
-    while (i < n) {
-        const unsigned char lead = static_cast<unsigned char>(bytes[i]);
-        if (lead < 0x80) {
-            out += static_cast<char>(lead);
-            ++i;
-            continue;
-        }
-        std::size_t needed = 0;
-        unsigned char low = 0x80, high = 0xBF;      // the range the next byte must be in
-        if (lead >= 0xC2 && lead <= 0xDF) {
-            needed = 1;
-        } else if (lead >= 0xE0 && lead <= 0xEF) {
-            needed = 2;
-            if (lead == 0xE0) low = 0xA0;           // no overlong forms
-            if (lead == 0xED) high = 0x9F;          // no surrogates
-        } else if (lead >= 0xF0 && lead <= 0xF4) {
-            needed = 3;
-            if (lead == 0xF0) low = 0x90;
-            if (lead == 0xF4) high = 0x8F;          // nothing above U+10FFFF
-        }
-        if (needed == 0) {
-            out += kReplacement;
-            ++i;
-            continue;
-        }
-        std::size_t length = 1;
-        bool ok = true;
-        while (length <= needed) {
-            if (i + length >= n) {
-                ok = false;
-                break;
-            }
-            const unsigned char next = static_cast<unsigned char>(bytes[i + length]);
-            if (next < low || next > high) {
-                ok = false;
-                break;
-            }
-            low = 0x80;
-            high = 0xBF;
-            ++length;
-        }
-        if (ok) out.append(bytes.data() + i, length);
-        else out += kReplacement;
-        i += length;
-    }
-    return out;
-}
-
-std::string decode_utf16(std::string_view bytes, bool big_endian) {
-    std::string out;
-    out.reserve(bytes.size());
-    const auto unit = [&](std::size_t i) -> char32_t {
-        const auto a = static_cast<unsigned char>(bytes[i]);
-        const auto b = static_cast<unsigned char>(bytes[i + 1]);
-        return big_endian ? static_cast<char32_t>((a << 8) | b) : static_cast<char32_t>((b << 8) | a);
-    };
-    std::size_t i = 0;
-    while (i + 1 < bytes.size()) {
-        const char32_t c = unit(i);
-        i += 2;
-        if (c >= 0xD800 && c <= 0xDBFF) {
-            if (i + 1 < bytes.size()) {
-                const char32_t next = unit(i);
-                if (next >= 0xDC00 && next <= 0xDFFF) {
-                    put_utf8(out, 0x10000 + ((c - 0xD800) << 10) + (next - 0xDC00));
-                    i += 2;
-                    continue;
-                }
-            } else {
-                // The first half of a pair and then the end of the text,
-                // with or without one more byte: one error for all of it.
-                i = bytes.size();
-            }
-            out += kReplacement;
-        } else if (c >= 0xDC00 && c <= 0xDFFF) {
-            out += kReplacement;
-        } else {
-            put_utf8(out, c);
-        }
-    }
-    if (i < bytes.size()) out += kReplacement;      // half a code unit at the end
-    return out;
-}
-
-std::string decode_windows_1252(std::string_view bytes) {
-    static const char32_t kHigh[32] = {
-        0x20AC, 0x81,   0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
-        0x2039, 0x0152, 0x8D,   0x017D, 0x8F,   0x90,   0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
-        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D,   0x017E, 0x0178,
-    };
-    std::string out;
-    out.reserve(bytes.size());
-    for (const char raw : bytes) {
-        const unsigned char b = static_cast<unsigned char>(raw);
-        if (b < 0x80) out += static_cast<char>(b);
-        else put_utf8(out, b < 0xA0 ? kHigh[b - 0x80] : b);
-    }
-    return out;
-}
-
-enum class TextEncoding { Utf8, Utf16LE, Utf16BE, Windows1252 };
-
-// The labels of the Encoding Standard for the four encodings read here.
-// False for any other label, one of the standard's or not.
-bool encoding_of_label(std::string_view label, TextEncoding& out) {
-    std::size_t start = 0, end = label.size();
-    while (start < end && is_ascii_whitespace(label[start])) ++start;
-    while (end > start && is_ascii_whitespace(label[end - 1])) --end;
-    const std::string name = lowered(label.substr(start, end - start));
-    static const char* const kUtf8[] = {"utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "x-unicode20utf8"};
-    static const char* const kUtf16LE[] = {"utf-16le", "utf-16", "ucs-2", "unicode", "csunicode", "iso-10646-ucs-2", "unicodefeff"};
-    static const char* const kUtf16BE[] = {"utf-16be", "unicodefffe"};
-    static const char* const kWindows1252[] = {
-        "ansi_x3.4-1968", "ascii", "cp1252", "cp819", "csisolatin1", "ibm819", "iso-8859-1", "iso-ir-100", "iso8859-1",
-        "iso88591", "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii", "windows-1252", "x-cp1252",
-    };
-    for (const char* candidate : kUtf8) {
-        if (name == candidate) { out = TextEncoding::Utf8; return true; }
-    }
-    for (const char* candidate : kUtf16LE) {
-        if (name == candidate) { out = TextEncoding::Utf16LE; return true; }
-    }
-    for (const char* candidate : kUtf16BE) {
-        if (name == candidate) { out = TextEncoding::Utf16BE; return true; }
-    }
-    for (const char* candidate : kWindows1252) {
-        if (name == candidate) { out = TextEncoding::Windows1252; return true; }
-    }
-    return false;
 }
 
 } // namespace
@@ -425,35 +268,23 @@ bool is_http_token(std::string_view text) {
 
 std::string utf8_decode(std::string_view bytes) {
     if (bytes.size() >= 3 && bytes.compare(0, 3, "\xEF\xBB\xBF") == 0) bytes.remove_prefix(3);
-    return decode_utf8(bytes);
+    std::string out;
+    decode_with_encoding(bytes, EncodingId::Utf8, out, false);
+    return out;
 }
 
 std::string decode_text(std::string_view bytes, std::string_view label) {
-    const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    if (bytes.size() >= 3 && byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) return decode_utf8(bytes.substr(3));
-    if (bytes.size() >= 2 && byte(0) == 0xFE && byte(1) == 0xFF) return decode_utf16(bytes.substr(2), true);
-    if (bytes.size() >= 2 && byte(0) == 0xFF && byte(1) == 0xFE) return decode_utf16(bytes.substr(2), false);
-    TextEncoding encoding = TextEncoding::Utf8;
-    if (!encoding_of_label(label, encoding)) encoding = TextEncoding::Utf8;
-    switch (encoding) {
-        case TextEncoding::Utf16LE: return decode_utf16(bytes, false);
-        case TextEncoding::Utf16BE: return decode_utf16(bytes, true);
-        case TextEncoding::Windows1252: return decode_windows_1252(bytes);
-        case TextEncoding::Utf8: break;
+    EncodingId fallback = EncodingId::Utf8;
+    if (!get_encoding_from_label(label, fallback)) {
+        fallback = EncodingId::Utf8;
     }
-    return decode_utf8(bytes);
+    return whatwg_decode(bytes, fallback);
 }
 
 std::string encoding_name_for_label(std::string_view label) {
-    TextEncoding encoding = TextEncoding::Utf8;
-    if (!encoding_of_label(label, encoding)) return std::string();
-    switch (encoding) {
-        case TextEncoding::Utf16LE: return "UTF-16LE";
-        case TextEncoding::Utf16BE: return "UTF-16BE";
-        case TextEncoding::Windows1252: return "windows-1252";
-        case TextEncoding::Utf8: break;
-    }
-    return "UTF-8";
+    EncodingId encoding = EncodingId::Utf8;
+    if (!get_encoding_from_label(label, encoding)) return std::string();
+    return std::string(canonical_encoding_name(encoding));
 }
 
 } // namespace litebird

@@ -58,6 +58,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
+| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 
 ---
@@ -2969,6 +2970,123 @@ above it said to do when this row was fixed.
 
 ---
 
+## 48. ✅ Nested browsing contexts (`<iframe>`), cross-realm DOM wrappers, cross-origin `WindowProxy` isolation, and `.xhtml` script execution (Phase 42)
+
+**The hole.** Four interlocking gaps kept Litebird single-realm on the main
+thread and accounted for 495 of the 534 expected WPT failures (`frames` in
+`tests/wpt/expected-failures.txt`), plus prevented running WPT `.xhtml` files
+and the multi-origin `DOMParser-parseFromString-url*` suite:
+
+1. **No `HTMLIFrameElement` or nested browsing context.** `<iframe>` was a
+   plain `HTMLElement`: `contentWindow`, `contentDocument`, `getSVGDocument()`,
+   `sandbox`, `srcdoc`, `window.frames`, `window.length`, `window[i]`,
+   `window.parent`, `window.top`, `window.frameElement`, `window.closed`, and
+   `window.postMessage` were absent or single-window stubs (`window.top ===
+   window`, `window.length === 0`). Connecting an `<iframe>` created no initial
+   `about:blank` document, navigated neither `src` nor `srcdoc`, and delayed no
+   parent `window` `load` event.
+2. **Single-realm assumptions across DOM/JS bindings.** `DomBindings::realm_if_any`
+   fell back to the last-constructed `Realm` when a `Document` had no realm
+   stamp; `JsIntrinsics::current()` and `DomBindings::current_realm()` could be
+   clobbered whenever a nested `JsInterpreter` initialized or executed inside a
+   parent script call; `new childWin.Comment()`, `new childWin.Text()`,
+   `new childWin.Document()`, `new childWin.DOMParser()`, `new childWin.Range()`,
+   and `new childWin.MutationObserver()` bound to the caller's active realm
+   rather than the constructor's realm (`caller_realm_or`); and creating a DOM
+   wrapper from a parent realm vs. a child realm risked either wrong prototype
+   chains (`node instanceof childWin.HTMLElement`) or split wrapper identity.
+3. **Cross-origin & `sandbox` boundary bypasses.** Even once child realms
+   existed, `JsInterpreter::init_builtins()` defines `"document"` on
+   `m_global_env`, and `WindowExotic::get` consulted `realm->global_scope`
+   before prototype accessors — letting `iframe.contentWindow.document` bypass
+   `Window.prototype.document`'s same-origin check on cross-origin or opaque
+   `sandbox` frames unless `WindowExotic::get` and `WindowExotic::set` enforce
+   HTML §7.2.3 cross-origin `WindowProxy` property filters directly. Similarly,
+   `HtmlParser::parse_into(..., scripting=false, on_script_end)` still invoked
+   `on_script_end`, so sandboxed frames without `allow-scripts` needed explicit
+   `scripting=false` enforcement in `load_page` and `load_xml_page`.
+4. **No `<iframe>` subdocument layout/painting, no origin-root mapping, and no
+   `.xhtml` script runner.** `LayoutTree` skipped `<iframe>` completely instead
+   of laying out a `300×150` replaced box and rasterizing `content_document()`
+   under `RasterBudget`; CLI XML/XHTML loads (`src/main.cpp`) parsed XML trees
+   without executing `<script>` elements; and `ResourceLoader` had no containment-
+   checked test origin mapper (`--map-origin=ORIGIN=DIR`) for multi-origin WPT
+   fixtures (`{{hosts[][www1]}}`, `{{hosts[alt][]}}`).
+
+**The fix.**
+
+- **Per-frame `JsInterpreter`, `WindowProxy` preservation, and zero-leak GC:**
+  Connecting an HTML `<iframe>` synchronously initializes an initial
+  `about:blank` `Document` + `JsInterpreter` child realm (`Document::browsing_realm_id`,
+  inherited origin, nesting depth cap of `8`) and queues asynchronous `srcdoc`
+  (`about:srcdoc`, fallback base URL = parent document base URL) or `src`
+  navigation (`http:`/`https:`/`file:`/`data:`/`about:blank`, HTML and XML/XHTML/SVG
+  MIME dispatch) via `JsInterpreter::navigate_document(...)`. `init_builtins()`
+  reuses `m_global_object` so `WindowProxy` object identity survives across
+  navigations (`before === iframe.contentWindow`), and detaching stamps own
+  property `closed = true` onto the detached `WindowProxy` before tearing down
+  the child realm so cyclic parent↔child references collect cleanly to zero
+  leaked heap cells. Recursive `delaying_load_count` holds parent `window`
+  `load` until nested frame loads complete.
+- **Cross-realm wrappers, constructors, and HTML §7.2.3 `WindowProxy` security:**
+  `DomBindings` maintains single-wrapper identity across realms keyed by
+  `Document::browsing_realm_id()` with RAII `JsIntrinsics` guards in
+  `JsInterpreter`, `make_function`, and `Realm::proto`. Constructor bindings use
+  `caller_realm_or(...)` (`current_callable_realm_id()`) and `DomParserState`
+  captures the relevant document (`URL`, `documentURI`, fallback base URL, and
+  `pushState`-updated URLs). `HTMLIFrameElement.sandbox` exposes a `DOMTokenList`
+  enforcing opaque origins (unless `allow-same-origin`) and blocking script
+  execution (unless `allow-scripts`); `contentDocument` / `getSVGDocument()`
+  return `null` cross-origin, and `WindowExotic::get` / `WindowExotic::set`
+  restrict cross-origin `WindowProxy` access to the HTML §7.2.3 safelist
+  (`window`, `self`, `frames`, `length`, `top`, `parent`, `opener`, `closed`,
+  `postMessage`, `close`, `focus`, `blur`, `location`, symbols, and indexed
+  child frames), throwing `DOMException("SecurityError")` otherwise.
+  `window.postMessage(message, targetOrigin)` validates `targetOrigin` (`"*"`,
+  `"/"`, or serialized origin; `"null"` never matches opaque origins) and
+  queues `MessageEvent` (`data`, `origin`, `source`) on the target realm.
+- **Subdocument layout/rasterization, origin-root mapping, and `.xhtml` WPT:**
+  `LayoutTree` lays out `<iframe>` as a `300×150` replaced `ImageNode` and
+  recursively lays out and rasterizes `element->content_document()` (depth cap
+  `8`, guarded by `RasterBudget::allows` + `RasterReservation`) into
+  `0xAARRGGBB` `ImageData`. `ResourceLoader` supports containment-checked
+  origin mapping (`weakly_canonical` inside root or HTTP `404`), `JsInterpreter::load_xml_page`
+  executes XHTML/SVG `<script>` elements in XML mode, and `run_wpt.py` discovers
+  `.xhtml` tests (`<![CDATA[...]]>`-safe script staging) and maps WPT multi-host
+  origins. Vendored 20 upstream WPT files at pinned commit `f2b7b7add021...`
+  (`common/blank.html`, 6 `domparsing/*.xhtml` files, `insert_adjacent_html.js`,
+  5 `DOMParser-parseFromString-url*.html` files, and 7 `domparsing/resources/*`).
+
+**How it was verified.**
+
+- `make test`: **165/165** engine unit suites pass in both Release (`-O2`) and
+  ASan+UBSan (`build-asan/test_suite`), including three new suites:
+  `iframe_browsing_context_hierarchy_and_navigation`,
+  `iframe_sandbox_origin_isolation_and_postmessage`, and
+  `iframe_cross_realm_wrappers_gc_and_subdocument_rendering` (verifying
+  3-round multi-frame zero-leak GC reclamation, symlink-escape `404` containment,
+  cross-origin `WindowProxy` `SecurityError` throws, `sandbox` opaque origin +
+  script blocking, `postMessage` origin matching, XHTML `<![CDATA[...]]>` script
+  execution, and `BitmapRenderer` subdocument pixel output).
+- `make wpt`: **5,421/5,463** subtests pass across **87** files (`WPT_FLOOR`
+  raised from `4,658` to `5,421`, **+763** passing subtests; expected failures
+  reduced from `534` to `42`, with **0** `frames` failures remaining, **211/211**
+  `DOMParser-parseFromString-url*.html` passing, and **59/62** `.xhtml` subtests
+  passing).
+- Full regression & sanitizer matrix clean: html5lib `1781/1792`, DOM `640/640`,
+  URL `1188/1188`, XML `1702/1702`, JS `907/921` (`906/921` ASan),
+  `security-fetch` `3/3`, `security-worker` `17/17`, `verify-media` `35/35`,
+  `asan-core`, `asan-deep` (`882` deep runs, `400` parser + `400` pipeline +
+  `600` XML + `1,800` media fuzz runs, `0` findings), and `make deep`.
+
+**What is still open.** Cross-origin `Object.getOwnPropertyDescriptor` /
+`Reflect.ownKeys` filtering on `WindowProxy` (`[[OwnPropertyKeys]]` exotic trap),
+cross-origin `Location` setter navigation (`childWin.location = ...`),
+`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc` CSP
+inheritance, and process-level site isolation remain open.
+
+---
+
 ## 50. ✅ Unicode escapes in JavaScript identifiers and Unicode 17.0 identifier validation (Phase 44)
 
 **What was wrong.** `JsLexer` had no handling for `\uXXXX` or `\u{HexDigits}`
@@ -3040,11 +3158,12 @@ escaped code points (`\u0030`, `\u200C`, `\u2E2F`, `\u0023`, surrogate pairs
   v22.22.3** via `--reference "node -e"`, **14/14 in Litebird**), raising
   `make js-conformance` from **907/921** to **921/935 (98.5%)** and raising
   CI `--min-pass` from `907` to `921` and `JS_ASAN_FLOOR` from `905` to `919`.
-- Added 3 C++ unit test suites in `tests/test_suite.cpp` (`make test`: **165/165**).
+- Added 3 C++ unit test suites in `tests/test_suite.cpp` (`make test`: **169/169**
+  in Release; ASan+UBSan `test_suite` 100% passing with 0 findings).
 - Verified under Release and ASan+UBSan (`make test`, `make conformance`,
   `make js-conformance`, `make dom-conformance`, `make url-conformance`,
   `make wpt`, `make diff-strings`, `make bench`, `make bench-surrogates`,
-  `make asan-core` / `make asan`).
+  ASan+UBSan `test_suite`, `js-conformance` 920/935, `dom-conformance` 640/640).
 
 **What remains open.**
 - Strict-mode parameter/function-name validation when `"use strict"` appears
@@ -3055,4 +3174,3 @@ escaped code points (`\u0030`, `\u200C`, `\u2E2F`, `\u0023`, surrogate pairs
   strict mode because `parse_statement_list` inspects cooked token text.
 - `%AsyncFunction%` and `%GeneratorFunction%` distinct constructors/prototypes
   are tracked under the existing *"What a function is, in small"* task row.
-

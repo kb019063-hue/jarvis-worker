@@ -37,15 +37,17 @@ float scaled_border(float value, float scale) {
 /// table each cell only owns half of a shared border.
 float horizontal_spacing(const LayoutBox& box) {
     const float scale = box.border_scale;
-    return scaled_border(box.style.border_width.left, scale) +
-           scaled_border(box.style.border_width.right, scale) +
+    const EdgeSizes& edges = box.border_override ? *box.border_override : box.style.border_width;
+    return scaled_border(edges.left, scale) +
+           scaled_border(edges.right, scale) +
            box.style.padding.left + box.style.padding.right;
 }
 
 float vertical_spacing(const LayoutBox& box) {
     const float scale = box.border_scale;
-    return scaled_border(box.style.border_width.top, scale) +
-           scaled_border(box.style.border_width.bottom, scale) +
+    const EdgeSizes& edges = box.border_override ? *box.border_override : box.style.border_width;
+    return scaled_border(edges.top, scale) +
+           scaled_border(edges.bottom, scale) +
            box.style.padding.top + box.style.padding.bottom;
 }
 
@@ -54,6 +56,120 @@ float vertical_spacing(const LayoutBox& box) {
 // ---------------------------------------------------------------------------
 // Float context
 // ---------------------------------------------------------------------------
+
+/// A cell placed on the occupancy grid: which row/column band it covers.
+struct PlacedCell {
+    std::shared_ptr<LayoutBox> box;
+    std::size_t row{0};
+    std::size_t col{0};
+    std::size_t rowspan{1};
+    std::size_t colspan{1};
+};
+
+/// CSS 2.1 17.6.2.1, the border-conflict resolution, reduced to what this
+/// engine can express: on a shared edge the wider used border wins and every
+/// cell touching the edge paints half of the winner's border, colour included
+/// (the two halves add up to the winning border). Positional priority
+/// (cell > row > table) and style-based priority (double > solid > …) are
+/// not modeled — borders carry a single solid style here, and row borders
+/// are not painted at all. Outer edges resolve against nothing and keep the
+/// cell's own width; the table's own border stays the table's.
+struct ResolvedBorders {
+    std::vector<EdgeSizes> widths;
+    std::vector<EdgeColors> colors;
+};
+
+ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
+                                          std::size_t row_count,
+                                          std::size_t column_count) {
+    const std::size_t n = placed.size();
+    std::vector<EdgeSizes> used;
+    std::vector<EdgeColors> used_colors;
+    used.reserve(n);
+    used_colors.reserve(n);
+    for (const auto& entry : placed) {
+        used.push_back(entry.box->style.border_width);
+        used_colors.push_back(EdgeColors(entry.box->style.border_color));
+    }
+
+    auto relax = [&](std::size_t index, int side, float width, const Color& color) {
+        float& edge = (side == 0) ? used[index].top
+                    : (side == 1) ? used[index].right
+                    : (side == 2) ? used[index].bottom
+                                  : used[index].left;
+        if (width >= edge) {
+            edge = width;
+            Color& colored = (side == 0) ? used_colors[index].top
+                           : (side == 1) ? used_colors[index].right
+                           : (side == 2) ? used_colors[index].bottom
+                                         : used_colors[index].left;
+            colored = color;
+        }
+    };
+
+    // Vertical boundaries between column b - 1 and b, one segment per row band.
+    for (std::size_t b = 1; b < column_count; ++b) {
+        for (std::size_t r = 0; r < row_count; ++r) {
+            float winner = 0.0f;
+            Color winner_color = Color::black();
+            std::vector<std::pair<std::size_t, int>> members;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto& entry = placed[i];
+                if (r < entry.row || r >= entry.row + entry.rowspan) continue;
+                float width = -1.0f;
+                Color color = Color::black();
+                if (entry.col + entry.colspan == b) {
+                    width = entry.box->style.border_width.right;
+                    color = entry.box->style.border_color;
+                    members.emplace_back(i, 1);
+                } else if (entry.col == b) {
+                    width = entry.box->style.border_width.left;
+                    color = entry.box->style.border_color;
+                    members.emplace_back(i, 3);
+                } else {
+                    continue;
+                }
+                if (width >= winner) {
+                    winner = width;
+                    winner_color = color;
+                }
+            }
+            for (const auto& [i, side] : members) relax(i, side, winner, winner_color);
+        }
+    }
+
+    // Horizontal boundaries between row b - 1 and b, one segment per column band.
+    for (std::size_t b = 1; b < row_count; ++b) {
+        for (std::size_t c = 0; c < column_count; ++c) {
+            float winner = 0.0f;
+            Color winner_color = Color::black();
+            std::vector<std::pair<std::size_t, int>> members;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto& entry = placed[i];
+                if (c < entry.col || c >= entry.col + entry.colspan) continue;
+                float width = -1.0f;
+                Color color = Color::black();
+                if (entry.row + entry.rowspan == b) {
+                    width = entry.box->style.border_width.bottom;
+                    color = entry.box->style.border_color;
+                    members.emplace_back(i, 2);
+                } else if (entry.row == b) {
+                    width = entry.box->style.border_width.top;
+                    color = entry.box->style.border_color;
+                    members.emplace_back(i, 0);
+                } else {
+                    continue;
+                }
+                if (width >= winner) {
+                    winner = width;
+                    winner_color = color;
+                }
+            }
+            for (const auto& [i, side] : members) relax(i, side, winner, winner_color);
+        }
+    }
+    return {used, used_colors};
+}
 
 bool LayoutBox::establishes_bfc() const {
     // CSS 2.1 9.4.1: floats, out-of-flow positioned boxes, non-visible
@@ -151,12 +267,25 @@ void LayoutBox::layout_table(float containing_width) {
     const float spacing_x = collapsed ? 0.0f : style.border_spacing_x;
     const float spacing_y = collapsed ? 0.0f : style.border_spacing_y;
 
+    // Captions are block-level boxes of their own: full grid width, stacked
+    // above or below the grid (CSS 2.1 17.4.1, `caption-side`). They are not
+    // rows, cells or groups, so the grid gather skips them.
+    std::vector<std::shared_ptr<LayoutBox>> top_captions;
+    std::vector<std::shared_ptr<LayoutBox>> bottom_captions;
+    for (const auto& child : children) {
+        if (child->style.is_table_caption()) {
+            (child->style.caption_side == CaptionSide::Bottom ? bottom_captions : top_captions)
+                .push_back(child);
+        }
+    }
+
     // 1. Gather the row grid, flattening row groups and synthesising rows for
     //    cells that are direct children of the table.
     std::vector<std::vector<std::shared_ptr<LayoutBox>>> grid;
     std::vector<std::shared_ptr<LayoutBox>> row_boxes;
 
     for (const auto& child : children) {
+        if (child->style.is_table_caption()) continue;
         if (child->box_type == BoxType::TableRowNode) {
             std::vector<std::shared_ptr<LayoutBox>> cells;
             for (const auto& cell : child->children) {
@@ -180,7 +309,7 @@ void LayoutBox::layout_table(float containing_width) {
             }
         } else if (child->box_type == BoxType::TableCellNode) {
             // Consecutive cells directly in the table form one anonymous row.
-            if (grid.empty() || !row_boxes.empty() && row_boxes.back() == nullptr) {
+            if (grid.empty() || (!row_boxes.empty() && row_boxes.back() == nullptr)) {
                 grid.push_back({});
                 row_boxes.push_back(nullptr);
             }
@@ -189,20 +318,30 @@ void LayoutBox::layout_table(float containing_width) {
     }
 
     if (grid.empty()) {
-        dimensions.content.width = (style.width >= 0.0f) ? style.width - h_pb : 0.0f;
-        dimensions.content.height = 0.0f;
+        float empty_w = (style.width >= 0.0f) ? style.width - h_pb
+                       : std::max(0.0f, containing_width - h_pb);
+        float cap_h = 0.0f;
+        for (auto& cap : top_captions) {
+            cap->width_basis_override = empty_w;
+            cap->layout(empty_w);
+            cap->shift_position(dimensions.content.x - cap->dimensions.content.x,
+                                dimensions.content.y + cap_h - cap->dimensions.content.y);
+            cap_h += cap->dimensions.margin_box().height;
+        }
+        for (auto& cap : bottom_captions) {
+            cap->width_basis_override = empty_w;
+            cap->layout(empty_w);
+            cap->shift_position(dimensions.content.x - cap->dimensions.content.x,
+                                dimensions.content.y + cap_h - cap->dimensions.content.y);
+            cap_h += cap->dimensions.margin_box().height;
+        }
+        dimensions.content.width = empty_w;
+        dimensions.content.height = cap_h;
         return;
     }
 
     // 2. Spans: place every cell into an occupancy grid so rowspan/colspan
     //    cells reserve the slots they cover (CSS 2.1 17.5).
-    struct PlacedCell {
-        std::shared_ptr<LayoutBox> box;
-        std::size_t row{0};
-        std::size_t col{0};
-        std::size_t rowspan{1};
-        std::size_t colspan{1};
-    };
     std::vector<PlacedCell> placed;
 
     auto numeric_attribute = [](const std::shared_ptr<LayoutBox>& cell, const char* name, int fallback) -> int {
@@ -247,12 +386,71 @@ void LayoutBox::layout_table(float containing_width) {
     }
     if (column_count == 0) column_count = 1;
 
-    // Collapsed tables share borders: each cell paints half of a shared edge.
+    // Collapsed tables: resolve the shared edges first (widest wins), handing
+    // the winner to every cell on the edge, then each cell paints half.
+    if (collapsed) {
+        const ResolvedBorders resolved = resolve_collapsed_borders(placed, row_count, column_count);
+        for (std::size_t i = 0; i < placed.size(); ++i) {
+            placed[i].box->border_override = resolved.widths[i];
+            placed[i].box->border_color_override = resolved.colors[i];
+        }
+    }
     for (auto& entry : placed) entry.box->border_scale = collapsed ? 0.5f : 1.0f;
 
     // 3. Column widths. A spanning cell distributes its requirement over the
-    //    columns it covers instead of demanding one wide column.
-    std::vector<float> column_widths(column_count, 0.0f);
+    //    columns it covers instead of demanding one wide column. In the fixed
+    //    algorithm (CSS 2.1 17.5.2.1) the first row decides: a cell or column
+    //    with a specified width sets its column, and the rest of the table's
+    //    width is divided equally between the remaining columns. Later rows
+    //    never widen a column, and `auto` table width shares the containing
+    //    width equally (there is no shrink-wrap in fixed layout here).
+    std::vector<float> column_widths;
+    if (style.table_layout == TableLayout::Fixed) {
+        const float explicit_w = (style.width >= 0.0f)
+            ? ((style.box_sizing == BoxSizing::BorderBox) ? std::max(0.0f, style.width - h_pb)
+                                                          : style.width)
+            : -1.0f;
+        const float basis_w = (explicit_w >= 0.0f)
+            ? explicit_w
+            : std::max(0.0f, containing_width - h_pb);
+        std::vector<float> widths(column_count, -1.0f);
+        for (const auto& entry : placed) {
+            if (entry.row != 0) continue;
+            const float spacing = horizontal_spacing(*entry.box) + entry.box->style.margin.left +
+                                  entry.box->style.margin.right;
+            float required = -1.0f;
+            if (entry.box->style.width >= 0.0f) required = entry.box->style.width + spacing;
+            else if (entry.box->style.width_percent >= 0.0f && explicit_w >= 0.0f) {
+                required = explicit_w * entry.box->style.width_percent / 100.0f + spacing;
+            }
+            if (required < 0.0f) continue;
+            if (entry.colspan == 1) {
+                widths[entry.col] = std::max(widths[entry.col], required);
+            } else {
+                // A spanning cell with a width divides its share evenly; an
+                // already-specified column keeps the larger of the two.
+                const float share = required / static_cast<float>(entry.colspan);
+                for (std::size_t c = entry.col; c < entry.col + entry.colspan && c < column_count; ++c) {
+                    widths[c] = std::max(widths[c], share);
+                }
+            }
+        }
+        float used_sum = 0.0f;
+        std::size_t unspecified = 0;
+        for (const float w : widths) {
+            if (w >= 0.0f) used_sum += w;
+            else ++unspecified;
+        }
+        const float available = std::max(0.0f, basis_w - spacing_x * static_cast<float>(column_count + 1));
+        const float share = (unspecified > 0)
+            ? std::max(0.0f, available - used_sum) / static_cast<float>(unspecified)
+            : 0.0f;
+        for (float& w : widths) {
+            if (w < 0.0f) w = share;
+        }
+        column_widths = std::move(widths);
+    } else {
+    column_widths.assign(column_count, 0.0f);
     for (const auto& entry : placed) {
         const auto& cell = entry.box;
         const float cell_spacing = horizontal_spacing(*cell) +
@@ -278,6 +476,8 @@ void LayoutBox::layout_table(float containing_width) {
         }
     }
 
+    }
+
     auto grid_width = [&]() {
         float total = spacing_x * static_cast<float>(column_count + 1);
         for (float width : column_widths) total += width;
@@ -287,7 +487,7 @@ void LayoutBox::layout_table(float containing_width) {
     float total = grid_width();
 
     // 4. An explicit table width distributes the surplus evenly.
-    if (style.width >= 0.0f) {
+    if (style.table_layout != TableLayout::Fixed && style.width >= 0.0f) {
         const float target = std::max(0.0f, (style.box_sizing == BoxSizing::BorderBox)
                                                  ? style.width - h_pb
                                                  : style.width);
@@ -299,8 +499,9 @@ void LayoutBox::layout_table(float containing_width) {
     }
 
     // 4b. Percentage cell widths resolve against the table's own width (CSS
-    //     2.1 17.5.2), so they are applied once that width is known.
-    {
+    //     2.1 17.5.2), so they are applied once that width is known. Not in
+    //     fixed layout: there, columns are fixed and cells overflow them.
+    if (style.table_layout != TableLayout::Fixed) {
         const bool size_known = (style.width >= 0.0f);
         float percent_total = total;
         for (auto& entry : placed) {
@@ -321,9 +522,46 @@ void LayoutBox::layout_table(float containing_width) {
         if (!size_known) total = grid_width();
     }
 
+    // 4c. Captions are block-level children: full grid width, stacked above or
+    //     below the grid. An explicitly sized caption that is wider than the
+    //     grid widens the table box (the grid keeps its width and stays
+    //     left-aligned; the cells do not stretch).
+    float caption_extent = total;
+    for (const auto* caps_ptr : {&top_captions, &bottom_captions}) {
+        for (const auto& cap : *caps_ptr) {
+            if (cap->style.width < 0.0f) continue;
+            const float cap_w = cap->style.width + horizontal_spacing(*cap) +
+                                cap->style.margin.left + cap->style.margin.right;
+            caption_extent = std::max(caption_extent, cap_w);
+        }
+    }
+    total = caption_extent;
+    float caption_top = 0.0f;
+    float caption_bottom = 0.0f;
+    for (auto& cap : top_captions) {
+        cap->width_basis_override = total;
+        cap->layout(total);
+        caption_top += cap->dimensions.margin_box().height;
+    }
+    for (auto& cap : bottom_captions) {
+        cap->width_basis_override = total;
+        cap->layout(total);
+        caption_bottom += cap->dimensions.margin_box().height;
+    }
+
     dimensions.content.width = total;
 
     // 5. Lay the cells out with the width of the columns they span. Cells go
+    //
+    // Fixed layout reads the first row once (CSS 2.1 17.5.2.1): a later cell's
+    // own width must not resize its column, so the cell hugs the column it
+    // was given instead of the width it asked for.
+    if (style.table_layout == TableLayout::Fixed) {
+        for (const auto& entry : placed) {
+            entry.box->ignore_own_width = true;
+        }
+    }
+    //
     //    through layout() rather than layout_table_cell(): only layout()
     //    copies margin/padding/border from the computed style onto the box.
     //    Percentage lengths inside a cell are relative to the table, so give
@@ -367,7 +605,7 @@ void LayoutBox::layout_table(float containing_width) {
     }
 
     std::vector<float> row_top(row_count, 0.0f);
-    float y_cursor = spacing_y;
+    float y_cursor = caption_top + spacing_y;
     for (std::size_t r = 0; r < row_count; ++r) {
         row_top[r] = y_cursor;
         y_cursor += row_heights[r] + spacing_y;
@@ -406,13 +644,32 @@ void LayoutBox::layout_table(float containing_width) {
         row->dimensions.border = row->style.border_width;
     }
 
-    // 8. Height: explicit, or the grid's own height.
+    // 8. Height: explicit, or the grid's own height, plus the bottom
+    //    captions. The rows region stays whatever it was; the captions sit
+    //    outside it (CSS 2.1 17.4.1).
+    float content_height = 0.0f;
     if (style.height >= 0.0f) {
-        dimensions.content.height = (style.box_sizing == BoxSizing::BorderBox)
-                                        ? std::max(0.0f, style.height - v_pb)
-                                        : style.height;
+        content_height = (style.box_sizing == BoxSizing::BorderBox)
+                             ? std::max(0.0f, style.height - v_pb)
+                             : style.height;
     } else {
-        dimensions.content.height = y_cursor;
+        content_height = y_cursor;
+    }
+    dimensions.content.height = content_height + caption_bottom;
+
+    // Position the captions: top ones stack at the top of the table's
+    // content box, bottom ones below the rows region.
+    float top_y = dimensions.content.y;
+    for (auto& cap : top_captions) {
+        cap->shift_position(dimensions.content.x - cap->dimensions.content.x,
+                            top_y - cap->dimensions.content.y);
+        top_y += cap->dimensions.margin_box().height;
+    }
+    float bottom_y = dimensions.content.y + content_height;
+    for (auto& cap : bottom_captions) {
+        cap->shift_position(dimensions.content.x - cap->dimensions.content.x,
+                            bottom_y - cap->dimensions.content.y);
+        bottom_y += cap->dimensions.margin_box().height;
     }
 }
 

@@ -1,8 +1,27 @@
+#include <cctype>
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <algorithm>
 
 namespace litebird {
+
+namespace {
+/// True when the cell holds something other than white space (CSS 2.1
+/// 17.5.1.2): any element box is content; a text node counts only if it
+/// contains a non-white-space character.
+bool table_cell_has_content(const LayoutBox& cell) {
+    for (const auto& child : cell.children) {
+        if (child->box_type == BoxType::TextNode) {
+            for (const unsigned char c : child->text) {
+                if (!std::isspace(c)) return true;
+            }
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
 
 DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
     DisplayList list;
@@ -34,8 +53,16 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         list.add(clip);
     }
 
+    // An empty cell in the separated border model paints no background,
+    // shadow or borders (CSS 2.1 17.5.1.2, `empty-cells: hide`). The
+    // collapsed model always paints the shared edges.
+    const bool skip_cell_chrome =
+        box->box_type == BoxType::TableCellNode && box->style.empty_cells == EmptyCells::Hide &&
+        box->style.border_collapse != BorderCollapse::Collapse && !table_cell_has_content(*box);
+
     // 0. Box Shadow (rendered underneath background)
-    if (box->style.box_shadow.has_shadow && !box->style.box_shadow.color.is_transparent()) {
+    if (!skip_cell_chrome && box->style.box_shadow.has_shadow &&
+        !box->style.box_shadow.color.is_transparent()) {
         DrawShadowCommand shadow;
         shadow.rect = box->dimensions.border_box();
         shadow.x_offset = box->style.box_shadow.x_offset;
@@ -47,7 +74,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     }
 
     // 1. Background
-    if (!box->style.background_color.is_transparent()) {
+    if (!skip_cell_chrome && !box->style.background_color.is_transparent()) {
         DrawRectCommand cmd;
         cmd.rect = box->dimensions.padding_box();
         cmd.color = box->style.background_color;
@@ -57,12 +84,13 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
 
     // 2. Borders
     const auto& bw = box->dimensions.border;
-    if (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left > 0) {
+    if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left > 0)) {
         DrawBorderCommand cmd;
         cmd.rect = box->dimensions.border_box();
         cmd.width = bw;
         cmd.color = box->style.border_color;
         cmd.border_radius = box->style.border_radius;
+        if (box->border_color_override) cmd.edge_colors = *box->border_color_override;
         list.add(cmd);
     }
 

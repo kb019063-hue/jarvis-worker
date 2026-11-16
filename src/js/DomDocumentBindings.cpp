@@ -196,7 +196,7 @@ void setup_document(Iface& I) {
         return str(as_document(self).quirks_mode() == QuirksMode::Quirks ? "BackCompat" : "CSS1Compat");
     });
     for (const char* name : {"characterSet", "charset", "inputEncoding"}) {
-        I.node_getter(doc, name, [](Realm&, Node&) { return str("UTF-8"); });
+        I.node_getter(doc, name, [](Realm&, Node& self) { return str(as_document(self).character_set()); });
     }
     I.node_getter(doc, "contentType", [](Realm&, Node& self) { return str(as_document(self).content_type()); });
     I.node_getter(doc, "doctype", [](Realm& r, Node& self) { return wrap(r, as_document(self).doctype_node()); });

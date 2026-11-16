@@ -84,7 +84,7 @@ REPORTER = r"""
 """
 
 SCRIPT_SRC = re.compile(
-    r"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*?)(?:>\s*</script\s*>|/\s*>)""",
+    rb"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*?)(?:>\s*</script\s*>|/\s*>)""",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -143,49 +143,64 @@ def is_test_file(path: Path, suite: Path) -> bool:
     return path.suffix in (".html", ".xhtml")
 
 
-def inline_scripts(page: Path, suite: Path) -> tuple[str, bool]:
+def inline_scripts(page: Path, suite: Path) -> tuple[bytes, bool]:
     """The page with each external script put inline; and whether it uses the harness."""
-    text = page.read_text(encoding="utf-8")
+    raw = page.read_bytes()
     uses_harness = False
     is_xml = page.suffix == ".xhtml"
 
-    def wrap_script_body(attrs_before: str, attrs_after: str, body: str) -> str:
+    def wrap_script_body(attrs_before: bytes, attrs_after: bytes, body: bytes) -> bytes:
         if is_xml:
-            return "<script" + attrs_before + attrs_after + "><![CDATA[" + body.replace("]]>", "]]]]><![CDATA[>") + "]]></script>"
-        body = re.sub(r"</(script)", r"<\\/\1", body, flags=re.IGNORECASE)
-        return "<script" + attrs_before + attrs_after + ">" + body + "</script>"
+            return b"<script" + attrs_before + attrs_after + b"><![CDATA[" + body.replace(b"]]>", b"]]]]><![CDATA[>") + b"]]></script>"
+        body = re.sub(rb"</(script)", rb"<\\/\1", body, flags=re.IGNORECASE)
+        return b"<script" + attrs_before + attrs_after + b">" + body + b"</script>"
 
-    def replace(match: re.Match) -> str:
+    def replace(match: re.Match) -> bytes:
         nonlocal uses_harness
-        source = match.group(2).strip("\"'")
+        source = match.group(2).decode("ascii", "ignore").strip("\"'")
         if source.endswith("/resources/testharnessreport.js"):
-            return wrap_script_body("", "", REPORTER)
+            return wrap_script_body(b"", b"", REPORTER.encode("utf-8"))
         if source.endswith("/resources/testharness.js"):
             uses_harness = True
         target = suite / source.lstrip("/") if source.startswith("/") else page.parent / source
         if not target.is_file():
             # Left as it is: the engine will not load it, and the test says so.
             return match.group(0)
-        body = target.read_text(encoding="utf-8")
+        body = target.read_bytes()
         return wrap_script_body(match.group(1), match.group(3), body)
 
-    return SCRIPT_SRC.sub(replace, text), uses_harness
+    return SCRIPT_SRC.sub(replace, raw), uses_harness
+
+
+def sidecar_content_type(page: Path) -> str | None:
+    sidecar = page.parent / (page.name + ".headers")
+    if not sidecar.is_file():
+        return None
+    for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            if k.strip().lower() == "content-type":
+                return v.strip()
+    return None
 
 
 def run_file(binary: str, suite: Path, page: Path, workdir: Path, timeout: float) -> FileResult:
     relative = page.relative_to(suite).as_posix()
     result = FileResult(relative)
-    text, uses_harness = inline_scripts(page, suite)
+    raw, uses_harness = inline_scripts(page, suite)
     staged = workdir / (relative.replace("/", "__"))
-    staged.write_text(text, encoding="utf-8")
+    staged.write_bytes(raw)
     empty = workdir / "empty.js"
     command = [
         binary,
         "--run-script", str(empty),
         f"--map-origin={ORIGIN}={suite}",
         f"--url={ORIGIN}/{relative}",
-        str(staged),
     ]
+    ct = sidecar_content_type(page)
+    if ct:
+        command.append(f"--content-type={ct}")
+    command.append(str(staged))
     env = dict(os.environ, TZ="UTC")
     try:
         completed = subprocess.run(command, capture_output=True, timeout=timeout, env=env)

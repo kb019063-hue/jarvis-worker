@@ -238,16 +238,20 @@ void JsInterpreter::load_page(std::string_view html, bool scripting,
         ResourceResponse resp = ResourceLoader::load_for_page(raw_src, ctx);
         if (!resp.success) return false;
 
-        std::string charset_label = script->get_attribute("charset");
+        std::string chosen_charset;
         MimeType mime;
         if (MimeType::parse(resp.content_type, mime)) {
             if (const std::string* cs = mime.parameter("charset")) {
-                charset_label = *cs;
+                chosen_charset = encoding_name_for_label(*cs);
             }
         }
-        source_out = charset_label.empty()
-                         ? resp.body
-                         : decode_text(resp.body, encoding_name_for_label(charset_label));
+        if (chosen_charset.empty()) {
+            chosen_charset = encoding_name_for_label(script->get_attribute("charset"));
+        }
+        if (chosen_charset.empty()) {
+            chosen_charset = document->character_set();
+        }
+        source_out = decode_text(resp.body, chosen_charset);
         return true;
     };
 
@@ -363,7 +367,8 @@ void JsInterpreter::navigate_document(std::shared_ptr<Document> doc) {
 
 bool JsInterpreter::load_xml_page(std::string_view xml_bytes, const std::string& content_type,
                                   bool scripting,
-                                  const std::function<void(const std::string& source)>& before) {
+                                  const std::function<void(const std::string& source)>& before,
+                                  std::string_view transport_charset) {
     if (!m_document) return false;
     JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
     JsIntrinsics::set_current(m_realm.get());
@@ -380,11 +385,26 @@ bool JsInterpreter::load_xml_page(std::string_view xml_bytes, const std::string&
 
     std::string xml_text, xml_enc;
     xml::XmlError xml_err;
-    if (!xml::decode_xml(xml_bytes, xml_text, xml_enc, xml_err) ||
+    if (xml::xml_encoding(xml_bytes, xml_enc, xml_err, transport_charset) && !xml_enc.empty()) {
+        document->set_character_set(xml_enc);
+    } else {
+        std::string tc = encoding_name_for_label(transport_charset);
+        document->set_character_set(tc.empty() ? std::string("UTF-8") : tc);
+    }
+    if (!xml::decode_xml(xml_bytes, xml_text, xml_enc, xml_err, transport_charset) ||
         !xml::parse_xml_document(document, xml_text, xml_err)) {
+        document->take_children();
+        document->set_doctype(Doctype{});
+        auto root = xml::make_element(document, "http://www.mozilla.org/newlayout/xml/parsererror.xml",
+                                      std::string(), "parsererror");
+        auto message = std::make_shared<Text>(xml_err.describe());
+        message->set_owner_document(document);
+        root->append_child(message);
+        document->append_child(root);
         notify_document_interactive();
         return false;
     }
+    document->set_character_set(xml_enc);
 
     if (!scripting) {
         dom::set_script_runner(dom::realm_of(*m_realm), nullptr);
@@ -430,14 +450,18 @@ bool JsInterpreter::load_xml_page(std::string_view xml_bytes, const std::string&
         ResourceResponse resp = ResourceLoader::load_for_page(raw_src, ctx);
         if (!resp.success) return false;
 
-        std::string charset_label = script->get_attribute("charset");
+        std::string chosen_charset;
         MimeType mime;
         if (MimeType::parse(resp.content_type, mime)) {
-            if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+            if (const std::string* cs = mime.parameter("charset")) chosen_charset = encoding_name_for_label(*cs);
         }
-        source_out = charset_label.empty()
-                         ? resp.body
-                         : decode_text(resp.body, encoding_name_for_label(charset_label));
+        if (chosen_charset.empty()) {
+            chosen_charset = encoding_name_for_label(script->get_attribute("charset"));
+        }
+        if (chosen_charset.empty()) {
+            chosen_charset = document->character_set();
+        }
+        source_out = decode_text(resp.body, chosen_charset);
         return true;
     };
 

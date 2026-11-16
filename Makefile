@@ -84,6 +84,8 @@ SRCS = src/common/Color.cpp \
        src/net/Deflate.cpp \
        src/net/UrlParser.cpp \
        src/net/DataUrl.cpp \
+       src/net/TextEncoding.cpp \
+       src/net/TextEncodingTables.cpp \
        src/net/Idna.cpp \
        src/net/IdnaTables.cpp \
        src/net/Fetch.cpp \
@@ -105,11 +107,11 @@ XML_CONFORMANCE = python3 tools/conformance/run_xml_conformance.py
 WPT = python3 tools/conformance/run_wpt.py
 # Documents of the W3C XML suite that must be read as the suite says: every
 # one that applies to a parser of this kind (tests/xml/README.md says which).
-XML_FLOOR ?= 1702
+XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 5421
+WPT_FLOOR ?= 7968
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000

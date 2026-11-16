@@ -720,3 +720,81 @@ document.getElementById('user').dispatchEvent(new KeyboardEvent('keypress', {key
 console.log(n);
 #expect
 0
+
+#name date and time input sanitization and calendar rules
+#code
+function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+console.log([
+  inp('date', '2024-02-29').value,
+  JSON.stringify(inp('date', '2025-02-29').value),
+  JSON.stringify(inp('date', '2026-02-30').value),
+  JSON.stringify(inp('date', '0000-01-01').value),
+  JSON.stringify(inp('time', '25:00').value),
+  inp('time', '12:30:45.5').value,
+  JSON.stringify(inp('month', '2026-13').value),
+  inp('month', '2026-03').value,
+  JSON.stringify(inp('week', '2025-W53').value),
+  inp('week', '2020-W53').value,
+  inp('datetime-local', '2026-03-04 05:06').value
+].join(' | '));
+#expect
+2024-02-29 | "" | "" | "" | "" | 12:30:45.5 | "" | 2026-03 | "" | 2020-W53 | 2026-03-04T05:06
+
+#name date and time valueAsNumber and valueAsDate
+#code
+function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+function iso(d) { return d === null ? null : (isNaN(d.getTime()) ? 'Invalid' : d.toISOString()); }
+var d = inp('date', '2026-03-04'), t = inp('time', '12:30'), m = inp('month', '2026-03'),
+    w = inp('week', '2026-W52'), dt = inp('datetime-local', '2026-03-04T05:06');
+console.log(d.valueAsNumber, t.valueAsNumber, m.valueAsNumber, w.valueAsNumber, dt.valueAsNumber);
+console.log(iso(d.valueAsDate), iso(t.valueAsDate), iso(m.valueAsDate), iso(w.valueAsDate), dt.valueAsDate);
+d.valueAsDate = new Date(Date.UTC(2020, 0, 2));
+t.valueAsNumber = 3661500;
+m.valueAsDate = new Date(Date.UTC(2025, 4, 15));
+w.valueAsDate = new Date(Date.UTC(2026, 2, 4));
+console.log(d.value, t.value, m.value, w.value);
+d.valueAsDate = null; t.valueAsNumber = NaN;
+console.log(JSON.stringify(d.value), JSON.stringify(t.value), isNaN(d.valueAsNumber));
+try { dt.valueAsDate = new Date(); } catch (e) { console.log(e.name); }
+try { inp('date').valueAsDate = '2026-03-04'; } catch (e) { console.log(e.name); }
+try { inp('text').valueAsDate = new Date(); } catch (e) { console.log(e.name); }
+try { inp('date').valueAsNumber = Infinity; } catch (e) { console.log(e.name); }
+#expect
+1772582400000 45000000 674 1797811200000 1772600760000
+2026-03-04T00:00:00.000Z 1970-01-01T12:30:00.000Z 2026-03-01T00:00:00.000Z 2026-12-21T00:00:00.000Z null
+2020-01-02 01:01:01.5 2025-05 2026-W10
+"" "" true
+InvalidStateError
+TypeError
+InvalidStateError
+TypeError
+
+#name date and time stepUp, stepDown and min/max/step validity
+#code
+function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+var d = inp('date', '2026-03-04'); d.stepUp(2);
+var t = inp('time', '12:30'); t.stepUp();
+var t2 = inp('time', '23:59'); t2.stepUp();
+var m = inp('month', '2026-12'); m.stepUp();
+var w = inp('week', '2025-W52'); w.stepUp();
+var dt = inp('datetime-local', '2026-03-04T23:59'); dt.stepUp();
+console.log(d.value, t.value, t2.value, m.value, w.value, dt.value);
+d.min = '2026-03-10';
+console.log(d.validity.rangeUnderflow, d.validity.valid);
+var v = inp('date', '2026-03-04'); v.min = '2026-03-02'; v.max = '2026-03-10'; v.step = '3';
+console.log(v.validity.stepMismatch, v.validity.valid);
+v.stepUp();
+console.log(v.value, v.validity.stepMismatch, v.validity.valid);
+v.value = '2026-03-12';
+console.log(v.validity.rangeOverflow);
+v.step = 'any';
+console.log(v.validity.stepMismatch);
+try { v.stepUp(); } catch (e) { console.log(e.name); }
+#expect
+2026-03-06 12:31 00:00 2027-01 2026-W01 2026-03-05T00:00
+true false
+true false
+2026-03-05 false true
+true
+false
+InvalidStateError

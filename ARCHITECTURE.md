@@ -349,11 +349,13 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
+| **Phase 37** | **Iterative RegExp VM, modern CSS cascade/units, CSSOM `el.style`, and HTML5 date/time inputs:** replaces recursive CPS regex matching and recursive AST destruction with an iterative bytecode VM and heap backtracking stack; adds CSS child/sibling combinators (`>`, `+`, `~`), `:is()`/`:where()`/selector-list `:not()`/`:host`, `@layer`, `@supports`, MQ L4 range/boolean evaluation, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`, iterative CSS block/selector parsing + `min_ancestors` / `AllDescendant` DP caching; expands `el.style` shorthands, canonical CSSOM values, and vendor aliases; and implements `date`/`time`/`month`/`week`/`datetime-local` input sanitization, `valueAsDate`/`valueAsNumber`, `stepUp()`/`stepDown()`, and constraint validation. | ✅ Completed (174/174 unit suites; JS corpus 926/940, `regexp.dat` 39/39; DOM corpus 644/644) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
-| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 167/167 unit suites) |
+| **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 175/175 unit suites) |
 
 ---
 
@@ -3603,6 +3605,71 @@ changed.
 
 ---
 
+## Phase 37 Architecture: Iterative RegExp VM, Modern CSS Cascade & Units, CSSOM `el.style`, and HTML5 Date/Time Inputs
+
+Phase 37 closes four cross-subsystem correctness, stack-safety, and real-web
+DOM gaps documented in `AUDIT.md` (finding 42):
+
+### 1. Iterative Bytecode RegExp VM (`src/js/BuiltinsRegExp.cpp`)
+- **Bytecode ISA & Compiler:** Compiles parsed `RegexNode` ASTs into flat
+  `InstOp` bytecode sequences (literals, character classes, anchors, `\b`/`\B`,
+  fixed/greedy/non-greedy quantifiers, capture groups, named backreferences,
+  lookahead, and right-to-left lookbehind sub-programs).
+- **Iterative Teardown & Heap Backtracking:** `~RegexNode()` frees AST graphs
+  via an explicit heap worklist (`std::vector`) rather than stack recursion;
+  `exec_vm()` runs iteratively against a heap `backtrack_stack` guarded by
+  `kMaxMatchSteps = 30,000,000`, while `kMaxCompilerDepth = 1,000` turns
+  deeply nested groups into a clean `SyntaxError` without touching the stack.
+
+### 2. Modern CSS Cascade, Selectors L4, Units & Deep-Input Pruning (`StyleSheet.hpp`, `CssParser.*`, `StyleResolver.*`)
+- **Parser & AST:** Replaces recursive block parsing with an explicit heap
+  frame stack inside `parse_stylesheet_blocks` (`append_qualified_rule_text`
+  with capacity reservation), supports `@layer` (block and statement ordering),
+  `@supports` feature queries (`and`/`or`/`not`), Media Queries Level 4 ranges
+  (`400px <= width <= 1000px`) and `not`/`and`/`or`, child/sibling combinators
+  (`>`, `+`, `~`), selector lists inside `:is()`, `:where()`, and `:not()`,
+  and `:host`.
+- **Cascade, Units & Values:** Adds cascade-layer priority (unlayered normal >
+  layered normal; earlier layered `!important` > later layered `!important`),
+  `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`,
+  and iterative `:root`/ancestor inheritance for `rem`/`em` while preserving
+  `line_height_number` and `effective_line_height()`.
+- **Bounded-Stack & Non-Quadratic Selector Matching:** `match_selector_impl`
+  runs on an explicit heap frame stack; `Selector::finalize_metadata()` caches
+  `min_ancestors`, `cached_specificity`, and `any_dynamic_specificity`; and
+  `StyleResolver` clears per-tree `m_depth_cache` + `m_desc_prefix_cache`
+  (DP prefix memoization for `AllDescendant` chains longer than 32 parts),
+  reducing depth-200,000 descendant matching from timeout to `0.0–0.1 s`.
+
+### 3. CSSOM `el.style` Shorthand Expansion & Normalization (`src/js/DomStyleBindings.cpp`)
+- Expands/recomposes CSS shorthands (`flex`, `overflow`, `inset`, `gap`,
+  `borderRadius`, `background`, `transition`, `textDecoration`, `listStyle`,
+  `outline`, `margin`, `padding`, `border`, `font`) for inline `el.style`,
+  canonicalizes `cssText`/`length`/`item()`/`removeProperty()`/`!important`/
+  custom `--*` properties, and maps `-webkit-`/`-moz-`/`-ms-`/`cssFloat` aliases.
+
+### 4. HTML5 Date/Time `<input>` Semantics (`FormState.*`, `src/js/DomFormBindings.cpp`)
+- Implements WHATWG sanitization, `valueAsNumber`, `valueAsDate`,
+  `stepUp()`/`stepDown()`, and `rangeUnderflow`/`rangeOverflow`/`stepMismatch`
+  validity for `date`, `time`, `month`, `week`, and `datetime-local` (plus
+  `TypeError`/`InvalidStateError` checks).
+
+### 5. Verification (Merged Tree)
+- **Release:** `make test` `174/174`; `make js-conformance` `926/940` (`regexp.dat`
+  `39/39`, probe `90/90`, `--reference "node -e"` `940/940`);
+  `make dom-conformance` `644/644` (probe `68/68`, `--reference` `644/644`);
+  `dates-and-svg.js` matches `jsdom` on `6/6` date checks; `inline-style.js`
+  matches on `26/27` lines; `make conformance` `1781/1792`, `make diff-trees`
+  `6000/6000`, `make url-conformance` `1188/1188`, `make xml-conformance`
+  `1702/1702`, `make diff-xml` `0 DIFFER` (`4000`) & `3000/3000`, `make wpt`
+  `5421/5463`, `make deep` `1332/1332` (depth `200,000`, slowest `26.9 s`).
+- **ASan+UBSan (`detect_leaks=0`):** `174/174` suites, JS `925/940`, DOM
+  `644/644`, URL `1188/1188`, XML `1702/1702`, WPT `5421/5463`, `fuzz` `0`
+  findings (`400`+`400`+`1927`/`600`+`1800`), `make asan-deep` `882/882` (slowest
+  `3.6 s`), and `make tsan` clean.
+
+---
+
 ## Phase 38 Architecture: Real-Web JPEG/GIF Decoding, SVG & Canvas 2D
 
 Phase 38 replaces Litebird's toy vector/canvas rasterizers and fills the missing
@@ -4007,7 +4074,7 @@ halves in its alphabet and concatenates, slices and appends with reads in
 between; it passes unchanged.
 
 The JavaScript corpus scores 907/921 with 0 timeouts, `long-strings.dat`
-34/34. The floor in CI is now that score, 907, as the comment above it said to
+34/34. The floor in CI rose to that score, 907, at that phase (before Phase 45), as the comment above it said to
 do when this row was fixed. Out-of-corpus, 40 surrogate-heavy programs run in
 Node.js and in both binaries print the same: 0 mismatches; and two pages' worth
 of DOM text built half a pair at a time through
@@ -4121,6 +4188,146 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
 
 ---
 
+## Phase 44 Architecture: Unicode 17.0 Identifiers, `\u` Identifier Escapes & Escaped Keyword Semantics
+
+### 1. Compact Unicode 17.0 `ID_Start` / `ID_Continue` Tables (`include/litebird/js/JsIdentifierTables.hpp`)
+- Generated reproducibly from Node.js v22.22.3's ICU Unicode 17.0 data (`/\p{ID_Start}/u`, `/\p{ID_Continue}/u`, plus `U+200C` ZWNJ and `U+200D` ZWJ per ECMA-262 §12.7.1).
+- Two sorted `constexpr CodePointRange` tables: 682 ranges (5.4 KB) for non-ASCII `ID_Start` and 795 ranges (6.3 KB) for non-ASCII `ID_Continue` + ZWNJ/ZWJ.
+- `is_js_id_start(uint32_t cp)` and `is_js_id_continue(uint32_t cp)` take a branch-predicted ASCII `< 0x80` fast path (`a-z`, `A-Z`, `_`, `$`, plus `0-9` for continue) and fall back to binary search (~10 comparisons) for non-ASCII code points. Surrogates (`0xD800..0xDFFF`), out-of-range values (`> 0x10FFFF`), and non-ID symbols such as `U+2E2F` (VERTICAL TILDE) and `#` (`U+0023`) are rejected.
+
+### 2. Lexer Decoding, Private Names, and Token Classification (`include/litebird/js/JsLexer.hpp`, `src/js/JsLexer.cpp`)
+- **Pure-ASCII fast path**: unescaped ASCII identifiers scan directly via a single `substr` with zero extra allocations.
+- **Unicode & escape slow path**: triggered on the first `\` or byte `>= 0x80`. Decodes well-formed UTF-8 code points (`decode_utf8`, rejecting overlongs and raw surrogates) and `\uXXXX` / `\u{HexDigits}` escapes (`scan_identifier_unicode_escape`, permitting arbitrary leading zeros per ECMA-262 while rejecting `> 0x10FFFF`, empty braces, surrogate pairs in identifiers, and `\xXX`). Validates the first code point with `is_js_id_start` and subsequent code points with `is_js_id_continue`.
+- **Private names (`#IdentifierName`)**: `scan_token()` uses `starts_identifier_at(m_cursor + 1)` so `#\u0061`, `#\u{1D49C}`, `#\u0069f`, and `#k\u200C` decode cleanly into `JsTokenType::PrivateName`, while `#\u0030`, `#\u200C`, `#\u2E2F`, and `\u0023foo` fail with `JsSyntaxError`.
+- **Escaped keyword classification (`JsTokenType::EscapedKeyword`, `JsToken::has_escape`)**:
+  - Unconditionally reserved words written with a `\u` escape (`v\u0061r`, `\u0069f`, `tr\u0075e`, `n\u0065w`, etc.) are classified as `JsTokenType::EscapedKeyword` with `is_keyword = true` and `has_escape = true`. They are never accepted as keywords, bindings, references, labels, or shorthand properties, while remaining valid `IdentifierName` tokens (property names, member names, methods, `#` private names). `regex_allowed()` treats `EscapedKeyword` as expression-ending so `obj.\u0069f / 2` lexes as division.
+  - Contextually reserved words with escapes (`l\u0065t`, `yi\u0065ld`, `aw\u0061it`) are classified as `JsTokenType::Identifier` with `has_escape = true` so they never act as keywords while remaining valid identifiers outside the contexts that reserve them.
+- **Unicode whitespace, line terminators, and numeric/regex boundaries**: `skip_whitespace_and_comments()` handles all 19 non-ASCII ECMA-262 `WhiteSpace` and `LineTerminator` code points (`U+00A0`, `U+1680`, `U+2000..U+200A`, `U+2028`, `U+2029`, `U+202F`, `U+205F`, `U+3000`, `U+FEFF`); `#!` hashbangs, `//` and `/* */` comments, string line continuations, and `/.../` regex literals all recognize `U+2028`/`U+2029`; `scan_number()` rejects trailing `\` and Unicode `ID_Start` (`1\u0061`); `scan_regex()` scans flags with `IdentifierPartChar` (disallowing escapes); and `scan_escape()` permits arbitrary leading zeros in string/template `\u{...}` escapes.
+
+### 3. Parser Enforcement (`include/litebird/js/JsParser.hpp`, `src/js/JsParser.cpp`)
+- `check_identifier(const char*)` requires `!peek().has_escape`, preventing escaped contextual keywords (`static`, `async`, `get`, `set`, `of`, `target`) from acting as modifiers or syntax while preserving their validity as ordinary property/method names (`class C { st\u0061tic() {} }`, `({ g\u0065t() {} })`).
+- `validate_identifier()` enforces strict-mode future reserved words (`implements`, `interface`, `let`, `package`, `private`, `protected`, `public`, `static`, `yield`), `yield` in generators and arrow parameters, and `await` in async functions, class `static {}` blocks, and arrow parameters — while `FunctionExpression` names bind their own `[Yield, Await]` parameters (`(function await(await) { return await; })` in `static {}`, `(function yield() {})` in `*g()`).
+- Class strict mode now covers the entire `ClassDeclaration`/`ClassExpression` including the class name and `extends` clause; `let`/`const` lexical bindings forbid `let` even in sloppy mode; `case JsTokenType::Await:` in `parse_unary()` applies only when `m_functions.back().is_async`; and `FunctionContext::forbid_arguments` enforces `ContainsArguments` early errors in class `static {}` blocks and field initializers (inherited by arrow functions, cleared by non-arrow functions).
+
+---
+
+## Phase 45 Architecture: Resolve a Promise Iterator One Item at a Time
+
+### 1. The hole
+
+The shared `combine` path for `Promise.all`, `allSettled` and `any`, and the
+separate `race` path, called `js_iterate` to the end while subscribing to the
+engine's `Promise::to_promise(item)`. That conversion does not invoke the
+static `Promise.resolve`, so a throwing override could not stop an infinite
+iterator. The same issue hid errors in a returned promise's `then` getter.
+`tests/js-conformance/async.dat` includes an iterator whose second `next()`
+throws and whose first value makes `resolve` throw: the baseline answered
+"advanced" rather than "stop", or ran until a timeout.
+
+### 2. Where the iterator boundary is now
+
+`combinator_resolve` reads the receiver's `resolve` once before getting the
+iterator. In every visitor call, the returned method resolves **that** item;
+`subscribe_combinator_item` gets `then` while the visitor is still on the
+stack. A native promise with the built-in `then` uses `Promise::subscribe` to
+keep captured values rooted; for a custom `then`, it calls the method with
+two once-only, non-constructible native callbacks. A root-only handler on the
+pending combinator keeps JS values captured by those callbacks alive even if
+a custom thenable retains them and script calls `gc()`. The iterator helper
+already invokes `return()` when its visitor throws; the surrounding
+`js_capture_throw` turns the exception into the result promise's rejection.
+The `remaining` sentinel starts at one so a synchronous custom `then` does
+not finish `all` or `allSettled` before iteration ends. No other iterator
+clients and no other files' Promise calls changed.
+
+### 3. Reproducible checks
+
+- `make verify-promise-iterators`: `34/34`, no crashes/timeouts; the baseline
+  passes `30/34` and does not stop the unbounded cases. `python3
+  tools/conformance/run_js_conformance.py --reference 'node -e' --filter
+  async --quiet` prints `34/34`. The full JS scoreboard is `925/939`
+  after Phase 44 (`911/925` before it).
+- `make test`: `163/163` on the original base, `167/167` after the frames
+  and table-layout PRs, and `170/170` after Phase 44's Unicode identifiers.
+  The new suite checks the `return()` order for all
+  four methods, a single `resolve` getter before `Symbol.iterator`, and a
+  throwing `then` getter on a still-live iterator.
+- `python3 tools/conformance/run_test262.py --binary
+  before=build/litebird-promise-before --binary after=build/litebird
+  --timeout 3 --jobs 2 built-ins/Promise/all built-ins/Promise/allSettled
+  built-ins/Promise/any built-ins/Promise/race`: 390 tests, 210 -> 293 pass;
+  84 gained and **one lost** (section 4). First run `python3
+  verify/build_promise_baseline.py` to relink this tree against the old
+  `src/js/Promise.cpp` from `118d946` (it prints
+  `baseline binary: build/litebird-promise-before`).
+- `python3 tools/conformance/compare_with_jsdom.py --html '<div
+  id="log"></div>' verify/promise-iterator-page.js`: `4 lines, 4 the same` on the
+  fixed binary; `0 the same` on the baseline. The checked-in script prints
+  a DOM update for each of the four methods. Four lines are compared, not a
+  single success marker.
+
+The complete first release run, before merging newer main: `make test conformance js-conformance
+verify-promise-iterators dom-conformance url-conformance xml-conformance wpt
+diff-trees diff-xml diff-strings deep` — 163 suites; html5lib 1781/1792;
+JS 911/925, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
+4658/5192 (0 unlisted); diff-trees 6000 pages with 0 differences from
+corrected parse5, diff-xml 4000 documents with 0 DIFFER, diff-strings at
+its 95-difference ceiling, deep 1332 runs/465 pages at depth 200000 and
+8 MB stack with 0 failed (slowest 20.7 s). `make asan` — 163 suites,
+JS 910/925 (one fewer is the old deep-recursion limit), DOM 640/640,
+URL 1188/1188, XML 1702/1702, WPT 4658/5192; 1000 differential XML
+documents 0 DIFFER and 1000 round trips; fuzz 400/parser + 400/pipeline +
+600/XML mutations 0 findings; 1800 media fuzz inputs clean; deep 882 runs/
+315 pages at depth 10000 on a 2 MB stack, 0 failed (slowest 3.1 s).
+The chain then ran `make fuzz` and `make tsan` in that order, both passing.
+
+After merging `main` at `4b803d7` (frames and table layout), the release
+chain passed again: `make test` **167/167**; JS **911/925**; WPT **5421/5463**
+(87 files, 42 listed, 0 unlisted); html5lib **1781/1792**, DOM **640/640**,
+URL **1188/1188**, XML **1702/1702**, diff-trees 6000 pages 0 differing,
+diff-xml 4000 docs 0 differing, diff-strings at its 95 ceiling, deep
+1332 runs/465 pages at depth 200000 with 0 failures (slowest 20.2 s).
+The sanitizer/fuzz/thread stages passed on this merged tree too: `make asan`
+167/167 suites, JS 910/925, DOM 640/640, URL 1188/1188, XML 1702/1702,
+WPT 5421/5463 (0 unlisted), 1000 XML differential docs 0 DIFFER and
+1000 round trips, fuzz 400/parser + 400/pipeline + 600/XML mutations 0
+findings, 1800 media fuzz inputs clean, deep 882 runs/315 pages at depth
+10000 on a 2 MB stack 0 failed (slowest 2.4 s). `make fuzz` again printed
+0 findings; `make tsan` passed the model/thread stress under TSan and ASan.
+Both complete logs are in ignored `build/promise-chain.log` and
+`build/promise-merged-chain.log` for this working session.
+
+Finally, after merging `main` at `020e0d5` (Phase 44, Unicode identifiers),
+the **third full chain passed on the combined tree** (`build/promise-third-chain.log`):
+`make test` 170/170; JS 925/939, DOM 640/640, URL 1188/1188, XML 1702/1702,
+html5lib 1781/1792, WPT 5421/5463 (42 listed, 0 unlisted); diff-trees 6000
+pages 0 differing, diff-xml 4000 docs 0 differing, diff-strings at ceiling,
+deep 1332 runs/465 pages 0 failed (slowest 16.6 s). `make asan` 170/170,
+JS 924/939, DOM/URL/XML/WPT unchanged, 1000 XML differential docs 0 DIFFER
+and 1000 round trips, fuzz 400/parser + 400/pipeline + 600/XML mutations 0
+findings, media fuzz 1800 clean, ASan deep 882 runs/315 pages 0 failed
+(slowest 2.7 s). `make fuzz` and `make tsan` also passed. The CI release JS
+floor rose to 925; `JS_ASAN_FLOOR` rose from 919 to 923 only after running
+`ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_js_conformance.py
+--binary build-asan/litebird --quiet --timeout 60 --min-pass 923`, which printed
+`924/939`, 0 crashes/timeouts.
+
+### 4. What remains
+
+`js_iterate` has a fast path for an array that walks its backing elements
+without asking for its own `Symbol.iterator`. Thus an array with a custom
+iterator still yields the wrong values (`[1]` here versus `[9]` in Node),
+and an override with `return()` is not closed; that is a new AGENTS row for
+`JsOps.cpp` (already claimed by PR #50). Promise combinators called through a
+subclass or custom constructor still return a base Promise, the existing
+"A built-in does not make the subclass" row. Now that we correctly invoke
+`C.resolve`, test262's `Promise.any/species-get-error.js` loses a *false*
+pass: its custom constructor ignores rejection, but our base Promise reports
+an unhandled rejection. We do not suppress the rejection or special-case a
+test; the subclass construction is separate work.
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -4136,14 +4343,16 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
    boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
    handles everyday layouts but not full CSS2.2/CSS3 edge cases.
-2. **JavaScript is interpreted, and one regular-expression limit remains.**
+2. **JavaScript is interpreted, and catastrophic-backtracking limits remain.**
    Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
    on loops and calls. Long strings are no longer quadratic (Phase 24), and
    neither are deleting many keys from one object or emptying a long array
-   with `shift()` (Phase 30). In regular expressions, a group
-   repeated more than about 12,000 times (`(?:a|b)*` over a long string) ends
-   in a `RangeError` where V8 answers, because the matcher recurses; a single
-   character or class under `*` has no such limit (AUDIT.md, finding 26).
+   with `shift()` (Phase 30). In regular expressions, Phase 37 (finding 42)
+   replaced the recursive CPS matcher with an iterative bytecode VM on an
+   explicit heap backtracking stack, eliminating native stack exhaustion on
+   repeated groups (`(?:a|b)+` on 120,000 characters succeeds cleanly); an
+   intentional `kMaxMatchSteps = 30,000,000` step guard still bounds
+   catastrophic backtracking with `RangeError` (AUDIT.md, finding 26 & 42).
 3. **Single process, no sandbox.** Chrome's original headline feature was
    process-per-tab isolation. Untrusted input is parsed in-process. Page-initiated
    `fetch()`, `XMLHttpRequest`, `Worker`, stylesheet, script, and `<img>` loads
@@ -4159,8 +4368,9 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    neither is what a pending timer holds (Phase 34, section 9).
 5. **Percentage lengths are resolved in layout, not the cascade** (the cascade
    has no containing block to resolve against) -- that is now correct for box
-   dimensions, margins and padding, but percentage `font-size`, `line-height`
-   and `border-radius` are still not resolved anywhere.
+   dimensions, margins, padding, percentage `font-size`, percentage/unitless
+   `line-height` (Phase 36), and scalar percentage `border-radius` (Phase 37);
+   two-axis elliptical `border-radius` (`50% / 25%`) remains deferred.
 6. **11 corpus cases still fail, all of them about `<select>`.**
    `webkit02.dat` 43/49 (six: `<selectedcontent>` cloning and the other
    rules of the 2025 customizable-`<select>` work), `tests1.dat` 110/112,
@@ -4186,22 +4396,24 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 5,421 of
+   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 5,421 of
    the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
    can only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
-   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 42
-   added nested browsing contexts (`<iframe>` `contentDocument`/`contentWindow`/
-   `srcdoc`/`sandbox`, cross-origin `WindowProxy` checks, `postMessage`, subdocument
-   layout/rasterization, and `.xhtml` script execution). Still missing:
-   `document.write`, style sheet objects (`sheet.cssRules`), CORS preflight
-   `OPTIONS`, four text encodings only, date and time inputs without their
-   values, `el.style` shorthands kept whole. Absent: `TextEncoder`, `crypto`,
-   `indexedDB`, `MessageChannel`, XPath, Web Animations, `ElementInternals`, and
-   what needs typed arrays (`ArrayBuffer`). The full lists are in Phase 27,
-   section 12, Phase 28, section 10, Phase 36, section 9, and Phase 42.
+   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 37
+   added `el.style` shorthand expansion/aliases and HTML5 date/time `<input>`
+   semantics; Phase 42 added nested browsing contexts (`<iframe>`
+   `contentDocument`/`contentWindow`/`srcdoc`/`sandbox`, cross-origin
+   `WindowProxy` checks, `postMessage`, subdocument layout/rasterization, and
+   `.xhtml` script execution). Still missing: `getComputedStyle(el).width`
+   layout metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG
+   DOM (`className.baseVal`, `viewBox`, `getBBox()`), CORS preflight `OPTIONS`,
+   and four text encodings only. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
+   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
+   Phase 28, section 10, Phase 36, section 9, and Phase 42.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10. Around classes: `new.target` is the
@@ -4209,8 +4421,8 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    no `Symbol.species` and `instanceof` does not ask `Symbol.hasInstance`,
    and nothing tells a built-in that is a constructor from one that is not
    (Phase 34, section 9). Of 15,686 test262 tests on functions, classes and
-   objects, 10,835 pass (`make test262`); of the 47,967 in all of its
-   `built-ins`, `language` and `annexB`, 26,012.
+   objects, 12,275 pass (`make test262`, up from 10,835 before Phase 44); of
+   the 47,967 in all of its `built-ins`, `language` and `annexB`, ~27,741.
 11. **A page can still be slow by being long.** Depth no longer ends the
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which

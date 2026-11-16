@@ -52,7 +52,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
-| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), array-hole semantics, and the recursive matcher of finding 26 (no catastrophic backtracking). | M |
+| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), and array-hole semantics. (The recursive matcher of finding 26 was replaced by an iterative heap-stack bytecode VM in Phase 37.) | M |
 | 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
 | 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, property escapes, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
@@ -63,8 +63,8 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | :--- | :--- | :--- |
 | 12 | **Two known-wrong layout bugs** — block-in-inline is split correctly (Phase 36); sized floats are placed by a band-edge sweep, landing on the exact bottom edge of the float in the way (10,000 sized floats in seconds; nothing escapes the box). **Done.** | M |
 | 13 | **Flexbox/Grid gap closure** vs WPT `css/flex` and `css/grid`. | M–L |
-| 14 | **Selectors level 4** — `:is()/:where()/:has()/:focus-visible`, cascade `@layer`, `@supports`, `@container`, CSS nesting, `::part`. | M–L |
-| 15 | **Media & container queries** — evaluation inside the cascade (parsing exists). | S–M |
+| 14 | **Selectors level 4** — `:has()`, `:focus-visible`, `@container`, CSS nesting, `::part`. (`:is()`, `:where()`, `:not()` selector lists, combinators `>`/`+`/`~`, `@layer`, and `@supports` landed in Phase 37.) | M–L |
+| 15 | **Container queries** — `@container` evaluation inside the cascade. (Media Queries Level 4 range syntax and boolean operators landed in Phase 37.) | S–M |
 | 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. | M |
 | 17 | **Table completeness** — `border-collapse` widest-wins (the wider border of a shared edge wins, its colour included; style and positional priorities are not modelled — this engine has a single solid border style — and row borders are not painted), `table-layout: fixed` (the first row decides; later rows cannot resize a column), `caption-side`, `empty-cells` (inherited, separate borders only). **Done.** | S–M |
 | 18 | **Multicol + fragmentation** — columns, `break-inside`. | M–L |

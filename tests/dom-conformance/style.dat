@@ -539,3 +539,27 @@ b1 color: rgb(0, 0, 0); margin-top: 0px; font-size: 30px; text-align: start; vis
 c color: rgb(1, 2, 3); margin-top: 0px; visibility: visible; cursor: pointer; display: block; font-size: 16px
 d --gap: 12px; --name: "Ann"; --missing: 
 d1 --gap: 12px; --name: "Ann"
+
+#name inline style shorthand expansion, cssText canonicalization and webkit aliases
+#code
+var el = document.createElement('div');
+el.style.flex = '2 1 10px';
+el.style.overflow = 'hidden auto';
+el.style.inset = '1px 2px';
+el.style.gap = '4px 8px';
+el.style.borderRadius = '6px';
+el.style.webkitTransform = 'translateX(10px) rotate(45deg)';
+el.style.margin = '0px 5px';
+console.log(el.style.flexGrow, el.style.flexShrink, el.style.flexBasis, el.style.overflowX, el.style.overflowY, el.style.top, el.style.left, el.style.rowGap, el.style.columnGap);
+console.log(el.style.borderTopLeftRadius, el.style.transform, el.style.webkitTransform, el.style.marginTop, el.style.marginRight);
+console.log(el.style.length, el.style.item(0), el.style.cssText);
+el.style.removeProperty('flex');
+console.log(el.style.flexGrow, el.style.flexBasis, el.style.overflow);
+el.style.setProperty('color', 'red', 'important');
+console.log(el.style.color, el.style.getPropertyPriority('color'));
+#expect
+2 1 10px hidden auto 1px 2px 4px 8px
+6px translateX(10px) rotate(45deg) translateX(10px) rotate(45deg) 0px 5px
+20 flex-grow flex: 2 1 10px; overflow: hidden auto; inset: 1px 2px; gap: 4px 8px; border-radius: 6px; transform: translateX(10px) rotate(45deg); margin: 0px 5px;
+  hidden auto
+red important

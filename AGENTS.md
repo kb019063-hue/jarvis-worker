@@ -60,8 +60,13 @@ the same time will both have changed them. So:
   W3C suite the first time (`tests/xml/README.md`), and `make diff-xml`
   needs `pip install lxml`.
 - A unit suite that passes in the normal build can fail in the sanitizer
-  build, and CI's log cannot be read from every sandbox: `make asan` here
-  is the only way to see why.
+  build, and CI's log cannot be read from every sandbox: run `make asan`
+  here first. When CI's sanitizer job fails all the same, its last step
+  says what failed in the job's annotations, which the API itself serves:
+  `gh run view RUN --json jobs` for the job's id, then
+  `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
+  (`tools/ci/annotate_failure.py`; any job that keeps its output with
+  `tee` can end with the same step.)
 - A floor in CI is not lowered to let a pull request pass.
   `tests/js-conformance/everyday-*.dat` and
   `tests/dom-conformance/everyday.dat` are not edited. A DOM case that

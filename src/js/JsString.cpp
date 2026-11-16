@@ -13,10 +13,13 @@ namespace {
 /// Work counters. Per thread, so counting costs an increment and no more.
 thread_local JsString::Stats t_stats;
 
-/// Serialises the (rare) building of UTF-16 forms. Readers never take it.
-std::mutex g_wide_mutex;
+/// Serialises lazy UTF-8 / wide cache construction. Steady-state readers never take it.
+std::mutex g_cache_mutex;
 
 bool is_continuation(unsigned char c) { return (c & 0xC0) == 0x80; }
+
+bool is_high_surrogate(char16_t u) noexcept { return u >= 0xD800 && u <= 0xDBFF; }
+bool is_low_surrogate(char16_t u) noexcept { return u >= 0xDC00 && u <= 0xDFFF; }
 
 /// Length of the well-formed sequence that starts at `p`, or 0 when the bytes
 /// there are not one. Well-formed means shortest form, nothing above U+10FFFF;
@@ -50,32 +53,16 @@ uint32_t decode3(const unsigned char* p) {
     return (static_cast<uint32_t>(p[0] & 0x0F) << 12) | (static_cast<uint32_t>(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
 }
 
-void encode(std::string& out, uint32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
-
 struct Scan {
     size_t units{0};
+    size_t repaired_utf8_bytes{0};
     bool well_formed{true};
+    bool ascii{true};
 };
 
-/// Counts UTF-16 code units and checks the text in one pass. Stops at the
-/// first problem: the caller repairs the text and scans again.
-Scan scan(std::string_view text) {
+/// Counts UTF-16 code units, exact repaired UTF-8 byte count, ASCII purity, and
+/// UTF-8 well-formedness in a single pass.
+Scan scan_utf8(std::string_view text) {
     const auto* p = reinterpret_cast<const unsigned char*>(text.data());
     const unsigned char* const end = p + text.size();
     Scan result;
@@ -87,129 +74,154 @@ Scan scan(std::string_view text) {
             if (word & 0x8080808080808080ull) break;
             p += 8;
             result.units += 8;
+            result.repaired_utf8_bytes += 8;
         }
         if (p >= end) break;
         if (*p < 0x80) {
             ++p;
             ++result.units;
+            ++result.repaired_utf8_bytes;
             continue;
         }
+        result.ascii = false;
         const size_t length = sequence_length(p, end);
         if (length == 0) {
             result.well_formed = false;
-            return result;
+            result.units += 1;
+            result.repaired_utf8_bytes += 3;            // repaired as U+FFFD
+            ++p;
+            continue;
         }
         if (length == 3 && is_high_half(p) && end - p >= 6 && sequence_length(p + 3, end) == 3 && is_low_half(p + 3)) {
-            result.well_formed = false;                 // a pair written as two halves
-            return result;
+            result.well_formed = false;                 // a pair written as two halves becomes one 4-byte character
+            result.units += 2;
+            result.repaired_utf8_bytes += 4;
+            p += 6;
+            continue;
         }
         result.units += length == 4 ? 2 : 1;
+        result.repaired_utf8_bytes += length;
         p += length;
     }
     return result;
 }
 
-/// The same text, well-formed: every byte that is not part of a sequence
-/// becomes U+FFFD, and two surrogate halves in a row become the character
-/// they spell.
-std::string repair(std::string_view text) {
+/// Decodes UTF-8 (repairing malformed bytes to U+FFFD) straight into `out`,
+/// which must have room for `scan_utf8(text).units` code units.
+void decode_utf8_to_utf16(std::string_view text, char16_t* out) noexcept {
     const auto* p = reinterpret_cast<const unsigned char*>(text.data());
     const unsigned char* const end = p + text.size();
-    std::string out;
-    out.reserve(text.size() + 8);
     while (p < end) {
-        const size_t length = sequence_length(p, end);
-        if (length == 0) {
-            out += "\xEF\xBF\xBD";
+        const unsigned char c = *p;
+        if (c < 0x80) {
+            *out++ = c;
             ++p;
             continue;
         }
-        if (length == 3 && is_high_half(p) && end - p >= 6 && sequence_length(p + 3, end) == 3 && is_low_half(p + 3)) {
-            const uint32_t high = decode3(p);
-            const uint32_t low = decode3(p + 3);
-            encode(out, 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00));
-            p += 6;
-            continue;
+        const size_t length = sequence_length(p, end);
+        if (length == 0) {
+            *out++ = 0xFFFD;
+            ++p;
+        } else if (length == 2) {
+            *out++ = static_cast<char16_t>(((c & 0x1F) << 6) | (p[1] & 0x3F));
+            p += 2;
+        } else if (length == 3) {
+            *out++ = static_cast<char16_t>(decode3(p));
+            p += 3;
+        } else {
+            uint32_t cp = (static_cast<uint32_t>(c & 0x07) << 18) | (static_cast<uint32_t>(p[1] & 0x3F) << 12) |
+                          (static_cast<uint32_t>(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+            cp -= 0x10000;
+            *out++ = static_cast<char16_t>(0xD800 + (cp >> 10));
+            *out++ = static_cast<char16_t>(0xDC00 + (cp & 0x3FF));
+            p += 4;
         }
-        out.append(reinterpret_cast<const char*>(p), length);
-        p += length;
     }
-    return out;
 }
 
-/// True when `first` ends in a high half and `second` starts with a low half:
-/// joined, they are one character and must be stored as one.
-bool halves_meet(std::string_view first, std::string_view second) {
-    if (first.size() < 3 || second.size() < 3) return false;
-    return is_high_half(reinterpret_cast<const unsigned char*>(first.data() + first.size() - 3)) &&
-           is_low_half(reinterpret_cast<const unsigned char*>(second.data()));
+void widen_bytes(const char* src, char16_t* dst, size_t count) noexcept {
+    for (size_t i = 0; i < count; ++i) dst[i] = static_cast<unsigned char>(src[i]);
 }
 
-/// True when `text` ends in a high half standing alone. `text` must be
-/// well-formed UTF-8 (lone halves allowed): 0xED is never a continuation byte,
-/// so three bytes from the end it can only start a character of its own.
-bool ends_in_high_half(std::string_view text) {
-    return text.size() >= 3 && is_high_half(reinterpret_cast<const unsigned char*>(text.data() + text.size() - 3));
+void narrow_units(const char16_t* src, char* dst, size_t count) noexcept {
+    for (size_t i = 0; i < count; ++i) dst[i] = static_cast<char>(src[i]);
 }
 
-/// True when `text` starts with a low half standing alone.
-bool starts_in_low_half(std::string_view text) {
-    return text.size() >= 3 && is_low_half(reinterpret_cast<const unsigned char*>(text.data()));
+size_t count_utf8_bytes_raw(const char16_t* units, size_t count) noexcept {
+    size_t bytes = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const char16_t c = units[i];
+        if (c < 0x80) {
+            bytes += 1;
+        } else if (c < 0x800) {
+            bytes += 2;
+        } else if (is_high_surrogate(c) && i + 1 < count && is_low_surrogate(units[i + 1])) {
+            bytes += 4;
+            ++i;
+        } else {
+            bytes += 3;
+        }
+    }
+    return bytes;
 }
 
-/// The three bytes of a surrogate half standing alone.
-void encode_half(char* out, uint32_t half) {
-    out[0] = static_cast<char>(0xE0 | (half >> 12));
-    out[1] = static_cast<char>(0x80 | ((half >> 6) & 0x3F));
-    out[2] = static_cast<char>(0x80 | (half & 0x3F));
+uint64_t current_thread_tag() noexcept {
+    static std::atomic<uint64_t> next_tag{1};
+    thread_local const uint64_t tag = next_tag.fetch_add(1, std::memory_order_relaxed);
+    return tag;
 }
 
-/// The four bytes of the character a high half and a low half spell together.
-void encode_pair(char* out, uint32_t high, uint32_t low) {
-    const uint32_t cp = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
-    out[0] = static_cast<char>(0xF0 | (cp >> 18));
-    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
+/// Capacities are rounded up to what the allocator hands out anyway (16-byte granularity).
+size_t round_capacity_units(size_t capacity_units, bool is_utf16) noexcept {
+    const size_t max_units = is_utf16 ? JsString::kMaxUnits : JsString::kMaxBytes;
+    const size_t rounded = is_utf16 ? ((capacity_units + 7) & ~size_t{7}) : ((capacity_units + 15) & ~size_t{15});
+    return rounded > max_units ? max_units : rounded;
 }
-
-/// Capacities are rounded up to what the allocator hands out anyway.
-size_t round_capacity(size_t bytes) { return (bytes + 15) & ~size_t{15}; }
 
 JsString* ascii_units() {
     // Never destroyed: values created during static destruction may still
     // want one of these.
-    static JsString* const table = [] {
-        auto* strings = new JsString[128];
-        return strings;
-    }();
+    static JsString* const table = [] { return new JsString[128]; }();
     return table;
+}
+
+uint32_t join_utf8_bytes(const JsString& a, const JsString& b, size_t a_bytes, size_t b_bytes) noexcept {
+    if (a.empty()) return static_cast<uint32_t>(b_bytes);
+    if (b.empty()) return static_cast<uint32_t>(a_bytes);
+    const char16_t a_last = a.unit_at(a.length() - 1);
+    const char16_t b_first = b.unit_at(0);
+    const size_t merged = a_bytes + b_bytes - (is_high_surrogate(a_last) && is_low_surrogate(b_first) ? 2 : 0);
+    return static_cast<uint32_t>(merged);
 }
 
 } // namespace
 
-JsString::Buffer* JsString::allocate(size_t capacity) {
-    if (capacity > kMaxBytes) js_throw_range_error("Invalid string length");
-    capacity = round_capacity(capacity);
-    void* memory = ::operator new(sizeof(Buffer) + capacity);
+JsString::Buffer* JsString::allocate(size_t capacity_units, bool is_utf16) {
+    const size_t max_units = is_utf16 ? kMaxUnits : kMaxBytes;
+    if (capacity_units > max_units) js_throw_range_error("Invalid string length");
+    capacity_units = round_capacity_units(capacity_units, is_utf16);
+    const size_t elem_size = is_utf16 ? sizeof(char16_t) : sizeof(char);
+    void* memory = ::operator new(sizeof(Buffer) + capacity_units * elem_size);
     auto* buffer = new (memory) Buffer;
-    buffer->capacity = static_cast<uint32_t>(capacity);
+    buffer->sole_thread.store(current_thread_tag(), std::memory_order_relaxed);
+    buffer->capacity = static_cast<uint32_t>(capacity_units);
+    buffer->is_utf16 = is_utf16;
     ++t_stats.blocks;
     return buffer;
 }
 
 void JsString::destroy(Buffer* buffer) noexcept {
-    if (Wide* wide = buffer->wide.load(std::memory_order_acquire)) {
+    if (Utf8Cache* utf8 = buffer->utf8.load(std::memory_order_acquire)) {
+        utf8->~Utf8Cache();
+        ::operator delete(utf8);
+    }
+    if (Wide* wide = buffer->wide_cache.load(std::memory_order_acquire)) {
         wide->~Wide();
         ::operator delete(wide);
     }
-    // Texts copied so that a handle owing a half could be read. This block held
-    // one claim on each; a handle still reading one holds its own.
-    for (Buffer::Settled* node = buffer->settled.load(std::memory_order_acquire); node;) {
-        Buffer::Settled* const next = node->next.load(std::memory_order_relaxed);
-        if (Buffer* text = node->text) {
-            if (text->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) destroy(text);
-        }
+    for (Buffer::Utf8Slice* node = buffer->utf8_slices.load(std::memory_order_acquire); node;) {
+        Buffer::Utf8Slice* const next = node->next.load(std::memory_order_relaxed);
+        node->~Utf8Slice();
         ::operator delete(node);
         node = next;
     }
@@ -217,35 +229,64 @@ void JsString::destroy(Buffer* buffer) noexcept {
     ::operator delete(buffer);
 }
 
-JsString JsString::join(std::string_view first, std::string_view second, size_t units, size_t capacity) {
+JsString JsString::hold(Buffer* buffer, uint32_t offset, uint32_t units, uint32_t utf8_bytes) noexcept {
+    JsString result;
+    result.m_buffer = buffer;
+    result.m_offset = offset;
+    result.m_units = units;
+    result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
+    result.retain();
+    return result;
+}
+
+JsString JsString::join_ascii(std::string_view first, std::string_view second, size_t capacity) {
     const size_t bytes = first.size() + second.size();
     JsString result;
     if (bytes == 0) return result;
-    Buffer* buffer = allocate(capacity < bytes ? bytes : capacity);
+    Buffer* buffer = allocate(capacity < bytes ? bytes : capacity, false);
     if (!first.empty()) std::memcpy(buffer->bytes(), first.data(), first.size());
     if (!second.empty()) std::memcpy(buffer->bytes() + first.size(), second.data(), second.size());
     buffer->used.store(static_cast<uint32_t>(bytes), std::memory_order_relaxed);
     t_stats.bytes_copied += bytes;
     result.m_buffer = buffer;
-    result.m_bytes = static_cast<uint32_t>(bytes);
-    result.m_units = static_cast<uint32_t>(units);
+    result.m_units = static_cast<uint32_t>(bytes);
+    result.m_utf8_bytes.store(static_cast<uint32_t>(bytes), std::memory_order_relaxed);
     return result;
 }
 
-JsString JsString::from_checked(std::string_view utf8, size_t units) {
-    if (utf8.size() == 1) return from_unit(static_cast<unsigned char>(utf8[0]));
-    return join(utf8, std::string_view(), units, utf8.size());
+JsString JsString::from_checked(std::string_view utf8, size_t units, bool ascii) {
+    if (utf8.empty()) return JsString();
+    if (ascii) {
+        if (units == 1) return from_unit(static_cast<unsigned char>(utf8[0]));
+        return join_ascii(utf8, std::string_view(), units);
+    }
+    Buffer* buffer = allocate(units, true);
+    decode_utf8_to_utf16(utf8, buffer->utf16());
+    buffer->used.store(static_cast<uint32_t>(units), std::memory_order_relaxed);
+    t_stats.bytes_copied += units * sizeof(char16_t);
+    t_stats.units_widened += units;
+    JsString result;
+    result.m_buffer = buffer;
+    result.m_units = static_cast<uint32_t>(units);
+    result.m_utf8_bytes.store(static_cast<uint32_t>(utf8.size()), std::memory_order_relaxed);
+    return result;
 }
 
 JsString::JsString(std::string_view utf8) {
     if (utf8.empty()) return;
-    const Scan scanned = scan(utf8);
-    if (scanned.well_formed) {
-        *this = from_checked(utf8, scanned.units);
+    const Scan scanned = scan_utf8(utf8);
+    if (scanned.ascii) {
+        *this = from_checked(utf8, scanned.units, true);
         return;
     }
-    const std::string repaired = repair(utf8);
-    *this = from_checked(repaired, scan(repaired).units);
+    Buffer* buffer = allocate(scanned.units, true);
+    decode_utf8_to_utf16(utf8, buffer->utf16());
+    buffer->used.store(static_cast<uint32_t>(scanned.units), std::memory_order_relaxed);
+    t_stats.bytes_copied += scanned.units * sizeof(char16_t);
+    t_stats.units_widened += scanned.units;
+    m_buffer = buffer;
+    m_units = static_cast<uint32_t>(scanned.units);
+    m_utf8_bytes.store(static_cast<uint32_t>(scanned.repaired_utf8_bytes), std::memory_order_relaxed);
 }
 
 JsString JsString::from_unit(char16_t unit) {
@@ -255,7 +296,7 @@ JsString JsString::from_unit(char16_t unit) {
         std::call_once(once, [table] {
             for (int c = 0; c < 128; ++c) {
                 const char byte = static_cast<char>(c);
-                table[c] = join(std::string_view(&byte, 1), std::string_view(), 1, 1);
+                table[c] = join_ascii(std::string_view(&byte, 1), std::string_view(), 1);
                 // Shared by every script on every thread: leave no room, so
                 // nothing is ever appended into one of these blocks.
                 table[c].m_buffer->capacity = 1;
@@ -271,143 +312,310 @@ JsString JsString::from_utf16(std::u16string_view units) {
     if (count == 0) return JsString();
     if (count == 1 && units[0] < 0x80) return from_unit(units[0]);
 
-    auto pair_at = [&](size_t i) {
-        return units[i] >= 0xD800 && units[i] <= 0xDBFF && i + 1 < count && units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF;
-    };
-    // Measure, then encode straight into the block. A surrogate pair becomes
-    // one four-byte character; a half on its own is kept, in three bytes.
-    size_t bytes = 0;
+    bool ascii = true;
+    size_t utf8_bytes = 0;
     for (size_t i = 0; i < count; ++i) {
         const char16_t unit = units[i];
-        if (unit < 0x80) bytes += 1;
-        else if (unit < 0x800) bytes += 2;
-        else if (pair_at(i)) { bytes += 4; ++i; }
-        else bytes += 3;
+        if (unit < 0x80) {
+            utf8_bytes += 1;
+        } else {
+            ascii = false;
+            if (unit < 0x800) {
+                utf8_bytes += 2;
+            } else if (is_high_surrogate(unit) && i + 1 < count && is_low_surrogate(units[i + 1])) {
+                utf8_bytes += 4;
+                ++i;
+            } else {
+                utf8_bytes += 3;
+            }
+        }
     }
-    Buffer* buffer = allocate(bytes);
-    char* out = buffer->bytes();
-    for (size_t i = 0; i < count; ++i) {
-        uint32_t cp = units[i];
-        if (cp < 0x80) {
-            *out++ = static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            *out++ = static_cast<char>(0xC0 | (cp >> 6));
-            *out++ = static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (pair_at(i)) {
-            cp = 0x10000 + ((cp - 0xD800) << 10) + (units[i + 1] - 0xDC00);
-            ++i;
+
+    if (ascii) {
+        Buffer* buffer = allocate(count, false);
+        narrow_units(units.data(), buffer->bytes(), count);
+        buffer->used.store(static_cast<uint32_t>(count), std::memory_order_relaxed);
+        t_stats.bytes_copied += count;
+        JsString result;
+        result.m_buffer = buffer;
+        result.m_units = static_cast<uint32_t>(count);
+        result.m_utf8_bytes.store(static_cast<uint32_t>(count), std::memory_order_relaxed);
+        return result;
+    }
+
+    Buffer* buffer = allocate(count, true);
+    std::memcpy(buffer->utf16(), units.data(), count * sizeof(char16_t));
+    buffer->used.store(static_cast<uint32_t>(count), std::memory_order_relaxed);
+    t_stats.bytes_copied += count * sizeof(char16_t);
+    JsString result;
+    result.m_buffer = buffer;
+    result.m_units = static_cast<uint32_t>(count);
+    result.m_utf8_bytes.store(static_cast<uint32_t>(utf8_bytes), std::memory_order_relaxed);
+    return result;
+}
+
+size_t JsString::size() const noexcept {
+    if (!m_buffer || m_units == 0) return 0;
+    if (!m_buffer->is_utf16) return m_units;
+    const uint32_t known = m_utf8_bytes.load(std::memory_order_relaxed);
+    if (known != kUnknownUtf8Bytes) return known;
+    const uint32_t counted = static_cast<uint32_t>(count_utf8_bytes_raw(m_buffer->utf16() + m_offset, m_units));
+    m_utf8_bytes.store(counted, std::memory_order_relaxed);
+    return counted;
+}
+
+std::string JsString::str() const {
+    const std::string_view text = view();
+    t_stats.bytes_copied += text.size();
+    return std::string(text);
+}
+
+namespace {
+
+uint32_t byte_of_unit_in_utf8(const auto* cached, const char16_t* u, uint32_t target, size_t kMarkEvery) noexcept {
+    if (target == 0) return 0;
+    const uint32_t mark = cached->marks()[target / kMarkEvery];
+    uint32_t at_unit = target - (target % static_cast<uint32_t>(kMarkEvery)) - (mark & 1u);
+    uint32_t at_byte = mark >> 1;
+    while (at_unit < target) {
+        const char16_t c = u[at_unit];
+        if (c < 0x80) {
+            ++at_unit;
+            at_byte += 1;
+        } else if (c < 0x800) {
+            ++at_unit;
+            at_byte += 2;
+        } else if (is_high_surrogate(c) && at_unit + 1 < target && is_low_surrogate(u[at_unit + 1])) {
+            at_unit += 2;
+            at_byte += 4;
+        } else {
+            ++at_unit;
+            at_byte += 3;
+        }
+    }
+    return at_byte;
+}
+
+} // namespace
+
+std::string_view JsString::utf8_view() const noexcept {
+    Buffer* const buffer = m_buffer;
+    const char16_t* const u = buffer->utf16();
+    const uint32_t end = m_offset + m_units;
+    const bool split_left = m_offset > 0 && is_low_surrogate(u[m_offset]) && is_high_surrogate(u[m_offset - 1]);
+    const bool ends_high = is_high_surrogate(u[end - 1]);
+
+    if (!split_left && !ends_high) {
+        if (const Utf8Cache* cached = buffer->utf8.load(std::memory_order_acquire)) {
+            if (cached->units.load(std::memory_order_acquire) >= end) {
+                const uint32_t byte_begin = byte_of_unit_in_utf8(cached, u, m_offset, kMarkEvery);
+                const uint32_t byte_end = byte_of_unit_in_utf8(cached, u, end, kMarkEvery);
+                return std::string_view(cached->data() + byte_begin, byte_end - byte_begin);
+            }
+        }
+        return build_utf8_cache(end);
+    }
+
+    for (const Buffer::Utf8Slice* node = buffer->utf8_slices.load(std::memory_order_acquire); node;
+         node = node->next.load(std::memory_order_acquire)) {
+        if (node->offset == m_offset && node->units == m_units) {
+            return std::string_view(node->data(), node->bytes);
+        }
+    }
+    return make_utf8_slice();
+}
+
+std::string_view JsString::build_utf8_cache(uint32_t end) const noexcept {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    Buffer* const buffer = m_buffer;
+    const char16_t* const u = buffer->utf16();
+    Utf8Cache* cache = buffer->utf8.load(std::memory_order_relaxed);
+    if (!cache) {
+        // Only inspect u[0 .. end), which is guaranteed already written before
+        // this handle was constructed; remaining capacity needs <= 3 bytes/unit.
+        const size_t cap_bytes = count_utf8_bytes_raw(u, end) + 2 + size_t{buffer->capacity - end} * 3;
+        const size_t marks = size_t{buffer->capacity} / kMarkEvery + 1;
+        const size_t data_bytes = (cap_bytes + 3) & ~size_t{3};
+        void* memory = ::operator new(sizeof(Utf8Cache) + data_bytes + sizeof(uint32_t) * marks);
+        cache = new (memory) Utf8Cache;
+        cache->capacity_units = buffer->capacity;
+        cache->data_bytes = static_cast<uint32_t>(data_bytes);
+    }
+    uint32_t unit = cache->units.load(std::memory_order_relaxed);
+    if (unit < end) {
+        char* const out = cache->data();
+        uint32_t* const marks = cache->marks();
+        uint32_t byte = cache->bytes;
+        const uint32_t prev_byte = byte;
+        const uint32_t start_unit = unit;
+        while (unit < end) {
+            if (unit % kMarkEvery == 0 && (unit == 0 || unit > start_unit)) {
+                marks[unit / kMarkEvery] = byte * 2;
+            }
+            const char16_t c = u[unit];
+            if (c < 0x80) {
+                out[byte++] = static_cast<char>(c);
+                ++unit;
+            } else if (c < 0x800) {
+                out[byte++] = static_cast<char>(0xC0 | (c >> 6));
+                out[byte++] = static_cast<char>(0x80 | (c & 0x3F));
+                ++unit;
+            } else if (is_high_surrogate(c) && unit + 1 < end && is_low_surrogate(u[unit + 1])) {
+                if ((unit + 1) % kMarkEvery == 0) {
+                    marks[(unit + 1) / kMarkEvery] = byte * 2 + 1;
+                }
+                const uint32_t cp = 0x10000 + ((static_cast<uint32_t>(c) - 0xD800) << 10) +
+                                    (static_cast<uint32_t>(u[unit + 1]) - 0xDC00);
+                out[byte++] = static_cast<char>(0xF0 | (cp >> 18));
+                out[byte++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                out[byte++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                out[byte++] = static_cast<char>(0x80 | (cp & 0x3F));
+                unit += 2;
+            } else {
+                out[byte++] = static_cast<char>(0xE0 | (c >> 12));
+                out[byte++] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+                out[byte++] = static_cast<char>(0x80 | (c & 0x3F));
+                ++unit;
+            }
+        }
+        if (end % kMarkEvery == 0) marks[end / kMarkEvery] = byte * 2;
+        t_stats.bytes_copied += byte - prev_byte;
+        cache->bytes = byte;
+        cache->units.store(unit, std::memory_order_release);
+    }
+    buffer->utf8.store(cache, std::memory_order_release);
+    const uint32_t byte_begin = byte_of_unit_in_utf8(cache, u, m_offset, kMarkEvery);
+    const uint32_t byte_end = byte_of_unit_in_utf8(cache, u, end, kMarkEvery);
+    return std::string_view(cache->data() + byte_begin, byte_end - byte_begin);
+}
+
+std::string_view JsString::make_utf8_slice() const noexcept {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    Buffer* const buffer = m_buffer;
+    for (const Buffer::Utf8Slice* node = buffer->utf8_slices.load(std::memory_order_relaxed); node;
+         node = node->next.load(std::memory_order_relaxed)) {
+        if (node->offset == m_offset && node->units == m_units) {
+            return std::string_view(node->data(), node->bytes);
+        }
+    }
+    const char16_t* const u = buffer->utf16() + m_offset;
+    const size_t exact_bytes = count_utf8_bytes_raw(u, m_units);
+    void* memory = ::operator new(sizeof(Buffer::Utf8Slice) + exact_bytes);
+    auto* node = new (memory) Buffer::Utf8Slice;
+    node->offset = m_offset;
+    node->units = m_units;
+    node->bytes = static_cast<uint32_t>(exact_bytes);
+    char* out = node->data();
+    for (size_t i = 0; i < m_units; ++i) {
+        const char16_t c = u[i];
+        if (c < 0x80) {
+            *out++ = static_cast<char>(c);
+        } else if (c < 0x800) {
+            *out++ = static_cast<char>(0xC0 | (c >> 6));
+            *out++ = static_cast<char>(0x80 | (c & 0x3F));
+        } else if (is_high_surrogate(c) && i + 1 < m_units && is_low_surrogate(u[i + 1])) {
+            const uint32_t cp = 0x10000 + ((static_cast<uint32_t>(c) - 0xD800) << 10) +
+                                (static_cast<uint32_t>(u[i + 1]) - 0xDC00);
             *out++ = static_cast<char>(0xF0 | (cp >> 18));
             *out++ = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
             *out++ = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
             *out++ = static_cast<char>(0x80 | (cp & 0x3F));
+            ++i;
         } else {
-            *out++ = static_cast<char>(0xE0 | (cp >> 12));
-            *out++ = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            *out++ = static_cast<char>(0x80 | (cp & 0x3F));
+            *out++ = static_cast<char>(0xE0 | (c >> 12));
+            *out++ = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            *out++ = static_cast<char>(0x80 | (c & 0x3F));
         }
     }
-    buffer->used.store(static_cast<uint32_t>(bytes), std::memory_order_relaxed);
-    t_stats.bytes_copied += bytes;
-    JsString result;
-    result.m_buffer = buffer;
-    result.m_bytes = static_cast<uint32_t>(bytes);
-    result.m_units = static_cast<uint32_t>(count);
-    return result;
+    t_stats.bytes_copied += exact_bytes;
+    m_utf8_bytes.store(static_cast<uint32_t>(exact_bytes), std::memory_order_relaxed);
+    node->next.store(buffer->utf8_slices.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    buffer->utf8_slices.store(node, std::memory_order_release);
+    return std::string_view(node->data(), node->bytes);
 }
 
-std::string JsString::str() const {
-    t_stats.bytes_copied += size();
-    return std::string(view());
-}
-
-const char16_t* JsString::widen() const {
-    std::lock_guard<std::mutex> lock(g_wide_mutex);
+const char16_t* JsString::widen_ascii() const {
+    const uint32_t end = m_offset + m_units;
+    const Wide* cached = m_buffer->wide_cache.load(std::memory_order_acquire);
+    if (cached && cached->units.load(std::memory_order_acquire) >= end) {
+        return cached->data() + m_offset;
+    }
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
     Buffer* const buffer = m_buffer;
-    const uint32_t end_byte = m_offset + m_bytes;
-    const uint32_t end_unit = m_unit_offset + m_units;
-    Wide* wide = buffer->wide.load(std::memory_order_relaxed);
+    Wide* wide = buffer->wide_cache.load(std::memory_order_relaxed);
     if (!wide) {
-        // Room for the block's text up to the end of this string, and for
-        // whatever else the block holds or can still be given: a byte of text
-        // is never more than one code unit. The array is therefore never
-        // moved, and pointers into it stay good.
-        const size_t capacity = size_t{end_unit} + (buffer->capacity - end_byte);
-        const size_t marks = capacity / kMarkEvery + 1;
-        const size_t data_bytes = sizeof(char16_t) * ((capacity + 1) & ~size_t{1});
-        void* memory = ::operator new(sizeof(Wide) + data_bytes + sizeof(uint32_t) * marks);
+        void* memory = ::operator new(sizeof(Wide) + sizeof(char16_t) * buffer->capacity);
         wide = new (memory) Wide;
-        wide->capacity = static_cast<uint32_t>(capacity);
+        wide->capacity = buffer->capacity;
     }
     uint32_t unit = wide->units.load(std::memory_order_relaxed);
-    if (unit < end_unit) {
-        // Convert only what was added since the last time. Every handle ends
-        // between two characters, so this starts and stops between characters.
-        const uint32_t first = unit;
-        char16_t* const out = wide->data();
-        uint32_t* const marks = wide->marks();
-        const auto* const base = reinterpret_cast<const unsigned char*>(buffer->bytes());
-        uint32_t at = wide->bytes;
-        while (at < end_byte) {
-            const unsigned char c = base[at];
-            if (unit % kMarkEvery == 0) marks[unit / kMarkEvery] = at * 2;
-            if (c < 0x80) {
-                out[unit++] = c;
-                at += 1;
-            } else if (c < 0xE0) {
-                out[unit++] = static_cast<char16_t>(((c & 0x1F) << 6) | (base[at + 1] & 0x3F));
-                at += 2;
-            } else if (c < 0xF0) {
-                out[unit++] = static_cast<char16_t>(decode3(base + at));
-                at += 3;
-            } else {
-                uint32_t cp = (static_cast<uint32_t>(c & 0x07) << 18) | (static_cast<uint32_t>(base[at + 1] & 0x3F) << 12) |
-                              (static_cast<uint32_t>(base[at + 2] & 0x3F) << 6) | (base[at + 3] & 0x3F);
-                cp -= 0x10000;
-                if ((unit + 1) % kMarkEvery == 0) marks[(unit + 1) / kMarkEvery] = at * 2 + 1;
-                out[unit++] = static_cast<char16_t>(0xD800 + (cp >> 10));
-                out[unit++] = static_cast<char16_t>(0xDC00 + (cp & 0x3FF));
-                at += 4;
+    if (unit < end) {
+        widen_bytes(buffer->bytes() + unit, wide->data() + unit, end - unit);
+        t_stats.units_widened += end - unit;
+        wide->units.store(end, std::memory_order_release);
+    }
+    buffer->wide_cache.store(wide, std::memory_order_release);
+    return wide->data() + m_offset;
+}
+
+bool JsString::equals_units(const JsString& other) const noexcept {
+    if (!m_buffer->is_utf16 && !other.m_buffer->is_utf16) {
+        return std::memcmp(m_buffer->bytes() + m_offset, other.m_buffer->bytes() + other.m_offset, m_units) == 0;
+    }
+    if (m_buffer->is_utf16 && other.m_buffer->is_utf16) {
+        return std::memcmp(m_buffer->utf16() + m_offset, other.m_buffer->utf16() + other.m_offset,
+                           m_units * sizeof(char16_t)) == 0;
+    }
+    const uint32_t a_bytes = m_utf8_bytes.load(std::memory_order_relaxed);
+    const uint32_t b_bytes = other.m_utf8_bytes.load(std::memory_order_relaxed);
+    if (a_bytes != kUnknownUtf8Bytes && b_bytes != kUnknownUtf8Bytes && a_bytes != b_bytes) return false;
+    const char* const narrow = m_buffer->is_utf16 ? (other.m_buffer->bytes() + other.m_offset)
+                                                  : (m_buffer->bytes() + m_offset);
+    const char16_t* const wide = m_buffer->is_utf16 ? (m_buffer->utf16() + m_offset)
+                                                    : (other.m_buffer->utf16() + other.m_offset);
+    for (uint32_t i = 0; i < m_units; ++i) {
+        if (static_cast<unsigned char>(narrow[i]) != wide[i]) return false;
+    }
+    return true;
+}
+
+bool JsString::equals_utf8(std::string_view utf8) const noexcept {
+    const uint32_t known = m_utf8_bytes.load(std::memory_order_relaxed);
+    if (known != kUnknownUtf8Bytes && known != utf8.size()) return false;
+    if (utf8.size() < m_units) return false;
+    const char16_t* const u = m_buffer->utf16() + m_offset;
+    const auto* const target = reinterpret_cast<const unsigned char*>(utf8.data());
+    size_t pos = 0;
+    const size_t n = utf8.size();
+    for (uint32_t i = 0; i < m_units; ++i) {
+        const char16_t c = u[i];
+        if (c < 0x80) {
+            if (pos >= n || target[pos] != c) return false;
+            ++pos;
+        } else if (c < 0x800) {
+            if (pos + 2 > n || target[pos] != (0xC0 | (c >> 6)) || target[pos + 1] != (0x80 | (c & 0x3F))) return false;
+            pos += 2;
+        } else if (is_high_surrogate(c) && i + 1 < m_units && is_low_surrogate(u[i + 1])) {
+            const uint32_t cp = 0x10000 + ((static_cast<uint32_t>(c) - 0xD800) << 10) +
+                                (static_cast<uint32_t>(u[i + 1]) - 0xDC00);
+            if (pos + 4 > n || target[pos] != (0xF0 | (cp >> 18)) || target[pos + 1] != (0x80 | ((cp >> 12) & 0x3F)) ||
+                target[pos + 2] != (0x80 | ((cp >> 6) & 0x3F)) || target[pos + 3] != (0x80 | (cp & 0x3F))) {
+                return false;
             }
+            pos += 4;
+            ++i;
+        } else {
+            if (pos + 3 > n || target[pos] != (0xE0 | (c >> 12)) || target[pos + 1] != (0x80 | ((c >> 6) & 0x3F)) ||
+                target[pos + 2] != (0x80 | (c & 0x3F))) {
+                return false;
+            }
+            pos += 3;
         }
-        t_stats.units_widened += unit - first;
-        wide->bytes = end_byte;
-        wide->units.store(unit, std::memory_order_release);
     }
-    buffer->wide.store(wide, std::memory_order_release);
-    return wide->data() + m_unit_offset;
-}
-
-JsString JsString::piece(size_t byte_begin, size_t bytes, size_t unit_begin, size_t units) const noexcept {
-    JsString result(*this);
-    result.m_offset = static_cast<uint32_t>(m_offset + byte_begin);
-    result.m_bytes = static_cast<uint32_t>(bytes);
-    result.m_unit_offset = static_cast<uint32_t>(m_unit_offset + unit_begin);
-    result.m_units = static_cast<uint32_t>(units);
-    result.m_pending = 0;       // substring settles before it takes a piece
-    return result;
-}
-
-size_t JsString::byte_of_unit(size_t unit) const {
-    if (is_ascii()) return unit;
-    wide();     // makes sure the marks up to the end of this string are written
-    const Wide* const cached = m_buffer->wide.load(std::memory_order_acquire);
-    const size_t target = m_unit_offset + unit;             // counted from the start of the block
-    const uint32_t mark = cached->marks()[target / kMarkEvery];
-    size_t at = mark >> 1;
-    size_t reached = target - target % kMarkEvery - (mark & 1);
-    const auto* const base = reinterpret_cast<const unsigned char*>(m_buffer->bytes());
-    while (reached < target) {
-        const unsigned char c = base[at];
-        if (c < 0x80) { at += 1; reached += 1; }
-        else if (c < 0xE0) { at += 2; reached += 1; }
-        else if (c < 0xF0) { at += 3; reached += 1; }
-        else { at += 4; reached += 2; }
-    }
-    return reached == target ? at - m_offset : static_cast<size_t>(-1);
+    return pos == n;
 }
 
 JsString JsString::substring(size_t begin, size_t end) const {
-    if (m_pending) return settled().substring(begin, end);
     if (end > m_units) end = m_units;
     if (begin >= end) return JsString();
     if (begin == 0 && end == m_units) return *this;
@@ -416,43 +624,63 @@ JsString JsString::substring(size_t begin, size_t end) const {
         const char16_t unit = unit_at(begin);
         if (unit < 0x80) return from_unit(unit);
     }
-    // A piece that is a good part of its block (a quarter of its bytes or
-    // more) becomes another range of the same block. Smaller pieces are
-    // copied, so that a few characters taken from a long text do not keep the
-    // whole text alive.
     const size_t capacity = m_buffer->capacity;
-    if (is_ascii()) {
-        if (count * kShareDivisor >= capacity) return piece(begin, count, begin, count);
-        // A piece of an ASCII string is ASCII: nothing to check or count.
-        return join(view().substr(begin, count), std::string_view(), count, count);
-    }
-    // Text that is not ASCII: a code unit takes one to three bytes, so how
-    // many bytes the piece has is only known by looking. A piece too small to
-    // be shared even at three bytes a unit is settled without looking.
-    if (count * 3 * kShareDivisor >= capacity) {
-        // The piece has to start and end between characters. One that starts or
-        // ends between the halves of a surrogate pair holds a half that is not
-        // in the block as such, and is built from the code units instead.
-        const size_t byte_begin = begin == 0 ? 0 : byte_of_unit(begin);
-        const size_t byte_end = end == m_units ? m_bytes : byte_of_unit(end);
-        if (byte_begin != static_cast<size_t>(-1) && byte_end != static_cast<size_t>(-1) &&
-            (byte_end - byte_begin) * kShareDivisor >= capacity) {
-            return piece(byte_begin, byte_end - byte_begin, begin, count);
+    if (!m_buffer->is_utf16) {
+        if (count * kShareDivisor >= capacity) {
+            return hold(m_buffer, static_cast<uint32_t>(m_offset + begin), static_cast<uint32_t>(count),
+                        static_cast<uint32_t>(count));
         }
+        return join_ascii(std::string_view(m_buffer->bytes() + m_offset + begin, count), std::string_view(), count);
     }
-    return from_utf16(std::u16string_view(wide() + begin, count));
+    const char16_t* const u = m_buffer->utf16() + m_offset;
+    if (count * kShareDivisor >= capacity) {
+        uint32_t new_utf8 = kUnknownUtf8Bytes;
+        const uint32_t parent_utf8 = m_utf8_bytes.load(std::memory_order_relaxed);
+        const size_t dropped = begin + (m_units - end);
+        if (parent_utf8 != kUnknownUtf8Bytes && dropped <= 256) {
+            size_t dropped_bytes = count_utf8_bytes_raw(u, begin) + count_utf8_bytes_raw(u + end, m_units - end);
+            const size_t split_adjust =
+                (begin > 0 && is_high_surrogate(u[begin - 1]) && is_low_surrogate(u[begin]) ? 2 : 0) +
+                (end < m_units && is_high_surrogate(u[end - 1]) && is_low_surrogate(u[end]) ? 2 : 0);
+            new_utf8 = static_cast<uint32_t>(size_t{parent_utf8} - dropped_bytes + split_adjust);
+        } else if (count <= 256) {
+            new_utf8 = static_cast<uint32_t>(count_utf8_bytes_raw(u + begin, count));
+        }
+        return hold(m_buffer, static_cast<uint32_t>(m_offset + begin), static_cast<uint32_t>(count), new_utf8);
+    }
+    return from_utf16(std::u16string_view(u + begin, count));
 }
 
-JsString JsString::append(const JsString& a, std::string_view more, size_t more_units) {
+namespace {
+
+bool cache_covers_past(const auto* buffer, uint32_t a_end) noexcept {
+    if (const auto* u8 = buffer->utf8.load(std::memory_order_acquire)) {
+        if (u8->units.load(std::memory_order_acquire) > a_end) return true;
+    }
+    if (const auto* w = buffer->wide_cache.load(std::memory_order_acquire)) {
+        if (w->units.load(std::memory_order_acquire) > a_end) return true;
+    }
+    for (const auto* node = buffer->utf8_slices.load(std::memory_order_acquire); node;
+         node = node->next.load(std::memory_order_acquire)) {
+        if (node->offset + node->units > a_end) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+JsString JsString::append_ascii(const JsString& a, std::string_view more) {
     if (more.empty()) return a;
     Buffer* const buffer = a.m_buffer;
-    const size_t total = size_t{a.m_bytes} + more.size();
+    const size_t total = size_t{a.m_units} + more.size();
     if (total > kMaxBytes) js_throw_range_error("Invalid string length");
 
-    // Is there room after `a`, and does `a` end where the block's text ends?
-    // Then claim the room and write there. The claim is a compare-and-swap, so
-    // two appends to the same text cannot both win; the loser copies, below.
-    const uint32_t a_end = a.m_offset + a.m_bytes;
+    const uint64_t tag = current_thread_tag();
+    if (buffer->sole_thread.load(std::memory_order_relaxed) != tag) {
+        buffer->sole_thread.store(0, std::memory_order_release);
+    }
+
+    const uint32_t a_end = a.m_offset + a.m_units;
     if (more.size() <= buffer->capacity - a_end) {
         uint32_t expected = a_end;
         if (buffer->used.compare_exchange_strong(expected, static_cast<uint32_t>(a_end + more.size()),
@@ -460,235 +688,335 @@ JsString JsString::append(const JsString& a, std::string_view more, size_t more_
             std::memcpy(buffer->bytes() + a_end, more.data(), more.size());
             t_stats.bytes_copied += more.size();
             JsString result(a);
-            result.m_bytes = static_cast<uint32_t>(total);
-            result.m_units = static_cast<uint32_t>(a.m_units + more_units);
+            result.m_units = static_cast<uint32_t>(total);
+            result.m_utf8_bytes.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
             return result;
+        }
+        const bool non_overlapping =
+            more.data() < buffer->bytes() || more.data() >= buffer->bytes() + buffer->capacity;
+        if (non_overlapping && buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+            buffer->refs.load(std::memory_order_acquire) == 1 && !cache_covers_past(buffer, a_end)) {
+            uint32_t cur_used = buffer->used.load(std::memory_order_acquire);
+            if (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                buffer->used.compare_exchange_strong(cur_used, static_cast<uint32_t>(a_end + more.size()),
+                                                     std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                std::memcpy(buffer->bytes() + a_end, more.data(), more.size());
+                t_stats.bytes_copied += more.size();
+                JsString result(a);
+                result.m_units = static_cast<uint32_t>(total);
+                result.m_utf8_bytes.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+                return result;
+            }
         }
     }
 
-    // A new block. Text that keeps being extended (`s += x` in a loop) is given
-    // room to grow by half, which is what makes n appends cost n and not n*n.
-    // The first moves get no spare room: most strings are joined once or
-    // twice and then only read, and those should not carry slack around.
-    const bool newest = buffer->used.load(std::memory_order_relaxed) == a_end;
+    const bool newest = (buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                        (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                         buffer->refs.load(std::memory_order_acquire) == 1);
     const uint32_t moves = newest ? (buffer->moves < 1000 ? buffer->moves + 1 : buffer->moves) : 1;
     size_t capacity = total;
     if (moves >= 3) {
         capacity = total + total / 2;
         if (capacity > kMaxBytes) capacity = kMaxBytes;
     }
-    JsString result = join(a.view(), more, a.m_units + more_units, capacity);
+    JsString result = join_ascii(a.view(), more, capacity);
     result.m_buffer->moves = moves;
     return result;
 }
 
-namespace {
+JsString JsString::append_utf16_handle(const JsString& a, const JsString& b, uint32_t utf8_bytes) {
+    Buffer* const buffer = a.m_buffer;
+    const size_t total = size_t{a.m_units} + b.m_units;
+    if (total > kMaxUnits) js_throw_range_error("Invalid string length");
 
-/// `first` ends in a high half and `second` starts with the low half: the two
-/// become one character, so the text is rebuilt (rare, and never in place).
-JsString merge_halves(std::string_view first, std::string_view second) {
-    std::string joined;
-    joined.reserve(first.size() + second.size());
-    joined += first;
-    joined += second;
-    return JsString(joined);
-}
+    const uint64_t tag = current_thread_tag();
+    if (buffer->sole_thread.load(std::memory_order_relaxed) != tag) {
+        buffer->sole_thread.store(0, std::memory_order_release);
+    }
 
-} // namespace
+    auto write_b = [&](char16_t* dst) noexcept {
+        if (!b.m_buffer->is_utf16) {
+            widen_bytes(b.m_buffer->bytes() + b.m_offset, dst, b.m_units);
+            t_stats.units_widened += b.m_units;
+        } else {
+            std::memcpy(dst, b.m_buffer->utf16() + b.m_offset, size_t{b.m_units} * sizeof(char16_t));
+        }
+        t_stats.bytes_copied += size_t{b.m_units} * sizeof(char16_t);
+    };
 
-// --- The half that has not been written yet ---------------------------------
-//
-// A join defers a high half that ends the result (concat_settled), the half
-// that arrives next decides what becomes of it (concat_owed), and anything
-// that reads the text settles it first (settled). See JsString.hpp.
+    const uint32_t a_end = a.m_offset + a.m_units;
+    if (b.m_units <= buffer->capacity - a_end) {
+        uint32_t expected = a_end;
+        if (buffer->used.compare_exchange_strong(expected, static_cast<uint32_t>(a_end + b.m_units),
+                                                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            write_b(buffer->utf16() + a_end);
+            JsString result(a);
+            result.m_units = static_cast<uint32_t>(total);
+            result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
+            return result;
+        }
+        if (buffer != b.m_buffer && buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+            buffer->refs.load(std::memory_order_acquire) == 1 && !cache_covers_past(buffer, a_end)) {
+            uint32_t cur_used = buffer->used.load(std::memory_order_acquire);
+            if (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                buffer->used.compare_exchange_strong(cur_used, static_cast<uint32_t>(a_end + b.m_units),
+                                                     std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                write_b(buffer->utf16() + a_end);
+                JsString result(a);
+                result.m_units = static_cast<uint32_t>(total);
+                result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
+                return result;
+            }
+        }
+    }
 
-JsString JsString::hold(Buffer* buffer, uint32_t offset, uint32_t bytes, uint32_t unit_offset, uint32_t units) noexcept {
+    const bool newest = (buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                        (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                         buffer->refs.load(std::memory_order_acquire) == 1);
+    const uint32_t moves = newest ? (buffer->moves < 1000 ? buffer->moves + 1 : buffer->moves) : 1;
+    size_t capacity = total;
+    if (moves >= 3) {
+        capacity = total + total / 2;
+        if (capacity > kMaxUnits) capacity = kMaxUnits;
+    }
+    Buffer* next = allocate(capacity, true);
+    next->moves = moves;
+    std::memcpy(next->utf16(), buffer->utf16() + a.m_offset, size_t{a.m_units} * sizeof(char16_t));
+    t_stats.bytes_copied += size_t{a.m_units} * sizeof(char16_t);
+    write_b(next->utf16() + a.m_units);
+    next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
     JsString result;
-    result.m_buffer = buffer;
-    result.m_offset = offset;
-    result.m_bytes = bytes;
-    result.m_unit_offset = unit_offset;
-    result.m_units = units;
-    result.retain();
+    result.m_buffer = next;
+    result.m_units = static_cast<uint32_t>(total);
+    result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
     return result;
 }
 
-std::string_view JsString::written_view() const noexcept {
-    return m_buffer ? std::string_view(m_buffer->bytes() + m_offset, m_bytes) : std::string_view();
-}
+JsString JsString::append_utf16_utf8(const JsString& a, std::string_view more, size_t more_units,
+                                     uint32_t more_utf8_bytes) {
+    Buffer* const buffer = a.m_buffer;
+    const size_t total = size_t{a.m_units} + more_units;
+    if (total > kMaxUnits) js_throw_range_error("Invalid string length");
 
-JsString JsString::written() const noexcept {
-    JsString result(*this);
-    result.m_pending = 0;
-    result.m_units = m_units - 1;      // the half owed is the last unit
+    const uint64_t tag = current_thread_tag();
+    if (buffer->sole_thread.load(std::memory_order_relaxed) != tag) {
+        buffer->sole_thread.store(0, std::memory_order_release);
+    }
+
+    const uint32_t a_bytes = a.m_utf8_bytes.load(std::memory_order_relaxed);
+    uint32_t merged_utf8 = kUnknownUtf8Bytes;
+    if (a_bytes != kUnknownUtf8Bytes) {
+        const char16_t a_last = a.unit_at(a.length() - 1);
+        const auto* const mp = reinterpret_cast<const unsigned char*>(more.data());
+        const bool b_low = more.size() >= 3 && is_low_half(mp);
+        merged_utf8 = static_cast<uint32_t>(size_t{a_bytes} + more_utf8_bytes -
+                                            (is_high_surrogate(a_last) && b_low ? 2 : 0));
+    }
+
+    const uint32_t a_end = a.m_offset + a.m_units;
+    if (more_units <= buffer->capacity - a_end) {
+        uint32_t expected = a_end;
+        if (buffer->used.compare_exchange_strong(expected, static_cast<uint32_t>(a_end + more_units),
+                                                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            decode_utf8_to_utf16(more, buffer->utf16() + a_end);
+            t_stats.bytes_copied += more_units * sizeof(char16_t);
+            t_stats.units_widened += more_units;
+            JsString result(a);
+            result.m_units = static_cast<uint32_t>(total);
+            result.m_utf8_bytes.store(merged_utf8, std::memory_order_relaxed);
+            return result;
+        }
+        if (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+            buffer->refs.load(std::memory_order_acquire) == 1 && !cache_covers_past(buffer, a_end)) {
+            uint32_t cur_used = buffer->used.load(std::memory_order_acquire);
+            if (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                buffer->used.compare_exchange_strong(cur_used, static_cast<uint32_t>(a_end + more_units),
+                                                     std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                decode_utf8_to_utf16(more, buffer->utf16() + a_end);
+                t_stats.bytes_copied += more_units * sizeof(char16_t);
+                t_stats.units_widened += more_units;
+                JsString result(a);
+                result.m_units = static_cast<uint32_t>(total);
+                result.m_utf8_bytes.store(merged_utf8, std::memory_order_relaxed);
+                return result;
+            }
+        }
+    }
+
+    const bool newest = (buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                        (buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                         buffer->refs.load(std::memory_order_acquire) == 1);
+    const uint32_t moves = newest ? (buffer->moves < 1000 ? buffer->moves + 1 : buffer->moves) : 1;
+    size_t capacity = total;
+    if (moves >= 3) {
+        capacity = total + total / 2;
+        if (capacity > kMaxUnits) capacity = kMaxUnits;
+    }
+    Buffer* next = allocate(capacity, true);
+    next->moves = moves;
+    std::memcpy(next->utf16(), buffer->utf16() + a.m_offset, size_t{a.m_units} * sizeof(char16_t));
+    t_stats.bytes_copied += size_t{a.m_units} * sizeof(char16_t);
+    decode_utf8_to_utf16(more, next->utf16() + a.m_units);
+    t_stats.bytes_copied += more_units * sizeof(char16_t);
+    t_stats.units_widened += more_units;
+    next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+    JsString result;
+    result.m_buffer = next;
+    result.m_units = static_cast<uint32_t>(total);
+    result.m_utf8_bytes.store(merged_utf8, std::memory_order_relaxed);
     return result;
-}
-
-void JsString::publish_settled(Buffer* buffer, Buffer::Settled* node) noexcept {
-    // Readers walk the list without taking this: a node is whole before it is
-    // linked, and what it points at was written before that.
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-    node->next.store(buffer->settled.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    buffer->settled.store(node, std::memory_order_release);
-}
-
-JsString JsString::with_pending(JsString a, uint32_t half) {
-    if (half == 0) return a;
-    if (a.m_pending) {
-        // Two high halves in a row: the first is not the start of a pair, so it
-        // belongs in the block. Writing it is an ordinary append.
-        char bytes[3];
-        encode_half(bytes, a.m_pending);
-        a = append(a.written(), std::string_view(bytes, 3), 1);
-    }
-    if (a.m_buffer == nullptr) {
-        const char16_t unit = static_cast<char16_t>(half);
-        return from_utf16(std::u16string_view(&unit, 1));
-    }
-    if (size_t{a.m_bytes} + 3 > kMaxBytes) js_throw_range_error("Invalid string length");
-    a.m_pending = half;
-    a.m_units += 1;
-    return a;
-}
-
-JsString JsString::settled() const {
-    if (m_pending == 0) return *this;
-    Buffer* const buffer = m_buffer;
-    const uint32_t bytes = m_bytes + 3;
-    const auto same = [&](const Buffer::Settled* node) {
-        return node->offset == m_offset && node->bytes == m_bytes && node->pending == m_pending;
-    };
-    const auto handle_for = [&](const Buffer::Settled* node) {
-        // A copy is held by this block, which this handle holds a claim on;
-        // text written into this block is held by this handle itself.
-        return node->text ? hold(node->text, node->text_offset, bytes, 0, m_units)
-                          : hold(buffer, node->text_offset, bytes, m_unit_offset, m_units);
-    };
-    for (const Buffer::Settled* node = buffer->settled.load(std::memory_order_acquire); node;
-         node = node->next.load(std::memory_order_acquire)) {
-        if (same(node)) return handle_for(node);
-    }
-
-    // The room after the block's text: write the half there and the text is
-    // contiguous, with nothing copied. The claim is a compare-and-swap, as for
-    // any append; whoever loses it copies, below.
-    char half[3];
-    encode_half(half, m_pending);
-    const uint32_t end = m_offset + m_bytes;
-    if (3 <= buffer->capacity - end) {
-        uint32_t expected = end;
-        if (buffer->used.compare_exchange_strong(expected, end + 3, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-            std::memcpy(buffer->bytes() + end, half, 3);
-            t_stats.bytes_copied += 3;
-            auto* node = new Buffer::Settled;
-            node->offset = m_offset;
-            node->bytes = m_bytes;
-            node->pending = m_pending;
-            node->text_offset = m_offset;
-            publish_settled(buffer, node);
-            return hold(buffer, m_offset, bytes, m_unit_offset, m_units);
-        }
-    }
-    return settle_copy(*this);
-}
-
-JsString JsString::settle_copy(const JsString& a) {
-    char half[3];
-    encode_half(half, a.m_pending);
-    // One copy of the text, in a block of its own. `join` hands back the only
-    // claim on it; that claim becomes the list's, so the copy lives for as long
-    // as any handle that can still ask for it.
-    JsString text = join(a.written_view(), std::string_view(half, 3), a.m_units, a.m_bytes + 3);
-    auto* node = new Buffer::Settled;
-    node->offset = a.m_offset;
-    node->bytes = a.m_bytes;
-    node->pending = a.m_pending;
-    node->text_offset = 0;
-    node->text = text.m_buffer;
-    text.forget();
-    publish_settled(a.m_buffer, node);
-    return hold(node->text, 0, a.m_bytes + 3, 0, a.m_units);
-}
-
-JsString JsString::concat_settled(const JsString& a, std::string_view more, size_t more_units) {
-    if (more.empty()) return a;
-    if (size_t{a.m_bytes} + more.size() > kMaxBytes) js_throw_range_error("Invalid string length");
-    if (a.m_buffer == nullptr) {
-        // Nothing to append to: the text is `more` itself, less the half owed.
-        if (ends_in_high_half(more)) {
-            const auto* const half = reinterpret_cast<const unsigned char*>(more.data() + more.size() - 3);
-            JsString base = from_checked(more.substr(0, more.size() - 3), more_units - 1);
-            return with_pending(std::move(base), decode3(half));
-        }
-        return from_checked(more, more_units);
-    }
-    if (halves_meet(a.view(), more)) {
-        // A high half that is already in a block: the four bytes that replace
-        // it and the low half start inside text another handle may be reading,
-        // so this join copies. A half owed by a handle never comes here.
-        return merge_halves(a.view(), more);
-    }
-    if (ends_in_high_half(more)) {
-        // Everything but the last character goes into the block; the high half
-        // that ends the text is owed by the handle, so that the low half can
-        // still be written after what is there instead of over it.
-        const auto* const half = reinterpret_cast<const unsigned char*>(more.data() + more.size() - 3);
-        JsString base = append(a, more.substr(0, more.size() - 3), more_units - 1);
-        return with_pending(std::move(base), decode3(half));
-    }
-    return append(a, more, more_units);
-}
-
-JsString JsString::concat_owed(const JsString& a, std::string_view more, size_t more_units) {
-    if (a.m_pending == 0) return concat_settled(a, more, more_units);
-    JsString base = a.written();
-    if (starts_in_low_half(more)) {
-        // The half owed and the half that has arrived are one character. It
-        // goes where the block's text ends: an ordinary append, and nothing of
-        // the text before it is copied. Two code units before, two now.
-        char pair[4];
-        encode_pair(pair, a.m_pending, decode3(reinterpret_cast<const unsigned char*>(more.data())));
-        base = append(base, std::string_view(pair, 4), 2);
-        return concat_settled(base, more.substr(3), more_units - 1);
-    }
-    // Something else came after it, so the half stands alone after all.
-    char half[3];
-    encode_half(half, a.m_pending);
-    base = append(base, std::string_view(half, 3), 1);
-    return concat_settled(base, more, more_units);
 }
 
 JsString JsString::concat(const JsString& a, const JsString& b) {
     if (b.empty()) return a;
     if (a.empty()) return b;
-    // `b` without the half it may owe: that half is owed by the result instead,
-    // so nothing of `b` has to be written to be joined.
-    JsString result = concat_owed(a, b.written_view(), b.m_units - (b.m_pending ? 1 : 0));
-    return with_pending(std::move(result), b.m_pending);
+    if (!a.m_buffer->is_utf16 && !b.m_buffer->is_utf16) {
+        return append_ascii(a, b.view());
+    }
+    const uint32_t a_bytes = a.m_utf8_bytes.load(std::memory_order_relaxed);
+    const uint32_t b_bytes = b.m_utf8_bytes.load(std::memory_order_relaxed);
+    const uint32_t utf8_bytes = (a_bytes != kUnknownUtf8Bytes && b_bytes != kUnknownUtf8Bytes)
+                                    ? join_utf8_bytes(a, b, a_bytes, b_bytes)
+                                    : kUnknownUtf8Bytes;
+    if (a.m_buffer->is_utf16) {
+        return append_utf16_handle(a, b, utf8_bytes);
+    }
+    // `a` is ASCII storage while `b` lives in a UTF-16 block. If `b` is known
+    // to be pure ASCII (all units < 0x80), stay in 1-byte ASCII storage;
+    // otherwise promote `a + b` to a UTF-16 block (growing if `a` was extended).
+    if (b_bytes == b.m_units) {
+        const size_t total = size_t{a.m_units} + b.m_units;
+        if (total > kMaxBytes) js_throw_range_error("Invalid string length");
+        const uint32_t a_end = a.m_offset + a.m_units;
+        const uint64_t tag = current_thread_tag();
+        const bool newest = (a.m_buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                            (a.m_buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                             a.m_buffer->refs.load(std::memory_order_acquire) == 1);
+        const uint32_t moves = newest ? (a.m_buffer->moves < 1000 ? a.m_buffer->moves + 1 : a.m_buffer->moves) : 1;
+        size_t capacity = total;
+        if (moves >= 3) {
+            capacity = total + total / 2;
+            if (capacity > kMaxBytes) capacity = kMaxBytes;
+        }
+        Buffer* next = allocate(capacity, false);
+        next->moves = moves;
+        std::memcpy(next->bytes(), a.m_buffer->bytes() + a.m_offset, a.m_units);
+        narrow_units(b.m_buffer->utf16() + b.m_offset, next->bytes() + a.m_units, b.m_units);
+        next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+        t_stats.bytes_copied += total;
+        JsString result;
+        result.m_buffer = next;
+        result.m_units = static_cast<uint32_t>(total);
+        result.m_utf8_bytes.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+        return result;
+    }
+
+    const size_t total = size_t{a.m_units} + b.m_units;
+    if (total > kMaxUnits) js_throw_range_error("Invalid string length");
+    const uint32_t a_end = a.m_offset + a.m_units;
+    const uint64_t tag = current_thread_tag();
+    const bool newest = (a.m_buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                        (a.m_buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                         a.m_buffer->refs.load(std::memory_order_acquire) == 1);
+    const uint32_t moves = newest ? (a.m_buffer->moves < 1000 ? a.m_buffer->moves + 1 : a.m_buffer->moves) : 1;
+    size_t capacity = total;
+    if (moves >= 3) {
+        capacity = total + total / 2;
+        if (capacity > kMaxUnits) capacity = kMaxUnits;
+    }
+    Buffer* next = allocate(capacity, true);
+    next->moves = moves;
+    widen_bytes(a.m_buffer->bytes() + a.m_offset, next->utf16(), a.m_units);
+    t_stats.units_widened += a.m_units;
+    std::memcpy(next->utf16() + a.m_units, b.m_buffer->utf16() + b.m_offset, size_t{b.m_units} * sizeof(char16_t));
+    next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+    t_stats.bytes_copied += total * sizeof(char16_t);
+    JsString result;
+    result.m_buffer = next;
+    result.m_units = static_cast<uint32_t>(total);
+    result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
+    return result;
 }
 
 JsString JsString::concat(const JsString& a, std::string_view b) {
     if (b.empty()) return a;
-    const Scan scanned = scan(b);
+    const Scan scanned = scan_utf8(b);
     if (!scanned.well_formed) return concat(a, JsString(b));
-    if (a.empty()) return concat_settled(JsString(), b, scanned.units);
-    return concat_owed(a, b, scanned.units);
+    if (a.empty()) return from_checked(b, scanned.units, scanned.ascii);
+    if (!a.m_buffer->is_utf16 && scanned.ascii) {
+        return append_ascii(a, b);
+    }
+    if (a.m_buffer->is_utf16) {
+        return append_utf16_utf8(a, b, scanned.units, static_cast<uint32_t>(scanned.repaired_utf8_bytes));
+    }
+
+    // `a` is ASCII, `b` is non-ASCII UTF-8: promote `a + b` to UTF-16.
+    const size_t total = size_t{a.m_units} + scanned.units;
+    if (total > kMaxUnits) js_throw_range_error("Invalid string length");
+    const uint32_t a_end = a.m_offset + a.m_units;
+    const uint64_t tag = current_thread_tag();
+    const bool newest = (a.m_buffer->used.load(std::memory_order_relaxed) == a_end) ||
+                        (a.m_buffer->sole_thread.load(std::memory_order_acquire) == tag &&
+                         a.m_buffer->refs.load(std::memory_order_acquire) == 1);
+    const uint32_t moves = newest ? (a.m_buffer->moves < 1000 ? a.m_buffer->moves + 1 : a.m_buffer->moves) : 1;
+    size_t capacity = total;
+    if (moves >= 3) {
+        capacity = total + total / 2;
+        if (capacity > kMaxUnits) capacity = kMaxUnits;
+    }
+    Buffer* next = allocate(capacity, true);
+    next->moves = moves;
+    widen_bytes(a.m_buffer->bytes() + a.m_offset, next->utf16(), a.m_units);
+    decode_utf8_to_utf16(b, next->utf16() + a.m_units);
+    next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+    t_stats.bytes_copied += total * sizeof(char16_t);
+    t_stats.units_widened += total;
+    JsString result;
+    result.m_buffer = next;
+    result.m_units = static_cast<uint32_t>(total);
+    result.m_utf8_bytes.store(static_cast<uint32_t>(size_t{a.m_units} + b.size()), std::memory_order_relaxed);
+    return result;
 }
 
 JsString JsString::concat(std::string_view a, const JsString& b) {
     if (a.empty()) return b;
-    const Scan scanned = scan(a);
+    const Scan scanned = scan_utf8(a);
     if (!scanned.well_formed) return concat(JsString(a), b);
-    if (b.empty()) return from_checked(a, scanned.units);
-    const std::string_view written = b.written_view();
-    if (halves_meet(a, written)) {
-        return with_pending(merge_halves(a, written), b.m_pending);
+    if (b.empty()) return from_checked(a, scanned.units, scanned.ascii);
+    if (scanned.ascii && !b.m_buffer->is_utf16) {
+        const size_t total = scanned.units + b.m_units;
+        if (total > kMaxBytes) js_throw_range_error("Invalid string length");
+        return join_ascii(a, b.view(), total);
     }
-    const size_t total = a.size() + b.size();
-    if (total > kMaxBytes) js_throw_range_error("Invalid string length");
-    JsString result = join(a, written, scanned.units + b.m_units - (b.m_pending ? 1 : 0), total);
-    return with_pending(std::move(result), b.m_pending);
+
+    const size_t total = scanned.units + b.m_units;
+    if (total > kMaxUnits) js_throw_range_error("Invalid string length");
+    Buffer* next = allocate(total, true);
+    decode_utf8_to_utf16(a, next->utf16());
+    t_stats.units_widened += scanned.units;
+    if (!b.m_buffer->is_utf16) {
+        widen_bytes(b.m_buffer->bytes() + b.m_offset, next->utf16() + scanned.units, b.m_units);
+        t_stats.units_widened += b.m_units;
+    } else {
+        std::memcpy(next->utf16() + scanned.units, b.m_buffer->utf16() + b.m_offset,
+                    size_t{b.m_units} * sizeof(char16_t));
+    }
+    next->used.store(static_cast<uint32_t>(total), std::memory_order_relaxed);
+    t_stats.bytes_copied += total * sizeof(char16_t);
+
+    uint32_t utf8_bytes = kUnknownUtf8Bytes;
+    const uint32_t b_bytes = b.m_utf8_bytes.load(std::memory_order_relaxed);
+    if (b_bytes != kUnknownUtf8Bytes) {
+        const char16_t a_last = next->utf16()[scanned.units - 1];
+        const char16_t b_first = next->utf16()[scanned.units];
+        utf8_bytes = static_cast<uint32_t>(a.size() + b_bytes -
+                                           (is_high_surrogate(a_last) && is_low_surrogate(b_first) ? 2 : 0));
+    }
+    JsString result;
+    result.m_buffer = next;
+    result.m_units = static_cast<uint32_t>(total);
+    result.m_utf8_bytes.store(utf8_bytes, std::memory_order_relaxed);
+    return result;
 }
 
 int JsString::compare(std::string_view a, std::string_view b) noexcept {
@@ -736,6 +1064,21 @@ int JsString::compare(std::string_view a, std::string_view b) noexcept {
     return a_is_pair ? pair_order : -pair_order;
 }
 
+bool JsString::is_well_formed() const noexcept {
+    if (!m_buffer || !m_buffer->is_utf16 || m_units == 0) return true;
+    const char16_t* const u = m_buffer->utf16() + m_offset;
+    for (uint32_t i = 0; i < m_units; ++i) {
+        const char16_t c = u[i];
+        if (is_high_surrogate(c)) {
+            if (i + 1 >= m_units || !is_low_surrogate(u[i + 1])) return false;
+            ++i;
+        } else if (is_low_surrogate(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t JsString::find_lone_half(std::string_view utf8, size_t from) noexcept {
     // Two halves that meet are stored as one four-byte character, so a
     // three-byte sequence in the surrogate range (0xED, then 0xA0 or more) is
@@ -747,15 +1090,34 @@ size_t JsString::find_lone_half(std::string_view utf8, size_t from) noexcept {
 }
 
 JsString JsString::to_well_formed() const {
-    if (is_ascii()) return *this;
-    const std::string_view text = view();
-    size_t at = find_lone_half(text);
-    if (at == std::string_view::npos) return *this;
-    std::string fixed(text);
-    for (; at != std::string_view::npos; at = find_lone_half(text, at + 3)) {
-        fixed.replace(at, 3, "\xEF\xBF\xBD");        // U+FFFD: three bytes and one code unit, like the half
+    if (is_well_formed()) return *this;
+    Buffer* next = allocate(m_units, true);
+    const char16_t* const src = m_buffer->utf16() + m_offset;
+    char16_t* const dst = next->utf16();
+    for (uint32_t i = 0; i < m_units; ++i) {
+        const char16_t c = src[i];
+        if (is_high_surrogate(c)) {
+            if (i + 1 < m_units && is_low_surrogate(src[i + 1])) {
+                dst[i] = c;
+                dst[i + 1] = src[i + 1];
+                ++i;
+            } else {
+                dst[i] = 0xFFFD;
+            }
+        } else if (is_low_surrogate(c)) {
+            dst[i] = 0xFFFD;
+        } else {
+            dst[i] = c;
+        }
     }
-    return from_checked(fixed, m_units);
+    next->used.store(m_units, std::memory_order_relaxed);
+    t_stats.bytes_copied += size_t{m_units} * sizeof(char16_t);
+    JsString result;
+    result.m_buffer = next;
+    result.m_units = m_units;
+    const uint32_t known = m_utf8_bytes.load(std::memory_order_relaxed);
+    result.m_utf8_bytes.store(known, std::memory_order_relaxed);      // U+FFFD is 3 UTF-8 bytes, identical to a lone half
+    return result;
 }
 
 JsString::Stats JsString::stats() noexcept { return t_stats; }
@@ -766,8 +1128,11 @@ JsString::Stats JsString::stats() noexcept { return t_stats; }
 
 Utf16View::Utf16View(JsString string) : m_string(std::move(string)), m_size(m_string.length()) {
     if (m_size == 0) return;
-    if (m_string.is_ascii()) m_narrow = m_string.view().data();
-    else m_wide = m_string.wide();
+    if (m_string.has_ascii_storage()) {
+        m_narrow = m_string.m_buffer->bytes() + m_string.m_offset;
+    } else {
+        m_wide = m_string.m_buffer->utf16() + m_string.m_offset;
+    }
 }
 
 std::u16string Utf16View::copy(size_t begin, size_t count) const {
@@ -804,12 +1169,31 @@ size_t Utf16View::find(const Utf16View& needle, size_t from) const {
     if (needle.m_size == 0) return from;
     if (needle.m_size > m_size - from) return npos;
     if (!m_wide) {
-        if (needle.m_wide) return npos;         // ASCII text holds no unit above 0x7F
-        return std::string_view(m_narrow, m_size).find(std::string_view(needle.m_narrow, needle.m_size), from);
+        if (needle.m_wide && !needle.m_string.is_ascii()) return npos;         // ASCII text holds no unit above 0x7F
+        if (!needle.m_wide) {
+            return std::string_view(m_narrow, m_size).find(std::string_view(needle.m_narrow, needle.m_size), from);
+        }
+        // `needle` is an all-ASCII slice inside a UTF-16 block.
+        for (size_t at = from; at + needle.m_size <= m_size; ++at) {
+            bool match = true;
+            for (size_t j = 0; j < needle.m_size; ++j) {
+                if (static_cast<unsigned char>(m_narrow[at + j]) != needle.m_wide[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return at;
+        }
+        return npos;
     }
     if (needle.m_size == 1) return find(needle[0], from);
     if (needle.m_wide) {
         return std::u16string_view(m_wide, m_size).find(std::u16string_view(needle.m_wide, needle.m_size), from);
+    }
+    if (needle.m_size <= 64) {
+        char16_t buf[64];
+        widen_bytes(needle.m_narrow, buf, needle.m_size);
+        return std::u16string_view(m_wide, m_size).find(std::u16string_view(buf, needle.m_size), from);
     }
     const std::u16string widened = needle.copy();
     return std::u16string_view(m_wide, m_size).find(widened, from);
@@ -819,11 +1203,30 @@ size_t Utf16View::rfind(const Utf16View& needle, size_t from) const {
     if (needle.m_size > m_size) return npos;
     if (needle.m_size == 0) return from < m_size ? from : m_size;
     if (!m_wide) {
-        if (needle.m_wide) return npos;
-        return std::string_view(m_narrow, m_size).rfind(std::string_view(needle.m_narrow, needle.m_size), from);
+        if (needle.m_wide && !needle.m_string.is_ascii()) return npos;
+        if (!needle.m_wide) {
+            return std::string_view(m_narrow, m_size).rfind(std::string_view(needle.m_narrow, needle.m_size), from);
+        }
+        const size_t limit = from < m_size - needle.m_size ? from : m_size - needle.m_size;
+        for (size_t at = limit + 1; at-- > 0;) {
+            bool match = true;
+            for (size_t j = 0; j < needle.m_size; ++j) {
+                if (static_cast<unsigned char>(m_narrow[at + j]) != needle.m_wide[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return at;
+        }
+        return npos;
     }
     if (needle.m_wide) {
         return std::u16string_view(m_wide, m_size).rfind(std::u16string_view(needle.m_wide, needle.m_size), from);
+    }
+    if (needle.m_size <= 64) {
+        char16_t buf[64];
+        widen_bytes(needle.m_narrow, buf, needle.m_size);
+        return std::u16string_view(m_wide, m_size).rfind(std::u16string_view(buf, needle.m_size), from);
     }
     const std::u16string widened = needle.copy();
     return std::u16string_view(m_wide, m_size).rfind(widened, from);
@@ -833,6 +1236,10 @@ bool Utf16View::matches_at(size_t at, const Utf16View& other) const noexcept {
     if (at > m_size || other.m_size > m_size - at) return false;
     if (!m_wide && !other.m_wide) {
         return other.m_size == 0 || std::memcmp(m_narrow + at, other.m_narrow, other.m_size) == 0;
+    }
+    if (m_wide && other.m_wide) {
+        return other.m_size == 0 ||
+               std::memcmp(m_wide + at, other.m_wide, other.m_size * sizeof(char16_t)) == 0;
     }
     for (size_t i = 0; i < other.m_size; ++i) {
         if ((*this)[at + i] != other[i]) return false;

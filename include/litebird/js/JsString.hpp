@@ -10,106 +10,80 @@ namespace litebird {
 
 /// The text of a JavaScript string value.
 ///
-/// A JsString is a handle onto a block of bytes that never change once they
-/// are written, so any number of values can point at the same block. Copying a
-/// string value (reading a variable, passing an argument, binding `this`)
-/// copies this handle and bumps a count; the text itself is never copied.
+/// A JsString is a handle onto an immutable range of a refcounted block whose
+/// code units never change once written, so any number of values can point at
+/// the same block. Copying a string value (reading a variable, passing an
+/// argument, binding `this`) copies this handle and bumps a count; the text
+/// itself is never copied.
 ///
 /// Before this type existed a string value owned a private std::string. Every
 /// read of a variable copied the whole text, `s.length` re-counted it and
 /// `s[i]` re-scanned it, so a loop over a string of n characters did n*n
 /// work: 76 seconds for 200,000 characters. See AUDIT.md, finding 25.
 ///
-/// Length and indexing
+/// Storage and indexing (Phase 53)
 ///
-/// The text is UTF-8, because that is what the DOM, property keys and every
-/// output path of the engine use. Script, however, counts in UTF-16 code
-/// units: `"é".length` is 1 although the text is two bytes. The handle
-/// therefore carries the length in code units, worked out once when the
-/// string is created, and `length()` is a field read. A string whose two
-/// lengths agree is pure ASCII, and for those a code unit is a byte: `s[i]`
-/// is one array read. Any other string gets a UTF-16 copy the first time it is
-/// indexed; the copy is kept with the block, so the second index is an array
-/// read as well.
+/// Script counts and indexes text in UTF-16 code units (`char16_t`), and two
+/// halves of a surrogate pair (`\uD83D`, `\uDE00`) can be written, sliced,
+/// read, and later joined at any boundary. Storing pure-ASCII blocks as one
+/// byte per unit and non-ASCII blocks directly as UTF-16 code units (`char16_t`)
+/// means `s.length`, `s[i]`, `charCodeAt`, `indexOf`, `slice`, `RegExp`, and
+/// `Utf16View` all read contiguous memory in O(1) with no widening and no
+/// surrogate settling.
+///
+/// UTF-8 views (`view()`, `str()`) for ASCII blocks return the bytes directly;
+/// for UTF-16 blocks, UTF-8 bytes are materialized lazily onto a thread-safe
+/// cache owned by the block (or a slice entry when a handle splits a surrogate
+/// pair at either edge) and kept for the lifetime of the block.
 ///
 /// Appending
 ///
 /// A handle shows a range of its block. A block can have room after the text
-/// it holds, and `a + b` writes b into that room when a ends where the
-/// block's text ends. The result is a longer range of the same block; `a`
-/// still sees exactly the bytes it saw before, because bytes that have been
-/// written are never written again. Blocks that are being extended are given
-/// room to grow by half, so building a string of n bytes by appending costs
-/// n, however many appends it takes. Before, every `s += x` copied all of s:
-/// 100,000 appends took 9 seconds.
+/// it holds, and `a + b` writes b into that room when `a` ends where the
+/// block's written text ends (or when `a` is the sole owner of the block and
+/// no cached view covers the tail being rewritten). Blocks that keep growing
+/// are given room to grow by half, so building a string of n code units by
+/// appending costs O(n), even when alternating half-pair appends with reads
+/// or trailing slices (`s += '\uD83D'; s.indexOf('zz'); s += '\uDE00'`).
 ///
 /// Taking pieces
 ///
-/// `s.slice(a, b)` copies a small piece into a block of its own. A piece that
-/// is a quarter of its block or more is a new range of the same block
-/// instead, with nothing copied; the quarter bounds how much memory a piece
-/// can keep alive. A tokenizer that eats its input with `s = s.slice(n)`
+/// `s.substring(a, b)` copies a small piece into a block of its own. A piece
+/// that is a quarter of its block's capacity or more becomes a range of the
+/// same block instead, with nothing copied; the quarter bounds how much memory
+/// a piece can keep alive. A tokenizer eating its input with `s = s.slice(n)`
 /// therefore costs what it reads, not the length of what is left each time.
-///
-/// Well-formedness
-///
-/// Bytes that are not UTF-8 become U+FFFD when a string is created, exactly as
-/// a browser decodes a page, so the two lengths can never disagree. The one
-/// extension is that half a surrogate pair may stand alone (encoded in three
-/// bytes), since script can make one: `"\uD83D"`. Two halves that meet are
-/// always stored as the one four-byte character they spell, so equal strings
-/// have equal bytes.
-///
-/// The half that has not been written yet
-///
-/// `a + b` where a ends in a high half and b starts with the low half is one
-/// character, four bytes, where the two texts had six. Those four bytes start
-/// three bytes before the end of a, and bytes that have been written are never
-/// written again, so the join used to copy the whole of a into a new block.
-/// Building a string one half at a time (`s += '\uD83D'; s += '\uDE00'`) did
-/// that on every pair: 20,000 pairs took 5.6 s, 40,000 took 21 s. See AUDIT.md,
-/// finding 47.
-///
-/// So a high half at the very end of a join is not written at all. The handle
-/// keeps it in `m_pending`; `m_bytes` counts only the bytes in the block,
-/// `m_units` counts the half. When the low half arrives the character is
-/// written where the block's text ends, which is an ordinary append: nothing
-/// is copied and the loop above costs what it writes.
-///
-/// A handle in that state is settled the first time anything reads its text:
-/// `view()`, `wide()`, `str()`, a piece. Settling writes the three bytes after
-/// the block's text if that room is still free, which costs nothing, and
-/// otherwise copies the text once into a block the handle's own block keeps
-/// alive (the same arrangement as the UTF-16 form). Nothing about a settled
-/// handle is new: it is an ordinary range of a block.
 ///
 /// Threads
 ///
 /// Suspended async functions and workers run on other threads. Handles may be
 /// copied, read, appended to and dropped from several threads at once (the
-/// count, the claim on a block's free room and the UTF-16 copy are atomic);
-/// one handle object must not be written by two threads, like any value.
+/// refcount, the claim on a block's free room, the lazy UTF-8 cache, and
+/// per-handle lazy byte-count cache are atomic); one handle object must not
+/// be mutated by two threads concurrently, like any value.
 class JsString {
 public:
     /// Longest string, in bytes. Past it script gets `RangeError: Invalid
     /// string length`, as it does in every engine.
     static constexpr size_t kMaxBytes = (size_t{1} << 29) - 24;
+    static constexpr size_t kMaxUnits = kMaxBytes / sizeof(char16_t);
 
     JsString() noexcept = default;
-    /// Copies `utf8`. Malformed input is repaired, not rejected.
+    /// Copies `utf8`. Malformed input is repaired (U+FFFD; adjacent surrogate
+    /// halves become one pair), not rejected.
     explicit JsString(std::string_view utf8);
     static JsString from_utf16(std::u16string_view units);
     /// The one-unit string. ASCII units are shared and cost no allocation.
     static JsString from_unit(char16_t unit);
 
     JsString(const JsString& other) noexcept
-        : m_buffer(other.m_buffer), m_offset(other.m_offset), m_bytes(other.m_bytes),
-          m_unit_offset(other.m_unit_offset), m_units(other.m_units), m_pending(other.m_pending) {
+        : m_buffer(other.m_buffer), m_offset(other.m_offset), m_units(other.m_units),
+          m_utf8_bytes(other.m_utf8_bytes.load(std::memory_order_relaxed)) {
         retain();
     }
     JsString(JsString&& other) noexcept
-        : m_buffer(other.m_buffer), m_offset(other.m_offset), m_bytes(other.m_bytes),
-          m_unit_offset(other.m_unit_offset), m_units(other.m_units), m_pending(other.m_pending) {
+        : m_buffer(other.m_buffer), m_offset(other.m_offset), m_units(other.m_units),
+          m_utf8_bytes(other.m_utf8_bytes.load(std::memory_order_relaxed)) {
         other.forget();
     }
     JsString& operator=(const JsString& other) noexcept {
@@ -133,44 +107,41 @@ public:
     // --- The text as UTF-8 ------------------------------------------------------
 
     /// The bytes. Valid for as long as this handle, or any copy of it, lives.
-    /// Not NUL-terminated.
+    /// Not NUL-terminated. For ASCII blocks this is zero-copy; for UTF-16
+    /// blocks the UTF-8 form is materialized lazily and cached on the block.
     std::string_view view() const noexcept {
-        if (m_pending) return settled().view();
-        return m_buffer ? std::string_view(m_buffer->bytes() + m_offset, m_bytes) : std::string_view();
+        if (!m_buffer || m_units == 0) return std::string_view();
+        if (!m_buffer->is_utf16) return std::string_view(m_buffer->bytes() + m_offset, m_units);
+        return utf8_view();
     }
     /// An owned copy of the bytes. This is the one read here that always costs
     /// the length of the text; code that runs once per character must not call
-    /// it. `view()` costs nothing except the first read of a handle that owes
-    /// a half, which settles it (see below).
+    /// it.
     std::string str() const;
-    /// How many bytes `view()` holds, the pending half included.
-    size_t size() const noexcept { return m_bytes + (m_pending ? 3 : 0); }
-    bool empty() const noexcept { return m_bytes == 0 && m_pending == 0; }
+    /// How many UTF-8 bytes `view()` holds.
+    size_t size() const noexcept;
+    bool empty() const noexcept { return m_units == 0; }
 
     // --- The text as script sees it: UTF-16 code units -----------------------------
 
     /// What script calls `.length`.
     size_t length() const noexcept { return m_units; }
-    bool is_ascii() const noexcept { return m_pending == 0 && m_units == m_bytes; }
-    /// The code unit at `index`, which must be below length().
-    char16_t unit_at(size_t index) const {
-        if (m_pending) {
-            // The half is the last unit; everything before it is in the block.
-            if (index + 1 == m_units) return static_cast<char16_t>(m_pending);
-            return written().unit_at(index);
-        }
-        return is_ascii() ? static_cast<unsigned char>(m_buffer->bytes()[m_offset + index]) : wide()[index];
+    bool is_ascii() const noexcept {
+        if (!m_buffer || !m_buffer->is_utf16) return true;
+        return size() == m_units;
     }
-    /// length() code units. Only for strings that are not ASCII. Built the
-    /// first time it is asked for and kept for as long as the block is; the
-    /// pointer stays valid for as long as this handle, or any copy, lives.
+    /// The code unit at `index`, which must be below length().
+    char16_t unit_at(size_t index) const noexcept {
+        return m_buffer->is_utf16 ? m_buffer->utf16()[m_offset + index]
+                                  : static_cast<unsigned char>(m_buffer->bytes()[m_offset + index]);
+    }
+    /// length() code units. Only for strings that are not ASCII. For UTF-16
+    /// blocks this returns directly into the block with no allocation or copy;
+    /// the pointer stays valid for as long as this handle, or any copy, lives.
     const char16_t* wide() const {
-        if (m_pending) return settled().wide();
-        const Wide* cached = m_buffer->wide.load(std::memory_order_acquire);
-        if (cached && cached->units.load(std::memory_order_acquire) >= m_unit_offset + m_units) {
-            return cached->data() + m_unit_offset;
-        }
-        return widen();
+        if (!m_buffer) return nullptr;
+        if (m_buffer->is_utf16) return m_buffer->utf16() + m_offset;
+        return widen_ascii();
     }
     /// Code units [begin, end), clamped to the string. See "Taking pieces".
     JsString substring(size_t begin, size_t end) const;
@@ -181,29 +152,26 @@ public:
     static JsString concat(std::string_view a, const JsString& b);
 
     /// Orders text the way `<` and `sort()` do: by UTF-16 code unit. Negative,
-    /// zero or positive. Comparing the bytes is almost the same thing and is
-    /// what this does until the texts differ; it is wrong only for a character
-    /// outside the Basic Multilingual Plane, which has the highest bytes in
-    /// UTF-8 but is a surrogate pair, below U+E000, in UTF-16. Both arguments
-    /// must be text taken from a JsString.
+    /// zero or positive. Both arguments must be UTF-8 text taken from a JsString.
     static int compare(std::string_view a, std::string_view b) noexcept;
 
     friend bool operator==(const JsString& a, const JsString& b) noexcept {
         if (a.m_units != b.m_units) return false;
-        if (a.m_pending != b.m_pending) return a.view() == b.view();   // one of them has a half not yet written
-        if (a.m_bytes != b.m_bytes) return false;
-        if (a.m_buffer == b.m_buffer && a.m_offset == b.m_offset) return true;     // the same range of one block
-        return a.view() == b.view();
+        if (a.m_units == 0) return true;
+        if (a.m_buffer == b.m_buffer && a.m_offset == b.m_offset) return true;
+        return a.equals_units(b);
     }
     friend bool operator!=(const JsString& a, const JsString& b) noexcept { return !(a == b); }
-    friend bool operator==(const JsString& a, std::string_view b) noexcept { return a.view() == b; }
-    friend bool operator!=(const JsString& a, std::string_view b) noexcept { return a.view() != b; }
+    friend bool operator==(const JsString& a, std::string_view b) noexcept {
+        if (a.empty()) return b.empty();
+        if (!a.m_buffer->is_utf16) return a.view() == b;
+        return a.equals_utf8(b);
+    }
+    friend bool operator!=(const JsString& a, std::string_view b) noexcept { return !(a == b); }
 
     /// True when no half of a surrogate pair stands alone in the text, which is
     /// when the bytes are UTF-8 that anything outside the engine will accept.
-    bool is_well_formed() const noexcept {
-        return m_pending == 0 && (is_ascii() || find_lone_half(view()) == std::string_view::npos);
-    }
+    bool is_well_formed() const noexcept;
     /// The text with every lone half replaced by U+FFFD.
     JsString to_well_formed() const;
     /// Where the next lone half is encoded in `utf8`, at or after `from`, or
@@ -225,117 +193,101 @@ public:
     /// does not copy or re-scan text. The counters only grow; compare two
     /// readings.
     struct Stats {
-        uint64_t bytes_copied{0};      // bytes written into blocks or handed out by str()
-        uint64_t units_widened{0};     // code units converted to UTF-16
+        uint64_t bytes_copied{0};      // bytes written into blocks, UTF-8 caches, or handed out by str()
+        uint64_t units_widened{0};     // code units converted from narrow/UTF-8 to UTF-16
         uint64_t blocks{0};            // blocks allocated
     };
     static Stats stats() noexcept;
 
 private:
-    /// The UTF-16 form of the start of a block. `units` code units are ready,
-    /// made from the first `bytes` bytes; both only grow, and what is ready
-    /// never changes. It has room for anything the block can ever hold, so it
-    /// never moves. After the code units comes a table of marks: where in the
-    /// block's bytes every kMarkEvery-th code unit is, which is what lets a
-    /// piece be found by its index without reading the text before it.
-    struct Wide {
+    static constexpr uint32_t kUnknownUtf8Bytes = 0xFFFFFFFFu;
+    static constexpr size_t kMarkEvery = 256;
+    /// A piece shares its block when it is at least this fraction of the
+    /// block's capacity.
+    static constexpr size_t kShareDivisor = 4;
+
+    /// Cached UTF-8 bytes for `[0 .. units)` of a UTF-16 block, plus marks
+    /// mapping every kMarkEvery-th UTF-16 code unit to its UTF-8 byte offset.
+    /// Sized once at creation to hold any future appends in the block so it
+    /// never relocates.
+    struct Utf8Cache {
         std::atomic<uint32_t> units{0};
         uint32_t bytes{0};
-        uint32_t capacity{0};       // code units there is room for
-        uint32_t reserved{0};
+        uint32_t capacity_units{0};
+        uint32_t data_bytes{0};
+
+        char* data() noexcept { return reinterpret_cast<char*>(this + 1); }
+        const char* data() const noexcept { return reinterpret_cast<const char*>(this + 1); }
+        uint32_t* marks() noexcept { return reinterpret_cast<uint32_t*>(data() + data_bytes); }
+        const uint32_t* marks() const noexcept { return reinterpret_cast<const uint32_t*>(data() + data_bytes); }
+    };
+
+    /// Lazy UTF-16 copy if `wide()` is called explicitly on an ASCII block.
+    struct Wide {
+        std::atomic<uint32_t> units{0};
+        uint32_t capacity{0};
 
         char16_t* data() noexcept { return reinterpret_cast<char16_t*>(this + 1); }
         const char16_t* data() const noexcept { return reinterpret_cast<const char16_t*>(this + 1); }
-        /// marks()[k] describes code unit k * kMarkEvery: the byte where its
-        /// character starts, times two, plus one when the unit is the second
-        /// half of that character's surrogate pair.
-        uint32_t* marks() noexcept { return reinterpret_cast<uint32_t*>(data() + ((capacity + 1) & ~size_t{1})); }
-        const uint32_t* marks() const noexcept { return const_cast<Wide*>(this)->marks(); }
     };
-    static constexpr size_t kMarkEvery = 256;
-    /// A piece shares its block when it is at least this fraction of the
-    /// block's bytes.
-    static constexpr size_t kShareDivisor = 4;
 
-    /// The shared block: this header, then `capacity` bytes of text.
+    /// Shared immutable block: header followed by `capacity` `char` bytes (if
+    /// `!is_utf16`) or `capacity` `char16_t` units (if `is_utf16`).
     struct Buffer {
-        std::atomic<uint32_t> refs{1};
-        /// Bytes written so far. Room is claimed by moving this forward
-        /// (atomically) before the bytes are written.
-        std::atomic<uint32_t> used{0};
-        uint32_t capacity{0};
-        /// How many times in a row this text has moved to a bigger block
-        /// because something was appended to it.
-        uint32_t moves{0};
-        std::atomic<Wide*> wide{nullptr};
-        /// Texts of handles that owed a half and had to be copied to be read,
-        /// because the room after this block's text had been taken. A settled
-        /// copy never changes and is only ever added to, so readers walk the
-        /// list without a lock; it is freed with this block. See settled().
-        struct Settled {
-            std::atomic<Settled*> next{nullptr};
-            uint32_t offset{0};       // the handle this text was made for
+        struct Utf8Slice {
+            std::atomic<Utf8Slice*> next{nullptr};
+            uint32_t offset{0};
+            uint32_t units{0};
             uint32_t bytes{0};
-            uint32_t pending{0};
-            uint32_t text_offset{0};  // where the text starts in `text`
-            Buffer* text{nullptr};    // null when it is this block itself
+            uint32_t reserved{0};
+
+            char* data() noexcept { return reinterpret_cast<char*>(this + 1); }
+            const char* data() const noexcept { return reinterpret_cast<const char*>(this + 1); }
         };
-        std::atomic<Settled*> settled{nullptr};
+
+        std::atomic<uint32_t> refs{1};
+        /// Code units written so far. Room is claimed atomically before writing.
+        std::atomic<uint32_t> used{0};
+        /// Creator thread tag while unshared; cleared to 0 if another thread touches `used`.
+        std::atomic<uint64_t> sole_thread{0};
+        uint32_t capacity{0};
+        /// How many times in a row this text has moved to a bigger block on append.
+        uint32_t moves{0};
+        bool is_utf16{false};
+        std::atomic<Utf8Cache*> utf8{nullptr};
+        std::atomic<Utf8Slice*> utf8_slices{nullptr};
+        std::atomic<Wide*> wide_cache{nullptr};
 
         char* bytes() noexcept { return reinterpret_cast<char*>(this + 1); }
         const char* bytes() const noexcept { return reinterpret_cast<const char*>(this + 1); }
+        char16_t* utf16() noexcept { return reinterpret_cast<char16_t*>(this + 1); }
+        const char16_t* utf16() const noexcept { return reinterpret_cast<const char16_t*>(this + 1); }
     };
 
-    static Buffer* allocate(size_t capacity);
+    static Buffer* allocate(size_t capacity_units, bool is_utf16);
     static void destroy(Buffer* buffer) noexcept;
-    /// A new block holding `first` then `second`, with room for `capacity` bytes.
-    static JsString join(std::string_view first, std::string_view second, size_t units, size_t capacity);
-    /// A new block holding exactly `utf8`, which is known to be well-formed.
-    static JsString from_checked(std::string_view utf8, size_t units);
-    /// `a` followed by `more` (well-formed, `more_units` code units, and not a
-    /// low surrogate half after a high one). `a` must be settled.
-    static JsString append(const JsString& a, std::string_view more, size_t more_units);
-    /// `a` with `half` (0, or a high surrogate half) owed at its end. `a` must
-    /// be settled and its units must not count the half yet.
-    static JsString with_pending(JsString a, uint32_t half);
-    /// `a` followed by `more`, joining the halves that meet and deferring a
-    /// high half that ends the result. `more` is well-formed UTF-8, may be
-    /// empty, and `more_units` counts its code units.
-    static JsString concat_settled(const JsString& a, std::string_view more, size_t more_units);
-    /// This handle without its pending half: the bytes that are in the block.
-    /// O(1), nothing is written. Only for reading what is already there.
-    JsString written() const noexcept;
-    /// The bytes in the block, without the pending half. Never null data with
-    /// a size: an empty range gives an empty view.
-    std::string_view written_view() const noexcept;
-    /// A handle on a range of a block, holding one claim on it.
-    static JsString hold(Buffer* buffer, uint32_t offset, uint32_t bytes, uint32_t unit_offset, uint32_t units) noexcept;
-    /// Add a settled text to its block's list. The list only grows.
-    static void publish_settled(Buffer* buffer, Buffer::Settled* node) noexcept;
-    /// `a` (which may owe a half) followed by `more`, which is well-formed and
-    /// whose units are counted. The half `a` owes is joined or written first.
-    static JsString concat_owed(const JsString& a, std::string_view more, size_t more_units);
-    /// This handle with the pending half written into a block: an ordinary
-    /// range, the same text. Nothing is copied when the room after the block's
-    /// text is still free.
-    JsString settled() const;
-    /// A block holding this text, kept alive by `owner` for as long as any
-    /// handle reads from `owner`. For settling a handle whose room was taken.
-    static JsString settle_copy(const JsString& a);
-    const char16_t* widen() const;
-    /// A handle on bytes [byte_begin, byte_begin + bytes) of this string,
-    /// which are its code units [unit_begin, unit_begin + units).
-    JsString piece(size_t byte_begin, size_t bytes, size_t unit_begin, size_t units) const noexcept;
-    /// Where code unit `unit` (0 < unit < length()) starts, in bytes from the
-    /// start of this string; npos when it is the second half of a pair.
-    size_t byte_of_unit(size_t unit) const;
+    static JsString hold(Buffer* buffer, uint32_t offset, uint32_t units, uint32_t utf8_bytes) noexcept;
+    static JsString join_ascii(std::string_view first, std::string_view second, size_t capacity);
+    static JsString from_checked(std::string_view utf8, size_t units, bool ascii);
+    static JsString append_ascii(const JsString& a, std::string_view more);
+    static JsString append_utf16_handle(const JsString& a, const JsString& b, uint32_t utf8_bytes);
+    static JsString append_utf16_utf8(const JsString& a, std::string_view more, size_t more_units, uint32_t more_utf8_bytes);
+
+    std::string_view utf8_view() const noexcept;
+    std::string_view build_utf8_cache(uint32_t end) const noexcept;
+    std::string_view make_utf8_slice() const noexcept;
+    const char16_t* widen_ascii() const;
+    bool equals_units(const JsString& other) const noexcept;
+    bool equals_utf8(std::string_view utf8) const noexcept;
+    bool has_ascii_storage() const noexcept { return !m_buffer || !m_buffer->is_utf16; }
+
+    friend class Utf16View;
+
     void copy_fields(const JsString& other) noexcept {
         m_buffer = other.m_buffer;
         m_offset = other.m_offset;
-        m_bytes = other.m_bytes;
-        m_unit_offset = other.m_unit_offset;
         m_units = other.m_units;
-        m_pending = other.m_pending;
+        m_utf8_bytes.store(other.m_utf8_bytes.load(std::memory_order_relaxed), std::memory_order_relaxed);
     }
 
     void retain() const noexcept {
@@ -347,27 +299,20 @@ private:
     void forget() noexcept {
         m_buffer = nullptr;
         m_offset = 0;
-        m_bytes = 0;
-        m_unit_offset = 0;
         m_units = 0;
-        m_pending = 0;
+        m_utf8_bytes.store(0, std::memory_order_relaxed);
     }
 
-    Buffer* m_buffer{nullptr};      // null for the empty string
-    uint32_t m_offset{0};           // where this string starts in the block, in bytes
-    uint32_t m_bytes{0};
-    uint32_t m_unit_offset{0};      // how many code units the block holds before it
-    uint32_t m_units{0};
-    /// A high surrogate half (0xD800..0xDBFF) owed at the end of this text and
-    /// not yet written into the block, or 0. m_units counts it, m_bytes does
-    /// not. See "The half that has not been written yet" above.
-    uint32_t m_pending{0};
+    Buffer* m_buffer{nullptr};                   // null for the empty string
+    uint32_t m_offset{0};                        // start in code units (bytes or char16_t)
+    uint32_t m_units{0};                         // length in UTF-16 code units
+    mutable std::atomic<uint32_t> m_utf8_bytes{0}; // UTF-8 byte count, or kUnknownUtf8Bytes
 };
 
 /// A string addressed by UTF-16 code unit, which is how String.prototype and
-/// the regular-expression engine index text. Building one is cheap: an ASCII
-/// string is read in place, any other through its cached UTF-16 form. The
-/// view keeps the string alive.
+/// the regular-expression engine index text. Building one is free: an ASCII
+/// block is read in place, and a UTF-16 block already holds code units in place.
+/// The view keeps the string alive.
 class Utf16View {
 public:
     static constexpr size_t npos = static_cast<size_t>(-1);

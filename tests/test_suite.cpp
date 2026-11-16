@@ -7091,11 +7091,11 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(b.string_val.shares_text_with(a.string_val) && c.string_val.shares_text_with(a.string_val));
         assert(a.string_val.use_count() == 103);
         assert(strict_equals(a, c));
-        // The handle is a pointer and five 32-bit fields: where the text is,
-        // how long it is in bytes and in code units, and the high half it may
-        // owe at its end (finding 47). It was four fields, 24 bytes, before the
-        // owed half; the fifth costs one word of padding.
-        assert(sizeof(JsString) == 32);
+        // The handle is a pointer and three 32-bit fields: where the text is,
+        // its offset and length in UTF-16 code units, and its cached UTF-8
+        // byte count (24 bytes; Phase 53 removed the owed-half fifth word by
+        // storing non-ASCII strings directly as UTF-16).
+        assert(sizeof(JsString) == 24);
     }
 
     // --- Length and indexing ---------------------------------------------------------
@@ -7106,23 +7106,29 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(mixed.length() == 9 && mixed.size() == 12 && !mixed.is_ascii());
         assert(mixed.unit_at(1) == 0xE9 && mixed.unit_at(6) == 0xD83D && mixed.unit_at(7) == 0xDE00 && mixed.unit_at(8) == '!');
 
-        // Text that is not ASCII is converted to UTF-16 once, at the first
-        // index, and the conversion is kept with the text: a copy of the
-        // handle finds it there.
+        // Text that is not ASCII is widened to UTF-16 once when constructed;
+        // indexing it later widens nothing more, and its UTF-8 view is cached
+        // once on first `.view()` so copies share it.
         std::string body;
         for (int i = 0; i < 10000; ++i) body += "ab\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80";       // "abé中😀": 6 code units, 11 bytes
+        const auto built_before = JsString::stats();
         JsString text(body);
+        const auto built_after = JsString::stats();
         assert(text.length() == 60000 && text.size() == 110000);
-        const auto before = JsString::stats();
+        assert(built_after.units_widened - built_before.units_widened == 60000);
         uint64_t sum = 0;
         for (size_t i = 0; i < text.length(); ++i) sum += text.unit_at(i);
         const auto once = JsString::stats();
         assert(sum == 10000ull * ('a' + 'b' + 0xE9 + 0x4E2D + 0xD83D + 0xDE00));
-        assert(once.units_widened - before.units_widened == 60000);
+        assert(once.units_widened == built_after.units_widened && once.bytes_copied == built_after.bytes_copied);
         JsString copy = text;
         for (size_t i = 0; i < copy.length(); ++i) sum += copy.unit_at(i);
+        assert(text.view() == body);
+        const auto viewed_once = JsString::stats();
+        assert(viewed_once.bytes_copied - once.bytes_copied == body.size());
+        assert(copy.view() == body);
         const auto twice = JsString::stats();
-        assert(twice.units_widened == once.units_widened && twice.bytes_copied == before.bytes_copied);
+        assert(twice.units_widened == built_after.units_widened && twice.bytes_copied == viewed_once.bytes_copied);
 
         JsString empty;
         assert(empty.length() == 0 && empty.view().empty() && empty.use_count() == 0 && empty == JsString(""));
@@ -7199,11 +7205,14 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(rest.shares_text_with(wide_text) && rest.length() == 7197);
         assert(rest.unit_at(0) == 0xE9 && rest.unit_at(2) == 0xD83D && rest.unit_at(3) == 0xDE00);
         assert(rest.substring(0, 1) == std::string_view("\xC3\xA9"));
-        // A piece that starts between the two halves of a pair holds a lone
-        // half, which is not in the block as such: it is built, not shared.
+        // A piece that starts between the two halves of a pair still shares the
+        // UTF-16 block (`from_low_half` indexes straight at offset 6) and builds
+        // its own UTF-8 view only if `.view()` is asked for.
         JsString from_low_half = wide_text.substring(6, 8000);
-        assert(!from_low_half.shares_text_with(wide_text));
+        assert(from_low_half.shares_text_with(wide_text));
         assert(from_low_half.length() == 7994 && from_low_half.unit_at(0) == 0xDE00 && from_low_half.unit_at(1) == ' ');
+        assert(from_low_half.view().substr(0, 4) == "\xED\xB8\x80 ");
+        assert(from_low_half.to_well_formed().view().substr(0, 4) == "\xEF\xBF\xBD ");
         // Appending to a piece that ends where its block ends still works in place.
         JsString grown = JsString::concat(JsString::concat(JsString("0123456789abcdef"), JsString("0123456789abcdef")),
                                           JsString("0123456789abcdef"));
@@ -7273,9 +7282,9 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(!js.last_eval_failed());
         assert(js.global_env()->get("total").to_number() == 1326300000);
         assert(js.global_env()->get("marks").to_number() == 20000);
-        // The UTF-16 form is built once, at the first index: 60,000 units,
-        // not 60,000 units for each of the 180,000 reads.
-        assert(after.units_widened - counted.units_widened == 60000);
+        // The UTF-16 form is already in the block, so 180,000 reads widen none
+        // of `s` (at most the 1-unit `'\u4e2d'` script literal on parse).
+        assert(after.units_widened - counted.units_widened <= 1);
         // `s[i]` makes a string of one code unit: a few bytes each time.
         assert(after.bytes_copied - counted.bytes_copied < 400000);
     }
@@ -7418,61 +7427,59 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
 TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
     using namespace litebird;
 
-    // AUDIT.md, finding 47. `a + b` where a ends in a high half and b starts
-    // with the low one is a single four-byte character that starts three bytes
-    // before the end of a. Written bytes never change, so that join used to
-    // copy the whole of a. A join now owes the half instead of writing it, and
-    // the character is written where the block's text ends when the low half
-    // arrives. These checks pin what script can see of that: nothing.
+    // AUDIT.md, findings 47 and 59. Non-ASCII strings now live directly in
+    // UTF-16 blocks: joining a high half writes its 2-byte UTF-16 code unit,
+    // reading it builds a UTF-8 view lazily without settling UTF-8 into the
+    // string's backing units, and arriving with the low half appends 2 bytes in
+    // place even after the half was read.
     const JsString high = JsString::from_unit(0xD83D);
     const JsString low = JsString::from_unit(0xDE00);
     const std::string_view high_bytes("\xED\xA0\xBD", 3);
     const std::string_view pair_bytes("\xF0\x9F\x98\x80", 4);
 
-    // --- Owed: nothing is written, and the text reads as it always did ---------------
+    // --- High half appended to UTF-16 base: 2 bytes written; UTF-8 view cached once -
     {
-        const JsString abc("abc");
+        const JsString base = JsString::from_utf16(u"ab\x00e9");
         const auto before = JsString::stats();
-        const JsString owed = JsString::concat(abc, high);
+        const JsString with_high = JsString::concat(base, high);
         const auto after = JsString::stats();
-        // No block, no byte: the half is a field of the handle.
-        assert(after.blocks == before.blocks && after.bytes_copied == before.bytes_copied);
-        assert(owed.shares_text_with(abc));
-        assert(owed.length() == 4 && owed.size() == 6 && !owed.is_ascii() && !owed.is_well_formed());
-        assert(owed.unit_at(0) == 'a' && owed.unit_at(3) == 0xD83D);
-        // Reading it settles it: three bytes, once. Reading it again copies nothing.
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(with_high.shares_text_with(base));
+        assert(with_high.length() == 4 && with_high.size() == 7 && !with_high.is_ascii() && !with_high.is_well_formed());
+        assert(with_high.unit_at(0) == 'a' && with_high.unit_at(2) == 0xE9 && with_high.unit_at(3) == 0xD83D);
+        // Reading UTF-8 creates a separate Utf8Slice once; reading it again copies nothing.
         const auto read_before = JsString::stats();
-        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        assert(with_high.view() == std::string("ab\xC3\xA9") + std::string(high_bytes));
         const auto read_once = JsString::stats();
-        assert(read_once.bytes_copied - read_before.bytes_copied == 3);
-        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        assert(read_once.bytes_copied - read_before.bytes_copied == 7);
+        assert(with_high.view() == std::string("ab\xC3\xA9") + std::string(high_bytes));
         assert(JsString::stats().bytes_copied == read_once.bytes_copied);
-        assert(owed.str() == owed.view());
-        assert(JsString::stats().bytes_copied - read_once.bytes_copied == 6);      // str() hands out its own copy
-        assert(owed == JsString("abc\xED\xA0\xBD"));            // equal to the same text, written out
-        assert(abc == std::string_view("abc"));                 // and what it was joined to is untouched
-        assert(owed.substring(0, 2) == std::string_view("ab"));
-        assert(owed.substring(3, 4).length() == 1 && owed.substring(3, 4).unit_at(0) == 0xD83D);
-        assert(owed.to_well_formed() == JsString("abc\xEF\xBF\xBD"));
+        assert(with_high.str() == with_high.view());
+        assert(JsString::stats().bytes_copied - read_once.bytes_copied == 7);   // str() hands out its own copy
+        assert(with_high == JsString("ab\xC3\xA9\xED\xA0\xBD"));
+        assert(base == std::string_view("ab\xC3\xA9"));
+        assert(with_high.substring(0, 2) == std::string_view("ab"));
+        assert(with_high.substring(3, 4).length() == 1 && with_high.substring(3, 4).unit_at(0) == 0xD83D);
+        assert(with_high.to_well_formed() == JsString("ab\xC3\xA9\xEF\xBF\xBD"));
     }
 
-    // --- The low half arrives: one character, written after the text, nothing copied --
+    // --- The low half arrives: 2 UTF-16 bytes written in place, nothing copied --------
     {
         const JsString abc("abc");
-        const JsString owed = JsString::concat(abc, high);
+        const JsString with_high = JsString::concat(abc, high);               // promotes ASCII "abc" once to UTF-16
         const auto before = JsString::stats();
-        const JsString joined = JsString::concat(owed, low);
+        const JsString joined = JsString::concat(with_high, low);
         const auto after = JsString::stats();
+        assert(after.blocks == before.blocks);
+        assert(after.bytes_copied - before.bytes_copied == 2);                // 2 bytes for `low`, and nothing else
+        assert(joined.shares_text_with(with_high));                           // same UTF-16 block: nothing copied
         assert(joined.view() == std::string("abc") + std::string(pair_bytes));
         assert(joined.length() == 5 && joined.size() == 7 && joined.is_well_formed());
         assert(joined == JsString("abc\xF0\x9F\x98\x80"));
-        assert(joined.shares_text_with(abc));                    // the same block: nothing was copied
-        assert(after.blocks == before.blocks);
-        assert(after.bytes_copied - before.bytes_copied == 4);   // the character, and nothing else
         assert(abc == std::string_view("abc"));
     }
 
-    // --- A handle kept before the pair was completed still ends in a half ------------
+    // --- A handle kept or read before the pair was completed still reads the half ----
     {
         const JsString abc("abc");
         const JsString owed = JsString::concat(abc, high);
@@ -7481,36 +7488,39 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(kept.length() == 4 && kept.view() == std::string("abc") + std::string(high_bytes));
         assert(kept.unit_at(3) == 0xD83D && !kept.is_well_formed());
         assert(joined.length() == 5 && joined.view() == std::string("abc") + std::string(pair_bytes));
-        // Reading the kept half first writes it into the block; completing the
-        // pair then has to copy, because those bytes are now spoken for.
-        JsString other("xyz");
+        // Phase 53, finding 59: reading `read_first` before `low` arrives STILL
+        // lets `completed` append `low` in place and share the block.
+        JsString other = JsString::from_utf16(u"xy\x00e9");
         JsString read_first = JsString::concat(other, high);
-        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+        assert(read_first.view() == std::string("xy\xC3\xA9") + std::string(high_bytes));
+        const auto before = JsString::stats();
         const JsString completed = JsString::concat(read_first, low);
-        assert(completed.view() == std::string("xyz") + std::string(pair_bytes));
-        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+        const auto after = JsString::stats();
+        assert(completed.shares_text_with(read_first));
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(completed.view() == std::string("xy\xC3\xA9") + std::string(pair_bytes));
+        assert(read_first.view() == std::string("xy\xC3\xA9") + std::string(high_bytes));
     }
 
-    // --- Settling when the room after the text has been taken ------------------------
+    // --- Taking the room after the text forces a copy, once -------------------------
     {
-        JsString base("room enough for a few appends");
-        const JsString owed = JsString::concat(base, high);
-        const JsString sibling = JsString::concat(base, JsString("!"));      // takes the room
-        assert(sibling.view().back() == '!');
+        JsString base = JsString::from_utf16(u"room enough for a few \x00e9");
+        const JsString sibling = JsString::concat(base, JsString("!"));       // takes the room
+        const JsString owed = JsString::concat(base, high);                   // copies once into its own block
+        assert(sibling.view().back() == '!' && !owed.shares_text_with(base));
         const auto before = JsString::stats();
-        const std::string_view text = owed.view();                            // has to copy, once
-        assert(text == std::string("room enough for a few appends") + std::string(high_bytes));
-        assert(JsString::stats().bytes_copied - before.bytes_copied == owed.size());
+        const std::string_view text = owed.view();
+        assert(text == std::string("room enough for a few \xC3\xA9") + std::string(high_bytes));
+        assert(JsString::stats().bytes_copied - before.bytes_copied == text.size());
         const auto again = JsString::stats();
-        assert(owed.view() == text && JsString::stats().blocks == again.blocks);   // the copy is kept
-        // The copy outlives the handles that took the room, and `base` itself.
+        assert(owed.view() == text && JsString::stats().blocks == again.blocks);
         const std::string expected(text);
         {
             JsString only_owed = owed;
             base = JsString();
             assert(only_owed.view() == expected);
         }
-        assert(owed.view() == expected && owed.length() == 30);
+        assert(owed.view() == expected && owed.length() == 24);
     }
 
     // --- Every way round: two halves, a half and text, raw text on either side --------
@@ -7525,7 +7535,6 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(JsString::concat(low_then_high, low).view() ==
                std::string("abc") + std::string("\xED\xB8\x80", 3) + std::string(pair_bytes));
 
-        // The half is owed by the result however the text arrives.
         assert(JsString::concat(abc, high_bytes).view() == std::string("abc") + std::string(high_bytes));
         assert(JsString::concat(JsString::concat(abc, high_bytes), low).view() == std::string("abc") + std::string(pair_bytes));
         assert(JsString::concat(std::string_view("abc"), JsString::concat(abc, high)).view() == std::string("abcabc") + std::string(high_bytes));
@@ -7533,13 +7542,107 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(JsString::concat(JsString(), high).length() == 1);
         assert(JsString::concat(high, low).view() == pair_bytes);
         assert(JsString::concat(abc, JsString()).shares_text_with(abc));
-        // Text appended after the half: the half stands alone and is written.
         const JsString then_text = JsString::concat(JsString::concat(abc, high), JsString("z"));
         assert(then_text.view() == std::string("abc") + std::string(high_bytes) + "z" && then_text.length() == 5);
-        // A join of more than one unit owes only the last half.
         const JsString tail = JsString::concat(abc, std::string_view("q\xED\xA0\xBD", 4));
         assert(tail.length() == 5 && tail.unit_at(3) == 'q' && tail.unit_at(4) == 0xD83D);
         assert(JsString::concat(tail, low).view() == std::string("abcq") + std::string(pair_bytes));
+    }
+}
+
+TEST(js_string_completes_a_surrogate_pair_after_reading_without_copying) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 59 (Phase 53). Reading a string that ends in a high
+    // surrogate (`indexOf`, `charCodeAt`, `===`, `wide()`) does not mutate its
+    // UTF-16 buffer, so completing the pair afterward stays O(N) total copies.
+    {
+        JsInterpreter js;
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var s = '', n = 0;"
+            "for (var i = 0; i < 20000; i++) { s += '\\uD83D'; n += s.indexOf('zz'); s += '\\uDE00'; }"
+            "var len = s.length, cp0 = s.codePointAt(0), cpLast = s.codePointAt(s.length - 2);");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("n").to_number() == -20000);
+        assert(js.global_env()->get("len").to_number() == 40000);
+        assert(js.global_env()->get("cp0").to_number() == 0x1F600);
+        assert(js.global_env()->get("cpLast").to_number() == 0x1F600);
+        assert(after.bytes_copied - before.bytes_copied < 1000000);
+        assert(after.blocks - before.blocks < 64);
+    }
+
+    // The same when the high half comes from `substring` of a surrogate pair.
+    {
+        JsInterpreter js;
+        js.eval_ast("var h = '\\uD83D\\uDE00'.substring(0, 1), s = '', n = 0;");
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "for (var i = 0; i < 20000; i++) { s += h; n += s.charCodeAt(s.length - 1); s += '\\uDE00'; }");
+        const auto after = JsString::stats();
+        js.eval_ast("var pairs = 0; for (var ch of s) if (ch.length === 2) pairs++;");
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("n").to_number() == 20000.0 * 0xD83D);
+        assert(js.global_env()->get("pairs").to_number() == 20000);
+        assert(after.bytes_copied - before.bytes_copied < 1000000);
+        assert(after.blocks - before.blocks < 64);
+    }
+
+    // C++ `substring` ending in a high half, completed with the low half:
+    // (a) when the original string is kept, the original is untouched and the
+    // completed string is valid; (b) when the original is dropped so `refs == 1`,
+    // `concat` rewinds the buffer tail in place, even if `.view()` was read
+    // on the high-half slice before completion, while respecting any cache
+    // extending past the slice end.
+    const JsString low = JsString::from_unit(0xDE00);
+    {
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        JsString kept = full;
+        JsString piece = full.substring(0, full.length() - 1);
+        assert(piece.shares_text_with(full));
+        assert(piece.view().size() == 5003);
+        JsString completed = JsString::concat(piece, low);
+        assert(!completed.shares_text_with(full));
+        assert(full.unit_at(5001) == 0xDE00);
+        assert(completed.length() == 5002 && completed.view() == full.view());
+        assert(piece.view().size() == 5003 && kept.length() == 5002);
+    }
+    {
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        JsString piece = full.substring(0, full.length() - 1);
+        full = JsString();
+        assert(piece.use_count() == 1);
+        assert(piece.view().size() == 5003);                                  // Utf8Slice covers up to a_end, not past it
+        const auto before = JsString::stats();
+        JsString completed = JsString::concat(piece, low);
+        const auto after = JsString::stats();
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(completed.shares_text_with(piece));
+        assert(completed.length() == 5002 && completed.view().size() == 5004 && completed.is_well_formed());
+    }
+    {
+        // When `full.view()` cached UTF-8 past `piece`'s end before `full` was
+        // dropped, `cache_covers_past` prevents rewinding over cached data.
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        assert(full.view().size() == 5004);
+        JsString piece = full.substring(0, full.length() - 1);
+        full = JsString();
+        JsString sub_tail = piece.substring(4998, 5001);
+        assert(piece.use_count() == 1);
+        JsString other = JsString::concat(piece, JsString::from_unit(0xE9));
+        assert(!other.shares_text_with(piece));
+        assert(other.length() == 5002 && other.unit_at(5001) == 0xE9);
+        assert(sub_tail.view() == std::string("aa\xED\xA0\xBD"));
     }
 }
 
@@ -14650,6 +14753,7 @@ int main() {
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_owes_a_trailing_high_half_until_it_is_read);
+    RUN_TEST(js_string_completes_a_surrogate_pair_after_reading_without_copying);
     RUN_TEST(js_string_built_half_a_pair_at_a_time_costs_what_it_writes);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_property_maps_and_arrays_keep_their_order_through_front_edits);

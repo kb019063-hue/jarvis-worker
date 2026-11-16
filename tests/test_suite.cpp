@@ -11518,6 +11518,243 @@ static void test_canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings() {
     assert(pxA >= 120.0 && pxA <= 135.0);
 }
 
+static int canvas_lit_pixels(const litebird::CanvasRenderingContext2D& ctx) {
+    int count = 0;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) ++count;
+        }
+    }
+    return count;
+}
+
+static void canvas_ink_extent(const litebird::CanvasRenderingContext2D& ctx, int& min_x, int& max_x, int& min_y,
+                              int& max_y) {
+    min_x = ctx.width();
+    max_x = -1;
+    min_y = ctx.height();
+    max_y = -1;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+}
+
+TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
+    using namespace litebird;
+
+    // 1. The default state and the C++ members.
+    {
+        CanvasRenderingContext2D ctx(80, 40);
+        assert(ctx.font == "10px sans-serif");
+        assert(ctx.text_align == "start");
+        assert(ctx.text_baseline == "alphabetic");
+    }
+
+    // 2. measure_text: empty measures zero, width grows with glyph count,
+    //    and the metric boxes are populated.
+    {
+        CanvasRenderingContext2D ctx(400, 40);
+        const float empty_w = ctx.measure_text("").width;
+        const float narrow = ctx.measure_text("i").width;
+        const float wide = ctx.measure_text("WWWWWWWW").width;
+        assert(empty_w == 0.0f);
+        assert(narrow > 0.0f);
+        assert(wide > narrow);
+        const auto m = ctx.measure_text("Hello");
+        assert(m.width > 0.0f);
+        assert(m.actual_bounding_box_right > 0.0f);
+        assert(m.actual_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_descent > 0.0f);
+        assert(m.em_height_ascent == m.font_bounding_box_ascent);
+    }
+
+    // 3. fill_text paints with the current fill style.
+    {
+        CanvasRenderingContext2D ctx(120, 50);
+        ctx.font = "20px sans-serif";
+        ctx.fill_style = Color(255, 0, 0);
+        assert(canvas_lit_pixels(ctx) == 0);
+        ctx.fill_text("Hi", 5.0f, 40.0f);
+        assert(canvas_lit_pixels(ctx) > 10);
+    }
+
+    // 4. textAlign start vs center: the same pen x-position shifts the ink.
+    {
+        CanvasRenderingContext2D a(140, 40), b(140, 40);
+        a.font = "16px sans-serif";
+        b.font = "16px sans-serif";
+        a.text_align = "start";
+        b.text_align = "center";
+        a.fill_text("X", 70.0f, 30.0f);
+        b.fill_text("X", 70.0f, 30.0f);
+        int amin, amax, ay0, ay1, bmin, bmax, by0, by1;
+        canvas_ink_extent(a, amin, amax, ay0, ay1);
+        canvas_ink_extent(b, bmin, bmax, by0, by1);
+        assert(amax > amin && bmax > bmin);
+        assert(bmin < amin); // centered ink starts left of left-aligned ink
+        assert(bmax <= amax); // and ends no further right
+    }
+
+    // 5. textBaseline changes the vertical placement for the same y.
+    {
+        CanvasRenderingContext2D top_ctx(120, 60), alpha_ctx(120, 60), bottom_ctx(120, 60);
+        top_ctx.font = "16px sans-serif";
+        alpha_ctx.font = "16px sans-serif";
+        bottom_ctx.font = "16px sans-serif";
+        top_ctx.text_baseline = "top";
+        alpha_ctx.text_baseline = "alphabetic";
+        bottom_ctx.text_baseline = "bottom";
+        top_ctx.fill_text("Xg", 5.0f, 30.0f);
+        alpha_ctx.fill_text("Xg", 5.0f, 30.0f);
+        bottom_ctx.fill_text("Xg", 5.0f, 30.0f);
+        int t0, t1, t2, t3, a0, a1, a2, a3, b0, b1, b2, b3;
+        canvas_ink_extent(top_ctx, t0, t1, t2, t3);
+        canvas_ink_extent(alpha_ctx, a0, a1, a2, a3);
+        canvas_ink_extent(bottom_ctx, b0, b1, b2, b3);
+        assert(t2 > a2); // "top" ink starts lower than baseline-aligned ink
+        assert(b3 <= 31); // "bottom" ink ends at the em box bottom (the y passed), allowing ink overshoot
+    }
+
+    // 6. maxWidth condenses the run horizontally.
+    {
+        CanvasRenderingContext2D natural(320, 40), condensed(320, 40);
+        natural.font = "16px sans-serif";
+        condensed.font = "16px sans-serif";
+        natural.fill_text("WWWWWWWWWW", 0.0f, 30.0f);
+        condensed.fill_text("WWWWWWWWWW", 0.0f, 30.0f, 30.0f);
+        int n0, n1, n2, n3, c0, c1, c2, c3;
+        canvas_ink_extent(natural, n0, n1, n2, n3);
+        canvas_ink_extent(condensed, c0, c1, c2, c3);
+        assert(n1 > 0 && c1 > 0);
+        assert(c1 < n1);    // condensed ink is narrower
+        assert(c1 <= 36);   // and stays (almost) inside the requested width
+    }
+
+    // 7. strokeText paints an outline; a wider lineWidth paints more of it.
+    {
+        CanvasRenderingContext2D thin(200, 40), thick(200, 40);
+        thin.font = "24px sans-serif";
+        thick.font = "24px sans-serif";
+        thin.line_width = 1.0f;
+        thick.line_width = 6.0f;
+        thin.stroke_text("MMMM", 2.0f, 30.0f);
+        thick.stroke_text("MMMM", 2.0f, 30.0f);
+        const int thin_px = canvas_lit_pixels(thin);
+        const int thick_px = canvas_lit_pixels(thick);
+        assert(thin_px > 0);
+        assert(thick_px > thin_px);
+    }
+
+    // 8. A gradient fillStyle paints along the text, not flat.
+    {
+        CanvasRenderingContext2D g(400, 40);
+        g.font = "20px sans-serif";
+        auto grad = g.create_linear_gradient(0.0f, 0.0f, 400.0f, 0.0f);
+        grad->add_color_stop(0.0f, Color(255, 0, 0));
+        grad->add_color_stop(1.0f, Color(0, 0, 255));
+        g.fill_gradient = grad;
+        g.fill_text("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", 0.0f, 30.0f);
+        int min_x, max_x, min_y, max_y;
+        canvas_ink_extent(g, min_x, max_x, min_y, max_y);
+        assert(max_x > min_x + 50);
+        // Find a strongly covered pixel in the left third and in the right third.
+        auto strong_pixel = [&](int x0, int x1, int& r, int& b) {
+            for (int x = x0; x < x1; ++x) {
+                for (int y = 0; y < g.height(); ++y) {
+                    const uint32_t px = g.image_data()->get_pixel(x, y);
+                    if ((px >> 24) == 255) {
+                        const Color c = Color::from_argb(px);
+                        r = c.r;
+                        b = c.b;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        int lr = 0, lb = 0, rr = 0, rb = 0;
+        assert(strong_pixel(min_x, min_x + 60, lr, lb));
+        assert(strong_pixel(max_x - 60, max_x + 1, rr, rb));
+        assert(lr > lb); // left ink is reddish
+        assert(rb > rr); // right ink is bluish
+    }
+
+    // 9. save()/restore() round-trip the text state.
+    {
+        CanvasRenderingContext2D c(40, 20);
+        c.font = "bold 18px sans-serif";
+        c.text_align = "end";
+        c.text_baseline = "top";
+        c.save();
+        c.font = "9px sans-serif";
+        c.text_align = "center";
+        c.text_baseline = "bottom";
+        assert(c.font == "9px sans-serif");
+        c.restore();
+        assert(c.font == "bold 18px sans-serif");
+        assert(c.text_align == "end");
+        assert(c.text_baseline == "top");
+    }
+
+    // 10. End-to-end through the JS bindings: setters validate, text renders.
+    auto doc = HtmlParser::parse("<body><canvas id='c' width='120' height='60'></canvas></body>");
+    JsInterpreter interp(doc);
+    interp.eval(R"(
+        var ctx = document.getElementById('c').getContext('2d');
+        ctx.font = 'bold 20px sans-serif';
+        var fontAfterSet = ctx.font;
+        ctx.font = 'totally not a font';
+        var fontAfterInvalid = ctx.font;
+        ctx.textAlign = 'right';
+        ctx.textAlign = 'bogus-align';
+        var alignAfterInvalid = ctx.textAlign;
+        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'bogus-baseline';
+        var baselineAfterInvalid = ctx.textBaseline;
+        ctx.fillStyle = '#00ff00';
+        ctx.fillText('Hello', 5, 40);
+        ctx.fillText('Hello', 5, 40, 4);
+        ctx.strokeText('Hello', 70, 40);
+        ctx.fillText();
+        var m = ctx.measureText('Hello');
+        var w = m.width;
+        var wide = ctx.measureText('WWWWWWWW').width;
+        var narrow = ctx.measureText('i').width;
+        var boxRight = m.actualBoundingBoxRight;
+        var boxLeft = m.actualBoundingBoxLeft;
+        var boxAsc = m.actualBoundingBoxAscent;
+        var fontAsc = m.fontBoundingBoxAscent;
+        var alphaBase = m.alphabeticBaseline;
+        var emptyW = ctx.measureText('').width;
+    )");
+    assert(interp.eval("fontAfterSet").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("fontAfterInvalid").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("alignAfterInvalid").to_string() == "right");
+    assert(interp.eval("baselineAfterInvalid").to_string() == "middle");
+    assert(interp.eval("w").to_number() > 0.0);
+    assert(interp.eval("wide").to_number() > interp.eval("narrow").to_number());
+    assert(interp.eval("boxRight").to_number() > 0.0);
+    assert(interp.eval("boxLeft").to_number() <= interp.eval("boxRight").to_number());
+    assert(interp.eval("boxAsc").to_number() >= 0.0);
+    assert(interp.eval("fontAsc").to_number() > 0.0);
+    assert(interp.eval("alphaBase").to_number() == 0.0);
+    assert(interp.eval("emptyW").to_number() == 0.0);
+
+    auto canvas_el = doc->get_element_by_id("c");
+    assert(canvas_el != nullptr);
+    auto ctx_ptr = canvas_el->canvas_context();
+    assert(ctx_ptr != nullptr);
+    assert(canvas_lit_pixels(*ctx_ptr) > 5); // both fill and stroke drew green pixels
+}
+
 static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     using namespace litebird;
     // 1. Paths with W3C elliptical arc + compact flags, <defs>, gradient href inheritance,
@@ -13113,6 +13350,7 @@ int main() {
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
+    RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
 

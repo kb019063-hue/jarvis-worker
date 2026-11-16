@@ -59,6 +59,23 @@ public:
     int height() const { return m_nominal_height; }
     void resize(int w, int h);
 
+    /// Dimensions of a glyph-anchored text run, as CSS pixels. Ink boxes are
+    /// relative to the pen origin (the alignment point is not applied); the
+    /// font boxes come from the loaded font's em metrics.
+    struct TextMetrics {
+        float width{0.0f};
+        float actual_bounding_box_left{0.0f};
+        float actual_bounding_box_right{0.0f};
+        float actual_bounding_box_ascent{0.0f};
+        float actual_bounding_box_descent{0.0f};
+        float font_bounding_box_ascent{0.0f};
+        float font_bounding_box_descent{0.0f};
+        float em_height_ascent{0.0f};
+        float em_height_descent{0.0f};
+        float hanging_baseline{0.0f};
+        float ideographic_baseline{0.0f};
+    };
+
     /// False when the canvas was given a size that is over a limit of
     /// RasterBudget. It then has a backing store of one pixel: every drawing
     /// call is accepted and changes nothing, and the canvas paints blank.
@@ -79,6 +96,15 @@ public:
     float miter_limit{10.0f};
     std::vector<float> line_dash;
     float line_dash_offset{0.0f};
+
+    // Text state (CSS/Canvas font shorthand; invalid assignments are ignored
+    // by the `font` setter, keep the value valid at all times).
+    std::string font{"10px sans-serif"};
+    // "start" | "end" | "left" | "right" | "center" (direction is not
+    // implemented: "start" is "left" and "end" is "right").
+    std::string text_align{"start"};
+    // "top" | "hanging" | "middle" | "alphabetic" | "ideographic" | "bottom"
+    std::string text_baseline{"alphabetic"};
 
     // Gradients
     std::shared_ptr<CanvasGradient> fill_gradient{nullptr};
@@ -128,6 +154,13 @@ public:
     void clip(FillRule rule = FillRule::NonZero);
     bool is_point_in_path(float x, float y, FillRule rule = FillRule::NonZero) const;
 
+    // Text drawing. `max_width` <= 0 means "not given"; when the natural
+    // advance exceeds it, the run is condensed horizontally (glyphs are
+    // drawn narrower, not re-spaced).
+    void fill_text(const std::string& text, float x, float y, float max_width = -1.0f);
+    void stroke_text(const std::string& text, float x, float y, float max_width = -1.0f);
+    TextMetrics measure_text(const std::string& text) const;
+
     // Pixel manipulation
     std::vector<uint8_t> get_image_data_rgba(int sx, int sy, int sw, int sh) const;
     void put_image_data_rgba(const uint8_t* rgba, int w, int h, int dx, int dy);
@@ -163,12 +196,42 @@ private:
         float miter_limit{10.0f};
         std::vector<float> line_dash;
         float line_dash_offset{0.0f};
+        std::string font;
+        std::string text_align;
+        std::string text_baseline;
         std::shared_ptr<CanvasGradient> fill_gradient;
         std::shared_ptr<CanvasGradient> stroke_gradient;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };
     std::vector<SavedState> m_state_stack;
+
+    /// A glyph run rasterised into a tight coverage buffer, in CSS pixels at
+    /// the uncondensed size. `condense` is <= 1 when `max_width` requested it.
+    struct TextLayout {
+        std::vector<uint8_t> coverage; // width * height, coverage [0..255]
+        int width{0};
+        int height{0};
+        int baseline_px{0};   // row of the alphabetic baseline inside the buffer
+        float pad_x{2.0f};    // buffer column of the pen origin
+        float ascent{0.0f};   // px above baseline
+        float descent{0.0f};  // px below baseline
+        float advance{0.0f};  // natural (uncondensed) advance, px
+        float condense{1.0f}; // horizontal scale applied at draw time
+        float ink_left{0.0f};   // leftmost ink, px relative to the pen origin
+        float ink_right{0.0f};  // rightmost ink, px relative to the pen origin
+        float ink_ascent{0.0f}; // highest ink, px above the baseline
+        float ink_descent{0.0f};// lowest ink, px below the baseline
+    };
+    /// Rasterises `text` with the current `font` state. `max_width` <= 0
+    /// disables horizontal condensing. Never allocates more than kMaxText*px.
+    TextLayout layout_text(const std::string& text, float max_width) const;
+    /// Draws `coverage` into the backing store through the CTM, mapping each
+    /// device pixel back into the source with nearest/max sampling.
+    void blit_text(const TextLayout& layout, float dest_x, float dest_y, bool stroke);
+    /// Shared body of fill_text and stroke_text: alignment and baseline
+    /// resolution, then blit_text. `max_width` < 0 means "not given".
+    void draw_text_run(const std::string& text, float x, float y, float max_width, bool stroke);
 
     void allocate(int width, int height);
 

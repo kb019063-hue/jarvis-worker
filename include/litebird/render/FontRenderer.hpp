@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace litebird {
@@ -88,6 +89,16 @@ public:
 
     /// Measures exact horizontal advance of UTF-8 text in pixels.
     float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400);
+
+    /// Scaled em metrics for `font_size` px: the ascent above the baseline and
+    /// the descent below it (positive). Uses the bold font when one is loaded
+    /// and `font_weight` asks for bold. Falls back to (0.8em, 0.2em) when no
+    /// font is available, matching the embedded 8x8 fallback.
+    std::pair<float, float> em_ascent_descent(float font_size, int font_weight = 400) const;
+
+    /// Horizontal advance of one codepoint at `font_size` px (exact size, not
+    /// rounded to a whole pixel size). Sums to `measure_text` for a string.
+    float glyph_advance_px(uint32_t codepoint, float font_size, int font_weight = 400) const;
 
     /// Draws anti-aliased UTF-8 text whose line-box top is `(top_x, top_y)`.
     /// Calls `emit_pixel(px, py, coverage)` for every covered pixel (`coverage` in 1..255).

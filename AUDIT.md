@@ -61,6 +61,8 @@ The rest are documented with enough detail to act on.
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 | 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
+| 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
+| 52 | A canvas could draw every shape but no text: `fillText`/`strokeText`/`measureText` and the `font`/`textAlign`/`textBaseline` state did not exist, so no canvas text could reach the screen | **Medium** | ✅ Fixed (Phase 46) |
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 
@@ -2678,10 +2680,11 @@ with zero edits to `everyday*.dat` and with CI floors raised (`925 -> 926`,
 - **SVG features still missing:** `<text>`/`<tspan>`, `<style>` CSS stylesheet
   rules targeting SVG elements, `<pattern>`, `<mask>`, `<filter>` (`feGaussianBlur`,
   etc.), `<marker>`, `<image>` inside `<svg>`, and SMIL/CSS animations on SVG.
-- **Canvas 2D features still missing:** `fillText`/`strokeText`/`measureText`,
-  shadows (`shadowBlur`/`shadowColor`), `createPattern`, `Path2D`,
+- **Canvas 2D features still missing:** shadows (`shadowBlur`/`shadowColor`),
+  `createPattern`, `Path2D`,
   `drawImage(HTMLImageElement)` (only `ImageData` / canvas-to-canvas is wired),
   and remaining Porter-Duff / blend modes beyond the existing set.
+  (`fillText`/`strokeText`/`measureText` are implemented — Phase 46.)
 
 ---
 
@@ -3409,6 +3412,98 @@ custom constructor discards it. This is disclosed, not silenced or presented
 as a conformance gain. Array holes and the general collector audit are also
 outside this change.
 
+---
+## 52. ✅ Canvas 2D could draw every shape except text
+
+**The hole.** `CanvasRenderingContext2D` could draw paths, rectangles, arcs,
+gradients and images, and it had no text at all: `fillText`, `strokeText` and
+`measureText` did not exist, and neither did the `font`, `textAlign` and
+`textBaseline` state. A page that labelled a chart, drew a scoreboard or
+measured a string before laying it out got `undefined` for all three calls —
+`ctx.measureText('x').width` threw `TypeError` — so no canvas text reached the
+screen, by any route. The JavaScript-facing API and the property table the
+canvas context was built with both knew every other member.
+
+**The fix.** ROADMAP Wave 1, row 6 (the text gap); `include/litebird/render/
+FontRenderer.hpp`, `src/render/FontRenderer.cpp`,
+`include/litebird/render/Canvas2D.hpp`, `src/render/Canvas2D.cpp`.
+`FontRenderer` gained two public accessors (`em_ascent_descent`,
+`glyph_advance_px`) and `measure_text` now walks the same advances, so what
+measures is what draws. The canvas paints a glyph run as an anti-aliased
+coverage buffer (capped at 16384×512 px) blitted through the CTM by inverse
+mapping of the destination box — the `drawImage` idiom — with a max filter
+over the source span, so horizontal condensing never drops stems; gradient
+paint is sampled in user space, the same as `rasterize_paths`, and clip,
+`globalAlpha` and the composite operations go through `set_pixel_safe`. The
+`font` attribute parses the CSS shorthand subset (style, variant and stretch
+accepted and otherwise ignored, weight 100–1000 with ≥600 selecting the bold
+face, a required size in px/pt/em/rem/% with an optional validated
+`/line-height`, and a family list that is parsed and reflected but not used
+for rasterisation — the engine still has one regular and one bold system
+TrueType, Phase 36). An invalid `font` string is ignored and the previous
+value kept; so are unknown `textAlign`/`textBaseline` values. `textAlign` is
+`start` ≡ `left` (no `direction` yet); `textBaseline` is `top`, `hanging`
+(approximated at 0.8em above the alphabetic baseline), `middle`, `alphabetic`,
+`ideographic` (approximated at the bottom of the em box) and `bottom`.
+`maxWidth` condenses the whole run horizontally (true scale, floored at
+0.02×). `measureText` returns the whole `TextMetrics` set: `width`, the ink
+boxes `actualBoundingBoxLeft/Right/Ascent/Descent` (relative to the natural
+pen origin; the alignment point is not applied; can be negative), the font
+boxes `fontBoundingBoxAscent/Descent` and `emHeightAscent/Descent`,
+`hangingBaseline`, `ideographicBaseline` and `alphabeticBaseline` (0).
+`strokeText` is an outline band (dilate minus erode by half the line width of
+the binary glyph mask; lineWidth ≤ 1 yields the inner boundary ring), not a
+stroked vector path — it is placement-accurate and paint-accurate, but glyph
+corners get no joins or mitres, and that is documented in the header and in
+ARCHITECTURE.md, Phase 46.
+
+**How verified.** A new suite,
+`canvas_text_filltext_stroketext_measuretext_and_font_state` (ten parts:
+the default members; `measure_text` width ordering and metric boxes; a solid
+fillStyle; the `textAlign` ink shift; the `textBaseline` placement; the
+`maxWidth` ink bound; the stroke band widening with `lineWidth`; a gradient
+fillStyle painting along the run rather than flat; `save`/`restore`
+round-tripping the text state; the JavaScript bindings end to end — setter
+validation, invalid assignments ignored, `measureText`'s properties,
+`maxWidth`, rendering through the canvas context). A generated page (heading, gradient display type, stroked
+text, centred and condensed lines) rendered with `--render-png` paints all of
+it. The scores on the tree merged with `main` (Phase 42 and the
+table-completeness phase included):
+
+```
+make test            # 179 engine suites, all passing (178 before, +1)
+make conformance     # html5lib 1781/1792 — unchanged
+make js-conformance  # 926/940 — unchanged
+make dom-conformance # 644/644 — unchanged
+make url-conformance # 1188/1188 — unchanged
+make xml-conformance # 1718/1718 — unchanged
+make wpt             # 7968/8009; 41 listed, 0 fail and are not listed
+make diff-trees      # 6,000 of 6,000 pages equal to the corrected parse5
+make diff-xml        # 4,000 generated documents, 0 differ; 3,000/3,000 round trips
+make deep            # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
+make asan            # ASan/UBSan, re-run green on this merged tree (Phase 47/48):
+                     # XML ≥ its 1718 floor, WPT ≥ its 7968 floor with 0 unlisted,
+                     # JS ≥ its 924 ASan floor, DOM ≥ its 644 ASan floor; diff-xml 1,000
+                     # documents 0 DIFFER; round trip 1,000/1,000; fuzz (400 parser
+                     # mutations, 400 pipeline runs, 600 XML mutations of 3,074 documents,
+                     # the fuzz-xml round trip of 1,927 documents, 1,800 media) 0 findings;
+                     # asan-deep
+                     # 882 runs over 315 pages at depth 10,000 on a 2 MB stack,
+                     # 0 failed (slowest 3.5 s)
+```
+
+**What this does not change.** No `direction`/RTL or bidi, no kerning or
+ligatures, no use of the family list, no true vector glyph outlines under a
+rotated CTM (the axis-aligned AA texture is sampled by nearest), no stroke
+joins/mitres on glyph corners, ink boxes reported relative to the natural
+origin regardless of alignment, and a 16384×512 px cap on a rasterised run
+(paint truncates on the right; measurement is exact). SVG `<text>` and
+WebP/AVIF are still not there (row of the task table); path and hit-test
+gaps of ROADMAP row 6 remain. No expectation was re-recorded and no floor
+was lowered.
+
+---
+
 ## 53. ✅ A page was read as UTF-8 whatever it said it was (Phase 47)
 
 **The hole.** One decoder existed — `utf8_decode` — plus an XML declaration
@@ -3517,7 +3612,7 @@ the tree builder to the current WHATWG HTML `<select>` rules:
 **Verification.** `make conformance` **1792/1792 (100.0%)** across all 57
 html5lib `.dat` files (`webkit02.dat` 49/49, `tests1.dat` 112/112,
 `tests_innerHTML_1.dat` 81/81, `tests7.dat` 34/34); CI conformance floor
-raised `1781 -> 1792`. `make test` **180/180** suites (adding
+raised `1781 -> 1792`. `make test` **181/181** suites (adding
 `customizable_select_scope_and_formatting_rules` and
 `select_selectedcontent_cloning_and_edge_cases`). `make js-conformance`
 **926/940**, `make dom-conformance` **644/644**, `make url-conformance`
@@ -3528,9 +3623,9 @@ reduced patterns all matching current HTML `<select>` element retention / scope
 boundary vs `parse5`'s legacy drops), `make verify-media` **35/35**,
 `make fuzz-media` **1800/1800**, `make diff-strings` **50485/50580** (`95`
 known Unicode diffs), `make deep` **1332/1332** runs at 200k depth (0 failed),
-`make tsan` green, and ASan+UBSan (`build-asan`) green on all 180 unit suites,
+`make tsan` green, and ASan+UBSan (`build-asan`) green on all 181 unit suites,
 tree-construction (`1792/1792`), DOM (`644/644`), URL (`1188/1188`), JS
-(`925/940`), WPT (`7968/8009` on merged CI/Release floor), `fuzz_parser` (400),
+(`924/940`), WPT (`7968/8009` on merged CI/Release floor), `fuzz_parser` (400),
 `fuzz_pipeline` (400), `fuzz_xml` (600), `verify-media` (35), `fuzz-media`
 (1800), and `asan-deep` (882 runs at 10k depth).
 

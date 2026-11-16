@@ -850,14 +850,17 @@ promise rejects. A custom `then` is invoked while the iterator is open.
 `make verify-promise-iterators` prints `34/34` async cases with a 3-second
 limit; four new cases use hostile iterators and expectations independently
 checked with Node. The old binary passes 30/34, with timeouts. The full JS
-score is 911/925; `make test` passes 167 suites after the Phase 42
-frames and table-layout merges (163 before them). A page outside the corpus,
-through `tools/conformance/compare_with_jsdom.py`, prints `4 lines, 4 the
-same` after the fix, versus 0 before. A custom array iterator is still
+score is now 925/939 after merging Phase 44's identifiers (911/925 before
+that merge); `make test` passes 170 suites (163 on the original base). A page
+outside the corpus, through `tools/conformance/compare_with_jsdom.py`, prints
+`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator is still
 ignored by `js_iterate`'s array fast path, and subclassed Promises still
 make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
-After merging main's frame and table-layout PRs, the release checks pass
-167 suites and 5421/5463 WPT subtests; the JS score remains 911/925.
+The full release and sanitizer chain passed on the base tree, again after
+merging main's frames/table work, and again with Phase 44's Unicode identifiers:
+170/170 suites, JS 925/939 (924/939 ASan), WPT 5421/5463, 0 unlisted;
+`make fuzz` and `make tsan` passed. The CI JS floor is now 925 and the ASan
+floor is 923 (both raised, neither lowered).
 
 
 ### Page resource origin (Phase 33)

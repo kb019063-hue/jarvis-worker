@@ -3248,6 +3248,19 @@ cases clean, 882 deep runs 0 failed (slowest 2.4 s). `make fuzz` passed
 400/400/600 mutations with 0 findings; `make tsan` passed both stress
 harnesses under ThreadSanitizer and ASan. No ASan/UBSan/TSan report.
 
+After merging `main` at `020e0d5` (Phase 44's Unicode identifiers), a
+**third full chain** passed (`build/promise-third-chain.log`): 170 suites,
+JS 925/939, html5lib 1781/1792, DOM 640/640, URL 1188/1188, XML
+1702/1702, WPT 5421/5463 (0 unlisted), diff-trees 6000 pages and
+diff-xml 4000 docs 0 differing, deep 1332 runs 0 failed (slowest 16.6 s).
+ASan: 170 suites, JS 924/939, DOM/URL/XML/WPT unchanged, 1000 differential
+XML docs 0 DIFFER and 1000 round trips, 400/400/600 mutations 0 findings,
+1800 media fuzz clean, 882 deep runs 0 failed (slowest 2.7 s). The standalone
+`make fuzz` and `make tsan` passed. The normal CI JS floor is now **925**;
+the ASan floor was raised from 919 to **923** after the 924/939 sanitizer
+score was repeated with `--min-pass 923` (0 crashes/timeouts). No floor
+was lowered.
+
 **Still open.** `js_iterate`'s array fast path ignores an array's overridden
 `Symbol.iterator`: with `a=[1]` and an iterator yielding 9, `Promise.all(a)`
 returns `[1]` here and `[9]` in Node. The new task-table row names the

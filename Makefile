@@ -119,9 +119,9 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the normal build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. The last merged floor is 919; measure
-# the combined 939-case corpus under ASan before raising it again.
-JS_ASAN_FLOOR ?= 919
+# case that the normal build passes. Phase 45's merged tree scores 924/939
+# under ASan and 925/939 in Release. Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 923
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 640

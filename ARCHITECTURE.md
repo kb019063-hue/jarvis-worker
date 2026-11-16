@@ -4177,9 +4177,11 @@ clients and no other files' Promise calls changed.
 - `make verify-promise-iterators`: `34/34`, no crashes/timeouts; the baseline
   passes `30/34` and does not stop the unbounded cases. `python3
   tools/conformance/run_js_conformance.py --reference 'node -e' --filter
-  async --quiet` prints `34/34`. The full JS scoreboard is `911/925`.
-- `make test`: `163/163` on the original base; `167/167` after merging
-  the frames and table-layout PRs into the branch. The new suite checks the `return()` order for all
+  async --quiet` prints `34/34`. The full JS scoreboard is `925/939`
+  after Phase 44 (`911/925` before it).
+- `make test`: `163/163` on the original base, `167/167` after the frames
+  and table-layout PRs, and `170/170` after Phase 44's Unicode identifiers.
+  The new suite checks the `return()` order for all
   four methods, a single `resolve` getter before `Symbol.iterator`, and a
   throwing `then` getter on a still-live iterator.
 - `python3 tools/conformance/run_test262.py --binary
@@ -4226,6 +4228,21 @@ findings, 1800 media fuzz inputs clean, deep 882 runs/315 pages at depth
 0 findings; `make tsan` passed the model/thread stress under TSan and ASan.
 Both complete logs are in ignored `build/promise-chain.log` and
 `build/promise-merged-chain.log` for this working session.
+
+Finally, after merging `main` at `020e0d5` (Phase 44, Unicode identifiers),
+the **third full chain passed on the combined tree** (`build/promise-third-chain.log`):
+`make test` 170/170; JS 925/939, DOM 640/640, URL 1188/1188, XML 1702/1702,
+html5lib 1781/1792, WPT 5421/5463 (42 listed, 0 unlisted); diff-trees 6000
+pages 0 differing, diff-xml 4000 docs 0 differing, diff-strings at ceiling,
+deep 1332 runs/465 pages 0 failed (slowest 16.6 s). `make asan` 170/170,
+JS 924/939, DOM/URL/XML/WPT unchanged, 1000 XML differential docs 0 DIFFER
+and 1000 round trips, fuzz 400/parser + 400/pipeline + 600/XML mutations 0
+findings, media fuzz 1800 clean, ASan deep 882 runs/315 pages 0 failed
+(slowest 2.7 s). `make fuzz` and `make tsan` also passed. The CI release JS
+floor rose to 925; `JS_ASAN_FLOOR` rose from 919 to 923 only after running
+`ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_js_conformance.py
+--binary build-asan/litebird --quiet --timeout 60 --min-pass 923`, which printed
+`924/939`, 0 crashes/timeouts.
 
 ### 4. What remains
 

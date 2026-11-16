@@ -84,7 +84,7 @@ REPORTER = r"""
 """
 
 SCRIPT_SRC = re.compile(
-    r"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*)>\s*</script\s*>""",
+    r"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*?)(?:>\s*</script\s*>|/\s*>)""",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -140,19 +140,26 @@ def is_test_file(path: Path, suite: Path) -> bool:
         return False
     if any(part in ("resources", "support") for part in relative[:-1]):
         return False
-    return path.suffix == ".html"
+    return path.suffix in (".html", ".xhtml")
 
 
 def inline_scripts(page: Path, suite: Path) -> tuple[str, bool]:
     """The page with each external script put inline; and whether it uses the harness."""
     text = page.read_text(encoding="utf-8")
     uses_harness = False
+    is_xml = page.suffix == ".xhtml"
+
+    def wrap_script_body(attrs_before: str, attrs_after: str, body: str) -> str:
+        if is_xml:
+            return "<script" + attrs_before + attrs_after + "><![CDATA[" + body.replace("]]>", "]]]]><![CDATA[>") + "]]></script>"
+        body = re.sub(r"</(script)", r"<\\/\1", body, flags=re.IGNORECASE)
+        return "<script" + attrs_before + attrs_after + ">" + body + "</script>"
 
     def replace(match: re.Match) -> str:
         nonlocal uses_harness
         source = match.group(2).strip("\"'")
         if source.endswith("/resources/testharnessreport.js"):
-            return "<script>" + REPORTER + "</script>"
+            return wrap_script_body("", "", REPORTER)
         if source.endswith("/resources/testharness.js"):
             uses_harness = True
         target = suite / source.lstrip("/") if source.startswith("/") else page.parent / source
@@ -160,10 +167,7 @@ def inline_scripts(page: Path, suite: Path) -> tuple[str, bool]:
             # Left as it is: the engine will not load it, and the test says so.
             return match.group(0)
         body = target.read_text(encoding="utf-8")
-        # The end of an inline script is the first "</script"; inside
-        # JavaScript "<\/script" is the same text.
-        body = re.sub(r"</(script)", r"<\\/\1", body, flags=re.IGNORECASE)
-        return "<script" + match.group(1) + match.group(3) + ">" + body + "</script>"
+        return wrap_script_body(match.group(1), match.group(3), body)
 
     return SCRIPT_SRC.sub(replace, text), uses_harness
 
@@ -175,7 +179,13 @@ def run_file(binary: str, suite: Path, page: Path, workdir: Path, timeout: float
     staged = workdir / (relative.replace("/", "__"))
     staged.write_text(text, encoding="utf-8")
     empty = workdir / "empty.js"
-    command = [binary, "--run-script", str(empty), f"--url={ORIGIN}/{relative}", str(staged)]
+    command = [
+        binary,
+        "--run-script", str(empty),
+        f"--map-origin={ORIGIN}={suite}",
+        f"--url={ORIGIN}/{relative}",
+        str(staged),
+    ]
     env = dict(os.environ, TZ="UTC")
     try:
         completed = subprocess.run(command, capture_output=True, timeout=timeout, env=env)
@@ -280,7 +290,7 @@ def main() -> int:
     expectations_path = Path(args.expectations) if args.expectations else suite / "expected-failures.txt"
     expected = Expectations(expectations_path)
 
-    pages = sorted(p for p in suite.rglob("*.html") if is_test_file(p, suite))
+    pages = sorted(p for p in suite.rglob("*") if p.is_file() and is_test_file(p, suite))
     if args.filter:
         pages = [p for p in pages if args.filter in p.relative_to(suite).as_posix()]
     if not pages:

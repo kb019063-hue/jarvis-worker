@@ -3477,7 +3477,12 @@ make wpt             # 5421/5463; 42 listed, 0 fail and are not listed
 make diff-trees      # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml        # 4,000 generated documents, 0 differ; 3,000/3,000 round trips
 make deep            # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
-make asan            # ASan/UBSan: re-run on this tree; see below
+make asan            # ASan/UBSan, re-run green on the merged tree: unit suites
+                     # under ASan pass, XML 1702/1702, WPT ≥ its 5421 floor with 0
+                     # unlisted; diff-xml 1,000 documents 0 DIFFER; round trip 1,000/1,000;
+                     # fuzz (400 parser, 400 pipeline, 600 XML, 1,927 round-trip, 1,800
+                     # media) 0 findings; asan-deep 882 runs over 315 pages at depth
+                     # 10,000 on a 2 MB stack, 0 failed (slowest 4.3 s)
 ```
 
 **What this does not change.** No `direction`/RTL or bidi, no kerning or

@@ -374,9 +374,8 @@ void hook_children_changed(Node& parent, const NodeVector& added, const NodeVect
     note_children_changed(parent, added, removed, previous, next);
 }
 
-void hook_attribute_changed(Element& element, const std::string& name, const std::string* old_value,
-                            const std::string* new_value) {
-    note_attribute_changed(element, name, old_value, new_value);
+void hook_attribute_changed(Element& element, const AttributeChange& change) {
+    note_attribute_changed(element, change);
 }
 
 void hook_character_data_changed(Node& node, const std::string& old_value) {

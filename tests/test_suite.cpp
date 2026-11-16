@@ -31,6 +31,7 @@
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsIdentifierTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -11892,6 +11893,188 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     EventLoop::default_loop().tick();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 44: Unicode identifier tables, \u escapes in identifiers/private names,
+// escaped keyword/contextual-keyword rules, and Unicode line terminators.
+// ---------------------------------------------------------------------------
+
+TEST(js_unicode_identifier_tables_and_lexer_escapes) {
+    using namespace litebird;
+    // 1. Unicode 17.0 ID_Start / ID_Continue checks (ECMA-262 §12.7.1).
+    assert(is_js_id_start('a') && is_js_id_start('Z') && is_js_id_start('_') && is_js_id_start('$'));
+    assert(!is_js_id_start('0') && is_js_id_continue('0'));
+    assert(is_js_id_start(0x088Fu));       // Unicode 17.0 ID_Start
+    assert(is_js_id_start(0x1D49Cu));      // Astral mathematical script A
+    assert(!is_js_id_start(0x200Cu) && is_js_id_continue(0x200Cu)); // ZWNJ
+    assert(!is_js_id_start(0x200Du) && is_js_id_continue(0x200Du)); // ZWJ
+    assert(!is_js_id_start(0x2E2Fu) && !is_js_id_continue(0x2E2Fu)); // VERTICAL TILDE
+    assert(!is_js_id_start(0xD800u) && !is_js_id_continue(0xD800u)); // Surrogate
+    assert(!is_js_id_start(0x0023u) && !is_js_id_continue(0x0023u)); // '#'
+
+    // 2. Lexer token classification & source spans.
+    {
+        JsLexer lex(R"(\u0061\u{0000000062} \u0069f l\u0065t #\u{1D49C} #\u0069f)");
+        auto toks = lex.tokenize_all();
+        assert(toks.size() == 6); // 5 tokens + Eof
+        assert(toks[0].type == JsTokenType::Identifier && toks[0].text == "ab" && toks[0].has_escape);
+        assert(toks[1].type == JsTokenType::EscapedKeyword && toks[1].text == "if" &&
+               toks[1].is_keyword && toks[1].has_escape);
+        assert(toks[2].type == JsTokenType::Identifier && toks[2].text == "let" &&
+               !toks[2].is_keyword && toks[2].has_escape);
+        assert(toks[3].type == JsTokenType::PrivateName && toks[3].text == "#\xF0\x9D\x92\x9C" &&
+               !toks[3].is_keyword && toks[3].has_escape);
+        assert(toks[4].type == JsTokenType::PrivateName && toks[4].text == "#if" &&
+               !toks[4].is_keyword && toks[4].has_escape);
+    }
+
+    // 3. Invalid identifier escapes and non-ID Unicode chars must throw JsSyntaxError.
+    const char* bad_tokens[] = {
+        R"(\u0030)", R"(\u200C)", R"(\u200D)", R"(\u2E2F)", "\xE2\xB8\xAF",
+        R"(\uD835\uDC9C)", R"(\uD800)", R"(\u{110000})", R"(\u{})", R"(\u00)",
+        R"(\x61)", R"(a\u2E2F)", R"(a\u0020)", R"(1\u0061)",
+        R"(#\u0030)", R"(#\u200C)", R"(#\u2E2F)", R"(\u0023foo)"
+    };
+    for (const char* src : bad_tokens) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            (void)lex.tokenize_all();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_escaped_keywords_and_contextual_rules) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Valid IdentifierName positions (properties, member access, division after escaped keyword,
+    //    methods, getters, destructuring property keys, private fields/methods).
+    JsValue res = js.eval(R"js(
+        var o = { \u0069f: 12, cl\u0061ss() { return 3; }, get v\u0061r() { return 4; } };
+        var { \u0069f: x } = o;
+        class C {
+            #\u{1D49C} = 5;
+            #\u0069f = 6;
+            st\u0061tic() { return 7; }
+            g\u0065t() { return 8; }
+            \u0061sync() { return 9; }
+            c\u006Fnstructor(v) { this.v = v; }
+            sum() { return this.#\u{1D49C} + this.#if + this.static() + this.get() + this.async() + this.v; }
+        }
+        var p = { __pr\u006Fto__: { k: 10 } };
+        (o.\u0069f / 2) + o.cl\u0061ss() + o.v\u0061r + x + new C(1).sum() + p.k
+    )js");
+    assert(res.type == JsType::Number && res.to_number() == 6 + 3 + 4 + 12 + (5 + 6 + 7 + 8 + 9 + 1) + 10);
+
+    // 2. Escaped reserved words and contextual keywords must be rejected in syntax/binding/shorthand slots.
+    const char* bad_scripts[] = {
+        R"(v\u0061r x = 1;)",
+        R"(l\u0065t x = 1;)",
+        R"(c\u006Fnst x = 1;)",
+        R"(\u0069f (true) {})",
+        R"(var \u0069f = 1;)",
+        R"(({ \u0069f }))",
+        R"(var { \u0069f } = { if: 1 };)",
+        R"(\u0069f: 1;)",
+        R"(class C { st\u0061tic m() {} })",
+        R"(class C { g\u0065t x() {} })",
+        R"(class C { s\u0065t x(v) {} })",
+        R"(class C { \u0061sync m() {} })",
+        R"(({ g\u0065t x() {} }))",
+        R"(({ \u0061sync m() {} }))",
+        R"(\u0061sync function f() {})",
+        R"(\u0061sync x => x)",
+        R"(\u0061sync (x) => x)",
+        R"(for (var a \u006Ff [1]) {})",
+        R"(function f() { return new.t\u0061rget; })",
+        R"(let l\u0065t = 1;)",
+        R"(const l\u0065t = 1;)"
+    };
+    for (const char* src : bad_scripts) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Sloppy-mode contextual identifiers, class await, FunctionExpression own [Yield, Await],
+    //    escaped labels, Function.prototype.toString preservation, and Unicode whitespace/line terminators.
+    JsValue ok = js.eval(R"js(
+        var l\u0065t = 1, yi\u0065ld = 2, aw\u0061it = 3;
+        var clsName;
+        { class aw\u0061it {} clsName = aw\u0061it.name; }
+        var fnRes = 0;
+        class C {
+            static {
+                fnRes = (function await(await) { return await; })(42);
+            }
+        }
+        var genOk = false;
+        var g = { *m() { genOk = typeof (function yield() {}) === 'function'; } };
+        g.m().next();
+        var lbl = 0;
+        \u0061bc: { lbl = 1; break a\u0062c; lbl = 2; }
+        function f\u006Fo() { return 1; }
+        l\u0065t === 1 && yi\u0065ld === 2 && aw\u0061it === 3 &&
+        clsName === 'await' && fnRes === 42 && genOk && lbl === 1 &&
+        f\u006Fo.name === 'foo' && f\u006Fo.toString() === 'function f\\u006Fo() { return 1; }'
+    )js");
+    assert(ok.type == JsType::Boolean && ok.is_truthy());
+
+    // 2. Unicode whitespace (U+3000, U+2000), U+2028/U+2029 hashbang/ASI/string line continuation.
+    JsValue ws = js.eval("#!bang\xE2\x80\xA8var x = 1\xE3\x80\x80+\xE2\x80\x80" "2\xE2\x80\xA9" "x + (\"a\\\xE2\x80\xA8" "b\" === \"ab\" ? 10 : 0)");
+    assert(ws.type == JsType::Number && ws.to_number() == 13);
+
+    // 3. Strict-mode future reserved words, async/generator/static-block early errors, regex LS/PS.
+    const char* bad_ctx[] = {
+        R"("use strict"; var l\u0065t = 1;)",
+        R"("use strict"; var st\u0061tic = 1;)",
+        R"("use strict"; var im\u0070lements = 1;)",
+        R"("use strict"; ({ l\u0065t } = { let: 1 });)",
+        R"(class l\u0065t {})",
+        R"(class st\u0061tic {})",
+        R"(class yi\u0065ld {})",
+        R"(async function f() { var aw\u0061it = 1; })",
+        R"(async function f() { aw\u0061it: ; })",
+        R"(function* g() { var yi\u0065ld = 1; })",
+        R"(function* g() { yi\u0065ld: ; })",
+        R"(var f = async function aw\u0061it() {};)",
+        R"(var f = function* yi\u0065ld() {};)",
+        R"(class S { static { argument\u0073; } })",
+        R"(class S { static { (class { [argument\u0073]() {} }); } })",
+        R"(class S { x = argument\u0073; })",
+        R"(class S { static { var aw\u0061it = 1; } })",
+        R"(class S { static { ((x = await) => 0); } })",
+        R"(function* g() { ((x = yield) => 0); })",
+        "/a\xE2\x80\xA8/",
+        "/a\xE2\x80\xA9/"
+    };
+    for (const char* src : bad_ctx) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
 // =========================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
@@ -12355,6 +12538,11 @@ int main() {
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
     RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
+
+    // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.
+    RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);
+    RUN_TEST(js_escaped_keywords_and_contextual_rules);
+    RUN_TEST(js_strict_async_generator_identifier_context_and_line_terminators);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -1,0 +1,249 @@
+#name escaped ascii and leading-zero code point identifiers
+#code
+var \u0061 = 10, \u{0000000062} = 20, \u0024x = 3, \u005Fy = 4, a\u0030 = 5;
+console.log(a, b, $x, _y, a0, \u0061 + \u{62});
+#expect
+10 20 3 4 5 30
+
+#name astral unicode and unicode 17 identifier escapes
+#code
+var \u{1D49C} = 11;
+var \u088F = 22;
+var z\u200C = 33;
+var z\u200D = 44;
+console.log(\u{1D49C}, \u088F, z\u200C, z\u200D, \u{1D49C} === 𝒜);
+#expect
+11 22 33 44 true
+
+#name invalid identifier starts and escape sequences are syntax errors
+#code
+var bad = [
+  'var \\u0030 = 1',
+  'var \\u200C = 1',
+  'var \\u200D = 1',
+  'var \\u2E2F = 1',
+  'var \u2E2F = 1',
+  'var \\u0023a = 1',
+  'var \\uD835\\uDC9C = 1',
+  'var \\uD800 = 1',
+  'var \\u{D800} = 1',
+  'var \\u{110000} = 1',
+  'var \\u{} = 1',
+  'var \\u00 = 1',
+  'var \\x61 = 1',
+  'var a\\u2E2F = 1',
+  'var a\u2E2F = 1',
+  'var a\\u0020 = 1',
+  'var a\\uD800 = 1',
+  '1\\u0061',
+  '/a/\\u0067'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(ok, bad.length);
+#expect
+true 19
+
+#name escaped reserved words cannot be used as keywords
+#code
+var bad = [
+  'v\\u0061r x = 1',
+  'c\\u006Fnst x = 1',
+  'l\\u0065t x = 1',
+  '\\u0069f (true) {}',
+  'f\\u0075nction f() {}',
+  'cl\\u0061ss C {}',
+  'tr\\u0075e',
+  'f\\u0061lse',
+  'n\\u0075ll',
+  'th\\u0069s',
+  'n\\u0065w Object()',
+  'for (var k \\u0069n {}) {}'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(ok, bad.length);
+#expect
+true 12
+
+#name escaped reserved words cannot be bindings references labels or shorthand
+#code
+var bad = [
+  'var \\u0069f = 1',
+  'var v\\u0061r = 1',
+  'var tr\\u0075e = 1',
+  'var n\\u0075ll = 1',
+  'var \\u0065num = 1',
+  '({ \\u0069f })',
+  'var { \\u0069f } = { if: 1 }',
+  '({ \\u0069f } = { if: 1 })',
+  '\\u0069f: 1',
+  'class \\u0069f {}'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(ok, bad.length);
+#expect
+true 10
+
+#name escaped reserved words are valid property member and method names
+#code
+var obj = { \u0069f: 10, cl\u0061ss() { return 20; }, get v\u0061r() { return 30; } };
+var { \u0069f: a } = obj;
+class C { \u0069f() { return 40; } }
+console.log(obj.\u0069f, obj.\u0069f / 2, obj.cl\u0061ss(), obj.v\u0061r, a, new C().\u0069f());
+#expect
+10 5 20 30 10 40
+
+#name private names with unicode escapes and invalid private names
+#code
+class Box {
+  #\u0061 = 7;
+  #\u{1D49C} = 8;
+  #\u0069f = 9;
+  #k\u200C = 10;
+  read() { return [this.#a, this.#\u{1D49C}, this.#if, this.#k\u200C]; }
+}
+var bad = [
+  'class A { #\\u0030 = 1; }',
+  'class A { #\\u200C = 1; }',
+  'class A { #\\u200D = 1; }',
+  'class A { #\\u2E2F = 1; }',
+  'class A { \\u0023x = 1; }'
+];
+var rejected = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(new Box().read().join(','), rejected);
+#expect
+7,8,9,10 true
+
+#name escaped contextual keywords cannot act as modifiers or syntax
+#code
+var bad = [
+  'class C { st\\u0061tic m() {} }',
+  'class C { g\\u0065t x() {} }',
+  'class C { s\\u0065t x(v) {} }',
+  'class C { \\u0061sync m() {} }',
+  'class C { st\\u0061tic {} }',
+  '({ g\\u0065t x() {} })',
+  '({ s\\u0065t x(v) {} })',
+  '({ \\u0061sync m() {} })',
+  '\\u0061sync function f() {}',
+  '(\\u0061sync function() {})',
+  '\\u0061sync x => x',
+  '\\u0061sync (x) => x',
+  'for (var x \\u006Ff [1]) {}',
+  'function f() { return new.t\\u0061rget; }'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(ok, bad.length);
+#expect
+true 14
+
+#name escaped contextual keywords remain valid ordinary property and method names
+#code
+class C {
+  st\u0061tic() { return 1; }
+  g\u0065t() { return 2; }
+  s\u0065t() { return 3; }
+  \u0061sync() { return 4; }
+  static st\u0061tic = 5;
+}
+var o = { g\u0065t() { return 6; }, \u0061sync() { return 7; } };
+var c = new C();
+console.log(c.static(), c.get(), c.set(), c.async(), C.static, o.get(), o.async());
+#expect
+1 2 3 4 5 6 7
+
+#name escaped constructor and proto preserve string-value semantics
+#code
+class D { c\u006Fnstructor(v) { this.v = v; } }
+var p = { __pr\u006Fto__: { inherited: 42 } };
+console.log(new D(9).v, p.inherited);
+#expect
+9 42
+
+#name escaped let yield and await in sloppy mode versus reserved contexts
+#code
+var l\u0065t = 1, yi\u0065ld = 2, aw\u0061it = 3;
+var clsName;
+{ class aw\u0061it {} clsName = aw\u0061it.name; }
+var bad = [
+  'let l\\u0065t = 1',
+  'const l\\u0065t = 1',
+  '"use strict"; var l\\u0065t = 1',
+  '"use strict"; var yi\\u0065ld = 1',
+  '"use strict"; var st\\u0061tic = 1',
+  '"use strict"; var im\\u0070lements = 1',
+  '"use strict"; ({ l\\u0065t } = { let: 1 })',
+  'class l\\u0065t {}',
+  'class st\\u0061tic {}',
+  'class yi\\u0065ld {}',
+  'function* g() { yi\\u0065ld 1; }',
+  'function* g() { var yi\\u0065ld = 1; }',
+  'function* g() { yi\\u0065ld: ; }',
+  'async function f() { aw\\u0061it 1; }',
+  'async function f() { var aw\\u0061it = 1; }',
+  'async function f() { aw\\u0061it: ; }'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(l\u0065t, yi\u0065ld, aw\u0061it, clsName, ok, bad.length);
+#expect
+1 2 3 await true 16
+
+#name function expressions bind their own yield and await parameters
+#code
+var out = [];
+class C {
+  static {
+    out.push(typeof (function await(await) { return await; }));
+  }
+}
+var g = { *m() { out.push(typeof (function yield() {})); } };
+g.m().next();
+var bad = [
+  'var f = async function aw\\u0061it() {}',
+  'var f = function* yi\\u0065ld() {}',
+  'class S { static { argument\\u0073; } }',
+  'class S { static { (class { [argument\\u0073]() {} }); } }',
+  'class S { x = argument\\u0073; }',
+  'class S { static { var aw\\u0061it = 1; } }'
+];
+var ok = bad.every(function (src) {
+  try { eval(src); return false; } catch (e) { return e.name === 'SyntaxError'; }
+});
+console.log(out.join(','), ok);
+#expect
+function,function true
+
+#name escaped labels and function toString preserve source text
+#code
+var hit = 0;
+\u0061bc: {
+  hit = 1;
+  break a\u0062c;
+  hit = 2;
+}
+function f\u006Fo() { return 1; }
+console.log(hit, f\u006Fo.name, f\u006Fo.toString());
+#expect
+1 foo function f\u006Fo() { return 1; }
+
+#name unicode whitespace line terminators and string leading-zero escape
+#code
+var a = eval('1\u3000+\u20002');
+var b = eval('var x = 1\u2028x + 4');
+var s = eval('"a\\\u2028b"') + "\u{0000000043}";
+var badRegex = false;
+try { eval('/a\u2028/'); } catch (e) { badRegex = e.name === 'SyntaxError'; }
+console.log(a, b, s, badRegex);
+#expect
+3 5 abC true

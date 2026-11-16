@@ -360,7 +360,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
 | **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 181/181 unit suites; CI floor `1781 → 1792`) |
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
-| **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (192/192 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
+| **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 
 ---
 
@@ -5503,6 +5503,36 @@ name — so `tools/fuzz/xml_roundtrip.py` now makes one `xmlns` or the other and
 never both; before this phase the second replaced the first, so the corpus
 never met the case. The 3,000-tree round trip still comes back 3,000/3,000.
 
+## Phase 52 Architecture: Repairing `main` After the Phase 49 and Phase 51 Merges
+
+A repair, not a phase of its own: `main` at `57a94be` did not compile. Phase 49
+(#58) had added `clone_node_tree` for `<selectedcontent>` cloning, and it copied
+an element's attributes and then called `element->copy_attribute_namespaces(from)`.
+Phase 51 (#60) deleted that method with the `AttributeNamespaces` side table: an
+`Attribute` carries its own namespace now, an interned `const std::string*`, so
+`element->m_attributes = from.m_attributes` copies the namespaces too. Both
+pull requests were green on their own head commit, each tested against a `main`
+that did not yet contain the other, and the merge of the two had never been
+compiled.
+
+What changed is one deleted call. What was added is the test that would have
+caught it: no suite looked at an attribute's namespace on a *cloned* node, so
+the new `cloning_for_selectedcontent_keeps_attribute_namespaces` parses a
+`<select><button><selectedcontent>` page whose selected `<option>` holds
+`<svg xml:lang="en"><use xlink:href="#i"/>` and reads the clone's attributes by
+namespace (`xml:lang` in the XML namespace, `xlink:href` in the XLink one, the
+nodes in the SVG one), then checks that changing the original does not change
+the clone. The README's suite count went from 181 to 183 (Phase 49's two plus
+this one), and the scoreboards are the ones Phase 51 left: web-platform-tests
+7998/8009 with 11 listed, html5lib 1792/1792, jsdom 644/644, JS 926/940, URL
+1188/1188, the W3C XML suite 1718/1718, 6,000 generated pages with 0
+differences, 4,000 XML documents and 3,000 round trips, 1,332 deep-page runs
+and the sanitizer build.
+
+The rule it broke is written in `AGENTS.md` and was skipped here: merge `main`
+into the branch, re-run the checks, and let CI pass on *that* commit before
+merging. A pull request behind `main` says nothing about the merge.
+
 ---
 
 ## Phase 53 Architecture: UTF-16 Storage for Non-ASCII `JsString` (Lazy UTF-8 & Tail Rewind)
@@ -5581,7 +5611,7 @@ only when **all three** invariants hold:
 
 ### 5. Verification & open nuances
 
-- `make test`: **192/192** unit suites (including updated
+- `make test`: **193/193** unit suites (including updated
   `js_strings_are_shared_and_read_in_constant_time` checking `sizeof(JsString) == 24`,
   `js_string_owes_a_trailing_high_half_until_it_is_read`, and new
   `js_string_completes_a_surrogate_pair_after_reading_without_copying`), in both
@@ -5603,4 +5633,3 @@ only when **all three** invariants hold:
   Repeated `.view()` calls while a string still ends in an unpaired high half
   allocate a bounded `Utf8Slice` per call rather than pinning `\xED\xA0\xBD` in
   `Utf8Cache`; standard JS string operations never call `.view()`.
-

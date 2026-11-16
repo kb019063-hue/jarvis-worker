@@ -27,14 +27,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **907 / 921 (98.5%)**; nine of the 14 that fail were recorded in Phase 34 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **640 / 640**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **JavaScript corpus** | **955 / 970 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **DOM corpus** (what a script sees) | **663 / 663**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`) | **4658 / 5192 subtests**; the 534 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 159 suites, all passing | `make test` |
+| Engine unit tests | 168 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 162 engine suites
+make test            # 168 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -68,7 +68,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 921 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 970 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -79,19 +79,21 @@ Read the number for what it is:
   covers the language and library features ordinary scripts use (syntax,
   closures, classes, destructuring, generators, promises and async functions,
   strings, arrays, regular expressions, dates, JSON), not every clause of the
-  specification. The official suite scores far lower: of the 47,967 tests in
+  specification. The official suite scores far lower: of the @@T262_ALL_TOTAL@@ tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  26,012 pass (54%); of the 15,686 on functions, classes and objects, 10,835
-  (69%). `make test262` runs the latter. It is used for what a change moved
+  @@T262_ALL_NOW@@ pass (@@T262_ALL_PCT@@%); of the @@T262_DEF_TOTAL@@ on functions, classes and objects, @@T262_DEF_NOW@@
+  (@@T262_DEF_PCT@@%). `make test262` runs the latter. It is used for what a change moved
   between two builds, not as a score (Phase 34: 108 more pass and none fewer
   in those directories; in the whole suite 122 more and three fewer, the
-  three being tests that passed for the wrong reason).
-- **Five of the 14 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine are
-  in `prototypes.dat` and were recorded to fail: what classes still lack
-  after Phase 34 (`new.target` in a parent's constructor, `Symbol.species`,
-  `Symbol.hasInstance`, and six smaller things; ARCHITECTURE.md, Phase 34,
-  section 9).
+  three being tests that passed for the wrong reason. Phase 43: @@T262_ALL_GAINED@@ more in
+  the whole suite and @@T262_ALL_LOST_WORD@@ fewer).
+- **Five of the 15 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
+  recorded to fail. Eight are in `prototypes.dat`: what classes still lack
+  after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
+  things; ARCHITECTURE.md, Phase 34, section 9). Two are in `construct.dat`:
+  `this` used before `super()` has run, and `eval` inside a function, which
+  sees nothing of the function (Phase 43, section 8).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -118,7 +120,13 @@ passes 12 of the 34 at best and times out on 15 (AUDIT.md, finding 25).
 prototype chain: the parent of a class, the prototype of an object,
 `Function.prototype` itself. Three of them are whole programs as Babel and
 TypeScript compile classes for older browsers, which stopped at their first
-class before. 67 of the 76 pass; the engine before Phase 34 passes 7.
+class before. 68 of the 76 pass; the engine before Phase 34 passes 7.
+
+49 cases (`construct.dat`, Phase 43) are about what a constructor makes:
+`new.target` in a parent's constructor and under `Reflect.construct`, an
+object a parent's constructor returns, when `this` is bound, and three more
+programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
+engine before Phase 43 passes 13.
 
 Every remaining failure can be inspected with
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
@@ -129,7 +137,7 @@ catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 640 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 663 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -147,7 +155,8 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Before Phase 27 (`main` at `6f08a70`) | 61 / 572; the everyday probe 13 / 68 |
 | Phase 27 | 572 / 572; the everyday probe 68 / 68 |
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
-| Now, with the 11 cases of Phase 34 (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
+| Phase 34, with 11 more cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
+| Now, with the 23 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 663 / 663 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -663,7 +672,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 159 engine test suites
+# Run the 168 engine test suites
 make test
 ```
 
@@ -730,14 +739,14 @@ make test
 make test
 ```
 
-Output (159 suites; the first and last lines shown):
+Output (168 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 159 engine test suites passed successfully!
+All 168 engine test suites passed successfully!
 ```
 
 ```bash
@@ -867,15 +876,16 @@ interface objects have their parents as prototypes
 ./build/litebird --run-js 'class A { static s() { return "A.s"; } } class B extends A {} class C extends B {}
 console.log(Object.getPrototypeOf(C) === B, C.s(), Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype)'
 # true A.s true function        (before: Uncaught TypeError: s is not a function)
-make js-conformance      # 907 / 921; prototypes.dat 67 / 76
-make test262             # the standard's own tests on functions, classes and objects: 10,835 of 15,686
+make js-conformance      # 955 / 970; prototypes.dat 68 / 76
+make test262             # the standard's own tests on functions, classes and objects: @@T262_DEF_NOW@@ of @@T262_DEF_TOTAL@@
 ```
 
-What is still missing around classes (`new.target` in a parent's
-constructor, `Symbol.species`, `Symbol.hasInstance`, custom elements compiled
-by Babel) is in `ARCHITECTURE.md`, Phase 34, section 9, with a failing case
-each; the design and what it costs are in the same place, and `AUDIT.md`,
-finding 41, says what found what.
+What is still missing around classes (`Symbol.species`,
+`Symbol.hasInstance`) is in `ARCHITECTURE.md`, Phase 34, section 9, with a
+failing case each; the design and what it costs are in the same place, and
+`AUDIT.md`, finding 41, says what found what. `new.target` in a parent's
+constructor and custom elements compiled by Babel, which were on that list,
+came with Phase 43 (below).
 
 
 ### Usable browser pipeline: HTTPS/CORS, subresources, live layout, TrueType & Web GUI (Phase 36)
@@ -925,3 +935,41 @@ bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, and 5 SVG feature
 suites; `make fuzz-media` runs 1,800 mutated JPEG/GIF/SVG inputs through
 `build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
 Phase 38, and `AUDIT.md`, finding 43.
+
+
+### `new.target`, and what a constructor makes (Phase 43)
+
+`new.target` was the function that was running, where it is the function
+`new` was applied to: an abstract class written the usual way (`if
+(new.target === Shape) throw …`) refused its own subclasses, and inside `F`
+`Reflect.construct(F, [], G)` did not name `G`. An object that a parent's
+constructor returned was dropped by `super()`, so a class on top of a
+singleton, a factory or a class compiled for older browsers went on with
+another object. Both are as in Node now, also through a bound function, and
+`this` is bound once: a second `super()`, a derived constructor that never
+calls it and one that returns a number throw.
+
+With the right `new.target` reaching the DOM's constructors, a custom
+element compiled for older browsers works: `Reflect.construct(HTMLElement,
+[], new.target)` makes the element for `new` and `document.createElement`,
+and for an element that exists already (in the page's markup, from
+`innerHTML`, a clone) the interface is given that element, as the standard's
+construction stack has it. The same holds for a compiled subclass of a class
+that a library ships.
+
+```bash
+./build/litebird --run-js 'class Shape { constructor() { if (new.target === Shape) throw new TypeError("abstract"); this.kind = new.target.name; } }
+class Circle extends Shape {}
+var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
+console.log(new Circle().kind, new Child() === one, one.added)'
+# Circle true 2        (before: Uncaught TypeError: abstract)
+make js-conformance      # 955 / 970; construct.dat 47 / 49
+make dom-conformance     # 663 / 663; compiled.dat 23 / 23
+```
+
+What is still missing: `this` can be used before `super()` has run, `eval`
+inside a function sees nothing of the function, and a private name is a
+property that `obj['#p']` reads. Those and what else was found on the way
+are rows of the task table in `AGENTS.md`; the design and what it costs are
+in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
+what.

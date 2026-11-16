@@ -352,6 +352,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (168/168 unit suites; JS corpus 955/970, `construct.dat` 47/49 against 13 before; DOM corpus 663/663, `compiled.dat` 23/23 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
 
 ---
 
@@ -3449,10 +3450,12 @@ In memory:
 
 ### 9. What is still open here
 
-Nine cases of `prototypes.dat` fail, each recorded for one of the first
-seven of these. Everything in the list is the same on `main`:
+Nine cases of `prototypes.dat` failed when this phase ended, each recorded
+for one of the first seven of these, and everything in the list was the same
+on `main`. Phase 43 has since done the first item and the first half of the
+last, and eight cases fail:
 
-- **`new.target` is the function that is running**, not the one `new` was
+- *(Done in Phase 43.)* **`new.target` is the function that is running**, not the one `new` was
   applied to. `if (new.target === Shape) throw …` in a parent's constructor,
   the usual way to write an abstract class, stops `new Circle()`; and with
   `Reflect.construct(F, [], G)` the object has `G.prototype` and `new.target`
@@ -3488,10 +3491,11 @@ seven of these. Everything in the list is the same on `main`:
   `o.b = f.bind(o)` 2,000 times leaves 2,000 cells after `gc()`. The
   collector cannot see into what a native function captured. It is part of
   "no leak audit has been done" in Known gaps, 4.
-- **An object that a parent's constructor returns does not become `this`**
-  in the child: after `super()` the child still has the object `new` made.
-  And `super.x` in a class that extends null is `undefined`, not a
-  `TypeError`. (Found by test262; no case here yet.)
+- *(The first half done in Phase 43.)* **An object that a parent's
+  constructor returns does not become `this`** in the child: after `super()`
+  the child still has the object `new` made. And `super.x` in a method of a
+  class that extends null is `undefined`, not a `TypeError`. (Found by
+  test262; no case here yet.)
 
 Three things were found on the way that are not about prototypes. All are
 on `main`, and all are rows of the task table now:
@@ -4458,7 +4462,7 @@ Eight cases of `prototypes.dat` fail on those.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 4,658 of
+   It passes all 663 cases of its corpus (Phases 27, 28, 34 and 43) and 4,658 of
    the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
    only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout
@@ -4474,13 +4478,15 @@ Eight cases of `prototypes.dat` fail on those.
    Phase 28, section 10, and Phase 36, section 9.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
-   corners are in Phase 23, section 10. Around classes: `new.target` is the
-   function that is running and not the one `new` was applied to, there is
+   corners are in Phase 23, section 10. Around classes: there is
    no `Symbol.species` and `instanceof` does not ask `Symbol.hasInstance`,
-   and nothing tells a built-in that is a constructor from one that is not
-   (Phase 34, section 9). Of 15,686 test262 tests on functions, classes and
-   objects, 10,835 pass (`make test262`); of the 47,967 in all of its
-   `built-ins`, `language` and `annexB`, 26,012.
+   nothing tells a built-in that is a constructor from one that is not
+   (Phase 34, section 9), `this` can be used before `super()` has run, `let`
+   and `const` have no dead zone, `eval` inside a function is global code,
+   and a private name is a property that `obj['#p']` reads (Phase 43,
+   section 8). Of @@T262_DEF_TOTAL@@ test262 tests on functions, classes and
+   objects, @@T262_DEF_NOW@@ pass (`make test262`); of the @@T262_ALL_TOTAL@@ in all of its
+   `built-ins`, `language` and `annexB`, @@T262_ALL_NOW@@.
 11. **A page can still be slow by being long.** Depth no longer ends the
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which

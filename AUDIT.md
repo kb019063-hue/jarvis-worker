@@ -39,17 +39,26 @@ The rest are documented with enough detail to act on.
 | 23 | 1.2% of 67,545 generated expressions disagreed with Node | **High** | ✅ Fixed where pages meet it (Phase 23); 0.15% left |
 | 24 | `node.appendChild(node)` ended the process, and so did any tree deeper than the stack: 300,000 nested `<div>` were a `SIGSEGV` | **High** | ✅ Fixed (Phase 25): cycles are refused, the parser stops nesting at 512, nothing that walks the DOM recurses |
 | 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
-| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
+| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | ✅ Fixed: lookbehind in Phase 24; bytecode VM on explicit heap stack in Phase 37 (finding 42; 30M catastrophic-backtracking step guard kept) |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
-| 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | Open |
+| 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | ✅ Fixed: block-in-inline split in Phase 36; float placement rewritten (band-edge sweep, exact landing, no step cap). The remaining inputs are smaller loops |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
-| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1,188 of 1,188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
+| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27/28/37): 644 of 644; URL data 1,188 of 1,188; date inputs & `el.style` shorthands fixed in Phase 37. Open: layout numbers in `getComputedStyle`, `sheet.cssRules`, `document.write`, SVG DOM |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
-| 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout/tokenizer costs remain open |
+| 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout costs remain open (its tokenizer cost was fixed in Phase 39) |
 | 36 | The renderer's color parser had 19 names, 15 of them not the CSS values, and returned black for the other 129 CSS keywords | **Medium** | ✅ Fixed (Phase 32) |
-| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS remain open |
+| 37 | Page `fetch()`/`Worker` sent arbitrary non-data/non-http addresses to the local filesystem; a web page could read local files, and a failed worker load could execute the path as source | **High (security)** | ✅ Fixed (Phase 33); CORS/XHR network/HTTPS landed in Phase 36 (preflight `OPTIONS` open) |
+| 38 | Host names outside ASCII were kept as written instead of converted with UTS #46; the 38 remaining URL failures were all such hosts | **Medium** | ✅ Fixed; URL data 1188/1188 |
+| 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
+| 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases remain (the tokenizer repeated-name cost was fixed in Phase 39) |
+| 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
+| 42 | Repeated regex groups overflowed the stack, modern CSS cascade/L4 selectors/units/MQ L4 were missing (and deep CSS blocks/selectors hit stack or quadratic bounds), `el.style` kept shorthands whole, and HTML5 date/time inputs acted as text inputs | **High** | ✅ Fixed (Phase 37) |
+| 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch wired in Phase 36; WebP/AVIF & text remain open |
+| 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
+| 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
+| 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 
 ---
 
@@ -1068,7 +1077,7 @@ reads it one character at a time, and some results are 90,000 characters.
 **Not part of this.** The audit's first table had two rows that are the same
 shape in other containers, and both are fixed in finding 33 (Phase 30).
 
-## 26. 🟡 Regular expressions over long input: lookbehind fixed, repeated groups still limited
+## 26. ✅ Regular expressions over long input: lookbehind fixed (Phase 24), bytecode VM removes repeated-group recursion (Phase 37)
 
 Found while testing finding 25. With the string no longer the cost, the
 matcher's own limits showed.
@@ -1108,7 +1117,15 @@ backtracking state on the heap instead of the native stack, which means
 compiling the expression and running it on an explicit stack: a rewrite of
 the matcher, not a patch.
 
-**Open: the step limit.** A match is abandoned after 30 million steps with
+**Fixed in Phase 37 (finding 42).** `src/js/BuiltinsRegExp.cpp` now compiles
+patterns to bytecode instructions (`InstOp`) executed iteratively by `exec_vm()`
+over an explicit heap `backtrack_stack`, with iterative AST node destruction so
+deeply nested non-capturing groups (`(?:` × 250) and 100,000+ repeated-group
+matches succeed without `RangeError`. Patterns nested deeper than
+`kMaxCompilerDepth` (1,000) still raise `SyntaxError`, and the 30-million
+`kMaxMatchSteps` guard remains.
+
+**The step limit (kept intentionally).** A match is abandoned after 30 million steps with
 the same `RangeError`. `/.*y/` on a line of 20,000 characters with no `y`
 needs 200 million; it throws after 0.2 s here and answers `false` after 0.46 s
 in Node. (Node is quadratic there too: 2 s at 40,000 characters, 39 s at
@@ -1284,6 +1301,21 @@ right (float 1,100 lands at x = 7,500). It needs a placement that goes
 straight to the bottom edge of the float in the way. That can move a float
 (today it lands on a multiple of a quarter of its height) and is a change of
 its own.
+
+**The float placement was rewritten.** A float is now placed by a sweep of
+the band edges: capacity below the flow is constant between two consecutive
+band edges, so the smallest position at which the float fits is found by
+closing and opening bands in y order, which is also exactly flush with the
+bottom edge of the float in the way (CSS 2.1 9.5.1, rule 6), and never past
+a fixed step cap. The quarter-height sliding loop and its 512-step limit are
+gone. On the audit's input (floats of 100 by 10 pixels in an 800-pixel box):
+every float lands inside the box again, in its row of eight, and the
+10,000-float parse-plus-layout-plus-dump end to end takes about 5 s on a
+two-core machine. A float wider than the containing block is placed at the
+top and overflows, the way CSS 2.1 9.5.1 handles it. One pre-existing
+expectation codified the old quantization: a 250-pixel float C below floats
+that end at 89.5 used to land at 90 (the slide's one-pixel step) and now
+lands exactly at 89.5.
 
 Removing the first child moves every other child up, because children are a
 vector. The spaces were trimmed one character at a time from the front of a
@@ -1836,7 +1868,7 @@ of them by reading the code.
 
 | Found by | What |
 | :--- | :--- |
-| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front is still the square (below) |
+| Pages that are large, not wrong (`tools/fuzz/deep_pages.py`) | An element with 50,000 attributes took 7.1 s to parse and 4 s to serialize: the DOM searched its attribute list for every attribute it added, as it does on `main`. 50,000 namespace declarations with a child each took over two minutes: the scope was copied a level and searched a name. Removing every second of 50,000 attributes took 88 s with the first index written for the list, which held positions. All but the last are 0.2 s or less now; removal from the front was still the square then (fixed in Phase 35, finding 40) |
 | The same question asked of the DOCTYPE | 50,000 attributes declared for one element took 4.5 s. And one attribute default of a megabyte with 100,000 empty tags made 100 GB of attribute values from a 1.4 MB document: entity expansion was bounded and defaults were not. Both bounded now, and both are deep pages |
 | Expat and libxml2 on generated documents (`tools/fuzz/diff_xml.py`) | No fault of Litebird's in 64,000 documents, and one in the references: three runs of 20,000 reported 10 differences, and all ten were `version="1."`, which Expat and libxml2 accept and the grammar does not (`'1.' [0-9]+`). A document whose version is outside the grammar is now judged by the grammar |
 | web-platform-tests, on their first run | Three faults that were not about XML: attributes of inline `<svg>` had no namespace (the row with `xlink:href` above), a doctype a script inserted was not `document.doctype`, and `lookupNamespaceURI('xml')` answered for a node that has no namespaces. 607 jsdom-recorded cases had passed over all three |
@@ -1867,14 +1899,16 @@ of them by reading the code.
   one or the other and fail.
 - **In the JavaScript engine, a function cannot have a function as its
   prototype**: `Object.getPrototypeOf(TypeError) !== Error`. 18 subtests.
+  (Fixed in Phase 34, finding 41.)
 - **An `Attr` is not a `Node`**, two attributes of one element cannot share
   a qualified name in two namespaces, and collections do not list their
   names as own properties: 33 subtests.
-- **Removing all 50,000 attributes of an element from the front takes 9 s**,
-  as it did before; from the back, 22 ms of 25,000.
-- **The HTML tokenizer still searches for a repeated attribute name**: one
-  element with 50,000 attributes takes 2.9 s in the HTML parser (10.4 s
-  before the attribute list had an index).
+- **Removing all 50,000 attributes of an element from the front took 9 s**
+  at Phase 28; from the back, 22 ms of 25,000. Fixed in Phase 35 (finding 40).
+- **The HTML tokenizer searched for a repeated attribute name** by comparing
+  it with every accepted one: one element with 50,000 attributes took 2.9 s in
+  the HTML parser (10.4 s before the attribute list had an index). Fixed in
+  Phase 39 (finding 46): 0.09 s whole-process.
 
 ### What the numbers do not say
 
@@ -1963,13 +1997,10 @@ cases were already cheap in this pipeline and stayed cheap.
 
 **What is still approximate.** The whitespace set is still the C locale's
 `std::isspace`, not the CSS whitespace production; VT is still trimmed.
-The separate `:nth-child(2n + 1)` sign-space parsing bug is **not** fixed:
-with three items it still paints only item 2 red, because the formula tail
-`+ 1` is read as `0`. The benchmark deliberately keeps `+1` glued so it
-measures the trimming cost without depending on that bug. Repro:
-`printf '<ul><li>a</li><li>b</li><li>c</li></ul><style>li:nth-child(2n + 1){color:rgb(255,0,0)}</style>' > /tmp/nth.html && ./build/litebird /tmp/nth.html --dump-paint`.
-The finding-28 float, computed-style memory and 50,000-attribute tokenizer
-costs are also not fixed here and remain open tasks.
+The separate `:nth-child(2n + 1)` sign-space parsing bug that this phase
+surfaced **is** fixed now — see finding 39. The finding-28 float,
+computed-style memory and 50,000-attribute tokenizer costs are also not
+fixed here and remain open tasks.
 
 **How verified.** `make test` passes 117 suites, including the helper model,
 selector/value equivalence and long-run suites. `make bench-css` passes 20
@@ -2132,3 +2163,937 @@ Python UTS #46 mirror prints zero real divergences.
   drift only affects code points assigned after Unicode 14 — currently all
   unassigned PVALID code points, which need no bidi data anyway. The
   generated header states both versions.
+
+---
+
+## 39. ✅ `:nth-child( An+B )` reads a sign separated from its digits by spaces
+
+**The hole.** The formula matcher (`src/css/StyleResolver.cpp`,
+`match_nth_formula`) parsed the offset part of an `<an+b>` formula with
+`std::stoi`. `"+ 1"` is not parseable by `stoi` — the sign must be attached
+to the digits — so the `catch` branch silently defaulted the offset to `0`.
+`li:nth-child(2n + 1)` matched only the even items; with three items, only
+`b` turned red. Any formula written with a space between the sign and the
+number (`2n + 1`, `-n + 3`, `+ n + 1`, the common style in real pages) was
+read as `b = 0`, and `:nth-of-type()` shared the matcher and the bug.
+
+**The fix.** The `<an+b>` micro-syntax ignores whitespace tokens, exactly as
+the CSS parser does, so the matcher now erases CSS whitespace (Tab, LF, FF,
+CR, Space) between tokens before parsing: `2n + 1`, `2n+1` and
+`2n\t+\n1` are the same formula, and a sign may sit next to or away from the
+digits it signs (`+ 2n + 1` is `+2n+1`). The coefficient and the offset are
+parsed as strictly signed integers (`parse_b_integer`): an empty coefficient
+or a bare sign means `1`, and anything that is not a signed integer (`1.5n`,
+`xn`, `n++1`, `1+1`, `++1`) makes the formula **invalid**, so it matches
+nothing — as an invalid selector must — instead of falling back to `a = 1`
+or `b = 0` (both silent-default bugs found while fixing this one, both dead
+now). `:nth-of-type()` is fixed by the same change.
+
+**How verified.** The finding-35 repro now paints items 1 and 3 red and item
+2 dark:
+`printf '<ul><li>a</li><li>b</li><li>c</li></ul><style>li:nth-child(2n + 1){color:rgb(255,0,0)}</style>' > /tmp/nth.html && ./build/litebird /tmp/nth.html --dump-paint`.
+`make test` passes 133 suites including the new `nth_child_formula_parsing`
+(the sign-space matrix `2n + 1`, `2n+ 1`, `2n +1`, tab/newline/FF/CR between
+tokens, `2N+1`, `+ 2n + 1`, plus `odd`/`even`/exact/`0n+2`/negative steps,
+and an invalid list that must match nothing and never crash). The benchmark
+keeps its glued `+1` so it still measures the trimming cost, untouched.
+`make bench-css` passes 20/20 with dumps identical to the compact pages;
+`make conformance` is 1781/1792, `make dom-conformance` is 629/629,
+`make js-conformance` is 840/845 and `make url-conformance` is 1188/1188 —
+the corpora are unchanged.
+
+**What is still approximate.** The whitespace set is the five code points
+above, not the CSS whitespace production in general (finding 35 documents
+the same limit in the trim path); an empty token span such as `:nth-child()`
+or a comment inside the formula (`2n/*x*/+1`) matches nothing, as an invalid
+argument does. The grammar covered is the `<an+b>` subset of the micro-syntax
+(`odd`, `even`, an optional signed coefficient, `n`, an optional signed
+offset, a plain integer, and arbitrary whitespace between the tokens); it is
+deliberately not a general CSS tokenizer. A sign separated from its
+coefficient by whitespace (e.g. `- 2n + 1`) is accepted, which token-boundary
+purists may call generous; no valid formula is rejected.
+
+---
+
+## 40. ✅ Attribute-list front removal was quadratic
+
+**The hole.** `AttributeList` kept the attributes in a `std::vector` and,
+once a list was long enough to index, kept a parallel vector of the numbers
+each name was given. The number index avoided rebuilding positions on every
+erase, but `erase(iterator)` still erased from both vectors at the same
+offset. Removing the first attribute moved every remaining string pair and
+every remaining number: draining 50,000 attributes from the front was
+quadratic. The recorded script loop took about 6 s (9 s in the older
+measurement); the same removals from the back were tens of milliseconds.
+
+**The fix.** Only `include/litebird/dom/AttributeList.hpp` changed. The
+items and `Index::numbers` remain vectors, but each has a logical start
+offset. A back erase pops the back. A front erase advances the start and
+leaves a dead prefix; `compact()` drops that prefix only when it is at least
+as large as the live tail, so repeated front erases are amortized O(1), a
+full drain is linear, and an empty list still allocates nothing. A
+`std::deque` was tried first and removed: libstdc++ allocates for an empty
+deque, which made every element pay even with no attributes and failed the
+deep-page memory limits. The public iterators are still random-access vector
+iterators (`attributes.begin() + index`, `found - list.begin()`). The lazy
+index still scans below 32 entries, then maps names to numbers and bisects
+the live ascending number range. Copy copies only the live range and drops
+the index; move resets the source start so a moved-from list is empty;
+`clear`, value update in place, insertion order, `operator[]`,
+`find/count/erase` and order-insensitive equality keep their semantics.
+`AttributeNamespaces` was not changed.
+
+**Measured.** Whole-process times, best of three, same machine and hour;
+baseline is the pre-change binary:
+
+```bash
+python3 tools/bench/bench_attributes.py \
+  --baseline build/litebird-attributes-baseline --reps 3 --max-ms 3000
+make bench-attributes
+```
+
+| Case (50,000 attributes unless noted) | Baseline | Current | Speedup |
+| :--- | ---: | ---: | ---: |
+| front: remove a0..aN | 7,132 ms | 90 ms | 79.0× |
+| back: remove aN..a0 | 115 ms | 114 ms | 1.0× |
+| ends: alternate front/back | 3,481 ms | 113 ms | 30.8× |
+| front half, then update/reinsert | 5,293 ms | 69 ms | 76.8× |
+| namespaces: front removal | 8,465 ms | 197 ms | 43.0× |
+| short lists: churn below index | 79 ms | 73 ms | 1.1× |
+
+Every case prints the same expected DOM checksum in both binaries. A
+script-only `Date.now()` probe measured the front removal loop at 6,078 ms
+before and 51 ms after; the back loop stayed in the tens of milliseconds.
+The checked-in guard is `make bench-attributes`: six cases, three
+repetitions, expected checksums, 3,000 ms whole-process limit.
+
+**How verified.** `make test` passes 135 suites, including
+`attribute_list_end_removals_keep_order_and_index` and
+`attribute_list_front_removal_is_linear_in_practice`. `make bench-attributes`
+passes 6 cases with 0 failures. The release run kept html5lib 1781/1792, JS
+840/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192;
+diff-trees/diff-xml have 0 differing; deep has 1332 runs/0 failed (slowest
+25.0 s); bench-css has 20 padded runs/0 failures; security-fetch has 3
+checks/0 failures; diff-strings is at the 95-difference ceiling. A generated
+out-of-corpus probe run through `tools/conformance/compare_with_jsdom.py`
+printed `4 lines, 4 the same` before and after. `make tsan` passed (JsString model/thread under ThreadSanitizer and under ASan+UBSan). `make asan` reported no sanitizer finding: 135/135 suites, JS 839/845, DOM 629/629, URL 1188/1188, XML 1702/1702, WPT 4640/5192; ASan diff-xml 1000 documents/0 differ and round trip 1000/1000; fuzz 400 parser mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep 882 runs/0 failed (slowest 4.3 s).
+
+**What is still open.** This fixes end removals, not arbitrary middle
+removals: a middle erase still moves the vector tail. The HTML tokenizer's
+repeated-name search for one element with 50,000 attributes was fixed in
+Phase 39 (finding 46). The `Attr`-is-not-a-`Node`, one-qualified-name-in-two-
+namespaces and collection named-property rows remain open. No parser, layout,
+CSS or JavaScript engine file was changed.
+
+---
+
+## 41. ✅ A function could not be a prototype
+
+**The hole.** A function is a value in this engine and an object is a heap
+cell, and a prototype link is a pointer to a cell. Nothing led from a cell
+back to a function, so nothing could have a function as its prototype and
+give it back. `Object.getPrototypeOf(Derived)` for `class Derived extends
+Base` was an object that was not `Base` and could not be called;
+`Object.getPrototypeOf(TypeError)` was not `Error`; `Function.prototype` was
+an object. A class kept its parent in a hidden property and a static member
+was looked for one step up and no further. Finding 34 listed it as known and
+not fixed, for the 18 web-platform-tests subtests that failed on it: every
+`assert_throws_js` walks up from the error type it was given with
+`Object.getPrototypeOf` until it reaches `Error`.
+
+What it broke outside a test suite is the code most pages ship: a class
+compiled for older browsers. The helpers Babel and TypeScript emit are made
+of the calls in this table.
+
+| A script | Before | Now, and in Node |
+| :--- | :--- | :--- |
+| `Object.getPrototypeOf(TypeError) === Error` | `false` | `true` |
+| `class Derived extends Base {}`; `Object.getPrototypeOf(Derived) === Base` | `false` | `true` |
+| `class C extends B {}`, `class B extends A {}`, `A` has `static s()`: `C.s()` | `TypeError: s is not a function` | runs |
+| `typeof Function.prototype`; `Function.prototype()` | `object`; `TypeError` | `function`; `undefined` |
+| `Object.getPrototypeOf(Object.create(f))()` | `TypeError: p is not a function` | what `f` returns |
+| `Reflect.construct(F, [], G) instanceof G` | `false` | `true` |
+| `F.prototype.m = …`, then `Object.defineProperty(F, 'prototype', { writable: false })`: how a compiled class ends | `TypeError: Cannot redefine property: prototype` | accepted |
+| `Object.getPrototypeOf(Derived).call(this, x)` in a compiled constructor | `TypeError: Function.prototype.call called on a non-function` | calls `Base` |
+| A class with a parent, compiled by Babel 7, by Babel's newer helpers, by TypeScript | stops at its first class, all three | prints what Node prints, all three |
+| `Object.getPrototypeOf(HTMLElement) === Element`; `HTMLElement.ELEMENT_NODE` | `false`; `undefined` | `true`; `1` |
+
+**The fix.** A function's cell can know the function it belongs to
+(`JsValue::as_prototype()` gives it a copy; `JsValue::make_object(cell)`
+gives the function back), every kind of function can have a cell, and the
+collector takes the pair apart, since the cell holds the function and the
+function holds the cell. The copy lives in a pointer the cell of a function
+had no use for, so no object and no value grew. Classes are linked to their
+parents, `super()` calls whatever the prototype is when it runs,
+`Function.prototype` is a function, `Reflect.construct` honours its third
+argument, `Object.defineProperty` follows the standard's
+ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have
+their parents as prototypes. ARCHITECTURE.md, Phase 34, has the design.
+
+### What each instrument found
+
+The change was written with a new file of the JavaScript corpus beside it,
+`prototypes.dat`, whose expected output is what Node prints. What follows was
+found by something else.
+
+| Found by | What |
+| :--- | :--- |
+| Two wrong collectors, built on purpose | With the function a cell stands for counted and not marked, a parent class reachable only as a prototype lost the variables it closed over, and every test passed: the cell keeps the function's name and properties, so checks of those see nothing. A test has to call the function it got back and read a variable it closed over. One suite and one corpus case do now |
+| test262, run in the binary of `main` and in this one | Two tests that passed on `main` and failed here, of 15,686. `[] instanceof Function.prototype` with a `prototype` that is a string threw on `main` only because `Function.prototype` was not callable; `instanceof` never looked at what kind of thing `prototype` is. And `{ __proto__: function () {} }` named the function `__proto__`, on `main` as well, where the function could not be got back to see its name. Both fixed, both corpus cases now |
+| Reading the whole diff once more before the documents | The mark that says `Function.prototype` is not a constructor was a hidden property, and `'%not-a-constructor' in f` was `true` for every function. It is a bit of the cell now. Looking for what else is stored that way found the row below |
+| The same reading | A script can read and write the engine's own slots, which are properties whose names begin with `%`: `el['%classList'] = 5` makes `el.classList` a number. Older than this change, not fixed, a row of the task table |
+| The sanitizer build, on a probe for classes in workers | A read of freed memory when a page ends while a worker is starting: 7 of 60 runs of `main`'s release build end in `SIGSEGV` on four `new Worker(...)` and nothing else. Not this change, not fixed, a row of the task table |
+| The corpus run on a busy machine | One case of `long-strings.dat` timed out. It builds a string half a surrogate pair at a time, which costs the square of the length (20,000 pairs: 4.3 s, and 5 ms a pair at a time), and takes 6 of the 10 seconds a case is allowed. Same on `main`. The CI floor is one below the score until it is fixed; a row of the task table |
+| jsdom, on the interface objects | Nothing wrong here, and three answers of jsdom's that are not the standard's, because its window is another realm than the one its script runs in: `Object.getPrototypeOf(EventTarget) === Function.prototype` is `false` there. `interfaces.dat` stays away from them |
+
+### What is known to be wrong and is not fixed
+
+All of it is the same on `main`. The first seven have a failing case each in
+`prototypes.dat` (nine cases), recorded from Node.
+
+- **`new.target` is the function that is running**, not the one `new` was
+  applied to. `if (new.target === Shape) throw …` in a parent's constructor
+  stops `new Circle()`. The DOM needs the same value:
+  `Reflect.construct(HTMLElement, [], Derived)` is `Illegal constructor`, so
+  a custom element compiled by Babel cannot be made
+  (`tests/dom-conformance/open/compiled-custom-elements.js`: 4 of 9 lines as
+  jsdom prints them).
+- **A built-in does not make the subclass it was called on**: `List.from`,
+  `new List().map(f)` and `P.resolve(1)` give a plain array and a plain
+  promise. No `Symbol.species`.
+- **`instanceof` does not ask `Symbol.hasInstance`**, answers `false` for a
+  right side with no `prototype` where it should throw, and does not ask a
+  bound function for its target.
+- **A function's own property names lack `length` and `name`**, `f.name =
+  'x'` takes effect, and async and generator functions have
+  `Function.prototype` itself as their prototype.
+- **Nothing tells a built-in that is a constructor from one that is not**:
+  `new Math.max()` makes an object, `class X extends f.bind(null)` is
+  accepted.
+- **A property of a prototype that cannot be written does not stop an
+  assignment** to an object that inherits it.
+- **A function bound to an object that holds it is never collected**, nor
+  what a pending timer holds: the collector cannot see into what a native
+  function captured.
+- **An object a parent's constructor returns does not become `this`** in the
+  child, and `super.x` in a class that extends null is `undefined`.
+- **Not about functions, found by running all of test262:** `Promise.all`,
+  `any` and `race` read an iterable to its end before they look at an
+  element, so with one that never ends the process grows until it is killed.
+  Three tests end that way in both builds, and a fourth on an array index
+  near 2^32 (arrays have no holes). A row of the task table.
+
+### What the numbers do not say
+
+**67 of 76** in `prototypes.dat`: the nine that fail were written to fail,
+one for each thing above that a case could be recorded for. The 67 are what
+somebody thought to ask.
+
+**10,835 of 15,686** test262 tests in the directories about functions,
+classes and objects, 10,727 before. That is 69%, and of the whole suite 54%
+pass (26,012 of 47,967; 25,893 before). The number that matters is the
+difference: 108 more and none fewer in those directories. In the whole
+suite it is 122 more and three fewer, and the three are not noise. They ask
+that the prototype of an async function, of a generator function and of an
+async generator function is an object that cannot be called. It is
+`Function.prototype` itself here, before and now, and the tests passed for
+as long as `Function.prototype` was not callable. The fault they are about
+is the fourth of the list above; the tests stay failing until it is fixed.
+
+**640 of 640** DOM cases is what jsdom answers. The 11 new ones ask what the
+prototype of an interface object is and whether its constants are inherited,
+and nothing about what an interface object does when it is called.
+
+**Every measure within a tenth of `main`** is 20 loops on one machine
+(ARCHITECTURE.md, Phase 34, section 8). The one that moved is `bind`.
+
+**How verified.** Every line is a command and what it printed on the merged
+tree, in the sandbox.
+
+- `make test`: `All 144 engine test suites passed successfully!`, five of
+  them new. Linked against the objects of `main`, with the lines that use
+  the new C++ interface cut, each of the five fails at least half of its
+  checks.
+- `make js-conformance`: `JS conformance, full corpus: 907/921 (98.5%) [23
+  files, 0 crashes, 0 timeouts]`; `prototypes.dat` 67 of 76. With
+  `--reference "node -e"`: 921 of 921. The binary of `main` passes 7 of the
+  76.
+- `python3 tools/conformance/run_test262.py --binary main=… --binary
+  now=build/litebird`: 15,686 tests, `main` 10,727 pass, now 10,835; 108
+  pass now and not on `main`, 0 the other way. With `--timeout 4 built-ins
+  language annexB` added: 47,967 tests, `main` 25,893, now 26,012; 122 pass
+  now and not on `main`, 3 the other way (named above).
+- `make wpt`: `Web Platform Tests: 4658/5192 subtests pass in 76 files; 534
+  fail as listed, 0 fail and are not listed`. On `main`: 4640, 552 listed.
+- `make dom-conformance`: `640/640` in 24 files, and the same from jsdom
+  with `--reference`. The binary of `main` passes 629: none of the 11 new
+  cases.
+- `make conformance` 1781 of 1792, `make url-conformance` 1188 of 1188,
+  `make xml-conformance` 1702 of 1702, `make diff-trees` 0 of 6,000 trees
+  differ, `make diff-xml` 0 of 4,000 documents and 0 of 3,000 round trips,
+  `make diff-strings` 95 of 50,580 results differ, `make bench`, `make
+  bench-css` 20 runs and 0 failures, `make security-fetch` 3 checks and 0
+  failures: all as on `main`.
+- `make deep` and `make asan` were run when `main` was three merges back:
+  before a fix to a CSS selector, the attribute list of Phase 35 and the
+  media work of Phase 38 came in, with seven suites. The unit tests were run
+  again in the sanitizer build after the first two of those merges, 140 of
+  140; after the third, CI's sanitizer job is what ran them.
+- `make deep`: `1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 22.5 s (table [dumps])`.
+- `make asan`: 137 of 137 suites; JavaScript 906 of 921 (the one more is a
+  case of deep recursion that needs more stack than a sanitizer build's
+  frames leave, as before); DOM 640 of 640; URL 1188 of 1188; XML 1702 of
+  1702; web-platform-tests 4658 of 5192; 1,000 generated documents and 1,000
+  round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs
+  … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over
+  `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
+  sanitizer. It takes 19 minutes here.
+
+---
+
+## 42. ✅ Iterative RegExp bytecode VM, CSS L4 cascade/selectors/units, CSSOM `el.style` shorthands, and HTML5 date/time inputs
+
+**What was wrong.**
+1. **Repeated-group regex recursion (finding 26):** `BuiltinsRegExp.cpp` used
+   recursive CPS `Matcher` lambdas and recursive AST node `~Node()` destructors,
+   failing with `RangeError` past ~12,000–21,800 group iterations and risking
+   native stack overflow on deeply nested pattern ASTs.
+2. **Modern CSS cascade, selectors, units, and deep-input bounds:** `CssParser`,
+   `StyleSheet`, and `StyleResolver` lacked child/sibling combinators (`>`,
+   `+`, `~`), selector lists (`:is()`, `:where()`, multi-argument `:not()`,
+   `:host`), `@layer` statement/block precedence, `@supports` feature checks,
+   Media Queries Level 4 ranges (`400px <= width <= 1000px`) and `not`/`and`/
+   `or`, math functions (`min()`, `max()`, `clamp()`), dynamic viewport units
+   (`dvh`, `dvw`, `vmax`), percentage `border-radius`, and `:root` font-size
+   inheritance (`rem`). In addition, `parse_stylesheet_blocks` and
+   `match_selector_impl` recursed on nested `{}` blocks and long selector
+   chains, and unpruned `AllDescendant` matching took quadratic time when a
+   page had a descendant selector whose length matched a 200,000-element chain.
+3. **Inline `el.style` CSSOM gap (finding 31 / `inline-style.js`):**
+   `DomStyleBindings.cpp` stored shorthands (`flex`, `overflow`, `inset`, `gap`,
+   `border-radius`, `background`, `transition`, `text-decoration`, `list-style`,
+   `outline`, `margin`, `padding`, `border`, `font`) unexpanded, omitted
+   canonical `cssText`/`length`/`item()`/`removeProperty()`/`setProperty(..., 'important')`
+   and `--*` custom-property normalization, and ignored vendor aliases
+   (`-webkit-*`, `-moz-*`, `-ms-*`, `cssFloat`).
+4. **HTML5 date/time `<input>` behavior (finding 31 / `dates-and-svg.js`):**
+   `date`, `time`, `month`, `week`, and `datetime-local` inputs behaved like
+   plain text inputs without calendar/leap-year/ISO-week sanitization,
+   `valueAsDate`, `valueAsNumber`, `stepUp()`/`stepDown()`, or
+   `min`/`max`/`step` constraint validation.
+
+**The fixes.**
+- **RegExp VM (`src/js/BuiltinsRegExp.cpp`):** Replaced recursive CPS matchers
+  with a bytecode compiler (`InstOp` opcode stream covering literals, character
+  classes, anchors, word boundaries, quantifiers, lazy/greedy captures, named
+  backreferences, lookahead/lookbehind, and assertions) and an iterative heap
+  backtracking VM (`exec_vm`) bounded by `kMaxMatchSteps = 30,000,000`. AST
+  teardown uses an iterative free-worklist (`~RegexNode()`), and parser nesting
+  past `kMaxCompilerDepth = 1,000` throws `SyntaxError` without touching the
+  stack. Lookbehind continues to match right-to-left via sub-VMs.
+- **CSS Parser, Cascade & Selectors (`StyleSheet.hpp`, `CssParser.*`,
+  `StyleResolver.*`):**
+  - Converted `parse_stylesheet_blocks` to an explicit heap frame stack
+    preserving `@layer`/`@media`/`@supports` state and iterative
+    rule-text emission (`append_qualified_rule_text` with `reserve`), keeping
+    depth-200,000 nested `{}` stylesheets under ~10 MB RSS and `< 0.3 s`.
+  - Added `CombinatorKind` (`None`, `Child`, `AdjacentSibling`, `GeneralSibling`),
+    `:is()` / `:where()` / selector-list `:not()` / `:host`, `@layer` ordering
+    (unlayered normal beats layered normal; earlier layered `!important` beats
+    later layered `!important`), `@supports` condition evaluation, MQ L4 range
+    syntax + `not`/`and`/`or`, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`,
+    `border_radius_percent`, and iterative ancestor inheritance in
+    `resolve_style` (while keeping `line_height_number` and
+    `effective_line_height()`).
+  - Replaced recursive `match_selector_impl` with an explicit heap frame stack
+    and added `Selector::finalize_metadata()` (`min_ancestors`,
+    `cached_specificity`, `any_dynamic_specificity`) plus `StyleResolver`'s
+    per-tree `m_depth_cache` and `m_desc_prefix_cache` (`n > 32` `AllDescendant`
+    DP memoization), turning depth-200,000 `descendant selector as long as
+    the nest` from a 60s timeout into `0.0–0.1 s` (`5–14 MB`).
+- **CSSOM `el.style` (`src/js/DomStyleBindings.cpp`):** Implemented full
+  shorthand expansion/recomposition, CSSOM serialization/value normalization,
+  `-webkit-`/`-moz-`/`-ms-`/`cssFloat` aliases, `length`/`item()`,
+  `removeProperty`, `!important` priority, and custom-property (`--*`)
+  handling.
+- **Date/time `<input>` (`include/litebird/dom/FormState.hpp`,
+  `src/dom/FormState.cpp`, `src/js/DomFormBindings.cpp`):** Added WHATWG input
+  sanitization (civil calendar leap-year checks, ISO 8601 week counts,
+  `datetime-local` space-to-`T` normalization), `valueAsNumber`, `valueAsDate`,
+  `stepUp()`/`stepDown()` with millisecond-accurate stepping, and
+  `rangeUnderflow`/`rangeOverflow`/`stepMismatch` constraint validation plus
+  spec-compliant `TypeError`/`InvalidStateError` exceptions.
+
+**How verified (on the merged tree).** Every line was run on the merged tree
+with zero edits to `everyday*.dat` and with CI floors raised (`907 -> 908`,
+`640 -> 644`, ASan JS `905 -> 906`, ASan DOM `640 -> 644`):
+- `make test`: `All 166 engine test suites passed successfully!` (includes four
+  new suites: `regexp_vm_handles_deep_nesting_and_long_inputs`,
+  `css_cascade_layers_supports_combinators_and_mq_l4`,
+  `inline_style_cssom_shorthands_and_aliases`,
+  `html5_date_time_inputs_validation_and_stepping`).
+- `make js-conformance`: `908/922 (98.5%)`, `regexp.dat` `39/39 (100.0%)`,
+  everyday probe `90/90`, `0` crashes, `0` timeouts; `--reference "node -e"`
+  `922/922 (100.0%)`.
+- `make dom-conformance`: `644/644 (100.0%)`, everyday probe `68/68`,
+  `--reference` `644/644 (100.0%)` (new cases in `forms.dat` and `style.dat`).
+- Out-of-corpus jsdom comparisons (`tools/conformance/compare_with_jsdom.py`):
+  `tests/dom-conformance/open/dates-and-svg.js` matches jsdom on `6/6` date
+  lines (the remaining line is SVG DOM);
+  `tests/dom-conformance/open/inline-style.js` matches on `26/27` lines (the
+  single difference is `font-family: "Helvetica Neue", Arial;` retaining quotes
+  per CSSOM/Chromium where jsdom's `cssstyle` strips them).
+- Existing scoreboards unchanged: `make conformance` `1781/1792`,
+  `make diff-trees` `6000/6000`, `make url-conformance` `1188/1188`,
+  `make xml-conformance` `1702/1702`, `make diff-xml` `4000` docs (`0` differ) &
+  `3000/3000` round trips, `make wpt` `4658/5192` (`0` unlisted),
+  `make diff-strings` `50485/50580` (`95` differ), `make bench` (42),
+  `make bench-css` (20), `make bench-attributes` (6),
+  `make bench-tokenizer-attributes` (7), `make bench-surrogates` (3),
+  `make security-fetch` (3), `make security-worker` (17),
+  `make verify-media` (35), `make fuzz-media` (1,800), `make tsan`, and
+  `make deep` (`1332` runs over `465` pages at depth `200000`, `0` failed,
+  slowest `25.0 s`).
+- Sanitizers (ASan+UBSan, `detect_leaks=0`): `166/166` unit suites,
+  JS `907/922` (probe `90/90`, `0` crashes/timeouts), DOM `644/644`,
+  URL `1188/1188`, XML `1702/1702`, WPT `4658/5192`, `diff_xml` `1,000` docs &
+  `1,000` round trips, `fuzz` (`400` parser + `400` pipeline + `1927`/`600` XML +
+  `1800` media, `0` findings), and `make asan-deep` (`882` runs over `315` pages
+  at depth `10000`, `0` failed, slowest `4.2 s`).
+
+**What is still open.**
+- RegExp: catastrophic backtracking still terminates via `kMaxMatchSteps`
+  (`30,000,000`), patterns nested >`1,000` levels raise `SyntaxError`, and
+  flags `u`/`v`/`d` completeness remains under Wave 2.
+- CSS: `AllGeneralSibling` (`~` in selectors longer than 32 parts at extreme
+  depth) does not share `m_desc_prefix_cache`'s DP memoization; `:has()`,
+  `:focus-visible`, `@container`, CSS nesting, and `::part` are still open.
+- DOM: `getComputedStyle(el).width` layout metrics, `sheet.cssRules`,
+  `document.write`, and the SVG DOM (`className.baseVal`, `viewBox`,
+  `getBBox()`) remain open.
+
+---
+
+## 43. ✅ Real-Web Media & Vector Rendering: standalone JPEG/GIF decoders, upgraded SVG & Canvas 2D
+
+**What was missing.**
+- **JPEG & GIF:** `ImageDecoder` had no GIF decoder at all, and its JPEG path
+  (`ImageDecoder.cpp`, owned in parallel by PR #39) was a minimal stub that
+  could not decode real-world Baseline/Extended/Progressive JPEGs, chroma
+  subsampling (4:2:0 / 4:2:2 / 4:4:0), restart markers (`DRI`/`RST0`–`RST7`),
+  or CMYK/YCCK color spaces.
+- **SVG (`SvgRenderer`):** `<path>` ignored curves (`C/c`, `S/s`, `Q/q`, `T/t`)
+  and elliptical arcs (`A/a`), `<defs>` children were painted directly,
+  `transform` matrices, `preserveAspectRatio`, inline `style` declarations,
+  `opacity`/`fill-opacity`/`stroke-opacity`, `fill-rule="evenodd"`,
+  `currentColor`, `display:none`/`visibility:hidden`, `<linearGradient>` /
+  `<radialGradient>`, `<use>` / `<symbol>`, `<clipPath>`, and rounded
+  `<rect rx ry>` were missing.
+- **Canvas 2D (`CanvasRenderingContext2D`):** No Current Transformation Matrix
+  (`save`/`restore`/`translate`/`rotate`/`scale`/`transform`/`setTransform`),
+  no `clip()`, no `globalAlpha`, no `NonZero`/`EvenOdd` winding rules or
+  anti-aliased scanline fill, thin Bresenham-only stroking (no real stroke
+  width, caps, joins, dashes, or `strokeGradient`), no `roundRect`/`ellipse`/
+  `arcTo`/`isPointInPath`, and no `getImageData`/`putImageData`.
+
+**What changed (Phase 38, strictly disjoint from open PRs #36–#40).**
+- **Standalone ITU-T T.81 JPEG decoder (`JpegDecoder.hpp/.cpp`):** Zero-dependency
+  C++20 decoder for Baseline (`SOF0`), Extended Sequential (`SOF1`), and
+  Progressive (`SOF2`) DCT JPEGs. Supports 8/16-bit `DQT`, 9-bit fast-lookup +
+  16-bit canonical `DHT`, `DRI`/`RST0`–`RST7`, interleaved and non-interleaved
+  scans, progressive DC/AC spectral selection + successive approximation + EOB
+  runs, separable double-precision 8×8 IDCT with DC-only fast paths, centered
+  triangle `[3/4, 1/4]` chroma upsampling (4:4:4, 4:2:2, 4:2:0, 4:4:0, odd
+  dimensions), Grayscale / YCbCr / RGB / CMYK / Adobe YCCK, and strict
+  `kMaxDecodedPixels` / `kMaxScans` / `RasterBudget` bounds.
+- **Standalone GIF87a/GIF89a decoder (`GifDecoder.hpp/.cpp`):** Zero-dependency
+  single-frame and animated multi-frame decoder. Supports 2..8-bit LZW with
+  deferred clear-code handling, Global/Local Color Tables, 4-pass interlacing,
+  Graphic Control Extension transparency, delays, all 4 disposal methods
+  (`None`, `DoNotDispose`, `RestoreBackground`, `RestorePrevious`), `NETSCAPE2.0`
+  loop counts, sub-rectangle frame compositing, and strict frame/pixel bounds.
+- **Upgraded Canvas 2D (`Canvas2D.hpp/.cpp`):** Full 2D CTM stack (`save`/
+  `restore`, `translate`/`rotate`/`scale`/`transform`/`setTransform`/
+  `resetTransform`), 4× vertical + analytical horizontal anti-aliased scanline
+  rasterizer with `NonZero` and `EvenOdd` winding rules, CW-wound polygon-ribbon
+  thick stroking with `butt`/`round`/`square` caps, `miter`/`bevel`/`round`
+  joins, `setLineDash`/`getLineDash`/`lineDashOffset`, `stroke_gradient`,
+  inverse-CTM linear/radial gradients with `Pad`/`Reflect`/`Repeat` spread modes,
+  `globalAlpha` + alpha clip mask (`clip()`), `roundRect`/`ellipse`/`arcTo`/
+  `rect`/`isPointInPath`, `getImageData`/`putImageData`/`createImageData`,
+  CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
+- **Upgraded SVG renderer (`SvgRenderer.hpp/.cpp`):** Iterative ID index (no
+  native recursion on deep DOMs), `<defs>` skipping, full SVG path grammar
+  including W3C F.6.5/F.6.6 `A/a` elliptical arcs and compact flag syntax,
+  `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`), `transform` stack,
+  presentation attributes + inline `style` + `#RGBA`/`#RRGGBBAA`/`rgba()` +
+  `currentColor` + `opacity`/`fill-opacity`/`stroke-opacity` + `display:none`/
+  `visibility:hidden`, `<linearGradient>`/`<radialGradient>` with `href`
+  inheritance / `objectBoundingBox` / `userSpaceOnUse` / `gradientTransform` /
+  `spreadMethod`, `<use>` with depth/cycle guard + `<symbol>`, `<clipPath>`,
+  rounded `<rect rx ry>`, nested `<svg>`, and recursion/budget caps.
+- **Verification & fuzzing tools:** `tools/media_check.cpp`,
+  `tools/conformance/verify_media_render.py`, `tools/fuzz/fuzz_media.py`, and
+  `Makefile` targets `verify-media` and `fuzz-media` (wired into CI and `asan-core`).
+
+**How verified.**
+- `make test`: **139/139** engine unit test suites pass (4 new suites:
+  `jpeg_decoder_baseline_progressive_and_guards`,
+  `gif_decoder_87a_89a_interlaced_and_animation`,
+  `canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings`,
+  `svg_real_world_paths_arcs_gradients_use_clip_and_guards`), both in Release
+  (`-O2`) and under strict ASan+UBSan (`-fsanitize=address,undefined -fno-sanitize-recover=all`).
+- `make verify-media`: **35/35** checks pass (both Release and ASan+UBSan+LSan
+  `detect_leaks=1`): 21 JPEG variants vs ImageMagick/`libjpeg` achieve
+  **52.06–99.00 dB PSNR** (`MAE 0.000–0.389`, `max_diff 0–3`), 9 GIF variants
+  (including 4-pass interlaced and animated Dispose None/Background/Previous/Optimize)
+  achieve **bit-for-bit exact `max_diff = 0`** against ImageMagick `-coalesce`,
+  and 5 SVG feature suites pass deterministic pixel assertions.
+- `make fuzz-media`: **1,800** mutated JPEG/GIF/SVG cases in Release and
+  **4,500** cases under ASan+UBSan+LSan (`detect_leaks=1`) — 0 crashes, 0 UB,
+  0 leaks, 0 timeouts.
+- Deep-page stress checks (`tools/fuzz/deep_pages.py --only svg/canvas/images`):
+  39/39 Release runs at depth 200,000 (8 MB stack) and 36/36 ASan+UBSan runs
+  at depth 10,000 (2 MB stack) pass with 0 failures.
+- Existing conformance corpora unchanged: `make conformance` 1781/1792,
+  `make js-conformance` 840/845, `make dom-conformance` 629/629,
+  `make url-conformance` 1188/1188, `make wpt` 4640/5192, `make bench-css` 20/20,
+  `make security-fetch` 3/3.
+
+**What is still open.**
+- **`ImageDecoder::decode()` dispatch wiring:** `include/litebird/render/ImageDecoder.hpp`
+  and `src/render/ImageDecoder.cpp` were left untouched because PR #39 owns them
+  in parallel; once PR #39 merges, wire `JpegDecoder::decode()` and
+  `GifDecoder::decode()` into `ImageDecoder::decode()` (and optionally expose
+  animated GIF frames to the shell).
+- **Other image formats:** WebP, AVIF, and animated APNG/ICO are not implemented.
+  JPEG arithmetic coding (`SOF9`/`SOF10`), lossless JPEG (`SOF3`), and 12-bit
+  precision (`P=12`) are rejected cleanly as unsupported.
+- **SVG features still missing:** `<text>`/`<tspan>`, `<style>` CSS stylesheet
+  rules targeting SVG elements, `<pattern>`, `<mask>`, `<filter>` (`feGaussianBlur`,
+  etc.), `<marker>`, `<image>` inside `<svg>`, and SMIL/CSS animations on SVG.
+- **Canvas 2D features still missing:** `fillText`/`strokeText`/`measureText`,
+  shadows (`shadowBlur`/`shadowColor`), `createPattern`, `Path2D`,
+  `drawImage(HTMLImageElement)` (only `ImageData` / canvas-to-canvas is wired),
+  and remaining Porter-Duff / blend modes beyond the existing set.
+
+---
+
+## 44. ✅ `<img src>` bypassed document-origin security, and unloaded images without dimensions laid out as 100×100 boxes
+
+**The hole.** Phase 33 moved `fetch()` and `Worker` behind
+`ResourceLoader::load_for_page`, but `LayoutTree::build_element` (`src/layout/LayoutTree.cpp`)
+still passed an `<img>` element's raw `src` attribute straight to
+`ImageDecoder::decode_file(src)`. `decode_file` opened any non-`data:` string
+with `std::ifstream(path, std::ios::binary)`. Consequently, a remote web
+document (`https://attacker.example/page.html`, or one smuggling
+`<base href="file:///...">`) could embed `<img src="/path/to/local.png">` or
+`<img src="file:///path/to/local.bmp">`, read local disk images in-process, and
+observe their decoded intrinsic pixel dimensions via layout or
+`getBoundingClientRect()`/`offsetWidth`/`offsetHeight` side channels.
+
+In addition, when an `<img>` without explicit `width`/`height` attributes or
+CSS dimensions failed to decode (or was blocked by origin policy),
+`LayoutBox::layout_image` (`src/layout/LayoutBox.cpp`) sized the box to a
+hardcoded `100×100` placeholder, pushing surrounding content down by 100 px,
+and inline-formatted `<img>` boxes (`InlineFormattingContext`) never wrote their
+laid-out fragment coordinates back to the DOM element (`set_layout_box`), so
+`img.getBoundingClientRect()` returned `0×0` even for valid inline images.
+
+**The fix.**
+1. `LayoutTree` now resolves and loads every `<img src>` through
+   `ResourceLoader::load_for_page(src, doc.base_uri(), doc.url(), /*enforce_cors=*/false)`
+   and caches decoded bitmaps per resolved URL on `Document`
+   (`lookup_decoded_image` / `cache_decoded_image`). Web documents (`http:`,
+   `https:`, `data:`) cannot read `file:` URLs or local filesystem paths, even
+   when `<base href="file:///...">` is present; trusted local `file:` documents
+   keep relative local image loading.
+2. `ImageDecoder::decode_bytes` now decodes PNG (`decode_png` / `encode_png`,
+   backed by the pure-C++20 RFC 1950/1951/1952 `Deflate` engine with 64 MiB
+   decompression and 16384×16384 / 64M-pixel bounds), wires Phase 38's
+   `JpegDecoder` and `GifDecoder`, and rasterizes SVG subresources alongside
+   BMP, PPM, and `data:image/*;base64,...` URLs.
+3. Unloaded or blocked `<img>` elements without explicit `width`/`height` now
+   lay out as `0×0` instead of `100×100` (explicit HTML `width`/`height`
+   attributes or CSS `width`/`height` are still honoured), and
+   `InlineFormattingContext` writes laid-out `ImageNode` border-box coordinates
+   back to the `Element` so `getBoundingClientRect()`/`offsetWidth` report live
+   inline image geometry.
+
+**How verified.**
+```bash
+./build/test_suite
+make security-fetch
+```
+`make test` passes **153/153** suites (and **153/153** under ASan+UBSan),
+including `img_subresources_enforce_document_origin_security` (proving a web
+page at `https://app.example/index.html` — with and without
+`<base href="file:///...">` — is denied local PNG access and lays out the
+blocked `<img>` at `0×0`, while a local `file:` document decodes the same PNG
+at its `24×18` intrinsic size and reports `24×18` from
+`img.getBoundingClientRect()`). `make security-fetch` passes `3 checks; 0 failure(s)`.
+
+**What is still approximate.**
+- WebP, AVIF, and ICO `<img>` payloads are not decoded yet (PNG, JPEG, GIF, SVG,
+  BMP, and PPM are decoded).
+- `HTMLImageElement` script properties and events (`naturalWidth`,
+  `naturalHeight`, `complete`, `decode()`, `load`/`error` events on `<img>`,
+  `srcset`, and `<picture>`) are not implemented yet.
+- Unloaded `<img>` elements with non-empty `alt` text and no explicit
+  dimensions collapse to `0×0` rather than synthesizing an inline `alt`-text
+  fallback box.
+- Cross-origin `<img>` loads follow the standard default `no-cors` subresource
+  model, but `<canvas>` taint tracking (`crossorigin="anonymous"`) is not
+  enforced yet because `drawImage` does not yet take `HTMLImageElement` bitmaps.
+
+---
+
+## 45. ✅ Worker MIME/module policy, EventTarget error dispatch, and shutdown `SIGSEGV`
+
+**What was wrong.**
+1. **No MIME or HTTP-status check on worker scripts:** `src/js/Worker.cpp` ran
+   any response returned by `ResourceLoader::load_for_page` as classic
+   JavaScript regardless of its `Content-Type` (`text/plain`, `text/html`,
+   `application/json`, default `data:,...`, missing `Content-Type`, or HTTP
+   `3xx` responses where `resp.success` was true).
+2. **`WorkerOptions` ignored:** `new Worker(url, { type: "module" })` silently
+   ignored the options argument and executed the script as classic JavaScript;
+   invalid `type` values did not throw `TypeError`; `options.name` was dropped;
+   calling `Worker(...)` without `new` did not throw `TypeError`.
+3. **Broken `EventTarget` error dispatch:** `WorkerObject::add_event_listener`
+   stored `"error"` listeners in `m_error_listeners`, but `post_error()` only
+   ever called `m_onerror`, silently dropping all `addEventListener("error")`
+   listeners. There was no `removeEventListener`, deduplication, `{ once }`,
+   `handleEvent`, `preventDefault()`, `stopImmediatePropagation()`,
+   `self.onerror`/`self.location`/`self.name`, or `importScripts(...)`, and
+   `WorkerObject::create_js_instance()` did not wire `onmessage`/`onerror`.
+4. **Exit-time `SIGSEGV` (4/30 runs on `main`) & reference-cycle leak:**
+   `create_constructor()` stored `[inst, worker]` inside `worker->m_onmessage`
+   while `inst` stored `worker` inside its method closures, creating a strong
+   reference cycle. Because `Heap::default_heap()` is intentionally never
+   destroyed at exit, active `WorkerObject` threads were never terminated or
+   joined before `main()` returned. Reproducing with
+   `for (var i = 0; i < 4; i++) new Worker("data:text/javascript,postMessage(1)");`
+   crashed with `SIGSEGV` (`rc = -11`) in **4 of 30 runs** on `main`; a
+   captured backtrace showed worker threads still inside
+   `WorkerObject::worker_thread_main` → `JsInterpreter::JsInterpreter` →
+   `install_object_builtins` → `js_symbol_for_key` dereferencing
+   `symbol_registry()`'s `static std::unordered_map` after `__run_exit_handlers`
+   had already destroyed it. Nested workers also had no parent-loop wake
+   mechanism or child teardown before the parent's `EventLoop` was destroyed.
+
+**What changed.**
+- `include/litebird/js/Worker.hpp` and `src/js/Worker.cpp`:
+  - Added `WorkerObject::is_javascript_mime_type()` implementing WHATWG MIME
+    Sniffing §4.3 (the 16 JavaScript MIME essences, parameter stripping, ASCII
+    HTTP whitespace trimming, case-insensitive matching, no MIME sniffing) and
+    required HTTP `2xx` + a JavaScript MIME type in `load_worker_script()` for
+    both `new Worker(...)` and `importScripts(...)`.
+  - Added `WorkerType` / `WorkerOptions` parsing (`new` check, `type` enum
+    validation, `{ type: "module" }` rejected cleanly via an `ErrorEvent`
+    instead of running classic JS, `name` exposed on `self.name` and global
+    `name`, plus `self.location` and `importScripts(...)`).
+  - Replaced ad-hoc callbacks with unified `ListenerMap` / `EventControl`
+    dispatch on both `Worker` and `self` (supporting `onerror`/`onmessage` +
+    `addEventListener` + `removeEventListener` + deduplication + `{ once }` +
+    `{ handleEvent }` + `preventDefault()` + `stopImmediatePropagation()` +
+    `ErrorEvent` metadata, and shared across `create_constructor` and
+    `create_js_instance`).
+  - Isolated owner-thread `JsValue` state into `WorkerOwnerJsState` (released
+    on `terminate()` and on the worker's final exit task to eliminate both
+    cross-thread non-atomic `handle_count` races and the `inst` ↔ `WorkerObject`
+    cycle).
+  - Added a lifetime-guarded `WorkerOwnerLoopState` with parent-wake support
+    for nested workers and guaranteed child teardown before parent `EventLoop`
+    destruction.
+  - Serialized worker `JsInterpreter` initialization and registered an immortal
+    `WorkerRegistry` with a `std::atexit` hook (installed after warming up
+    `JsLexer`'s keyword table, `JsOps`'s `symbol_registry()`, and
+    `DomBindings`'s interface table) so all active worker threads are woken
+    and joined cleanly before static destructors run.
+- Added 4 unit test suites in `tests/test_suite.cpp` (suites 154–157) and
+  `tools/security/verify_worker_policy.py` (`make security-worker`, wired into
+  CI `build-and-test` and `make asan-core`).
+
+**How it was verified.**
+- `make test`: **157/157** unit suites pass in Release (`-O2`) and
+  **157/157** under ASan+UBSan (`build-asan/test_suite`, `ASAN_OPTIONS=detect_leaks=0`).
+- `make security-worker`: **17/17** checks pass in Release (loopback HTTP
+  `text/javascript`, `text/plain`, `text/html`, `application/json`, missing
+  `Content-Type`, HTTP `404`, `data:` MIME checks, `{type:"module"}` refusal,
+  `{type:"classic", name}`, invalid `type` `TypeError`, `importScripts` MIME
+  and Phase 33 local-file boundary, and **60/60** concurrent 4-worker
+  startup/exit runs) and **17/17** under ASan+UBSan (**60/60** stress runs).
+- Extended startup/exit stress check: **200/200** consecutive CLI runs of
+  4 concurrent `new Worker(...)` with immediate exit pass (**0 crashes**,
+  down from 4/30 `SIGSEGV` before; also resolves the 7/60 `SIGSEGV` /
+  `heap-use-after-free` worker startup exit bug noted in finding 41).
+- Existing conformance suites unchanged on latest `main`: `make conformance`
+  1781/1792, `make js-conformance` 906/921, `make dom-conformance` 640/640,
+  `make url-conformance` 1188/1188, `make wpt` 4658/5192, `make security-fetch`
+  3/3, `make verify-media` 35/35, `make bench-attributes` 6/6, `make bench-css`
+  20/20.
+
+**What is still open.**
+- **ES module workers:** `{ type: "module" }` is now explicitly refused with an
+  error event instead of silently running classic JS; actual module worker
+  execution waits for an ES module loader in the JS engine.
+- **Structured clone & messaging ports:** `postMessage` still serializes via
+  JSON (no `ArrayBuffer`, transferables, cyclic object graphs, `MessagePort`,
+  or `SharedWorker`).
+- **Defense-in-depth for process-wide registries:** `symbol_registry()` in
+  `src/js/JsOps.cpp` and `s_registry` in `src/js/DomBindings.cpp` are still
+  destroyed at static teardown; Phase 40 warms them before registering
+  `atexit_shutdown_workers()` so worker threads are always joined first, and a
+  small follow-up can heap-allocate both like `Heap::default_heap()`.
+
+---
+
+## 46. ✅ The tokenizer's repeated-attribute-name check was quadratic
+
+**The hole.** `HtmlTokenizer::consume_tag` drops a repeated attribute name —
+the standard's *duplicate-attribute* parse error, where the first attribute
+with that name wins — by comparing the name with every attribute the token
+has already accepted (`std::any_of` over `token.attributes` in the
+`flush_attribute` lambda). Each attribute costs as much as the ones before
+it, so a tag with n attributes costs n² comparisons. One element with 50,000
+attributes took about 2.9 s in the HTML parser (10.4 s before Phase 28 indexed
+the element's own attribute list); 25,000 took about 0.5 s. An end tag with
+that many attributes paid the same and its attributes were then thrown away
+by the tree builder. This was the tokenizer half of finding 28's cost row;
+the XML parser already did the check with a set.
+
+**The fix.** Only `src/html/HtmlTokenizer.cpp` changed. A tag that reaches 32
+accepted attributes gets a `std::unordered_set<std::string_view>` of their
+names; below that the scan stays, because comparing a handful of short
+strings in a contiguous vector is cheaper than hashing into a table, and an
+ordinary tag allocates nothing extra. The set holds views of the names inside
+`token.attributes`, so no name is stored twice — which is only safe while
+those strings stay put. Appending can reallocate the vector, and a short name
+lives inside its `std::string` object and moves with it, so the index records
+the vector's capacity and is rebuilt whenever it changes; between rebuilds no
+accepted name moves. Capacity grows geometrically, so all the rebuilds
+together are O(n) and the check is linear. Nothing else changed: names are
+ASCII-lower-cased before the check, the first value wins, order is the order
+of first occurrence, valueless/quoted/unquoted forms behave as before, `=`
+may start a name, end-tag attributes are still tokenized, and EOF inside a
+tag still drops the token.
+
+**Measured.** Whole-process times (`--dump-dom-webplatform`: parse and tree
+dump, no layout, no scripts), best of three, idle machine, same hour. The
+baseline is this merged tree built with `main`'s tokenizer, kept as
+`build/litebird-final-baseline`, so the only difference is this change:
+
+```bash
+python3 tools/bench/bench_tokenizer_attributes.py \
+  --baseline build/litebird-final-baseline --reps 3 --max-ms 1000
+```
+
+| Case (50,000 attribute occurrences) | Baseline | Current | Speedup |
+| :--- | ---: | ---: | ---: |
+| distinct names | 3,474 ms | 93 ms | 37.2× |
+| each name twice | 1,150 ms | 39 ms | 29.6× |
+| uppercase repeats | 1,320 ms | 35 ms | 37.6× |
+| long names, each twice | 3,810 ms | 71 ms | 53.5× |
+| quoted, bare, unquoted | 772 ms | 27 ms | 28.2× |
+| many small tags | 39 ms | 40 ms | 1.0× |
+| end tag with attributes | 3,170 ms | 25 ms | 125.5× |
+
+Every dump equals the tree the markup must produce — computed by the bench
+from the markup, not recorded from a binary — and equals the baseline
+binary's dump byte for byte. The square is gone: distinct names at
+25,000/50,000/100,000/200,000 attributes take 45/93/183/344 ms across runs
+(before: 628 ms at 25,000, 3,474 ms at 50,000). Tokenizing alone, 50,000 attributes cost 28 ms
+in the release build and 102 ms under ASan/UBSan. `make
+bench-tokenizer-attributes` is the checked-in guard: seven cases, three
+repetitions, expected trees, 1,000 ms limit, run by CI (the scan cost 3.5 s).
+
+**How it was verified.** `make test` passes 159 suites; the two new ones are
+`tokenizer_repeated_attribute_names_keep_the_first` and
+`tokenizer_duplicate_attribute_check_is_linear`. Both were checked against
+mutants: with the old scan restored the correctness suite still passes and
+the timing suite fails at `distinct_seconds < 2.0`; with the capacity rebuild
+removed the correctness suite fails at the first size past a vector growth,
+which is exactly the dangling-view bug the rebuild prevents. Out-of-corpus
+pages through `tools/conformance/compare_with_jsdom.py` printed `16 lines, 16
+the same`, `20 lines, 20 the same` and `6 lines, 6 the same` before and after
+(duplicates through `innerHTML`/`DOMParser`/`insertAdjacentHTML`/SVG/table
+cells, the sizes around the index threshold and every vector growth,
+whitespace forms, form controls, and `=`-starting names). No expectation was
+re-recorded and no floor was lowered.
+
+The release run on the merged tree kept every scoreboard: html5lib
+1781/1792, JS 907/921, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
+4658/5192 (534 listed, 0 unlisted); diff-trees 6,000 pages and diff-xml 4,000
+documents with 0 differing, XML round trip 3000/3000; deep 1,332 runs over
+465 pages at depth 200,000 on an 8 MB stack, 0 failed (slowest 19.3 s);
+bench-css 20 padded runs, bench-attributes 6 cases,
+bench-tokenizer-attributes 7 cases, security-fetch 3 checks and
+security-worker 17 checks, all with 0 failures; verify-media 35 checks and
+fuzz-media 1,800 cases clean;
+diff-strings at its 95-difference ceiling. Peak RSS for the 50,000-attribute
+page was 16.1 MB in both binaries: the index is freed when the tag ends and
+the dump reuses its memory.
+
+The sanitizer run on the same tree reported nothing: ASan/UBSan 159/159
+suites, JS 906/921 (one fewer than release: a deep-recursion case needs more
+stack than a sanitizer build's frames leave, as before), DOM
+640/640, URL 1188/1188, XML 1702/1702, WPT 4658/5192; ASan diff-xml 1,000
+documents with 0 differing and 1,000/1,000 round trips; fuzz 400 parser
+mutations, 400 pipeline runs and 600 XML mutations with 0 findings; ASan deep
+882 runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest
+2.7 s). `make tsan` passed (the string type under ThreadSanitizer, then under
+ASan with leak checking).
+
+**What is still open.** A cost fix in one function, not a parser conformance
+change: the tokenizer's other states, the tree builder (the eleven html5lib
+`<select>` cases) and the XML parser were not touched. Finding 28's layout
+costs (a block inside an inline box, 10,000 sized floats) and finding 40's
+middle erases remain, as do the `Attr`-is-not-a-`Node`,
+one-qualified-name-in-two-namespaces and collection named-property rows.
+
+---
+
+## 47. ✅ A string built half a surrogate pair at a time cost the square of its length
+
+**The hole.** `JsString` stores text as UTF-8 in blocks that never change once
+written, and `a + b` writes `b` into the room after `a` when `a` ends where the
+block's text ends. That is what makes `s += x` in a loop cost what it writes
+(finding 25). One join could not use it: when `a` ends in a high surrogate half
+and `b` starts with the low half, the two are one character, four bytes, and
+those four bytes start *three bytes before the end of `a`*. Writing them would
+change bytes another handle is reading, so `merge_halves` copied the whole of
+`a` and `b` into a new block — and the new block had no room to grow and no
+history of moves, so the next append copied too. Building a string one half at
+a time (`s += '\uD83D'; s += '\uDE00'`) therefore copied the whole text at every
+pair. Whole-process times on the verification machine, release build:
+
+| Pairs appended | Half at a time, before | Half at a time, after | Speedup | A pair at a time, before and after |
+| ---: | ---: | ---: | ---: | ---: |
+| 5,000 | 325 ms | 7 ms | 43.5× | — |
+| 10,000 | 1,390 ms | 11 ms | 127.1× | — |
+| 20,000 | 5,583 ms | 18 ms | 308.0× | 11 ms |
+| 40,000 | 23,252 ms | 30 ms | 782.1× | 15 ms |
+
+Best of three, idle machine, `--run-js`, whole process. The baseline is the
+branch's base commit (`ce37948`), which is `main`'s `JsString`, kept as
+`build/litebird-surrogate-baseline`; these scripts run no layout, so the only
+difference on their path is this change. Four times the time for twice the input
+before; in step with the input after, and the same as a pair at a time. One case
+of the corpus, `pairs made a half at a time in a long string`
+(`tests/js-conformance/long-strings.dat`), does this 60,000 times: it took
+5.545 s of the 10 s a case is allowed, so it timed out on a busy machine. That
+is why the JavaScript floor in CI sat at 906 while the corpus scored 907. It
+now takes 0.035 s and prints the same line.
+
+**The fix.** Only `src/js/JsString.cpp` and `include/litebird/js/JsString.hpp`
+changed. A join no longer writes a high half that ends its result. The handle
+owes it: a fifth 32-bit field, `m_pending`, holds the half, `m_units` counts it
+and `m_bytes` does not. When the low half arrives, the character is written
+where the block's text ends — an ordinary append, nothing copied — and when
+anything else arrives the half is written first, which is also an append. A
+handle that owes a half is settled the first time its text is read (`view()`,
+`wide()`, `str()`, a piece): the three bytes go into the room after the block's
+text if it is still free, and otherwise the text is copied once into a block
+that the handle's own block keeps alive, the same arrangement as the cached
+UTF-16 form. The claim on that room is the same compare-and-swap every append
+makes, so two threads settling at once cannot both win; the loser copies. A
+settled handle is an ordinary range of a block, and nothing about it is new.
+
+The handle grew from 24 bytes to 32 (one word of padding for the fifth field)
+and `JsValue` from 88 to 96. That has a small cost, and it is measured rather
+than assumed: across the 39 string benchmarks that were already there, best of
+three on an idle machine, 2,521 ms before and 2,640 ms after (1.05×), median
+case 1.04×, mean 1.03×, nine of 39 more than 15% slower. The worst is `read:
+for-of, 200k non-ASCII` at 42 → 64 ms and `read: charCodeAt, 200k ASCII` at
+97 → 133 ms; the best are `build: obj.s += x` and `build: append, then read the
+end` at 0.60×. An earlier run of the same two binaries came out the other way
+(2,661 → 2,452 ms, median 0.92×), so on this two-core machine the difference is
+close to the run-to-run spread; the slowest case is still a fifth of the three
+seconds `make bench` allows.
+
+**Measured.** `make bench-surrogates` is the checked-in guard: the two sizes a
+doubling apart plus the keep-each-prefix shape, best of three, results compared
+with Node.js, limit one second.
+
+```bash
+make bench-surrogates
+```
+
+| Case | Before (`main`) | After | Node.js |
+| :--- | ---: | ---: | ---: |
+| half a pair at a time, 20,000 | 5,546 ms | 17 ms | 36 ms |
+| half a pair at a time, 40,000 | over 8 s | 28 ms | 44 ms |
+| half a pair, keeping each prefix, 20,000 | 3,856 ms | 14 ms | 40 ms |
+
+The guard fails on all three cases against `main`'s binary and passes on this
+one. Counting work rather than timing it (`JsString::stats`), 20,000 pairs built
+half at a time copy 399,370 bytes into 152 blocks for 100,000 bytes of text;
+20,000 pairs built a pair at a time copy 399,220 bytes into 22. The old path
+copied the text so far at each of the 20,000 pairs, about a thousand million
+bytes. The corpus case itself went from 5.545 s to 0.035 s, printing the same
+line.
+
+**How it was verified.** `make test` passes 162 suites; the two new ones are
+`js_string_owes_a_trailing_high_half_until_it_is_read` and
+`js_string_built_half_a_pair_at_a_time_costs_what_it_writes`. Both were checked
+against a mutant: with the deferral turned off (`ends_in_high_half` always
+false, which is the old behaviour) the first fails at "no block and no byte is
+written when a half is owed" and the second at `bytes_copied < 2000000`. The
+first pins what script can see: nothing is written when a half is owed, the
+text reads as it always did, a handle kept before the pair was completed still
+ends in a lone half, settling copies three bytes once and never again, a settle
+whose room was taken copies once and outlives the handle that took it, and
+every way round (two highs, a low then a high, raw text on either side, a join
+of several units) gives the same bytes. The random UTF-16 model test
+(`tests/js_string_stress.hpp`, also run by `make tsan`) already generates lone
+halves in its alphabet and concatenates, slices and appends with reads in
+between; it passes unchanged.
+
+Out-of-corpus: 40 surrogate-heavy programs (kept prefixes, slicing a pending
+string, splitting a pair, `for...of`, `indexOf` across the boundary, JSON,
+property keys, `repeat`, `replace`, template literals, regular expressions,
+numbers on either side) run in Node.js and in both binaries: 0 mismatches
+against Node, and the two binaries print the same for all 40. Two pages' worth
+of DOM text built the same way — `textContent`, attributes, comments,
+`splitText`, `normalize`, `cloneNode`, `insertAdjacentHTML`, `innerHTML` round
+trips — through `tools/conformance/compare_with_jsdom.py` printed `11 lines, 11
+the same` and `12 lines, 12 the same`, on both binaries.
+
+The new settle path is shared state, so it was also run on its own under the
+sanitizers: 200 rounds of seven threads settling copies of one handle that owes
+a half, reading one handle from several threads at once, taking pieces and
+appending, while another thread appends to the same block so the room is
+sometimes free and sometimes taken. `0 failure(s)` under ThreadSanitizer and
+under ASan/UBSan with leak checking on — no race, no leak, and every answer the
+text it was given.
+
+The release run on the merged tree (`main` at `e007fa2`, which brought PR #51's
+float placement) kept every scoreboard: 162 suites; html5lib
+1781/1792 (57 files); JS 907/921 with 0 crashes and 0 timeouts; DOM 640/640;
+URL 1188/1188; XML 1702/1702; WPT 4658/5192 (534 listed, 0 unlisted);
+diff-trees 6,000 pages and diff-xml 4,000 documents with 0 differing, XML round trip 3000/3000;
+diff-strings at its 95-difference ceiling; deep 1,332 runs over 465 pages at
+depth 200,000 on an 8 MB stack, 0 failed (slowest 23.4 s); bench 42 cases,
+bench-surrogates 3, bench-css 20, bench-attributes 6,
+bench-tokenizer-attributes 7, security-fetch 3 and security-worker 17, all
+with 0 failures; verify-media 35 checks. The sanitizer run: 162 suites,
+JS 906/921 (one fewer, a deep-recursion case that needs more stack than a
+sanitizer build's frames leave), XML 1702/1702, WPT 4658/5192, 1,000 generated
+XML documents with 0 differing and 1,000 round trips, fuzz 400 / pipeline 400 /
+XML 600 mutations with 0 findings, 1,800 media fuzz cases clean, and 882 deep
+runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed (slowest 3.6 s).
+`make tsan` passed both the model and the thread test, under ThreadSanitizer
+and under ASan with leak checking.
+
+**What this does not change.** A high half that is *already in a block* — from
+a literal, from `String.fromCharCode`, from a piece — still copies when the low
+half arrives, because the four bytes start inside text another handle may be
+reading. And a handle that owes a half and is *read* before the low half
+arrives has its half written into the block, so completing the pair then
+copies: `s += '\uD83D'; n += s.indexOf('zz'); s += '\uDE00'` in a loop is still
+quadratic (58/242/893 ms at 5,000/10,000/20,000). Neither shape is in the
+corpus; both are rows of the task table now. No expectation was re-recorded, no
+`everyday-*.dat` file was touched, and no floor was lowered: the JavaScript
+floor in CI went **up**, from 906 to the score of 907, which is what the comment
+above it said to do when this row was fixed.

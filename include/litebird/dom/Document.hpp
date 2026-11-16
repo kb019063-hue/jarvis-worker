@@ -3,11 +3,15 @@
 #include "litebird/dom/Node.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <memory>
 #include <unordered_map>
 
 namespace litebird {
+
+struct ImageData;
+struct StyleSheetCache;
 
 /// Document type information retained from the tokenizer.
 struct Doctype {
@@ -58,7 +62,10 @@ private:
 
 class Document : public Node {
 public:
-    Document() : Node(NodeType::Document) {}
+    using LayoutUpdater = std::function<void(Document&)>;
+
+    Document();
+    ~Document() override;
 
     void set_doctype(Doctype d) { m_doctype = std::move(d); m_doctype_node.reset(); }
     const Doctype& doctype() const { return m_doctype; }
@@ -148,6 +155,38 @@ public:
     std::shared_ptr<Text> create_text_node(const std::string& text);
     std::shared_ptr<Node> create_document_fragment();
 
+    // --- Live viewport & on-demand layout reflow -------------------------------
+    void set_viewport_size(float width, float height) {
+        if (m_viewport_width != width || m_viewport_height != height) {
+            m_viewport_width = width;
+            m_viewport_height = height;
+            m_layout_tree_version = 0;
+        }
+    }
+    float viewport_width() const { return m_viewport_width; }
+    float viewport_height() const { return m_viewport_height; }
+
+    void set_layout_updater(LayoutUpdater updater) {
+        m_layout_updater = std::move(updater);
+        m_layout_tree_version = 0;
+    }
+    bool has_layout_updater() const { return static_cast<bool>(m_layout_updater); }
+    void mark_layout_clean() { m_layout_tree_version = tree_version(); }
+    void invalidate_layout() { m_layout_tree_version = 0; }
+    /// Runs `m_layout_updater` if attached and the DOM/style tree has mutated
+    /// since the last layout pass. No-op on standalone unit-test documents
+    /// without a layout updater.
+    void ensure_layout();
+    /// Attaches the default CSS + LayoutTree reflow updater if none is set.
+    void install_default_layout_updater();
+
+    // --- Per-document subresource caches (CSS & images) ------------------------
+    StyleSheetCache& stylesheet_cache();
+    std::shared_ptr<ImageData> find_cached_image(const std::string& resolved_url, bool& in_cache) const;
+    void store_cached_image(const std::string& resolved_url, std::shared_ptr<ImageData> img);
+    bool allow_external_image_fetch();
+    void clear_subresource_caches();
+
 protected:
     void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
 
@@ -165,6 +204,17 @@ private:
     std::string m_content_type{"text/html"};
     bool m_is_html{true};
     bool m_xml_document_object{false};
+
+    float m_viewport_width{1024.0f};
+    float m_viewport_height{768.0f};
+    LayoutUpdater m_layout_updater;
+    uint64_t m_layout_tree_version{0};
+    bool m_in_layout_update{false};
+
+    std::unique_ptr<StyleSheetCache> m_stylesheet_cache;
+    std::unordered_map<std::string, std::shared_ptr<ImageData>> m_image_cache;
+    std::size_t m_external_image_fetches{0};
+    static constexpr std::size_t kMaxExternalImageFetches = 256;
 
     // getElementById; see Document.cpp. The pointers are only read while the
     // tree is at the version the index was built at: an element cannot leave

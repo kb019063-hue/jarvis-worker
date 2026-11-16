@@ -129,19 +129,10 @@ JsTokenType binary_operator_for(JsTokenType assign_op) {
 }
 
 /// Property lookup that starts at `start` but runs getters against `receiver`:
-/// what `super.x` needs.
+/// what `super.x` needs. In a static method `start` is the cell of the parent
+/// class, a function.
 JsValue get_with_receiver(JsObject* start, const std::string& key, const JsValue& receiver) {
-    int guard = 0;
-    for (JsObject* obj = start; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
-        auto it = obj->properties.find(key);
-        if (it == obj->properties.end()) continue;
-        if (it->flags & PropertyMap::Accessor) {
-            if (it->second.is_function()) return it->second.call_with_this(receiver, {});
-            return JsValue::make_undefined();
-        }
-        return it->second;
-    }
-    return JsValue::make_undefined();
+    return js_get_from_chain(start, key, receiver);
 }
 
 /// Pulls values out of an iterable one at a time, for array destructuring,
@@ -649,7 +640,9 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     if (cls->super_class) {
         parent = evaluate(cls->super_class.get(), env);
         if (parent.type != JsType::Null) {
-            if (!parent.is_function()) {
+            // An arrow function, a method, an async or a generator function
+            // cannot be constructed, so it cannot be a parent either.
+            if (!js_is_constructor(parent)) {
                 js_throw_type_error("Class extends value " + js_describe_thrown(parent) +
                                     " is not a constructor or null");
             }
@@ -665,8 +658,10 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     JsValue proto = JsValue::make_object();
     if (has_parent) {
         JsValue parent_proto = parent.get_property("prototype");
-        if (parent_proto.object_val && parent_proto.is_object_like()) {
-            proto.object_val->prototype = parent_proto.object_val;
+        if (parent_proto.is_object_like()) {
+            if (JsObject* target = parent_proto.as_prototype()) proto.object_val->prototype = target;
+        } else if (parent_proto.type == JsType::Null) {
+            proto.object_val->prototype = nullptr;
         }
     } else if (cls->super_class) {
         proto.object_val->prototype = nullptr;       // `extends null`
@@ -682,7 +677,13 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     }
     ctor.define_property("prototype", proto, 0);
     proto.define_property("constructor", ctor, PropertyMap::Hidden);
-    if (has_parent) ctor.define_property("%super", parent, PropertyMap::Hidden);
+    // The parent is the prototype of the class itself: static members are
+    // found along that link, `Object.getPrototypeOf(Derived)` is `Base`, and
+    // `super(...)` calls whatever is there when the constructor runs. The
+    // class was made a moment ago, so it cannot be in its parent's chain and
+    // there is no loop to look for (which would cost the length of the chain
+    // for every class of a long one).
+    if (has_parent) ctor.function_cell()->prototype = parent.as_prototype();
     ctor.define_property("%home", proto, PropertyMap::Hidden);
 
     if (!cls->name.empty()) class_env->define_const(cls->name, ctor);
@@ -780,6 +781,8 @@ JsValue JsInterpreter::super_base(const EnvPtr& env) {
     if (!home || !home->value.is_object_like()) {
         js_throw_error(JsErrorKind::SyntaxError, "'super' keyword unexpected here");
     }
+    // One step up from where the method lives: the prototype of the class's
+    // prototype object, or for a static method the parent class, a function.
     JsObject* proto = home->value.prototype_object();
     if (!proto) return JsValue::make_undefined();
     return JsValue::make_object(proto);
@@ -792,15 +795,18 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     }
     JsValue ctor = active->value;
     JsValue this_val = lookup_identifier("this", env);
+    // The parent is the constructor's prototype at this moment, as the
+    // language has it: `Object.setPrototypeOf(Derived, Other)` changes what
+    // `super(...)` calls. A class that extends null has Function.prototype
+    // there, a function that is not a constructor.
     JsValue parent;
-    if (JsObject* cell = ctor.property_cell()) {
-        auto it = cell->properties.find("%super");
-        if (it != cell->properties.end()) parent = it->second;
+    if (JsObject* link = ctor.prototype_object()) parent = JsValue::make_object(link);
+    const auto* parent_fd = parent.function_data();
+    if (!js_is_constructor(parent)) {
+        js_throw_type_error("Super constructor is not a constructor");
     }
-    if (!parent.is_function()) js_throw_type_error("Super constructor is not a constructor");
 
     std::vector<JsValue> args = eval_arguments(expr->args, env);
-    const auto* parent_fd = parent.function_data();
     if (parent_fd && parent_fd->node) {
         // A script parent initialises the same `this` object.
         parent.construct(args, &this_val);
@@ -1754,7 +1760,7 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
                 ? js_to_property_key(evaluate(super_member->computed.get(), env))
                 : super_member->property;
             JsValue base = super_base(env);
-            fn = get_with_receiver(base.object_val, computed_name, this_val);
+            fn = get_with_receiver(base.property_cell(), computed_name, this_val);
             callee_name = &computed_name;
             break;
         }
@@ -1833,11 +1839,17 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             continue;
         }
 
-        JsValue value = evaluate_named(prop.value.get(), env, key);
-        if (key == "__proto__" && !prop.computed_key && !prop.shorthand) {
-            // `{ __proto__: base }` sets the prototype rather than a property.
-            if (value.object_val && value.is_object_like()) object.object_val->prototype = value.object_val;
-            else if (value.type == JsType::Null) object.object_val->prototype = nullptr;
+        // `{ __proto__: base }` sets the prototype rather than a property, so
+        // a function or a class written there is not named after the key.
+        const bool sets_prototype = key == "__proto__" && !prop.computed_key && !prop.shorthand;
+        JsValue value = sets_prototype ? evaluate(prop.value.get(), env)
+                                       : evaluate_named(prop.value.get(), env, key);
+        if (sets_prototype) {
+            if (value.is_object_like()) {
+                if (JsObject* target = value.as_prototype()) object.object_val->prototype = target;
+            } else if (value.type == JsType::Null) {
+                object.object_val->prototype = nullptr;
+            }
             continue;
         }
         object.define_property(key, value, PropertyMap::Default);
@@ -2100,7 +2112,7 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                 ? js_to_property_key(evaluate(super_member->computed.get(), env))
                 : super_member->property;
             JsValue base = super_base(env);
-            return get_with_receiver(base.object_val, key, lookup_identifier("this", env));
+            return get_with_receiver(base.property_cell(), key, lookup_identifier("this", env));
         }
 
         case NodeKind::NewTarget: {

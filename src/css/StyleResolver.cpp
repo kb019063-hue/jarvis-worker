@@ -1,5 +1,6 @@
 #include "litebird/css/StyleResolver.hpp"
 #include <unordered_set>
+#include <algorithm>
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/CssText.hpp"
 #include "litebird/dom/Selector.hpp"
@@ -157,80 +158,78 @@ std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
     return candidates;
 }
 
+// Parse a strictly signed base-10 integer (optional single sign, then at
+// least one digit). CSS tokenises the parts of an <an+b> formula separately,
+// so this rejects anything that is not one token's worth of number: "+1" is
+// valid, "1.5", "x", "" and "++1" are not (the caller decides what an empty
+// part means).
+static bool parse_b_integer(const std::string& text, int& out) {
+    size_t i = 0;
+    int sign = 1;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+        sign = text[i] == '-' ? -1 : 1;
+        ++i;
+    }
+    if (i >= text.size()) return false;
+    long value = 0;
+    for (; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<long>(c - '0');
+        if (value > 0x7fffffffL) return false;
+    }
+    out = static_cast<int>(sign * value);
+    return true;
+}
+
+// The <an+b> micro-syntax ignores whitespace tokens: `:nth-child(2n + 1)`
+// and `:nth-child(2n+1)` are the same formula, and so are the spaces around
+// a sign (`+ 1` is `+1`).
+static void erase_css_whitespace(std::string& text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
+                   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+               }),
+               text.end());
+}
+
 static bool match_nth_formula(int idx, std::string_view formula_text) {
-    std::string_view sv = css_trim_view(formula_text);
-    if (sv.empty()) return false;
+    std::string formula(css_trim_view(formula_text));
+    std::transform(formula.begin(), formula.end(), formula.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    erase_css_whitespace(formula);
 
-    auto iequals = [](std::string_view a, std::string_view b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i) {
-            if ((a[i] | 0x20) != b[i]) return false;
-        }
-        return true;
-    };
+    if (formula.empty()) return false;
+    if (formula == "odd") return (idx % 2 != 0);
+    if (formula == "even") return (idx % 2 == 0);
 
-    if (iequals(sv, "odd")) return (idx % 2 != 0);
-    if (iequals(sv, "even")) return (idx % 2 == 0);
-
-    size_t n_pos = std::string_view::npos;
-    for (size_t i = 0; i < sv.size(); ++i) {
-        if ((sv[i] | 0x20) == 'n') {
-            n_pos = i;
-            break;
-        }
-    }
-
-    auto parse_int_sv = [](std::string_view part, int& out) -> bool {
-        part = css_trim_view(part);
-        if (part.empty()) return false;
-        int sign = 1;
-        size_t i = 0;
-        if (part[i] == '+' || part[i] == '-') {
-            sign = (part[i] == '-') ? -1 : 1;
-            ++i;
-            while (i < part.size() && css_is_space(part[i])) ++i;
-        }
-        if (i >= part.size() || !std::isdigit(static_cast<unsigned char>(part[i]))) return false;
-        long val = 0;
-        while (i < part.size() && std::isdigit(static_cast<unsigned char>(part[i]))) {
-            val = std::min<long>(val * 10 + (part[i] - '0'), 100000000L);
-            ++i;
-        }
-        if (i != part.size()) return false;
-        out = sign * static_cast<int>(val);
-        return true;
-    };
-
-    if (n_pos == std::string_view::npos) {
+    const size_t n_pos = formula.find('n');
+    if (n_pos == std::string::npos) {
+        // A plain integer: matches only that position.
         int b = 0;
-        return parse_int_sv(sv, b) && idx == b;
+        return parse_b_integer(formula, b) && idx == b;
     }
 
+    // The coefficient: empty, a bare sign, or a signed integer; anything
+    // else ("2nn", "1.5n", "xn") makes the formula invalid.
+    const std::string a_text = formula.substr(0, n_pos);
     int a = 1;
-    std::string_view prefix = css_trim_view(sv.substr(0, n_pos));
-    if (prefix.empty() || prefix == "+") {
+    if (a_text.empty() || a_text == "+") {
         a = 1;
-    } else if (prefix == "-") {
+    } else if (a_text == "-") {
         a = -1;
-    } else {
-        // In CSS An+B, no space is allowed between sign and integer before 'n'
-        try {
-            size_t used = 0;
-            a = std::stoi(std::string(prefix), &used);
-            if (used != prefix.size()) return false;
-        } catch (...) {
-            return false;
-        }
+    } else if (!parse_b_integer(a_text, a)) {
+        return false;
     }
 
+    // The offset: empty (0) or a signed integer.
+    const std::string b_text = formula.substr(n_pos + 1);
     int b = 0;
-    std::string_view rest = css_trim_view(sv.substr(n_pos + 1));
-    if (!rest.empty()) {
-        if (!parse_int_sv(rest, b)) return false;
+    if (!b_text.empty() && !parse_b_integer(b_text, b)) {
+        return false;
     }
 
     if (a == 0) return idx == b;
-    int diff = idx - b;
+    const int diff = idx - b;
     if (diff % a != 0) return false;
     return (diff / a) >= 0;
 }
@@ -1681,27 +1680,34 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             style.font_size = std::max(0.0f, parse_length(val, 16.0f));
         }
     } else if (prop == "line-height") {
+        const std::string text{css_trim_view(val)};
+        bool is_number = false;
+        float multiplier = 0.0f;
+        if (val_lower != "normal" && !is_percentage_value(text)) {
+            std::size_t consumed = 0;
+            try {
+                multiplier = std::stof(text, &consumed);
+                is_number = consumed == text.size();
+            } catch (...) {}
+        }
         if (val_lower == "normal") {
             style.line_height = -1.0f;
-        } else if (is_percentage_value(val)) {
-            float pct = parse_length(val, 120.0f);
-            style.line_height = style.font_size * (pct / 100.0f);
+            style.line_height_number = -1.0f;
+        } else if (is_percentage_value(text)) {
+            // A percentage is of the element's own font size.
+            style.line_height = style.font_size * parse_length(text, 0.0f) / 100.0f;
+            style.line_height_number = -1.0f;
+        } else if (is_number) {
+            if (multiplier >= 0.0f) {
+                style.line_height_number = multiplier;
+                style.line_height = -1.0f;
+            } // a negative multiplier is not a legal line-height; drop the declaration
         } else {
-            // Check unitless multiplier vs unit length
-            bool has_unit = false;
-            std::size_t consumed = 0;
-            float num = 0.0f;
-            try {
-                num = std::stof(val, &consumed);
-                for (std::size_t k = consumed; k < val.size(); ++k) {
-                    if (!css_is_space(val[k])) { has_unit = true; break; }
-                }
-                if (!has_unit) {
-                    style.line_height = num * style.font_size;
-                } else {
-                    style.line_height = parse_length(val, -1.0f);
-                }
-            } catch (...) {}
+            const float len = parse_length(text, -1.0f);
+            if (len >= 0.0f) {
+                style.line_height = len;
+                style.line_height_number = -1.0f;
+            } // negative lengths are not a legal line-height; drop the declaration
         }
     } else if (prop == "font-weight") {
         if (val_lower == "bold" || val_lower == "bolder") style.font_weight = 700;
@@ -2347,8 +2353,14 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
-        style.line_height = parent_style->line_height;
         style.custom_properties = parent_style->custom_properties;
+        if (parent_style->line_height_number >= 0.0f) {
+            // A declared multiplier is inherited as a multiplier.
+            style.line_height_number = parent_style->line_height_number;
+        } else if (parent_style->line_height >= 0.0f) {
+            // A declared length or percentage is inherited as a length.
+            style.line_height = parent_style->line_height;
+        }
     }
 
     struct MatchedRule {
@@ -2490,20 +2502,24 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     cascade_order.insert(cascade_order.end(), important_author.begin(), important_author.end());
     cascade_order.insert(cascade_order.end(), important_inline.begin(), important_inline.end());
 
-    // Font size first: em/ex/ch lengths elsewhere on the element resolve
-    // against its own computed font size, while font-size itself resolves
-    // against the inherited one.
+    // Custom properties first so font-size: var(--...) works, then font-size
+    // so em/ex/ch lengths elsewhere on the element resolve against its own
+    // computed font size while font-size resolves against the inherited one.
     auto sets_font_size = [](const std::string& prop) {
         return prop == "font-size" || prop == "font";
     };
+    std::vector<const Declaration*> font_decls;
     std::vector<const Declaration*> rest;
     for (const auto* declaration : cascade_order) {
-        if (sets_font_size(declaration->property)) {
+        if (declaration->property.rfind("--", 0) == 0) {
             apply_declaration(style, declaration->property, declaration->value);
+        } else if (sets_font_size(declaration->property)) {
+            font_decls.push_back(declaration);
         } else {
             rest.push_back(declaration);
         }
     }
+    apply_all(font_decls);
     if (element->tag_name() == "html") {
         m_root_font_size = style.font_size;
     }

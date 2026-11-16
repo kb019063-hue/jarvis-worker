@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <string_view>
+#include <unordered_set>
 
 namespace litebird {
 
@@ -181,12 +183,47 @@ bool HtmlTokenizer::consume_tag(HtmlToken& token) {
     std::string attribute_name;
     std::string attribute_value;
 
+    // A repeated name is dropped: the first attribute with that name wins.
+    // Comparing every name with every attribute already accepted is the
+    // square of the count -- one element with 50,000 attributes spent about
+    // 2.9 s here, and an end tag with that many paid the same -- so a wide
+    // tag gets an index. An ordinary tag has a handful of attributes, where
+    // scanning a short vector costs less than hashing into a table, so the
+    // index is built only from this many accepted attributes on.
+    constexpr std::size_t kAttributeNameIndexFrom = 32;
+    // The index holds views of the names inside token.attributes, so no
+    // attribute name is stored twice. Appending to that vector can move its
+    // strings (the short ones live inside the string object), so the views
+    // are rebuilt whenever the vector's capacity changes. Capacity grows
+    // geometrically, so all the rebuilds together stay linear in the number
+    // of attributes, and between rebuilds no accepted name moves.
+    std::unordered_set<std::string_view> accepted_names;
+    std::size_t indexed_capacity = 0;
+    auto index_accepted_names = [&]() {
+        accepted_names.clear();
+        accepted_names.reserve(token.attributes.size() * 2);
+        for (const auto& attribute : token.attributes) accepted_names.insert(attribute.first);
+        indexed_capacity = token.attributes.capacity();
+    };
+
     auto flush_attribute = [&]() {
         if (attribute_name.empty()) return;
-        const bool duplicate = std::any_of(
-            token.attributes.begin(), token.attributes.end(),
-            [&](const auto& pair) { return pair.first == attribute_name; });
-        if (!duplicate) token.attributes.emplace_back(attribute_name, attribute_value);
+        const bool indexed = token.attributes.size() >= kAttributeNameIndexFrom;
+        if (indexed && indexed_capacity != token.attributes.capacity()) index_accepted_names();
+        // Both sides are already ASCII-lower-cased by the attribute-name
+        // state, which is what makes this the spec's case-insensitive
+        // comparison rather than a case-sensitive one.
+        const bool duplicate = indexed
+            ? accepted_names.count(attribute_name) != 0
+            : std::any_of(token.attributes.begin(), token.attributes.end(),
+                          [&](const auto& pair) { return pair.first == attribute_name; });
+        if (!duplicate) {
+            token.attributes.emplace_back(attribute_name, attribute_value);
+            if (indexed) {
+                if (indexed_capacity != token.attributes.capacity()) index_accepted_names();
+                else accepted_names.insert(token.attributes.back().first);
+            }
+        }
         attribute_name.clear();
         attribute_value.clear();
     };

@@ -1,19 +1,24 @@
 #include "litebird/xml/XmlTools.hpp"
+#include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
+#include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/TerminalRenderer.hpp"
 #include "litebird/render/BitmapRenderer.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/net/DataUrl.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/shell/BrowserShell.hpp"
+#include "litebird/shell/WebBrowserServer.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -49,6 +54,9 @@ void print_help(const char* prog) {
     std::cout << "  --dump-bytecode        Dump compiled JS bytecode disassembly\n";
     std::cout << "  --render-terminal      Render web page to ANSI terminal (default)\n";
     std::cout << "  --render-bmp <file>    Render web page to 24-bit BMP image\n";
+    std::cout << "  --render-png <file>    Render web page to lossless PNG image\n";
+    std::cout << "  --gui [url]            Launch interactive graphical Web Browser UI server\n";
+    std::cout << "  --port=PORT            TCP port for --gui (default: 8080, bound to 0.0.0.0)\n";
     std::cout << "  --run-js <code>        Execute JavaScript code directly\n";
     std::cout << "  --run-script <file>    Load the page, run <file> in it as a deferred script,\n";
     std::cout << "                         let the page finish loading and its timers run, and\n";
@@ -112,9 +120,12 @@ int main(int argc, char* argv[]) {
     bool dump_bytecode = false;
     bool render_terminal = true;
     std::string bmp_output;
+    std::string png_output;
     std::string js_code;
     bool repl_mode = false;
     bool shell_mode = false;
+    bool gui_mode = false;
+    uint16_t gui_port = 8080;
     bool dump_dom_webplatform = false;
     bool scripting = true;
     // How much timer time a page gets to settle before it is rendered: one
@@ -162,6 +173,20 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 input_file = argv[++i];
             }
+        } else if (arg == "--gui") {
+            gui_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                input_file = argv[++i];
+            }
+        } else if (arg.rfind("--port=", 0) == 0) {
+            gui_port = static_cast<uint16_t>(std::clamp(std::atoi(arg.substr(7).c_str()), 0, 65535));
+        } else if (arg == "--render-png") {
+            if (i + 1 < argc) {
+                png_output = argv[++i];
+            } else {
+                std::cerr << "Error: --render-png requires output filename\n";
+                return 1;
+            }
         } else if (arg == "--render-bmp") {
             if (i + 1 < argc) {
                 bmp_output = argv[++i];
@@ -195,6 +220,26 @@ int main(int argc, char* argv[]) {
 
     if (repl_mode) {
         run_repl();
+        return 0;
+    }
+
+    if (gui_mode) {
+        litebird::Storage::local_storage().persist_to("/tmp/litebird_localstorage.db");
+        litebird::WebBrowserServer server(1120.0f, 700.0f);
+        if (!server.start_background(gui_port, "0.0.0.0")) {
+            std::cerr << "Error: Failed to bind Litebird GUI server on 0.0.0.0:" << gui_port << "\n";
+            return 1;
+        }
+        const uint16_t actual_port = server.bound_port();
+        const std::string start_url = input_file.empty()
+                                          ? ("http://127.0.0.1:" + std::to_string(actual_port) + "/demo")
+                                          : input_file;
+        server.navigate_to(start_url);
+        std::cout << "Litebird Graphical Browser Server listening on http://0.0.0.0:" << actual_port << "\n"
+                  << "Initial page: " << start_url << "\n" << std::flush;
+        while (server.is_running()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
         return 0;
     }
 
@@ -245,7 +290,28 @@ int main(int argc, char* argv[]) {
     }
 
     std::string html_content;
-    if (!read_file(input_file, html_content)) return 1;
+    std::string nav_content_type = "text/html";
+    std::string effective_url;
+    const bool is_remote_or_scheme =
+        input_file.rfind("http://", 0) == 0 ||
+        input_file.rfind("https://", 0) == 0 ||
+        input_file.rfind("data:", 0) == 0 ||
+        input_file.rfind("file://", 0) == 0 ||
+        input_file.rfind("about:", 0) == 0;
+
+    if (!dump_dom_webplatform && xml_dump.empty() && is_remote_or_scheme) {
+        auto nav = litebird::ResourceLoader::load_navigation(input_file);
+        if (!nav.success) {
+            std::cerr << "Error loading '" << input_file << "': " << nav.error_message << "\n";
+            return 1;
+        }
+        html_content = std::move(nav.body);
+        nav_content_type = nav.content_type;
+        effective_url = nav.url.empty() ? litebird::ResourceLoader::address_of(input_file) : nav.url;
+    } else {
+        if (!read_file(input_file, html_content)) return 1;
+        effective_url = litebird::ResourceLoader::address_of(input_file);
+    }
 
     // --xml-canonical, --xml-events: the file through the XML parser alone.
     // Exit status 0 for a well-formed document, 1 for one that is not (the
@@ -294,20 +360,44 @@ int main(int argc, char* argv[]) {
     // 2. The page: its tree, and its scripts run as the parser reaches them.
     // The document exists first, with the address scripts see as
     // location.href and document.URL, and the script engine attached to it.
+    float viewport_w = 800.0f;
+    float viewport_h = 600.0f;
     auto doc = std::make_shared<litebird::Document>();
-    doc->set_url(page_url.empty() ? litebird::ResourceLoader::address_of(input_file) : page_url);
+    doc->set_url(page_url.empty() ? effective_url : page_url);
+    doc->set_viewport_size(viewport_w, viewport_h);
+
+    litebird::MimeType nav_mime;
+    const bool parsed_nav_mime = litebird::MimeType::parse(nav_content_type, nav_mime);
+    const bool is_xml_nav =
+        !run_script &&
+        ((parsed_nav_mime && ((nav_mime.type == "image" && nav_mime.subtype == "svg+xml") ||
+                              (nav_mime.type == "application" && (nav_mime.subtype == "xml" || nav_mime.subtype == "xhtml+xml")) ||
+                              (nav_mime.type == "text" && nav_mime.subtype == "xml"))) ||
+         input_file.ends_with(".svg") || input_file.ends_with(".xhtml"));
+
     litebird::JsInterpreter js_engine(doc);
-    js_engine.load_page(html_content, scripting, [&](const std::string& script) {
-        if (!dump_bytecode) return;
-        std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
-        try {
-            auto fn = js_engine.compile_to_bytecode(script);
-            fn->chunk.disassemble(std::cout, "Inline <script>");
-        } catch (const std::exception& ex) {
-            std::cout << "(not compiled: " << ex.what() << ")";
+    if (is_xml_nav) {
+        const std::string essence = parsed_nav_mime ? nav_mime.essence() : (input_file.ends_with(".svg") ? "image/svg+xml" : "application/xhtml+xml");
+        doc->set_content_type(essence);
+        std::string xml_text, xml_enc;
+        litebird::xml::XmlError xml_err;
+        if (litebird::xml::decode_xml(html_content, xml_text, xml_enc, xml_err)) {
+            litebird::xml::parse_xml_document(doc, xml_text, xml_err);
         }
-        std::cout << "\n";
-    });
+        doc->install_default_layout_updater();
+    } else {
+        js_engine.load_page(html_content, scripting, [&](const std::string& script) {
+            if (!dump_bytecode) return;
+            std::cout << "\033[1;33m--- [Compiled Bytecode Disassembly] ---\033[0m\n";
+            try {
+                auto fn = js_engine.compile_to_bytecode(script);
+                fn->chunk.disassemble(std::cout, "Inline <script>");
+            } catch (const std::exception& ex) {
+                std::cout << "(not compiled: " << ex.what() << ")";
+            }
+            std::cout << "\n";
+        });
+    }
 
     // --run-script: one more script, run the way a deferred script is: the
     // tree is complete and the page has not been told so yet. Then the page
@@ -330,17 +420,13 @@ int main(int argc, char* argv[]) {
     js_engine.notify_document_loaded();
     page_loop.run_until_idle(std::chrono::milliseconds(virtual_time_budget_ms));
 
-    // 3. CSS Parsing & Style Resolution: the <style> elements of the page as
-    // its scripts left it.
-    litebird::StyleResolver resolver;
-    for (const auto& el : doc->get_elements_by_tag_name("style")) {
-        auto sheet = litebird::CssParser::parse(el->text_content());
-        resolver.add_stylesheet(sheet);
-    }
+    // 3. CSS Parsing & Style Resolution: all <style>, <link rel="stylesheet">,
+    // and @import sheets in document tree order.
+    litebird::StyleResolver resolver = litebird::DocumentStyles::build_resolver(
+        *doc, &doc->stylesheet_cache(), viewport_w, viewport_h
+    );
 
     // 4. Layout Box Tree Construction
-    float viewport_w = 800.0f;
-    float viewport_h = 600.0f;
     auto layout_root = litebird::LayoutTree::build(doc, resolver, viewport_w, viewport_h);
 
     // 5. Display List Generation
@@ -401,20 +487,38 @@ int main(int argc, char* argv[]) {
         std::cout << "\n";
     }
 
-    // Render BMP if specified
-    if (!bmp_output.empty()) {
-        litebird::BitmapRenderer bmp(800, 600);
+    // Render BMP / PNG if specified
+    if (!bmp_output.empty() || !png_output.empty()) {
+        litebird::BitmapRenderer bmp(static_cast<int>(viewport_w), static_cast<int>(viewport_h));
         bmp.clear(litebird::Color::white());
         bmp.render(display_list);
-        if (bmp.save_bmp(bmp_output)) {
-            std::cout << "\033[1;32mRendered bitmap saved to: " << bmp_output << "\033[0m\n";
-        } else {
-            std::cerr << "Failed to save bitmap to: " << bmp_output << "\n";
+        if (!bmp_output.empty()) {
+            if (bmp.save_bmp(bmp_output)) {
+                std::cout << "\033[1;32mRendered bitmap saved to: " << bmp_output << "\033[0m\n";
+            } else {
+                std::cerr << "Failed to save bitmap to: " << bmp_output << "\n";
+            }
+        }
+        if (!png_output.empty()) {
+            litebird::ImageData img;
+            img.width = static_cast<int>(viewport_w);
+            img.height = static_cast<int>(viewport_h);
+            img.pixels.resize(static_cast<std::size_t>(img.width * img.height));
+            for (int y = 0; y < img.height; ++y) {
+                for (int x = 0; x < img.width; ++x) {
+                    img.set_pixel(x, y, bmp.get_pixel(x, y).to_argb());
+                }
+            }
+            if (litebird::ImageDecoder::save_png(img, png_output)) {
+                std::cout << "\033[1;32mRendered PNG saved to: " << png_output << "\033[0m\n";
+            } else {
+                std::cerr << "Failed to save PNG to: " << png_output << "\n";
+            }
         }
     }
 
     // Terminal Render
-    if (render_terminal && !dump_dom && !dump_css && !dump_layout && !dump_paint && bmp_output.empty()) {
+    if (render_terminal && !dump_dom && !dump_css && !dump_layout && !dump_paint && bmp_output.empty() && png_output.empty()) {
         std::cout << "\033[1;36m┌──────────────────── [Litebird Viewport: 80x25] ────────────────────┐\033[0m\n";
         litebird::TerminalRenderer term(80, 25);
         term.render(display_list);

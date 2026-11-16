@@ -10,14 +10,22 @@
 #include "litebird/net/DataUrl.hpp"
 #include <fstream>
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/html/HtmlTokenizer.hpp"
 #include "litebird/html/HtmlTreeBuilder.hpp"
 #include "litebird/html/TreeDump.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/CssText.hpp"
+#include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/FontRenderer.hpp"
+#include "litebird/render/JpegDecoder.hpp"
+#include "litebird/render/GifDecoder.hpp"
+#include "litebird/net/Deflate.hpp"
+#include "litebird/shell/WebBrowserServer.hpp"
+#include <filesystem>
 #include <array>
 #include <cstdint>
 #include <climits>
@@ -59,6 +67,7 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <cstdio>
 #include <algorithm>
 #include <functional>
+#include <set>
 #include <sstream>
 #include <vector>
 #include <cassert>
@@ -274,6 +283,130 @@ TEST(style_resolver_indexed_candidates_preserve_cascade) {
         auto computed = by_class.resolve_style(element);
         assert(computed.color == Color::parse("#010203"));
         assert(computed.background_color == Color::parse("#040506"));
+    }
+}
+
+TEST(percentage_font_size_and_line_height) {
+    using namespace litebird;
+    // Percentages compound down the tree: each level resolves against the
+    // parent's computed size, and em lengths on the element resolve against
+    // its own. A 50% child of 16px is 8px, and 50% of that is 4px.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-size: 16px;">
+            <div id="half" style="font-size: 50%;"><span id="quarter" style="font-size: 50%;">x</span></div>
+        </div>
+    )");
+    StyleResolver resolver;
+    auto half = doc->get_element_by_id("half");
+    auto quarter = doc->get_element_by_id("quarter");
+    assert(half && quarter);
+    auto half_style = resolver.resolve_style(half, nullptr);
+    assert(half_style.font_size == 8.0f);
+    auto quarter_style = resolver.resolve_style(quarter, &half_style);
+    assert(quarter_style.font_size == 4.0f);
+
+    // line-height keywords, numbers, percentages and lengths. The used value
+    // multiplies the element's own font size; percentages resolve where they
+    // were declared.
+    auto line_height_of = [&](const std::string& declaration, float font_size_px) {
+        auto element = HtmlParser::parse("<p id=\"p\">x</p>");
+        auto p = element->get_element_by_id("p");
+        StyleResolver scoped;
+        scoped.add_stylesheet(CssParser::parse(
+            "#p { font-size: " + std::to_string(static_cast<int>(font_size_px)) + "px; line-height: " + declaration + "; }"));
+        return scoped.resolve_style(p, nullptr);
+    };
+
+    // normal: not declared -> the 1.25 fallback the renderer always used
+    assert(line_height_of("normal", 16.0f).effective_line_height() == 20.0f);
+    // unchanged font size: normal tracks the element's size
+    assert(line_height_of("normal", 20.0f).effective_line_height() == 25.0f);
+    // bare number: a multiplier of the element's own font size
+    assert(line_height_of("1.5", 16.0f).effective_line_height() == 24.0f);
+    assert(line_height_of("2", 20.0f).effective_line_height() == 40.0f);
+    // percentage: of the font size where it was declared
+    assert(line_height_of("150%", 16.0f).effective_line_height() == 24.0f);
+    assert(line_height_of("37.5%", 16.0f).effective_line_height() == 6.0f);
+    // absolute length
+    assert(line_height_of("40px", 16.0f).effective_line_height() == 40.0f);
+
+    // Inheritance: a declared multiplier is inherited as a multiplier (the
+    // child multiplies its own font size); a declared percentage is resolved
+    // once and inherited as a length; a declared length is inherited as a length.
+    auto inheritance_doc = HtmlParser::parse(R"(
+        <div id="parent"><span id="child">x</span></div>
+    )");
+    auto parent = inheritance_doc->get_element_by_id("parent");
+    auto child = inheritance_doc->get_element_by_id("child");
+    assert(parent && child);
+
+    StyleResolver multiplier;
+    multiplier.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 1.5; } #child { font-size: 20px; }"));
+    auto parent_style = multiplier.resolve_style(parent, nullptr);
+    auto child_style = multiplier.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 30.0f); // 1.5 * 20px, not 24px
+
+    StyleResolver percentage;
+    percentage.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 150%; } #child { font-size: 20px; }"));
+    parent_style = percentage.resolve_style(parent, nullptr);
+    child_style = percentage.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 24.0f); // inherited as a length
+
+    StyleResolver length;
+    length.add_stylesheet(CssParser::parse("#parent { font-size: 16px; line-height: 40px; } #child { font-size: 20px; }"));
+    parent_style = length.resolve_style(parent, nullptr);
+    child_style = length.resolve_style(child, &parent_style);
+    assert(child_style.effective_line_height() == 40.0f);
+
+    // normal is not declared and stays undeclared down the tree
+    StyleResolver normal;
+    normal.add_stylesheet(CssParser::parse("#parent { font-size: 16px; } #child { font-size: 20px; }"));
+    parent_style = normal.resolve_style(parent, nullptr);
+    child_style = normal.resolve_style(child, &parent_style);
+    assert(child_style.line_height < 0.0f && child_style.line_height_number < 0.0f);
+    assert(child_style.effective_line_height() == 25.0f); // 1.25 * own font size
+
+    // font: size/line-height shorthand feeds both properties
+    StyleResolver shorthand;
+    shorthand.add_stylesheet(CssParser::parse("#parent { font: 16px/2 serif; }"));
+    parent_style = shorthand.resolve_style(parent, nullptr);
+    assert(parent_style.font_size == 16.0f);
+    assert(parent_style.effective_line_height() == 32.0f);
+
+    // Order independence: line-height: <percentage> must see the element's
+    // own font size even when font-size is declared after it on the same
+    // element, in the stylesheet and in the longhand pass.
+    StyleResolver reversed;
+    reversed.add_stylesheet(CssParser::parse("#parent { line-height: 150%; font-size: 20px; }"));
+    parent_style = reversed.resolve_style(parent, nullptr);
+    assert(parent_style.effective_line_height() == 30.0f); // 1.5 * 20px
+
+    // The layout stage actually uses the property: a paragraph with
+    // line-height: 48px lays its line boxes out 48px apart, replacing the
+    // hardcoded 1.25x estimate.
+    auto layout_doc = HtmlParser::parse(R"(
+        <p id="p" style="width: 500px; font-size: 16px; line-height: 48px;">
+            one two three four five six seven eight nine ten eleven twelve
+        </p>
+    )");
+    StyleResolver laid;
+    auto p = layout_doc->get_element_by_id("p");
+    auto root = LayoutTree::build(layout_doc, laid, 800.0f, 600.0f);
+    assert(root);
+    Node* wanted = static_cast<Node*>(p.get());
+    auto find_p = [](const auto& self, const std::shared_ptr<LayoutBox>& box, Node* wanted) -> std::shared_ptr<LayoutBox> {
+        if (!box) return nullptr;
+        if (box->node.get() == wanted) return box;
+        for (const auto& ch : box->children) {
+            if (auto found = self(self, ch, wanted)) return found;
+        }
+        return nullptr;
+    };
+    auto paragraph = find_p(find_p, root, wanted);
+    assert(paragraph);
+    assert(!paragraph->line_boxes.empty());
+    for (const auto& line : paragraph->line_boxes) {
+        assert(line.rect.height == 48.0f);
     }
 }
 
@@ -5035,9 +5168,15 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
              "var x = get('data:application/xml,' + encodeURIComponent(bomb));"
              "String(x.responseXML) + ' ' + (x.responseText === bomb) + ' ' + (Date.now() - t0 < 5000)") == "null true true");
     //     A large response is read in time that grows with its size.
-    assert(S("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
-             "var x = get('data:text/xml,' + big);"
-             "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < 5000)") == "200000 2800007 true");
+#if defined(__SANITIZE_ADDRESS__)
+    const char* big_xhr_budget = "15000";
+#else
+    const char* big_xhr_budget = "5000";
+#endif
+    assert(S(std::string("var big = '<r>' + new Array(200001).join('<i a=\"1\">x</i>') + '</r>', t0 = Date.now();"
+                         "var x = get('data:text/xml,' + big);"
+                         "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
+             big_xhr_budget + ")") == "200000 2800007 true");
 
     settle();
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
@@ -6590,8 +6729,11 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(b.string_val.shares_text_with(a.string_val) && c.string_val.shares_text_with(a.string_val));
         assert(a.string_val.use_count() == 103);
         assert(strict_equals(a, c));
-        // The handle is a pointer and four 32-bit fields.
-        assert(sizeof(JsString) == 24);
+        // The handle is a pointer and five 32-bit fields: where the text is,
+        // how long it is in bytes and in code units, and the high half it may
+        // owe at its end (finding 47). It was four fields, 24 bytes, before the
+        // owed half; the fifth costs one word of padding.
+        assert(sizeof(JsString) == 32);
     }
 
     // --- Length and indexing ---------------------------------------------------------
@@ -6909,6 +7051,192 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
             "try { 'abc'.repeat(Math.pow(2, 29)); } catch (e) { message = (e instanceof RangeError) + ': ' + e.message; }");
         assert(js.global_env()->get("message").to_string() == "true: Invalid string length");
     }
+}
+
+TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 47. `a + b` where a ends in a high half and b starts
+    // with the low one is a single four-byte character that starts three bytes
+    // before the end of a. Written bytes never change, so that join used to
+    // copy the whole of a. A join now owes the half instead of writing it, and
+    // the character is written where the block's text ends when the low half
+    // arrives. These checks pin what script can see of that: nothing.
+    const JsString high = JsString::from_unit(0xD83D);
+    const JsString low = JsString::from_unit(0xDE00);
+    const std::string_view high_bytes("\xED\xA0\xBD", 3);
+    const std::string_view pair_bytes("\xF0\x9F\x98\x80", 4);
+
+    // --- Owed: nothing is written, and the text reads as it always did ---------------
+    {
+        const JsString abc("abc");
+        const auto before = JsString::stats();
+        const JsString owed = JsString::concat(abc, high);
+        const auto after = JsString::stats();
+        // No block, no byte: the half is a field of the handle.
+        assert(after.blocks == before.blocks && after.bytes_copied == before.bytes_copied);
+        assert(owed.shares_text_with(abc));
+        assert(owed.length() == 4 && owed.size() == 6 && !owed.is_ascii() && !owed.is_well_formed());
+        assert(owed.unit_at(0) == 'a' && owed.unit_at(3) == 0xD83D);
+        // Reading it settles it: three bytes, once. Reading it again copies nothing.
+        const auto read_before = JsString::stats();
+        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        const auto read_once = JsString::stats();
+        assert(read_once.bytes_copied - read_before.bytes_copied == 3);
+        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        assert(JsString::stats().bytes_copied == read_once.bytes_copied);
+        assert(owed.str() == owed.view());
+        assert(JsString::stats().bytes_copied - read_once.bytes_copied == 6);      // str() hands out its own copy
+        assert(owed == JsString("abc\xED\xA0\xBD"));            // equal to the same text, written out
+        assert(abc == std::string_view("abc"));                 // and what it was joined to is untouched
+        assert(owed.substring(0, 2) == std::string_view("ab"));
+        assert(owed.substring(3, 4).length() == 1 && owed.substring(3, 4).unit_at(0) == 0xD83D);
+        assert(owed.to_well_formed() == JsString("abc\xEF\xBF\xBD"));
+    }
+
+    // --- The low half arrives: one character, written after the text, nothing copied --
+    {
+        const JsString abc("abc");
+        const JsString owed = JsString::concat(abc, high);
+        const auto before = JsString::stats();
+        const JsString joined = JsString::concat(owed, low);
+        const auto after = JsString::stats();
+        assert(joined.view() == std::string("abc") + std::string(pair_bytes));
+        assert(joined.length() == 5 && joined.size() == 7 && joined.is_well_formed());
+        assert(joined == JsString("abc\xF0\x9F\x98\x80"));
+        assert(joined.shares_text_with(abc));                    // the same block: nothing was copied
+        assert(after.blocks == before.blocks);
+        assert(after.bytes_copied - before.bytes_copied == 4);   // the character, and nothing else
+        assert(abc == std::string_view("abc"));
+    }
+
+    // --- A handle kept before the pair was completed still ends in a half ------------
+    {
+        const JsString abc("abc");
+        const JsString owed = JsString::concat(abc, high);
+        const JsString kept = owed;
+        const JsString joined = JsString::concat(owed, low);
+        assert(kept.length() == 4 && kept.view() == std::string("abc") + std::string(high_bytes));
+        assert(kept.unit_at(3) == 0xD83D && !kept.is_well_formed());
+        assert(joined.length() == 5 && joined.view() == std::string("abc") + std::string(pair_bytes));
+        // Reading the kept half first writes it into the block; completing the
+        // pair then has to copy, because those bytes are now spoken for.
+        JsString other("xyz");
+        JsString read_first = JsString::concat(other, high);
+        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+        const JsString completed = JsString::concat(read_first, low);
+        assert(completed.view() == std::string("xyz") + std::string(pair_bytes));
+        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+    }
+
+    // --- Settling when the room after the text has been taken ------------------------
+    {
+        JsString base("room enough for a few appends");
+        const JsString owed = JsString::concat(base, high);
+        const JsString sibling = JsString::concat(base, JsString("!"));      // takes the room
+        assert(sibling.view().back() == '!');
+        const auto before = JsString::stats();
+        const std::string_view text = owed.view();                            // has to copy, once
+        assert(text == std::string("room enough for a few appends") + std::string(high_bytes));
+        assert(JsString::stats().bytes_copied - before.bytes_copied == owed.size());
+        const auto again = JsString::stats();
+        assert(owed.view() == text && JsString::stats().blocks == again.blocks);   // the copy is kept
+        // The copy outlives the handles that took the room, and `base` itself.
+        const std::string expected(text);
+        {
+            JsString only_owed = owed;
+            base = JsString();
+            assert(only_owed.view() == expected);
+        }
+        assert(owed.view() == expected && owed.length() == 30);
+    }
+
+    // --- Every way round: two halves, a half and text, raw text on either side --------
+    {
+        const JsString abc("abc");
+        const JsString two_highs = JsString::concat(JsString::concat(abc, high), high);
+        assert(two_highs.length() == 5 && two_highs.view() == std::string("abc") + std::string(high_bytes) + std::string(high_bytes));
+        assert(JsString::concat(two_highs, low).view() == std::string("abc") + std::string(high_bytes) + std::string(pair_bytes));
+
+        const JsString low_then_high = JsString::concat(JsString::concat(abc, low), high);
+        assert(low_then_high.length() == 5 && low_then_high.unit_at(3) == 0xDE00 && low_then_high.unit_at(4) == 0xD83D);
+        assert(JsString::concat(low_then_high, low).view() ==
+               std::string("abc") + std::string("\xED\xB8\x80", 3) + std::string(pair_bytes));
+
+        // The half is owed by the result however the text arrives.
+        assert(JsString::concat(abc, high_bytes).view() == std::string("abc") + std::string(high_bytes));
+        assert(JsString::concat(JsString::concat(abc, high_bytes), low).view() == std::string("abc") + std::string(pair_bytes));
+        assert(JsString::concat(std::string_view("abc"), JsString::concat(abc, high)).view() == std::string("abcabc") + std::string(high_bytes));
+        assert(JsString::concat(JsString(), high).view() == high_bytes);
+        assert(JsString::concat(JsString(), high).length() == 1);
+        assert(JsString::concat(high, low).view() == pair_bytes);
+        assert(JsString::concat(abc, JsString()).shares_text_with(abc));
+        // Text appended after the half: the half stands alone and is written.
+        const JsString then_text = JsString::concat(JsString::concat(abc, high), JsString("z"));
+        assert(then_text.view() == std::string("abc") + std::string(high_bytes) + "z" && then_text.length() == 5);
+        // A join of more than one unit owes only the last half.
+        const JsString tail = JsString::concat(abc, std::string_view("q\xED\xA0\xBD", 4));
+        assert(tail.length() == 5 && tail.unit_at(3) == 'q' && tail.unit_at(4) == 0xD83D);
+        assert(JsString::concat(tail, low).view() == std::string("abcq") + std::string(pair_bytes));
+    }
+}
+
+TEST(js_string_built_half_a_pair_at_a_time_costs_what_it_writes) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 47. The corpus case `pairs made a half at a time in a
+    // long string` (tests/js-conformance/long-strings.dat) appends 60,000
+    // halves and took 5.7 s of the 10 s a case is allowed, so it timed out on a
+    // busy machine and the JavaScript floor in CI had to sit one below the
+    // score. This counts the work instead of timing it: 20,000 pairs write
+    // 100,000 bytes, where copying the text so far at every pair wrote about
+    // a thousand million.
+    JsInterpreter js;
+    const auto before = JsString::stats();
+    js.eval_ast(
+        "var s = '';"
+        "for (var i = 0; i < 20000; i++) { s += '\\uD83D'; s += '\\uDE00'; s += '-'; }"
+        "var t = '';"
+        "for (var i = 0; i < 20000; i++) t += '\\uD83D\\uDE00-';");
+    const auto after = JsString::stats();
+    assert(!js.last_eval_failed());
+    // Both builds together write 200,000 bytes of text. Allow ten times that
+    // for the moves a growing block makes; the old path copied 20,000 times
+    // the length of the text so far. The blocks are the moves: a string that
+    // grows by half needs a few dozen, not one per append.
+    assert(after.bytes_copied - before.bytes_copied < 2000000);
+    assert(after.blocks - before.blocks < 500);
+
+    // What the two builds say is the same, and every read of the text agrees.
+    js.eval_ast(
+        "var same = s === t, pairs = 0;"
+        "for (var ch of s) if (ch.length === 2) pairs++;"
+        "var found = s.indexOf('\\uDE00-\\uD83D', 5), last = s.lastIndexOf('\\uD83D');");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("same").bool_val);
+    assert(js.global_env()->get("pairs").to_number() == 20000);
+    assert(js.global_env()->get("found").to_number() == 7);
+    assert(js.global_env()->get("last").to_number() == 59997);
+
+    // Keeping every prefix as the string grows: each one is a range of the
+    // same few blocks, and each still ends in the half it was given.
+    JsInterpreter kept;
+    const auto kept_before = JsString::stats();
+    kept.eval_ast(
+        "var s = '', all = [], ok = true;"
+        "for (var i = 0; i < 6000; i++) { s += '\\uD83D'; all.push(s); s += '\\uDE00'; }"
+        "for (var i = 0; i < 6000; i += 7) {"
+        "  var p = all[i];"
+        "  if (p.length !== 2 * i + 1 || p.charCodeAt(p.length - 1) !== 0xD83D) ok = false;"
+        "}"
+        "var end = s.length, first = all[0].length;");
+    const auto kept_after = JsString::stats();
+    assert(!kept.last_eval_failed());
+    assert(kept.global_env()->get("ok").bool_val);
+    assert(kept.global_env()->get("end").to_number() == 12000);
+    assert(kept.global_env()->get("first").to_number() == 1);
+    assert(kept_after.bytes_copied - kept_before.bytes_copied < 500000);
+    assert(kept_after.blocks - kept_before.blocks < 1000);
 }
 
 // Strings share blocks of text; these two check that script can never tell.
@@ -8437,6 +8765,54 @@ TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length) {
     }
 }
 
+TEST(many_sized_floats_pack_without_escaping_the_box) {
+    using namespace litebird;
+
+    // Finding 28 measured 46 s for 10,000 floats of 100 by 10 pixels in an
+    // 800-pixel box, and placing every float past the first 1,024 (row 128)
+    // wherever the 512-step slide gave up, running out of the box to the
+    // right. The placement now sweeps the band edges: the float lands on the
+    // exact bottom edge of whatever is in the way, or at the top of the box
+    // if it is wider than the containing block.
+    std::string html = R"(<body style="margin:0"><div id="box" style="width:800px">)";
+    for (int i = 0; i < 1056; ++i) {
+        html += "<div id=\"f" + std::to_string(i) + "\" style=\"float:left; width:100px; height:10px\"></div>";
+    }
+    html += "</div></body>";
+
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto box = find_box_by_id(root, "box");
+    assert(box);
+    for (const auto& child : box->children) {
+        const float x = child->dimensions.content.x - box->dimensions.content.x;
+        assert(x >= 0.0f && x + 100.0f <= 800.0f);
+    }
+    // Floats past row 128 used to be placed in one row that ran out of the
+    // box to the right. Rows of eight 100px floats still tile exactly:
+    // row r sits at y = top + r * 10.
+    for (int row = 128; row < 132; ++row) {
+        for (int k = 0; k < 8; ++k) {
+            auto f = find_box_by_id(root, "f" + std::to_string(row * 8 + k));
+            assert(f);
+            assert(f->dimensions.content.y == box->dimensions.content.y + row * 10.0f);
+            assert(f->dimensions.content.x == box->dimensions.content.x + k * 100.0f);
+        }
+    }
+    // A float wider than the containing block does not spin: it is placed and
+    // overflows to the left, the way CSS 2.1 9.5.1 puts it.
+    auto wide_doc = HtmlParser::parse(R"(<body style="margin:0"><div id="widebox" style="width:800px">
+        <div id="wide" style="float:left; width:900px; height:10px"></div>
+    </div></body>)");
+    StyleResolver wide_resolver;
+    auto wide_root = LayoutTree::build(wide_doc, wide_resolver, 800.0f, 600.0f);
+    auto wide_box = find_box_by_id(wide_root, "widebox");
+    auto wide = find_box_by_id(wide_root, "wide");
+    assert(wide_box && wide);
+    assert(wide->dimensions.content.x == wide_box->dimensions.content.x);
+}
+
 TEST(floats_of_no_height_cost_nothing_and_still_count) {
     using namespace litebird;
 
@@ -8499,10 +8875,10 @@ TEST(floats_of_no_height_cost_nothing_and_still_count) {
         assert(cleared->dimensions.content.y == box->dimensions.content.y + 40.0f);
     }
     {
-        // A box that contains its floats is as high as the lowest of them,
-        // and here the lowest is the float with no height: B ends at 89.5,
-        // and C, which is moved down a pixel at a time until it fits, lands
-        // at 90.
+        // A box that contains its floats is as high as the lowest of them.
+        // The float with no height is placed as high as it fits: flush with
+        // the bottom edge of B, at 89.5. (Before the placement swept the
+        // band edges it slid in one-pixel steps and landed at 90.)
         auto root = layout(R"(<body style="margin:0"><div id="box" style="width:300px; overflow:hidden">
             <div style="float:left; width:200px; height:50px">A</div>
             <div style="float:right; width:80px; height:89.5px">B</div>
@@ -8510,8 +8886,8 @@ TEST(floats_of_no_height_cost_nothing_and_still_count) {
         auto box = find_box_by_id(root, "box");
         auto c = find_box_by_id(root, "c");
         assert(box && c);
-        assert(c->dimensions.content.y == box->dimensions.content.y + 90.0f);
-        assert(box->dimensions.content.height == 90.0f);
+        assert(c->dimensions.content.y == box->dimensions.content.y + 89.5f);
+        assert(box->dimensions.content.height == 89.5f);
         assert(box->float_bands.size() == 2);
     }
 
@@ -8810,6 +9186,65 @@ TEST(css_whitespace_does_not_change_selector_or_value_meaning) {
     auto compact = resolve("#box{transform:translate(10px,20px) scale(2,3)}", box, "box").transform_matrix;
     assert(moved.a == compact.a && moved.d == compact.d && moved.e == compact.e && moved.f == compact.f);
     assert(moved.e == 10.0f && moved.f == 20.0f);
+}
+
+TEST(nth_child_formula_parsing) {
+    using namespace litebird;
+    // The <an+b> micro-syntax ignores whitespace tokens: "2n + 1" and
+    // "2n+1" are the same formula, and the signs may be surrounded by spaces.
+    // Before the fix the tail "+ 1" was read as 0 (std::stoi rejected the
+    // sign-then-space), painting only the even items.
+    const std::string items = "<ul><li id='a'>a</li><li id='b'>b</li><li id='c'>c</li></ul>";
+    auto matches = [&](const std::string& formula) {
+        auto doc = HtmlParser::parse(items);
+        StyleResolver resolver;
+        resolver.add_stylesheet(CssParser::parse("li:nth-child(" + formula + "){color:rgb(255,0,0)}"));
+        std::array<bool, 3> hit{};
+        for (int i = 0; i < 3; ++i) {
+            const char id[3] = {static_cast<char>('a' + i), '\0', '\0'};
+            hit[i] = resolver.resolve_style(doc->get_element_by_id(id)).color == Color(255, 0, 0);
+        }
+        return hit;
+    };
+    const std::array<bool, 3> none{false, false, false};
+    const auto expect = [&](const std::string& formula, bool a, bool b, bool c) {
+        const auto hit = matches(formula);
+        assert(hit[0] == a);
+        assert(hit[1] == b);
+        assert(hit[2] == c);
+    };
+    // The reported bug and its neighbours.
+    expect("2n + 1", true, false, true);
+    expect("2n+ 1", true, false, true);
+    expect("2n +1", true, false, true);
+    expect("2n\t+\n1", true, false, true);
+    expect("2n\f+\r1", true, false, true);
+    expect("2N+1", true, false, true);
+    expect("+ 2n + 1", true, false, true);
+    expect("- n + 2", true, true, false);
+    expect("+ n + 1", true, true, true);
+    expect("n - 1", true, true, true);
+    expect("-n+2", true, true, false);
+    expect("-2n+5", true, false, true);
+    expect("3n-2", true, false, false);
+    expect("0n+2", false, true, false);
+    expect("0n+5", false, false, false);
+    expect("odd", true, false, true);
+    expect("even", false, true, false);
+    expect("2", false, true, false);
+    expect("+2", false, true, false);
+    expect("-2", false, false, false);
+    expect("N", true, true, true);
+    // Invalid formulas match nothing and never crash.
+    for (const std::string& formula : {"2n+a", "n+x", "2nn", "+", "-", "1.5", "++1", "n++1", "1+1", "2n+3n",
+                                       "2++1", "--1", "n n", "", "   ", "n+", "2n-", "5n"}) {
+        if (formula == "5n") {
+            expect("5n", false, false, false);  // a=5: matches only idx 5, which is not in three items
+            continue;
+        }
+        const auto hit = matches(formula);
+        assert(hit == none);
+    }
 }
 
 TEST(css_long_whitespace_runs_keep_their_meaning) {
@@ -9132,7 +9567,7 @@ TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
     assert(later_style.width == 300.0f); // 50dvh of 600px
     assert(later_style.border_radius_percent == 50.0f);
     assert(later_style.font_size == 24.0f); // 150% of inherited 16px body font-size
-    assert(later_style.line_height == 36.0f); // 1.5 * 24px
+    assert(later_style.effective_line_height() == 36.0f); // 1.5 * 24px
 
     auto lis = doc->get_elements_by_tag_name("li");
     assert(lis.size() == 3);
@@ -9215,6 +9650,2078 @@ TEST(html5_date_time_inputs_validation_and_stepping) {
            "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
 }
 
+// =============================================================================
+// Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
+// =============================================================================
+
+TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits) {
+    using namespace litebird;
+
+    // 1. Zlib stored round-trip and Adler-32 integrity check
+    const std::string payload = "Litebird Phase 36 DEFLATE + zlib + gzip verification payload! Repeated payload!";
+    std::vector<uint8_t> zlib_bytes;
+    Deflate::compress_zlib_stored(reinterpret_cast<const uint8_t*>(payload.data()), payload.size(), zlib_bytes);
+    assert(zlib_bytes.size() > payload.size() + 6);
+
+    std::vector<uint8_t> inflated;
+    assert(Deflate::inflate_zlib(zlib_bytes.data(), zlib_bytes.size(), inflated));
+    assert(std::string(inflated.begin(), inflated.end()) == payload);
+
+    // Corrupting the Adler-32 trailer must fail verification.
+    std::vector<uint8_t> corrupted = zlib_bytes;
+    corrupted.back() ^= 0x55u;
+    std::vector<uint8_t> bad_out;
+    assert(!Deflate::inflate_zlib(corrupted.data(), corrupted.size(), bad_out));
+
+    // 2. Fixed-Huffman (BTYPE=1) and Dynamic-Huffman (BTYPE=2) gzip streams
+    const std::vector<uint8_t> fixed_gzip = {
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
+        0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x5c,
+        0x00, 0x3b, 0x7c, 0x8a, 0xdf, 0x12, 0x00, 0x00, 0x00
+    };
+    std::vector<uint8_t> gz_out;
+    assert(Deflate::inflate_gzip(fixed_gzip.data(), fixed_gzip.size(), gz_out));
+    assert(std::string(gz_out.begin(), gz_out.end()) == "hello hello hello\n");
+
+    const std::vector<uint8_t> dyn_gzip = {
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x35, 0x8f, 0xc1, 0x4e, 0xc3, 0x30,
+        0x0c, 0x86, 0x5f, 0xc5, 0xeb, 0x79, 0x5a, 0xd5, 0x03, 0x07, 0xa4, 0x2c, 0x07, 0xba, 0xa1, 0x09,
+        0x0d, 0x81, 0xe8, 0x2e, 0x1c, 0xbd, 0xc4, 0x59, 0xb3, 0xa5, 0x49, 0x64, 0x87, 0xa1, 0xbe, 0x3d,
+        0x11, 0x85, 0x8b, 0x65, 0xf9, 0xff, 0xf5, 0xe9, 0xb3, 0x5a, 0xed, 0xde, 0xfa, 0xd3, 0xe7, 0xfb,
+        0x1e, 0xc6, 0x32, 0x05, 0xad, 0xfe, 0x26, 0xa1, 0xd5, 0x2a, 0xf8, 0x78, 0x03, 0xa6, 0xb0, 0x6d,
+        0xa4, 0xcc, 0x81, 0x64, 0x24, 0x2a, 0x0d, 0x8c, 0x4c, 0xee, 0xff, 0xb2, 0x31, 0x22, 0x8d, 0x56,
+        0x62, 0xd8, 0xe7, 0x02, 0xc2, 0x66, 0xdb, 0x60, 0xce, 0x9b, 0xab, 0x34, 0x60, 0xc9, 0x11, 0x6b,
+        0xd5, 0x2e, 0x59, 0x5d, 0x16, 0xe6, 0x39, 0xd9, 0xb9, 0xf2, 0x3b, 0x7d, 0xf4, 0x85, 0xce, 0x9e,
+        0x2d, 0x3c, 0x71, 0xfa, 0x16, 0x62, 0xd8, 0xc7, 0x8b, 0x8f, 0x54, 0x7b, 0x9d, 0x56, 0x59, 0xef,
+        0xe6, 0x88, 0x93, 0x37, 0x70, 0xf8, 0x72, 0x6e, 0xc2, 0x08, 0x1f, 0xcf, 0x3d, 0x74, 0x8f, 0x0f,
+        0x1d, 0xdc, 0x89, 0xbd, 0xf3, 0x06, 0x8b, 0x4f, 0x11, 0xd0, 0x70, 0x12, 0xa9, 0x8e, 0x18, 0xe0,
+        0x70, 0x7a, 0x3d, 0xae, 0xa1, 0x1f, 0x86, 0x35, 0x60, 0xb4, 0xf0, 0x82, 0x77, 0x1c, 0x16, 0xaf,
+        0x8c, 0x73, 0x48, 0x68, 0x65, 0xa5, 0xda, 0x5c, 0x45, 0x16, 0x85, 0xf6, 0xf7, 0xd3, 0x1f, 0x1b,
+        0x99, 0x9e, 0x24, 0xff, 0x00, 0x00, 0x00
+    };
+    std::vector<uint8_t> dyn_out;
+    assert(Deflate::inflate_gzip(dyn_gzip.data(), dyn_gzip.size(), dyn_out));
+    assert(std::string(dyn_out.begin(), dyn_out.end()) ==
+           "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"styles.css\"><script src=\"app.js\" defer></script></head><body><h1>Litebird Browser Engine</h1><p>Dynamic Huffman RFC 1951 verification across real HTML, CSS, and JavaScript payloads!</p></body></html>");
+
+    // Multi-member concatenated gzip stream decodes both members seamlessly.
+    std::vector<uint8_t> multi_gz = fixed_gzip;
+    multi_gz.insert(multi_gz.end(), fixed_gzip.begin(), fixed_gzip.end());
+    std::vector<uint8_t> multi_out;
+    assert(Deflate::inflate_gzip(multi_gz.data(), multi_gz.size(), multi_out));
+    assert(std::string(multi_out.begin(), multi_out.end()) == "hello hello hello\nhello hello hello\n");
+
+    // 3. Decompression bomb output cap must fail deterministically before OOM.
+    std::vector<uint8_t> large_in(8192, 'A');
+    std::vector<uint8_t> large_z;
+    Deflate::compress_zlib_stored(large_in.data(), large_in.size(), large_z);
+    std::vector<uint8_t> capped_out;
+    assert(!Deflate::inflate_zlib(large_z.data(), large_z.size(), capped_out, 1024));
+}
+
+TEST(png_and_svg_subresource_decoding_and_roundtrip) {
+    using namespace litebird;
+
+    // 1. RGBA PNG lossless encode + decode pixel-exact round-trip
+    auto src_img = std::make_shared<ImageData>();
+    src_img->width = 16;
+    src_img->height = 12;
+    src_img->pixels.resize(16 * 12, 0);
+    for (int y = 0; y < 12; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            src_img->set_pixel(x, y, Color(
+                static_cast<uint8_t>(x * 15),
+                static_cast<uint8_t>(y * 20),
+                static_cast<uint8_t>((x + y) * 7),
+                static_cast<uint8_t>(120 + (x * 8))
+            ).to_argb());
+        }
+    }
+
+    std::vector<uint8_t> png_bytes = ImageDecoder::encode_png(*src_img);
+    assert(png_bytes.size() > 32);
+    assert(png_bytes[0] == 0x89 && png_bytes[1] == 'P' && png_bytes[2] == 'N' && png_bytes[3] == 'G');
+
+    auto decoded_png = ImageDecoder::decode_png(png_bytes.data(), png_bytes.size());
+    assert(decoded_png != nullptr);
+    assert(decoded_png->width == 16 && decoded_png->height == 12);
+    for (int y = 0; y < 12; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            Color a = src_img->get_pixel_color(x, y);
+            Color b = decoded_png->get_pixel_color(x, y);
+            assert(a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a);
+        }
+    }
+
+    // 2. SVG byte decoding and data:image/svg+xml URI decoding
+    const std::string svg_src =
+        R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="20"><rect x="0" y="0" width="24" height="20" fill="#2563eb"/></svg>)";
+    auto svg_img = ImageDecoder::decode_bytes(
+        reinterpret_cast<const uint8_t*>(svg_src.data()), svg_src.size(), "image/svg+xml"
+    );
+    assert(svg_img != nullptr);
+    assert(svg_img->width == 24 && svg_img->height == 20);
+    Color center = svg_img->get_pixel_color(12, 10);
+    assert(center.b > center.r && center.a == 255);
+
+    auto data_svg = ImageDecoder::decode_data_uri(
+        "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='%23ff0000'/></svg>"
+    );
+    assert(data_svg != nullptr && data_svg->width == 10 && data_svg->height == 10);
+    assert(data_svg->get_pixel_color(5, 5).r > 200);
+
+    // 3. Hostile PNG dimensions (50000 x 50000) rejected before allocation
+    std::vector<uint8_t> hostile_png = png_bytes;
+    // IHDR width at offset 16..19, height at 20..23
+    hostile_png[16] = 0x00; hostile_png[17] = 0x00; hostile_png[18] = 0xC3; hostile_png[19] = 0x50;
+    hostile_png[20] = 0x00; hostile_png[21] = 0x00; hostile_png[22] = 0xC3; hostile_png[23] = 0x50;
+    assert(ImageDecoder::decode_png(hostile_png.data(), hostile_png.size()) == nullptr);
+}
+
+TEST(img_subresources_enforce_document_origin_security) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    // Create a temporary local PNG file to verify Finding 40 origin isolation.
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_f40";
+    fs::create_directories(tmp_dir);
+    const fs::path secret_png = tmp_dir / "secret.png";
+
+    auto img = ImageDecoder::create_test_pattern(8, 8, Color(12, 200, 45, 255));
+    assert(img != nullptr && ImageDecoder::save_png(*img, secret_png.string()));
+
+    const std::string file_uri = "file://" + secret_png.string();
+
+    // 1. A local file: document CAN load a local relative or file: <img>.
+    {
+        auto doc = HtmlParser::parse("<img id='pic' src='secret.png'>");
+        doc->set_url("file://" + (tmp_dir / "index.html").string());
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+        assert(root != nullptr);
+        auto pic = doc->get_element_by_id("pic");
+        assert(pic != nullptr && pic->bounding_box().width == 8.0f && pic->bounding_box().height == 8.0f);
+    }
+
+    // 2. An https: web document CANNOT read local files via file://, absolute path, or <base href="file://...">.
+    for (const std::string& doc_url : {
+             std::string("https://attacker.example/page.html"),
+             std::string("http://attacker.example/page.html"),
+             std::string("data:text/html,<h1>opaque</h1>"),
+             std::string("about:blank")
+         }) {
+        const std::string html =
+            "<head><base href='file://" + tmp_dir.string() + "/'></head>"
+            "<body>"
+            "<img id='i1' src='" + file_uri + "'>"
+            "<img id='i2' src='" + secret_png.string() + "'>"
+            "<img id='i3' src='secret.png'>"
+            "</body>";
+        auto doc = HtmlParser::parse(html);
+        doc->set_url(doc_url);
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+        assert(root != nullptr);
+        assert(doc->get_element_by_id("i1")->bounding_box().width == 0.0f);
+        assert(doc->get_element_by_id("i2")->bounding_box().width == 0.0f);
+        assert(doc->get_element_by_id("i3")->bounding_box().width == 0.0f);
+    }
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(document_styles_load_external_links_base_href_media_and_imports) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_css";
+    fs::create_directories(tmp_dir / "assets");
+
+    {
+        std::ofstream f(tmp_dir / "assets" / "imported.css");
+        f << "@import 'cycle.css';\n";
+        f << "#box { width: 210px; height: 45px; }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "cycle.css");
+        f << "@import 'imported.css';\n#box { padding-left: 12px; }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "main.css");
+        f << "@import 'imported.css';\n#box { height: 70px; background-color: rgb(10, 20, 30); }\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "assets" / "mobile.css");
+        f << "#box { width: 99px; }\n";
+    }
+
+    const std::string html =
+        "<!DOCTYPE html><html><head>"
+        "<base href='file://" + (tmp_dir / "assets").string() + "/'>"
+        "<style>#box { width: 50px; height: 20px; border: 2px solid black; }</style>"
+        "<link rel='stylesheet' href='main.css'>"
+        "<link rel='stylesheet' href='mobile.css' media='(max-width: 500px)'>"
+        "<style>#box { border-top-width: 6px; }</style>"
+        "</head><body style='margin:0'><div id='box'>Styled</div></body></html>";
+
+    auto doc = HtmlParser::parse(html);
+    doc->set_url("file://" + (tmp_dir / "index.html").string());
+
+    StyleSheetCache cache;
+    StyleResolver desktop = DocumentStyles::build_resolver(*doc, &cache, 1024.0f, 768.0f);
+    const std::size_t fetches_after_first = cache.external_fetches;
+    assert(fetches_after_first >= 3);
+
+    // Rebuilding with the same cache performs zero redundant stylesheet loads.
+    StyleResolver desktop_cached = DocumentStyles::build_resolver(*doc, &cache, 1024.0f, 768.0f);
+    assert(cache.external_fetches == fetches_after_first);
+
+    auto box_el = doc->get_element_by_id("box");
+    assert(box_el != nullptr);
+    ComputedStyle st = desktop_cached.resolve_style(box_el);
+    assert(st.width == 210.0f);       // from imported.css (overrides earlier <style>, mobile.css skipped at 1024px)
+    assert(st.height == 70.0f);       // main.css overrides imported.css
+    assert(st.padding.left == 12.0f); // cycle.css loaded once without infinite recursion
+    assert(st.border_width.top == 6.0f); // trailing inline <style> wins in tree order
+
+    // Narrow viewport activates media='(max-width: 500px)'
+    StyleResolver mobile = DocumentStyles::build_resolver(*doc, &cache, 420.0f, 768.0f);
+    assert(mobile.resolve_style(box_el).width == 99.0f);
+
+    // Web documents cannot load local stylesheets via file://
+    auto web_doc = HtmlParser::parse(
+        "<link rel='stylesheet' href='file://" + (tmp_dir / "assets" / "main.css").string() + "'>"
+        "<div id='box'>Web</div>"
+    );
+    web_doc->set_url("https://example.org/");
+    StyleResolver web_res = DocumentStyles::build_resolver(*web_doc);
+    assert(web_res.resolve_style(web_doc->get_element_by_id("box")).height < 0.0f);
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(external_classic_and_deferred_scripts_execute_in_html_order) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase36_scripts";
+    fs::create_directories(tmp_dir);
+
+    {
+        std::ofstream f(tmp_dir / "sync1.js");
+        f << "window.log.push('sync1:' + (document.getElementById('after') !== null) + ':' + document.currentScript.getAttribute('src'));\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "defer1.js");
+        f << "window.log.push('defer1:' + document.readyState + ':' + (document.getElementById('after') !== null));\n";
+    }
+    {
+        std::ofstream f(tmp_dir / "defer2.js");
+        f << "window.log.push('defer2:' + document.getElementById('after').textContent);\n";
+    }
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("file://" + (tmp_dir / "index.html").string());
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head>"
+        "<script>window.log = []; document.addEventListener('DOMContentLoaded', () => window.log.push('dcl'));"
+        "window.addEventListener('load', () => window.log.push('load'));</script>"
+        "<script src='defer1.js' defer></script>"
+        "<script src='sync1.js'></script>"
+        "<script src='defer2.js' defer></script>"
+        "</head><body>"
+        "<script>window.log.push('inline-body:' + (document.getElementById('after') !== null));</script>"
+        "<div id='after'>ready</div>"
+        "</body></html>"
+    );
+    js.notify_document_loaded();
+
+    assert(js.eval("window.log.join('|')").to_string() ==
+           "sync1:false:sync1.js|inline-body:false|defer1:interactive:true|defer2:ready|dcl|load");
+
+    // Cross-origin web page cannot execute a local file:// script.
+    auto web_doc = std::make_shared<Document>();
+    web_doc->set_url("https://example.org/app.html");
+    JsInterpreter web_js(web_doc);
+    web_js.load_page(
+        "<script>window.ranLocal = false;</script>"
+        "<script src='file://" + (tmp_dir / "sync1.js").string() + "'></script>"
+    );
+    web_js.notify_document_loaded();
+    assert(web_js.eval("typeof window.log").to_string() == "undefined");
+
+    fs::remove_all(tmp_dir);
+}
+
+TEST(live_dom_geometry_and_layout_invalidation) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example/dashboard");
+    doc->set_viewport_size(960.0f, 640.0f);
+
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "body { margin: 0; }"
+        "#panel { width: 200px; height: 80px; padding: 10px; border: 4px solid #333; }"
+        "#card-link { text-decoration: none; }"
+        "#card-inner { width: 240px; height: 60px; }"
+        "</style></head><body>"
+        "<div id='panel'>Hello</div>"
+        "<a id='card-link' href='/details'><div id='card-inner'>Block inside inline link</div></a>"
+        "<p style='margin:0'>Prefix <span id='chip'>inline-span</span> suffix</p>"
+        "</body></html>"
+    );
+    js.notify_document_loaded();
+
+    assert(js.eval("window.innerWidth").to_number() == 960.0);
+    assert(js.eval("window.innerHeight").to_number() == 640.0);
+
+    // Initial border-box: 200 + 20 padding + 8 border = 228 x 108; client box: 220 x 100; clientLeft/Top: 4
+    assert(js.eval("document.getElementById('panel').offsetWidth").to_number() == 228.0);
+    assert(js.eval("document.getElementById('panel').offsetHeight").to_number() == 108.0);
+    assert(js.eval("document.getElementById('panel').clientWidth").to_number() == 220.0);
+    assert(js.eval("document.getElementById('panel').clientHeight").to_number() == 100.0);
+    assert(js.eval("document.getElementById('panel').clientLeft").to_number() == 4.0);
+    assert(js.eval("document.getElementById('panel').getBoundingClientRect().width").to_number() == 228.0);
+
+    // Mutating inline style invalidates layout and reflows automatically on next geometry read!
+    js.eval("document.getElementById('panel').style.width = '340px';");
+    assert(js.eval("document.getElementById('panel').getBoundingClientRect().width").to_number() == 368.0);
+    assert(js.eval("document.getElementById('panel').offsetWidth").to_number() == 368.0);
+
+    // Block-in-inline <a><div>...</div></a> reports unioned non-zero geometry and remains clickable.
+    assert(js.eval("document.getElementById('card-link').getBoundingClientRect().width").to_number() == 240.0);
+    assert(js.eval("document.getElementById('card-link').getBoundingClientRect().height").to_number() == 60.0);
+
+    // Inline <span> inside IFC reports accurate non-zero text fragment bounds.
+    assert(js.eval("document.getElementById('chip').getBoundingClientRect().width > 20").is_truthy());
+    assert(js.eval("document.getElementById('chip').getClientRects().length === 1").is_truthy());
+
+    // Detached elements report 0x0 geometry.
+    js.eval("const p = document.getElementById('panel'); p.remove(); window.removedW = p.offsetWidth;");
+    assert(js.eval("window.removedW").to_number() == 0.0);
+}
+
+TEST(truetype_font_rasterizer_and_utf8_proportional_metrics) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // Proportional metrics: narrow glyphs ('iiii') measure substantially narrower than wide glyphs ('WWWW')
+    float narrow_w = fr.measure_text("iiii", 18.0f, 400);
+    float wide_w = fr.measure_text("WWWW", 18.0f, 400);
+    assert(narrow_w > 0.0f);
+    if (fr.has_truetype_font()) {
+        assert(narrow_w * 1.5f < wide_w);
+    }
+
+    // UTF-8 multi-byte text ("Café — Zürich • Δx → ∞") renders anti-aliased pixels cleanly
+    auto doc = HtmlParser::parse(
+        "<body style='margin:0;background:#ffffff'>"
+        "<div style='font-size:20px;font-weight:700;color:#112233;padding:8px'>Café — Zürich • Δx → ∞</div>"
+        "</body>"
+    );
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 360.0f, 80.0f);
+    DisplayList dl = DisplayList::build(root);
+    BitmapRenderer bmp(360, 80);
+    bmp.render(dl);
+
+    int ink_pixels = 0;
+    int aa_edge_pixels = 0;
+    for (int y = 0; y < 80; ++y) {
+        for (int x = 0; x < 360; ++x) {
+            Color c = bmp.get_pixel(x, y);
+            if (c.r < 250 || c.g < 250 || c.b < 250) {
+                ++ink_pixels;
+                if (c.r > 25 && c.r < 240) ++aa_edge_pixels;
+            }
+        }
+    }
+    assert(ink_pixels > 100);
+    if (fr.has_truetype_font()) {
+        assert(aa_edge_pixels > 20);
+    }
+}
+
+TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e) {
+    using namespace litebird;
+
+    WebBrowserServer server(1024.0f, 680.0f);
+    server.set_custom_handler([](const HttpServerRequest& req, HttpServerResponse& resp) -> bool {
+        if (req.path == "/test/redirect") {
+            resp.status = 302;
+            resp.status_text = "Found";
+            resp.headers.push_back({"Location", "/test/chunked-gzip"});
+            resp.body = "";
+            return true;
+        }
+        if (req.path == "/test/chunked-gzip") {
+            const uint8_t gz[] = {
+                0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
+                0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x5c,
+                0x00, 0x3b, 0x7c, 0x8a, 0xdf, 0x12, 0x00, 0x00, 0x00
+            };
+            resp.status = 200;
+            resp.content_type = "text/plain; charset=utf-8";
+            resp.headers.push_back({"Content-Encoding", "gzip"});
+            resp.chunked = true;
+            resp.body.assign(reinterpret_cast<const char*>(gz), sizeof(gz));
+            return true;
+        }
+        if (req.path == "/test/cors-open") {
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.headers.push_back({"Access-Control-Allow-Origin", "*"});
+            resp.body = "{\"cors\":true}";
+            return true;
+        }
+        if (req.path == "/test/cors-closed") {
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.body = "{\"secret\":1}";
+            return true;
+        }
+        return false;
+    });
+
+    assert(server.start_background(0, "127.0.0.1"));
+    const uint16_t port = server.bound_port();
+    assert(port > 0);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    // 1. HTTP/1.1 302 redirect -> chunked + gzip transfer decoding
+    {
+        ResourceResponse r = ResourceLoader::load_navigation(base + "/test/redirect");
+        assert(r.success && r.status_code == 200);
+        assert(r.url == base + "/test/chunked-gzip");
+        assert(r.body == "hello hello hello\n");
+    }
+
+    // 2. CORS enforcement on cross-origin XHR & fetch()
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://webapp.example/index.html");
+        JsInterpreter js(doc);
+        js.load_page("<script>window.openRes = ''; window.closedErr = false;</script>");
+        js.notify_document_loaded();
+
+        js.eval(
+            "const x1 = new XMLHttpRequest();"
+            "x1.open('GET', '" + base + "/test/cors-open', false);"
+            "x1.send();"
+            "window.openRes = x1.status + ':' + x1.responseText;"
+            "const x2 = new XMLHttpRequest();"
+            "x2.onerror = () => { window.closedErr = true; };"
+            "x2.open('GET', '" + base + "/test/cors-closed', false);"
+            "try { x2.send(); } catch (e) { window.closedErr = true; }"
+        );
+        assert(js.eval("window.openRes").to_string() == "200:{\"cors\":true}");
+        assert(js.eval("window.closedErr || x2.status === 0").is_truthy());
+    }
+
+    // 3. Drive the live `--gui` browser server end-to-end over HTTP/1.1
+    {
+        ResourceResponse nav_resp = ResourceLoader::load_http(
+            base + "/api/navigate",
+            "POST",
+            {{"Content-Type", "application/json"}},
+            "{\"url\":\"" + base + "/demo/index.html\"}"
+        );
+        assert(nav_resp.success && nav_resp.status_code == 200);
+        assert(nav_resp.body.find("Litebird Multi-File Workspace") != std::string::npos);
+
+        // Fetch rendered PNG viewport frame and verify it decodes to a rich 1024x680 bitmap
+        ResourceResponse frame_resp = ResourceLoader::load_navigation(base + "/api/frame.png");
+        assert(frame_resp.success && frame_resp.status_code == 200);
+        assert(frame_resp.content_type.find("image/png") != std::string::npos);
+        auto frame_img = ImageDecoder::decode_png(
+            reinterpret_cast<const uint8_t*>(frame_resp.body.data()), frame_resp.body.size()
+        );
+        assert(frame_img != nullptr);
+        assert(frame_img->width == 1024 && frame_img->height == 680);
+
+        // Serve the browser chrome HTML shell (uses relative URLs for proxy compatibility)
+        ResourceResponse ui_resp = ResourceLoader::load_navigation(base + "/");
+        assert(ui_resp.success && ui_resp.body.find("api/frame.png") != std::string::npos);
+
+        // Navigate to details page and test /api/back history restoration
+        ResourceResponse nav2 = ResourceLoader::load_http(
+            base + "/api/navigate",
+            "POST",
+            {{"Content-Type", "application/json"}},
+            "{\"url\":\"" + base + "/demo/details.html\"}"
+        );
+        assert(nav2.success && nav2.body.find("canBack\":true") != std::string::npos);
+
+        ResourceResponse back_resp = ResourceLoader::load_http(base + "/api/back", "POST", {}, "{}");
+        assert(back_resp.success && back_resp.body.find("/demo/index.html") != std::string::npos);
+    }
+
+    server.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 34: a function as the prototype of a function, and of an object
+// ---------------------------------------------------------------------------
+
+TEST(js_a_function_is_the_prototype_of_a_function) {
+    using namespace litebird;
+
+    // `Object.getPrototypeOf(Derived)` gave back an object that was not
+    // `Base` and could not be called: a prototype link is a pointer to a
+    // cell, a function is a value, and nothing led from one to the other.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        class Base { constructor(x) { this.x = x; } static s() { return 'static of ' + this.name; } }
+        class Derived extends Base {}
+        class Leaf extends Derived {}
+        function Plain() {}
+        Plain.own = 1;
+        function Proto() { return 'called'; }
+        var child = Object.create(Proto);
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("Object.getPrototypeOf(Derived) === Base") == "true");
+    assert(text("typeof Object.getPrototypeOf(Derived)") == "function");
+    assert(text("Derived.__proto__ === Base && Reflect.getPrototypeOf(Leaf) === Derived") == "true");
+    assert(text("new (Object.getPrototypeOf(Derived))(7).x") == "7");
+    // Static members are found along the link, through any number of levels,
+    // and run with the class they were asked on as `this`.
+    assert(text("Leaf.s()") == "static of Leaf");
+    assert(text("Leaf.hasOwnProperty('s')") == "false");
+    assert(text("Base.isPrototypeOf(Leaf) && !Leaf.isPrototypeOf(Base)") == "true");
+    // The six error constructors: what every assert_throws_js of
+    // web-platform-tests walks before it looks at anything else.
+    assert(text("[TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError]"
+                ".every(function (C) { return Object.getPrototypeOf(C) === Error; })") == "true");
+    assert(text("Object.getPrototypeOf(Error) === Function.prototype") == "true");
+
+    // The same through the engine's own interface.
+    JsValue base = js.eval("Base");
+    JsValue derived = js.eval("Derived");
+    assert(derived.prototype_object() != nullptr);
+    assert(derived.prototype_object() == base.as_prototype());
+    assert(base.as_prototype() == base.as_prototype());            // one cell, however often it is asked for
+    JsValue link = JsValue::make_object(derived.prototype_object());
+    assert(link.is_function());
+    assert(link.identity() == base.identity());
+    assert(link.get_property("name").to_string() == "Base");
+    assert(base.as_prototype()->function_value() != nullptr);
+
+    // A function that is nobody's prototype has a cell for its properties
+    // and no way back from it: the cell and the function would keep each
+    // other alive, and only the collector could take the pair apart.
+    JsValue plain = js.eval("Plain");
+    assert(plain.property_cell() != nullptr);
+    assert(plain.property_cell()->function_value() == nullptr);
+    // An object's cell has none either.
+    assert(js.eval("({ a: 1 })").property_cell()->function_value() == nullptr);
+
+    // Function.prototype is a function: the prototype of every function is.
+    assert(JsIntrinsics::get().function_proto->function_value() != nullptr);
+    assert(text("typeof Function.prototype + ':' + typeof Object.getPrototypeOf(Plain) + ':' + typeof Plain.__proto__") ==
+           "function:function:function");
+    assert(text("Object.getPrototypeOf(Plain) === Function.prototype && Object.getPrototypeOf(Math.max) === Function.prototype") == "true");
+    assert(text("String(Function.prototype()) + ':' + Function.prototype.length + ':' + (Function.prototype.name === '')") ==
+           "undefined:0:true");
+    assert(text("Object.getPrototypeOf(Function.prototype) === Object.prototype") == "true");
+    assert(text("Function.prototype.constructor === Function && Plain instanceof Function && Function.prototype.isPrototypeOf(Plain)") ==
+           "true");
+    // It is not a constructor's prototype property that arrow functions and
+    // methods would find: they have none.
+    assert(text("typeof (() => 1).prototype + ':' + typeof ({ m() {} }).m.prototype + ':' + typeof Function.prototype.prototype") ==
+           "undefined:undefined:undefined");
+    assert(text("typeof Object.create(Function.prototype) + ':' + typeof Object.create(Function.prototype).call") ==
+           "object:function");
+
+    // A function as the prototype of an object.
+    assert(text("Object.getPrototypeOf(child) === Proto") == "true");
+    assert(text("Object.getPrototypeOf(child)()") == "called");
+    assert(text("typeof child") == "object");
+    assert(text("child.name + ':' + child.length + ':' + (child.prototype === Proto.prototype)") == "Proto:0:true");
+    assert(text("var o = { __proto__: Proto }; Object.getPrototypeOf(o) === Proto") == "true");
+    assert(text("function C() {} C.prototype = Proto; Object.getPrototypeOf(new C()) === Proto") == "true");
+    // `__proto__:` in a literal sets a prototype and defines no property, so
+    // a function written there is not named after it. It was, on `main` too,
+    // and nothing could see it: the function could not be got back.
+    assert(text("Object.getPrototypeOf({ __proto__: function () {} }).name === ''") == "true");
+    assert(text("({ p: function () {} }).p.name") == "p");
+
+    // Function.prototype is callable now, so `x instanceof Function.prototype`
+    // no longer stops at "not callable". With a `prototype` that is there and
+    // is not an object, instanceof throws, as it does for any function; with
+    // none it answers false (js_instance_of says why it does not throw).
+    assert(text("var r; try { r = String([] instanceof Function.prototype); } catch (e) { r = e.name; } r") == "false");
+    assert(text("function N() {} N.prototype = 5; var r; try { r = String(({}) instanceof N); } catch (e) { r = e.name; } r") ==
+           "TypeError");
+    assert(text("N.prototype = 5; 1 instanceof N") == "false");       // a primitive is answered first
+    assert(text("N.prototype = {}; new N() instanceof N") == "true");
+
+    // A built-in function gets a cell the first time it needs one, and keeps
+    // what it had: its name, its length, its text, and what it does.
+    JsValue native = js.eval("Math.max");
+    JsObject* native_cell = native.function_cell();
+    assert(native_cell != nullptr);
+    assert(native.function_cell() == native_cell);
+    assert(text("Math.max.name + ':' + Math.max.length + ':' + Math.max(1, 5)") == "max:2:5");
+    assert(text("var n = Object.create(Math.max); Object.getPrototypeOf(n) === Math.max") == "true");
+    assert(text("Object.getPrototypeOf(n)(2, 9)") == "9");
+    assert(text("n.name + ':' + n.length + ':' + typeof n.call") == "max:2:function");
+    assert(text("String(Object.getPrototypeOf(n)) === String(Math.max)") == "true");
+
+    // A chain cannot be closed into a loop through functions either.
+    assert(text("var r; try { Object.setPrototypeOf(Base, Leaf); r = 'no error'; } catch (e) { r = e.name; } r") ==
+           "TypeError");
+    assert(text("Reflect.setPrototypeOf(Proto, child)") == "false");
+    assert(text("Object.getPrototypeOf(Base) === Function.prototype") == "true");
+
+    // The bytecode VM has an Object of its own with these three functions
+    // (a VM that no interpreter gave its globals to). The same answers.
+    auto on_vm = [](const char* source) {
+        JsInterpreter compiler;
+        VM vm;
+        return vm.interpret(compiler.compile_to_bytecode(source)).to_string();
+    };
+    assert(on_vm("function F() { return 7; } let c = Object.create(F); Object.getPrototypeOf(c) === F;") == "true");
+    assert(on_vm("function F() { return 7; } let c = Object.create(F); Object.getPrototypeOf(c)();") == "7");
+    assert(on_vm("function F() {} function G() {} Object.setPrototypeOf(F, G); Object.getPrototypeOf(F) === G;") == "true");
+    assert(on_vm("let o = {}; function G() {} Object.setPrototypeOf(o, G); Object.getPrototypeOf(o) === G;") == "true");
+    assert(on_vm("function F() {} Object.getPrototypeOf(F) === null;") == "false");
+    // A loop is refused there too.
+    assert(on_vm("function F() {} function G() {} Object.setPrototypeOf(F, G); Object.setPrototypeOf(G, F);"
+                 "Object.getPrototypeOf(G) === F;") == "false");
+}
+
+TEST(js_classes_and_their_parents_are_collected) {
+    using namespace litebird;
+
+    // A function that is a prototype and its cell keep each other alive, so
+    // only the collector frees them. It has to: every `class B extends A`
+    // makes such a pair.
+    JsIntrinsics::get();
+    // Twice: the suites before this one leave hundreds of thousands of cells
+    // behind, and those that something still held a handle to during the
+    // first collection are freed by the second (300,309 alive after one,
+    // 269 after two, when this was written).
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function make(i) { class Base { static s() { return i; } } class D extends Base {} return D; }
+            var kept = (function () { var secret = 'called'; function Hidden() { return secret; } Hidden.tag = 't'; return Object.create(Hidden); })();
+            var instance = (function () { class A { static s() { return 'static of A'; } } class B extends A {} return new B(); })();
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t before = Heap::default_heap().stats().alive_cells;
+
+        js.eval_ast("var keep = []; for (var i = 0; i < 500; i++) keep.push(make(i));");
+        Heap::default_heap().collect_garbage();
+        const size_t with_classes = Heap::default_heap().stats().alive_cells;
+        // Two classes a pair, each a cell and a prototype object.
+        assert(with_classes >= before + 2000);
+        assert(js.eval("keep[499].s() + ':' + Object.getPrototypeOf(keep[5]).s()").to_string() == "499:5");
+
+        js.eval_ast("keep = null;");
+        Heap::default_heap().collect_garbage();
+        const size_t after = Heap::default_heap().stats().alive_cells;
+        assert(after <= before + 4);         // the array's cell and such; nothing that grows with 500
+
+        // What is reachable only as a prototype is not collected, and neither
+        // is what it closed over.
+        Heap::default_heap().collect_garbage();
+        assert(js.eval("var H = Object.getPrototypeOf(kept); typeof H + ':' + H() + ':' + kept.tag + ':' + H.name")
+                   .to_string() == "function:called:t:Hidden");
+        assert(js.eval("Object.getPrototypeOf(instance.constructor).s()").to_string() == "static of A");
+
+        // A prototype that was replaced goes; the one in use stays.
+        js.eval_ast(R"(
+            function F() {}
+            for (var j = 0; j < 500; j++) Object.setPrototypeOf(F, function Temp() {});
+            Object.setPrototypeOf(F, function Last() { return 'last'; });
+            H = null;
+        )");
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells <= after + 8);
+        assert(js.eval("Object.getPrototypeOf(F).name + ':' + Object.getPrototypeOf(F)()").to_string() == "Last:last");
+    }
+    // With the interpreter gone, so is everything its scripts made.
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+}
+
+TEST(js_classes_compiled_to_es5_run) {
+    using namespace litebird;
+
+    // What a compiler turns `class B extends A` into. Each line of these
+    // helpers failed before Phase 34: `Object.defineProperty(B, "prototype",
+    // { writable: false })` threw, `_getPrototypeOf(B)` was not `A`, and
+    // `Reflect.construct` ignored its third argument.
+    JsInterpreter js;
+    js.eval_ast(R"(
+        function _getPrototypeOf(o) { return Object.getPrototypeOf(o); }
+        function _inherits(subClass, superClass) {
+            if (typeof superClass !== 'function' && superClass !== null) throw new TypeError('Super expression must either be null or a function');
+            subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+            Object.defineProperty(subClass, 'prototype', { writable: false });
+            if (superClass) Object.setPrototypeOf(subClass, superClass);
+        }
+        function _createSuper(Derived) {
+            return function () {
+                var Super = _getPrototypeOf(Derived);
+                return Reflect.construct(Super, arguments, _getPrototypeOf(this).constructor);
+            };
+        }
+        var Animal = function Animal(name) { this.name = name; };
+        Animal.prototype.speak = function () { return this.name + ' makes a sound'; };
+        Animal.create = function (name) { return new this(name); };
+        var Dog = (function (_Animal) {
+            _inherits(Dog, _Animal);
+            var _super = _createSuper(Dog);
+            function Dog() { return _super.apply(this, arguments); }
+            Dog.prototype.speak = function () { return _Animal.prototype.speak.call(this) + ', woof'; };
+            return Dog;
+        })(Animal);
+        var MyError = (function (_Error) {
+            _inherits(MyError, _Error);
+            var _super = _createSuper(MyError);
+            function MyError() { return _super.apply(this, arguments); }
+            return MyError;
+        })(Error);
+
+        var __extends = (function () {
+            var extendStatics = function (d, b) { extendStatics = Object.setPrototypeOf; return extendStatics(d, b); };
+            return function (d, b) { extendStatics(d, b); function __() { this.constructor = d; } d.prototype = (__.prototype = b.prototype, new __()); };
+        })();
+        var Shape = (function () { function Shape(n) { this.n = n; } Shape.make = function (n) { return new this(n); }; return Shape; })();
+        var Circle = (function (_super) { __extends(Circle, _super); function Circle() { return _super !== null && _super.apply(this, arguments) || this; } return Circle; })(Shape);
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("var d = Dog.create('Rex'); d.speak()") == "Rex makes a sound, woof");
+    assert(text("d instanceof Dog && d instanceof Animal && Object.getPrototypeOf(Dog) === Animal") == "true");
+    assert(text("var e = new MyError('boom'); (e instanceof MyError) + ':' + (e instanceof Error) + ':' + e.message") ==
+           "true:true:boom");
+    assert(text("Circle.make(3).n + ':' + (Circle.make(3) instanceof Circle) + ':' + (Object.getPrototypeOf(Circle) === Shape)") ==
+           "3:true:true");
+
+    // The prototype property of a constructor: there before it is read,
+    // writable and nothing else, and it can be made read-only once.
+    assert(text("function F() {} var pd = Object.getOwnPropertyDescriptor(F, 'prototype');"
+                "[pd.writable, pd.enumerable, pd.configurable, F.hasOwnProperty('prototype')].join()") ==
+           "true,false,false,true");
+    assert(text("Object.defineProperty(F, 'prototype', { writable: false }); F.prototype = 5; typeof F.prototype") == "object");
+    assert(text("var r; try { Object.defineProperty(F, 'prototype', { writable: true }); r = 'no error'; } catch (x) { r = x.name; } r") ==
+           "TypeError");
+    assert(text("Reflect.defineProperty(F, 'prototype', { value: 1 })") == "false");
+    // An assigned prototype is not enumerable: a loop that copies static
+    // members must not copy it.
+    assert(text("function P() {} P.prototype = { m: 1 }; P.s = 1; Object.keys(P).join()") == "s");
+
+    // Reflect.construct with a third argument, also for a built-in.
+    assert(text("function A2(x) { this.x = x; } function B2() {} var made = Reflect.construct(A2, [3], B2);"
+                "[made.x, made instanceof B2, made instanceof A2].join()") == "3,true,false");
+    assert(text("var arr = Reflect.construct(Array, [1, 2, 3], B2); [Array.isArray(arr), arr.length, arr instanceof B2].join()") ==
+           "true,3,true");
+    assert(text("try { Reflect.construct(A2, [], function () {}.bind ? (() => 1) : 0); r = 'no error'; } catch (x) { r = x.name; } r") ==
+           "TypeError");
+}
+
+TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval_ast(R"(
+        class MyEvent extends Event { constructor(type, extra) { super(type); this.extra = extra; } }
+        class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
+        class Card extends HTMLElement { static get observedAttributes() { return ['title']; } }
+        var seen = [];
+        var bus = new Bus();
+        bus.addEventListener('x', function (e) { seen.push(e.type, e.extra, e instanceof MyEvent, e instanceof Event); });
+        bus.emit('x');
+    )");
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("seen.join()") == "x,7,true,true");
+    assert(text("Object.getPrototypeOf(MyEvent) === Event") == "true");
+    assert(text("Object.getPrototypeOf(Bus) === EventTarget") == "true");
+    assert(text("Object.getPrototypeOf(Card) === HTMLElement") == "true");
+    assert(text("typeof Object.getPrototypeOf(Card)") == "function");
+    // A static member of the interface is found through the class.
+    assert(text("MyEvent.CAPTURING_PHASE + ':' + MyEvent.hasOwnProperty('CAPTURING_PHASE')") == "1:false");
+    assert(text("Card.observedAttributes.join()") == "title");
+    // The interface objects themselves keep working once they have a cell.
+    assert(text("Event.name + ':' + (new Event('y').type) + ':' + (document.createElement('div') instanceof HTMLElement)") ==
+           "Event:y:true");
+
+    // The interface objects are linked the same way: each has its parent's
+    // as prototype, as Web IDL says. Until Phase 34 a hidden property named
+    // the parent, and nothing but `class X extends` read it.
+    assert(text("var names = [], c = HTMLDivElement;"
+                "while (typeof c === 'function' && c.name) { names.push(c.name); c = Object.getPrototypeOf(c); }"
+                "names.join(' < ')") == "HTMLDivElement < HTMLElement < Element < Node < EventTarget");
+    assert(text("Object.getPrototypeOf(EventTarget) === Function.prototype && Object.getPrototypeOf(Event) === Function.prototype") ==
+           "true");
+    assert(text("Object.getPrototypeOf(MouseEvent) === UIEvent && Object.getPrototypeOf(UIEvent) === Event") == "true");
+    assert(text("Object.getPrototypeOf(DOMException) === Function.prototype && HTMLDivElement instanceof Function") == "true");
+    // Constants are inherited, and are own properties where they are defined.
+    assert(text("[HTMLElement.ELEMENT_NODE, Text.COMMENT_NODE, Card.TEXT_NODE, MouseEvent.AT_TARGET].join()") == "1,8,3,2");
+    assert(text("[Node.hasOwnProperty('ELEMENT_NODE'), HTMLElement.hasOwnProperty('ELEMENT_NODE'), 'ELEMENT_NODE' in HTMLElement,"
+                " 'ELEMENT_NODE' in Event].join()") == "true,false,true,false");
+    // No property stands in for the link any more.
+    assert(text("('%super' in HTMLElement) + ':' + Object.getOwnPropertyNames(HTMLElement).indexOf('%super')") == "false:-1");
+    // The link is the script's to change, like any other.
+    assert(text("function Old() {} Object.setPrototypeOf(Old, HTMLElement); var a = Old.ELEMENT_NODE;"
+                "Object.setPrototypeOf(Old, Function.prototype); a + ':' + typeof Old.ELEMENT_NODE") == "1:undefined");
+}
+
+TEST(js_interface_objects_are_collected_with_their_page) {
+    using namespace litebird;
+
+    // An interface object that is a prototype and its cell keep each other
+    // alive, like a parent class and its cell. When the page goes, the
+    // collector has to take them: a browser makes a realm per page.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    for (int round = 0; round < 3; ++round) {
+        {
+            auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='a'><p>x</p></div></body>");
+            JsInterpreter js(doc);
+            js.eval_ast(R"(
+                var o = HTMLDivElement, depth = 0;
+                while (o) { o = Object.getPrototypeOf(o); depth++; }
+                class Card extends HTMLElement { constructor() { super(); this.made = true; } }
+                customElements.define('x-card', Card);
+                var card = document.createElement('x-card');
+                document.body.appendChild(card);
+                class MyEvent extends Event {}
+                class Bus extends EventTarget {}
+                new Bus().dispatchEvent(new MyEvent('x'));
+                var constants = [Card.ELEMENT_NODE, MyEvent.AT_TARGET, Text.TEXT_NODE];
+            )");
+            assert(js.eval("depth + ':' + card.made + ':' + constants.join()").to_string() == "7:true:1,2,3");
+            Heap::default_heap().collect_garbage();
+            assert(js.eval("Object.getPrototypeOf(Object.getPrototypeOf(Card)) === Element && card instanceof Card").to_string() == "true");
+        }
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+    }
+
+    // Two pages at once. Each realm has a Function.prototype and an Error of
+    // its own, and the questions about chains get the same answers in each,
+    // whichever ran last, and after the other is gone and collected.
+    const char* questions =
+        "[Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype,"
+        " Object.getPrototypeOf(function () {}) === Function.prototype,"
+        " Object.getPrototypeOf(Math.max) === Function.prototype,"
+        " Object.getPrototypeOf(HTMLElement) === Element, HTMLElement.ELEMENT_NODE,"
+        " Object.getPrototypeOf(Object.getPrototypeOf(class A extends Error {})) === Function.prototype].join()";
+    const std::string answers = "true,function,true,true,true,1,true";
+    {
+        auto first_doc = HtmlParser::parse("<!DOCTYPE html><body><div id='a'></div></body>");
+        JsInterpreter first(first_doc);
+        assert(first.eval(questions).to_string() == answers);
+        {
+            auto second_doc = HtmlParser::parse("<!DOCTYPE html><body><p>x</p></body>");
+            JsInterpreter second(second_doc);
+            assert(second.eval(questions).to_string() == answers);
+            assert(first.eval(questions).to_string() == answers);       // the second was the last to run
+            assert(second.eval(questions).to_string() == answers);
+            // An error type of the other page has the other page's Error above it.
+            first.global_env()->define("otherTypeError", second.eval("TypeError"));
+            assert(first.eval("Object.getPrototypeOf(otherTypeError) === Error").to_string() == "false");
+            assert(first.eval("Object.getPrototypeOf(otherTypeError).name").to_string() == "Error");
+        }
+        Heap::default_heap().collect_garbage();
+        assert(first.eval(questions).to_string() == answers);
+        // What the first page kept of the second is still a function with a
+        // function above it.
+        assert(first.eval("typeof otherTypeError + ':' + typeof Object.getPrototypeOf(otherTypeError)").to_string() ==
+               "function:function");
+    }
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+}
+
+// --- Phase 35: attribute-list end removals ---------------------------------
+
+TEST(attribute_list_end_removals_keep_order_and_index) {
+    using namespace litebird;
+
+    // Cross the scan/index boundary in both directions. Erase through both
+    // overloads, reinsert names (their numbers must keep increasing), update
+    // values in place, and compare every observable with a vector model.
+    for (const int count : {0, 1, 31, 32, 33, 129, 513}) {
+        AttributeList list;
+        std::vector<AttributeList::value_type> model;
+        for (int i = 0; i < count; ++i) {
+            const std::string name = "a" + std::to_string(i);
+            list[name] = std::to_string(i);
+            model.emplace_back(name, std::to_string(i));
+        }
+        // Force the long list's index before the first removal.
+        assert(list.count("missing") == 0);
+        int removed_front = 0;
+        int removed_back = 0;
+        while (!model.empty()) {
+            const bool front = ((removed_front + removed_back) % 3) != 2;
+            const auto at = front ? model.begin() : model.end() - 1;
+            const std::string name = at->first;
+            if ((removed_front + removed_back) % 2 == 0) {
+                auto found = list.find(name);
+                assert(found != list.end());
+                const bool was_front = at == model.begin();
+                const bool was_back = at == model.end() - 1;
+                const std::string next_name = was_front
+                    ? (model.size() > 1 ? std::next(at)->first : std::string())
+                    : std::string();
+                auto next = list.erase(found);
+                if (was_front && !next_name.empty()) {
+                    assert(next != list.end() && next->first == next_name);
+                } else if (was_back) {
+                    assert(next == list.end());
+                }
+                if (front) ++removed_front; else ++removed_back;
+            } else {
+                assert(list.erase(name) == 1);
+                if (front) ++removed_front; else ++removed_back;
+            }
+            // The model erase uses the name because the list's erase may
+            // compact its storage and invalidate the endpoint we read above.
+            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+            assert(model_at != model.end());
+            model.erase(model_at);
+            assert(list.size() == model.size());
+            assert(list.empty() == model.empty());
+            assert(list.count(name) == 0);
+            assert(list.erase(name) == 0);
+            for (std::size_t i = 0; i < model.size(); ++i) {
+                assert(list[i] == model[i]);
+                auto found = list.find(model[i].first);
+                assert(found != list.end() && found - list.begin() == static_cast<std::ptrdiff_t>(i));
+                assert(found->second == model[i].second);
+            }
+            std::size_t walked = 0;
+            for (const auto& item : list) {
+                assert(item == model[walked++]);
+            }
+            assert(walked == model.size());
+            if (!model.empty()) {
+                // Updating keeps the position. Now and then a fresh name is
+                // appended while the ends are being drained; its number must
+                // be greater than every surviving one. Most steps shrink the
+                // model, so this loop terminates.
+                const std::string kept = model.back().first;
+                list[kept] = "updated";
+                model.back().second = "updated";
+                assert(list.count(kept) == 1);
+                if ((removed_front + removed_back) % 7 == 0) {
+                    const std::string returned = front ? ("front" + std::to_string(removed_front)) : ("back" + std::to_string(removed_back));
+                    list[returned] = "new";
+                    model.emplace_back(returned, "new");
+                    assert(list.find(returned) == list.end() - 1);
+                }
+            }
+        }
+        assert(list.empty());
+        list["after-clear"] = "ok";
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
+    }
+
+    // Copy and assignment preserve the visible order/values and remain
+    // independently editable after the source has had its ends drained.
+    AttributeList source;
+    for (int i = 0; i < 80; ++i) source["k" + std::to_string(i)] = std::to_string(i);
+    assert(source.count("k79") == 1);
+    AttributeList copy(source);
+    AttributeList assigned;
+    assigned["old"] = "gone";
+    assigned = source;
+    assert(copy == source && assigned == source);
+    assert(source.erase("k0") == 1 && source.erase("k79") == 1);
+    assert(copy.count("k0") == 1 && copy.count("k79") == 1);
+    assert(assigned.count("k0") == 1 && assigned.count("k79") == 1);
+    copy["k1"] = "changed";
+    assert(assigned["k1"] == "1" && source["k1"] == "1");
+    AttributeList moved(std::move(copy));
+    assert(copy.empty());
+    assert(moved.size() == 80 && moved["k1"] == "changed" && moved.count("k79") == 1);
+    AttributeList move_assigned;
+    move_assigned = std::move(assigned);
+    assert(assigned.empty());
+    assert(move_assigned.size() == 80 && move_assigned.count("k0") == 1);
+    move_assigned.clear();
+    assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
+    move_assigned["fresh"] = "1";
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
+
+    // The index can be built after a dead prefix already exists: stay below
+    // the scan threshold while erasing the front, grow past it, then search.
+    AttributeList late;
+    for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
+    for (int i = 0; i < 10; ++i) late.erase(late.begin());
+    for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
+    assert(late.count("l50") == 1); // builds the index with a nonzero start
+    for (int i = 10; i < 51; ++i) {
+        assert(late.erase("l" + std::to_string(i)) == 1);
+        assert(late.size() == static_cast<std::size_t>(51 - i - 1));
+    }
+    assert(late.empty());
+}
+
+TEST(attribute_list_front_removal_is_linear_in_practice) {
+    using namespace litebird;
+
+    // The old vector shifted both the items and the parallel number vector
+    // on every front erase: 50,000 script removals took about six seconds on
+    // the verification machine. The logical-start vector compacts only when
+    // the dead prefix reaches the live tail. This is a generous wall-clock
+    // regression guard, not a microbenchmark; the reproducible comparison is
+    // tools/bench/bench_attributes.py / make bench-attributes.
+    AttributeList direct;
+    for (int i = 0; i < 50000; ++i) direct["a" + std::to_string(i)] = std::to_string(i);
+    assert(direct.count("a49999") == 1);
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 50000; ++i) {
+        assert(direct.erase("a" + std::to_string(i)) == 1);
+        assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
+    }
+    const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(direct.empty());
+    assert(direct_seconds < 5.0);
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    start = std::chrono::steady_clock::now();
+    assert(js.eval(
+        "var e = document.createElement('div');"
+        "for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, String(i));"
+        "for (var i = 0; i < 50000; i++) e.removeAttribute('a' + i);"
+        "e.setAttribute('last', 'ok');"
+        "[e.attributes.length, e.attributes[0].name, e.getAttribute('last'), e.hasAttribute('a0'), e.outerHTML].join('|')").to_string() ==
+        "1|last|ok|false|<div last=\"ok\"></div>");
+    const double script_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(script_seconds < 10.0);
+}
+
+// --- Phase 39: the HTML tokenizer's repeated attribute names -----------------
+
+namespace {
+
+using WrittenAttributes = std::vector<std::pair<std::string, std::string>>;
+
+/// The first tag token of `markup`, or the EOF token when the tokenizer
+/// dropped the tag (EOF inside it).
+litebird::HtmlToken first_tag_token(const std::string& markup) {
+    litebird::HtmlTokenizer tokenizer(markup);
+    while (tokenizer.has_more()) {
+        litebird::HtmlToken token = tokenizer.next_token();
+        if (token.type == litebird::HtmlTokenType::StartTag ||
+            token.type == litebird::HtmlTokenType::EndTag) return token;
+        if (token.type == litebird::HtmlTokenType::EndOfFile) break;
+    }
+    return litebird::HtmlToken::make_eof();
+}
+
+std::string ascii_lower_name(const std::string& name) {
+    std::string out = name;
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+}
+
+std::string ascii_upper_name(const std::string& name) {
+    std::string out = name;
+    for (char& c : out) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    }
+    return out;
+}
+
+/// What the standard says a tag's attributes are: in the order written, the
+/// first of each ASCII-lower-cased name kept with its value, every later one
+/// dropped. A set, not the tokenizer's own scan or index.
+WrittenAttributes first_attribute_wins(const WrittenAttributes& written) {
+    WrittenAttributes kept;
+    std::set<std::string> names;
+    for (const auto& [name, value] : written) {
+        std::string lowered = ascii_lower_name(name);
+        if (names.insert(lowered).second) kept.emplace_back(std::move(lowered), value);
+    }
+    return kept;
+}
+
+/// One attribute as markup. `form` 3 is valueless, so its value must be "".
+std::string write_attribute(const std::string& name, const std::string& value, unsigned form) {
+    switch (form % 4) {
+        case 0: return name + "=\"" + value + "\"";
+        case 1: return name + "='" + value + "'";
+        case 2: return name + "=" + value;
+        default: return name;
+    }
+}
+
+} // namespace
+
+TEST(tokenizer_repeated_attribute_names_keep_the_first) {
+    using namespace litebird;
+
+    // Every spelling of a duplicate: the first one wins, the name is
+    // lower-cased before the comparison, and the order is the order of the
+    // first occurrences. These tags are all below the size where the
+    // tokenizer builds an index, so this is the short-tag path.
+    struct Case { const char* markup; WrittenAttributes expected; bool self_closing; };
+    const Case cases[] = {
+        {"<div a=1 A=2 a=3 b=4 B=5>", {{"a", "1"}, {"b", "4"}}, false},
+        {"<div a=\"first\" a a='third' a=fourth>", {{"a", "first"}}, false},
+        {"<div a a=\"later\">", {{"a", ""}}, false},
+        {"<div TITLE=\"x\" title=\"y\">", {{"title", "x"}}, false},
+        // "=" starts a name, and after a name a "=" still opens that name's
+        // value: <div bare =q=1> is one attribute "bare" with the value "q=1".
+        {"<div =x=y =X=z =a =a=\"later\">", {{"=x", "y"}, {"=a", "a=\"later\""}}, false},
+        {"<div bare =q=1>", {{"bare", "q=1"}}, false},
+        {"<div bare / =q=1>", {{"bare", ""}, {"=q", "1"}}, false},
+        {"<div a=\"&amp;&quot;&#65;\" a=\"&lt;\">", {{"a", "&\"A"}}, false},
+        // Case folding is ASCII-only: Ä and ä are two different names.
+        {"<div \xC3\x84=1 \xC3\xA4=2 \xC3\x84=3>", {{"\xC3\x84", "1"}, {"\xC3\xA4", "2"}}, false},
+        {"<div a-b=1 A-B=2 a:b=3 A:B=4>", {{"a-b", "1"}, {"a:b", "3"}}, false},
+        {"<div a=1 / a=2 />", {{"a", "1"}}, true},
+        {"<div a=\"x>y\" a=z>", {{"a", "x>y"}}, false},
+        {"<div a=\"x\"  a='y'\tb='z'\nB='w'>", {{"a", "x"}, {"b", "z"}}, false},
+        {"<input disabled DISABLED type=text TYPE=hidden>", {{"disabled", ""}, {"type", "text"}}, false},
+        {"<div a=\"\" a=\"full\">", {{"a", ""}}, false},
+        {"<div a=1 b=2>", {{"a", "1"}, {"b", "2"}}, false},
+    };
+    for (const Case& one : cases) {
+        const HtmlToken token = first_tag_token(one.markup);
+        assert(token.type == HtmlTokenType::StartTag);
+        assert(token.attributes == one.expected);
+        assert(token.self_closing == one.self_closing);
+    }
+
+    // An end tag's attributes are tokenized the same way (the tree builder
+    // is what drops them), and EOF inside a tag still drops the whole token.
+    const HtmlToken end = first_tag_token("</div a=1 A=2 b=3>");
+    assert(end.type == HtmlTokenType::EndTag);
+    assert(end.name == "div");
+    assert((end.attributes == WrittenAttributes{{"a", "1"}, {"b", "3"}}));
+    assert(first_tag_token("<div a=1 a=2").type == HtmlTokenType::EndOfFile);
+    assert(first_tag_token("<div a=1 a=2 ").type == HtmlTokenType::EndOfFile);
+
+    // Around the size where the index is built, and around every growth of
+    // the attribute vector after it: a duplicate of the first and of the
+    // last name, in the other case, must still be dropped.
+    for (int n : {1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257}) {
+        WrittenAttributes written;
+        std::string markup = "<div";
+        for (int i = 0; i < n; ++i) {
+            // Every third name is longer than std::string's own buffer, so
+            // the name's bytes move when the vector grows.
+            const std::string name = (i % 3 == 0)
+                ? "long-attribute-name-" + std::to_string(i) + "-" + std::string(48, 'x')
+                : "n" + std::to_string(i);
+            const unsigned form = static_cast<unsigned>(i);
+            const std::string value = (form % 4 == 3) ? "" : "v" + std::to_string(i);
+            written.emplace_back(name, value);
+            markup += " " + write_attribute(name, value, form);
+        }
+        const std::string first_name = written.front().first;
+        const std::string last_name = written.back().first;
+        written.emplace_back(first_name, "dup-first");
+        markup += " " + ascii_upper_name(first_name) + "=\"dup-first\"";
+        written.emplace_back(last_name, "dup-last");
+        markup += " " + ascii_upper_name(last_name) + "=\"dup-last\"";
+        markup += ">x</div>";
+        const HtmlToken token = first_tag_token(markup);
+        assert(token.type == HtmlTokenType::StartTag);
+        assert(token.attributes == first_attribute_wins(written));
+        assert(token.attributes.size() == static_cast<std::size_t>(n));
+    }
+
+    // Random tags against the model: names short and long, ASCII and not,
+    // plain and starting with '=', quoted, unquoted and valueless, with
+    // duplicates in both cases. The pool size moves the tag across the
+    // index threshold and across several vector growths.
+    for (unsigned round = 0; round < 60; ++round) {
+        std::mt19937 rng(20261114u + round);
+        const int pool_size = 1 + static_cast<int>(rng() % 300);
+        std::vector<std::string> pool;
+        for (int i = 0; i < pool_size; ++i) {
+            switch (i % 5) {
+                case 0: pool.push_back("a" + std::to_string(i)); break;
+                case 1: pool.push_back("data-very-long-attribute-" + std::to_string(i) + "-" + std::string(60, 'y')); break;
+                case 2: pool.push_back("ns:b" + std::to_string(i)); break;
+                case 3: pool.push_back("=eq" + std::to_string(i)); break;
+                default: pool.push_back((i % 2 ? "\xC3\x84" : "\xC3\xA4") + std::to_string(i)); break;
+            }
+        }
+        const bool end_tag = (round % 7 == 0);
+        WrittenAttributes written;
+        std::string markup = end_tag ? "</div" : "<div";
+        const int count = 1 + static_cast<int>(rng() % 400);
+        for (int k = 0; k < count; ++k) {
+            std::string name = pool[rng() % pool.size()];
+            // A valueless attribute followed by "=" takes what comes after
+            // it as its value (the after-attribute-name state), so a name
+            // that starts with "=" may not follow one.
+            if (!written.empty() && written.back().second.empty() && name.front() == '=') name[0] = 'e';
+            if (rng() % 2) name = ascii_upper_name(name);
+            const unsigned form = rng() % 4;
+            const std::string value = (form == 3) ? "" : "v" + std::to_string(k);
+            written.emplace_back(name, value);
+            markup += " " + write_attribute(name, value, form);
+        }
+        markup += ">";
+        const HtmlToken token = first_tag_token(markup);
+        assert(token.type == (end_tag ? HtmlTokenType::EndTag : HtmlTokenType::StartTag));
+        assert(token.attributes == first_attribute_wins(written));
+    }
+
+    // The same shapes through the parser and the DOM, which is where a page
+    // meets this: the element keeps the first value and the first position.
+    auto document = HtmlParser::parse("<!DOCTYPE html><body><p id=p b=2 A=1 a=3 B=4 c>x</p></body>");
+    const std::shared_ptr<Element> p = document->get_element_by_id("p");
+    assert(p != nullptr);
+    assert(p->get_attribute("a") == "1");
+    assert(p->get_attribute("b") == "2");
+    assert(p->get_attribute("c") == "");
+    assert(p->attributes().size() == 4);
+    assert(p->outer_html() == "<p id=\"p\" b=\"2\" a=\"1\" c=\"\">x</p>");
+}
+
+TEST(tokenizer_duplicate_attribute_check_is_linear) {
+    using namespace litebird;
+
+    // One element with 50,000 attributes took about 2.9 s in the parser when
+    // every name was compared with every accepted attribute: the square of
+    // the count. These are generous wall-clock regression guards, not
+    // microbenchmarks; the reproducible comparison against an older binary
+    // is tools/bench/bench_tokenizer_attributes.py / make
+    // bench-tokenizer-attributes.
+    constexpr int kWide = 50000;
+
+    std::string distinct = "<div";
+    for (int i = 0; i < kWide; ++i) distinct += " a" + std::to_string(i) + "=\"v" + std::to_string(i) + "\"";
+    distinct += ">x</div>";
+    auto start = std::chrono::steady_clock::now();
+    const HtmlToken wide = first_tag_token(distinct);
+    const double distinct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(wide.type == HtmlTokenType::StartTag);
+    assert(wide.attributes.size() == static_cast<std::size_t>(kWide));
+    for (int i = 0; i < kWide; ++i) {
+        assert(wide.attributes[static_cast<std::size_t>(i)].first == "a" + std::to_string(i));
+        assert(wide.attributes[static_cast<std::size_t>(i)].second == "v" + std::to_string(i));
+    }
+    assert(distinct_seconds < 2.0);
+
+    // Half of them repeats, in the other case and with names longer than
+    // std::string's buffer: the index must survive the vector growing under
+    // it, and must still drop the second value of every name.
+    std::string repeated = "<div";
+    WrittenAttributes written;
+    for (int i = 0; i < kWide; ++i) {
+        const std::string name = "attribute-" + std::to_string(i / 2) + "-" + std::string(40, 'n');
+        const bool second = (i % 2 != 0);
+        const std::string value = second ? "dup" + std::to_string(i) : "v" + std::to_string(i / 2);
+        written.emplace_back(second ? ascii_upper_name(name) : name, value);
+        repeated += " " + write_attribute(written.back().first, value, static_cast<unsigned>(i));
+    }
+    repeated += ">x</div>";
+    const WrittenAttributes expected = first_attribute_wins(written);
+    start = std::chrono::steady_clock::now();
+    const HtmlToken folded = first_tag_token(repeated);
+    const double repeated_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(folded.attributes == expected);
+    assert(folded.attributes.size() == static_cast<std::size_t>(kWide / 2));
+    assert(repeated_seconds < 2.0);
+
+    // An end tag pays the same check; the tree builder drops its attributes
+    // afterwards, so nothing but the tokenizer's time is left.
+    std::string end_markup = "</div";
+    for (int i = 0; i < kWide; ++i) end_markup += " a" + std::to_string(i) + "=v" + std::to_string(i);
+    end_markup += ">";
+    start = std::chrono::steady_clock::now();
+    const HtmlToken end = first_tag_token(end_markup);
+    const double end_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(end.type == HtmlTokenType::EndTag);
+    assert(end.attributes.size() == static_cast<std::size_t>(kWide));
+    assert(end.attributes.back().first == "a" + std::to_string(kWide - 1));
+    assert(end_seconds < 2.0);
+
+    // Ordinary markup must not pay for the index: many tags of four
+    // attributes each, one of them a repeat.
+    std::string small;
+    for (int i = 0; i < 5000; ++i) small += "<div a0=\"0\" a1=\"1\" a2=\"2\" A0=\"dup\">t</div>";
+    start = std::chrono::steady_clock::now();
+    HtmlTokenizer tokenizer(small);
+    int tags = 0;
+    while (tokenizer.has_more()) {
+        const HtmlToken token = tokenizer.next_token();
+        if (token.type == HtmlTokenType::EndOfFile) break;
+        if (token.type != HtmlTokenType::StartTag) continue;
+        assert((token.attributes == WrittenAttributes{{"a0", "0"}, {"a1", "1"}, {"a2", "2"}}));
+        ++tags;
+    }
+    const double small_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    assert(tags == 5000);
+    assert(small_seconds < 5.0);
+}
+
+// Phase 38: Real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
+static void test_jpeg_decoder_baseline_progressive_and_guards() {
+    using namespace litebird;
+    // 8x8 4-quadrant test image (TL=red, TR=green, BL=blue, BR=yellow)
+    static constexpr uint8_t kTestJpegBaseline8x8[387] = {
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02,
+        0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x02, 0x02, 0x02, 0x05, 0x04,
+        0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06, 0x06, 0x06, 0x07, 0x09, 0x08, 0x06,
+        0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0B, 0x08, 0x09, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x06, 0x08,
+        0x0B, 0x0C, 0x0B, 0x0A, 0x0C, 0x09, 0x0A, 0x0A, 0x0A, 0xFF, 0xDB, 0x00, 0x43, 0x01, 0x02, 0x02,
+        0x02, 0x02, 0x02, 0x02, 0x05, 0x03, 0x03, 0x05, 0x0A, 0x07, 0x06, 0x07, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0xFF, 0xC0,
+        0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11,
+        0x01, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xFF, 0xC4, 0x00, 0x24, 0x10, 0x00, 0x00, 0x03, 0x05,
+        0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x12, 0x14, 0x03,
+        0x06, 0x09, 0x13, 0x16, 0x15, 0x17, 0x18, 0x21, 0x25, 0x41, 0x43, 0x61, 0x62, 0xFF, 0xC4, 0x00,
+        0x15, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x05, 0x07, 0xFF, 0xC4, 0x00, 0x27, 0x11, 0x00, 0x01, 0x02, 0x02, 0x08, 0x07, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x13, 0x14, 0x08, 0x15, 0x03, 0x04,
+        0x05, 0x07, 0x18, 0x22, 0x41, 0x62, 0x11, 0x21, 0x24, 0x42, 0x43, 0x61, 0x63, 0xFF, 0xDA, 0x00,
+        0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00, 0x37, 0x07, 0x87, 0x27, 0x17,
+        0x77, 0x8B, 0xA9, 0xD3, 0xD4, 0xF5, 0x91, 0xC2, 0xAD, 0x44, 0xF5, 0xBE, 0x99, 0x90, 0xB2, 0x7B,
+        0x13, 0x6C, 0x19, 0xC5, 0xA3, 0x6A, 0xE8, 0xF0, 0xD3, 0x20, 0xEB, 0x5F, 0xBF, 0x75, 0xE3, 0x41,
+        0x34, 0x1B, 0x7D, 0x29, 0x88, 0x96, 0xDA, 0x23, 0xAF, 0x1E, 0x4F, 0xC4, 0x6D, 0xA7, 0x8B, 0xF9,
+        0x5E, 0x49, 0x64, 0xB1, 0x7D, 0x5C, 0xAA, 0xE5, 0x1F, 0x55, 0x70, 0x06, 0xFB, 0xC8, 0xFB, 0x47,
+        0x37, 0xFF, 0xD9,
+    };
+    static constexpr uint8_t kTestJpegProgressive8x8[627] = {
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02,
+        0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x02, 0x02, 0x02, 0x05, 0x04,
+        0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06, 0x06, 0x06, 0x07, 0x09, 0x08, 0x06,
+        0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0B, 0x08, 0x09, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x06, 0x08,
+        0x0B, 0x0C, 0x0B, 0x0A, 0x0C, 0x09, 0x0A, 0x0A, 0x0A, 0xFF, 0xDB, 0x00, 0x43, 0x01, 0x02, 0x02,
+        0x02, 0x02, 0x02, 0x02, 0x05, 0x03, 0x03, 0x05, 0x0A, 0x07, 0x06, 0x07, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0xFF, 0xC2,
+        0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x08, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11,
+        0x01, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xFF, 0xC4, 0x00, 0x15, 0x01, 0x01, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x06, 0xFF, 0xDA,
+        0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x10, 0x03, 0x10, 0x00, 0x00, 0x01, 0x36, 0x29, 0xFF, 0x00,
+        0xFF, 0xC4, 0x00, 0x17, 0x10, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x07, 0x16, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00,
+        0x01, 0x05, 0x02, 0x8F, 0x25, 0xAE, 0x3F, 0xFF, 0xC4, 0x00, 0x1F, 0x11, 0x00, 0x01, 0x03, 0x03,
+        0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x12, 0x13, 0x14,
+        0x04, 0x07, 0x21, 0x17, 0x41, 0x61, 0x63, 0x73, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x03, 0x01, 0x01,
+        0x3F, 0x01, 0xB8, 0xD5, 0x3A, 0xBF, 0x17, 0x11, 0xA3, 0x2F, 0xB1, 0x4E, 0x23, 0xCC, 0x06, 0xF9,
+        0x27, 0x61, 0x9F, 0xFF, 0xC4, 0x00, 0x20, 0x11, 0x00, 0x02, 0x01, 0x01, 0x09, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x12, 0x13, 0x00, 0x02, 0x06, 0x07, 0x14,
+        0x17, 0x23, 0x42, 0x61, 0x62, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x02, 0x01, 0x01, 0x3F, 0x01, 0xC6,
+        0xDB, 0xA3, 0xA6, 0x99, 0x0D, 0xE9, 0xE7, 0x97, 0x8A, 0x2A, 0x47, 0xEA, 0xD9, 0x2F, 0xD0, 0x15,
+        0xFF, 0xC4, 0x00, 0x1D, 0x10, 0x00, 0x01, 0x02, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00, 0x14, 0x05, 0x11, 0x13, 0x23, 0x41, 0x51, 0x71, 0xFF,
+        0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x06, 0x3F, 0x02, 0x88, 0xDC, 0x6E, 0xDE, 0x96, 0x08, 0xA6,
+        0x7C, 0xD2, 0xFF, 0xC4, 0x00, 0x18, 0x10, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x51, 0xB1, 0xF0, 0xFF, 0xDA, 0x00, 0x08,
+        0x01, 0x01, 0x00, 0x01, 0x3F, 0x21, 0xDD, 0x3A, 0x94, 0x57, 0x3F, 0xFF, 0xDA, 0x00, 0x0C, 0x03,
+        0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10, 0x7F, 0xFF, 0xC4, 0x00, 0x16, 0x11, 0x00,
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xA1, 0xB1, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x03, 0x01, 0x01, 0x3F, 0x10, 0xBD, 0xEB, 0x86, 0xA3,
+        0xFF, 0xC4, 0x00, 0x17, 0x11, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x21, 0xF0, 0x41, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x02, 0x01,
+        0x01, 0x3F, 0x10, 0x87, 0x97, 0x00, 0xD1, 0x5F, 0xFF, 0xC4, 0x00, 0x18, 0x10, 0x00, 0x02, 0x03,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x21, 0x51,
+        0xE1, 0xF0, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x3F, 0x10, 0xD7, 0xEB, 0xB2, 0x18,
+        0x07, 0xFF, 0xD9,
+    };
+    static constexpr uint8_t kTestJpegGray8x8[195] = {
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02,
+        0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x04, 0x03, 0x02, 0x02, 0x02, 0x02, 0x05, 0x04,
+        0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06, 0x06, 0x06, 0x07, 0x09, 0x08, 0x06,
+        0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0B, 0x08, 0x09, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x06, 0x08,
+        0x0B, 0x0C, 0x0B, 0x0A, 0x0C, 0x09, 0x0A, 0x0A, 0x0A, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x08,
+        0x00, 0x08, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xFF, 0xC4, 0x00, 0x22,
+        0x10, 0x00, 0x00, 0x04, 0x04, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x11, 0x12, 0x13, 0x15, 0x02, 0x06, 0x09, 0x61, 0x14, 0x17, 0x18, 0x21, 0x24, 0x41, 0x43,
+        0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x06, 0x80, 0xF2, 0xBE, 0xA3, 0x73,
+        0x63, 0x9C, 0xCC, 0xCC, 0xC3, 0xE5, 0x88, 0x59, 0x67, 0x1B, 0xC0, 0x50, 0x4A, 0xE2, 0x6E, 0x83,
+        0x7F, 0xFF, 0xD9,
+    };
+
+    assert(JpegDecoder::is_jpeg(kTestJpegBaseline8x8, sizeof(kTestJpegBaseline8x8)));
+    auto base = JpegDecoder::decode_detailed(kTestJpegBaseline8x8, sizeof(kTestJpegBaseline8x8));
+    assert(base.ok() && !base.progressive && base.width == 8 && base.height == 8 && base.components == 3);
+    auto tl = Color::from_argb(base.image->get_pixel(1, 1));
+    auto tr = Color::from_argb(base.image->get_pixel(6, 1));
+    auto bl = Color::from_argb(base.image->get_pixel(1, 6));
+    auto br = Color::from_argb(base.image->get_pixel(6, 6));
+    assert(tl.r > 200 && tl.g < 60 && tl.b < 60);
+    assert(tr.g > 180 && tr.r < 60 && tr.b < 60);
+    assert(bl.b > 190 && bl.r < 60 && bl.g < 60);
+    assert(br.r > 200 && br.g > 190 && br.b < 60);
+
+    // Progressive SOF2 must produce identical quadrant pixels to Baseline SOF0.
+    auto prog = JpegDecoder::decode_detailed(kTestJpegProgressive8x8, sizeof(kTestJpegProgressive8x8));
+    assert(prog.ok() && prog.progressive && prog.width == 8 && prog.height == 8);
+    assert(prog.image->pixels == base.image->pixels);
+
+    // Grayscale JPEG
+    auto gray = JpegDecoder::decode_detailed(kTestJpegGray8x8, sizeof(kTestJpegGray8x8));
+    assert(gray.ok() && gray.components == 1 && gray.width == 8 && gray.height == 8);
+    auto gp = Color::from_argb(gray.image->get_pixel(6, 6));
+    assert(gp.r == gp.g && gp.g == gp.b && gp.r > 180);
+
+    // Hostile/malformed inputs must fail cleanly without allocating oversized buffers
+    static constexpr uint8_t kDimBomb[] = {
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9
+    };
+    assert(!JpegDecoder::decode(kDimBomb, sizeof(kDimBomb)));
+    assert(!JpegDecoder::decode(kTestJpegBaseline8x8, 40)); // truncated
+    static constexpr uint8_t kNotJpeg[] = {'P', 'N', 'G', 0, 1, 2};
+    assert(!JpegDecoder::is_jpeg(kNotJpeg, sizeof(kNotJpeg)));
+    assert(!JpegDecoder::decode(kNotJpeg, sizeof(kNotJpeg)));
+}
+
+static void test_gif_decoder_87a_89a_interlaced_and_animation() {
+    using namespace litebird;
+    // 8x8 2-frame animated GIF89a with Dispose=Background, transparency, loop=1 (NETSCAPE2.0)
+    static constexpr uint8_t kTestGifAnim8x8[110] = {
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x08, 0x00, 0x08, 0x00, 0xF0, 0x00, 0x00, 0xFF, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x09, 0x0C, 0x00, 0x01, 0x00, 0x21, 0xFF, 0x0B, 0x4E, 0x45,
+        0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30, 0x03, 0x01, 0x01, 0x00, 0x00, 0x2C, 0x00,
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x02, 0x0C, 0x84, 0x11, 0x19, 0x87, 0xCA, 0xBA,
+        0x0E, 0x9C, 0xB4, 0x5A, 0x5A, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x09, 0x0C, 0x00, 0x01, 0x00, 0x2C,
+        0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x08, 0x00, 0x80, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x02,
+        0x0B, 0x8C, 0x8F, 0xA9, 0xCB, 0xE0, 0x80, 0x1E, 0x3C, 0x32, 0xBE, 0x02, 0x00, 0x3B,
+    };
+    // 9x9 interlaced GIF89a: row 0 red, row 1 blue, rows 2..8 green
+    static constexpr uint8_t kTestGifInterlaced9x9[59] = {
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x09, 0x00, 0x09, 0x00, 0xF1, 0x00, 0x00, 0xFF, 0x00, 0x00,
+        0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x09, 0x00, 0x40, 0x02, 0x0C, 0x84, 0x7F, 0xA1,
+        0xCB, 0xED, 0x0F, 0x85, 0x9C, 0x13, 0xDA, 0x5B, 0x00, 0x00, 0x3B,
+    };
+
+    assert(GifDecoder::is_gif(kTestGifAnim8x8, sizeof(kTestGifAnim8x8)));
+    auto anim = GifDecoder::decode_frames(kTestGifAnim8x8, sizeof(kTestGifAnim8x8));
+    assert(anim.ok() && anim.width == 8 && anim.height == 8);
+    assert(anim.frames.size() == 2);
+    assert(anim.loop_count == 1);
+    assert(anim.frames[0].delay_ms == 120);
+    // Frame 0: TL 4x4 red, BR transparent
+    assert(anim.frames[0].image->get_pixel(1, 1) == Color(255, 0, 0, 255).to_argb());
+    assert(Color::from_argb(anim.frames[0].image->get_pixel(6, 6)).a == 0);
+    // Frame 1 (after Dispose=Background): TL cleared to transparent, BR 4x4 blue
+    assert(Color::from_argb(anim.frames[1].image->get_pixel(1, 1)).a == 0);
+    assert(anim.frames[1].image->get_pixel(6, 6) == Color(0, 0, 255, 255).to_argb());
+
+    // Single-frame helper returns frame 0
+    auto first = GifDecoder::decode(kTestGifAnim8x8, sizeof(kTestGifAnim8x8));
+    assert(first && first->get_pixel(1, 1) == Color(255, 0, 0, 255).to_argb());
+
+    // 4-pass interlaced GIF
+    auto inter = GifDecoder::decode(kTestGifInterlaced9x9, sizeof(kTestGifInterlaced9x9));
+    assert(inter && inter->width == 9 && inter->height == 9);
+    assert(inter->get_pixel(4, 0) == Color(255, 0, 0, 255).to_argb());
+    assert(inter->get_pixel(4, 1) == Color(0, 0, 255, 255).to_argb());
+    assert(inter->get_pixel(4, 5) == Color(0, 255, 0, 255).to_argb());
+    assert(inter->get_pixel(4, 8) == Color(0, 255, 0, 255).to_argb());
+
+    // Hostile dimension bomb & truncated GIF rejected cleanly
+    static constexpr uint8_t kGifBomb[] = {
+        'G', 'I', 'F', '8', '9', 'a', 0xFF, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x3B
+    };
+    assert(!GifDecoder::decode(kGifBomb, sizeof(kGifBomb)));
+    assert(!GifDecoder::decode(kTestGifAnim8x8, 12));
+}
+
+static void test_canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings() {
+    using namespace litebird;
+    CanvasRenderingContext2D ctx(100, 80);
+
+    // 1. Even-odd vs non-zero winding on concentric squares
+    ctx.fill_style = Color(255, 0, 0);
+    ctx.begin_path();
+    ctx.rect(5.0f, 5.0f, 30.0f, 30.0f);
+    ctx.rect(12.0f, 12.0f, 16.0f, 16.0f);
+    assert(ctx.is_point_in_path(8.0f, 8.0f, FillRule::EvenOdd));
+    assert(!ctx.is_point_in_path(20.0f, 20.0f, FillRule::EvenOdd));
+    assert(ctx.is_point_in_path(20.0f, 20.0f, FillRule::NonZero));
+    ctx.fill(FillRule::EvenOdd);
+    assert(ctx.image_data()->get_pixel(8, 20) == Color(255, 0, 0).to_argb());
+    assert(ctx.image_data()->get_pixel(20, 20) == 0);
+
+    // 2. CTM save/restore + translate/rotate + clip intersection
+    ctx.save();
+    ctx.begin_path();
+    ctx.rect(45.0f, 5.0f, 20.0f, 30.0f);
+    ctx.clip();
+    ctx.translate(60.0f, 20.0f);
+    ctx.rotate(0.78539816f); // 45 deg
+    ctx.fill_style = Color(0, 255, 0);
+    ctx.fill_rect(-15.0f, -15.0f, 30.0f, 30.0f);
+    ctx.restore();
+    // Inside both rotated square and clip rect [45..65]
+    assert(ctx.image_data()->get_pixel(55, 20) == Color(0, 255, 0).to_argb());
+    // Inside rotated square but outside clip rect (>65) -> clipped!
+    assert(ctx.image_data()->get_pixel(70, 20) == 0);
+
+    // 3. Thick dashed stroke + global_alpha
+    ctx.stroke_style = Color(0, 0, 255);
+    ctx.line_width = 6.0f;
+    ctx.set_line_dash({10.0f, 10.0f});
+    ctx.begin_path();
+    ctx.move_to(10.0f, 55.0f);
+    ctx.line_to(70.0f, 55.0f);
+    ctx.stroke();
+    assert(ctx.image_data()->get_pixel(15, 55) == Color(0, 0, 255).to_argb());
+    assert(ctx.image_data()->get_pixel(15, 53) == Color(0, 0, 255).to_argb());
+    assert(ctx.image_data()->get_pixel(25, 55) == 0); // gap
+    assert(ctx.image_data()->get_pixel(35, 55) == Color(0, 0, 255).to_argb());
+
+    // 4. get_image_data_rgba / put_image_data_rgba roundtrip
+    auto patch = ctx.get_image_data_rgba(14, 54, 2, 2);
+    assert(patch.size() == 16 && patch[0] == 0 && patch[1] == 0 && patch[2] == 255 && patch[3] == 255);
+    ctx.put_image_data_rgba(patch.data(), 2, 2, 85, 65);
+    assert(ctx.image_data()->get_pixel(85, 65) == Color(0, 0, 255).to_argb());
+
+    // 5. End-to-end JS accessor bindings via document.getElementById().getContext('2d')
+    auto cdoc = HtmlParser::parse("<body><canvas id='c' width='40' height='40'></canvas></body>");
+    JsInterpreter interp(cdoc);
+    interp.eval(R"(
+        var ctx = document.getElementById('c').getContext('2d');
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.lineCap = 'round';
+        ctx.setLineDash([6, 4]);
+        var dashLen = ctx.getLineDash().length;
+        var capVal = ctx.lineCap;
+        var alphaVal = ctx.globalAlpha;
+        ctx.translate(10, 10);
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 20, 20);
+        ctx.restore();
+        var afterRestoreAlpha = ctx.globalAlpha;
+        var img = ctx.getImageData(15, 15, 1, 1);
+        var pxR = img.data[0];
+        var pxA = img.data[3];
+    )");
+    assert(interp.eval("dashLen").to_number() == 2.0);
+    assert(interp.eval("capVal").to_string() == "round");
+    assert(std::abs(interp.eval("alphaVal").to_number() - 0.5) < 0.01);
+    assert(std::abs(interp.eval("afterRestoreAlpha").to_number() - 1.0) < 0.01);
+    assert(interp.eval("pxR").to_number() == 255.0);
+    const double pxA = interp.eval("pxA").to_number();
+    assert(pxA >= 120.0 && pxA <= 135.0);
+}
+
+static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
+    using namespace litebird;
+    // 1. Paths with W3C elliptical arc + compact flags, <defs>, gradient href inheritance,
+    //    <use>, <symbol>, <clipPath>, inline style, currentColor, display:none
+    auto doc = HtmlParser::parse(R"svg(
+        <svg viewBox="0 0 120 60">
+          <defs>
+            <linearGradient id="baseG">
+              <stop offset="0%" stop-color="#ff0000"/>
+              <stop offset="100%" stop-color="#0000ff"/>
+            </linearGradient>
+            <linearGradient id="grad1" href="#baseG" x1="0%" y1="0%" x2="100%" y2="0%"/>
+            <clipPath id="halfClip"><rect x="0" y="0" width="20" height="40"/></clipPath>
+            <symbol id="dot" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9"/></symbol>
+          </defs>
+          <rect x="0" y="0" width="40" height="40" fill="url(#grad1)" clip-path="url(#halfClip)"/>
+          <g color="#00ff00" transform="translate(50, 10)">
+            <use href="#dot" width="20" height="20" fill="currentColor"/>
+          </g>
+          <path d="M80,30 A15,15 0 11110,30 A15,15 0 1180,30 Z" style="fill: #ffff00"/>
+          <rect x="0" y="0" width="120" height="60" fill="#ffffff" display="none"/>
+        </svg>
+    )svg");
+    auto svgs = doc->get_elements_by_tag_name("svg");
+    assert(!svgs.empty());
+    auto img = SvgRenderer::render(svgs[0], 120.0f, 60.0f);
+    assert(img && img->width == 120 && img->height == 60);
+
+    auto left_grad = Color::from_argb(img->get_pixel(2, 20));
+    assert(left_grad.a == 255 && left_grad.r > 220 && left_grad.b < 35);
+    assert(img->get_pixel(30, 20) == 0); // clipped by halfClip
+    assert(img->get_pixel(60, 20) == Color(0, 255, 0, 255).to_argb()); // <use> + <symbol> + currentColor
+    assert(img->get_pixel(95, 30) == Color(255, 255, 0, 255).to_argb()); // arc circle
+
+    // 2. Hostile <use> and <linearGradient> reference cycles must terminate cleanly without stack overflow
+    auto cyclic_doc = HtmlParser::parse(R"svg(
+        <svg viewBox="0 0 40 40">
+          <defs>
+            <linearGradient id="lgA" href="#lgB"/>
+            <linearGradient id="lgB" href="#lgA"/>
+            <g id="uA"><use href="#uB"/></g>
+            <g id="uB"><use href="#uA"/></g>
+          </defs>
+          <rect x="0" y="0" width="40" height="40" fill="url(#lgA)"/>
+          <use href="#uA"/>
+        </svg>
+    )svg");
+    auto c_svgs = cyclic_doc->get_elements_by_tag_name("svg");
+    auto c_img = SvgRenderer::render(c_svgs[0], 40.0f, 40.0f);
+    assert(c_img && c_img->width == 40 && c_img->height == 40);
+}
+
+// ============================================================================
+// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// ============================================================================
+
+TEST(worker_mime_policy_enforces_javascript_content_types) {
+    using namespace litebird;
+
+    // 1. Direct WHATWG MIME Sniffing §4.3 table checks (all 16 standard types,
+    //    case-insensitivity, parameters, and surrounding HTTP whitespace).
+    const char* allowed[] = {
+        "application/ecmascript",
+        "application/javascript",
+        "application/x-ecmascript",
+        "application/x-javascript",
+        "text/ecmascript",
+        "text/javascript",
+        "text/javascript1.0",
+        "text/javascript1.1",
+        "text/javascript1.2",
+        "text/javascript1.3",
+        "text/javascript1.4",
+        "text/javascript1.5",
+        "text/jscript",
+        "text/livescript",
+        "text/x-ecmascript",
+        "text/x-javascript",
+        "TEXT/JAVASCRIPT; charset=utf-8",
+        "  application/javascript ; charset=UTF-8 ",
+        "\ttext/javascript\t",
+    };
+    for (const char* ct : allowed) {
+        assert(WorkerObject::is_javascript_mime_type(ct));
+    }
+
+    const char* rejected[] = {
+        "",
+        "   ",
+        "text/plain",
+        "text/plain; charset=utf-8",
+        "text/html",
+        "application/json",
+        "application/octet-stream",
+        "image/png",
+        "image/svg+xml",
+        "text/javascript/extra",
+        "text/ javascript",
+        "application/javascript2",
+        ";charset=utf-8",
+    };
+    for (const char* ct : rejected) {
+        assert(!WorkerObject::is_javascript_mime_type(ct));
+    }
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    // 2. Real loopback HTTP server returning diverse Content-Type headers & status codes.
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(server >= 0);
+    int reuse = 1;
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(::bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    assert(::listen(server, 16) == 0);
+    socklen_t addr_len = sizeof(addr);
+    assert(::getsockname(server, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
+    const int port = ntohs(addr.sin_port);
+
+    std::atomic<bool> stop_server{false};
+    std::thread server_thread([server, &stop_server]() {
+        while (!stop_server.load(std::memory_order_acquire)) {
+            timeval tv{0, 50000};
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(server, &rfds);
+            if (::select(server + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+            const int client = ::accept(server, nullptr, nullptr);
+            if (client < 0) continue;
+            char buf[2048];
+            const ssize_t n = ::recv(client, buf, sizeof(buf) - 1, 0);
+            std::string req = (n > 0) ? std::string(buf, static_cast<size_t>(n)) : "";
+            std::string path = "/";
+            auto sp1 = req.find(' ');
+            if (sp1 != std::string::npos) {
+                auto sp2 = req.find(' ', sp1 + 1);
+                if (sp2 != std::string::npos) path = req.substr(sp1 + 1, sp2 - sp1 - 1);
+            }
+
+            std::string reply;
+            if (path == "/ok.js") {
+                std::string body = "postMessage('http-js-ok');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/legacy.js") {
+                std::string body = "postMessage('http-legacy-ok');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: application/x-javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/plain.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_PLAIN');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/html.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_HTML');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/missing-ct.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_NO_CT');";
+                reply = "HTTP/1.1 200 OK\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/redirect.js") {
+                std::string body = "redirecting";
+                reply = "HTTP/1.1 302 Found\r\nLocation: /ok.js\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else if (path == "/status300.js") {
+                std::string body = "postMessage('MUST_NOT_RUN_300');";
+                reply = "HTTP/1.1 300 Multiple Choices\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            } else {
+                std::string body = "postMessage('MUST_NOT_RUN_404');";
+                reply = "HTTP/1.1 404 Not Found\r\nContent-Type: text/javascript\r\nContent-Length: " +
+                        std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+            }
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        }
+    });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    auto doc = std::make_shared<Document>();
+    doc->set_url(base + "/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.eval(
+        "var msgs = {}, errs = {};"
+        "function spawn(k, url) {"
+        "  var w = new Worker(url);"
+        "  w.onmessage = function(e) { msgs[k] = String(e.data); };"
+        "  w.addEventListener('error', function(e) { errs[k] = e.message; });"
+        "  return w;"
+        "}"
+        "var ws = ["
+        "  spawn('data_js', 'data:text/javascript,postMessage(\"data-js-ok\")'),"
+        "  spawn('data_app_js', 'data:application/javascript;charset=utf-8,postMessage(\"data-app-ok\")'),"
+        "  spawn('data_plain', 'data:text/plain,postMessage(\"BAD\")'),"
+        "  spawn('data_default', 'data:,postMessage(\"BAD\")'),"
+        "  spawn('data_html', 'data:text/html,postMessage(\"BAD\")'),"
+        "  spawn('http_ok', '" + base + "/ok.js'),"
+        "  spawn('http_legacy', '" + base + "/legacy.js'),"
+        "  spawn('http_plain', '" + base + "/plain.js'),"
+        "  spawn('http_html', '" + base + "/html.js'),"
+        "  spawn('http_no_ct', '" + base + "/missing-ct.js'),"
+        "  spawn('http_redirect', '" + base + "/redirect.js'),"
+        "  spawn('http_300', '" + base + "/status300.js'),"
+        "  spawn('http_404', '" + base + "/notfound.js')"
+        "];"
+    );
+
+    assert(wait_for(js,
+        "!!(msgs.data_js && msgs.data_app_js && msgs.http_ok && msgs.http_legacy && msgs.http_redirect && "
+        "errs.data_plain && errs.data_default && errs.data_html && "
+        "errs.http_plain && errs.http_html && errs.http_no_ct && errs.http_300 && errs.http_404)"));
+
+    assert(js.eval("msgs.data_js").to_string() == "data-js-ok");
+    assert(js.eval("msgs.data_app_js").to_string() == "data-app-ok");
+    assert(js.eval("msgs.http_ok").to_string() == "http-js-ok");
+    assert(js.eval("msgs.http_legacy").to_string() == "http-legacy-ok");
+    assert(js.eval("msgs.http_redirect").to_string() == "http-js-ok");
+    assert(js.eval("!msgs.data_plain && !msgs.data_default && !msgs.data_html").is_truthy());
+    assert(js.eval("!msgs.http_plain && !msgs.http_html && !msgs.http_no_ct && !msgs.http_300 && !msgs.http_404").is_truthy());
+    assert(js.eval("errs.data_plain").to_string().find("text/plain") != std::string::npos);
+    assert(js.eval("errs.http_html").to_string().find("text/html") != std::string::npos);
+    assert(js.eval("errs.http_no_ct").to_string().find("missing Content-Type") != std::string::npos);
+    assert(js.eval("errs.http_300").to_string().find("300") != std::string::npos);
+    assert(js.eval("errs.http_404").to_string().find("404") != std::string::npos);
+
+    js.eval("ws.forEach(function(w) { w.terminate(); });");
+    stop_server.store(true, std::memory_order_release);
+    server_thread.join();
+    ::close(server);
+
+    // 3. Local file document: .txt file is rejected by MIME policy even when local files are allowed.
+    const std::string suffix = std::to_string(static_cast<long>(::getpid()));
+    const std::string txt_path = "/tmp/litebird-worker-mime-" + suffix + ".txt";
+    {
+        std::ofstream f(txt_path);
+        f << "postMessage('MUST_NOT_RUN_TXT');";
+    }
+    auto file_doc = std::make_shared<Document>();
+    file_doc->set_url("file:///tmp/litebird-worker-mime-page-" + suffix + ".html");
+    JsInterpreter local(file_doc);
+    local.load_page("<!DOCTYPE html><body></body>");
+    local.eval(
+        "var localMsg = '', localErr = '';"
+        "var lw = new Worker('" + txt_path + "');"
+        "lw.onmessage = function(e) { localMsg = String(e.data); };"
+        "lw.addEventListener('error', function(e) { localErr = e.message; });"
+    );
+    assert(wait_for(local, "!!localErr"));
+    assert(local.eval("localMsg").to_string().empty());
+    assert(local.eval("localErr").to_string().find("text/plain") != std::string::npos);
+    local.eval("lw.terminate();");
+    std::remove(txt_path.c_str());
+}
+
+TEST(worker_options_module_policy_and_global_scope) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const std::string suffix = std::to_string(static_cast<long>(::getpid()));
+    const std::string secret_js = "/tmp/litebird-import-secret-" + suffix + ".js";
+    {
+        std::ofstream f(secret_js);
+        f << "var LEAKED_SECRET = 1;";
+    }
+
+    auto web_doc = std::make_shared<Document>();
+    web_doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(web_doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+
+    // 1. Constructor validation: missing `new`, missing arg, bad options, invalid type enum.
+    js.eval(
+        "var ctorErrs = {};"
+        "try { Worker('data:text/javascript,1'); } catch (e) { ctorErrs.noNew = e.name; }"
+        "try { new Worker(); } catch (e) { ctorErrs.noArg = e.name; }"
+        "try { new Worker('data:text/javascript,1', 42); } catch (e) { ctorErrs.badOpts = e.name; }"
+        "try { new Worker('data:text/javascript,1', { type: 'esm' }); } catch (e) { ctorErrs.badType = e.name; }"
+    );
+    assert(js.eval("ctorErrs.noNew").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.noArg").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
+    assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
+
+    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
+    //    it queues an error event to both onerror and addEventListener('error').
+    js.eval(
+        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
+        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function() { modRan = true; };"
+        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
+    );
+    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
+    assert(!js.eval("modRan").is_truthy());
+    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
+    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
+    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    js.eval("wm.terminate();");
+
+    // 3. Classic options (name, self.location, null/undefined options) and importScripts().
+    js.eval(
+        "var classicInfo = null, nullOptsOk = false, importResult = null;"
+        "var wc = new Worker('data:text/javascript,postMessage({ name: self.name, globalName: name, sameSelf: self.self === self, proto: self.location.protocol })', { type: 'classic', name: 'compute-7' });"
+        "wc.onmessage = function(e) { classicInfo = e.data; };"
+        "var wn = new Worker('data:text/javascript,postMessage(123)', null);"
+        "wn.onmessage = function(e) { nullOptsOk = (e.data === 123); };"
+        "var wi = new Worker('data:text/javascript,"
+        "  importScripts(\"data:text/javascript,var helperVal = 40;\", \"data:application/javascript,helperVal += 2;\");"
+        "  var plainErr = \"\", localErr = \"\";"
+        "  try { importScripts(\"data:text/plain,helperVal = 999;\"); } catch (e) { plainErr = String(e); }"
+        "  try { importScripts(\"" + secret_js + "\"); } catch (e) { localErr = String(e); }"
+        "  postMessage({ val: helperVal, plainErr: plainErr, localErr: localErr });"
+        "');"
+        "wi.onmessage = function(e) { importResult = e.data; };"
+    );
+    assert(wait_for(js, "!!(classicInfo && nullOptsOk && importResult)"));
+    assert(js.eval("classicInfo.name").to_string() == "compute-7");
+    assert(js.eval("classicInfo.globalName").to_string() == "compute-7");
+    assert(js.eval("classicInfo.sameSelf").is_truthy());
+    assert(js.eval("classicInfo.proto").to_string() == "data:");
+    assert(js.eval("importResult.val").to_number() == 42.0);
+    assert(js.eval("importResult.plainErr").to_string().find("text/plain") != std::string::npos);
+    assert(!js.eval("importResult.localErr").to_string().empty());
+
+    js.eval("wc.terminate(); wn.terminate(); wi.terminate();");
+    std::remove(secret_js.c_str());
+}
+
+TEST(worker_event_target_error_and_message_dispatch) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    JsInterpreter js(nullptr);
+
+    // 1. addEventListener('error') alone (no onerror), plus onerror + multiple listeners,
+    //    dedup, removeEventListener, once, handleEvent, preventDefault, stopImmediatePropagation.
+    js.eval(
+        "var log = [];"
+        "var w1 = new Worker('data:text/javascript,throw new Error(\"boom-1\")');"
+        "function dupFn(e) { log.push('dup:' + e.type + ':' + (e.target === w1)); }"
+        "function removedFn() { log.push('REMOVED'); }"
+        "var objListener = { handleEvent: function(e) { log.push('obj:' + e.cancelable); e.preventDefault(); log.push('dp:' + e.defaultPrevented); } };"
+        "w1.onerror = function(e) { log.push('onerror:' + e.message.indexOf('boom-1')); };"
+        "w1.addEventListener('error', dupFn);"
+        "w1.addEventListener('error', dupFn);"
+        "w1.addEventListener('error', removedFn);"
+        "w1.removeEventListener('error', removedFn);"
+        "w1.addEventListener('error', objListener);"
+        "w1.addEventListener('error', function(e) { log.push('stop'); e.stopImmediatePropagation(); });"
+        "w1.addEventListener('error', function() { log.push('AFTER_STOP'); });"
+        ""
+        "var onlyListenerErr = '';"
+        "var w2 = new Worker('data:text/plain,not-js');"
+        "w2.addEventListener('error', function(e) { onlyListenerErr = e.message; });"
+        ""
+        "var onceCount = 0, allCount = 0;"
+        "var w3 = new Worker('data:text/javascript,self.addEventListener(\"message\", function(e) { postMessage(e.data * 10); });');"
+        "w3.addEventListener('message', function() { onceCount++; }, { once: true });"
+        "w3.addEventListener('message', function() { allCount++; });"
+        "w3.postMessage(1); w3.postMessage(2); w3.postMessage(3);"
+        ""
+        "var internalHandled = false, leakedToPage = false;"
+        "var w4 = new Worker('data:text/javascript,"
+        "  self.addEventListener(\"error\", function(e) { e.preventDefault(); postMessage(\"caught-inside\"); });"
+        "  self.onmessage = function() { throw new Error(\"inner\"); };"
+        "');"
+        "w4.onmessage = function(e) { if (e.data === 'caught-inside') internalHandled = true; };"
+        "w4.addEventListener('error', function() { leakedToPage = true; });"
+        "w4.postMessage('go');"
+    );
+
+    assert(wait_for(js, "log.length >= 5 && !!onlyListenerErr && allCount === 3 && internalHandled"));
+    assert(js.eval("log.join('|')").to_string() == "onerror:7|dup:error:true|obj:true|dp:true|stop");
+    assert(js.eval("onlyListenerErr").to_string().find("text/plain") != std::string::npos);
+    assert(js.eval("onceCount").to_number() == 1.0);
+    assert(js.eval("allCount").to_number() == 3.0);
+    assert(!js.eval("leakedToPage").is_truthy());
+
+    js.eval("w1.terminate(); w2.terminate(); w3.terminate(); w4.terminate();");
+
+    // 2. Direct C++ WorkerObject::create_js_instance also wires onmessage/onerror/addEventListener.
+    ResourceRequestContext ctx;
+    JsValue direct = WorkerObject::create_js_instance(
+        "data:text/javascript,postMessage('direct-ok')", ctx, WorkerOptions{WorkerType::Classic, "d"});
+    js.global_env()->define("directW", direct);
+    js.eval("var directMsg = ''; directW.onmessage = function(e) { directMsg = e.data; };");
+    assert(wait_for(js, "directMsg === 'direct-ok'"));
+    js.eval("directW.terminate();");
+}
+
+TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    JsInterpreter js(nullptr);
+
+    // 1. 8 concurrent workers starting simultaneously + self.close() cleanup.
+    js.eval(
+        "var sum = 0, done = 0;"
+        "for (var i = 1; i <= 8; i++) {"
+        "  (function(n) {"
+        "    var w = new Worker('data:text/javascript,postMessage(' + n + '); self.close();');"
+        "    w.onmessage = function(e) { sum += e.data; done++; };"
+        "  })(i);"
+        "}"
+    );
+    assert(wait_for(js, "done === 8"));
+    assert(js.eval("sum").to_number() == 36.0);
+
+    // 2. Nested worker (page -> parent worker -> child worker -> parent -> page)
+    //    and clean parent termination (child must be stopped before parent's EventLoop dies).
+    js.eval(R"js(
+        var nestedReply = '';
+        var childUrl = "data:text/javascript,self.onmessage = function(e) { postMessage(e.data + ':child'); };";
+        var parentUrl = "data:text/javascript,"
+            + "var child = new Worker(" + JSON.stringify(childUrl) + ");"
+            + "child.onmessage = function(e) { postMessage(e.data + ':parent'); };"
+            + "child.postMessage('ping');";
+        var parent = new Worker(parentUrl);
+        parent.onmessage = function(e) { nestedReply = e.data; };
+    )js");
+    assert(wait_for(js, "nestedReply === 'ping:child:parent'"));
+    js.eval("parent.terminate();");
+
+    // 3. Collect garbage after workers close/terminate to verify zero UAF/cycles.
+    EventLoop::default_loop().tick();
+    Heap::default_heap().collect_garbage();
+
+    // 4. Spawn 4 idle workers without calling terminate(), then verify shutdown_all_workers()
+    //    joins every thread deterministically.
+    js.eval(
+        "for (var j = 0; j < 4; j++) {"
+        "  new Worker('data:text/javascript,self.onmessage = function(e) { postMessage(e.data); };');"
+        "}"
+    );
+    WorkerObject::shutdown_all_workers();
+    EventLoop::default_loop().tick();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -9224,6 +11731,7 @@ int main() {
     RUN_TEST(css_parser_and_specificity);
     RUN_TEST(style_resolver_and_cascade);
     RUN_TEST(style_resolver_indexed_candidates_preserve_cascade);
+    RUN_TEST(percentage_font_size_and_line_height);
     RUN_TEST(layout_box_tree);
     RUN_TEST(javascript_engine);
     RUN_TEST(bytecode_virtual_machine);
@@ -9330,8 +11838,11 @@ int main() {
     RUN_TEST(canvas_and_svg_bitmaps_are_bounded);
     RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
+    RUN_TEST(many_sized_floats_pack_without_escaping_the_box);
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
+    RUN_TEST(js_string_owes_a_trailing_high_half_until_it_is_read);
+    RUN_TEST(js_string_built_half_a_pair_at_a_time_costs_what_it_writes);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_property_maps_and_arrays_keep_their_order_through_front_edits);
     RUN_TEST(js_strings_can_be_used_from_several_threads);
@@ -9350,16 +11861,56 @@ int main() {
     RUN_TEST(css_whitespace_does_not_change_selector_or_value_meaning);
     RUN_TEST(css_long_whitespace_runs_keep_their_meaning);
 
+    // CSS <an+b> formula parsing (finding 35's tail).
+    RUN_TEST(nth_child_formula_parsing);
+
+    // Phase 35: attribute-list end removals.
+    RUN_TEST(attribute_list_end_removals_keep_order_and_index);
+    RUN_TEST(attribute_list_front_removal_is_linear_in_practice);
+
+    // Phase 39: the HTML tokenizer's repeated attribute names.
+    RUN_TEST(tokenizer_repeated_attribute_names_keep_the_first);
+    RUN_TEST(tokenizer_duplicate_attribute_check_is_linear);
+
     // Phase 33: page resource loads are origin-aware.
     RUN_TEST(resource_loader_page_requests_are_origin_aware);
     RUN_TEST(fetch_and_workers_use_the_document_origin);
     RUN_TEST(fetch_relative_requests_use_the_document_base_url);
+
+    // Phase 34: a function as the prototype of a function.
+    RUN_TEST(js_a_function_is_the_prototype_of_a_function);
+    RUN_TEST(js_classes_and_their_parents_are_collected);
+    RUN_TEST(js_classes_compiled_to_es5_run);
+    RUN_TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype);
+    RUN_TEST(js_interface_objects_are_collected_with_their_page);
+
+    // Phase 36: usable real-world browser & Finding 44 security tests.
+    RUN_TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits);
+    RUN_TEST(png_and_svg_subresource_decoding_and_roundtrip);
+    RUN_TEST(img_subresources_enforce_document_origin_security);
+    RUN_TEST(document_styles_load_external_links_base_href_media_and_imports);
+    RUN_TEST(external_classic_and_deferred_scripts_execute_in_html_order);
+    RUN_TEST(live_dom_geometry_and_layout_invalidation);
+    RUN_TEST(truetype_font_rasterizer_and_utf8_proportional_metrics);
+    RUN_TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e);
 
     // Phase 37: RegExp VM, modern CSS cascade/units/MQ L4, inline-style CSSOM, HTML5 date/time inputs.
     RUN_TEST(regexp_vm_handles_deep_nesting_and_long_inputs);
     RUN_TEST(css_cascade_layers_supports_combinators_and_mq_l4);
     RUN_TEST(inline_style_cssom_shorthands_and_aliases);
     RUN_TEST(html5_date_time_inputs_validation_and_stepping);
+
+    // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
+    RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
+    RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
+    RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
+    RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
+
+    // Phase 40: Worker MIME/module policy, EventTarget dispatch, and lifecycle safety.
+    RUN_TEST(worker_mime_policy_enforces_javascript_content_types);
+    RUN_TEST(worker_options_module_policy_and_global_scope);
+    RUN_TEST(worker_event_target_error_and_message_dispatch);
+    RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

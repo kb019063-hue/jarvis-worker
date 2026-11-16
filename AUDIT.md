@@ -3058,7 +3058,7 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
 
 **How it was verified.**
 
-- `make test`: **162/162** engine unit suites pass in both Release (`-O2`) and
+- `make test`: **165/165** engine unit suites pass in both Release (`-O2`) and
   ASan+UBSan (`build-asan/test_suite`), including three new suites:
   `iframe_browsing_context_hierarchy_and_navigation`,
   `iframe_sandbox_origin_isolation_and_postmessage`, and

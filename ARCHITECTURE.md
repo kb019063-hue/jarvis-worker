@@ -4113,7 +4113,7 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
   `--map-origin=ORIGIN=DIR`, returning HTTP `404` on `weakly_canonical` root
   escape), and `JsInterpreter::load_xml_page` + `src/main.cpp` execute `<script>`
   elements in XML/XHTML/SVG documents.
-- Verification: `make test` passes **162/162** suites (Release and ASan+UBSan),
+- Verification: `make test` passes **165/165** suites (Release and ASan+UBSan),
   and `make wpt` passes **5,421/5,463** subtests across **87** files (`WPT_FLOOR`
   raised from `4,658` to `5,421`, **0** `frames` failures remaining).
 

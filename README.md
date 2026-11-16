@@ -28,7 +28,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **955 / 970 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **664 / 664**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **DOM corpus** (what a script sees) | **665 / 665**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`) | **4658 / 5192 subtests**; the 534 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
@@ -137,7 +137,7 @@ catalogued in `ARCHITECTURE.md` rather than papered over.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 664 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 665 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -156,7 +156,7 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Phase 27 | 572 / 572; the everyday probe 68 / 68 |
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
 | Phase 34, with 11 more cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
-| Now, with the 24 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 664 / 664 |
+| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 665 / 665 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -964,7 +964,7 @@ var one = {}; function Single() { return one; } class Child extends Single { con
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
 make js-conformance      # 955 / 970; construct.dat 47 / 49
-make dom-conformance     # 664 / 664; compiled.dat 24 / 24
+make dom-conformance     # 665 / 665; compiled.dat 25 / 25
 ```
 
 What is still missing: `this` can be used before `super()` has run, `eval`

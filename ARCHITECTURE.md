@@ -352,7 +352,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
-| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (168/168 unit suites; JS corpus 955/970, `construct.dat` 47/49 against 13 before; DOM corpus 664/664, `compiled.dat` 24/24 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (168/168 unit suites; JS corpus 955/970, `construct.dat` 47/49 against 13 before; DOM corpus 665/665, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
 
 ---
 
@@ -4304,6 +4304,18 @@ given to `customElements.define` all the same, no longer has an element
 turned into something else under it: its upgrade fails, as the standard has
 it.
 
+A parent that is no interface at all is the same question without the list:
+`class M extends Map {}`, given to `customElements.define`. A built-in
+parent builds its own object and `eval_super_call` lets `this` take over its
+state (section 3). With an element as `this`, that made the element's object
+a map (an error, an array), and for an interface that builds its own node
+whatever it is offered (`Text`, `DocumentFragment`) the wrapper of another
+node: `el.nodeType` was 3. `eval_super_call` takes nothing over into a
+platform object any more. What the parent built is `this` from there on,
+with the prototype `new.target` has, the way `Reflect.construct(Map, [],
+NewTarget)` makes it; the constructor returns that, and the upgrade fails
+because it is not the element.
+
 This is the HTML standard's *construction stack*, which each definition has
 there: the element being upgraded is pushed on it, the `HTMLElement`
 constructor finds the definition by `new.target`, returns the element on top
@@ -4320,6 +4332,7 @@ and jsdom's (all of these are cases of `compiled.dat`):
 | The constructor asks twice during an upgrade | The second request is a `TypeError`. Under `new`, where nothing is being upgraded, each request makes an element |
 | A second instance of the class made while it is being upgraded | Before the constructor reached its interface: the inner instance is the element being upgraded, and the constructor's own request is the one refused. After: the inner one is refused. For a class and for a compiled constructor alike |
 | The constructor throws after it got its element | The upgrade fails; later constructions get elements of their own |
+| A class whose parent is `Map`, `Error`, `Array`, `Text` or `DocumentFragment`, given to `customElements.define` | `this` in its constructor is a map (an error, an array, a text node) of its own; the element is not touched, and its upgrade fails |
 | The constructor reaches its interface from the body of a generator or of an async function | The same element, though that body runs on another thread. A generator that was started during an upgrade and is resumed after it makes an element of its own |
 
 **What is left** is in how `run_upgrade` calls the constructor, which is in
@@ -4473,7 +4486,7 @@ Eight cases of `prototypes.dat` fail on those.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 664 cases of its corpus (Phases 27, 28, 34 and 43) and 4,658 of
+   It passes all 665 cases of its corpus (Phases 27, 28, 34 and 43) and 4,658 of
    the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
    only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout

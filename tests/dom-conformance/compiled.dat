@@ -627,3 +627,34 @@ gen x-gen async x-async
 true another element
 mid true
 resumed | resumed | after await true | after await false
+
+#name a class that is no element, given to customElements.define, does not make the element a map, an error, an array or a text node
+#html
+<html><head><title>Upgrade</title></head><body><x-map id="m" k="v"></x-map><x-err id="e" k="v"></x-err><x-arr id="a" k="v"></x-arr><x-text id="t" k="v"></x-text><x-frag id="f" k="v"></x-frag></body></html>
+#code
+var made = {};
+function attr(el) { return Element.prototype.getAttribute.call(el, 'k'); }
+class M extends Map { constructor() { super([[1, 2]]); made.m = this; } }
+class E extends Error { constructor() { super('boom'); made.e = this; } }
+class A extends Array { constructor() { super(); this.push(1); made.a = this; } }
+class T extends Text { field = 'kept'; constructor() { super('text'); made.t = this; } }
+class F extends DocumentFragment { constructor() { super(); made.f = this; } }
+[['x-map', M, 'm'], ['x-err', E, 'e'], ['x-arr', A, 'a'], ['x-text', T, 't'], ['x-frag', F, 'f']].forEach(function (d) {
+  var el = document.getElementById(d[2]);
+  customElements.define(d[0], d[1]);
+  console.log(d[0], made[d[2]] === el, made[d[2]] instanceof d[1], attr(el), document.querySelectorAll(d[0] + ':defined').length, document.body.contains(el));
+});
+console.log(made.m.size, made.m.get(1), made.e.message, made.a.length, Array.isArray(made.a), Array.isArray(document.getElementById('a')));
+console.log(made.t.data, made.t.nodeType, made.t.parentNode, made.t.field, made.f.nodeType, made.f.childNodes.length);
+console.log(document.body.innerHTML);
+console.log(new M().size, new E().message, new A().length, new T().data, new F().nodeType);
+#expect
+x-map false true v 0 true
+x-err false true v 0 true
+x-arr false true v 0 true
+x-text false true v 0 true
+x-frag false true v 0 true
+1 2 boom 1 true false
+text 3 null kept 11 0
+<x-map id="m" k="v"></x-map><x-err id="e" k="v"></x-err><x-arr id="a" k="v"></x-arr><x-text id="t" k="v"></x-text><x-frag id="f" k="v"></x-frag>
+1 boom 1 text 11

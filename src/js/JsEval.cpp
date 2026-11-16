@@ -899,20 +899,7 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         // take over its state so `this` becomes that kind of object. A host
         // constructor (Event, HTMLElement) is handed `this` and makes it the
         // object it constructs, and then there is nothing to take over.
-        JsValue in_place;
-        JsValue built = parent.construct_as_super(args, receiver, new_target, &in_place);
-        if (in_place.is_object()) {
-            // The interface did not build on the object it was offered,
-            // because an element is being upgraded to new.target (JsValue.cpp,
-            // "Constructions in place"). Either this constructor was reached
-            // with Reflect.construct, on an object of its own, and the
-            // interface took the element: the element is what this
-            // construction makes. Or the interface is not the element's and
-            // made another object. Whichever it built on is `this` from here.
-            made = in_place;
-        } else if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
-            JsObject* from = built.object_val;
-            JsObject* to = receiver.object_val;
+        const auto take_over = [](JsObject* from, JsObject* to) {
             for (const auto& entry : from->properties) {
                 auto& slot = to->properties.entry(entry.first);
                 slot.second = entry.second;
@@ -928,6 +915,40 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             to->has_accessors = to->has_accessors || from->has_accessors;
             to->has_legacy_getters = to->has_legacy_getters || from->has_legacy_getters;
             if (from->dom_node) to->dom_node = from->dom_node;
+        };
+        JsValue in_place;
+        JsValue built = parent.construct_as_super(args, receiver, new_target, &in_place);
+        if (in_place.is_object()) {
+            // The interface was not offered the object super(...) came with,
+            // because an element is being upgraded to new.target (JsValue.cpp,
+            // "Constructions in place"). Either this constructor was reached
+            // with Reflect.construct, on an object of its own, and the
+            // interface took the element: the element is what this
+            // construction makes. Or the interface is not the element's and
+            // was offered another object. Whichever that is, it is `this`
+            // from here; an interface that builds its own object whatever it
+            // is offered (Text) has its state taken over into it, as below.
+            made = in_place;
+            if (built.object_val && built.object_val != in_place.object_val) {
+                take_over(built.object_val, in_place.object_val);
+            }
+        } else if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
+            if (receiver.object_val->dom_node) {
+                // `this` is an element that is being upgraded, and the parent
+                // is no interface of the DOM at all: a class that extends Map
+                // was given to customElements.define. The element is not made
+                // a map. What the parent built is `this`, with the prototype
+                // new.target has, as Reflect.construct(Map, [], NewTarget)
+                // makes it, and the upgrade fails because that is not the
+                // element.
+                const JsValue proto = new_target ? new_target->get_property("prototype") : JsValue::make_undefined();
+                if (proto.is_object_like()) {
+                    if (JsObject* target = proto.as_prototype()) js_set_prototype(built.object_val, target);
+                }
+                made = built;
+            } else {
+                take_over(built.object_val, receiver.object_val);
+            }
         }
     }
     // The parent has run; now `this` is bound. (The scope is looked at again:

@@ -12338,6 +12338,38 @@ TEST(js_compiled_custom_elements_are_upgraded) {
                 "Element.prototype.getAttribute.call(not, 'id')].join()") ==
            "0,button,false,true,x,0,1,not");
 
+    // A parent that is no interface of the DOM at all, or an interface that
+    // builds its own object whatever it is offered (Text). Until Phase 43
+    // the element's object took over what the parent built: it was made a
+    // map, an error, an array, the wrapper of a text node. Now what the
+    // parent built is `this` in the constructor, a real one of its kind,
+    // and the element is left as it was, its upgrade failed.
+    js.eval_ast(R"(
+        var kinds = {};
+        class AsMap extends Map { constructor() { super([[1, 2]]); kinds.map = this; } }
+        class AsError extends Error { constructor() { super('boom'); kinds.error = this; } }
+        class AsArray extends Array { constructor() { super(); this.push(1); kinds.array = this; } }
+        class AsText extends Text { field = 'kept'; constructor() { super('text'); kinds.text = this; } }
+        customElements.define('x-as-map', AsMap);
+        customElements.define('x-as-error', AsError);
+        customElements.define('x-as-array', AsArray);
+        customElements.define('x-as-text', AsText);
+        host.innerHTML = '<x-as-map k="v"></x-as-map><x-as-error k="v"></x-as-error><x-as-array k="v"></x-as-array><x-as-text k="v"></x-as-text>';
+        var els = Array.prototype.slice.call(host.childNodes);
+        function attr(el) { return Element.prototype.getAttribute.call(el, 'k'); }
+    )");
+    assert(text("[kinds.map !== els[0], kinds.map instanceof AsMap, kinds.map.size, kinds.map.get(1), kinds.error !== "
+                "els[1], kinds.error instanceof AsError, kinds.error.message, kinds.array !== els[2], "
+                "Array.isArray(kinds.array), kinds.array.length].join()") ==
+           "true,true,1,2,true,true,boom,true,true,1");
+    assert(text("[kinds.text !== els[3], kinds.text instanceof AsText, kinds.text.data, kinds.text.nodeType, "
+                "kinds.text.parentNode === null, kinds.text.field, els[3].field].join()") ==
+           "true,true,text,3,true,kept,");
+    assert(text("[els.map(attr).join(''), Array.isArray(els[2]), host.querySelectorAll(':defined').length, "
+                "host.childNodes.length, host.innerHTML.indexOf('<x-as-text k=\"v\"></x-as-text>') > 0, new "
+                "AsMap().size, new AsText().data].join()") ==
+           "vvvv,false,0,4,true,1,text");
+
     // The body of a generator, and of an async function that awaits, runs on
     // a thread of its own. What it constructs while an element is upgraded
     // is part of that upgrade all the same: the list of constructions in

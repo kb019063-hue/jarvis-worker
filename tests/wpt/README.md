@@ -62,6 +62,30 @@ reporter in place of `resources/testharnessreport.js`, and runs the page with
 The page's address is `https://web-platform.test/<path>`. Nothing else is
 changed, and the files in this directory are not touched.
 
+**Two time limits.** `--timeout SECONDS` is the runner's, for one file (60
+by default; `make asan` gives a sanitizer build 600). The harness in the
+page has one of its own, 10 seconds, and reports `TIMEOUT` for the file when
+it is passed, as one more row, `(harness)`. That happens to a page which
+needs more than 10 seconds to reach its load event even when every subtest
+has passed by then: the harness finishes from a zero-delay timer it sets in
+the load event, and its 10-second timer, set when `testharness.js` was read,
+is due first. A page with one subtest that takes 11 seconds prints `PASS`
+for the subtest and `TIMEOUT` for the file. In a sanitizer build on a busy
+machine the long files come close (under ASan here `big5-decode-extra.html`
+needs 6 seconds to its load event and `Node-compareDocumentPosition.html`
+3.5, each alone on a core), and CI's sanitizer job failed that way: `1 fail
+and are not listed`, with none fewer passing than the day before. That is
+what one failed run said; the same step had failed four times before (twice
+on the branch of that change, once on `main`, once on another branch), when
+a failed job could not yet say anything (AUDIT.md, finding 49). So the
+reporter scales the harness's limit with the runner's: it calls
+`setup({timeout_multiplier: SECONDS / 60})`, which is what wptrunner does
+for slow builds, and calls nothing when that is 1. No test here uses
+`step_timeout` or `step_wait`, the other things that multiplier lengthens.
+
+A run that fails names the first ten failures that are not listed, also
+with `--quiet`.
+
 ## The failures that are listed
 
 `expected-failures.txt` has every subtest that fails, with a word for why.

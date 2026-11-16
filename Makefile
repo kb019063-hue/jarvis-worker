@@ -123,12 +123,13 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. Combined Phase 37 + Phase 45 scores 925/940
-# under ASan and 926/940 in Release. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 924
+# case that the normal build passes. With Phases 37, 43, 44 and 45 together
+# 973 of 989 pass under ASan and 974 in Release, which is what the CI floor
+# requires. Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 972
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 644
+DOM_ASAN_FLOOR ?= 669
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -214,7 +215,7 @@ dom-conformance: $(TARGET)
 ## what a change to functions, classes, prototypes or property definition
 ## can move. Downloaded the first time into build/test262, at a pinned
 ## commit; needs the network once. It is not a scoreboard and has no floor
-## (about two thirds pass). It is for the difference between two builds,
+## (about four fifths pass). It is for the difference between two builds,
 ##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
 ## which lists every test that passes in the first and not in the second,
 ## and fails if there is one. About three minutes for two builds.

@@ -199,6 +199,11 @@ public:
         /// functions never have one, and a cell is only reclaimed by the
         /// collector.
         CellRef cell;
+        /// A native function that, constructed, constructs another function
+        /// in its place and hands new.target on to it: a bound function. What
+        /// comes back is finished, whichever object it is: js_construct() and
+        /// `super(...)` give it neither a prototype nor a state to take over.
+        bool forwards_construct{false};
         using Payload = std::variant<std::monostate, FunctionData, NativeFn,
                                      std::shared_ptr<Node>,
                                      std::shared_ptr<CanvasRenderingContext2D>,
@@ -224,6 +229,10 @@ public:
     bool function_is_async() const;
     bool function_is_generator() const;
     const NativeFn& native_function() const;
+    /// See Extra::forwards_construct. Set it while building the function,
+    /// before the value is copied.
+    bool forwards_construct() const { return m_extra && m_extra->forwards_construct; }
+    void set_forwards_construct() { mutable_extra().forwards_construct = true; }
     /// The node this value is the script object of; empty for anything else.
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;
@@ -339,14 +348,48 @@ public:
     JsValue call_with_this(const JsValue& this_val, const std::vector<JsValue>& args = {}) const;
     /// Invokes the function as a constructor (`new f(...)`). `this_val` is the
     /// freshly created instance for script functions; natives build their own.
-    JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr) const;
+    ///
+    /// `new_target` is what `new.target` is inside the function: the function
+    /// `new` was applied to. Null means this function itself, which is every
+    /// case but two: `super(...)` hands on the new.target of the constructor
+    /// it stands in, and `Reflect.construct(F, args, NewTarget)` names one.
+    /// It has to stay alive for the duration of the call.
+    ///
+    /// A `this_val` that is a platform object already (an element) makes this
+    /// a construction in place: the constructor is to turn that object into
+    /// what it constructs. However the interface's constructor is reached
+    /// from there, with `super(...)` or with `Reflect.construct(Native, [],
+    /// new.target)`, it is given that object when it asks, once, found by
+    /// new.target (see "Constructions in place" in JsValue.cpp).
+    JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr,
+                      const JsValue* new_target = nullptr) const;
     /// `super(...args)` in a class whose parent is a native constructor.
     /// `derived_this` is the object the `new` expression created, with the
     /// subclass's prototype. A native that can turn an existing object into
     /// what it constructs (see current_derived_this) does so, and then the
     /// subclass instance and the native object are one; the others build
     /// their own and the caller takes over its state.
-    JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this) const;
+    ///
+    /// When `new_target` is being constructed in place (see construct()),
+    /// the native may build on another object than `derived_this`, and that
+    /// object is left in `in_place`: it is what this construction makes. It
+    /// is the element under construction when a class was constructed with
+    /// `Reflect.construct(Class, args, NewTarget)` while an element is being
+    /// upgraded to NewTarget, and a new object when the native is not the
+    /// element's interface and `derived_this` is the element.
+    JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
+                               const JsValue* new_target = nullptr, JsValue* in_place = nullptr) const;
+    /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,
+    /// another function as new.target, and no object to hand it yet. A native
+    /// that asks for current_derived_this() gets the object `new_target` is
+    /// being constructed in place on, if it is (once: a second request
+    /// throws); otherwise one with the prototype
+    /// `new_target` has at that moment. Either is left in `made`; when
+    /// `new_target` has no object for a prototype the native gets none and
+    /// `made` is null. A native that never asks builds its own, `made` stays
+    /// undefined, and nothing was read from `new_target`. Both have to
+    /// outlive the call.
+    JsValue construct_for(const std::vector<JsValue>& args, const JsValue& new_target, JsValue& made) const;
 
     // --- Call context ---------------------------------------------------------
     //
@@ -359,11 +402,26 @@ public:
     static bool current_is_construct();
     /// For a native constructor reached through `super()`: the subclass's
     /// object, which should become the thing constructed. Null otherwise.
+    /// Under construct_for() the object is made by this call, the first time,
+    /// which can run a getter of the script's. Either way, when new.target is
+    /// being constructed in place on an element of the interface that asks,
+    /// the answer is that element, and asking for it a second time while the
+    /// construction runs throws a TypeError.
     static const JsValue* current_derived_this();
+    /// For a native function invoked with `new`: the function `new` was
+    /// applied to, when that is not the native itself (it was reached through
+    /// `super(...)` or named by `Reflect.construct`). Null otherwise. Read it
+    /// before calling anything: the next call has a context of its own.
+    static const JsValue* current_new_target();
     /// For script functions: consumes the pending call context. Returns false
     /// (and leaves `this_out` undefined) when the function was entered without
-    /// going through call_with_this()/construct().
-    static bool take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out = nullptr);
+    /// going through call_with_this()/construct(). `new_target_out` gets the
+    /// function `new` was applied to when that is not the callee (see
+    /// construct()), and null otherwise: in a plain call, and when it is the
+    /// callee. It points at what the caller of construct() holds, which
+    /// stays for as long as the call runs.
+    static bool take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out = nullptr,
+                                  const JsValue** new_target_out = nullptr);
 
     JsValue get_property(const std::string& name) const;
     void set_property(const std::string& name, JsValue val);

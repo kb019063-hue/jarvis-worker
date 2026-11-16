@@ -741,23 +741,46 @@ JsValue js_construct(const JsValue& ctor, const std::vector<JsValue>& args, cons
         if (new_target->identity() == ctor.identity()) new_target = nullptr;     // the ordinary case
     }
     if (fd && fd->node) {
+        // A script function is given the object: it has the `prototype` of
+        // new.target, and inside the function new.target is that function.
         JsValue instance = JsValue::make_object();
         JsValue proto = (new_target ? *new_target : ctor).get_property("prototype");
         if (proto.is_object_like()) {
             if (JsObject* target = proto.as_prototype()) instance.object_val->prototype = target;
         }
-        JsValue result = ctor.construct(args, &instance);
+        JsValue result = ctor.construct(args, &instance, new_target);
         return result.is_object_like() ? result : instance;
     }
-    // A built-in constructor makes its own object. With another function as
-    // new.target that object is what the built-in makes (an array, an error)
-    // with the other function's prototype.
-    JsValue result = ctor.construct(args, nullptr);
-    if (new_target && result.type == JsType::Object && result.object_val) {
+    // A built-in constructor makes its own object.
+    if (!new_target) return ctor.construct(args, nullptr);
+    // A bound function constructs its target with this new.target, and what
+    // that makes or returns is the answer as it stands.
+    if (ctor.forwards_construct()) return ctor.construct(args, nullptr, new_target);
+    // Any other built-in, with another function as new.target. A host
+    // constructor asks for the object it is to construct on, the way it does
+    // under `super(...)`, and is given one that has new.target's prototype:
+    // this is how `Reflect.construct(HTMLElement, [], Derived)` makes an
+    // element. The others build their own (an array, an error), and that
+    // gets the prototype afterwards: after the built-in has looked at its
+    // arguments, which is the order the language has
+    // (`Reflect.construct(Promise, [], NewTarget)` complains about the
+    // executor before `NewTarget.prototype` is read).
+    // Either way `NewTarget.prototype` is read once, and where it is not an
+    // object the built-in's own prototype stays.
+    JsValue asked_for;
+    JsValue result = ctor.construct_for(args, *new_target, asked_for);
+    if (!result.is_object_like()) return result;
+    JsObject* target = nullptr;
+    if (asked_for.is_object()) {
+        if (result.identity() == asked_for.identity()) return result;
+        target = asked_for.object_val->prototype;       // asked for and then not used: what was read then
+    } else if (asked_for.is_undefined()) {
         JsValue proto = new_target->get_property("prototype");
-        if (proto.is_object_like()) {
-            if (JsObject* target = proto.as_prototype()) js_set_prototype(result.object_val, target);
-        }
+        if (proto.is_object_like()) target = proto.as_prototype();
+    }
+    if (target) {
+        JsObject* cell = result.is_function() ? result.function_cell() : result.object_val.get();
+        if (cell) js_set_prototype(cell, target);
     }
     return result;
 }

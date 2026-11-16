@@ -583,10 +583,13 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
             std::vector<JsValue> all = bound_args;
             all.insert(all.end(), call_args.begin(), call_args.end());
-            // `new boundFn()` constructs the target and ignores the bound `this`.
-            if (JsValue::current_is_construct()) return js_construct(target, all);
+            // `new boundFn()` constructs the target and ignores the bound
+            // `this`. Inside, new.target is the target, or whatever function
+            // Reflect.construct or a subclass's super() named instead.
+            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
             return target.call_with_this(bound_this, all);
         });
+        bound.set_forwards_construct();
         double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());
         bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
                               PropertyMap::Configurable);
@@ -721,8 +724,16 @@ void install_object_builtins(JsIntrinsics& realm) {
         // The third argument is new.target: whose `prototype` the new object
         // gets. Compiled classes are built on it (Babel's `_createSuper`
         // calls `Reflect.construct(Super, arguments, NewTarget)`).
-        return js_construct(js_arg(args, 0), array_like_to_vector(js_arg(args, 1)),
-                            args.size() > 2 ? &args[2] : nullptr);
+        const JsValue target = js_arg(args, 0);
+        const JsValue* new_target = args.size() > 2 ? &args[2] : nullptr;
+        // The list of arguments has to be an object, and it is looked at
+        // only once both functions are known to be constructors.
+        std::vector<JsValue> list;
+        if (js_is_constructor(target) && (!new_target || js_is_constructor(*new_target))) {
+            if (!js_arg(args, 1).is_object_like()) js_throw_type_error("CreateListFromArrayLike called on non-object");
+            list = array_like_to_vector(js_arg(args, 1));
+        }
+        return js_construct(target, list, new_target);      // refuses what is not a constructor, in its own words
     });
     realm.add_global("Reflect", reflect);
 

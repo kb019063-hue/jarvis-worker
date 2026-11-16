@@ -4634,9 +4634,11 @@ make xml-conformance # 1718/1718, unchanged
 make wpt           # 7968/8009, the 41 listed failures, 0 unlisted
 make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
-make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed
-make asan          # ASan/UBSan: 179/179 suites, corpora, fuzz and deep pages (re-run on
-                   # this tree; see AUDIT.md finding 52)
+make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
+make asan          # ASan/UBSan green on this tree: XML ≥ 1718, WPT ≥ 7968 with 0 unlisted,
+                   # JS ≥ 924, DOM ≥ 644, diff-xml 1,000 documents 0 DIFFER, round trip
+                   # 1,000/1,000, fuzz 0 findings, asan-deep 882 runs over 315 pages,
+                   # 0 failed (slowest 3.5 s; see AUDIT.md finding 52)
 ```
 
 (Numbers as run on this branch; see AUDIT.md finding 52 for what each one

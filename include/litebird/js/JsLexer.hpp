@@ -13,6 +13,7 @@ enum class JsTokenType {
     Number,
     String,
     Identifier,
+    EscapedKeyword, // reserved word written with \u escape: valid only as IdentifierName
     Regex,          // text = pattern, flags = flags
     PrivateName,    // #name (text includes the '#')
 
@@ -138,6 +139,7 @@ struct JsToken {
     uint32_t end{0};
     bool newline_before{false};  // a line terminator separates this token from the previous one
     bool is_keyword{false};      // reserved word; still valid as a property name after '.'
+    bool has_escape{false};      // identifier contained a \uXXXX or \u{...} escape
 };
 
 /// A syntax error found while lexing or parsing. Carries the source line so the
@@ -165,11 +167,13 @@ private:
     bool match(char expected);
     void skip_whitespace_and_comments();
     bool regex_allowed() const;
+    bool starts_identifier_at(size_t pos) const;
 
     JsToken scan_token();
     JsToken scan_number();
     JsToken scan_string(char quote);
     JsToken scan_identifier();
+    uint32_t scan_identifier_unicode_escape();
     JsToken scan_regex();
     JsToken scan_template(bool is_start);
     void scan_escape(std::string& cooked, bool in_template);

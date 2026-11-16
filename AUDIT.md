@@ -3374,8 +3374,9 @@ memory or by the clock, in both builds, and not the same way each time.
 **The comparisons are four pull requests old.** Everything that sets this
 change against `main` (the two corpora in `main`'s binary, test262, the
 pages against jsdom, the timings) was measured with `main` at `95d7fb2`.
-`main` took four more pull requests while that ran, and for an hour of it
-did not build. What was run again on the tree as merged is what checks and
+`main` took four more pull requests while that ran, and for three quarters
+of an hour of it did not build (one of them called a function that the next
+had removed). What was run again on the tree as merged is what checks and
 does not compare: the unit suites, the corpora, web-platform-tests, the
 differential runs. None of the four touches a call or a construction, so
 the comparisons are taken to hold; they were not made again.
@@ -3419,8 +3420,9 @@ sandbox. The first six are from the tree as merged (`main` at `a4952ed`).
   diff-xml`: `4000 documents … 0 DIFFER` and `3000 trees, 3000 come back the
   same`. `make diff-strings`: `50485 equal to node's, 95 differ`, as on
   `main`. `make verify-promise-iterators`: 34/34.
-- `make deep`, one page at a time (`--jobs 1`; two at a time need more memory than the sandbox has; this one is from `648692a`, three pull requests of `main` before the merged tree):
-  `deep pages: 1332 runs over 465 pages at depth 200000 on a 8 MB stack, 0 failed; slowest 21.6 s (table [dumps])`.
+- `make deep`, one page at a time (`--jobs 1`; two at a time need more
+  memory than the sandbox has): `deep pages: 1332 runs over 465 pages at
+  depth 200000 on a 8 MB stack, 0 failed; slowest 21.5 s (table [dumps])`.
 
 From this branch with `main` at `95d7fb2` merged in (`357b861`), where "the
 binary of `main`" is a release build of that commit:
@@ -3454,8 +3456,9 @@ And from `b740984`, the last commit that changed the engine:
   finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`, media 1,800 clean;
   `deep pages: 882 runs over 315 pages at depth 10000 on a 2 MB stack, 0
   failed; slowest 3.5 s`.
-- CI: the runs are in the pull request; what its sanitizer job said when it
-  failed is in the table above.
+
+CI: the runs are in the pull request; what its sanitizer job said when it
+failed is in the table above.
 
 ---
 

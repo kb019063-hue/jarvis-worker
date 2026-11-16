@@ -12243,6 +12243,80 @@ TEST(js_compiled_custom_elements_are_upgraded) {
                 "document.createElement('x-old'); }), fresh instanceof Old, fresh !== e, fresh.localName, "
                 "fresh.isConnected, nameOf(function () { new Twice(); })].join()") ==
            "false,RangeError,no error,true,true,x-old,false,no error");
+
+    // A class from a library and a subclass of it compiled for ES5. The
+    // compiled constructor constructs the class with Reflect.construct, on a
+    // new object, and the class reaches HTMLElement with super(): the
+    // interface is given the element that is being upgraded all the same,
+    // and that element is `this` in the class, with the class's field on it.
+    js.eval_ast(R"(
+        class Base extends HTMLElement {
+            ready = 'yes';
+            constructor() { super(); this.base = new.target.name; }
+        }
+        var MyEl = (function (_Base) {
+            inherit(MyEl, _Base);
+            var _super = _createSuper(MyEl);
+            function MyEl() { var _this = _super.call(this); _this.mine = true; return _this; }
+            return MyEl;
+        })(Base);
+        customElements.define('my-el', MyEl);
+        host.innerHTML = '<my-el id="mixed"></my-el>';
+        var mixed = $('mixed'), mixedCopy = mixed.cloneNode(false);
+    )");
+    assert(text("[mixed instanceof MyEl, mixed instanceof Base, mixed.mine, mixed.base, mixed.ready, mixed === "
+                "host.firstChild, mixedCopy.mine, mixedCopy.ready, new MyEl().base, "
+                "document.createElement('my-el').mine].join()") ==
+           "true,true,true,MyEl,yes,true,true,yes,MyEl,true");
+
+    // The element is given out once, to a class too. A second instance made
+    // after super() has taken it is refused; one made before takes it, and
+    // then the constructor's own super() is the one refused and the upgrade
+    // fails. Outside an upgrade nothing is being constructed in place.
+    js.eval_ast(R"(
+        var tries = [], firstTime = true;
+        class Again extends HTMLElement {
+            constructor() { super(); if (firstTime) { firstTime = false; tries.push(nameOf(function () { new Again(); })); } }
+        }
+        customElements.define('x-again', Again);
+        host.innerHTML = '<x-again id="again"></x-again>';
+        var again = $('again'), order = [], firstBefore = true;
+        class Before extends HTMLElement {
+            constructor() {
+                if (firstBefore) { firstBefore = false; order.push('inner is ' + (new Before().id || 'new')); }
+                super();
+                order.push('own');
+            }
+        }
+        customElements.define('x-before', Before);
+        host.innerHTML = '<x-before id="before"></x-before>';
+    )");
+    assert(text("[tries.join(), again instanceof Again, again.matches(':defined'), nameOf(function () { new Again(); "
+                "}), order.join('|'), $('before').matches(':defined')].join()") ==
+           "TypeError,true,true,no error,own|inner is before,false");
+
+    // Only the interface the element belongs to is given it. An event made
+    // with the class as new.target while the element is upgraded is another
+    // object, and a customized built-in that asks HTMLElement where its
+    // interface is HTMLButtonElement gets nothing.
+    js.eval_ast(R"(
+        var notes = [];
+        class Ev extends HTMLElement {
+            constructor() {
+                var made = Reflect.construct(Event, ['ping'], new.target);
+                notes.push(made === $('ev'), Object.getPrototypeOf(made) === Ev.prototype);
+                super();
+                notes.push(this === $('ev'));
+            }
+        }
+        customElements.define('x-ev', Ev);
+        var Wrong = inherit(function () { return Reflect.construct(HTMLElement, [], new.target); }, HTMLButtonElement);
+        customElements.define('wrong-b', Wrong, { extends: 'button' });
+        host.innerHTML = '<x-ev id="ev"></x-ev><button is="wrong-b" id="wrong"></button>';
+    )");
+    assert(text("[notes.join(), $('ev') instanceof Ev, $('ev').matches(':defined'), $('wrong').localName, typeof "
+                "$('wrong').click, nameOf(function () { new Wrong(); })].join()") ==
+           "false,true,true,true,true,button,function,TypeError");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {
@@ -12258,7 +12332,7 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
         {
             auto doc = HtmlParser::parse(
                 "<!DOCTYPE html><body><x-old id='first'></x-old><x-modern id='second'></x-modern>"
-                "<x-throws></x-throws><div id='host'></div></body>");
+                "<x-throws></x-throws><my-el id='third'></my-el><x-twice></x-twice><div id='host'></div></body>");
             JsInterpreter js(doc);
             js.eval_ast(R"(
                 function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
@@ -12272,6 +12346,17 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
                 Throws.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Throws, writable: true, configurable: true } });
                 Object.setPrototypeOf(Throws, HTMLElement);
                 customElements.define('x-throws', Throws);
+                // A class constructed on an object of its own, which is dropped
+                // for the element; and a constructor refused for asking twice.
+                class Base extends HTMLElement { ready = 'yes'; constructor() { super(); this.self = () => this; } }
+                function MyEl() { var made = Reflect.construct(Base, [], new.target); made.mine = true; return made; }
+                MyEl.prototype = Object.create(Base.prototype, { constructor: { value: MyEl, writable: true, configurable: true } });
+                Object.setPrototypeOf(MyEl, Base);
+                customElements.define('my-el', MyEl);
+                function Twice() { var self = Reflect.construct(HTMLElement, [], new.target); self.again = Reflect.construct(HTMLElement, [], new.target); return self; }
+                Twice.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Twice, writable: true, configurable: true } });
+                Object.setPrototypeOf(Twice, HTMLElement);
+                customElements.define('x-twice', Twice);
                 var host = document.getElementById('host'), kinds = [];
                 for (var i = 0; i < 50; i++) {
                     var el = i % 2 ? document.createElement('x-modern') : new Old();
@@ -12292,6 +12377,9 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
                    "true");
             assert(js.eval("[first.made, second.self() === second, document.querySelector('x-throws').keeps.length].join()")
                        .to_string() == "true,true,1");
+            assert(js.eval("var third = document.getElementById('third'); [third.mine, third.ready, third.self() === third, "
+                           "document.querySelector('x-twice').again, new Twice().again.localName].join()")
+                       .to_string() == "true,yes,true,,x-twice");
         }
         Heap::default_heap().collect_garbage();
         Heap::default_heap().collect_garbage();

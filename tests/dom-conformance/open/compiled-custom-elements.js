@@ -1,15 +1,16 @@
 // An element that exists is upgraded by running its definition's constructor.
 // The standard constructs the function the ordinary way: `this` is a new
-// object, and the element comes from the HTMLElement constructor, which finds
-// it on the definition's construction stack. Litebird runs the constructor
-// with the element as `this`. A class that constructs nothing but itself
-// cannot tell the two apart. A constructor written as a function can, and so
-// can a class that makes a second instance while it is being upgraded: the
-// four lines below that differ. (What a compiled constructor is for works:
-// tests/dom-conformance/compiled.dat.)
+// object, the element comes from the HTMLElement constructor, which finds it
+// on the definition's construction stack and gives it the class's prototype
+// at that moment, and the upgrade fails unless the constructor returns the
+// element. Litebird gives the element the prototype first and runs the
+// constructor with the element as `this`. The interface hands out the
+// element as the standard does (tests/dom-conformance/compiled.dat), so a
+// class, and a constructor compiled for older browsers, cannot tell. What
+// can tell is below: four of the five lines differ.
 var out = [];
 function t(name, fn) { var v; try { v = fn(); } catch (e) { v = 'THROWS ' + e.name; } out.push(name + ' = ' + (typeof v === 'string' ? v : JSON.stringify(v))); }
-function inherit(C) { C.prototype = Object.create(HTMLElement.prototype, { constructor: { value: C, writable: true, configurable: true } }); Object.setPrototypeOf(C, HTMLElement); return C; }
+function inherit(C, Parent) { Parent = Parent || HTMLElement; C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } }); Object.setPrototypeOf(C, Parent); return C; }
 var $ = function (id) { return document.getElementById(id); };
 
 // The same in both: the element is upgraded.
@@ -33,22 +34,18 @@ t('a constructor that never reaches HTMLElement', function () {
   customElements.define('x-plain', Plain);
   return [$('plain').touched, $('plain').matches(':defined'), $('plain') instanceof Plain];
 });
-// Differ, for a class too: the standard's HTMLElement constructor takes the
-// element from the definition's construction stack however it was reached,
-// so during an upgrade a second instance of the class is refused after
-// `super()` has taken the element, and one made before `super()` takes it
-// (the constructor's own `super()` is then the one refused). Here a class's
-// `super()` always builds on the object `new` gave it.
-t('a class that makes another instance of itself after super(), during an upgrade', function () {
-  var seen = [], first = true;
-  class Again extends HTMLElement { constructor() { super(); if (first) { first = false; try { new Again(); seen.push('made'); } catch (e) { seen.push(e.name); } } } }
-  customElements.define('x-again', Again);
-  return [seen.join(), $('again') instanceof Again, $('again').matches(':defined')];
+// Differs: the element keeps the prototype it was given before the
+// constructor ran, where the standard had not given it one yet.
+t('a constructor that throws before it reaches HTMLElement', function () {
+  var Early = inherit(function () { throw new RangeError('early'); });
+  customElements.define('x-early', Early);
+  return [$('early') instanceof Early, Object.getPrototypeOf($('early')) === HTMLElement.prototype, $('early').matches(':defined')];
 });
-t('a class that makes another instance of itself before super(), during an upgrade', function () {
-  var seen = [], first = true;
-  class Before extends HTMLElement { constructor() { var inner; if (first) { first = false; inner = new Before(); seen.push('inner id: ' + (inner.id || 'none')); } super(); seen.push('own'); } }
-  customElements.define('x-before', Before);
-  return [seen.join(), $('before').matches(':defined')];
+// Differs, and is the selector's: a customized built-in whose upgrade failed
+// still matches `:defined`.
+t(':defined after the upgrade of a customized built-in failed', function () {
+  var Failed = inherit(function () { throw new RangeError('no'); }, HTMLButtonElement);
+  customElements.define('failed-b', Failed, { extends: 'button' });
+  return [$('failed').matches(':defined'), document.querySelectorAll('button:defined').length];
 });
 console.log(out.join('\n'));

@@ -425,3 +425,122 @@ false undefined ""
 true true hello page true false
 true true true true HELLO LOUD! true
 true HELLO INNER! true true true false
+
+#name a subclass compiled for ES5 of a class that extends HTMLElement: made, and upgraded where it stands
+#html
+<html><head><title>Upgrade</title></head><body><my-el id="page" name="page"></my-el><div id="host"></div></body></html>
+#code
+class Base extends HTMLElement {
+  ready = 'yes';
+  constructor() { super(); this.base = new.target.name; }
+  connectedCallback() { this.textContent = 'hello ' + this.getAttribute('name'); }
+}
+function _createSuper(Derived) { return function () { return Reflect.construct(Object.getPrototypeOf(Derived), arguments, Object.getPrototypeOf(this).constructor); }; }
+function _inherits(subClass, superClass) { subClass.prototype = Object.create(superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.setPrototypeOf(subClass, superClass); }
+var MyEl = (function (_Base) {
+  _inherits(MyEl, _Base);
+  var _super = _createSuper(MyEl);
+  function MyEl() { var _this = _super.call(this); _this.mine = true; return _this; }
+  return MyEl;
+})(Base);
+customElements.define('my-el', MyEl);
+var e = document.getElementById('page');
+console.log(e instanceof MyEl, e instanceof Base, e.mine, e.base, e.ready, e.textContent, e === document.querySelector('my-el'));
+var made = document.createElement('my-el'), fresh = new MyEl();
+console.log(made instanceof MyEl, made.mine, made.base, made.ready, fresh.mine, fresh.base, fresh.localName, fresh !== made);
+var host = document.getElementById('host');
+host.innerHTML = '<my-el name="in"></my-el>';
+var inner = host.firstChild, copy = inner.cloneNode(true);
+console.log(inner instanceof MyEl, inner.mine, inner.base, inner.ready, inner.textContent, copy.mine, copy.ready, copy !== inner);
+#expect
+true true true MyEl yes hello page true
+true true MyEl yes true MyEl my-el true
+true true MyEl yes hello in true yes true
+
+#name during an upgrade a class cannot make a second instance of itself: the element is given out once
+#html
+<html><head><title>Upgrade</title></head><body><x-again id="again"></x-again><x-before id="before"></x-before><div id="host"></div></body></html>
+#code
+var seen = [], first = true;
+class Again extends HTMLElement {
+  constructor() {
+    super();
+    if (first) { first = false; try { new Again(); seen.push('made'); } catch (e) { seen.push(e.name); } }
+  }
+}
+customElements.define('x-again', Again);
+var again = document.getElementById('again');
+console.log(seen.join(), again instanceof Again, again.matches(':defined'));
+try { console.log(new Again() instanceof Again, document.createElement('x-again') instanceof Again); } catch (e) { console.log(e.name); }
+seen.length = 0; first = true;
+class Before extends HTMLElement {
+  constructor() {
+    var inner;
+    if (first) { first = false; inner = new Before(); seen.push('inner is ' + (inner.id || 'new')); }
+    super();
+    seen.push('own');
+  }
+}
+customElements.define('x-before', Before);
+console.log(seen.join(), document.getElementById('before').matches(':defined'));
+#expect
+TypeError true true
+true true
+own,inner is before false
+
+#name an event made with the class as new.target while an element is upgraded is not the element
+#html
+<html><head><title>Upgrade</title></head><body><x-ev id="ev"></x-ev><x-tgt id="tgt"></x-tgt><div id="host"></div></body></html>
+#code
+var seen = [];
+class Ev extends HTMLElement {
+  constructor() {
+    var e = Reflect.construct(Event, ['ping'], new.target);
+    seen.push(e instanceof Ev, e === document.getElementById('ev'), Object.getPrototypeOf(e) === Ev.prototype);
+    super();
+    seen.push(this.id, this === document.getElementById('ev'));
+  }
+}
+customElements.define('x-ev', Ev);
+var ev = document.getElementById('ev');
+console.log(seen.join(), ev instanceof Ev, ev.matches(':defined'), ev.localName);
+seen.length = 0;
+function Tgt() {
+  var other = Reflect.construct(EventTarget, [], new.target);
+  seen.push(other instanceof Tgt, other === document.getElementById('tgt'));
+  var self = Reflect.construct(HTMLElement, [], new.target);
+  seen.push(self.id, self === document.getElementById('tgt'));
+  return self;
+}
+Tgt.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Tgt, writable: true, configurable: true } });
+Object.setPrototypeOf(Tgt, HTMLElement);
+customElements.define('x-tgt', Tgt);
+var tgt = document.getElementById('tgt');
+console.log(seen.join(), tgt instanceof Tgt, tgt.matches(':defined'), tgt.localName);
+#expect
+true,false,true,ev,true true true x-ev
+true,false,tgt,true true true x-tgt
+
+#name the wrong interface is not given the element: a customized built-in that asks HTMLElement
+#html
+<html><head><title>Upgrade</title></head><body><button is="wrong-b" id="wrong">w</button><button is="right-b" id="right">r</button></body></html>
+#code
+var seen = [];
+function Wrong() {
+  var self;
+  try { self = Reflect.construct(HTMLElement, [], new.target); seen.push('made'); } catch (e) { seen.push(e.name); throw e; }
+  return self;
+}
+Wrong.prototype = Object.create(HTMLButtonElement.prototype, { constructor: { value: Wrong, writable: true, configurable: true } });
+Object.setPrototypeOf(Wrong, HTMLButtonElement);
+customElements.define('wrong-b', Wrong, { extends: 'button' });
+console.log(seen.join(), document.getElementById('wrong').right, document.getElementById('wrong').localName);
+function Right() { var self = Reflect.construct(HTMLButtonElement, [], new.target); self.right = true; return self; }
+Right.prototype = Object.create(HTMLButtonElement.prototype, { constructor: { value: Right, writable: true, configurable: true } });
+Object.setPrototypeOf(Right, HTMLButtonElement);
+customElements.define('right-b', Right, { extends: 'button' });
+var right = document.getElementById('right');
+console.log(right.right, right.matches(':defined'), right instanceof Right, right.type);
+#expect
+TypeError undefined button
+true true true submit

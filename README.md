@@ -854,6 +854,8 @@ through `tools/conformance/compare_with_jsdom.py`, prints `4 lines, 4 the
 same` after the fix, versus 0 before. A custom array iterator is still
 ignored by `js_iterate`'s array fast path, and subclassed Promises still
 make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
+After merging main's frame and table-layout PRs, the release checks pass
+167 suites and 5421/5463 WPT subtests; the JS score remains 911/925.
 
 
 ### Page resource origin (Phase 33)

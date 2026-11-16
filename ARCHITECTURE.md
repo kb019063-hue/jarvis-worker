@@ -4154,7 +4154,8 @@ clients and no other files' Promise calls changed.
   passes `30/34` and does not stop the unbounded cases. `python3
   tools/conformance/run_js_conformance.py --reference 'node -e' --filter
   async --quiet` prints `34/34`. The full JS scoreboard is `911/925`.
-- `make test`: `163/163`. The new suite checks the `return()` order for all
+- `make test`: `163/163` on the original base; `167/167` after merging
+  the frames and table-layout PRs into the branch. The new suite checks the `return()` order for all
   four methods, a single `resolve` getter before `Symbol.iterator`, and a
   throwing `then` getter on a still-live iterator.
 - `python3 tools/conformance/run_test262.py --binary
@@ -4171,7 +4172,7 @@ clients and no other files' Promise calls changed.
   a DOM update for each of the four methods. Four lines are compared, not a
   single success marker.
 
-The complete release run on the branch: `make test conformance js-conformance
+The complete first release run, before merging newer main: `make test conformance js-conformance
 verify-promise-iterators dom-conformance url-conformance xml-conformance wpt
 diff-trees diff-xml diff-strings deep` — 163 suites; html5lib 1781/1792;
 JS 911/925, DOM 640/640, URL 1188/1188, XML 1702/1702, WPT
@@ -4184,7 +4185,23 @@ URL 1188/1188, XML 1702/1702, WPT 4658/5192; 1000 differential XML
 documents 0 DIFFER and 1000 round trips; fuzz 400/parser + 400/pipeline +
 600/XML mutations 0 findings; 1800 media fuzz inputs clean; deep 882 runs/
 315 pages at depth 10000 on a 2 MB stack, 0 failed (slowest 3.1 s).
-The chain then runs `make fuzz` and `make tsan` in that order.
+The chain then ran `make fuzz` and `make tsan` in that order, both passing.
+
+After merging `main` at `4b803d7` (frames and table layout), the release
+chain passed again: `make test` **167/167**; JS **911/925**; WPT **5421/5463**
+(87 files, 42 listed, 0 unlisted); html5lib **1781/1792**, DOM **640/640**,
+URL **1188/1188**, XML **1702/1702**, diff-trees 6000 pages 0 differing,
+diff-xml 4000 docs 0 differing, diff-strings at its 95 ceiling, deep
+1332 runs/465 pages at depth 200000 with 0 failures (slowest 20.2 s).
+The sanitizer/fuzz/thread stages passed on this merged tree too: `make asan`
+167/167 suites, JS 910/925, DOM 640/640, URL 1188/1188, XML 1702/1702,
+WPT 5421/5463 (0 unlisted), 1000 XML differential docs 0 DIFFER and
+1000 round trips, fuzz 400/parser + 400/pipeline + 600/XML mutations 0
+findings, 1800 media fuzz inputs clean, deep 882 runs/315 pages at depth
+10000 on a 2 MB stack 0 failed (slowest 2.4 s). `make fuzz` again printed
+0 findings; `make tsan` passed the model/thread stress under TSan and ASan.
+Both complete logs are in ignored `build/promise-chain.log` and
+`build/promise-merged-chain.log` for this working session.
 
 ### 4. What remains
 

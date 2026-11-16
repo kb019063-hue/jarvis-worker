@@ -3141,7 +3141,8 @@ round-tripping the text state; the JavaScript bindings end to end — setter
 validation, invalid assignments ignored, `measureText`'s properties,
 `maxWidth`, rendering through the canvas context). A generated page (heading, gradient display type, stroked
 text, centred and condensed lines) rendered with `--render-png` paints all of
-it. The scores on this branch:
+it. The scores on the tree merged with `main` (Phase 42 and the
+table-completeness phase included):
 
 ```
 make test            # 167 engine suites, all passing (166 before, +1)
@@ -3149,11 +3150,12 @@ make conformance     # html5lib 1781/1792 — unchanged
 make js-conformance  # 907/921 — unchanged
 make dom-conformance # 640/640 — unchanged
 make url-conformance # 1188/1188 — unchanged
-make wpt             # 4658/5192; 534 listed, 0 fail and are not listed
+make xml-conformance # 1702/1702 — unchanged
+make wpt             # 5421/5463; 42 listed, 0 fail and are not listed
 make diff-trees      # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml        # 4,000 generated documents, 0 differ; 3,000/3,000 round trips
+make deep            # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
 make asan            # see below
-make deep            # see below
 ```
 
 **What this does not change.** No `direction`/RTL or bidi, no kerning or

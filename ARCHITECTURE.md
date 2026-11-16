@@ -4308,15 +4308,16 @@ script that measured its own strings threw `TypeError`.
 
 ```
 make test          # 167 engine suites, all passing (one new)
-make wpt           # 4658/5192, the 534 listed failures unchanged, 0 unlisted
 make conformance   # html5lib 1781/1792, unchanged
 make js-conformance # 907/921, unchanged
 make dom-conformance # 640/640, unchanged
 make url-conformance # 1188/1188, unchanged
+make xml-conformance # 1702/1702, unchanged
+make wpt           # 5421/5463, the 42 listed failures, 0 unlisted
 make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
+make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed
 make asan          # ASan/UBSan: 167/167 suites, corpora, fuzz and deep pages
-make deep          # 1,332 deep runs, 0 failed
 ```
 
 (Numbers as run on this branch; see AUDIT.md finding 52 for what each one

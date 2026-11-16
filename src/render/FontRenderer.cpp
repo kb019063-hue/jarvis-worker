@@ -707,21 +707,35 @@ FontRenderer::FontRenderer() {
     }
 }
 
-float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight) {
-    if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
+std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int font_weight) const {
+    if (!(font_size > 0.0f)) return {0.0f, 0.0f};
     const bool want_bold = font_weight >= 600;
     const TrueTypeFont* font = (want_bold && m_bold.is_loaded())
                                    ? &m_bold
                                    : (m_regular.is_loaded() ? &m_regular : nullptr);
+    if (!font) return {font_size * 0.8f, font_size * 0.2f};
+    const float scale = font_size / static_cast<float>(font->units_per_em());
+    const float asc = static_cast<float>(font->ascent()) * scale;
+    const float desc = -static_cast<float>(font->descent()) * scale;
+    return {asc, desc};
+}
+
+float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight) const {
+    const bool want_bold = font_weight >= 600;
+    const TrueTypeFont* font = (want_bold && m_bold.is_loaded())
+                                   ? &m_bold
+                                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    if (font) return font->glyph_advance(codepoint, font_size);
+    return std::max(1.0f, font_size * 0.55f);
+}
+
+float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight) {
+    if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     float total = 0.0f;
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        if (font) {
-            total += font->glyph_advance(cp, font_size);
-        } else {
-            total += std::max(1.0f, font_size * 0.55f);
-        }
+        total += glyph_advance_px(cp, font_size, font_weight);
     }
     return total;
 }

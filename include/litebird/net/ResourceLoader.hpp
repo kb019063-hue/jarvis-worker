@@ -97,6 +97,12 @@ public:
     /// Optional custom CA bundle path for deterministic loopback HTTPS testing.
     static void set_ca_bundle_for_testing(std::string ca_file_path);
 
+    /// Maps an HTTP(S) origin (e.g. "https://web-platform.test") to a local
+    /// directory root so offline test suites can load subresources, frames, and
+    /// scripts over real HTTP(S) origins without opening network sockets.
+    static void set_origin_root_for_testing(const std::string& origin, std::string directory_path);
+    static void clear_origin_roots_for_testing();
+
     static std::string detect_mime_type(std::string_view path_or_url);
 };
 

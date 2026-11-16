@@ -353,7 +353,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
-| **Phase 45** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 51; 163/163 unit suites) |
+| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 167/167 unit suites) |
 
 ---
 
@@ -4055,6 +4055,72 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
 
 ---
 
+## Phase 42 — Nested Browsing Contexts (`<iframe>`), Cross-Realm DOM Wrappers, Origin Isolation, and `.xhtml` Execution
+
+### 1. Per-Frame `JsInterpreter`, `WindowProxy`, and Load Ordering
+
+- Connecting an HTML `<iframe>` (`DomWindowBindings.cpp::note_iframe_connected`)
+  synchronously initializes a child browsing context (`Document` +
+  `JsInterpreter` + `dom::Realm`, nesting depth cap `8`) on an initial
+  `about:blank` document inheriting the parent document's effective origin and
+  `Document::browsing_realm_id()`.
+- Asynchronous navigation runs through `JsInterpreter::navigate_document(...)`
+  for `srcdoc` (`about:srcdoc` with `fallback_base_url` set to the parent
+  document's base URL) and `src` (`http:`/`https:`/`file:`/`data:`/`about:blank`,
+  dispatching HTML vs. XML/XHTML/SVG MIME types). `JsInterpreter::init_builtins()`
+  reuses `m_global_object` across navigations so `WindowProxy` object identity
+  (`before === iframe.contentWindow`) is preserved while resetting JS/DOM realm
+  bindings.
+- Recursive `delaying_load_count` holds parent `window` `load` events until
+  nested frame navigations finish and dispatches `load` (or `error` on HTTP
+  `>= 400` / network failure) on the `<iframe>` element. Detaching an `<iframe>`
+  stamps own property `closed = true` onto the detached `WindowProxy` before
+  shutting down the child realm so cyclic parent↔child references reclaim to
+  zero leaked heap cells on GC.
+
+### 2. Multi-Realm DOM Wrappers, Constructors, and `WindowProxy` Security
+
+- `DomBindings` tracks a single wrapper per DOM `Node` keyed via
+  `Document::browsing_realm_id()` with RAII `JsIntrinsics` guards in
+  `JsInterpreter`, `make_function`, and `Realm::proto`, ensuring cross-realm
+  calls never corrupt active intrinsics or duplicate wrappers.
+- Constructor bindings (`Document`, `DOMParser`, `Comment`, `Text`, `Range`,
+  `MutationObserver`) resolve their target realm through `caller_realm_or(...)`
+  (`current_callable_realm_id()`), and `DomParserState` captures the relevant
+  document so `new childWin.DOMParser().parseFromString(...)` inherits the child
+  document's URL, fallback base URL, and `history.pushState` URL updates.
+- `HTMLIFrameElement` exposes `src`, `srcdoc`, `name`, `width`, `height`,
+  `sandbox` (`DOMTokenList`), `contentWindow`, `contentDocument`, and
+  `getSVGDocument()`. `sandbox` enforces opaque origins (unless
+  `allow-same-origin`) and disables script execution in `load_page` /
+  `load_xml_page` (unless `allow-scripts`).
+- `WindowExotic::get` and `WindowExotic::set` enforce HTML §7.2.3 cross-origin
+  `WindowProxy` property checks before consulting `realm->global_scope` or the
+  prototype chain, throwing `DOMException("SecurityError")` for non-safelisted
+  cross-origin accesses while allowing `window`, `self`, `frames`, `length`,
+  `top`, `parent`, `opener`, `closed`, `postMessage`, `close`, `focus`, `blur`,
+  `location`, symbols, and indexed child frames. `window.postMessage` validates
+  `targetOrigin` (`"*"`, `"/"`, or exact origin; `"null"` never matches opaque
+  origins) and queues `MessageEvent` (`data`, `origin`, `source`) on the target
+  realm.
+
+### 3. `<iframe>` Subdocument Layout/Rasterization, Origin Mapping, and `.xhtml` WPT
+
+- `LayoutTree` lays out `<iframe>` as a `300×150` replaced `ImageNode` (overridden
+  by `width`/`height` attributes or CSS) and recursively lays out and rasterizes
+  `element->content_document()` (`BitmapRenderer` -> `0xAARRGGBB` `ImageData`,
+  depth cap `8`, bounded by `RasterBudget::allows` and `RasterReservation`).
+- `ResourceLoader` supports containment-checked test origin mapping
+  (`set_origin_root_for_testing`, `LITEBIRD_ORIGIN_MAP`, and CLI
+  `--map-origin=ORIGIN=DIR`, returning HTTP `404` on `weakly_canonical` root
+  escape), and `JsInterpreter::load_xml_page` + `src/main.cpp` execute `<script>`
+  elements in XML/XHTML/SVG documents.
+- Verification: `make test` passes **165/165** suites (Release and ASan+UBSan),
+  and `make wpt` passes **5,421/5,463** subtests across **87** files (`WPT_FLOOR`
+  raised from `4,658` to `5,421`, **0** `frames` failures remaining).
+
+---
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -4120,20 +4186,22 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 4,658 of
-   the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
-   only ask what jsdom can answer and what somebody thought to ask, and the
+   It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 5,421 of
+   the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
+   can only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
-   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`. Still
-   missing: `document.write`, style sheet objects (`sheet.cssRules`), frames
-   with documents (`iframe.contentDocument`), CORS preflight `OPTIONS`, four text
-   encodings only, date and time inputs without their values, `el.style`
-   shorthands kept whole. Absent: `TextEncoder`, `crypto`, `indexedDB`,
-   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
-   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
-   Phase 28, section 10, and Phase 36, section 9.
+   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 42
+   added nested browsing contexts (`<iframe>` `contentDocument`/`contentWindow`/
+   `srcdoc`/`sandbox`, cross-origin `WindowProxy` checks, `postMessage`, subdocument
+   layout/rasterization, and `.xhtml` script execution). Still missing:
+   `document.write`, style sheet objects (`sheet.cssRules`), CORS preflight
+   `OPTIONS`, four text encodings only, date and time inputs without their
+   values, `el.style` shorthands kept whole. Absent: `TextEncoder`, `crypto`,
+   `indexedDB`, `MessageChannel`, XPath, Web Animations, `ElementInternals`, and
+   what needs typed arrays (`ArrayBuffer`). The full lists are in Phase 27,
+   section 12, Phase 28, section 10, Phase 36, section 9, and Phase 42.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10. Around classes: `new.target` is the
@@ -4157,7 +4225,7 @@ depth 10,000 (0 failed, slowest 3.6 s), and `make tsan` under both sanitizers.
    finding 28.
 
 ---
-## Phase 45 Architecture: Canvas 2D Text — `fillText`, `strokeText`, `measureText`
+## Phase 46 Architecture: Canvas 2D Text — `fillText`, `strokeText`, `measureText`
 
 ROADMAP.md Wave 1, row 6 names the text gap as the largest part of what
 Canvas 2D was missing; this phase does that part (path and hit-test gaps
@@ -4239,7 +4307,7 @@ script that measured its own strings threw `TypeError`.
 ### 3. How it is verified
 
 ```
-make test          # 163 engine suites, all passing (one new)
+make test          # 167 engine suites, all passing (one new)
 make wpt           # 4658/5192, the 534 listed failures unchanged, 0 unlisted
 make conformance   # html5lib 1781/1792, unchanged
 make js-conformance # 907/921, unchanged
@@ -4247,11 +4315,11 @@ make dom-conformance # 640/640, unchanged
 make url-conformance # 1188/1188, unchanged
 make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
-make asan          # ASan/UBSan: 163/163 suites, corpora, fuzz and deep pages
+make asan          # ASan/UBSan: 167/167 suites, corpora, fuzz and deep pages
 make deep          # 1,332 deep runs, 0 failed
 ```
 
-(Numbers as run on this branch; see AUDIT.md finding 51 for what each one
+(Numbers as run on this branch; see AUDIT.md finding 52 for what each one
 prints.) The new unit suite
 `canvas_text_filltext_stroketext_measuretext_and_font_state` covers the
 default and restored state, measurement ordering and metric boxes, painting
@@ -4267,4 +4335,4 @@ baseline with the gradient applied across the run.
 `ROADMAP.md` row 6 now reads path/hit-test gaps; the AGENTS.md row was
 rewritten to what is left (WebP/AVIF, SVG `<text>`). No expectation was
 re-recorded, no `.dat` corpus file was touched, and no floor was lowered;
-the unit scoreboard went from 162 to 163 suites.
+the unit scoreboard went from 166 to 167 suites.

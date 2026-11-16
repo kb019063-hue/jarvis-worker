@@ -25,39 +25,38 @@ python3 tools/conformance/run_wpt.py --list-failures       # every failure, in t
 
 Copied from `web-platform-tests/wpt` at commit
 `f2b7b7add021b5f40e30c65dd348135058996249` (14 November 2026), unchanged:
-92 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
+112 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
 and the runner checks the files against it before every run. Do not edit a
 test. To take a newer copy, replace the files and write the manifest again
 from upstream's tree.
 
 | | Files | About |
 | :--- | ---: | :--- |
-| `domparsing/` | 16 | `DOMParser` for XML and HTML, the `parsererror` document, CDATA, doctypes, entities, `XMLSerializer`, a round trip |
-| `dom/nodes/` | 60 test files, 10 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data |
+| `domparsing/` | 27 test files, 8 support files | `DOMParser` for XML and HTML (including cross-frame URL and `pushState` provenance), XHTML `innerHTML` / `insertAdjacentHTML` / `createContextualFragment`, the `parsererror` document, CDATA, doctypes, entities, `XMLSerializer`, a round trip |
+| `dom/nodes/` | 60 test files, 10 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data, cross-frame adoption and constructors |
 | `resources/testharness.js` | 1 | the harness |
-| `dom/common.js`, `dom/constants.js`, `common/` | 4 | what the tests include, and two documents some load into a frame |
+| `dom/common.js`, `dom/constants.js`, `common/` | 5 | what the tests include, and three documents (`blank.html`, `dummy.xml`, `dummy.xhtml`) some load into a frame |
 | `LICENSE.md` | 1 | the licence of the tests |
 
-They are the tests for what Phase 28 built (XML in the DOM) and for the code
-it touched. It is not all of `dom/`: the rest is to be added as it is worked
-on.
+They are the tests for what Phase 28 and Phase 42 built (XML in the DOM,
+nested `<iframe>` browsing contexts, and XHTML page execution) and for the
+code they touched. It is not all of `dom/`: the rest is to be added as it is
+worked on.
 
-Left out of `domparsing/`: the `.xhtml` tests, which are XHTML pages (the
-command line does not load a page as XML), the two `DOMParser…url` tests,
-which are nothing but frames, and everything about streaming and Trusted
-Types.
+Left out of `domparsing/`: streaming and Trusted Types tests, and `.sub.html`
+server-substitution tests.
 
 The licence is `LICENSE.md`, the 3-Clause BSD licence of the project.
 
 ## How a test is run
 
-Litebird's command line does not fetch a page's external scripts. The runner
-puts every `<script src>` of a test into the page inline (the harness, the
-scripts next to the test), puts a reporter in place of
-`resources/testharnessreport.js`, which is what that file is for, and runs
-the page with `--run-script`. The page's address is
-`https://web-platform.test/<path>`. Nothing else is changed, and the files in
-this directory are not touched.
+The runner puts every `<script src>` of the top-level test into the staged
+page inline (wrapped in `<![CDATA[…]]>` when the page is `.xhtml`), puts a
+reporter in place of `resources/testharnessreport.js`, and runs the page with
+`--run-script` and `--map-origin=https://web-platform.test=tests/wpt` so nested
+`<iframe>` navigations and their subresources resolve against the suite root.
+The page's address is `https://web-platform.test/<path>`. Nothing else is
+changed, and the files in this directory are not touched.
 
 ## The failures that are listed
 
@@ -65,17 +64,17 @@ this directory are not touched.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**4,658 of 5,192 subtests pass. 534 are listed:**
+**5,421 of 5,463 subtests pass. 42 are listed:**
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `frames` | 495 | The test loads a document into an `<iframe>` and works in it; most of them load an XML or an XHTML document (`createElement` and `createElementNS` in three kinds of document, of which the HTML one passes). Litebird has no frames with documents in them, and its command line does not load XML pages |
 | `one-name-two-namespaces` | 14 | Two attributes of one element with the same qualified name and different namespaces (`setAttributeNS('ab', 'attr', …)` then `setAttributeNS('kl', 'attr', …)`). An element keeps its attributes under their qualified names, so the second replaces the first. Only a script can make such a pair; no parser can |
 | `attr-is-not-a-node` | 10 | An `Attr` is an object and not a `Node`: `attr.cloneNode()`, `attr.lookupNamespaceURI()`, `importNode(attr)`, an `Attr` adopted with its element |
 | `named-properties` | 8 | `Object.getOwnPropertyNames` and property descriptors of a `NamedNodeMap` and an `HTMLCollection`; assigning to an index of an `HTMLCollection` in strict mode |
 | `nodelist-iterator` | 1 | `NodeList.prototype[Symbol.iterator]` is not the same function as `Array.prototype[Symbol.iterator]` |
 | `page-encoding` | 1 | `document.characterSet` of the page is always UTF-8 |
-| the four below | 5 | Where the test and the standard, or the test and XML, disagree |
+| `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
+| the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 
 ### `XMLSerializer`: five subtests Litebird fails on purpose
 

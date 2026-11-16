@@ -107,7 +107,7 @@ FloatPlacement place_float(const std::vector<FloatBand>& bands, float y0, float 
 void LayoutBox::apply_style_edges() {
     dimensions.margin = style.margin;
     dimensions.padding = style.padding;
-    dimensions.border = style.border_width;
+    dimensions.border = border_override ? *border_override : style.border_width;
     if (border_scale != 1.0f) {
         auto scaled = [&](float value) { return std::ceil(value * border_scale); };
         dimensions.border = EdgeSizes(scaled(dimensions.border.top),
@@ -241,7 +241,7 @@ void LayoutBox::layout_block(float containing_width) {
     float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
 
     // 1. Calculate Content Width with BoxSizing & Min/Max constraints
-    if (style.width >= 0.0f) {
+    if (style.width >= 0.0f && !ignore_own_width) {
         if (style.box_sizing == BoxSizing::BorderBox) {
             dimensions.content.width = std::max(0.0f, style.width - h_padding_border);
         } else {
@@ -1077,7 +1077,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
                             dimensions.padding.left + dimensions.padding.right;
     float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
 
-    if (style.width >= 0.0f) {
+    if (style.width >= 0.0f && !ignore_own_width) {
         dimensions.content.width = (style.box_sizing == BoxSizing::BorderBox)
                                        ? std::max(0.0f, style.width - h_padding_border)
                                        : style.width;

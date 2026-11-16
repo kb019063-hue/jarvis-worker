@@ -45,7 +45,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 3 | **Windowed shell** — a real window with keyboard/mouse/touch, focus, scrolling, cursor; terminal renderer kept as a fallback. | L |
 | 4 | **Image codecs** — PNG, GIF (animated), WebP (JPEG optional, AVIF later). Today: BMP/PPM only. Oracle: WPT `image/`. | M–L |
 | 5 | **Compositor / tiling + damage tracking** — tile raster, repaint regions, scroll compositing; GPU path (Skia/ANGLE) or CPU tiles first. | L–XL |
-| 6 | **Canvas 2D completion** — path/hit-test gaps vs WPT `canvas/`. The text gap (`fillText`/`strokeText`/`measureText` and the `font`/`textAlign`/`textBaseline` state) is done — Phase 45. | M |
+| 6 | **Canvas 2D completion** — path/hit-test gaps vs WPT `canvas/`. The text gap (`fillText`/`strokeText`/`measureText` and the `font`/`textAlign`/`textBaseline` state) is done — Phase 46. | M |
 
 ## Wave 2 — JavaScript is a platform
 
@@ -66,7 +66,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 14 | **Selectors level 4** — `:is()/:where()/:has()/:focus-visible`, cascade `@layer`, `@supports`, `@container`, CSS nesting, `::part`. | M–L |
 | 15 | **Media & container queries** — evaluation inside the cascade (parsing exists). | S–M |
 | 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. | M |
-| 17 | **Table completeness** — `border-collapse` widest-wins, `table-layout: fixed`, `caption-side`, `empty-cells`. | S–M |
+| 17 | **Table completeness** — `border-collapse` widest-wins (the wider border of a shared edge wins, its colour included; style and positional priorities are not modelled — this engine has a single solid border style — and row borders are not painted), `table-layout: fixed` (the first row decides; later rows cannot resize a column), `caption-side`, `empty-cells` (inherited, separate borders only). **Done.** | S–M |
 | 18 | **Multicol + fragmentation** — columns, `break-inside`. | M–L |
 | 19 | **Scrolling & positioning corners** — `overflow: auto` actually scrolls, `position: sticky` robustness. | M |
 | 20 | **Cascade arithmetic** — percentage `font-size` (against the parent's computed value) and `line-height` as a real property (`normal`, bare number, percentage of own font size, absolute length) across style, inheritance and inline layout. **Done** (percentage `border-radius` deliberately deferred: `ComputedStyle` carries a single scalar radius end to end, so a percentage radius — and two-axis elliptical radii — cannot be expressed without a bigger change; no pixel oracle measures them today). | S |
@@ -79,7 +79,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 22 | **HTTPS** — TLS with certificate validation (adopt a stack or platform APIs). This phase *is* the project, not a detail. | L–XL |
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. | M |
-| 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml`); 495 of the 552 WPT failures hang off this and #26. | M–L |
+| 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
 

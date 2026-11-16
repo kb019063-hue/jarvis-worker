@@ -3,8 +3,11 @@
 #include "litebird/dom/Event.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Text.hpp"
+#include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/html/HtmlParser.hpp"
+#include "litebird/xml/XmlDom.hpp"
+#include "litebird/xml/XmlParser.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Json.hpp"
@@ -145,7 +148,9 @@ void JsInterpreter::fire_window_event(const std::string& type) {
 void JsInterpreter::notify_document_loaded() {
     if (m_load_notified) return;
     m_load_notified = true;
+    JsIntrinsics* prev = &JsIntrinsics::get();
     JsIntrinsics::set_current(m_realm.get());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
 
     if (m_document) {
         // DOMContentLoaded at the document, readystatechange, then load at
@@ -161,7 +166,9 @@ void JsInterpreter::notify_document_loaded() {
 
 void JsInterpreter::notify_document_interactive() {
     if (!m_document || m_document->ready_state() != "loading") return;
+    JsIntrinsics* prev = &JsIntrinsics::get();
     JsIntrinsics::set_current(m_realm.get());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
     JsScriptScope scope;
     dom::Realm& realm = dom::realm_of(*m_realm);
     m_document->set_ready_state("interactive");
@@ -169,7 +176,9 @@ void JsInterpreter::notify_document_interactive() {
 }
 
 void JsInterpreter::notify_window_resized() {
+    JsIntrinsics* prev = &JsIntrinsics::get();
     JsIntrinsics::set_current(m_realm.get());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
     if (m_document) {
         JsScriptScope scope;
         dom::Realm& realm = dom::realm_of(*m_realm);
@@ -182,6 +191,9 @@ void JsInterpreter::notify_window_resized() {
 void JsInterpreter::load_page(std::string_view html, bool scripting,
                               const std::function<void(const std::string& source)>& before) {
     if (!m_document) return;
+    JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
+    JsIntrinsics::set_current(m_realm.get());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev_intrinsics};
     std::shared_ptr<Document> document = m_document;
     document->clear_subresource_caches();
     document->install_default_layout_updater();
@@ -205,6 +217,10 @@ void JsInterpreter::load_page(std::string_view html, bool scripting,
 
         ResourceRequestContext ctx;
         ctx.document_url = document->url();
+        if ((ctx.document_url == "about:srcdoc" || ctx.document_url == "about:blank") &&
+            !document->inherited_origin_url().empty() && !document->has_opaque_origin()) {
+            ctx.document_url = document->inherited_origin_url();
+        }
         ctx.base_url = ctx.document_url;
         Url base;
         if (dom::document_base_url(dom::realm_of(*m_realm), *document, base)) {
@@ -245,7 +261,12 @@ void JsInterpreter::load_page(std::string_view html, bool scripting,
         dom::fire(dom::realm_of(*m_realm), *script, event_name);
     };
 
+    if (!scripting) {
+        dom::set_script_runner(dom::realm_of(*m_realm), nullptr);
+    }
+
     HtmlParser::parse_into(document, html, scripting, [&](const std::shared_ptr<Element>& script) {
+        if (!scripting) return;
         // Not in the page (inside a <template>, or an earlier script took
         // its parent out) or not a classic JavaScript script.
         if (!script->is_connected() || script->owner_document() != document) return;
@@ -311,10 +332,192 @@ void JsInterpreter::load_page(std::string_view html, bool scripting,
     }
 }
 
+dom::Realm& JsInterpreter::dom_realm() {
+    return dom::realm_of(*m_realm);
+}
+
 void JsInterpreter::set_document(std::shared_ptr<Document> doc) {
     m_document = std::move(doc);
     m_vm.set_document(m_document);
     init_builtins();
+}
+
+void JsInterpreter::navigate_document(std::shared_ptr<Document> doc) {
+    JsIntrinsics* prev = &JsIntrinsics::get();
+    JsIntrinsics::set_current(m_realm.get());
+    if (m_document && m_document->browsing_realm_id() == dom::realm_of(*m_realm).id) {
+        m_document->set_browsing_realm_id(0);
+    }
+    m_load_notified = false;
+    m_global_env = std::make_shared<JsEnvironment>();
+    if (m_global_object.is_object() && m_global_object.object_val) {
+        m_global_object.object_val->properties.clear();
+        m_global_object.object_val->has_accessors = false;
+        m_global_object.object_val->has_legacy_getters = false;
+    }
+    m_document = std::move(doc);
+    m_vm.set_document(m_document);
+    init_builtins();
+    JsIntrinsics::set_current(prev);
+}
+
+bool JsInterpreter::load_xml_page(std::string_view xml_bytes, const std::string& content_type,
+                                  bool scripting,
+                                  const std::function<void(const std::string& source)>& before) {
+    if (!m_document) return false;
+    JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
+    JsIntrinsics::set_current(m_realm.get());
+    struct RestoreIntrinsics {
+        JsIntrinsics* prev;
+        ~RestoreIntrinsics() { JsIntrinsics::set_current(prev); }
+    } restore_guard{prev_intrinsics};
+
+    std::shared_ptr<Document> document = m_document;
+    document->clear_subresource_caches();
+    document->set_content_type(content_type);
+    document->set_ready_state("loading");
+    document->install_default_layout_updater();
+
+    std::string xml_text, xml_enc;
+    xml::XmlError xml_err;
+    if (!xml::decode_xml(xml_bytes, xml_text, xml_enc, xml_err) ||
+        !xml::parse_xml_document(document, xml_text, xml_err)) {
+        notify_document_interactive();
+        return false;
+    }
+
+    if (!scripting) {
+        dom::set_script_runner(dom::realm_of(*m_realm), nullptr);
+        notify_document_interactive();
+        return true;
+    }
+
+    struct DeferredScript {
+        std::shared_ptr<Element> element;
+        bool ok{false};
+        std::string source;
+    };
+    std::vector<DeferredScript> deferred_scripts;
+    std::size_t external_script_fetches = 0;
+    static constexpr std::size_t kMaxExternalScriptFetches = 256;
+
+    auto fetch_external_script = [&](const std::shared_ptr<Element>& script, std::string& source_out) -> bool {
+        source_out.clear();
+        const std::string raw_src = dom::strip_ascii_space(script->get_attribute("src"));
+        if (raw_src.empty() || external_script_fetches >= kMaxExternalScriptFetches) return false;
+        ++external_script_fetches;
+
+        ResourceRequestContext ctx;
+        ctx.document_url = document->url();
+        if ((ctx.document_url == "about:srcdoc" || ctx.document_url == "about:blank") &&
+            !document->inherited_origin_url().empty() && !document->has_opaque_origin()) {
+            ctx.document_url = document->inherited_origin_url();
+        }
+        ctx.base_url = ctx.document_url;
+        Url base;
+        if (dom::document_base_url(dom::realm_of(*m_realm), *document, base)) {
+            ctx.base_url = base.href();
+        }
+        if (script->has_attribute("crossorigin")) {
+            ctx.mode = RequestMode::Cors;
+            if (dom::ascii_lower(dom::strip_ascii_space(script->get_attribute("crossorigin"))) == "use-credentials") {
+                ctx.include_credentials = true;
+            }
+        } else {
+            ctx.mode = RequestMode::NoCors;
+        }
+
+        ResourceResponse resp = ResourceLoader::load_for_page(raw_src, ctx);
+        if (!resp.success) return false;
+
+        std::string charset_label = script->get_attribute("charset");
+        MimeType mime;
+        if (MimeType::parse(resp.content_type, mime)) {
+            if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+        }
+        source_out = charset_label.empty()
+                         ? resp.body
+                         : decode_text(resp.body, encoding_name_for_label(charset_label));
+        return true;
+    };
+
+    auto fire_script_event_if_observed = [&](const std::shared_ptr<Element>& script, const char* event_name) {
+        const std::string handler_attr = std::string("on") + event_name;
+        if (!script->has_listeners(event_name) && !script->has_attribute(handler_attr) && !script->script_object()) {
+            return;
+        }
+        JsIntrinsics::set_current(m_realm.get());
+        JsScriptScope scope;
+        dom::fire(dom::realm_of(*m_realm), *script, event_name);
+    };
+
+    std::vector<std::shared_ptr<Element>> scripts;
+    for_each_descendant(*document, [&](Node& n) {
+        if (!n.is_element()) return true;
+        auto& el = static_cast<Element&>(n);
+        if (el.element_namespace() == ElementNamespace::HTML && el.tag_name() == "script") {
+            scripts.push_back(std::static_pointer_cast<Element>(el.shared_from_this()));
+        }
+        return true;
+    });
+
+    for (const auto& script : scripts) {
+        if (!script->is_connected() || script->owner_document() != document) continue;
+        if (!dom::is_classic_script(*script)) continue;
+
+        if (script->has_attribute("src")) {
+            std::string ext_source;
+            const bool fetched = fetch_external_script(script, ext_source);
+            if (script->has_attribute("defer") && !script->has_attribute("async")) {
+                deferred_scripts.push_back(DeferredScript{script, fetched, std::move(ext_source)});
+                continue;
+            }
+            if (!fetched) {
+                fire_script_event_if_observed(script, "error");
+                continue;
+            }
+            if (before) before(ext_source);
+            {
+                JsIntrinsics::set_current(m_realm.get());
+                JsScriptScope checkpoint;
+            }
+            auto previous = document->current_script();
+            document->set_current_script(script);
+            eval_ast(ext_source);
+            document->set_current_script(previous);
+            fire_script_event_if_observed(script, "load");
+            continue;
+        }
+
+        const std::string source = script->text_content();
+        if (source.empty()) continue;
+        if (before) before(source);
+        {
+            JsIntrinsics::set_current(m_realm.get());
+            JsScriptScope checkpoint;
+        }
+        auto previous = document->current_script();
+        document->set_current_script(script);
+        eval_ast(source);
+        document->set_current_script(previous);
+    }
+
+    notify_document_interactive();
+
+    for (const auto& def : deferred_scripts) {
+        if (!def.element || !def.element->is_connected() || def.element->owner_document() != document) continue;
+        if (!def.ok) {
+            fire_script_event_if_observed(def.element, "error");
+            continue;
+        }
+        if (before) before(def.source);
+        auto previous = document->current_script();
+        document->set_current_script(def.element);
+        eval_ast(def.source);
+        document->set_current_script(previous);
+        fire_script_event_if_observed(def.element, "load");
+    }
+    return true;
 }
 
 std::shared_ptr<BytecodeFunction> JsInterpreter::compile_to_bytecode(std::string_view source) {
@@ -464,7 +667,9 @@ void JsInterpreter::init_builtins() {
     }));
     m_global_env->define("console", console_obj);
 
-    JsValue win_obj = JsValue::make_object();
+    JsValue win_obj = (m_global_object.is_object() && m_global_object.object_val)
+                          ? m_global_object
+                          : JsValue::make_object();
 
     // With a page, the global object is a Window: everything a window has
     // (events, location, history, storage, the document) comes from the DOM
@@ -830,6 +1035,8 @@ void JsInterpreter::init_language_builtins() {
     auto* existing_window = m_global_env->find_own("window");
     if (existing_window && existing_window->value.object_val) {
         m_global_object = existing_window->value;
+    } else if (m_global_object.is_object() && m_global_object.object_val) {
+        m_global_env->define("window", m_global_object);
     } else {
         m_global_object = JsValue::make_object();
         m_global_env->define("window", m_global_object);

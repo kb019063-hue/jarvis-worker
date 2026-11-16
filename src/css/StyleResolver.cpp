@@ -14,6 +14,8 @@ namespace litebird {
 StyleSheet StyleResolver::default_user_agent_stylesheet() {
     const char* ua_css = R"(
         table { display: table; border-collapse: separate; }
+        caption { display: table-caption; }
+        col, colgroup { display: none; }
         thead, tbody, tfoot { display: table-row-group; }
         tr { display: table-row; }
         td, th { display: table-cell; }
@@ -933,6 +935,8 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val == "table-cell") style.display = Display::TableCell;
         else if (val == "table-row-group" || val == "table-header-group" ||
                  val == "table-footer-group") style.display = Display::TableRowGroup;
+        else if (val == "table-caption") style.display = Display::TableCaption;
+        else if (val == "table-column" || val == "table-column-group") style.display = Display::None;
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
         else if (val == "right") style.float_type = FloatType::Right;
@@ -942,6 +946,12 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val == "auto") style.overflow = Overflow::Auto;
         else if (val == "scroll") style.overflow = Overflow::Scroll;
         else style.overflow = Overflow::Visible;
+    } else if (prop == "table-layout") {
+        style.table_layout = (val == "fixed") ? TableLayout::Fixed : TableLayout::Auto;
+    } else if (prop == "empty-cells") {
+        style.empty_cells = (val == "hide") ? EmptyCells::Hide : EmptyCells::Show;
+    } else if (prop == "caption-side") {
+        style.caption_side = (val == "bottom") ? CaptionSide::Bottom : CaptionSide::Top;
     } else if (prop == "border-collapse") {
         style.border_collapse = (val == "collapse") ? BorderCollapse::Collapse : BorderCollapse::Separate;
     } else if (prop == "border-spacing") {
@@ -1744,6 +1754,9 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
         style.custom_properties = parent_style->custom_properties;
+        // empty-cells and caption-side inherit per CSS 2.1 17.5.1.2 and 17.4.1.
+        style.empty_cells = parent_style->empty_cells;
+        style.caption_side = parent_style->caption_side;
         if (parent_style->line_height_number >= 0.0f) {
             // A declared multiplier is inherited as a multiplier.
             style.line_height_number = parent_style->line_height_number;

@@ -125,9 +125,9 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 922 of 936 pass, and the floor is that score (raised by
-        # 14 in finding 50 with identifiers.dat and 1 in finding 42 with
-        # regexp.dat's bytecode VM case). It used to sit one below for
+        # does not vary: 926 of 940 pass, and the floor is that score (raised by
+        # 14 in finding 50, 4 in finding 51, and 1 in finding 42). It used to sit
+        # one below for
         # `pairs made a half at a time in a long string` (long-strings.dat),
         # which copied the whole string at every pair and took 6 of the 10
         # seconds a case is allowed, so it timed out on a busy machine. Finding
@@ -135,7 +135,7 @@ jobs:
         # engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 922
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 926
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -147,6 +147,11 @@ jobs:
         # a limit of one second: 20,000 pairs take about 20 ms and 40,000 about
         # 35 ms, where copying the text at every pair took 5.6 s and 23 s.
         run: make bench-surrogates
+      - name: Promise combinators resolve before advancing the iterator
+        # Four reference-checked adversarial cases in async.dat: an unbounded
+        # iterator must be closed when resolve/then throws; the old walk
+        # advanced forever before it looked at the first yielded value.
+        run: make verify-promise-iterators
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

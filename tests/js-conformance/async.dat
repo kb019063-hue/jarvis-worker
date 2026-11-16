@@ -192,3 +192,53 @@ async function* gen(){ yield 1; yield 2; } (async function(){ var s = 0; for awa
 var log = []; async function a(){ log.push("a1"); await null; log.push("a2"); } async function b(){ log.push("b1"); await null; log.push("b2"); } a(); b(); Promise.resolve().then(function(){ return null; }).then(function(){ console.log(log.join()); })
 #expect
 a1,b1,a2,b2
+
+#name Promise combinators close a live iterator when resolving the first value throws
+#code
+var original = Promise.resolve;
+function checkCombinator(method) {
+  var steps = [], i = 0;
+  var iterable = { next: function() { steps.push('next'); if (i++ === 0) return {value: 7, done: false}; throw Error('advanced'); }, return: function() { steps.push('return'); return {done: true}; } };
+  iterable[Symbol.iterator] = function() { steps.push('iterator'); return this; };
+  Promise.resolve = function(x) { steps.push('resolve:' + x); throw Error('stop'); };
+  Promise[method](iterable).then(function() { console.log('unexpected'); }, function(e) { console.log(method + ': ' + steps.join(',') + ' / ' + e.message); });
+}
+checkCombinator('all'); checkCombinator('any'); checkCombinator('race'); checkCombinator('allSettled');
+Promise.resolve = original;
+#expect
+all: iterator,next,resolve:7,return / stop
+any: iterator,next,resolve:7,return / stop
+race: iterator,next,resolve:7,return / stop
+allSettled: iterator,next,resolve:7,return / stop
+
+#name Promise combinators get resolve once before the iterator and call it for every value
+#code
+var original = Promise.resolve, events = [];
+Object.defineProperty(Promise, 'resolve', {configurable: true, get: function() { events.push('get'); return function(x) { events.push('resolve:' + x); return original.call(Promise, x * 10); }; }});
+var iterable = {i: 0, next: function() { events.push('next'); return this.i++ < 2 ? {value: this.i, done: false} : {done: true}; }};
+iterable[Symbol.iterator] = function() { events.push('iterator'); return this; };
+Promise.all(iterable).then(function(values) { console.log(events.join(',') + ' / ' + values.join(',')); });
+Object.defineProperty(Promise, 'resolve', {value: original, writable: true, configurable: true});
+#expect
+get,iterator,next,resolve:1,next,resolve:2,next / 10,20
+
+#name Promise combinators close when a returned promise has a throwing then getter
+#code
+var original = Promise.resolve, events = [], item = Promise.resolve(1);
+Object.defineProperty(item, 'then', {get: function() { events.push('then'); throw Error('then getter'); }});
+var iterable = {next: function() { events.push('next'); return {value: item, done: false}; }, return: function() { events.push('return'); return {done: true}; }};
+iterable[Symbol.iterator] = function() { return this; };
+Promise.all(iterable).catch(function(e) { console.log(events.join(',') + ' / ' + e.message); });
+#expect
+next,then,return / then getter
+
+#name Promise combinators call a custom then synchronously and close if it throws
+#code
+var original = Promise.resolve, events = [], item = {then: function() { events.push('then'); throw Error('then call'); }};
+Promise.resolve = function() { events.push('resolve'); return item; };
+var iterable = {next: function() { events.push('next'); return {value: 1, done: false}; }, return: function() { events.push('return'); return {done: true}; }};
+iterable[Symbol.iterator] = function() { return this; };
+Promise.race(iterable).catch(function(e) { console.log(events.join(',') + ' / ' + e.message); });
+Promise.resolve = original;
+#expect
+next,resolve,then,return / then call

@@ -5866,6 +5866,176 @@ TEST(table_layout_columns_and_rows) {
     assert(a12->dimensions.content.x > a11->dimensions.content.x);  // still columnar
 }
 
+TEST(table_completeness) {
+    using namespace litebird;
+
+    // --- table-layout: fixed -------------------------------------------------
+    // The first row decides: 100px specified, the rest of the 400px split
+    // equally. A later row asking for 300px does not resize its column.
+    std::string fixed_html = R"(
+        <table id="fixed" style="width: 400px; table-layout: fixed; border-spacing: 0;">
+            <tr>
+                <td id="f1" style="width: 100px; padding: 0;">a</td>
+                <td id="f2" style="padding: 0;">b</td>
+                <td id="f3" style="padding: 0;">c</td>
+            </tr>
+            <tr>
+                <td id="f4" style="width: 300px; padding: 0;">later rows ignored</td>
+                <td id="f5" style="padding: 0;">x</td>
+                <td id="f6" style="padding: 0;">y</td>
+            </tr>
+        </table>
+    )";
+    auto doc = HtmlParser::parse(fixed_html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto fixed = find_box_by_id(root, "fixed");
+    auto f1 = find_box_by_id(root, "f1");
+    auto f2 = find_box_by_id(root, "f2");
+    auto f3 = find_box_by_id(root, "f3");
+    auto f4 = find_box_by_id(root, "f4");
+    auto f5 = find_box_by_id(root, "f5");
+    assert(fixed && f1 && f2 && f3 && f4 && f5);
+    assert(std::abs(f1->dimensions.margin_box().width - 100.0f) < 2.0f);
+    assert(std::abs(f2->dimensions.margin_box().width - 150.0f) < 2.0f);
+    assert(std::abs(f3->dimensions.margin_box().width - 150.0f) < 2.0f);
+    assert(std::abs(f4->dimensions.margin_box().width - 100.0f) < 2.0f);
+    assert(std::abs(f5->dimensions.margin_box().width - 150.0f) < 2.0f);
+    assert(std::abs(fixed->dimensions.content.width - 400.0f) < 2.0f);
+
+    // --- caption-side ---------------------------------------------------------
+    // caption-side on the table itself is inherited by the caption (CSS 2.1
+    // 17.4.1), so the caption stacks below the grid and the table box grows to
+    // include it.
+    std::string bottom_html = R"(
+        <table id="bottom" style="width: 200px; border-spacing: 0; caption-side: bottom;">
+            <caption id="bottomcap">below</caption>
+            <tr><td id="bottomcell">cell</td></tr>
+        </table>
+    )";
+    auto bottom_doc = HtmlParser::parse(bottom_html);
+    StyleResolver bottom_resolver;
+    auto bottom_root = LayoutTree::build(bottom_doc, bottom_resolver, 800.0f, 600.0f);
+    auto bottom_table = find_box_by_id(bottom_root, "bottom");
+    auto bottom_cap = find_box_by_id(bottom_root, "bottomcap");
+    auto bottom_cell = find_box_by_id(bottom_root, "bottomcell");
+    assert(bottom_table && bottom_cap && bottom_cell);
+    assert(bottom_cap->dimensions.content.y >= bottom_cell->dimensions.content.y + 20.0f);
+    assert(bottom_table->dimensions.content.height > bottom_cell->dimensions.margin_box().height);
+
+    // The default is top: the caption stacks above the grid.
+    std::string top_html = R"(
+        <table id="top" style="width: 200px; border-spacing: 0;">
+            <caption id="topcap">above</caption>
+            <tr><td id="topcell">cell</td></tr>
+        </table>
+    )";
+    auto top_doc = HtmlParser::parse(top_html);
+    StyleResolver top_resolver;
+    auto top_root = LayoutTree::build(top_doc, top_resolver, 800.0f, 600.0f);
+    auto top_table = find_box_by_id(top_root, "top");
+    auto top_cap = find_box_by_id(top_root, "topcap");
+    auto top_cell = find_box_by_id(top_root, "topcell");
+    assert(top_table && top_cap && top_cell);
+    assert(top_cap->dimensions.content.y < top_cell->dimensions.content.y);
+    assert(top_cell->dimensions.content.y >= top_cap->dimensions.content.y + 20.0f);
+    assert(top_table->dimensions.content.height > top_cell->dimensions.margin_box().height);
+
+    // --- collapsed borders: widest shared edge wins ---------------------------
+    std::string collapse_html = R"(
+        <table id="collapse" style="border-collapse: collapse; width: 200px; border-spacing: 0;">
+            <tr>
+                <td id="left" style="border-right: 6px solid #ff0000; padding: 0;">L</td>
+                <td id="right" style="border-left: 2px solid #0000ff; padding: 0;">R</td>
+            </tr>
+        </table>
+    )";
+    auto collapse_doc = HtmlParser::parse(collapse_html);
+    StyleResolver collapse_resolver;
+    auto collapse_root = LayoutTree::build(collapse_doc, collapse_resolver, 800.0f, 600.0f);
+    auto left = find_box_by_id(collapse_root, "left");
+    auto right = find_box_by_id(collapse_root, "right");
+    assert(left && right);
+    // Both boxes paint half of the shared 6px winner: ceil(6 * 0.5) = 3 each.
+    assert(left->dimensions.border.right == 3.0f);
+    assert(right->dimensions.border.left == 3.0f);
+
+    // The shared edge belongs to the winning border, colour included: both
+    // halves paint the 6px red, not the 2px blue.
+    auto collapse_list = DisplayList::build(collapse_root);
+    bool left_edge_red = false;
+    bool right_edge_red = false;
+    const Color red{255, 0, 0, 255};
+    for (const auto& cmd : collapse_list.commands()) {
+        const auto* border = std::get_if<DrawBorderCommand>(&cmd);
+        if (!border || !border->edge_colors) continue;
+        if (border->rect.x == left->dimensions.border_box().x) {
+            left_edge_red = (border->edge_colors->right == red);
+        }
+        if (border->rect.x == right->dimensions.border_box().x) {
+            right_edge_red = (border->edge_colors->left == red);
+        }
+    }
+    assert(left_edge_red);
+    assert(right_edge_red);
+
+    // ... and with separate borders the two keep their own widths.
+    std::string separate_html = R"(
+        <table id="separate" style="border-collapse: separate; width: 200px; border-spacing: 0;">
+            <tr>
+                <td id="sleft" style="border-right: 6px solid #ff0000; padding: 0;">L</td>
+                <td id="sright" style="border-left: 2px solid #0000ff; padding: 0;">R</td>
+            </tr>
+        </table>
+    )";
+    auto separate_doc = HtmlParser::parse(separate_html);
+    StyleResolver separate_resolver;
+    auto separate_root = LayoutTree::build(separate_doc, separate_resolver, 800.0f, 600.0f);
+    auto sleft = find_box_by_id(separate_root, "sleft");
+    auto sright = find_box_by_id(separate_root, "sright");
+    assert(sleft && sright);
+    assert(sleft->dimensions.border.right == 6.0f);
+    assert(sright->dimensions.border.left == 2.0f);
+
+    // --- empty-cells: hide ---------------------------------------------------
+    std::string empty_html = R"(
+        <table id="empty" style="empty-cells: hide; border-spacing: 0;">
+            <tr>
+                <td id="nothing" style="background-color: #ff0000;"></td>
+                <td id="filled" style="background-color: #00ff00;">text</td>
+                <td id="nbsp" style="background-color: #0000ff;">&nbsp;</td>
+            </tr>
+        </table>
+    )";
+    auto empty_doc = HtmlParser::parse(empty_html);
+    StyleResolver empty_resolver;
+    auto empty_root = LayoutTree::build(empty_doc, empty_resolver, 800.0f, 600.0f);
+    auto empty_cell = find_box_by_id(empty_root, "nothing");
+    assert(empty_cell != nullptr);
+    DisplayList empty_list = DisplayList::build(empty_root);
+    bool saw_red_rect = false;
+    bool saw_green_rect = false;
+    bool saw_blue_rect = false;
+    for (const auto& cmd : empty_list.commands()) {
+        if (const auto* rect = std::get_if<DrawRectCommand>(&cmd)) {
+            if (rect->color.r == 255 && rect->color.g == 0 && rect->color.b == 0 && rect->color.a == 255) {
+                saw_red_rect = true;
+            }
+            if (rect->color.r == 0 && rect->color.g == 255 && rect->color.b == 0 && rect->color.a == 255) {
+                saw_green_rect = true;
+            }
+            if (rect->color.r == 0 && rect->color.g == 0 && rect->color.b == 255 && rect->color.a == 255) {
+                saw_blue_rect = true;
+            }
+        }
+    }
+    // The empty cell paints no background; the filled cell and the cell holding
+    // a non-breaking space do.
+    assert(!saw_red_rect);
+    assert(saw_green_rect);
+    assert(saw_blue_rect);
+}
+
 
 TEST(float_shrinks_inline_line_boxes) {
     using namespace litebird;
@@ -11630,6 +11800,7 @@ int main() {
     RUN_TEST(float_layout_and_text_wrapping);
     RUN_TEST(float_clearance_and_bug_containment);
     RUN_TEST(table_layout_columns_and_rows);
+    RUN_TEST(table_completeness);
     RUN_TEST(script_data_escaped_and_double_escaped_states);
     RUN_TEST(pre_and_textarea_leading_newline_handling);
     RUN_TEST(adoption_agency_nobr_and_nested_formatting);

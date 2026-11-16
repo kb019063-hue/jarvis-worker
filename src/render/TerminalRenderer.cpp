@@ -70,25 +70,33 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
             int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
 
+            const Color top_color = arg.edge_colors ? arg.edge_colors->top : arg.color;
+            const Color right_color = arg.edge_colors ? arg.edge_colors->right : arg.color;
+            const Color bottom_color = arg.edge_colors ? arg.edge_colors->bottom : arg.color;
+            const Color left_color = arg.edge_colors ? arg.edge_colors->left : arg.color;
             // Horizontal borders
             for (int c = start_col; c <= end_col; ++c) {
                 m_grid[start_row * m_cols + c].ch = '-';
-                m_grid[start_row * m_cols + c].fg = arg.color;
+                m_grid[start_row * m_cols + c].fg = top_color;
                 m_grid[end_row * m_cols + c].ch = '-';
-                m_grid[end_row * m_cols + c].fg = arg.color;
+                m_grid[end_row * m_cols + c].fg = bottom_color;
             }
             // Vertical borders
             for (int r = start_row; r <= end_row; ++r) {
                 m_grid[r * m_cols + start_col].ch = '|';
-                m_grid[r * m_cols + start_col].fg = arg.color;
+                m_grid[r * m_cols + start_col].fg = left_color;
                 m_grid[r * m_cols + end_col].ch = '|';
-                m_grid[r * m_cols + end_col].fg = arg.color;
+                m_grid[r * m_cols + end_col].fg = right_color;
             }
-            // Corners
+            // Corners take their horizontal edge's colour.
             m_grid[start_row * m_cols + start_col].ch = '+';
+            m_grid[start_row * m_cols + start_col].fg = top_color;
             m_grid[start_row * m_cols + end_col].ch = '+';
+            m_grid[start_row * m_cols + end_col].fg = top_color;
             m_grid[end_row * m_cols + start_col].ch = '+';
+            m_grid[end_row * m_cols + start_col].fg = bottom_color;
             m_grid[end_row * m_cols + end_col].ch = '+';
+            m_grid[end_row * m_cols + end_col].fg = bottom_color;
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
             Point tp = current_transform().map_point(arg.position);

@@ -267,14 +267,18 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             int w = static_cast<int>(tr.width);
             int h = static_cast<int>(tr.height);
 
+            const Color top_color = arg.edge_colors ? arg.edge_colors->top : arg.color;
+            const Color right_color = arg.edge_colors ? arg.edge_colors->right : arg.color;
+            const Color bottom_color = arg.edge_colors ? arg.edge_colors->bottom : arg.color;
+            const Color left_color = arg.edge_colors ? arg.edge_colors->left : arg.color;
             // Top
-            fill_rect(x, y, w, static_cast<int>(arg.width.top), arg.color);
+            fill_rect(x, y, w, static_cast<int>(arg.width.top), top_color);
             // Bottom
-            fill_rect(x, y + h - static_cast<int>(arg.width.bottom), w, static_cast<int>(arg.width.bottom), arg.color);
+            fill_rect(x, y + h - static_cast<int>(arg.width.bottom), w, static_cast<int>(arg.width.bottom), bottom_color);
             // Left
-            fill_rect(x, y, static_cast<int>(arg.width.left), h, arg.color);
+            fill_rect(x, y, static_cast<int>(arg.width.left), h, left_color);
             // Right
-            fill_rect(x + w - static_cast<int>(arg.width.right), y, static_cast<int>(arg.width.right), h, arg.color);
+            fill_rect(x + w - static_cast<int>(arg.width.right), y, static_cast<int>(arg.width.right), h, right_color);
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
             Point tp = current_transform().map_point(arg.position);

@@ -295,6 +295,15 @@ public:
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> ctx) { m_canvas_context = std::move(ctx); }
     std::shared_ptr<CanvasRenderingContext2D> get_or_create_canvas_context_2d();
 
+    /// Nested frame document hosted by an `<iframe>` / `<frame>`, if active.
+    std::shared_ptr<Document> content_document() const {
+        return m_rare ? m_rare->content_document.lock() : nullptr;
+    }
+    void set_content_document(const std::shared_ptr<Document>& doc) {
+        if (!doc && !m_rare) return;
+        rare().content_document = doc;
+    }
+
 protected:
     void dump_open(std::ostream& os, const std::string& indent, bool has_content) const override;
     void dump_close(std::ostream& os, const std::string& indent) const override;
@@ -324,6 +333,8 @@ public:
         AttributeNamespaces attribute_namespaces;
         /// Layout border widths (stored only when non-zero so Element pays 0 bytes).
         EdgeSizes layout_border;
+        /// Weak reference to nested browsing context Document for `<iframe>` layout/paint.
+        std::weak_ptr<Document> content_document;
     };
     std::unique_ptr<Rare> m_rare;
     Rare& rare() {

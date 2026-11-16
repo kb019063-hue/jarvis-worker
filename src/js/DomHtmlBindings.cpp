@@ -930,8 +930,23 @@ void setup_title(Iface& I) {
 void setup_iframe(Iface& I) {
     setup_reflecting(I);
     Html H(I);
-    H.getter("contentWindow", [](Realm&, Element&) { return null(); });
-    H.getter("contentDocument", [](Realm&, Element&) { return null(); });
+    H.token_list("sandbox", "sandbox",
+                 {"allow-downloads", "allow-forms", "allow-modals", "allow-orientation-lock",
+                  "allow-pointer-lock", "allow-popups", "allow-popups-to-escape-sandbox",
+                  "allow-presentation", "allow-same-origin", "allow-scripts", "allow-top-navigation",
+                  "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols"});
+    H.getter("contentWindow", [](Realm& r, Element& el) { return iframe_content_window(r, el); });
+    H.getter("contentDocument", [](Realm& r, Element& el) { return iframe_content_document(r, el); });
+    H.method("getSVGDocument", 0, [](Realm& r, Element& el, Args) {
+        JsValue doc_val = iframe_content_document(r, el);
+        Node* n = node_ptr(doc_val);
+        if (!n || !n->is_document()) return null();
+        auto& d = static_cast<Document&>(*n);
+        if (d.content_type() == "image/svg+xml") return doc_val;
+        auto root = d.document_element();
+        if (root && root->element_namespace() == ElementNamespace::SVG && root->tag_name() == "svg") return doc_val;
+        return null();
+    });
 }
 
 void setup_video(Iface& I) {

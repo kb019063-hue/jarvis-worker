@@ -2,6 +2,7 @@
 # the Git blob id of each file copied here, as that commit has it.
 # tools/conformance/run_wpt.py checks every file against this before it runs.
 39c46d03ac2988226f949ee7ab3c7347d5481bd8  LICENSE.md
+e69de29bb2d1d6434b8b29ae775ad8c2e48c5391  common/blank.html
 dba6945f4baf55d6f3ecdc7884499919f471c97c  common/dummy.xhtml
 4a60c3035fcc3617de38a514159a281e2422b067  common/dummy.xml
 97d7da542bc74d6a4c0b60eb84b529d0435908be  dom/common.js
@@ -79,6 +80,11 @@ f779c467d890a8f2d6fdaaf8942b98439f0b1e00  dom/nodes/productions.js
 2636dc3c8de02fac853d708696a13660da0947b8  domparsing/Comment-serialization-double-hyphen.html
 0dd4468cf248640c9c002185e6071db14c505fdd  domparsing/DOMParser-parseFromString-encoding.html
 86e516d6180acb4bd614e91067df625765d28352  domparsing/DOMParser-parseFromString-html.html
+57f4d4367ba1ec825c79304d7160bed2d0319640  domparsing/DOMParser-parseFromString-url-base-pushstate.html
+0258e71351851b8006486b77d41f5a893b47f154  domparsing/DOMParser-parseFromString-url-base.html
+e7599f306e99edd5f3c61b0490c33606fb5e1565  domparsing/DOMParser-parseFromString-url-moretests.html
+75456e948d5780083b7e7205536d146756e43025  domparsing/DOMParser-parseFromString-url-pushstate.html
+492d9c89d056c5e0bce45c9c5610f2b4fb4032a0  domparsing/DOMParser-parseFromString-url.html
 1e3b000e25200f30a55f90112bd9b492d9e4dec6  domparsing/DOMParser-parseFromString-xml-CDATA.html
 cd655acf930e7bb638eb38adf8d93c3d8d1c1c17  domparsing/DOMParser-parseFromString-xml-doctype.html
 6e9e35eb30782bca308fb7535f76686d92b2305e  domparsing/DOMParser-parseFromString-xml-empty-nodes.html
@@ -89,7 +95,21 @@ b07bb3d87c823bd7cc4c1bcc751eaca3a18b53cb  domparsing/DOMParser-parseFromString-x
 8f9f7055d282bc1b5f9eaf95c99280424993afb6  domparsing/DOMParser-xml-character-entities.html
 65c955cdf8fd020fc0c375b3c69448441ec902fb  domparsing/XMLSerializer-serializeToString.html
 d7c7e0033ebd2078029b0679e9c9d4de84f78ea4  domparsing/createContextualFragment-in-detached-xml-document-crash.html
+5e7bae556df5ec8a80b17cd231f85144c6a9b45b  domparsing/createContextualFragment-xhtml.xhtml
 f8a7ab894d0a33aa54d8526a0af36afcb20d00f7  domparsing/domparser-spurious-attributes.html
+08345ac58b8ed5ccaa03758b5d2481194f649c53  domparsing/innerhtml-01.xhtml
+313531e49cdb135f1b6c800aff4c6b5dbe2bf272  domparsing/innerhtml-03.xhtml
+3afb6815231280325abac6a39026163fce6711b2  domparsing/innerhtml-05.xhtml
+f02f425c47d4346e984dee82ee4a74fa35afa522  domparsing/insert_adjacent_html-xhtml.xhtml
+2980037433d02f8a53b0b83ffdbe94f778adb03c  domparsing/insert_adjacent_html.js
+9c4a1bd07ac91d2067b7aafa736d6895a4f45bda  domparsing/resources/domparser-iframe-base-pushstate.html
+e8a084b7dce26320515dd13d273ee7857ca84c31  domparsing/resources/domparser-iframe-base.html
+b2821c69940f4b30d78e1c358fa8f84d66dea6ca  domparsing/resources/domparser-iframe-pushstate.html
+710f141bb9e0d5ede986c36935aa8dfa93d0c895  domparsing/resources/domparser-iframe.html
+a62d2f293b306f2ee47bef8a92e7d73e26089b54  domparsing/resources/domparser-iframe.js
+7b02fab1c30bd46ecd3e278b1925186495d40249  domparsing/resources/domparser-url-tests.js
+46f36c60b66400658764f42f85e09675ffbb8bbb  domparsing/resources/dummy-xml.xml
 5195b9f04b5dd9f47937a5d11d2e82f09fdb9204  domparsing/xml-parse-serialize-roundtrip.html
+852bbcc9fd1b1c91fd544dfc2fc462efc1195a4a  domparsing/xml-serialization.xhtml
 9dac65d3053a6f5e531888a7b470051389840f89  domparsing/xmldomparser.html
 dd841a084662637b32b7f064b1816ab0b35f89d1  resources/testharness.js

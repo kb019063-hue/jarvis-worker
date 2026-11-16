@@ -3,6 +3,7 @@
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/layout/LayoutBox.hpp"
+#include <optional>
 #include <string>
 #include <vector>
 #include <variant>
@@ -30,6 +31,9 @@ struct DrawBorderCommand {
     EdgeSizes width;
     Color color;
     float border_radius{0.0f};
+    /// When set, each edge is drawn in its own colour (collapsed tables: the
+    /// shared edge belongs to the winning border, colour included).
+    std::optional<EdgeColors> edge_colors;
 };
 
 struct DrawTextCommand {

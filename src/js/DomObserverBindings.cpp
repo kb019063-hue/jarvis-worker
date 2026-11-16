@@ -809,6 +809,9 @@ void note_attribute_changed(Element& element, const std::string& name, const std
     }
     if (name.size() > 2 && name[0] == 'o' && name[1] == 'n') event_handler_attribute_changed(*realm, element, name);
     if (!new_value && old_value) detach_attr_object(*realm, element, name, *old_value);
+    if (is_html_element(element, "iframe") && (name == "src" || name == "srcdoc" || name == "name")) {
+        note_iframe_attribute_changed(*realm, element, name);
+    }
     if (element.custom_state() == CustomElementState::Custom) {
         auto definition = definition_for(*realm, element);
         if (definition && observes(*definition, name)) {
@@ -829,6 +832,11 @@ void note_character_data_changed(Node& node, const std::string& old_value) {
 }
 
 void note_connected(Element& element, bool connected) {
+    if (is_html_element(element, "iframe")) {
+        if (Realm* realm = realm_if_any(element); realm && realm->alive) {
+            note_iframe_connected(*realm, element, connected);
+        }
+    }
     // Nearly every element is neither a custom element nor about to be one.
     if (element.custom_state() != CustomElementState::Custom &&
         (element.is_foreign() || (element.tag_name().find('-') == std::string::npos && element.is_value().empty()))) {

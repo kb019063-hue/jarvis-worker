@@ -61,6 +61,13 @@ jobs:
         run: |
           make verify-media
           make fuzz-media
+      - name: CSS Color 4/5 rational oracle, WPT vectors, and fuzzing
+        # Cross-checks all 15 color spaces against an independent exact-rational
+        # Python W3C CSS Color 4 oracle, verifies §13.2 OKLCH gamut mapping,
+        # WPT valid/invalid computed vectors, and 5,000 adversarial fuzz inputs.
+        run: |
+          make verify-color
+          make fuzz-color
 
   conformance:
     name: DOM conformance (html5lib corpus)

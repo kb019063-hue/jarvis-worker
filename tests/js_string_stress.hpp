@@ -72,8 +72,12 @@ inline void js_string_model_test() {
         const JsString& text = entry.text;
         const std::u16string& model = entry.model;
         if (text.length() != model.size()) return false;
-        if (text.view() != js_string_test_encode(model)) return false;      // the one way to write this text
+        const std::string encoded = js_string_test_encode(model);
+        if (!(text == std::string_view(encoded))) return false;
+        if (text == std::string_view(encoded + "z")) return false;
+        if (text.view() != encoded) return false;                              // the one way to write this text
         if (text.is_ascii() != (text.size() == model.size())) return false;
+        if (std::u16string_view(text.wide(), text.length()) != model) return false;
         for (size_t i = 0; i < model.size(); ++i) {
             if (text.unit_at(i) != model[i]) return false;
         }
@@ -343,6 +347,49 @@ inline void js_string_model_test() {
         after = JsString::stats();
         assert(after.bytes_copied - before.bytes_copied < 2 * wide_text.size() * 5 / 3);
         assert(after.units_widened == before.units_widened);
+
+        // Phase 53, finding 59: reading between surrogate halves, or taking a
+        // piece from substring() ending in a high half and completing it, does
+        // not copy the prefix.
+        const JsString high_half = JsString::from_unit(0xD83D);
+        const JsString low_half = JsString::from_unit(0xDE00);
+        const JsString full_pair = JsString::concat(high_half, low_half);
+        const litebird::Utf16View zz_needle(JsString("zz"));
+        {
+            before = JsString::stats();
+            JsString paired;
+            for (int n = 0; n < 20000; ++n) {
+                paired = JsString::concat(paired, high_half);
+                assert(paired.unit_at(paired.length() - 1) == 0xD83D);
+                assert(litebird::Utf16View(paired).find(zz_needle) == litebird::Utf16View::npos);
+                assert(!(paired == std::string_view("zz")));
+                paired = JsString::concat(paired, low_half);
+                // Reading UTF-8 after completing the pair incrementally extends Utf8Cache.
+                if ((n & 7) == 0) assert(paired.view().size() == static_cast<size_t>(n + 1) * 4);
+            }
+            after = JsString::stats();
+            assert(paired.length() == 40000 && paired.size() == 80000 && paired.is_well_formed());
+            assert(paired.view().size() == 80000);
+            assert(after.bytes_copied - before.bytes_copied < 8 * paired.size());
+            assert(after.blocks - before.blocks < 64);
+        }
+        {
+            before = JsString::stats();
+            JsString paired;
+            for (int n = 0; n < 20000; ++n) {
+                paired = JsString::concat(paired, full_pair);
+                paired = paired.substring(0, paired.length() - 1);
+                assert(paired.unit_at(paired.length() - 1) == 0xD83D);
+                assert(paired.wide()[paired.length() - 1] == 0xD83D);
+                assert(litebird::Utf16View(paired).find(zz_needle) == litebird::Utf16View::npos);
+                paired = JsString::concat(paired, low_half);
+            }
+            after = JsString::stats();
+            assert(paired.length() == 40000 && paired.size() == 80000 && paired.is_well_formed());
+            assert(paired.view().size() == 80000);
+            assert(after.bytes_copied - before.bytes_copied < 8 * paired.size());
+            assert(after.blocks - before.blocks < 64);
+        }
     }
 }
 
@@ -507,8 +554,12 @@ inline void js_string_thread_test() {
                     // that are written along with the UTF-16 copy.
                     const JsString tail = text.substring(2, length);
                     if (tail.length() != length - 2 || tail.unit_at(0) != 0xDE00 || tail.unit_at(tail.length() - 1) != '!') ++failures;
+                    if (tail.view().substr(0, 3) != "\xED\xB8\x80" || tail.view().back() != '!') ++failures;
+                    if (tail.to_well_formed().view().substr(0, 3) != "\xEF\xBF\xBD") ++failures;
                     const JsString most = text.substring(3, length);
                     if (!most.shares_text_with(text) || most.unit_at(0) != '0' || most.size() != length - 3) ++failures;
+                    if (most.view().size() != length - 3 || text.view().substr(0, 6) != "\xC3\xA9\xF0\x9F\x98\x80") ++failures;
+                    if (text.wide()[1] != 0xD83D || text.wide()[length - 1] != '!') ++failures;
                 }
                 finished[id].store(r, std::memory_order_release);
             }
@@ -521,13 +572,13 @@ inline void js_string_thread_test() {
                 std::string body = "\xC3\xA9\xF0\x9F\x98\x80";
                 for (int d = 0; d < 30 + (n % 5) * 10; ++d) body += digits[static_cast<size_t>(d % 10)];
                 if (n % 2 == 0) {
-                    strings[n] = JsString(body + "!");                      // never indexed
+                    strings[n] = JsString(body + "!");                      // never read/cached
                 } else {
-                    // Grown by appending, indexed while it was shorter, then
-                    // appended to again: its UTF-16 copy stops short.
+                    // Grown by appending, `.view()` cached while shorter, then
+                    // appended to again: its Utf8Cache stops short.
                     JsString text;
                     for (size_t at = 0; at < body.size(); at += 6) text = JsString::concat(text, std::string_view(body).substr(at, 6));
-                    assert(text.unit_at(1) == 0xD83D);
+                    assert(text.unit_at(1) == 0xD83D && text.view().back() == digits[(body.size() - 7) % 10]);
                     strings[n] = JsString::concat(text, JsString("!"));
                     assert(strings[n].shares_text_with(text));
                 }
@@ -542,6 +593,42 @@ inline void js_string_thread_test() {
         two.join();
         assert(failures.load() == 0);
         for (const auto& text : strings) assert(text.use_count() == 1);
+    }
+
+    // Part four: tail rewind + cross-thread `const JsString&` safety. A handle
+    // whose buffer previously held a longer string (then dropped back to
+    // refs == 1) is passed by reference to another thread while both append
+    // and read; only the creator thread could ever rewind, and only before any
+    // other thread touches the block.
+    {
+        std::atomic<int> failures{0};
+        for (int round = 0; round < 500; ++round) {
+            JsString base("0123456789abcdefghij");
+            JsString grown = JsString::concat(base, JsString("0123456789abcdefghij"));
+            JsString sub = grown.substring(0, 39);
+            grown = JsString();
+            base = JsString();
+            assert(sub.use_count() == 1);
+            // Bump `used` above `sub`'s end, then drop so `refs == 1` with `used > a_end`.
+            {
+                JsString tmp = JsString::concat(sub, JsString("Z"));
+                if (tmp.length() != 40) ++failures;
+            }
+            std::atomic<bool> go{false};
+            JsString out_a, out_b;
+            std::thread t([&] {
+                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+                out_b = JsString::concat(sub, JsString("!"));
+                if (sub.view().size() != 39 || out_b.view().back() != '!') ++failures;
+            });
+            go.store(true, std::memory_order_release);
+            out_a = JsString::concat(sub, JsString("?"));
+            t.join();
+            if (sub.view().size() != 39) ++failures;
+            if (out_a.view() != "0123456789abcdefghij0123456789abcdefghi?") ++failures;
+            if (out_b.view() != "0123456789abcdefghij0123456789abcdefghi!") ++failures;
+        }
+        assert(failures.load() == 0);
     }
 }
 

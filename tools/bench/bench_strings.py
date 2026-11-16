@@ -95,6 +95,12 @@ CASES = [
      r"var s='';for(var i=0;i<40000;i++){s+='\uD83D';s+='\uDE00';s+='-'}console.log(s.length)"),
     ("build: half a surrogate pair, keeping each prefix, 20k",
      r"var s='',k='';for(var i=0;i<20000;i++){s+='\uD83D';k=s;s+='\uDE00'}console.log(s.length,k.length)"),
+    ("build: half a surrogate pair, read between halves, 20k",
+     r"var s='',n=0;for(var i=0;i<20000;i++){s+='\uD83D';n+=s.charCodeAt(s.length-1);s+='\uDE00'}console.log(s.length,n)"),
+    ("build: half a surrogate pair, indexOf between halves, 20k",
+     r"var s='',n=0;for(var i=0;i<20000;i++){s+='\uD83D';n+=s.indexOf('zz');s+='\uDE00'}console.log(s.length,n)"),
+    ("build: surrogate piece from substring, read then complete, 20k",
+     r"var h='\uD83D\uDE00'.substring(0,1),s='',n=0;for(var i=0;i<20000;i++){s+=h;n+=s.charCodeAt(s.length-1);s+='\uDE00'}console.log(s.length,n)"),
 
     # --- consuming --------------------------------------------------------------
     ("consume: s = s.slice(k), 20k tokens",

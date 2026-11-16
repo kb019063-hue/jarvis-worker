@@ -61,18 +61,20 @@ directories of it (downloaded the first time, at a pinned commit, into
 `build/test262`; nothing of it is in the repository).
 
 ```bash
-make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 12,275 pass
+make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 12,316 pass
 python3 tools/conformance/run_test262.py --binary before=/tmp/litebird-main --binary now=build/litebird
 python3 tools/conformance/run_test262.py --show 20 language/expressions/super
 ```
 
-It is not a scoreboard and has no floor: 78.3% of those directories pass
+It is not a scoreboard and has no floor: 78.5% of those directories pass
 (Phase 44 / finding 50 added Unicode 17.0 identifier validation and `\uXXXX` /
 `\u{...}` identifier escape handling, moving the 21 default directories from
 10,835 to 12,275 of 15,686 with 0 regressions, and moving `language/identifiers`,
-`keywords`, `future-reserved-words` and `reserved-words` to 374/374 = 100.0%).
-Of the whole suite, ~27,741 of 47,967 pass (`run_test262.py --timeout 4
-built-ins language annexB`, a quarter of an hour for two builds). What it is for
+`keywords`, `future-reserved-words` and `reserved-words` to 374/374 = 100.0%;
+Phase 43 / finding 49, `new.target` and what `super(...)` binds, moved them to
+12,316, again with none lost). Of the whole suite, 27,872 of 47,967 pass
+(`run_test262.py --timeout 6 built-ins language annexB`, eight minutes for two
+builds on two cores). What it is for
 is the second form: build `main` somewhere (`git worktree add /tmp/main origin/main`,
 `make` there), give the runner both binaries, and it lists every test that passes
 in the first and not in the second and exits 1 if there is one. A change to how

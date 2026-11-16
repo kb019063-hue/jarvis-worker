@@ -353,8 +353,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
-| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (184/184 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
+| **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (185/185 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 179/179 unit suites) |
 | **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
 
 ---
@@ -4910,7 +4912,123 @@ arrives in pieces.
    finding 28.
 
 ---
+## Phase 46 Architecture: Canvas 2D Text — `fillText`, `strokeText`, `measureText`
 
+ROADMAP.md Wave 1, row 6 names the text gap as the largest part of what
+Canvas 2D was missing; this phase does that part (path and hit-test gaps
+remain — row 6 stays open for them). Before it, a canvas could draw every
+shape it has and no text at all: `ctx.fillText(...)` was `undefined`, so a
+page that drew a label, a chart axis or a captcha painted nothing and any
+script that measured its own strings threw `TypeError`.
+
+### 1. What was added
+
+- **`src/render/FontRenderer.cpp`** — two public accessors:
+  `em_ascent_descent(font_size, weight)` returns the scaled em metrics
+  (ascent above the baseline, descent below it, positive), falling back to
+  (0.8em, 0.2em) when no `.ttf` loaded; `glyph_advance_px(cp, size, weight)`
+  returns the advance at the exact size. `measure_text` now goes through the
+  same path, so what measures is what draws. The system font is always the
+  engine's regular/bold pair (Phase 36) — no family list, kerning or
+  ligatures, as before.
+- **`include/litebird/render/Canvas2D.hpp` / `.cpp`** — new drawing state
+  `font` (`10px sans-serif` default), `text_align` (`start`) and
+  `text_baseline` (`alphabetic`), saved/restored with the rest of the state,
+  and three operations:
+  - `fill_text(text, x, y [, maxWidth])` / `stroke_text(...)` — alignment
+    resolves the pen position from `x` (`center` halves the advance, `right`
+    and `end` subtract it; `direction`/RTL is not implemented, so `start` is
+    `left` and `end` is `right`); the baseline resolves from `y`
+    (`top` puts the em box top at `y`, `middle` centres it, `bottom` puts its
+    bottom at `y`, `alphabetic` uses `y` directly, `hanging` is approximated
+    at 0.8em above the alphabetic baseline, `ideographic` at the bottom of
+    the em box). Text respects `globalAlpha`, `clip()`, both gradient and
+    solid paints, and the CTM. `maxWidth` requests a horizontal condense of
+    the whole run (true scaling down to a floor of 0.02×, not re-spacing).
+  - `measure_text(text)` — `TextMetrics`: `width` (natural advance),
+    `actualBoundingBoxLeft/Right/Ascent/Descent` (ink boxes relative to the
+    natural pen origin; the alignment point is not applied, values can be
+    negative), `fontBoundingBoxAscent/Descent` and `emHeightAscent/Descent`
+    (em metrics), `hangingBaseline` (0.8em approximation),
+    `ideographicBaseline` (descent) and `alphabeticBaseline` (0).
+- **The `font` attribute** parses the CSS font shorthand subset: `style`
+  (normal/italic/oblique, oblique widths ignored), `font-variant` and
+  `stretch` (accepted, otherwise ignored), `weight` (normal/bold/bolder/
+  lighter/100–1000; ≥600 selects the bold face), `size` **required**, in
+  px/pt/em/rem/% with an optional `/line-height` (validated for syntax, not
+  rendered), then a non-empty family list that is parsed and reflected but
+  not used for rasterisation. An invalid font string is ignored and the old
+  value kept, per the spec; the same for unknown `textAlign`/`textBaseline`
+  values.
+- **Rasterisation.** Glyphs are drawn into a tight AA coverage buffer
+  (capped at 16384×512 px; a wider run truncates on the right for painting,
+  measurement is unaffected), then blitted through the CTM by inverse
+  mapping of the destination bounding box — the same inverse-map idiom
+  `drawImage` uses. A device pixel maps back to the whole horizontal source
+  span and takes the maximum coverage there, so down-sampling (condensing)
+  never drops stems; the y axis samples the row nearest the inverse-mapped
+  position. Gradients are sampled in user space, as `rasterize_paths` does,
+  and `globalCompositeOperation`, clip and alpha run through the ordinary
+  `set_pixel_safe` path.
+- **`strokeText`** is an honest approximation, documented as such: a band
+  centred on the binary glyph boundary (dilate(mask, d) minus erode(mask, d),
+  d = half the line width, clamped to 16 px; lineWidth ≤ 1 yields the inner
+  boundary ring). It is not a stroked vector outline — no joins or mitres on
+  glyph corners. Placement, CTM, clip and paint are identical to `fillText`.
+
+### 2. What this does not do (plainly)
+
+- No `direction`: RTL/bidi is unparsed, `start` ≡ `left`.
+- No kerning or ligatures; advance is the sum of glyph advances, and the
+  same sum is used by measure and by draw.
+- The family list is a no-op for rasterisation — the engine still has one
+  regular and one bold system font (Phase 36).
+- Rotated/sheared CTM places the run correctly but samples the axis-aligned
+  coverage texture by nearest sampling: visibly blocky at large scales.
+  True vector glyph rendering under rotation is future work.
+- `strokeText` is the band approximation described above.
+- Text metrics beyond those listed (e.g. boxes relative to the alignment
+  point) are approximated relative to the natural origin.
+- Rasterised runs are capped at 16384×512 px.
+
+### 3. How it is verified
+
+```
+make test          # 179 engine suites, all passing (one new)
+make conformance   # html5lib 1781/1792, unchanged
+make js-conformance # 926/940, unchanged
+make dom-conformance # 644/644, unchanged
+make url-conformance # 1188/1188, unchanged
+make xml-conformance # 1718/1718, unchanged
+make wpt           # 7968/8009, the 41 listed failures, 0 unlisted
+make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
+make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
+make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
+make asan          # ASan/UBSan green on this tree: XML ≥ 1718, WPT ≥ 7968 with 0 unlisted,
+                   # JS ≥ 924, DOM ≥ 644, diff-xml 1,000 documents 0 DIFFER, round trip
+                   # 1,000/1,000, fuzz 0 findings, asan-deep 882 runs over 315 pages,
+                   # 0 failed (slowest 3.5 s; see AUDIT.md finding 52)
+```
+
+(Numbers as run on this branch; see AUDIT.md finding 52 for what each one
+prints.) The new unit suite
+`canvas_text_filltext_stroketext_measuretext_and_font_state` covers the
+default and restored state, measurement ordering and metric boxes, painting
+with a solid and with a gradient fill, alignment and baseline placement,
+`maxWidth` condensing, the stroke band widening with `lineWidth`, setter
+validation from JavaScript, and `measureText`'s property set end to end.
+A generated page (heading, gradient display type, stroked text, centered and
+condensed lines) rendered with `--render-png` shows glyphs painted along the
+baseline with the gradient applied across the run.
+
+### 4. Task queue
+
+`ROADMAP.md` row 6 now reads path/hit-test gaps; the AGENTS.md row was
+rewritten to what is left (WebP/AVIF, SVG `<text>`). No expectation was
+re-recorded, no `.dat` corpus file was touched, and no floor was lowered;
+the unit scoreboard went from 178 to 179 suites.
+
+---
 ## Phase 48 Architecture: Sized-Float Placement Index
 
 `LayoutBox::layout_block` builds a per-block `FloatPlacementIndex` lazily when

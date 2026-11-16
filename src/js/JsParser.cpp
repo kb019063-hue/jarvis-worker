@@ -160,7 +160,7 @@ bool JsParser::check(JsTokenType type) const {
 }
 
 bool JsParser::check_identifier(const char* text) const {
-    return peek().type == JsTokenType::Identifier && peek().text == text;
+    return peek().type == JsTokenType::Identifier && !peek().has_escape && peek().text == text;
 }
 
 bool JsParser::match(JsTokenType type) {
@@ -190,6 +190,7 @@ void JsParser::fail_unexpected() const {
         case JsTokenType::Number: fail("Unexpected number");
         case JsTokenType::String: fail("Unexpected string");
         case JsTokenType::Identifier: fail("Unexpected identifier '" + t.text + "'");
+        case JsTokenType::EscapedKeyword: fail("Keyword must not contain escaped characters");
         case JsTokenType::NoSubstitutionTemplate:
         case JsTokenType::TemplateHead:
         case JsTokenType::TemplateMiddle:
@@ -212,11 +213,38 @@ void JsParser::consume_semicolon() {
     fail_unexpected();
 }
 
+static bool is_strict_reserved_word(const std::string& name) {
+    return name == "implements" || name == "interface" || name == "let" ||
+           name == "package" || name == "private" || name == "protected" ||
+           name == "public" || name == "static" || name == "yield";
+}
+
+bool JsParser::is_strict() const {
+    return !m_functions.empty() && m_functions.back().strict;
+}
+
+void JsParser::validate_identifier(const std::string& name, bool strict_ctx) const {
+    if (strict_ctx && is_strict_reserved_word(name)) {
+        fail("Unexpected strict mode reserved word");
+    }
+    if (!m_functions.empty()) {
+        const auto& ctx = m_functions.back();
+        if ((ctx.is_generator || ctx.forbid_yield) && name == "yield") {
+            fail("Unexpected reserved word");
+        }
+        if ((ctx.is_async || ctx.forbid_await) && name == "await") {
+            fail("Unexpected reserved word");
+        }
+    }
+}
+
 std::string JsParser::consume_binding_identifier(const char* what) {
-    if (check(JsTokenType::Identifier)) return advance().text;
-    // `yield`, `await` and `let` are only reserved in some contexts; accept
-    // them as names where no such context applies.
-    if (check(JsTokenType::Yield) || check(JsTokenType::Await) || check(JsTokenType::Let)) return advance().text;
+    if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
+        check(JsTokenType::Await) || check(JsTokenType::Let)) {
+        std::string name = advance().text;
+        validate_identifier(name, is_strict());
+        return name;
+    }
     if (is_at_end()) fail(std::string("Unexpected end of input: expected ") + what);
     fail(std::string("Unexpected token '") + peek().text + "': expected " + what);
 }
@@ -316,7 +344,7 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
             break;
         }
         case JsTokenType::Identifier: {
-            if (peek().text == "async" && peek(1).type == JsTokenType::Function && !peek(1).newline_before) {
+            if (check_identifier("async") && peek(1).type == JsTokenType::Function && !peek(1).newline_before) {
                 advance();
                 advance();
                 auto decl = std::make_unique<FunctionDeclStmt>(parse_function(true, true));
@@ -327,6 +355,7 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
             }
             if (peek(1).type == JsTokenType::Colon) {
                 std::string label = advance().text;
+                validate_identifier(label, is_strict());
                 advance();
                 auto body = parse_declaration_or_statement();
                 result = std::make_unique<LabeledStmt>(std::move(label), std::move(body));
@@ -377,7 +406,11 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
         case JsTokenType::Continue: {
             bool is_break = advance().type == JsTokenType::Break;
             std::string label;
-            if (check(JsTokenType::Identifier) && !peek().newline_before) label = advance().text;
+            if ((check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
+                 check(JsTokenType::Await) || check(JsTokenType::Let)) && !peek().newline_before) {
+                label = advance().text;
+                validate_identifier(label, is_strict());
+            }
             consume_semicolon();
             if (is_break) return std::make_unique<BreakStmt>(std::move(label));
             return std::make_unique<ContinueStmt>(std::move(label));
@@ -430,7 +463,15 @@ std::unique_ptr<VarDeclStmt> JsParser::parse_var_declaration(JsDeclKind kind, bo
         } else if (kind == JsDeclKind::Const && !no_in) {
             fail("Missing initializer in const declaration");
         }
-        if (kind == JsDeclKind::Var) declare_var_names(*d.target);
+        if (kind == JsDeclKind::Var) {
+            declare_var_names(*d.target);
+        } else {
+            std::vector<std::string> names;
+            d.target->collect_names(names);
+            for (const auto& name : names) {
+                if (name == "let") fail("let is disallowed as a lexically bound name");
+            }
+        }
         decl->decls.push_back(std::move(d));
     } while (match(JsTokenType::Comma));
     return decl;
@@ -702,6 +743,15 @@ std::shared_ptr<FunctionNode> JsParser::parse_function(bool is_async, bool is_de
     if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) || check(JsTokenType::Await) ||
         check(JsTokenType::Let)) {
         fn->name = advance().text;
+        if (is_declaration) {
+            validate_identifier(fn->name, is_strict());
+        } else {
+            if (is_strict() && is_strict_reserved_word(fn->name)) {
+                fail("Unexpected strict mode reserved word");
+            }
+            if (fn->is_generator && fn->name == "yield") fail("Unexpected reserved word");
+            if (fn->is_async && fn->name == "await") fail("Unexpected reserved word");
+        }
     } else if (is_declaration) {
         fail("Function statements require a function name");
     }
@@ -733,6 +783,10 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     ctx.is_arrow = true;
     ctx.is_async = is_async;
     ctx.strict = m_functions.empty() ? false : m_functions.back().strict;
+    ctx.forbid_arguments = m_functions.empty() ? false : m_functions.back().forbid_arguments;
+    // ArrowParameters inherit [?Yield, ?Await] from the enclosing scope (ECMA-262 §15.3).
+    ctx.forbid_await = is_async || (!m_functions.empty() && (m_functions.back().is_async || m_functions.back().forbid_await));
+    ctx.forbid_yield = !m_functions.empty() && (m_functions.back().is_generator || m_functions.back().forbid_yield);
     m_functions.push_back(ctx);
 
     if (check(JsTokenType::OpenParen)) {
@@ -745,6 +799,9 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
         finish_params(*fn);
     }
     consume(JsTokenType::Arrow, "Expected '=>' after arrow function parameters.");
+    // ConciseBody resets [~Yield] and uses only the arrow's own [Await].
+    m_functions.back().forbid_await = is_async;
+    m_functions.back().forbid_yield = false;
 
     if (check(JsTokenType::OpenBrace)) {
         parse_function_body(*fn);
@@ -788,8 +845,17 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
     auto cls = std::make_shared<ClassNode>();
     cls->line = previous().line;
     const size_t class_token = m_current - 1;       // called with `class` consumed
-    if (check(JsTokenType::Identifier)) {
+
+    // All parts of a ClassDeclaration or ClassExpression are strict mode code.
+    // The context is addressed by index because parsing the members pushes onto m_functions.
+    const size_t enclosing = m_functions.size() - 1;
+    const bool enclosing_strict = m_functions[enclosing].strict;
+    m_functions[enclosing].strict = true;
+
+    if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
+        check(JsTokenType::Await) || check(JsTokenType::Let)) {
         cls->name = advance().text;
+        validate_identifier(cls->name, true);
     } else if (is_declaration) {
         fail("Class declarations require a class name");
     }
@@ -798,11 +864,6 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
     }
     consume(JsTokenType::OpenBrace, "Expected '{' before class body.");
 
-    // Class bodies are always strict mode code. The context is addressed by
-    // index because parsing the members pushes onto m_functions.
-    const size_t enclosing = m_functions.size() - 1;
-    const bool enclosing_strict = m_functions[enclosing].strict;
-    m_functions[enclosing].strict = true;
     FlagScope in_scope(m_no_in, false);
 
     auto can_follow_modifier = [&]() {
@@ -826,6 +887,8 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.fn = fn.get();
                 ctx.var_names = &fn->var_names;
                 ctx.strict = true;
+                ctx.forbid_arguments = true;
+                ctx.forbid_await = true;
                 m_functions.push_back(ctx);
                 parse_function_body(*fn);
                 m_functions.pop_back();
@@ -880,6 +943,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.fn = &scratch;
                 ctx.var_names = &scratch.var_names;
                 ctx.strict = true;
+                ctx.forbid_arguments = true;
                 m_functions.push_back(ctx);
                 member.value = parse_assignment();
                 m_functions.pop_back();
@@ -959,7 +1023,8 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
                 element.target = std::make_unique<Pattern>();
                 element.target->name = consume_binding_identifier("a rest property name");
             } else {
-                bool key_is_identifier = check(JsTokenType::Identifier) || peek().is_keyword;
+                bool key_is_identifier = check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
+                                         check(JsTokenType::Await) || check(JsTokenType::Let);
                 std::unique_ptr<Expr> computed;
                 element.key = parse_property_name(computed);
                 element.computed_key = std::move(computed);
@@ -967,6 +1032,7 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
                     element.target = parse_binding_pattern();
                 } else {
                     if (!key_is_identifier || element.computed_key) fail_unexpected();
+                    validate_identifier(element.key, is_strict());
                     element.target = std::make_unique<Pattern>();
                     element.target->name = element.key;
                 }
@@ -1102,18 +1168,21 @@ std::unique_ptr<Expr> JsParser::parse_assignment() {
 
     // Arrow functions.
     if (check(JsTokenType::Identifier)) {
-        if (peek(1).type == JsTokenType::Arrow) {
+        if (peek(1).type == JsTokenType::Arrow && !peek(1).newline_before) {
             auto fn = parse_arrow_function(false);
             return std::make_unique<FunctionExpr>(std::move(fn));
         }
-        if (peek().text == "async" && !peek(1).newline_before) {
-            if (peek(1).type == JsTokenType::Identifier && peek(2).type == JsTokenType::Arrow) {
+        if (check_identifier("async") && !peek(1).newline_before) {
+            if ((peek(1).type == JsTokenType::Identifier || peek(1).type == JsTokenType::Yield ||
+                 peek(1).type == JsTokenType::Await || peek(1).type == JsTokenType::Let) &&
+                peek(2).type == JsTokenType::Arrow && !peek(2).newline_before) {
                 advance();
                 return std::make_unique<FunctionExpr>(parse_arrow_function(true));
             }
             if (peek(1).type == JsTokenType::OpenParen) {
                 int close = m_match[m_current + 1];
-                if (close >= 0 && m_tokens[static_cast<size_t>(close) + 1].type == JsTokenType::Arrow) {
+                if (close >= 0 && m_tokens[static_cast<size_t>(close) + 1].type == JsTokenType::Arrow &&
+                    !m_tokens[static_cast<size_t>(close) + 1].newline_before) {
                     advance();
                     return std::make_unique<FunctionExpr>(parse_arrow_function(true));
                 }
@@ -1298,12 +1367,15 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
             return std::make_unique<UpdateExpr>(std::move(target), op, /*prefix=*/true);
         }
         case JsTokenType::Await: {
-            advance();
-            // Unlike `arguments`, await belongs to the innermost function,
-            // arrow or not.
-            if (!m_functions.empty() && m_functions.back().fn) m_functions.back().fn->uses_await = true;
-            auto operand = parse_unary();
-            return std::make_unique<AwaitExpr>(std::move(operand));
+            if (!m_functions.empty() && m_functions.back().is_async) {
+                advance();
+                // Unlike `arguments`, await belongs to the innermost function,
+                // arrow or not.
+                if (m_functions.back().fn) m_functions.back().fn->uses_await = true;
+                auto operand = parse_unary();
+                return std::make_unique<AwaitExpr>(std::move(operand));
+            }
+            return parse_postfix();
         }
         default:
             return parse_postfix();
@@ -1539,8 +1611,12 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
         } else {
             // Shorthand `{a}`; `{a = 1}` is only meaningful as a pattern.
             if (!key_is_identifier || prop.computed_key) fail_unexpected();
+            validate_identifier(prop.key, is_strict());
             prop.shorthand = true;
             if (prop.key == "arguments") {
+                if (!m_functions.empty() && m_functions.back().forbid_arguments) {
+                    fail("'arguments' is not allowed in class field initializer or static initialization block");
+                }
                 if (auto* fn = nearest_non_arrow_function()) fn->uses_arguments = true;
             }
             auto ident = std::make_unique<IdentifierExpr>(prop.key);
@@ -1591,24 +1667,32 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             result = std::make_unique<IdentifierExpr>("this");
             break;
         case JsTokenType::Identifier: {
-            if (token.text == "async" && peek(1).type == JsTokenType::Function && !peek(1).newline_before) {
+            if (check_identifier("async") && peek(1).type == JsTokenType::Function && !peek(1).newline_before) {
                 advance();
                 advance();
                 result = std::make_unique<FunctionExpr>(parse_function(true, false));
                 break;
             }
             std::string name = advance().text;
+            validate_identifier(name, is_strict());
             if (name == "arguments") {
+                if (!m_functions.empty() && m_functions.back().forbid_arguments) {
+                    fail("'arguments' is not allowed in class field initializer or static initialization block");
+                }
                 if (auto* fn = nearest_non_arrow_function()) fn->uses_arguments = true;
             }
             result = std::make_unique<IdentifierExpr>(std::move(name));
             break;
         }
         case JsTokenType::Yield:
-        case JsTokenType::Let:
+        case JsTokenType::Await:
+        case JsTokenType::Let: {
             // Outside the contexts that reserve them these are plain names.
-            result = std::make_unique<IdentifierExpr>(advance().text);
+            std::string name = advance().text;
+            validate_identifier(name, is_strict());
+            result = std::make_unique<IdentifierExpr>(std::move(name));
             break;
+        }
         case JsTokenType::OpenParen: {
             advance();
             FlagScope scope(m_no_in, false);

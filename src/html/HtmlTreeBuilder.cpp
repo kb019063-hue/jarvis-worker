@@ -1308,8 +1308,9 @@ std::shared_ptr<Node> clone_node_tree(const Node& source, const std::shared_ptr<
                 element->set_tag_name_verbatim(from.tag_name());
                 element->set_prefix(from.prefix());
                 element->set_other_namespace_uri(from.other_namespace_uri());
+                // The attributes carry their own namespaces (Phase 51), so
+                // copying the list is the whole of it.
                 element->m_attributes = from.m_attributes;
-                element->copy_attribute_namespaces(from);
                 if (!from.is_value().empty()) element->set_is_value(from.is_value());
                 if (const FormControlState* state = from.form_state()) {
                     FormControlState& made = element->ensure_form_state();

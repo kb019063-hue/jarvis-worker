@@ -27,14 +27,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **955 / 970 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **969 / 984 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **665 / 665**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`) | **5421 / 5463 subtests** across 87 files; the 42 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 172 suites, all passing | `make test` |
+| Engine unit tests | 175 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 172 engine suites
+make test            # 175 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -68,7 +68,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 970 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 984 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -79,14 +79,16 @@ Read the number for what it is:
   covers the language and library features ordinary scripts use (syntax,
   closures, classes, destructuring, generators, promises and async functions,
   strings, arrays, regular expressions, dates, JSON), not every clause of the
-  specification. The official suite scores far lower: of the @@T262_ALL_TOTAL@@ tests in
+  specification. The official suite scores lower: of the @@T262_ALL_TOTAL@@ tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  @@T262_ALL_NOW@@ pass (@@T262_ALL_PCT@@%); of the @@T262_DEF_TOTAL@@ on functions, classes and objects, @@T262_DEF_NOW@@
-  (@@T262_DEF_PCT@@%). `make test262` runs the latter. It is used for what a change moved
-  between two builds, not as a score (Phase 34: 108 more pass and none fewer
-  in those directories; in the whole suite 122 more and three fewer, the
-  three being tests that passed for the wrong reason. Phase 43: @@T262_ALL_GAINED@@ more in
-  the whole suite and @@T262_ALL_LOST_WORD@@ fewer).
+  @@T262_ALL_NOW@@ pass (@@T262_ALL_PCT@@%; 26,012 / 54.2% before Phase 44); of the @@T262_DEF_TOTAL@@
+  on functions, classes and objects, @@T262_DEF_NOW@@ pass (@@T262_DEF_PCT@@%; 10,835 / 69.1%
+  before Phase 44). `make test262` runs the latter. It is used for what a
+  change moved between two builds, not as a score (Phase 34: 108 more pass
+  and none fewer in those directories; Phase 44: 1,440 more pass and none
+  fewer in those 21 directories, plus 374/374 = 100.0% in
+  `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
+  Phase 43: @@T262_ALL_GAINED@@ more in the whole suite and @@T262_ALL_LOST_WORD@@ fewer).
 - **Five of the 15 failures are whole features that do not exist**: BigInt
   (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
@@ -674,7 +676,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 172 engine test suites
+# Run the 175 engine test suites
 make test
 ```
 
@@ -741,14 +743,14 @@ make test
 make test
 ```
 
-Output (172 suites; the first and last lines shown):
+Output (175 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 172 engine test suites passed successfully!
+All 175 engine test suites passed successfully!
 ```
 
 ```bash
@@ -878,7 +880,7 @@ interface objects have their parents as prototypes
 ./build/litebird --run-js 'class A { static s() { return "A.s"; } } class B extends A {} class C extends B {}
 console.log(Object.getPrototypeOf(C) === B, C.s(), Object.getPrototypeOf(TypeError) === Error, typeof Function.prototype)'
 # true A.s true function        (before: Uncaught TypeError: s is not a function)
-make js-conformance      # 955 / 970; prototypes.dat 68 / 76
+make js-conformance      # 969 / 984; prototypes.dat 68 / 76
 make test262             # the standard's own tests on functions, classes and objects: @@T262_DEF_NOW@@ of @@T262_DEF_TOTAL@@
 ```
 
@@ -965,7 +967,7 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 955 / 970; construct.dat 47 / 49
+make js-conformance      # 969 / 984; construct.dat 47 / 49
 make dom-conformance     # 665 / 665; compiled.dat 25 / 25
 ```
 

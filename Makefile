@@ -119,9 +119,9 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the normal build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. (954 pass there today, 955 in the normal
-# build, which is what the CI floor requires since finding 47.)
-JS_ASAN_FLOOR ?= 953
+# case that the normal build passes. (968 pass there today, 969 in the normal
+# build, which is what the CI floor requires since findings 49 and 50.)
+JS_ASAN_FLOOR ?= 967
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 665

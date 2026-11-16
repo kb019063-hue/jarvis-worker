@@ -30,7 +30,7 @@ a row from Open tasks over anything here, take that row.
 ## Where Litebird stands today (the honest baseline)
 
 WPT-grade HTML/DOM/XML parsing for the covered corpora; JavaScript interpreted
-on a tree-walking evaluator (plus a half-finished bytecode VM), 955/970 on its
+on a tree-walking evaluator (plus a half-finished bytecode VM), 969/984 on its
 recorded corpus; layout with an 8×8 bitmap font; a terminal/ANSI renderer;
 `http://` only — no TLS at all; XHR for `data:` URLs only; no typed arrays,
 `Proxy`, BigInt or ES modules; pixels are **unmeasured** by any scoreboard.

@@ -61,20 +61,21 @@ directories of it (downloaded the first time, at a pinned commit, into
 `build/test262`; nothing of it is in the repository).
 
 ```bash
-make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 10,835 pass
+make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 12,275 pass
 python3 tools/conformance/run_test262.py --binary before=/tmp/litebird-main --binary now=build/litebird
 python3 tools/conformance/run_test262.py --show 20 language/expressions/super
 ```
 
-It is not a scoreboard and has no floor: two thirds of those directories
-pass (of the 4,851 tests that do not, 1,259 write an identifier with a
-Unicode escape, which the lexer does not read, and 1,027 are scripts that
-should be refused before they run). Of the whole suite, 26,012 of 47,967
-pass (`run_test262.py --timeout 4 built-ins language annexB`, a quarter of
-an hour for two builds). What it is for is the second form: build
-`main` somewhere (`git worktree add /tmp/main origin/main`, `make` there),
-give the runner both binaries, and it lists every test that passes in the
-first and not in the second and exits 1 if there is one. A change to how
+It is not a scoreboard and has no floor: 78.3% of those directories pass
+(Phase 44 / finding 50 added Unicode 17.0 identifier validation and `\uXXXX` /
+`\u{...}` identifier escape handling, moving the 21 default directories from
+10,835 to 12,275 of 15,686 with 0 regressions, and moving `language/identifiers`,
+`keywords`, `future-reserved-words` and `reserved-words` to 374/374 = 100.0%).
+Of the whole suite, ~27,741 of 47,967 pass (`run_test262.py --timeout 4
+built-ins language annexB`, a quarter of an hour for two builds). What it is for
+is the second form: build `main` somewhere (`git worktree add /tmp/main origin/main`,
+`make` there), give the runner both binaries, and it lists every test that passes
+in the first and not in the second and exits 1 if there is one. A change to how
 functions, classes or properties work should be run through it before it is
 called done: Phase 34 passed every case it had written for itself and still
 failed two tests that `main` passed. Both became corpus cases.

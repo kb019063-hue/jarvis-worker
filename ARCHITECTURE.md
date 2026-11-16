@@ -4519,17 +4519,18 @@ script that measured its own strings threw `TypeError`.
 ### 3. How it is verified
 
 ```
-make test          # 167 engine suites, all passing (one new)
+make test          # 175 engine suites, all passing (one new)
 make conformance   # html5lib 1781/1792, unchanged
-make js-conformance # 907/921, unchanged
-make dom-conformance # 640/640, unchanged
+make js-conformance # 926/940, unchanged
+make dom-conformance # 644/644, unchanged
 make url-conformance # 1188/1188, unchanged
 make xml-conformance # 1702/1702, unchanged
 make wpt           # 5421/5463, the 42 listed failures, 0 unlisted
 make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
 make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed
-make asan          # ASan/UBSan: 167/167 suites, corpora, fuzz and deep pages
+make asan          # ASan/UBSan: 175/175 suites, corpora, fuzz (0 findings),
+                   # 882 deep runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed
 ```
 
 (Numbers as run on this branch; see AUDIT.md finding 52 for what each one
@@ -4548,4 +4549,4 @@ baseline with the gradient applied across the run.
 `ROADMAP.md` row 6 now reads path/hit-test gaps; the AGENTS.md row was
 rewritten to what is left (WebP/AVIF, SVG `<text>`). No expectation was
 re-recorded, no `.dat` corpus file was touched, and no floor was lowered;
-the unit scoreboard went from 166 to 167 suites.
+the unit scoreboard went from 174 to 175 suites.

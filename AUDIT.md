@@ -3467,18 +3467,17 @@ it. The scores on the tree merged with `main` (Phase 42 and the
 table-completeness phase included):
 
 ```
-make test            # 167 engine suites, all passing (166 before, +1)
+make test            # 175 engine suites, all passing (174 before, +1)
 make conformance     # html5lib 1781/1792 — unchanged
-make js-conformance  # 907/921 — unchanged
-make dom-conformance # 640/640 — unchanged
+make js-conformance  # 926/940 — unchanged
+make dom-conformance # 644/644 — unchanged
 make url-conformance # 1188/1188 — unchanged
 make xml-conformance # 1702/1702 — unchanged
 make wpt             # 5421/5463; 42 listed, 0 fail and are not listed
 make diff-trees      # 6,000 of 6,000 pages equal to the corrected parse5
 make diff-xml        # 4,000 generated documents, 0 differ; 3,000/3,000 round trips
 make deep            # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
-make asan            # ASan/UBSan: 167/167 suites, corpora, fuzz (0 findings),
-                         # 882 deep runs over 315 pages at depth 10,000 on a 2 MB stack, 0 failed
+make asan            # ASan/UBSan: re-run on this tree; see below
 ```
 
 **What this does not change.** No `direction`/RTL or bidi, no kerning or

@@ -107,7 +107,7 @@ XML_FLOOR ?= 1702
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 5421
+WPT_FLOOR ?= 6961
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -217,11 +217,12 @@ url-conformance: $(TARGET)
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
 
-## The web-platform-tests in tests/wpt (dom/nodes and domparsing), the tests
-## browsers are tested with, run with their own testharness.js. Needs nothing
-## but the binary. Fails when fewer than the floor pass, when a subtest fails
-## that tests/wpt/expected-failures.txt does not list, when a listed one
-## passes, and when a file differs from tests/wpt/MANIFEST.txt.
+## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
+## Flexbox parsing suites), the tests browsers are tested with, run with their
+## own testharness.js. Needs nothing but the binary. Fails when fewer than
+## the floor pass, when a subtest fails that tests/wpt/expected-failures.txt
+## does not list, when a listed one passes, and when a file differs from
+## tests/wpt/MANIFEST.txt.
 wpt: $(TARGET)
 	@$(WPT) --min-pass $(WPT_FLOOR)
 

@@ -25,7 +25,7 @@ python3 tools/conformance/run_wpt.py --list-failures       # every failure, in t
 
 Copied from `web-platform-tests/wpt` at commit
 `f2b7b7add021b5f40e30c65dd348135058996249` (14 November 2026), unchanged:
-112 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
+210 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
 and the runner checks the files against it before every run. Do not edit a
 test. To take a newer copy, replace the files and write the manifest again
 from upstream's tree.
@@ -34,17 +34,27 @@ from upstream's tree.
 | :--- | ---: | :--- |
 | `domparsing/` | 27 test files, 8 support files | `DOMParser` for XML and HTML (including cross-frame URL and `pushState` provenance), XHTML `innerHTML` / `insertAdjacentHTML` / `createContextualFragment`, the `parsererror` document, CDATA, doctypes, entities, `XMLSerializer`, a round trip |
 | `dom/nodes/` | 60 test files, 10 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data, cross-frame adoption and constructors |
+| `css/css-flexbox/parsing/` | 27 test files | the flexbox properties: what values are valid and invalid, what the computed value is, the shorthands and their serialization, `-webkit-` legacy aliases |
+| `css/css-grid/parsing/` | 60 test files, 1 metadata file (`WEB_FEATURES.yml`) | the grid track properties, named lines and `grid-template-areas`, the `repeat()` notation including auto-fill/auto-fit, the shorthands and their serialization |
+| `css/support/`, `css/css-grid/support/` | 7 support files | what the parsing tests include (`parsing-testcommon.js`, `computed-testcommon.js`, `shorthand-testcommon.js`, `grid-child-utils.js`, three stylesheets) |
 | `resources/testharness.js` | 1 | the harness |
 | `dom/common.js`, `dom/constants.js`, `common/` | 5 | what the tests include, and three documents (`blank.html`, `dummy.xml`, `dummy.xhtml`) some load into a frame |
+| `fonts/` | 3 | Ahem and its stylesheet, used by two grid tests |
 | `LICENSE.md` | 1 | the licence of the tests |
 
 They are the tests for what Phase 28 and Phase 42 built (XML in the DOM,
 nested `<iframe>` browsing contexts, and XHTML page execution) and for the
-code they touched. It is not all of `dom/`: the rest is to be added as it is
-worked on.
+code they touched, and for the CSS Grid and Flexbox property parsers and
+serializers. It is not all of `dom/` and not all of `css/`: the rest is to be
+added as it is worked on. In particular, only the *parsing* of the grid and
+flexbox suites is here. Everything layout — `abspos/`, `alignment/`,
+`layout-algorithm/`, `grid-lanes/` — is a test of a layout engine this
+project does not have yet; those suites arrive with the engine, and the
+`.tentative.html` grid-lanes files with them.
 
 Left out of `domparsing/`: streaming and Trusted Types tests, and `.sub.html`
-server-substitution tests.
+server-substitution tests. Left out of `css/`: the layout suites, `animation/`,
+and `.sub.html` tests.
 
 The licence is `LICENSE.md`, the 3-Clause BSD licence of the project.
 
@@ -64,7 +74,16 @@ changed, and the files in this directory are not touched.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**5,421 of 5,463 subtests pass. 42 are listed:**
+**6,961 of 7,198 subtests pass. 237 are listed:** the 42 below from the
+DOM suites, and these 195 from the CSS parsing suites.
+
+| Reason | Subtests | What it is |
+| :--- | ---: | :--- |
+| `grid-resolved-tracks` | 120 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does |
+| `intrinsic-auto-repeat-lanes` | 64 | `repeat(auto-fill, <intrinsic-size>)` — an intrinsic size inside an auto-repetition. The current Grid 3 draft (21 October 2026) makes that a grid-lanes feature only and says the declaration on a non-lanes grid computes to `none`, which is what Litebird does; these `.tentative.html` tests expect the lanes behavior, resolved against a layout, and are expected to move with the spec |
+| `css-values-4` | 8 | `sign()`, `sibling-index()` (and what they need: the context the value is evaluated in) and the Values 4 term order of a serialized `calc()`. None is implemented; the `sign(…)` cases in `flex-computed.html`/`flex-valid.html` cannot be answered without them |
+| `detached-computed-style` | 1 | `grid-template-node-not-connected.html`: after the element is disconnected, the test wants `getComputedStyle().gridTemplate` to be the empty string (it guards a WebKit crash, bug 261421). Litebird answers `none`, the computed value; it does not special-case disconnected elements |
+| `document-fonts` | 2 | `document.fonts` (`FontFaceSet`) is not implemented; two tests call `document.fonts.ready.then(…)` and harness-error before any subtest runs |
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |

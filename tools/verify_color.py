@@ -341,9 +341,9 @@ class ColorCheckProcess:
 
     def run_lines(self, lines):
         payload = "\n".join(lines) + "\n"
-        out, err = self.proc.communicate(payload, timeout=30)
-        if self.proc.returncode != 0:
-            raise RuntimeError(f"color_check crashed with rc={self.proc.returncode}: {err}")
+        out, err = self.proc.communicate(payload, timeout=60)
+        if self.proc.returncode != 0 or "runtime error:" in err or "Sanitizer" in err:
+            raise RuntimeError(f"color_check failed with rc={self.proc.returncode}: {err}")
         return out.splitlines()
 
 

@@ -788,10 +788,19 @@ private:
                 out.kind = (out.kind != MathKind::Number) ? out.kind : rhs.kind;
                 out.value = out.value * rhs.value;
             } else {
+                auto safe_div = [](double num, double den) -> double {
+                    if (den == 0.0) {
+                        if (std::isnan(num) || num == 0.0) return std::numeric_limits<double>::quiet_NaN();
+                        const bool neg = std::signbit(num) != std::signbit(den);
+                        return neg ? -std::numeric_limits<double>::infinity()
+                                   : std::numeric_limits<double>::infinity();
+                    }
+                    return num / den;
+                };
                 if (rhs.kind == MathKind::Number) {
-                    out.value = out.value / rhs.value;
+                    out.value = safe_div(out.value, rhs.value);
                 } else if (out.kind == rhs.kind) {
-                    out.value = out.value / rhs.value;
+                    out.value = safe_div(out.value, rhs.value);
                     out.kind = MathKind::Number;
                 } else {
                     return false;

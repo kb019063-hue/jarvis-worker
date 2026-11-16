@@ -12337,6 +12337,53 @@ TEST(js_compiled_custom_elements_are_upgraded) {
                 "host.querySelectorAll('x-not:defined').length, host.querySelectorAll('x-not').length, "
                 "Element.prototype.getAttribute.call(not, 'id')].join()") ==
            "0,button,false,true,x,0,1,not");
+
+    // The body of a generator, and of an async function that awaits, runs on
+    // a thread of its own. What it constructs while an element is upgraded
+    // is part of that upgrade all the same: the list of constructions in
+    // place belongs to the agent, not to the thread. (With a list for each
+    // thread the first three of these were refused: "The custom element
+    // constructor returned a different object".) A generator that was
+    // started during an upgrade and is resumed after it finds nothing under
+    // construction and makes an element of its own.
+    js.eval_ast(R"(
+        var resumed = 0, keep = null;
+        var Gen = inherit(function () {
+            var nt = new.target;
+            var it = (function* () { var el = Reflect.construct(HTMLElement, [], nt); yield el; resumed++; })();
+            var self = it.next().value;
+            self.made = 'gen';
+            it.next();
+            return self;
+        }, HTMLElement);
+        var Async = inherit(function () {
+            var nt = new.target, self;
+            (async function () { self = Reflect.construct(HTMLElement, [], nt); await null; })();
+            self.made = 'async';
+            return self;
+        }, HTMLElement);
+        var early = (function* () { var nt = yield 0; yield Reflect.construct(HTMLElement, [], nt); })();
+        early.next();
+        var Mid = inherit(function () { var self = early.next(new.target).value; self.made = 'mid'; return self; }, HTMLElement);
+        var LateGen = inherit(function () {
+            var nt = new.target;
+            keep = (function* () { yield 1; yield Reflect.construct(HTMLElement, [], nt); })();
+            keep.next();
+            return Reflect.construct(HTMLElement, [], nt);
+        }, HTMLElement);
+        customElements.define('x-gen', Gen);
+        customElements.define('x-async', Async);
+        customElements.define('x-mid', Mid);
+        customElements.define('x-late-gen', LateGen);
+        host.innerHTML = '<x-gen id="gen"></x-gen><x-async id="async"></x-async><x-mid id="mid"></x-mid><x-late-gen id="lategen"></x-late-gen>';
+        var afterwards = keep.next().value;
+    )");
+    assert(text("[$('gen').made, $('gen') instanceof Gen, $('async').made, $('async') instanceof Async, $('mid').made, "
+                "$('mid') instanceof Mid, host.querySelectorAll(':defined').length, resumed].join()") ==
+           "gen,true,async,true,mid,true,4,1");
+    assert(text("[$('lategen') instanceof LateGen, afterwards instanceof LateGen, afterwards !== $('lategen'), "
+                "afterwards.localName, afterwards.isConnected, new Gen().made, new Async().made].join()") ==
+           "true,true,true,x-late-gen,false,gen,async");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {

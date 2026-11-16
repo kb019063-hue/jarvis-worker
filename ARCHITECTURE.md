@@ -352,7 +352,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
-| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (168/168 unit suites; JS corpus 955/970, `construct.dat` 47/49 against 13 before; DOM corpus 663/663, `compiled.dat` 23/23 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
+| **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (168/168 unit suites; JS corpus 955/970, `construct.dat` 47/49 against 13 before; DOM corpus 664/664, `compiled.dat` 24/24 against 2 before; test262 @@T262_ALL_GAINED@@ more and @@T262_ALL_LOST_WORD@@ fewer of @@T262_ALL_TOTAL@@) |
 
 ---
 
@@ -4274,9 +4274,17 @@ upgrade it is part of is `new.target`.
 
 So `JsValue::construct()` notes a construction whose `this` is a platform
 object already, a *construction in place*, for as long as it runs, under the
-function `new` is applied to (a thread-local list in `src/js/JsValue.cpp`;
+function `new` is applied to (a list in `src/js/JsValue.cpp`;
 `super(...)` constructing a script parent on the same object adds nothing to
-it). When the constructor of an interface asks for the object it is to build
+it). The list belongs to the agent, not to the thread, unlike the call
+context: the body of a generator, and of an async function that awaits, runs
+on a thread of its own in step with whoever resumed it, and a constructor
+that reaches its interface from there is part of the same upgrade. (The
+first version had a list for each thread, and such a constructor was
+refused.) One thread of an agent runs at a time, so a list has no lock; the
+table of lists has one, because a worker is an agent on another thread, and
+a counter of running constructions lets every other construction skip it.
+When the constructor of an interface asks for the object it is to build
 on (`current_derived_this()`), the list is looked at first. If the call's
 `new.target` is being constructed in place, on an element of the interface
 that asks, the answer is that element, whatever the call came with, and it
@@ -4312,6 +4320,7 @@ and jsdom's (all of these are cases of `compiled.dat`):
 | The constructor asks twice during an upgrade | The second request is a `TypeError`. Under `new`, where nothing is being upgraded, each request makes an element |
 | A second instance of the class made while it is being upgraded | Before the constructor reached its interface: the inner instance is the element being upgraded, and the constructor's own request is the one refused. After: the inner one is refused. For a class and for a compiled constructor alike |
 | The constructor throws after it got its element | The upgrade fails; later constructions get elements of their own |
+| The constructor reaches its interface from the body of a generator or of an async function | The same element, though that body runs on another thread. A generator that was started during an upgrade and is resumed after it makes an element of its own |
 
 **What is left** is in how `run_upgrade` calls the constructor, which is in
 `src/js/DomObserverBindings.cpp`. The standard constructs it the ordinary
@@ -4321,13 +4330,15 @@ returns the element. Here the element is given the prototype first and is
 `this`. A class cannot tell, and neither can a compiled constructor that
 does what it is for. Three things can
 (`tests/dom-conformance/open/compiled-custom-elements.js`, 5 lines, 4
-differ, all four the same on `main`): in a constructor written as a function
+differ): in a constructor written as a function
 `this === self` is `true`; one that never reaches `HTMLElement` (`function
 Plain() { this.touched = true; }`) has written on the element and its
 upgrade counts as done, where the standard refuses it; and after a
 constructor that throws before it reaches `HTMLElement` the element keeps
 the class's prototype. The fourth line is the selector's: a customized
-built-in whose upgrade failed still matches `:defined`. A row of the task
+built-in whose upgrade failed still matches `:defined`. The last three
+print the same on `main`; the first could not be asked there, because the
+constructor it is asked of did not get its element. A row of the task
 table.
 
 ### 6. How this is verified
@@ -4462,7 +4473,7 @@ Eight cases of `prototypes.dat` fail on those.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 663 cases of its corpus (Phases 27, 28, 34 and 43) and 4,658 of
+   It passes all 664 cases of its corpus (Phases 27, 28, 34 and 43) and 4,658 of
    the 5,192 subtests of `dom/nodes` and `domparsing`; the corpus can
    only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout

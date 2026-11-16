@@ -11,6 +11,10 @@
 #include "litebird/common/ReleaseQueue.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <sstream>
+#include <cassert>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
@@ -387,23 +391,65 @@ struct InPlaceConstruction {
     bool handed_out{false};     // the standard's "already constructed" marker
 };
 
-thread_local std::vector<InPlaceConstruction> t_in_place;
+// One list for each agent, not for each thread. The body of a generator, and
+// of an async function that awaits, runs on a thread of its own, in step with
+// whoever resumed it (JsInterpreter::spawn_frame); what it constructs there is
+// part of the construction that is running, and has to find it here. Within
+// an agent one thread runs at a time, and a thread hands over to the next
+// under the frame's lock, so a list needs no lock of its own. The table of
+// lists does: a worker is an agent on another thread.
+struct InPlaceLists {
+    std::mutex mutex;
+    std::unordered_map<uint32_t, std::vector<InPlaceConstruction>> by_agent;
+    // Constructions in place that are running, in all agents. Nearly always
+    // none, and then nobody has to take the lock to find that out.
+    std::atomic<size_t> running{0};
+};
+
+InPlaceLists& in_place_lists() {
+    // Never destroyed: an entry holds a handle into the heap, which is gone
+    // by the time statics are.
+    static InPlaceLists* const lists = new InPlaceLists;
+    return *lists;
+}
+
+/// The list of this thread's agent. Null when `create` is false and nothing
+/// is being constructed in place in it.
+std::vector<InPlaceConstruction>* in_place_list(bool create) {
+    InPlaceLists& lists = in_place_lists();
+    if (!create && lists.running.load(std::memory_order_acquire) == 0) return nullptr;
+    const uint32_t agent = Heap::current_agent();
+    std::lock_guard<std::mutex> lock(lists.mutex);
+    // A rehash moves no element: the pointer stays good while other agents
+    // add lists of their own.
+    if (create) return &lists.by_agent[agent];
+    const auto found = lists.by_agent.find(agent);
+    return found == lists.by_agent.end() || found->second.empty() ? nullptr : &found->second;
+}
 
 struct InPlaceScope {
-    bool noted{false};
+    std::vector<InPlaceConstruction>* list{nullptr};
     InPlaceScope(const JsValue& callee, const JsValue* this_val, const JsValue* new_target) {
         if (!this_val || this_val->type != JsType::Object || !this_val->object_val ||
             !this_val->object_val->dom_node) {
             return;
         }
+        std::vector<InPlaceConstruction>* found = in_place_list(true);
         // `super(...)` constructs the parent on the same object with the same
         // new.target: it is one construction, noted once.
-        if (!t_in_place.empty() && t_in_place.back().object.object_val.get() == this_val->object_val.get()) return;
-        t_in_place.push_back({(new_target ? *new_target : callee).identity(), *this_val});
-        noted = true;
+        if (!found->empty() && found->back().object.object_val.get() == this_val->object_val.get()) return;
+        found->push_back({(new_target ? *new_target : callee).identity(), *this_val});
+        in_place_lists().running.fetch_add(1, std::memory_order_release);
+        list = found;
     }
     ~InPlaceScope() {
-        if (noted) t_in_place.pop_back();
+        if (!list) return;
+        // Constructions nest, also across the threads of an agent: a frame
+        // is never suspended inside a call it made, so the last one noted is
+        // the first to end.
+        assert(!list->empty());
+        list->pop_back();
+        in_place_lists().running.fetch_sub(1, std::memory_order_release);
     }
     InPlaceScope(const InPlaceScope&) = delete;
     InPlaceScope& operator=(const InPlaceScope&) = delete;
@@ -440,8 +486,9 @@ const JsValue* JsValue::current_derived_this() {
     // the object, whatever this call was given, and only once: a constructor
     // that reaches its interface a second time, or makes another instance of
     // its own class while it runs, is refused, as the standard has it.
-    if (new_target && slot && context.callee) {
-        for (auto entry = t_in_place.rbegin(); entry != t_in_place.rend(); ++entry) {
+    std::vector<InPlaceConstruction>* in_place = new_target && slot && context.callee ? in_place_list(false) : nullptr;
+    if (in_place) {
+        for (auto entry = in_place->rbegin(); entry != in_place->rend(); ++entry) {
             if (entry->new_target != new_target->identity()) continue;
             if (!is_interface_of(*context.callee, entry->object)) {
                 // Another interface than the element's is not given the

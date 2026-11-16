@@ -184,7 +184,7 @@ jobs:
         # a regression.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 663
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 664
       - name: URL scoreboard (web-platform-tests data)
         # tests/url holds the URL parsing and setter cases browsers are tested
         # with. The floor in the Makefile is the number that pass today; the

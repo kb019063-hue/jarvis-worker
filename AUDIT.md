@@ -3024,7 +3024,7 @@ read where the language reads it. And when the function named as
 upgrade), the element's interface is handed that element, once, whether
 `super()` or `Reflect.construct` reached it: the HTML standard's
 construction stack, kept beside the call context because the files of the
-DOM bindings belonged to another open pull request. Five files of `src/js`
+DOM bindings belonged to another open pull request. Four files of `src/js`
 and one header; ARCHITECTURE.md, Phase 43, has the design.
 
 ### What each instrument found
@@ -3048,6 +3048,7 @@ found by something else.
 | Writing the case for fields on an object a parent returned | A private name is a property whose name begins with `#`: `obj['#p']` reads a private field from outside its class, and `o.#p` for an object without the field is `undefined` where it is a `TypeError`. Older than this change, not fixed, a row of the task table |
 | A case for `new.target` inside `eval` | `eval` inside a function is global code: no local variable, no `this`, no `new.target`, no `super`. Older than this change, not fixed, a row of the task table, and one failing case |
 | jsdom, on `Reflect.construct(Event, …)` | Two answers of jsdom's that are not Web IDL's: it reads `NewTarget.prototype` twice, and when that is not an object it makes something that is not an event. `compiled.dat` stays away from both and the unit suite asserts the standard's |
+| Asking, while checking that the collector sees the list of constructions in place, which thread it belongs to | It was a list for each thread, and the body of a generator or of an async function that awaits runs on a thread of its own. A constructor that asked for its element from there, during an upgrade, found no construction and was refused (`The custom element constructor returned a different object`): 4 of the 6 lines of a page written for it differed from jsdom. Nobody compiles a constructor that way, but the list was in the wrong place: it is the agent's now, as the standard's construction stack is the definition's. One case of `compiled.dat` and two assertions of the unit suite |
 | The sanitizer build, on the new cases, the probes and the six new suites | @@ASAN_FOUND@@ |
 
 ### What is known to be wrong and is not fixed

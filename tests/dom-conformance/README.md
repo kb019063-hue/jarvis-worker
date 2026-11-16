@@ -13,11 +13,11 @@ python3 tools/conformance/run_dom_conformance.py --reference   # check the corpu
 python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside the corpus: where do jsdom and Litebird differ?
 ```
 
-663 cases in 25 files, and Litebird passes all of them. Of the 572 that
+664 cases in 25 files, and Litebird passes all of them. Of the 572 that
 Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
 57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
 none; of the 11 that Phase 34 wrote (`interfaces.dat`), the engine before it
-passes none; of the 23 that Phase 43 wrote (`compiled.dat`), the engine
+passes none; of the 24 that Phase 43 wrote (`compiled.dat`), the engine
 before it passes 2.
 
 ## Where the expectations come from
@@ -142,7 +142,7 @@ case that dies early fails because its output is cut short.
 | `document.dat`, `window.dat`, `loading.dat` | The document, the global object, location, history, storage, timers, the load events |
 | `events.dat`, `forms.dat` | Dispatch, the event classes, handlers; form controls, their state, validation and submission |
 | `components.dat` | Custom elements and shadow trees |
-| `compiled.dat` | Custom elements and other interfaces built without `class`: a constructor written for ES5 that gets its element from `Reflect.construct(HTMLElement, [], new.target)`, what Babel emits (`_wrapNativeSuper`, `_createSuper`) two classes deep, a class on top of a compiled constructor, a compiled subclass of a class that extends `HTMLElement`, a customized built-in. Made by `new` and `createElement`, and upgraded where they stand: in the page's markup, from `innerHTML`, by `cloneNode`, by `customElements.upgrade`. The element is given out once: what happens when a constructor asks twice, when a second instance of the class is made while it is being upgraded, and when the interface that asks is not the element's (a customized built-in that asks `HTMLElement`, a class that extends `Event`). `Reflect.construct` of `Event`, `CustomEvent` and `EventTarget` with a `new.target`, and `new.target` in the parent class of a custom element |
+| `compiled.dat` | Custom elements and other interfaces built without `class`: a constructor written for ES5 that gets its element from `Reflect.construct(HTMLElement, [], new.target)`, what Babel emits (`_wrapNativeSuper`, `_createSuper`) two classes deep, a class on top of a compiled constructor, a compiled subclass of a class that extends `HTMLElement`, a customized built-in. Made by `new` and `createElement`, and upgraded where they stand: in the page's markup, from `innerHTML`, by `cloneNode`, by `customElements.upgrade`. The element is given out once: what happens when a constructor asks twice, when a second instance of the class is made while it is being upgraded, and when the interface that asks is not the element's (a customized built-in that asks `HTMLElement`, a class that extends `Event`). A constructor that reaches its interface from the body of a generator or of an async function, which run on threads of their own here. `Reflect.construct` of `Event`, `CustomEvent` and `EventTarget` with a `new.target`, and `new.target` in the parent class of a custom element |
 | `interfaces.dat` | The interface objects as functions with prototypes of their own: `Object.getPrototypeOf(HTMLDivElement)` is `HTMLElement`, then `Element`, `Node`, `EventTarget`; the same for events and for nodes that are not elements; constants inherited along the way (`HTMLElement.ELEMENT_NODE`); a class and an ES5 constructor that extend an interface |
 | `errors.dat` | Which exception each misuse throws, and what a page sees of an uncaught one |
 | `xml.dat` | `DOMParser` with the XML types and what it gives when the text is not well formed, namespaces, CDATA sections and processing instructions, `createDocument`, `XMLSerializer`, `innerHTML` in an XML document, which names are names |

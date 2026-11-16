@@ -569,3 +569,61 @@ console.log(ok.ok, ok instanceof Ok, new Ok().localName, document.createElement(
 1 false true x 0
 true 1
 true true x-ok true
+
+#name the constructor reaches its interface from a generator and from an async function, during an upgrade
+#html
+<html><head><title>Upgrade</title></head><body><x-gen id="a"></x-gen><x-async id="b"></x-async><div id="host"></div></body></html>
+#code
+function proto(F) { F.prototype = Object.create(HTMLElement.prototype, { constructor: { value: F, writable: true, configurable: true } }); Object.setPrototypeOf(F, HTMLElement); }
+var log = [];
+function Gen() {
+  var nt = new.target;
+  var it = (function* () { var el = Reflect.construct(HTMLElement, [], nt); yield el; log.push('resumed'); })();
+  var self = it.next().value;
+  self.made = 'gen';
+  it.next();
+  return self;
+}
+proto(Gen);
+function Async() {
+  var nt = new.target, self;
+  (async function () { self = Reflect.construct(HTMLElement, [], nt); await null; log.push('after await ' + (self === document.getElementById('b'))); })();
+  self.made = 'async';
+  return self;
+}
+proto(Async);
+customElements.define('x-gen', Gen);
+customElements.define('x-async', Async);
+var a = document.getElementById('a'), b = document.getElementById('b');
+console.log(a.made, a instanceof Gen, document.querySelectorAll('x-gen:defined').length);
+console.log(b.made, b instanceof Async, document.querySelectorAll('x-async:defined').length);
+var n = new Gen(), m = new Async();
+console.log(n.made, n.localName, m.made, m.localName);
+var keep, late;
+function Late() {
+  var nt = new.target;
+  keep = (function* () { yield 1; var r; try { r = Reflect.construct(HTMLElement, [], nt) === late ? 'the element' : 'another element'; } catch (e) { r = e.name; } yield r; })();
+  keep.next();
+  return Reflect.construct(HTMLElement, [], nt);
+}
+proto(Late);
+customElements.define('x-late', Late);
+var host = document.getElementById('host');
+host.innerHTML = '<x-late></x-late>';
+late = host.firstChild;
+console.log(late instanceof Late, keep.next().value);
+var early = (function* () { var nt = yield 0; yield Reflect.construct(HTMLElement, [], nt); })();
+early.next();
+function Mid() { var self = early.next(new.target).value; self.made = 'mid'; return self; }
+proto(Mid);
+customElements.define('x-mid', Mid);
+host.innerHTML = '<x-mid></x-mid>';
+console.log(host.firstChild.made, host.firstChild instanceof Mid);
+Promise.resolve().then(function () { return 0; }).then(function () { console.log(log.join(' | ')); });
+#expect
+gen true 1
+async true 1
+gen x-gen async x-async
+true another element
+mid true
+resumed | resumed | after await true | after await false

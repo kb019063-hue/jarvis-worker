@@ -89,7 +89,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 28 | **Processing instructions in the HTML parser** (`<?target data>`) + migrate html5lib→WPT corpus. | M |
-| 29 | **`Attr` is a `Node`**; one qualified name in two namespaces; `NamedNodeMap`/`HTMLCollection` own-props (open task). | M |
+| 29 | ~~**`Attr` is a `Node`**; one qualified name in two namespaces; `NamedNodeMap`/`HTMLCollection` own-props~~ (Phase 51). | M |
 | 30 | **Shadow DOM complete** — slots, `::part`, event retargeting, constructable stylesheets. | M–L |
 | 31 | **Selection + `contenteditable` stack** — `Selection` API, ranges, caret, input events. The authoring gap nobody notices until they try to edit rich text. | L–XL |
 | 32 | **SVG completeness + MathML** — text/gradients/viewBox transforms in render; MathML parse-only. | M |

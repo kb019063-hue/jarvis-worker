@@ -39,9 +39,10 @@ from upstream's tree.
 | `dom/common.js`, `dom/constants.js`, `common/` | 5 | what the tests include, and three documents (`blank.html`, `dummy.xml`, `dummy.xhtml`) some load into a frame |
 | `LICENSE.md` | 1 | the licence of the tests |
 
-They are the tests for what Phase 28, Phase 42 and Phase 47 built (XML in the
-DOM, nested `<iframe>` browsing contexts, XHTML page execution, and the
-WHATWG Encoding Standard) and for the code they touched. It is not all of
+They are the tests for what Phase 28, Phase 42, Phase 47 and Phase 51 built
+(XML in the DOM, nested `<iframe>` browsing contexts, XHTML page execution,
+the WHATWG Encoding Standard, and the attribute model) and for the code they
+touched. It is not all of
 `dom/` or `encoding/`: the rest is to be added as it is worked on — the
 `encoding/` pages left out are the ones that call a browser's `TextDecoder`
 and `TextEncoder`, which this engine does not expose to script.
@@ -90,13 +91,11 @@ with `--quiet`.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**7,968 of 8,009 subtests pass. 41 are listed:**
+**7,998 of 8,009 subtests pass. 11 are listed:**
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `one-name-two-namespaces` | 14 | Two attributes of one element with the same qualified name and different namespaces (`setAttributeNS('ab', 'attr', …)` then `setAttributeNS('kl', 'attr', …)`). An element keeps its attributes under their qualified names, so the second replaces the first. Only a script can make such a pair; no parser can |
-| `attr-is-not-a-node` | 10 | An `Attr` is an object and not a `Node`: `attr.cloneNode()`, `attr.lookupNamespaceURI()`, `importNode(attr)`, an `Attr` adopted with its element |
-| `named-properties` | 8 | `Object.getOwnPropertyNames` and property descriptors of a `NamedNodeMap` and an `HTMLCollection`; assigning to an index of an `HTMLCollection` in strict mode |
+| `strict-write` | 2 | Assigning to an index of an `HTMLCollection` that is out of range must throw a `TypeError` in strict mode. The write is refused — the index is not created, and `list[5]` stays `undefined` — but the refusal is not reported to the caller, so nothing throws. A browser throws from `[[Set]]`; here the exotic object's `set` returns "handled" and the strictness of the assignment lives in `JsEval.cpp`, which is claimed by another change (see `ARCHITECTURE.md`, "Known gaps") |
 | `nodelist-iterator` | 1 | `NodeList.prototype[Symbol.iterator]` is not the same function as `Array.prototype[Symbol.iterator]` |
 | `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
@@ -141,9 +140,15 @@ once more.
 ```text
 $ python3 tools/fuzz/xml_roundtrip.py --count 3000
 XML round trip: 3000 trees, 3000 come back the same from Litebird and from Expat, 0 do not
-  1252 of the trees that pass hold a name that contradicts a declaration in scope (3347 such names);
-  165 were written with other prefixes the second time, and none changed after that
+  1226 of the trees that pass hold a name that contradicts a declaration in scope (3315 such names);
+  166 were written with other prefixes the second time, and none changed after that
 ```
+
+Since Phase 51 an element may hold two attributes with one qualified name in
+different namespaces — an `xmlns` in the XMLNS namespace and one in no
+namespace, say — and no XML text can write that pair: a parser refuses the
+repeated name. The tree generator makes one or the other, never both, and the
+pair is exercised by the unit suite instead.
 
 Following the two subtests above to the letter makes this fail: with the
 standard's "generate a prefix" as written (issue 44) 265 of those 3,000 trees

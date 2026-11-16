@@ -55,6 +55,20 @@ public:
     /// Appends the computed property names that enumerate, in order. They come
     /// before the stored properties.
     virtual void keys(JsObject* self, std::vector<std::string>& out) { (void)self; (void)out; }
+    /// Appends every computed property name, the ones that do not enumerate
+    /// included (`Object.getOwnPropertyNames` asks for those too). Defaults to
+    /// the enumerable ones.
+    virtual void own_keys(JsObject* self, std::vector<std::string>& out) { keys(self, out); }
+    /// What the computed property `name` is, when it is one: whether it
+    /// enumerates and whether it can be written. False when `name` is not a
+    /// computed property.
+    virtual bool computed_property(JsObject* self, const std::string& name, bool& enumerable, bool& writable) {
+        (void)self;
+        (void)name;
+        (void)enumerable;
+        (void)writable;
+        return false;
+    }
     /// Reports every value held outside the property table to the collector.
     virtual void trace(Heap& heap) { (void)heap; }
 };

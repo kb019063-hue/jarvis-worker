@@ -287,6 +287,18 @@ private:
     void replace_template_mode(Mode mode);
     void stop_parsing();
 
+    // --- customizable <select> / <selectedcontent> ------------------------
+    struct SelectState {
+        std::weak_ptr<Element> first_selectedcontent;
+        std::weak_ptr<Element> selected_option;
+        bool has_explicit_selected{false};
+        bool has_auto_selected{false};
+    };
+    void register_selectedcontent(const std::shared_ptr<Element>& selectedcontent);
+    void update_selectedcontent_on_option_pop(const std::shared_ptr<Element>& option);
+    void sync_selectedcontent_on_pop(const std::shared_ptr<Element>& selectedcontent);
+    void clone_option_into_selectedcontent(const Element& option, Element& selectedcontent) const;
+
     static QuirksMode quirks_mode_for(const Doctype&, bool force_quirks);
 
     std::shared_ptr<Document> m_document;
@@ -341,6 +353,9 @@ private:
     ContentModel m_tokenizer_pending{ContentModel::Data};
     std::string m_tokenizer_pending_tag;
     bool m_skip_next_newline{false};
+    bool m_saw_selectedcontent{false};
+    bool m_script_ran{false};
+    std::unordered_map<const Element*, SelectState> m_select_states;
 };
 
 } // namespace litebird

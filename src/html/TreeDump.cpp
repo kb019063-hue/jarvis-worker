@@ -76,18 +76,17 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 // ("xlink href", "xml lang", "xmlns xlink").
                 std::vector<std::pair<std::string, std::string>> attrs;
                 attrs.reserve(el.attributes().size());
-                for (const auto& [name, value] : el.attributes()) {
-                    const std::string& uri = el.attribute_namespace(name);
+                for (const auto& attribute : el.attributes()) {
+                    const std::string& uri = attribute.namespace_uri();
                     const char* shown = uri == "http://www.w3.org/1999/xlink" ? "xlink "
                                       : uri == "http://www.w3.org/XML/1998/namespace" ? "xml "
                                       : uri == "http://www.w3.org/2000/xmlns/" ? "xmlns "
                                       : nullptr;
                     if (!shown) {
-                        attrs.emplace_back(name, value);
+                        attrs.emplace_back(attribute.name, attribute.value);
                         continue;
                     }
-                    const auto colon = name.find(':');
-                    attrs.emplace_back(shown + (colon == std::string::npos ? name : name.substr(colon + 1)), value);
+                    attrs.emplace_back(shown + std::string(attribute.local_name()), attribute.value);
                 }
                 std::sort(attrs.begin(), attrs.end(),
                           [](const auto& a, const auto& b) { return a.first < b.first; })

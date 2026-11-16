@@ -64,6 +64,7 @@ The rest are documented with enough detail to act on.
 | 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
 | 52 | A canvas could draw every shape but no text: `fillText`/`strokeText`/`measureText` and the `font`/`textAlign`/`textBaseline` state did not exist, so no canvas text could reach the screen | **Medium** | ✅ Fixed (Phase 46) |
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
+| 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 
 ---
 
@@ -1558,18 +1559,16 @@ being checked is worth less than one that was not:
 
 ### What the comparison does not reach
 
-- **`<select>`.** The standard changed how its content is parsed, parse5 has
-  the older rules and so does Litebird: the 11 corpus cases that still fail.
-  Two parsers that are both behind cannot check each other.
+- **`<select>`.** At the time of Phase 26, the standard had changed how `<select>` content is parsed, parse5 had the older rules and so did Litebird (the 11 corpus cases that failed until Phase 49, finding 55, implemented customizable `<select>` and `<selectedcontent>` cloning). Two parsers that were both behind could not check each other; parse5 8.1.1 still keeps the older rules (`--with-select`), while Litebird passes all 1,792 corpus cases.
 - **The corpus has moved.** html5lib-tests handed its tree-construction
   tests to web-platform-tests in June 2026, and the vendored copy is the
   last one from before. The web-platform-tests copy has 1,973 cases;
-  Litebird passes 1,868 of them (1,851 before Phase 26). Of the other 105,
+  Litebird passed 1,868 of them after Phase 26 (1,851 before Phase 26; the
+  11 `<select>` cases were fixed later in Phase 49). Of the remaining cases,
   88 need processing instructions (`<?x?>` is a node of its own in the
-  standard now and a comment here), 6 need a script to run while the page
-  is being parsed, and 11 are the `<select>` cases. Vendoring that copy is
-  the next step for the scoreboard; the runner does not read its
-  `#description` sections yet.
+  standard now and a comment here) and 6 need a script to run while the page
+  is being parsed. Vendoring that copy is the next step for the scoreboard;
+  the runner does not read its `#description` sections yet.
 - **Reading `innerHTML`.** The markup Litebird writes does not escape `<`
   and `&` in text, and writes `<br />` where the standard writes `<br>`. So
   text that holds `<b>` reads back as an element. Parsing is this finding;
@@ -3575,3 +3574,63 @@ whole subtrees without a fitting edge. See `ARCHITECTURE.md`, Phase 48, for
 the generator, exact baseline/new timings, differential command and the
 remaining O(number of intersecting intervals) insertion cost. No table-layout,
 encoding, Canvas, or JavaScript semantics were changed.
+
+## 55. ✅ `<select>` content and `<selectedcontent>` cloning followed pre-2025 rules (Phase 49)
+
+**The hole.** Litebird parsed `<select>` using the pre-2025 HTML rules:
+`"select"` was omitted from default scope boundaries (`has_element_in_select_scope`
+walked only `option`/`optgroup`), `Mode::InSelect` character/element paths
+skipped `reconstruct_formatting_elements()`, `<keygen>` and `<textarea>` broke out
+of `<select>`, `stop_parsing()` cleared nothing (so an unclosed trailing
+`<option>` never fired pop-time hooks), and `<selectedcontent>` cloning did not
+exist. That left 11 cases failing in the html5lib tree-construction corpus
+(`webkit02.dat` 43/49, `tests1.dat` 110/112, `tests_innerHTML_1.dat` 79/81,
+`tests7.dat` 33/34 — `1781/1792`, 99.4%).
+
+**The fix.** `include/litebird/html/HtmlTreeBuilder.hpp`,
+`src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp` update
+the tree builder to the current WHATWG HTML `<select>` rules:
+- `"select"` is indexed in `m_scope_boundary_indices[0]` as a default scope
+  boundary, keeping `has_element_in_scope("select")` $O(1)$ and forwarding
+  `has_element_in_select_scope` to it.
+- `Mode::InSelect` reconstructs active formatting elements before character
+  tokens (except `U+0000`) and before `<option>`, `<optgroup>`, and `<hr>`, and
+  only breaks out of `<select>` on `<input>` (leaving `<keygen>` and `<textarea>`
+  inside `<select>` via `send_to_in_body`).
+- `stop_parsing()` pops all remaining open elements via
+  `resize_open_elements(0)` so EOF-open `<option>` elements trigger
+  `pop_current_node()`.
+- Iterative DOM cloning (`clone_node_tree`) populates the nearest-ancestor
+  `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`)
+  when an `<option>` closes (only once popped, ignoring disabled `<option>` /
+  disabled ancestor `<optgroup>`, respecting `multiple`, `size > 1`, and
+  `select_none`) or when `<selectedcontent>` itself closes after earlier
+  `<option>`s, with `m_saw_selectedcontent` avoiding tree walks when absent and
+  `m_script_ran` triggering a full DOM rescan when inline scripts mutate the
+  `<select>`. Per-`<select>` `SelectState` is erased when `<select>` pops.
+
+**Verification.** `make conformance` **1792/1792 (100.0%)** across all 57
+html5lib `.dat` files (`webkit02.dat` 49/49, `tests1.dat` 112/112,
+`tests_innerHTML_1.dat` 81/81, `tests7.dat` 34/34); CI conformance floor
+raised `1781 -> 1792`. `make test` **181/181** suites (adding
+`customizable_select_scope_and_formatting_rules` and
+`select_selectedcontent_cloning_and_edge_cases`). `make js-conformance`
+**926/940**, `make dom-conformance` **644/644**, `make url-conformance`
+**1188/1188**, `make wpt` **7968/8009** across 103 files (`41` listed, `0`
+unlisted), `make diff-trees` **6000/6000** (`0` differ vs corrected `parse5
+8.1.1`; `--with-select --pages 1500` gives `1368/1500` equal and `132` / `49`
+reduced patterns all matching current HTML `<select>` element retention / scope
+boundary vs `parse5`'s legacy drops), `make verify-media` **35/35**,
+`make fuzz-media` **1800/1800**, `make diff-strings` **50485/50580** (`95`
+known Unicode diffs), `make deep` **1332/1332** runs at 200k depth (0 failed),
+`make tsan` green, and ASan+UBSan (`build-asan`) green on all 181 unit suites,
+tree-construction (`1792/1792`), DOM (`644/644`), URL (`1188/1188`), JS
+(`924/940`), WPT (`7968/8009` on merged CI/Release floor), `fuzz_parser` (400),
+`fuzz_pipeline` (400), `fuzz_xml` (600), `verify-media` (35), `fuzz-media`
+(1800), and `asan-deep` (882 runs at 10k depth).
+
+**Still open.** Script-driven dynamic `<option>`/`<selectedcontent>` updates
+*after* parsing finishes (live DOM mutations via `el.selected = true` or
+inserting/removing `<option>` children via JS) are not coupled to `<selectedcontent>`
+re-cloning; only parse-time and post-parse-script-rescan `<selectedcontent>`
+sync are implemented here.

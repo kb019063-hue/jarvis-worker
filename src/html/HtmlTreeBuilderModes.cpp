@@ -387,7 +387,10 @@ void HtmlTreeBuilder::process_text(const HtmlToken& token) {
             }
             pop_current_node();
             m_mode = m_original_mode;
-            if (script) m_script_handler(script);
+            if (script) {
+                m_script_ran = true;
+                m_script_handler(script);
+            }
             return;
         }
         default:
@@ -1255,6 +1258,7 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
     switch (token.type) {
         case HtmlTokenType::Character:
             if (token.data[0] == '\0') return;
+            reconstruct_formatting_elements();
             insert_character(token.data[0]);
             return;
         case HtmlTokenType::Comment:
@@ -1267,30 +1271,33 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
             if (name == "html") { send_to_in_body(token); return; }
             if (name == "option") {
                 if (current_node() && html_name(current_node()) == "option") pop_current_node();
+                reconstruct_formatting_elements();
                 insert_html_element(token);
                 return;
             }
             if (name == "optgroup") {
                 if (current_node() && html_name(current_node()) == "option") pop_current_node();
                 if (current_node() && html_name(current_node()) == "optgroup") pop_current_node();
+                reconstruct_formatting_elements();
                 insert_html_element(token);
                 return;
             }
             if (name == "hr") {
                 if (current_node() && html_name(current_node()) == "option") pop_current_node();
                 if (current_node() && html_name(current_node()) == "optgroup") pop_current_node();
+                reconstruct_formatting_elements();
                 insert_html_element(token);
                 pop_current_node();
                 return;
             }
             if (name == "select") {
-                if (!has_element_in_select_scope("select")) return;
+                if (!has_element_in_scope("select")) return;
                 pop_until_tag("select");
                 reset_insertion_mode();
                 return;
             }
-            if (name == "input" || name == "keygen" || name == "textarea") {
-                if (!has_element_in_select_scope("select")) return;
+            if (name == "input") {
+                if (!has_element_in_scope("select")) return;
                 pop_until_tag("select");
                 reset_insertion_mode();
                 process_token(token);
@@ -1318,7 +1325,7 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
                 return;
             }
             if (name == "select") {
-                if (!has_element_in_select_scope("select")) return;
+                if (!has_element_in_scope("select")) return;
                 pop_until_tag("select");
                 reset_insertion_mode();
                 return;

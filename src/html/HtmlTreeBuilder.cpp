@@ -1,10 +1,13 @@
 #include "litebird/html/HtmlTreeBuilder.hpp"
 
 #include "litebird/dom/Comment.hpp"
+#include "litebird/dom/FormState.hpp"
+#include "litebird/dom/ProcessingInstruction.hpp"
 #include "litebird/dom/Text.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <unordered_set>
 
 namespace litebird {
@@ -342,7 +345,7 @@ void HtmlTreeBuilder::index_open_element(std::size_t index, const std::shared_pt
         m_open_html_tag_indices[name].push_back(index);
         if (name == "applet" || name == "caption" || name == "html" || name == "table" ||
             name == "td" || name == "th" || name == "marquee" || name == "object" ||
-            name == "template") {
+            name == "select" || name == "template") {
             m_scope_boundary_indices[0].push_back(index);
         }
         if (name == "ol" || name == "ul") m_scope_boundary_indices[1].push_back(index);
@@ -403,9 +406,19 @@ void HtmlTreeBuilder::push_element(const std::shared_ptr<Element>& element) {
 
 void HtmlTreeBuilder::pop_current_node() {
     if (m_open_elements.empty()) return;
-    unindex_open_element(m_open_elements.size() - 1, m_open_elements.back());
+    auto element = m_open_elements.back();
+    unindex_open_element(m_open_elements.size() - 1, element);
     m_open_elements.pop_back();
     m_open_depths.pop_back();
+    if (m_saw_selectedcontent && element && element->element_namespace() == ElementNamespace::HTML) {
+        if (element->tag_name() == "option") {
+            update_selectedcontent_on_option_pop(element);
+        } else if (element->tag_name() == "selectedcontent") {
+            sync_selectedcontent_on_pop(element);
+        } else if (element->tag_name() == "select") {
+            m_select_states.erase(element.get());
+        }
+    }
 }
 
 void HtmlTreeBuilder::resize_open_elements(std::size_t size) {
@@ -573,13 +586,10 @@ bool HtmlTreeBuilder::has_element_in_table_scope(const std::string& tag) const {
 }
 
 bool HtmlTreeBuilder::has_element_in_select_scope(const std::string& tag) const {
-    for (int i = static_cast<int>(m_open_elements.size()) - 1; i >= 0; --i) {
-        const auto& element = m_open_elements[static_cast<std::size_t>(i)];
-        const std::string& name = html_name(element);
-        if (name == tag) return true;
-        if (!(name == "optgroup" || name == "option")) return false;
-    }
-    return false;
+    // Under the current HTML standard (customizable <select>), "select" is
+    // part of default scope and the former "in select scope" check is replaced
+    // by "in scope".
+    return has_element_in_scope(tag);
 }
 
 void HtmlTreeBuilder::generate_implied_end_tags(const std::string& except) {
@@ -829,6 +839,7 @@ std::shared_ptr<Element> HtmlTreeBuilder::insert_html_element(const HtmlToken& t
     auto element = create_element_for_token(token, ElementNamespace::HTML);
     append_node_at(element, place_for_new_node());
     push_element(element);
+    if (token.name == "selectedcontent") register_selectedcontent(element);
     return element;
 }
 
@@ -1190,7 +1201,322 @@ bool HtmlTreeBuilder::is_html_integration_point(const Element& element) const {
 }
 
 void HtmlTreeBuilder::stop_parsing() {
-    // Nothing to tear down: the loop ends when the tokenizer reports EOF.
+    // Pop all remaining open elements off the stack so end-of-parse steps
+    // (such as cloning a trailing <option> into <selectedcontent>) run.
+    resize_open_elements(0);
+}
+
+namespace {
+
+bool is_html_tag(const Node& node, std::string_view tag) {
+    if (!node.is_element()) return false;
+    const auto& el = static_cast<const Element&>(node);
+    return el.element_namespace() == ElementNamespace::HTML && el.tag_name() == tag;
+}
+
+std::shared_ptr<Element> nearest_select_ancestor(const Node& node) {
+    for (auto cur = node.parent(); cur; cur = cur->parent()) {
+        if (!cur->is_element()) return nullptr;
+        const auto& el = static_cast<const Element&>(*cur);
+        if (el.element_namespace() == ElementNamespace::HTML) {
+            if (el.tag_name() == "select") return std::static_pointer_cast<Element>(cur);
+            if (el.tag_name() == "datalist") return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+bool is_option_disabled(const Element& option, const Element& select) {
+    if (option.has_attribute("disabled")) return true;
+    for (auto cur = option.parent(); cur && cur.get() != &select; cur = cur->parent()) {
+        if (!cur->is_element()) break;
+        const auto& el = static_cast<const Element&>(*cur);
+        if (el.element_namespace() == ElementNamespace::HTML && el.tag_name() == "optgroup" &&
+            el.has_attribute("disabled")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int parse_select_size(const std::string& raw) {
+    std::size_t i = 0;
+    while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\n' ||
+                              raw[i] == '\f' || raw[i] == '\r')) {
+        ++i;
+    }
+    if (i < raw.size() && raw[i] == '+') ++i;
+    if (i >= raw.size() || raw[i] < '0' || raw[i] > '9') return 0;
+    long long value = 0;
+    while (i < raw.size() && raw[i] >= '0' && raw[i] <= '9') {
+        value = value * 10 + (raw[i] - '0');
+        if (value > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
+        ++i;
+    }
+    return static_cast<int>(value);
+}
+
+bool select_allows_auto_select(const Element& select) {
+    if (select.has_attribute("multiple")) return false;
+    if (const FormControlState* state = select.form_state()) {
+        if (state->select_none) return false;
+    }
+    if (const std::string* size_attr = select.attribute("size")) {
+        if (parse_select_size(*size_attr) > 1) return false;
+    }
+    return true;
+}
+
+bool option_has_explicit_selected(const Element& option) {
+    if (const FormControlState* state = option.form_state()) {
+        if (state->has_selected) return state->selected;
+    }
+    return option.has_attribute("selected");
+}
+
+std::shared_ptr<Element> find_first_selectedcontent(const Element& select) {
+    std::vector<Node*> stack;
+    const auto& top_children = select.children();
+    for (std::size_t i = top_children.size(); i-- > 0;) stack.push_back(top_children[i].get());
+
+    while (!stack.empty()) {
+        Node* cur = stack.back();
+        stack.pop_back();
+        if (!cur || !cur->is_element()) continue;
+        auto* el = static_cast<Element*>(cur);
+        if (el->element_namespace() == ElementNamespace::HTML) {
+            if (el->tag_name() == "selectedcontent") {
+                return std::static_pointer_cast<Element>(el->shared_from_this());
+            }
+            if (el->tag_name() == "select") continue;
+        }
+        const auto& children = el->children();
+        for (std::size_t i = children.size(); i-- > 0;) stack.push_back(children[i].get());
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Node> clone_node_tree(const Node& source, const std::shared_ptr<Document>& into) {
+    std::vector<std::pair<const Node*, std::shared_ptr<Node>>> pending;
+
+    auto copy_one = [&](const Node& src) -> std::shared_ptr<Node> {
+        std::shared_ptr<Node> copy;
+        switch (src.type()) {
+            case NodeType::Element: {
+                const auto& from = static_cast<const Element&>(src);
+                auto element = std::make_shared<Element>(from.tag_name(), from.element_namespace());
+                element->set_tag_name_verbatim(from.tag_name());
+                element->set_prefix(from.prefix());
+                element->set_other_namespace_uri(from.other_namespace_uri());
+                element->m_attributes = from.m_attributes;
+                element->copy_attribute_namespaces(from);
+                if (!from.is_value().empty()) element->set_is_value(from.is_value());
+                if (const FormControlState* state = from.form_state()) {
+                    FormControlState& made = element->ensure_form_state();
+                    made = *state;
+                    made.none_options.clear();
+                    made.select_none = false;
+                }
+                if (from.template_contents()) {
+                    auto contents = std::make_shared<Node>(NodeType::DocumentFragment);
+                    if (into) contents->set_owner_document(into);
+                    element->set_template_contents(contents);
+                    pending.push_back({from.template_contents().get(), contents});
+                }
+                copy = element;
+                break;
+            }
+            case NodeType::Text: {
+                auto text = std::make_shared<Text>(static_cast<const Text&>(src).text());
+                text->set_cdata_section(src.is_cdata_section());
+                copy = text;
+                break;
+            }
+            case NodeType::Comment:
+                copy = std::make_shared<Comment>(static_cast<const Comment&>(src).data());
+                break;
+            case NodeType::ProcessingInstruction: {
+                const auto& pi = static_cast<const ProcessingInstruction&>(src);
+                copy = std::make_shared<ProcessingInstruction>(pi.target(), pi.data());
+                break;
+            }
+            case NodeType::DocumentFragment:
+                copy = std::make_shared<Node>(NodeType::DocumentFragment);
+                break;
+            case NodeType::DocumentType: {
+                const auto& dt = static_cast<const DocumentTypeNode&>(src);
+                copy = std::make_shared<DocumentTypeNode>(dt.name(), dt.public_id(), dt.system_id());
+                break;
+            }
+            case NodeType::Document:
+                return nullptr;
+        }
+        if (copy && into) copy->set_owner_document(into);
+        return copy;
+    };
+
+    std::shared_ptr<Node> root = copy_one(source);
+    if (!root) return nullptr;
+    if (!source.children().empty()) pending.push_back({&source, root});
+
+    while (!pending.empty()) {
+        auto [src, dst] = pending.back();
+        pending.pop_back();
+        for (const auto& child : src->children()) {
+            auto child_copy = copy_one(*child);
+            if (!child_copy) continue;
+            dst->append_child(child_copy);
+            if (!child->children().empty()) pending.push_back({child.get(), child_copy});
+        }
+    }
+    return root;
+}
+
+} // namespace
+
+void HtmlTreeBuilder::clone_option_into_selectedcontent(const Element& option, Element& selectedcontent) const {
+    selectedcontent.take_children();
+    for (const auto& child : option.children()) {
+        if (child.get() == &selectedcontent) continue;
+        if (auto copy = clone_node_tree(*child, m_document)) {
+            selectedcontent.append_child(copy);
+        }
+    }
+}
+
+void HtmlTreeBuilder::register_selectedcontent(const std::shared_ptr<Element>& selectedcontent) {
+    m_saw_selectedcontent = true;
+    auto select = nearest_select_ancestor(*selectedcontent);
+    if (!select) return;
+    auto& state = m_select_states[select.get()];
+    if (state.first_selectedcontent.expired()) {
+        state.first_selectedcontent = selectedcontent;
+    }
+}
+
+void HtmlTreeBuilder::sync_selectedcontent_on_pop(const std::shared_ptr<Element>& selectedcontent) {
+    auto select = nearest_select_ancestor(*selectedcontent);
+    if (!select) return;
+
+    auto first_sc = find_first_selectedcontent(*select);
+    if (first_sc != selectedcontent) return;
+
+    auto& state = m_select_states[select.get()];
+    state.first_selectedcontent = selectedcontent;
+
+    if (select->has_attribute("multiple")) return;
+
+    // Walk select for any already-closed <option> elements (e.g. when
+    // <selectedcontent> appears after <option> inside <select>).
+    std::shared_ptr<Element> explicit_option;
+    std::shared_ptr<Element> first_enabled;
+    std::vector<Node*> stack;
+    const auto& top_children = select->children();
+    for (std::size_t i = top_children.size(); i-- > 0;) stack.push_back(top_children[i].get());
+
+    while (!stack.empty()) {
+        Node* cur = stack.back();
+        stack.pop_back();
+        if (!cur || !cur->is_element()) continue;
+        auto* el = static_cast<Element*>(cur);
+        if (el->element_namespace() == ElementNamespace::HTML) {
+            if (el->tag_name() == "select" || el->tag_name() == "datalist") continue;
+            if (el->tag_name() == "option") {
+                auto opt = std::static_pointer_cast<Element>(el->shared_from_this());
+                if (open_element_position(opt) < 0) {
+                    if (option_has_explicit_selected(*opt)) {
+                        explicit_option = opt;
+                    } else if (!first_enabled && !is_option_disabled(*opt, *select)) {
+                        first_enabled = opt;
+                    }
+                }
+                continue;
+            }
+        }
+        const auto& children = el->children();
+        for (std::size_t i = children.size(); i-- > 0;) stack.push_back(children[i].get());
+    }
+
+    std::shared_ptr<Element> picked;
+    if (explicit_option) {
+        state.has_explicit_selected = true;
+        picked = explicit_option;
+    } else if (first_enabled && select_allows_auto_select(*select)) {
+        state.has_auto_selected = true;
+        picked = first_enabled;
+    }
+    if (picked) {
+        state.selected_option = picked;
+        clone_option_into_selectedcontent(*picked, *selectedcontent);
+    }
+}
+
+void HtmlTreeBuilder::update_selectedcontent_on_option_pop(const std::shared_ptr<Element>& option) {
+    auto select = nearest_select_ancestor(*option);
+    if (!select) return;
+    if (select->has_attribute("multiple")) return;
+
+    std::shared_ptr<Element> selectedcontent;
+    if (m_script_ran) {
+        selectedcontent = find_first_selectedcontent(*select);
+        if (!selectedcontent) return;
+    } else {
+        auto it = m_select_states.find(select.get());
+        if (it == m_select_states.end()) return;
+        selectedcontent = it->second.first_selectedcontent.lock();
+        if (!selectedcontent) return;
+    }
+
+    auto& state = m_select_states[select.get()];
+    if (m_script_ran) state.first_selectedcontent = selectedcontent;
+
+    if (m_script_ran) {
+        // Re-evaluate selection across all closed options in the mutated DOM.
+        std::shared_ptr<Element> explicit_option;
+        std::shared_ptr<Element> first_enabled;
+        std::vector<Node*> stack;
+        const auto& top_children = select->children();
+        for (std::size_t i = top_children.size(); i-- > 0;) stack.push_back(top_children[i].get());
+        while (!stack.empty()) {
+            Node* cur = stack.back();
+            stack.pop_back();
+            if (!cur || !cur->is_element()) continue;
+            auto* el = static_cast<Element*>(cur);
+            if (is_html_tag(*el, "select") || is_html_tag(*el, "datalist")) continue;
+            if (is_html_tag(*el, "option")) {
+                auto opt = std::static_pointer_cast<Element>(el->shared_from_this());
+                if (open_element_position(opt) < 0) {
+                    if (option_has_explicit_selected(*opt)) explicit_option = opt;
+                    else if (!first_enabled && !is_option_disabled(*opt, *select)) first_enabled = opt;
+                }
+                continue;
+            }
+            const auto& children = el->children();
+            for (std::size_t i = children.size(); i-- > 0;) stack.push_back(children[i].get());
+        }
+        std::shared_ptr<Element> picked =
+            explicit_option ? explicit_option : (select_allows_auto_select(*select) ? first_enabled : nullptr);
+        if (picked) {
+            state.selected_option = picked;
+            clone_option_into_selectedcontent(*picked, *selectedcontent);
+        }
+        return;
+    }
+
+    const bool is_explicit = option_has_explicit_selected(*option);
+    if (is_explicit) {
+        state.has_explicit_selected = true;
+        state.selected_option = option;
+        clone_option_into_selectedcontent(*option, *selectedcontent);
+        return;
+    }
+
+    if (!state.has_explicit_selected && !state.has_auto_selected &&
+        select_allows_auto_select(*select) && !is_option_disabled(*option, *select)) {
+        state.has_auto_selected = true;
+        state.selected_option = option;
+        clone_option_into_selectedcontent(*option, *selectedcontent);
+    }
 }
 
 QuirksMode HtmlTreeBuilder::quirks_mode_for(const Doctype& doctype, bool force_quirks) {
@@ -1433,7 +1759,7 @@ void HtmlTreeBuilder::process_character(char c) {
         case Mode::InSelect:
             // "A character token that is U+0000 NULL: parse error, ignore."
             if (c == '\0') return;
-            insert_character(c);
+            process_token_in_mode(m_mode, token);
             return;
         case Mode::InSelectInTable:
             process_token_in_mode(m_mode, token);

@@ -25,7 +25,7 @@ python3 tools/conformance/run_wpt.py --list-failures       # every failure, in t
 
 Copied from `web-platform-tests/wpt` at commit
 `f2b7b7add021b5f40e30c65dd348135058996249` (14 November 2026), unchanged:
-112 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
+150 files, `MANIFEST.txt` has the Git blob id of each as that commit has it,
 and the runner checks the files against it before every run. Do not edit a
 test. To take a newer copy, replace the files and write the manifest again
 from upstream's tree.
@@ -34,14 +34,17 @@ from upstream's tree.
 | :--- | ---: | :--- |
 | `domparsing/` | 27 test files, 8 support files | `DOMParser` for XML and HTML (including cross-frame URL and `pushState` provenance), XHTML `innerHTML` / `insertAdjacentHTML` / `createContextualFragment`, the `parsererror` document, CDATA, doctypes, entities, `XMLSerializer`, a round trip |
 | `dom/nodes/` | 60 test files, 10 scripts they include | namespaces and names (`createElementNS`, `createDocument`, `createAttribute`, `lookupNamespaceURI`), the attribute methods, CDATA sections and processing instructions, cloning, inserting and replacing children of a document, character data, cross-frame adoption and constructors |
-| `resources/testharness.js` | 1 | the harness |
+| `encoding/` | 16 test files, 5 scripts and `.headers` sidecars, 14 resources | `bom-handling`, `remove-only-one-bom`, `utf-32` and `utf-32-from-win1252`, and the `legacy-mb-{japanese,korean,tchinese}` error pages: each test iframes a document in a legacy encoding and reads the text it decoded to, which is the byte-level check on the tables of the Encoding Standard |
+| `resources/testharness.js`, `common/subset-tests.js` | 2 | the harness, and the subset runner `big5-decode-extra.html` counts its 2,472 subtests with |
 | `dom/common.js`, `dom/constants.js`, `common/` | 5 | what the tests include, and three documents (`blank.html`, `dummy.xml`, `dummy.xhtml`) some load into a frame |
 | `LICENSE.md` | 1 | the licence of the tests |
 
-They are the tests for what Phase 28 and Phase 42 built (XML in the DOM,
-nested `<iframe>` browsing contexts, and XHTML page execution) and for the
-code they touched. It is not all of `dom/`: the rest is to be added as it is
-worked on.
+They are the tests for what Phase 28, Phase 42 and Phase 47 built (XML in the
+DOM, nested `<iframe>` browsing contexts, XHTML page execution, and the
+WHATWG Encoding Standard) and for the code they touched. It is not all of
+`dom/` or `encoding/`: the rest is to be added as it is worked on — the
+`encoding/` pages left out are the ones that call a browser's `TextDecoder`
+and `TextEncoder`, which this engine does not expose to script.
 
 Left out of `domparsing/`: streaming and Trusted Types tests, and `.sub.html`
 server-substitution tests.
@@ -64,7 +67,7 @@ changed, and the files in this directory are not touched.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**5,421 of 5,463 subtests pass. 42 are listed:**
+**7,968 of 8,009 subtests pass. 41 are listed:**
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
@@ -72,7 +75,6 @@ one passes, so the list stays what is true today.
 | `attr-is-not-a-node` | 10 | An `Attr` is an object and not a `Node`: `attr.cloneNode()`, `attr.lookupNamespaceURI()`, `importNode(attr)`, an `Attr` adopted with its element |
 | `named-properties` | 8 | `Object.getOwnPropertyNames` and property descriptors of a `NamedNodeMap` and an `HTMLCollection`; assigning to an index of an `HTMLCollection` in strict mode |
 | `nodelist-iterator` | 1 | `NodeList.prototype[Symbol.iterator]` is not the same function as `Array.prototype[Symbol.iterator]` |
-| `page-encoding` | 1 | `document.characterSet` of the page is always UTF-8 |
 | `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 

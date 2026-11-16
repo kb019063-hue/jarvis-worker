@@ -4495,10 +4495,11 @@ arrives in pieces.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 5,421 of
-   the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
-   can only ask what jsdom can answer and what somebody thought to ask, and the
-   rest of web-platform-tests has not been run. Phase 36 added on-demand layout
+   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 7,968 of
+   the 8,009 subtests of `dom/nodes`, `domparsing` and `encoding` across 103
+   files; the corpus can only ask what jsdom can answer and what somebody
+   thought to ask, and the rest of web-platform-tests has not been run.
+   Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
    document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 37
@@ -4506,10 +4507,12 @@ arrives in pieces.
    semantics; Phase 42 added nested browsing contexts (`<iframe>`
    `contentDocument`/`contentWindow`/`srcdoc`/`sandbox`, cross-origin
    `WindowProxy` checks, `postMessage`, subdocument layout/rasterization, and
-   `.xhtml` script execution). Still missing: `getComputedStyle(el).width`
-   layout metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG
-   DOM (`className.baseVal`, `viewBox`, `getBBox()`), CORS preflight `OPTIONS`,
-   and four text encodings only. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `.xhtml` script execution); Phase 47 added the WHATWG Encoding Standard's 40
+   decoders and 228 labels for pages, XML and subresources. Still missing:
+   `getComputedStyle(el).width` layout metrics, `document.write`, style sheet
+   objects (`sheet.cssRules`), SVG DOM (`className.baseVal`, `viewBox`,
+   `getBBox()`), CORS preflight `OPTIONS`, and `TextDecoder`/`TextEncoder` (the
+   encodings themselves are read since Phase 47). Absent: `crypto`, `indexedDB`,
    `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
    typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
    Phase 28, section 10, Phase 36, section 9, and Phase 42.

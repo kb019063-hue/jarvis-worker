@@ -4304,8 +4304,10 @@ object, after it has found both functions to be constructors.
 
 ### 5. The DOM: a custom element compiled for older browsers
 
-No file of the DOM bindings changed (they belonged to another open pull
-request). Two things in the engine make such an element work.
+No file of the DOM bindings changed: they belonged to another open pull
+request (#49, which merged while this one was being verified; what was left
+for that reason is at the end of this section). Two things in the engine
+make such an element work.
 
 **Made new.** The constructor of a DOM interface already asked for the
 object a subclass's `super()` hands it and made the element, or the event,

@@ -60,6 +60,29 @@ namespace litebird {
 /// always stored as the one four-byte character they spell, so equal strings
 /// have equal bytes.
 ///
+/// The half that has not been written yet
+///
+/// `a + b` where a ends in a high half and b starts with the low half is one
+/// character, four bytes, where the two texts had six. Those four bytes start
+/// three bytes before the end of a, and bytes that have been written are never
+/// written again, so the join used to copy the whole of a into a new block.
+/// Building a string one half at a time (`s += '\uD83D'; s += '\uDE00'`) did
+/// that on every pair: 20,000 pairs took 5.6 s, 40,000 took 21 s. See AUDIT.md,
+/// finding 47.
+///
+/// So a high half at the very end of a join is not written at all. The handle
+/// keeps it in `m_pending`; `m_bytes` counts only the bytes in the block,
+/// `m_units` counts the half. When the low half arrives the character is
+/// written where the block's text ends, which is an ordinary append: nothing
+/// is copied and the loop above costs what it writes.
+///
+/// A handle in that state is settled the first time anything reads its text:
+/// `view()`, `wide()`, `str()`, a piece. Settling writes the three bytes after
+/// the block's text if that room is still free, which costs nothing, and
+/// otherwise copies the text once into a block the handle's own block keeps
+/// alive (the same arrangement as the UTF-16 form). Nothing about a settled
+/// handle is new: it is an ordinary range of a block.
+///
 /// Threads
 ///
 /// Suspended async functions and workers run on other threads. Handles may be
@@ -81,12 +104,12 @@ public:
 
     JsString(const JsString& other) noexcept
         : m_buffer(other.m_buffer), m_offset(other.m_offset), m_bytes(other.m_bytes),
-          m_unit_offset(other.m_unit_offset), m_units(other.m_units) {
+          m_unit_offset(other.m_unit_offset), m_units(other.m_units), m_pending(other.m_pending) {
         retain();
     }
     JsString(JsString&& other) noexcept
         : m_buffer(other.m_buffer), m_offset(other.m_offset), m_bytes(other.m_bytes),
-          m_unit_offset(other.m_unit_offset), m_units(other.m_units) {
+          m_unit_offset(other.m_unit_offset), m_units(other.m_units), m_pending(other.m_pending) {
         other.forget();
     }
     JsString& operator=(const JsString& other) noexcept {
@@ -112,27 +135,37 @@ public:
     /// The bytes. Valid for as long as this handle, or any copy of it, lives.
     /// Not NUL-terminated.
     std::string_view view() const noexcept {
+        if (m_pending) return settled().view();
         return m_buffer ? std::string_view(m_buffer->bytes() + m_offset, m_bytes) : std::string_view();
     }
-    /// An owned copy of the bytes. This is the one read here whose cost grows
-    /// with the text; code that runs once per character must not call it.
+    /// An owned copy of the bytes. This is the one read here that always costs
+    /// the length of the text; code that runs once per character must not call
+    /// it. `view()` costs nothing except the first read of a handle that owes
+    /// a half, which settles it (see below).
     std::string str() const;
-    size_t size() const noexcept { return m_bytes; }
-    bool empty() const noexcept { return m_bytes == 0; }
+    /// How many bytes `view()` holds, the pending half included.
+    size_t size() const noexcept { return m_bytes + (m_pending ? 3 : 0); }
+    bool empty() const noexcept { return m_bytes == 0 && m_pending == 0; }
 
     // --- The text as script sees it: UTF-16 code units -----------------------------
 
     /// What script calls `.length`.
     size_t length() const noexcept { return m_units; }
-    bool is_ascii() const noexcept { return m_units == m_bytes; }
+    bool is_ascii() const noexcept { return m_pending == 0 && m_units == m_bytes; }
     /// The code unit at `index`, which must be below length().
     char16_t unit_at(size_t index) const {
+        if (m_pending) {
+            // The half is the last unit; everything before it is in the block.
+            if (index + 1 == m_units) return static_cast<char16_t>(m_pending);
+            return written().unit_at(index);
+        }
         return is_ascii() ? static_cast<unsigned char>(m_buffer->bytes()[m_offset + index]) : wide()[index];
     }
     /// length() code units. Only for strings that are not ASCII. Built the
     /// first time it is asked for and kept for as long as the block is; the
     /// pointer stays valid for as long as this handle, or any copy, lives.
     const char16_t* wide() const {
+        if (m_pending) return settled().wide();
         const Wide* cached = m_buffer->wide.load(std::memory_order_acquire);
         if (cached && cached->units.load(std::memory_order_acquire) >= m_unit_offset + m_units) {
             return cached->data() + m_unit_offset;
@@ -156,7 +189,9 @@ public:
     static int compare(std::string_view a, std::string_view b) noexcept;
 
     friend bool operator==(const JsString& a, const JsString& b) noexcept {
-        if (a.m_bytes != b.m_bytes || a.m_units != b.m_units) return false;
+        if (a.m_units != b.m_units) return false;
+        if (a.m_pending != b.m_pending) return a.view() == b.view();   // one of them has a half not yet written
+        if (a.m_bytes != b.m_bytes) return false;
         if (a.m_buffer == b.m_buffer && a.m_offset == b.m_offset) return true;     // the same range of one block
         return a.view() == b.view();
     }
@@ -166,7 +201,9 @@ public:
 
     /// True when no half of a surrogate pair stands alone in the text, which is
     /// when the bytes are UTF-8 that anything outside the engine will accept.
-    bool is_well_formed() const noexcept { return is_ascii() || find_lone_half(view()) == std::string_view::npos; }
+    bool is_well_formed() const noexcept {
+        return m_pending == 0 && (is_ascii() || find_lone_half(view()) == std::string_view::npos);
+    }
     /// The text with every lone half replaced by U+FFFD.
     JsString to_well_formed() const;
     /// Where the next lone half is encoded in `utf8`, at or after `from`, or
@@ -231,6 +268,19 @@ private:
         /// because something was appended to it.
         uint32_t moves{0};
         std::atomic<Wide*> wide{nullptr};
+        /// Texts of handles that owed a half and had to be copied to be read,
+        /// because the room after this block's text had been taken. A settled
+        /// copy never changes and is only ever added to, so readers walk the
+        /// list without a lock; it is freed with this block. See settled().
+        struct Settled {
+            std::atomic<Settled*> next{nullptr};
+            uint32_t offset{0};       // the handle this text was made for
+            uint32_t bytes{0};
+            uint32_t pending{0};
+            uint32_t text_offset{0};  // where the text starts in `text`
+            Buffer* text{nullptr};    // null when it is this block itself
+        };
+        std::atomic<Settled*> settled{nullptr};
 
         char* bytes() noexcept { return reinterpret_cast<char*>(this + 1); }
         const char* bytes() const noexcept { return reinterpret_cast<const char*>(this + 1); }
@@ -243,8 +293,35 @@ private:
     /// A new block holding exactly `utf8`, which is known to be well-formed.
     static JsString from_checked(std::string_view utf8, size_t units);
     /// `a` followed by `more` (well-formed, `more_units` code units, and not a
-    /// low surrogate half after a high one).
+    /// low surrogate half after a high one). `a` must be settled.
     static JsString append(const JsString& a, std::string_view more, size_t more_units);
+    /// `a` with `half` (0, or a high surrogate half) owed at its end. `a` must
+    /// be settled and its units must not count the half yet.
+    static JsString with_pending(JsString a, uint32_t half);
+    /// `a` followed by `more`, joining the halves that meet and deferring a
+    /// high half that ends the result. `more` is well-formed UTF-8, may be
+    /// empty, and `more_units` counts its code units.
+    static JsString concat_settled(const JsString& a, std::string_view more, size_t more_units);
+    /// This handle without its pending half: the bytes that are in the block.
+    /// O(1), nothing is written. Only for reading what is already there.
+    JsString written() const noexcept;
+    /// The bytes in the block, without the pending half. Never null data with
+    /// a size: an empty range gives an empty view.
+    std::string_view written_view() const noexcept;
+    /// A handle on a range of a block, holding one claim on it.
+    static JsString hold(Buffer* buffer, uint32_t offset, uint32_t bytes, uint32_t unit_offset, uint32_t units) noexcept;
+    /// Add a settled text to its block's list. The list only grows.
+    static void publish_settled(Buffer* buffer, Buffer::Settled* node) noexcept;
+    /// `a` (which may owe a half) followed by `more`, which is well-formed and
+    /// whose units are counted. The half `a` owes is joined or written first.
+    static JsString concat_owed(const JsString& a, std::string_view more, size_t more_units);
+    /// This handle with the pending half written into a block: an ordinary
+    /// range, the same text. Nothing is copied when the room after the block's
+    /// text is still free.
+    JsString settled() const;
+    /// A block holding this text, kept alive by `owner` for as long as any
+    /// handle reads from `owner`. For settling a handle whose room was taken.
+    static JsString settle_copy(const JsString& a);
     const char16_t* widen() const;
     /// A handle on bytes [byte_begin, byte_begin + bytes) of this string,
     /// which are its code units [unit_begin, unit_begin + units).
@@ -258,6 +335,7 @@ private:
         m_bytes = other.m_bytes;
         m_unit_offset = other.m_unit_offset;
         m_units = other.m_units;
+        m_pending = other.m_pending;
     }
 
     void retain() const noexcept {
@@ -272,6 +350,7 @@ private:
         m_bytes = 0;
         m_unit_offset = 0;
         m_units = 0;
+        m_pending = 0;
     }
 
     Buffer* m_buffer{nullptr};      // null for the empty string
@@ -279,6 +358,10 @@ private:
     uint32_t m_bytes{0};
     uint32_t m_unit_offset{0};      // how many code units the block holds before it
     uint32_t m_units{0};
+    /// A high surrogate half (0xD800..0xDBFF) owed at the end of this text and
+    /// not yet written into the block, or 0. m_units counts it, m_bytes does
+    /// not. See "The half that has not been written yet" above.
+    uint32_t m_pending{0};
 };
 
 /// A string addressed by UTF-16 code unit, which is how String.prototype and

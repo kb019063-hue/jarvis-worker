@@ -84,6 +84,17 @@ CASES = [
      "var a=[];for(var i=0;i<100000;i++)a.push('item'+(i%10));console.log(a.join(',').length)"),
     ("build: prepend, 20k times",
      "var s='';for(var i=0;i<20000;i++)s='ab'+s;console.log(s.length)"),
+    # Half a surrogate pair at a time. The two halves become one four-byte
+    # character, which starts inside the text already written: this copied the
+    # whole string at every pair until finding 47 (20,000 pairs took 5.6 s,
+    # 40,000 took 23 s). The sizes are a doubling apart so that a cost growing
+    # with the square of the length shows up as four times the time.
+    ("build: half a surrogate pair at a time, 20k",
+     r"var s='';for(var i=0;i<20000;i++){s+='\uD83D';s+='\uDE00';s+='-'}console.log(s.length)"),
+    ("build: half a surrogate pair at a time, 40k",
+     r"var s='';for(var i=0;i<40000;i++){s+='\uD83D';s+='\uDE00';s+='-'}console.log(s.length)"),
+    ("build: half a surrogate pair, keeping each prefix, 20k",
+     r"var s='',k='';for(var i=0;i<20000;i++){s+='\uD83D';k=s;s+='\uDE00'}console.log(s.length,k.length)"),
 
     # --- consuming --------------------------------------------------------------
     ("consume: s = s.slice(k), 20k tokens",

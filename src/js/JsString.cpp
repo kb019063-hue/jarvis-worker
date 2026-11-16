@@ -145,6 +145,34 @@ bool halves_meet(std::string_view first, std::string_view second) {
            is_low_half(reinterpret_cast<const unsigned char*>(second.data()));
 }
 
+/// True when `text` ends in a high half standing alone. `text` must be
+/// well-formed UTF-8 (lone halves allowed): 0xED is never a continuation byte,
+/// so three bytes from the end it can only start a character of its own.
+bool ends_in_high_half(std::string_view text) {
+    return text.size() >= 3 && is_high_half(reinterpret_cast<const unsigned char*>(text.data() + text.size() - 3));
+}
+
+/// True when `text` starts with a low half standing alone.
+bool starts_in_low_half(std::string_view text) {
+    return text.size() >= 3 && is_low_half(reinterpret_cast<const unsigned char*>(text.data()));
+}
+
+/// The three bytes of a surrogate half standing alone.
+void encode_half(char* out, uint32_t half) {
+    out[0] = static_cast<char>(0xE0 | (half >> 12));
+    out[1] = static_cast<char>(0x80 | ((half >> 6) & 0x3F));
+    out[2] = static_cast<char>(0x80 | (half & 0x3F));
+}
+
+/// The four bytes of the character a high half and a low half spell together.
+void encode_pair(char* out, uint32_t high, uint32_t low) {
+    const uint32_t cp = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+    out[0] = static_cast<char>(0xF0 | (cp >> 18));
+    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
+}
+
 /// Capacities are rounded up to what the allocator hands out anyway.
 size_t round_capacity(size_t bytes) { return (bytes + 15) & ~size_t{15}; }
 
@@ -174,6 +202,16 @@ void JsString::destroy(Buffer* buffer) noexcept {
     if (Wide* wide = buffer->wide.load(std::memory_order_acquire)) {
         wide->~Wide();
         ::operator delete(wide);
+    }
+    // Texts copied so that a handle owing a half could be read. This block held
+    // one claim on each; a handle still reading one holds its own.
+    for (Buffer::Settled* node = buffer->settled.load(std::memory_order_acquire); node;) {
+        Buffer::Settled* const next = node->next.load(std::memory_order_relaxed);
+        if (Buffer* text = node->text) {
+            if (text->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) destroy(text);
+        }
+        ::operator delete(node);
+        node = next;
     }
     buffer->~Buffer();
     ::operator delete(buffer);
@@ -278,7 +316,7 @@ JsString JsString::from_utf16(std::u16string_view units) {
 }
 
 std::string JsString::str() const {
-    t_stats.bytes_copied += m_bytes;
+    t_stats.bytes_copied += size();
     return std::string(view());
 }
 
@@ -345,6 +383,7 @@ JsString JsString::piece(size_t byte_begin, size_t bytes, size_t unit_begin, siz
     result.m_bytes = static_cast<uint32_t>(bytes);
     result.m_unit_offset = static_cast<uint32_t>(m_unit_offset + unit_begin);
     result.m_units = static_cast<uint32_t>(units);
+    result.m_pending = 0;       // substring settles before it takes a piece
     return result;
 }
 
@@ -368,6 +407,7 @@ size_t JsString::byte_of_unit(size_t unit) const {
 }
 
 JsString JsString::substring(size_t begin, size_t end) const {
+    if (m_pending) return settled().substring(begin, end);
     if (end > m_units) end = m_units;
     if (begin >= end) return JsString();
     if (begin == 0 && end == m_units) return *this;
@@ -404,6 +444,7 @@ JsString JsString::substring(size_t begin, size_t end) const {
 }
 
 JsString JsString::append(const JsString& a, std::string_view more, size_t more_units) {
+    if (more.empty()) return a;
     Buffer* const buffer = a.m_buffer;
     const size_t total = size_t{a.m_bytes} + more.size();
     if (total > kMaxBytes) js_throw_range_error("Invalid string length");
@@ -455,20 +496,184 @@ JsString merge_halves(std::string_view first, std::string_view second) {
 
 } // namespace
 
+// --- The half that has not been written yet ---------------------------------
+//
+// A join defers a high half that ends the result (concat_settled), the half
+// that arrives next decides what becomes of it (concat_owed), and anything
+// that reads the text settles it first (settled). See JsString.hpp.
+
+JsString JsString::hold(Buffer* buffer, uint32_t offset, uint32_t bytes, uint32_t unit_offset, uint32_t units) noexcept {
+    JsString result;
+    result.m_buffer = buffer;
+    result.m_offset = offset;
+    result.m_bytes = bytes;
+    result.m_unit_offset = unit_offset;
+    result.m_units = units;
+    result.retain();
+    return result;
+}
+
+std::string_view JsString::written_view() const noexcept {
+    return m_buffer ? std::string_view(m_buffer->bytes() + m_offset, m_bytes) : std::string_view();
+}
+
+JsString JsString::written() const noexcept {
+    JsString result(*this);
+    result.m_pending = 0;
+    result.m_units = m_units - 1;      // the half owed is the last unit
+    return result;
+}
+
+void JsString::publish_settled(Buffer* buffer, Buffer::Settled* node) noexcept {
+    // Readers walk the list without taking this: a node is whole before it is
+    // linked, and what it points at was written before that.
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    node->next.store(buffer->settled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    buffer->settled.store(node, std::memory_order_release);
+}
+
+JsString JsString::with_pending(JsString a, uint32_t half) {
+    if (half == 0) return a;
+    if (a.m_pending) {
+        // Two high halves in a row: the first is not the start of a pair, so it
+        // belongs in the block. Writing it is an ordinary append.
+        char bytes[3];
+        encode_half(bytes, a.m_pending);
+        a = append(a.written(), std::string_view(bytes, 3), 1);
+    }
+    if (a.m_buffer == nullptr) {
+        const char16_t unit = static_cast<char16_t>(half);
+        return from_utf16(std::u16string_view(&unit, 1));
+    }
+    if (size_t{a.m_bytes} + 3 > kMaxBytes) js_throw_range_error("Invalid string length");
+    a.m_pending = half;
+    a.m_units += 1;
+    return a;
+}
+
+JsString JsString::settled() const {
+    if (m_pending == 0) return *this;
+    Buffer* const buffer = m_buffer;
+    const uint32_t bytes = m_bytes + 3;
+    const auto same = [&](const Buffer::Settled* node) {
+        return node->offset == m_offset && node->bytes == m_bytes && node->pending == m_pending;
+    };
+    const auto handle_for = [&](const Buffer::Settled* node) {
+        // A copy is held by this block, which this handle holds a claim on;
+        // text written into this block is held by this handle itself.
+        return node->text ? hold(node->text, node->text_offset, bytes, 0, m_units)
+                          : hold(buffer, node->text_offset, bytes, m_unit_offset, m_units);
+    };
+    for (const Buffer::Settled* node = buffer->settled.load(std::memory_order_acquire); node;
+         node = node->next.load(std::memory_order_acquire)) {
+        if (same(node)) return handle_for(node);
+    }
+
+    // The room after the block's text: write the half there and the text is
+    // contiguous, with nothing copied. The claim is a compare-and-swap, as for
+    // any append; whoever loses it copies, below.
+    char half[3];
+    encode_half(half, m_pending);
+    const uint32_t end = m_offset + m_bytes;
+    if (3 <= buffer->capacity - end) {
+        uint32_t expected = end;
+        if (buffer->used.compare_exchange_strong(expected, end + 3, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            std::memcpy(buffer->bytes() + end, half, 3);
+            t_stats.bytes_copied += 3;
+            auto* node = new Buffer::Settled;
+            node->offset = m_offset;
+            node->bytes = m_bytes;
+            node->pending = m_pending;
+            node->text_offset = m_offset;
+            publish_settled(buffer, node);
+            return hold(buffer, m_offset, bytes, m_unit_offset, m_units);
+        }
+    }
+    return settle_copy(*this);
+}
+
+JsString JsString::settle_copy(const JsString& a) {
+    char half[3];
+    encode_half(half, a.m_pending);
+    // One copy of the text, in a block of its own. `join` hands back the only
+    // claim on it; that claim becomes the list's, so the copy lives for as long
+    // as any handle that can still ask for it.
+    JsString text = join(a.written_view(), std::string_view(half, 3), a.m_units, a.m_bytes + 3);
+    auto* node = new Buffer::Settled;
+    node->offset = a.m_offset;
+    node->bytes = a.m_bytes;
+    node->pending = a.m_pending;
+    node->text_offset = 0;
+    node->text = text.m_buffer;
+    text.forget();
+    publish_settled(a.m_buffer, node);
+    return hold(node->text, 0, a.m_bytes + 3, 0, a.m_units);
+}
+
+JsString JsString::concat_settled(const JsString& a, std::string_view more, size_t more_units) {
+    if (more.empty()) return a;
+    if (size_t{a.m_bytes} + more.size() > kMaxBytes) js_throw_range_error("Invalid string length");
+    if (a.m_buffer == nullptr) {
+        // Nothing to append to: the text is `more` itself, less the half owed.
+        if (ends_in_high_half(more)) {
+            const auto* const half = reinterpret_cast<const unsigned char*>(more.data() + more.size() - 3);
+            JsString base = from_checked(more.substr(0, more.size() - 3), more_units - 1);
+            return with_pending(std::move(base), decode3(half));
+        }
+        return from_checked(more, more_units);
+    }
+    if (halves_meet(a.view(), more)) {
+        // A high half that is already in a block: the four bytes that replace
+        // it and the low half start inside text another handle may be reading,
+        // so this join copies. A half owed by a handle never comes here.
+        return merge_halves(a.view(), more);
+    }
+    if (ends_in_high_half(more)) {
+        // Everything but the last character goes into the block; the high half
+        // that ends the text is owed by the handle, so that the low half can
+        // still be written after what is there instead of over it.
+        const auto* const half = reinterpret_cast<const unsigned char*>(more.data() + more.size() - 3);
+        JsString base = append(a, more.substr(0, more.size() - 3), more_units - 1);
+        return with_pending(std::move(base), decode3(half));
+    }
+    return append(a, more, more_units);
+}
+
+JsString JsString::concat_owed(const JsString& a, std::string_view more, size_t more_units) {
+    if (a.m_pending == 0) return concat_settled(a, more, more_units);
+    JsString base = a.written();
+    if (starts_in_low_half(more)) {
+        // The half owed and the half that has arrived are one character. It
+        // goes where the block's text ends: an ordinary append, and nothing of
+        // the text before it is copied. Two code units before, two now.
+        char pair[4];
+        encode_pair(pair, a.m_pending, decode3(reinterpret_cast<const unsigned char*>(more.data())));
+        base = append(base, std::string_view(pair, 4), 2);
+        return concat_settled(base, more.substr(3), more_units - 1);
+    }
+    // Something else came after it, so the half stands alone after all.
+    char half[3];
+    encode_half(half, a.m_pending);
+    base = append(base, std::string_view(half, 3), 1);
+    return concat_settled(base, more, more_units);
+}
+
 JsString JsString::concat(const JsString& a, const JsString& b) {
     if (b.empty()) return a;
     if (a.empty()) return b;
-    if (halves_meet(a.view(), b.view())) return merge_halves(a.view(), b.view());
-    return append(a, b.view(), b.m_units);
+    // `b` without the half it may owe: that half is owed by the result instead,
+    // so nothing of `b` has to be written to be joined.
+    JsString result = concat_owed(a, b.written_view(), b.m_units - (b.m_pending ? 1 : 0));
+    return with_pending(std::move(result), b.m_pending);
 }
 
 JsString JsString::concat(const JsString& a, std::string_view b) {
     if (b.empty()) return a;
     const Scan scanned = scan(b);
     if (!scanned.well_formed) return concat(a, JsString(b));
-    if (a.empty()) return from_checked(b, scanned.units);
-    if (halves_meet(a.view(), b)) return merge_halves(a.view(), b);
-    return append(a, b, scanned.units);
+    if (a.empty()) return concat_settled(JsString(), b, scanned.units);
+    return concat_owed(a, b, scanned.units);
 }
 
 JsString JsString::concat(std::string_view a, const JsString& b) {
@@ -476,10 +681,14 @@ JsString JsString::concat(std::string_view a, const JsString& b) {
     const Scan scanned = scan(a);
     if (!scanned.well_formed) return concat(JsString(a), b);
     if (b.empty()) return from_checked(a, scanned.units);
-    if (halves_meet(a, b.view())) return merge_halves(a, b.view());
+    const std::string_view written = b.written_view();
+    if (halves_meet(a, written)) {
+        return with_pending(merge_halves(a, written), b.m_pending);
+    }
     const size_t total = a.size() + b.size();
     if (total > kMaxBytes) js_throw_range_error("Invalid string length");
-    return join(a, b.view(), scanned.units + b.m_units, total);
+    JsString result = join(a, written, scanned.units + b.m_units - (b.m_pending ? 1 : 0), total);
+    return with_pending(std::move(result), b.m_pending);
 }
 
 int JsString::compare(std::string_view a, std::string_view b) noexcept {

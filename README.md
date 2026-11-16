@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 159 engine suites
+make test            # 162 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -59,6 +59,7 @@ make bench           # string-heavy scripts timed against Node; fails if one is 
 make bench-css       # CSS whitespace runs: same paint as compact pages, each under 3 s
 make bench-attributes # attribute-list end removals: expected DOM checksums, each under 3 s
 make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
+make bench-surrogates # a string built half a surrogate pair at a time: results face Node, each under 1 s
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
 make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
@@ -807,6 +808,29 @@ fails over 1 s. On the verification machine the wide cases went from 3.5 s to
 folding, order and every value spelling are unchanged; this is a cost fix, not
 a parser conformance change. Details and repro are in `ARCHITECTURE.md`,
 Phase 39, and `AUDIT.md`, finding 46.
+
+
+### A string built half a surrogate pair at a time (Phase 41)
+
+String text is UTF-8 in blocks that never change once written, and `s += x`
+writes into the room after the text so a loop costs what it writes. One join
+could not: `s += '\uD83D'; s += '\uDE00'` makes one character out of two halves,
+four bytes that start three bytes before the end of what was already written,
+so it copied the whole string at every pair — 20,000 pairs took 5.6 s and
+40,000 took 21 s, against 9 and 15 ms a pair at a time. A join now owes a
+trailing high half instead of writing it: the handle keeps it, and the
+character is written where the block's text ends when the low half arrives.
+Anything that reads the text settles the handle first, writing three bytes
+into the free room or copying once into a block the handle's own block keeps
+alive. `make bench-surrogates` runs the two sizes a doubling apart and the
+keep-each-prefix shape against Node.js with a one-second limit: 17 ms, 28 ms
+and 14 ms, where `main`'s binary fails all three (5.5 s, over 8 s, 3.9 s). The
+corpus case that used to take 5.5 s of its 10-second budget takes 0.035 s, so
+the JavaScript floor in CI is now the score, 907 of 921. The handle is a word
+wider, which costs about 5% across the string benchmarks that were already
+there. Reading a half-owed string before completing the
+pair still copies; that shape is a row of the task table. Details and repro are
+in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
 
 
 ### Page resource origin (Phase 33)

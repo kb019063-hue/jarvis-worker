@@ -117,10 +117,10 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 # URL cases that must pass (tests/url). The UTS #46 host handling makes all
 # of them pass.
 URL_FLOOR ?= 1188
-# Cases that must pass in the sanitizer build. One below the CI scoreboard
-# floor: a sanitizer build's stack frames are too large for one deep-recursion
+# Cases that must pass in the sanitizer build. One below what the normal build
+# scores: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes. (906 pass there today, 907 in the normal
-# build; the CI floor says why it is one below that.)
+# build, which is what the CI floor requires since finding 47.)
 JS_ASAN_FLOOR ?= 905
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
@@ -143,7 +143,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -350,6 +350,15 @@ bench-attributes: $(TARGET)
 bench-tokenizer-attributes: $(TARGET)
 	@python3 tools/bench/bench_tokenizer_attributes.py --reps 3 --max-ms 1000
 
+## A string built half a surrogate pair at a time, at two sizes a doubling
+## apart. The character the halves spell starts inside the text already
+## written, so every pair used to copy the whole string: 20,000 pairs took
+## 5.6 s and 40,000 took 23 s (AUDIT.md, finding 47). They now take about 20
+## and 35 ms; the limit is a second, so this fails on a cost that grows with
+## the square of the length and not on a slow runner. Results face Node.js.
+bench-surrogates: $(TARGET)
+	@python3 tools/bench/bench_strings.py --only surrogate --reps 3 --max-ms 1000
+
 ## Page fetch() must not read arbitrary local files. Generates a marker file
 ## and checks web, file:-base-smuggled, and local file: documents.
 security-fetch: $(TARGET)
@@ -375,4 +384,4 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
-	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

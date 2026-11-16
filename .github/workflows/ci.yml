@@ -133,7 +133,7 @@ jobs:
         # floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 907
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 911
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -145,6 +145,11 @@ jobs:
         # a limit of one second: 20,000 pairs take about 20 ms and 40,000 about
         # 35 ms, where copying the text at every pair took 5.6 s and 23 s.
         run: make bench-surrogates
+      - name: Promise combinators resolve before advancing the iterator
+        # Four reference-checked adversarial cases in async.dat: an unbounded
+        # iterator must be closed when resolve/then throws; the old walk
+        # advanced forever before it looked at the first yielded value.
+        run: make verify-promise-iterators
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

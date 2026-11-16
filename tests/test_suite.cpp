@@ -1391,6 +1391,70 @@ TEST(js_async_promises_and_json) {
     assert(result_code.to_number() == 200.0);
 }
 
+TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var combinator_trace = [];
+        var saved_resolve = Promise.resolve;
+        function check(method) {
+            var steps = 0;
+            var iterable = {
+                next: function() {
+                    combinator_trace.push('next');
+                    if (steps++ === 0) return {value: 7, done: false};
+                    throw Error('advanced beyond the first value');
+                },
+                return: function() { combinator_trace.push('close'); return {done: true}; }
+            };
+            iterable[Symbol.iterator] = function() { return this; };
+            Promise.resolve = function(value) {
+                combinator_trace.push('resolve:' + value);
+                throw Error('stop');
+            };
+            Promise[method](iterable).catch(function(e) {
+                combinator_trace.push(method + ':' + e.message);
+            });
+        }
+        check('all'); check('allSettled'); check('any'); check('race');
+        Promise.resolve = saved_resolve;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("combinator_trace.join('|')").to_string() ==
+           "next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|"
+           "all:stop|allSettled:stop|any:stop|race:stop");
+
+    // Getting resolve is a single operation, before asking for the iterator.
+    js.eval_ast(R"JS(
+        var order = [];
+        Object.defineProperty(Promise, 'resolve', {configurable:true, get:function() {
+            order.push('get');
+            return function(value) { order.push('resolve:' + value); return saved_resolve.call(Promise, value); };
+        }});
+        var items = {i:0, next:function() {
+            order.push('next');
+            return this.i++ < 2 ? {value:this.i, done:false} : {done:true};
+        }};
+        items[Symbol.iterator] = function() { order.push('iterator'); return this; };
+        Promise.all(items);
+        Object.defineProperty(Promise, 'resolve', {value:saved_resolve, writable:true, configurable:true});
+    )JS");
+    assert(js.eval("order.join('|')").to_string() == "get|iterator|next|resolve:1|next|resolve:2|next");
+
+    // The returned promise's own then getter can throw. This happens *during*
+    // iteration, so IteratorClose must call return before rejecting.
+    js.eval_ast(R"JS(
+        var then_trace = [], item = Promise.resolve(1);
+        Object.defineProperty(item, 'then', {get:function() { then_trace.push('then'); throw Error('getter'); }});
+        var forever = {next:function() { then_trace.push('next'); return {value:item, done:false}; },
+                       return:function() { then_trace.push('close'); return {done:true}; }};
+        forever[Symbol.iterator] = function() { return this; };
+        Promise.any(forever).catch(function(e) { then_trace.push(e.message); });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
+}
+
 TEST(css_flex_wrapping_and_grid_layout) {
     using namespace litebird;
 
@@ -11570,6 +11634,7 @@ int main() {
     RUN_TEST(javascript_prototype_chain_and_arrays);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
+    RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);

@@ -38,7 +38,6 @@ dom/nodes/attributes.html	Own property correctness with two namespaced attribute
 dom/nodes/attributes.html	Own property names should only include all-lowercase qualified names for an HTML element in an HTML document	named-properties
 dom/nodes/attributes.html	Own property names should include all qualified names for a non-HTML element in an HTML document	named-properties
 dom/nodes/attributes.html	Own property names should include all qualified names for an HTML element in a non-HTML document	named-properties
-domparsing/DOMParser-parseFromString-encoding.html	(harness)	page-encoding
 domparsing/XMLSerializer-serializeToString.html	Check if an attribute with namespace and no prefix is serialized with the nearest-declared prefix even if the prefix is assigned to another namespace.	serializer-another-tree
 domparsing/XMLSerializer-serializeToString.html	Check if the prefix of an attribute is NOT preserved in a case where neither its prefix nor its namespace URI is not already used.	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization takes into account of the same prefix declared in an ancestor element	serializer-standard-moved

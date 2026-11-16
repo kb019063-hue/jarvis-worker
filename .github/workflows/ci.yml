@@ -217,7 +217,7 @@ jobs:
           path: build/xml-conformance/xmlts20130923.zip
           key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
       - name: XML scoreboard (W3C XML Conformance Test Suite)
-        # 1,702 documents apply to a parser that does not validate, knows
+        # 1,718 documents apply to a parser that does not validate, knows
         # namespaces, reads no external entity and follows XML 1.0 Fifth
         # Edition. Each must be accepted or refused as the suite says, 261
         # with the canonical form the suite gives. All of them pass; the

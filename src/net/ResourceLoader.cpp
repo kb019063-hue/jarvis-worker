@@ -881,6 +881,30 @@ ResourceResponse ResourceLoader::load_http_single_hop(
             return resp;
         }
         file_resp.url = parsed_url.href(true);
+        // Honor optional WPT `<file>.headers` sidecar header declarations.
+        std::filesystem::path sidecar = target_str + ".headers";
+        if (std::filesystem::is_regular_file(sidecar, ec)) {
+            auto trim_ows = [](std::string_view sv) {
+                while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
+                while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t')) sv.remove_suffix(1);
+                return std::string(sv);
+            };
+            std::ifstream hfs(sidecar, std::ios::binary);
+            std::string line;
+            while (std::getline(hfs, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const auto colon = line.find(':');
+                if (colon == std::string::npos || colon == 0) continue;
+                std::string hname = ascii_lower(trim_ows(std::string_view(line).substr(0, colon)));
+                std::string hval = trim_ows(std::string_view(line).substr(colon + 1));
+                if (hname.empty()) continue;
+                file_resp.headers[hname] = hval;
+                file_resp.header_list.emplace_back(hname, hval);
+                if (hname == "content-type") {
+                    file_resp.content_type = hval;
+                }
+            }
+        }
         return file_resp;
     }
 

@@ -58,6 +58,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
+| 49 | `new.target` was the function that was running: an abstract class refused its own subclasses and `Reflect.construct(F, [], G)` did not name `G` inside `F`. `super()` dropped an object the parent's constructor returned, `this` could be bound twice or never, and a custom element compiled for older browsers could neither be made nor upgraded | **High** | ✅ Fixed (Phase 43); `this` before `super()`, `eval` in a function and private names remain |
 
 ---
 
@@ -2342,9 +2343,10 @@ found by something else.
 All of it is the same on `main`. The first seven have a failing case each in
 `prototypes.dat` (nine cases), recorded from Node.
 
-- **`new.target` is the function that is running**, not the one `new` was
-  applied to. `if (new.target === Shape) throw …` in a parent's constructor
-  stops `new Circle()`. The DOM needs the same value:
+- *(Fixed since: finding 49.)* **`new.target` is the function that is
+  running**, not the one `new` was applied to. `if (new.target === Shape)
+  throw …` in a parent's constructor stops `new Circle()`. The DOM needs the
+  same value:
   `Reflect.construct(HTMLElement, [], Derived)` is `Illegal constructor`, so
   a custom element compiled by Babel cannot be made
   (`tests/dom-conformance/open/compiled-custom-elements.js`: 4 of 9 lines as
@@ -2367,7 +2369,8 @@ All of it is the same on `main`. The first seven have a failing case each in
   what a pending timer holds: the collector cannot see into what a native
   function captured.
 - **An object a parent's constructor returns does not become `this`** in the
-  child, and `super.x` in a class that extends null is `undefined`.
+  child (fixed since: finding 49), and `super.x` in a method of a class that
+  extends null is `undefined`.
 - **Not about functions, found by running all of test262:** `Promise.all`,
   `any` and `race` read an iterable to its end before they look at an
   element, so with one that never ends the process grows until it is killed.
@@ -2965,3 +2968,130 @@ corpus; both are rows of the task table now. No expectation was re-recorded, no
 `everyday-*.dat` file was touched, and no floor was lowered: the JavaScript
 floor in CI went **up**, from 906 to the score of 907, which is what the comment
 above it said to do when this row was fixed.
+
+---
+
+## 49. ✅ `new.target` was the function that was running
+
+**The hole.** `new.target` is the function `new` was applied to: in a
+constructor reached through `super(...)` it is the subclass, and inside `F`
+under `Reflect.construct(F, args, G)` it is `G`. Here it was the function
+that was running. The value was bound on entry to a function, to the callee
+whenever the call was a construction, and the call that got there carried
+nothing else: `JsValue::construct(args, this)` was all `super(...)` and
+`Reflect.construct` had to say. Finding 41 listed it as known and not fixed,
+together with the second thing below; the rest was found while fixing those
+two.
+
+| A script | Before | Now, and in Node |
+| :--- | :--- | :--- |
+| `class Shape { constructor() { if (new.target === Shape) throw new TypeError('abstract'); } }`, `class Circle extends Shape {}`: `new Circle()` | `TypeError: abstract` | a `Circle` |
+| `class MyErr extends Error { constructor(m) { super(m); this.who = new.target.name; } }`, `class Sub extends MyErr {}`: `new Sub('m').who` | `MyErr` | `Sub` |
+| `function F() { this.nt = new.target; }`: `Reflect.construct(F, [], G).nt === G` | `false` | `true` |
+| `function Parent() { return custom; }`, `class Child extends Parent { constructor() { super(); this.added = 2; } }`: `new Child() === custom`; `custom.added` | `false`; `undefined` | `true`; `2` |
+| `class Child extends Parent { f = 7; }` over the same parent: `custom.f` | `undefined` | `7` |
+| `var r = super()`: `r === this` | `false` | `true` |
+| `constructor() { super([[1, 2]]); try { super(); } catch (e) {} }` in a subclass of `Map`: what was caught, and the map's size | nothing; `0` | `ReferenceError`; `1` |
+| `class B extends A { constructor() {} }`: `new B()` | an object | `ReferenceError` |
+| `constructor() { super(); return 1; }` | an object | `TypeError` |
+| `Reflect.construct(F.bind(null), [], G)`: `new.target` in `F` | `F` | `G` |
+| `Reflect.construct(Function, ['return 3'], G)`: the prototype of what is made | `Function.prototype` | `G.prototype` |
+| `Reflect.construct(F)`, with no list of arguments | accepted | `TypeError` |
+| `function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }` with a prototype, given to `customElements.define`: `new Old()`; `document.createElement('x-old') instanceof Old` | `TypeError: Illegal constructor`; `false` | an `Old`; `true` (this row and the next two: as in jsdom) |
+| An `<x-old>` that stands in the page when that `define` runs: `el.made` | `undefined`, after an uncaught `Illegal constructor` | `true` |
+| `class NotAnElement extends Event { constructor() { super('x'); made = this; } }`, given to `customElements.define` with such an element in the page: `made === el` | `true`: the element's object was made an event, and the element counted as defined | `false`: an event of its own, and the upgrade fails |
+
+What it broke outside a test: an abstract class written the usual way
+refused its own subclasses; an error class that names itself with
+`new.target.name` named every subclass after the parent; a class that
+extends a singleton, a factory function or a class compiled for older
+browsers got a second object and lost the one its parent made, without an
+error; and a custom element compiled by Babel could neither be constructed
+nor take over an element of the page.
+
+**The fix.** The call context that every call has beside its arguments got a
+field for `new.target`, and `construct()` an argument for it; `super(...)`
+passes on the one of the constructor it stands in and `Reflect.construct`
+its third argument, also through a bound function. What a parent's
+constructor returns becomes `this` in the child, where the class's fields
+then go, and is what `new` gives. `this` is bound once, when `super(...)`
+returns, and a derived constructor that returns without it, or returns a
+primitive, throws. `Reflect.construct(Native, args, NewTarget)` hands a
+built-in that builds on a given object (the DOM's interfaces) an object with
+`NewTarget.prototype`, made when the built-in asks, so that the property is
+read where the language reads it. And when the function named as
+`new.target` is at that moment being run on an element that exists (an
+upgrade), the element's interface is handed that element, once, whether
+`super()` or `Reflect.construct` reached it: the HTML standard's
+construction stack, kept beside the call context because the files of the
+DOM bindings belonged to another open pull request. Five files of `src/js`
+and one header; ARCHITECTURE.md, Phase 43, has the design.
+
+### What each instrument found
+
+The change was written with a new file of the JavaScript corpus beside it,
+`construct.dat`, whose expected output is what Node prints, and a new file
+of the DOM corpus, `compiled.dat`, recorded from jsdom. What follows was
+found by something else.
+
+| Found by | What |
+| :--- | :--- |
+| test262, run in the binary of `main` and in this one | One test that passed on `main` and failed here: `built-ins/Promise/get-prototype-abrupt-executor-not-callable.js`. The first version made the object for a built-in before running it and so read `NewTarget.prototype` before `Promise` had looked at its executor; the test has a getter there that throws. The object is made when the built-in asks for it now (`JsValue::construct_for`), and built-ins that never ask get the prototype afterwards |
+| A probe of 51 lines on when `this` is bound, run in Node, in `main`'s binary and here | The rows of the list above on a second `super()`, on none at all and on a returned primitive, which nobody had listed: all three were accepted. Also that on `main` a parent that returns a function or an array was a `TypeError` |
+| Reading the whole diff once more before the documents | A second `super()` has to run the parent (a script can count the runs) and then throw. Run on the constructor's own `this` it overwrote what the first had made: a `Map` came out empty, an error's message was replaced, the parent's fields were reset. The second run gets a spare object now, and a case holds it |
+| The same reading, a second time | `Reflect.construct(Event, ['q'], NewTarget)` read `NewTarget.prototype` twice when what it found there was not an object: once when the constructor asked for its object and once afterwards. Once on every path now, with an assertion for each |
+| `compare_with_jsdom.py` on `open/compiled-custom-elements`, after the constructor worked | Three of the page's 11 lines still differed, and they were the common case: an element that stands in the page, comes from `innerHTML` or exists before `define` was not upgraded by a compiled constructor (`The custom element constructor returned a different object.`), because `Reflect.construct(HTMLElement, …)` made a second element. That is what the construction in place is for |
+| The same tool, on a page with a class and a subclass of it compiled for ES5 | The upgrade still failed there: the compiled constructor constructs the class on a new object, and the class's `super()` built a second element on that. The interface is given the element under construction when it asks, however it was reached, and `super(...)` makes that element `this` |
+| The same tool, on a class that makes a second instance of itself while it is being upgraded | On `main`, and in the first version of this, the inner instance was a new element; the standard refuses it once the element has been taken, and before that gives it the element. Both as the standard now, for a class and for a compiled constructor |
+| Reading the code that hands the element out | Any interface that asked would have been given it: `Reflect.construct(Event, [], new.target)` in the constructor of a custom element would have made the element's own object an event. And `main` did exactly that through `super()`, to a class that extends `Event` and is given to `customElements.define` (the last row of the list above). Only the interface the element belongs to is given it now |
+| The same probes | A case of the new file passed for the wrong reason. It counted how often the constructor ran for `createElement` and `cloneNode`, and the constructor did run for the clone before its upgrade failed with an error on standard error, which the DOM runner does not look at. The case prints what the constructor left on each element now |
+| Writing the case for fields on an object a parent returned | A private name is a property whose name begins with `#`: `obj['#p']` reads a private field from outside its class, and `o.#p` for an object without the field is `undefined` where it is a `TypeError`. Older than this change, not fixed, a row of the task table |
+| A case for `new.target` inside `eval` | `eval` inside a function is global code: no local variable, no `this`, no `new.target`, no `super`. Older than this change, not fixed, a row of the task table, and one failing case |
+| jsdom, on `Reflect.construct(Event, …)` | Two answers of jsdom's that are not Web IDL's: it reads `NewTarget.prototype` twice, and when that is not an object it makes something that is not an event. `compiled.dat` stays away from both and the unit suite asserts the standard's |
+| The sanitizer build, on the new cases, the probes and the six new suites | @@ASAN_FOUND@@ |
+
+### What is known to be wrong and is not fixed
+
+All of it is the same on `main`.
+
+- **An upgrade runs the constructor on the element itself**, where the
+  standard constructs it the ordinary way and lets `HTMLElement` find the
+  element. A class cannot tell, and neither can a compiled constructor that
+  does what it is for. In a constructor written as a function `this` is the
+  element (`this === self`); one that never reaches `HTMLElement` has
+  written on the element and its upgrade counts as done, where the standard
+  refuses it; and the element is given the class's prototype before the
+  constructor runs, so it keeps that prototype when the upgrade fails early.
+  In `src/js/DomObserverBindings.cpp` (`run_upgrade`);
+  `tests/dom-conformance/open/compiled-custom-elements.js` has the lines.
+- **A customized built-in whose upgrade failed still matches `:defined`.**
+  The same page.
+- **`this` can be used before `super(...)` has run**, where it is a
+  `ReferenceError`; `let` and `const` have no dead zone either. One failing
+  case of `construct.dat`.
+- **`eval` inside a function is global code.** One failing case of
+  `construct.dat`.
+- **A private name is a property whose name begins with `#`**, readable and
+  writable as `obj['#p']`.
+- **A script's own property whose name begins with `#`, `%` or `@@`, or has
+  the shape `__x__`, is left out of `Object.keys`, `JSON.stringify`,
+  `for…in`, `Object.assign` and spread.** `var m = {}; m['#/route'] =
+  'home'; JSON.stringify(m)` is `{}`. It is how the engine hides its own
+  slots (finding 41) seen from the other side, and it loses a script's data
+  without an error.
+- **`new Map(iterable)` and `new Set(iterable)` do not call the `set` and
+  `add` of the object they fill**, so a subclass that overrides one is not
+  asked.
+- **Any function is accepted as `new.target` and as a parent**:
+  `Reflect.construct(F, [], Date.now)` and `class X extends f.bind(null)`
+  (finding 41's "nothing tells a built-in that is a constructor from one
+  that is not").
+
+### What the numbers do not say
+
+@@NUMBERS_TEXT@@
+
+**How verified.** Every line is a command and what it printed on the merged
+tree, in the sandbox.
+
+@@VERIFIED_LIST@@

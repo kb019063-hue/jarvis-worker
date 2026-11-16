@@ -12407,6 +12407,269 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
     assert(heap.stats().alive_cells == permanent_cells);
 }
 
+TEST(customizable_select_scope_and_formatting_rules) {
+    using namespace litebird;
+
+    // 1. <select> is a default scope boundary: outer </font> cannot run
+    //    adoption agency across <select>.
+    const std::string font_select = tree_of("<font><select><option>a</option></font></select>");
+    assert(font_select ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <font>\n"
+        "|       <select>\n"
+        "|         <option>\n"
+        "|           \"a\"\n");
+
+    // 2. Outer </p> inside <select> cannot close <p> outside <select>.
+    const std::string p_select = tree_of("<!doctype html><p><select><div></p></select>x");
+    assert(contains(p_select,
+        "|     <p>\n"
+        "|       <select>\n"
+        "|         <div>\n"
+        "|           <p>\n"
+        "|       \"x\"\n"));
+
+    // 3. A nested <select> finds the enclosing <select> in scope across <b><option>
+    //    (and <button>), closes it, and reconstructs active formatting outside.
+    const std::string nested = tree_of("<select><b><option><select><option></b></select>X");
+    assert(nested ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <b>\n"
+        "|         <option>\n"
+        "|     <b>\n"
+        "|       <option>\n"
+        "|     \"X\"\n");
+
+    // 4. Reconstruct active formatting elements inside "in select" for
+    //    <option>, <optgroup>, <hr>, and character tokens.
+    assert(tree_of("<select><div><i></div><option>option") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <div>\n"
+        "|         <i>\n"
+        "|       <i>\n"
+        "|         <option>\n"
+        "|           \"option\"\n");
+
+    const std::string char_reconstruct = tree_of("<!doctype html><select><div><i></div>abc");
+    assert(contains(char_reconstruct,
+        "|       <i>\n"
+        "|         \"abc\"\n"));
+
+    const std::string optgroup_reconstruct = tree_of("<!doctype html><select><div><i></div><optgroup><option>x");
+    assert(contains(optgroup_reconstruct,
+        "|       <i>\n"
+        "|         <optgroup>\n"
+        "|           <option>\n"
+        "|             \"x\"\n"));
+
+    const std::string hr_reconstruct = tree_of("<!doctype html><select><div><i></div><hr>");
+    assert(contains(hr_reconstruct,
+        "|       <i>\n"
+        "|         <hr>\n"));
+
+    // 5. <keygen> and <textarea> remain inside <select> (document & fragment),
+    //    while <input> still closes <select> in documents and is ignored in fragments.
+    assert(tree_of("<select><keygen>") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <keygen>\n");
+
+    assert(fragment_tree_of("<keygen><option>", "select") ==
+        "| <keygen>\n"
+        "| <option>\n");
+
+    assert(fragment_tree_of("<textarea><option>", "select") ==
+        "| <textarea>\n"
+        "|   \"<option>\"\n");
+
+    assert(tree_of("<!doctype html><select><input>X") ==
+        "| <!DOCTYPE html>\n"
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|     <input>\n"
+        "|     \"X\"\n");
+
+    assert(fragment_tree_of("<input><option>", "select") ==
+        "| <option>\n");
+}
+
+TEST(select_selectedcontent_cloning_and_edge_cases) {
+    using namespace litebird;
+
+    // 1. Unclosed trailing <option> clones into <selectedcontent> at EOF,
+    //    including adoption-agency-rearranged children.
+    assert(tree_of("<select><button><selectedcontent></button><option>X") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>x<i>i<b>ib</i>b") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"x\"\n"
+        "|           <i>\n"
+        "|             \"i\"\n"
+        "|             <b>\n"
+        "|               \"ib\"\n"
+        "|           <b>\n"
+        "|             \"b\"\n"
+        "|       <option>\n"
+        "|         \"x\"\n"
+        "|         <i>\n"
+        "|           \"i\"\n"
+        "|           <b>\n"
+        "|             \"ib\"\n"
+        "|         <b>\n"
+        "|           \"b\"\n");
+
+    // 2. First enabled <option> vs explicit `selected` attribute.
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         \"Y\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option selected>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"Y\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         selected=\"\"\n"
+        "|         \"Y\"\n");
+
+    const std::string first_explicit =
+        tree_of("<!doctype html><select><button><selectedcontent></button><option selected>X<option>Y");
+    assert(contains(first_explicit, "<selectedcontent>\n|           \"X\"\n"));
+
+    // 3. Disabled <option> / <optgroup disabled>, <datalist>, and <template> isolation.
+    const std::string disabled_opt = tree_of(
+        "<!doctype html><select><button><selectedcontent></button><option disabled>X<option>Y");
+    assert(contains(disabled_opt, "<selectedcontent>\n|           \"Y\"\n"));
+
+    const std::string disabled_grp = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<optgroup disabled><option>A</option></optgroup><option>B</option></select>");
+    assert(contains(disabled_grp, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_datalist = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<datalist><option>D</option></datalist><option>B</option></select>");
+    assert(contains(with_datalist, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_template = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<template><option>T</option></template><option>B</option></select>");
+    assert(contains(with_template, "<selectedcontent>\n|           \"B\"\n"));
+
+    // 4. multiple / size>1 / no options preserve fallback content.
+    const std::string fallback_multi = tree_of(
+        "<!doctype html><select multiple><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_multi, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    const std::string fallback_size2 = tree_of(
+        "<!doctype html><select size='2'><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_size2, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    // 5. <selectedcontent> appearing after <option>, plus sibling and <template>/DOM-nested <select> isolation.
+    const std::string after_option = tree_of(
+        "<!doctype html><select><option>X</option><button><selectedcontent></selectedcontent></button></select>");
+    assert(contains(after_option, "<selectedcontent>\n|           \"X\"\n"));
+
+    auto sibling_doc = HtmlParser::parse(
+        "<!doctype html>"
+        "<select id='s1'><button><selectedcontent id='sc1'></button><option>First</option></select>"
+        "<select id='s2'><button><selectedcontent id='sc2'></button><option>Second</option></select>"
+        "<select id='s3'><button><selectedcontent id='sc3'></button>"
+        "<template><select><button><selectedcontent id='sct'></button><option>Tpl</option></select></template>"
+        "<option>Outer</option></select>");
+    auto sc1 = sibling_doc->get_element_by_id("sc1");
+    auto sc2 = sibling_doc->get_element_by_id("sc2");
+    auto sc3 = sibling_doc->get_element_by_id("sc3");
+    assert(sc1 && sc2 && sc3);
+    assert(sc1->text_content() == "First");
+    assert(sc2->text_content() == "Second");
+    assert(sc3->text_content() == "Outer");
+
+    // 6. <option> containing <template> clones its template contents cleanly,
+    //    and <script> mutation / DOM-nested <select> during parse re-evaluates accurately.
+    const std::string with_tpl_child = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<option><template><span>T</span></template>Label</option></select>");
+    assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
+
+    {
+        auto doc = std::make_shared<Document>();
+        JsInterpreter js(doc);
+        js.load_page(
+            "<!doctype html><select><button><selectedcontent id='sc'></button>"
+            "<option id='o1'>First</option>"
+            "<div id='slot'></div>"
+            "<script>"
+            "document.getElementById('o1').setAttribute('selected', '');"
+            "var inner = document.createElement('select');"
+            "var btn = document.createElement('button');"
+            "var sc2 = document.createElement('selectedcontent');"
+            "sc2.id = 'sc2'; btn.appendChild(sc2); inner.appendChild(btn);"
+            "var opt = document.createElement('option'); opt.textContent = 'Inner'; inner.appendChild(opt);"
+            "document.getElementById('slot').appendChild(inner);"
+            "</script>"
+            "<option>Second</option></select>",
+            true);
+        assert(doc->get_element_by_id("sc")->text_content() == "First");
+        assert(doc->get_element_by_id("sc2")->text_content().empty());
+    }
+
+    // 7. Stress: 5,000 options + deeply nested markup inside <option> stay fast
+    //    and respect kMaxTreeDepth without overflowing the native stack.
+    std::string deep_select = "<!doctype html><select><button><selectedcontent id='sc'></button><option id='deep'>";
+    for (int i = 0; i < 600; ++i) deep_select += "<div>";
+    deep_select += "DeepPick";
+    for (int i = 0; i < 600; ++i) deep_select += "</div>";
+    deep_select += "</option>";
+    for (int i = 0; i < 5000; ++i) deep_select += "<option>Other</option>";
+    deep_select += "</select>";
+    auto deep_doc = HtmlParser::parse(deep_select);
+    auto deep_sc = deep_doc->get_element_by_id("sc");
+    assert(deep_sc && deep_sc->text_content() == "DeepPick");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -12608,6 +12871,10 @@ int main() {
     RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);
     RUN_TEST(js_escaped_keywords_and_contextual_rules);
     RUN_TEST(js_strict_async_generator_identifier_context_and_line_terminators);
+
+    // Phase 49: customizable <select> content and <selectedcontent> cloning.
+    RUN_TEST(customizable_select_scope_and_formatting_rules);
+    RUN_TEST(select_selectedcontent_cloning_and_edge_cases);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

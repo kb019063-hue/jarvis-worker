@@ -437,7 +437,8 @@ void LayoutTree::build_boxes(
             box = LayoutBox::create_flex(element, style);
         } else if (style.is_grid()) {
             box = LayoutBox::create_grid(element, style);
-        } else if (style.is_block() || style.is_block_level() || style.is_inline_block()) {
+        } else if (style.is_block() || style.is_block_level() || style.is_inline_block() ||
+                   style.is_table_caption()) {
             box = LayoutBox::create_block(element, style);
         } else {
             box = LayoutBox::create_inline(element, style);

@@ -66,7 +66,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 14 | **Selectors level 4** — `:is()/:where()/:has()/:focus-visible`, cascade `@layer`, `@supports`, `@container`, CSS nesting, `::part`. | M–L |
 | 15 | **Media & container queries** — evaluation inside the cascade (parsing exists). | S–M |
 | 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. | M |
-| 17 | **Table completeness** — `border-collapse` widest-wins, `table-layout: fixed`, `caption-side`, `empty-cells`. | S–M |
+| 17 | **Table completeness** — `border-collapse` widest-wins (the wider border of a shared edge wins, its colour included; style and positional priorities are not modelled — this engine has a single solid border style — and row borders are not painted), `table-layout: fixed` (the first row decides; later rows cannot resize a column), `caption-side`, `empty-cells` (inherited, separate borders only). **Done.** | S–M |
 | 18 | **Multicol + fragmentation** — columns, `break-inside`. | M–L |
 | 19 | **Scrolling & positioning corners** — `overflow: auto` actually scrolls, `position: sticky` robustness. | M |
 | 20 | **Cascade arithmetic** — percentage `font-size` (against the parent's computed value) and `line-height` as a real property (`normal`, bare number, percentage of own font size, absolute length) across style, inheritance and inline layout. **Done** (percentage `border-radius` deliberately deferred: `ComputedStyle` carries a single scalar radius end to end, so a percentage radius — and two-axis elliptical radii — cannot be expressed without a bigger change; no pixel oracle measures them today). | S |

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "litebird/common/Color.hpp"
+#include <optional>
 #include <algorithm>
 #include <cmath>
 
@@ -46,6 +48,22 @@ struct EdgeSizes {
         : top(all), right(all), bottom(all), left(all) {}
 
     bool operator==(const EdgeSizes& other) const = default;
+};
+
+/// One colour per edge, parallel to EdgeSizes. Border-conflict resolution in
+/// collapsed tables picks a winning *border* for a shared edge, colour
+/// included, so the painter needs to know which colour each side owns.
+struct EdgeColors {
+    Color top{Color::black()};
+    Color right{Color::black()};
+    Color bottom{Color::black()};
+    Color left{Color::black()};
+
+    constexpr EdgeColors() = default;
+    constexpr EdgeColors(Color t, Color r, Color b, Color l)
+        : top(t), right(r), bottom(b), left(l) {}
+    explicit EdgeColors(Color all)
+        : top(all), right(all), bottom(all), left(all) {}
 };
 
 /**

@@ -1,4 +1,5 @@
 #include "litebird/js/JsLexer.hpp"
+#include "litebird/js/JsIdentifierTables.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <unordered_map>
@@ -16,11 +17,64 @@ int hex_value(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return c - 'A' + 10;
 }
-bool is_ident_start(char c) {
-    unsigned char u = static_cast<unsigned char>(c);
-    return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_' || u == '$' || u >= 0x80;
+bool is_ascii_ident_start(unsigned char u) {
+    return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_' || u == '$';
 }
-bool is_ident_part(char c) { return is_ident_start(c) || is_digit(c); }
+bool is_ascii_ident_part(unsigned char u) {
+    return is_ascii_ident_start(u) || (u >= '0' && u <= '9');
+}
+
+// Decodes one well-formed UTF-8 code point at src[offset]. Returns its byte
+// length (1..4) and writes the code point to `cp`, or returns 0 on invalid UTF-8.
+size_t decode_utf8(std::string_view src, size_t offset, uint32_t& cp) {
+    if (offset >= src.size()) return 0;
+    unsigned char b0 = static_cast<unsigned char>(src[offset]);
+    if (b0 < 0x80) {
+        cp = b0;
+        return 1;
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        if (offset + 1 >= src.size()) return 0;
+        unsigned char b1 = static_cast<unsigned char>(src[offset + 1]);
+        if ((b1 & 0xC0) != 0x80) return 0;
+        uint32_t v = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+        if (v < 0x80u) return 0;
+        cp = v;
+        return 2;
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        if (offset + 2 >= src.size()) return 0;
+        unsigned char b1 = static_cast<unsigned char>(src[offset + 1]);
+        unsigned char b2 = static_cast<unsigned char>(src[offset + 2]);
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return 0;
+        uint32_t v = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+        if (v < 0x800u || (v >= 0xD800u && v <= 0xDFFFu)) return 0;
+        cp = v;
+        return 3;
+    }
+    if ((b0 & 0xF8) == 0xF0) {
+        if (offset + 3 >= src.size()) return 0;
+        unsigned char b1 = static_cast<unsigned char>(src[offset + 1]);
+        unsigned char b2 = static_cast<unsigned char>(src[offset + 2]);
+        unsigned char b3 = static_cast<unsigned char>(src[offset + 3]);
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return 0;
+        uint32_t v = ((b0 & 0x07u) << 18) | ((b1 & 0x3Fu) << 12) |
+                     ((b2 & 0x3Fu) << 6) | (b3 & 0x3Fu);
+        if (v < 0x10000u || v > 0x10FFFFu) return 0;
+        cp = v;
+        return 4;
+    }
+    return 0;
+}
+
+bool is_unicode_whitespace(uint32_t cp) {
+    return cp == 0x00A0u || cp == 0x1680u || (cp >= 0x2000u && cp <= 0x200Au) ||
+           cp == 0x202Fu || cp == 0x205Fu || cp == 0x3000u || cp == 0xFEFFu;
+}
+
+bool is_unicode_line_terminator(uint32_t cp) {
+    return cp == 0x2028u || cp == 0x2029u;
+}
 
 const std::unordered_map<std::string, JsTokenType>& keyword_table() {
     static const std::unordered_map<std::string, JsTokenType> keywords = {
@@ -72,7 +126,16 @@ const std::unordered_map<std::string, JsTokenType>& keyword_table() {
 JsLexer::JsLexer(std::string_view source) : m_source(source) {
     // A hashbang line is only legal at the very start of the source.
     if (m_source.size() >= 2 && m_source[0] == '#' && m_source[1] == '!') {
-        while (m_cursor < m_source.size() && m_source[m_cursor] != '\n') m_cursor++;
+        while (m_cursor < m_source.size()) {
+            char c = m_source[m_cursor];
+            if (c == '\n' || c == '\r') break;
+            if (static_cast<unsigned char>(c) >= 0x80) {
+                uint32_t cp = 0;
+                size_t len = decode_utf8(m_source, m_cursor, cp);
+                if (len > 0 && is_unicode_line_terminator(cp)) break;
+            }
+            m_cursor++;
+        }
     }
 }
 
@@ -101,6 +164,17 @@ bool JsLexer::match(char expected) {
 }
 
 void JsLexer::skip_whitespace_and_comments() {
+    auto at_line_terminator = [&]() {
+        char ch = peek();
+        if (ch == '\n' || ch == '\r') return true;
+        if (static_cast<unsigned char>(ch) >= 0x80) {
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            return len > 0 && is_unicode_line_terminator(cp);
+        }
+        return false;
+    };
+
     while (m_cursor < m_source.size()) {
         unsigned char c = static_cast<unsigned char>(peek());
         if (c == '\n' || c == '\r') {
@@ -108,18 +182,19 @@ void JsLexer::skip_whitespace_and_comments() {
             advance();
         } else if (c == ' ' || c == '\t' || c == '\v' || c == '\f') {
             advance();
-        } else if (c == 0xC2 && static_cast<unsigned char>(peek(1)) == 0xA0) {
-            m_cursor += 2;                       // U+00A0 no-break space
-        } else if (c == 0xEF && static_cast<unsigned char>(peek(1)) == 0xBB &&
-                   static_cast<unsigned char>(peek(2)) == 0xBF) {
-            m_cursor += 3;                       // U+FEFF byte order mark
-        } else if (c == 0xE2 && static_cast<unsigned char>(peek(1)) == 0x80 &&
-                   (static_cast<unsigned char>(peek(2)) == 0xA8 ||
-                    static_cast<unsigned char>(peek(2)) == 0xA9)) {
-            m_cursor += 3;                       // U+2028 / U+2029 line terminators
-            m_newline_before = true;
+        } else if (c >= 0x80) {
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            if (len > 0 && is_unicode_whitespace(cp)) {
+                m_cursor += len;
+            } else if (len > 0 && is_unicode_line_terminator(cp)) {
+                m_cursor += len;
+                m_newline_before = true;
+            } else {
+                break;
+            }
         } else if (c == '/' && peek(1) == '/') {
-            while (m_cursor < m_source.size() && peek() != '\n') advance();
+            while (m_cursor < m_source.size() && !at_line_terminator()) advance();
         } else if (c == '/' && peek(1) == '*') {
             advance(); advance();
             bool closed = false;
@@ -129,16 +204,16 @@ void JsLexer::skip_whitespace_and_comments() {
                     closed = true;
                     break;
                 }
-                if (peek() == '\n') m_newline_before = true;
+                if (at_line_terminator()) m_newline_before = true;
                 advance();
             }
             if (!closed) fail("Unterminated comment");
         } else if (c == '<' && peek(1) == '!' && peek(2) == '-' && peek(3) == '-') {
             // HTML-like comment opener: legacy pages still wrap scripts in these.
-            while (m_cursor < m_source.size() && peek() != '\n') advance();
+            while (m_cursor < m_source.size() && !at_line_terminator()) advance();
         } else if (c == '-' && peek(1) == '-' && peek(2) == '>' && (m_newline_before || !m_has_prev)) {
             // HTML-like comment closer, only at the start of a line.
-            while (m_cursor < m_source.size() && peek() != '\n') advance();
+            while (m_cursor < m_source.size() && !at_line_terminator()) advance();
         } else {
             break;
         }
@@ -154,6 +229,7 @@ bool JsLexer::regex_allowed() const {
         case JsTokenType::Number:
         case JsTokenType::String:
         case JsTokenType::Identifier:
+        case JsTokenType::EscapedKeyword:
         case JsTokenType::Regex:
         case JsTokenType::PrivateName:
         case JsTokenType::NoSubstitutionTemplate:
@@ -197,6 +273,14 @@ void JsLexer::append_code_point(std::string& out, unsigned long cp) {
 // Called with the cursor just past a backslash.
 void JsLexer::scan_escape(std::string& cooked, bool in_template) {
     if (m_cursor >= m_source.size()) fail("Invalid or unexpected token");
+    if (static_cast<unsigned char>(peek()) >= 0x80) {
+        uint32_t cp = 0;
+        size_t len = decode_utf8(m_source, m_cursor, cp);
+        if (len > 0 && is_unicode_line_terminator(cp)) {
+            m_cursor += len;                   // line continuation (U+2028 / U+2029)
+            return;
+        }
+    }
     char esc = advance();
     switch (esc) {
         case 'n': cooked += '\n'; return;
@@ -221,12 +305,13 @@ void JsLexer::scan_escape(std::string& cooked, bool in_template) {
             unsigned long cp = 0;
             if (peek() == '{') {
                 advance();
-                int digits = 0;
+                bool has_digit = false;
                 while (is_hex_digit(peek())) {
+                    has_digit = true;
                     cp = cp * 16 + static_cast<unsigned long>(hex_value(advance()));
-                    if (++digits > 6 || cp > 0x10FFFF) fail("Undefined Unicode code-point");
+                    if (cp > 0x10FFFF) fail("Undefined Unicode code-point");
                 }
-                if (digits == 0 || peek() != '}') fail("Invalid Unicode escape sequence");
+                if (!has_digit || peek() != '}') fail("Invalid Unicode escape sequence");
                 advance();
             } else {
                 for (int i = 0; i < 4; ++i) {
@@ -331,7 +416,7 @@ JsToken JsLexer::scan_number() {
     }
 
     if (peek() == 'n') fail("BigInt literals are not supported");
-    if (is_ident_start(peek()) || is_digit(peek())) fail("Invalid or unexpected token");
+    if (starts_identifier_at(m_cursor) || is_digit(peek())) fail("Invalid or unexpected token");
     t.text = std::string(m_source.substr(start, m_cursor - start));
     return t;
 }
@@ -360,26 +445,127 @@ JsToken JsLexer::scan_string(char quote) {
     return t;
 }
 
+bool JsLexer::starts_identifier_at(size_t pos) const {
+    if (pos >= m_source.size()) return false;
+    unsigned char c = static_cast<unsigned char>(m_source[pos]);
+    if (c < 0x80) return is_ascii_ident_start(c) || c == '\\';
+    uint32_t cp = 0;
+    size_t len = decode_utf8(m_source, pos, cp);
+    return len > 0 && is_js_id_start(cp);
+}
+
+uint32_t JsLexer::scan_identifier_unicode_escape() {
+    advance(); // consume '\\'
+    if (peek() != 'u') fail("Invalid or unexpected token");
+    advance(); // consume 'u'
+    uint32_t cp = 0;
+    if (peek() == '{') {
+        advance();
+        bool has_digit = false;
+        while (is_hex_digit(peek())) {
+            has_digit = true;
+            cp = cp * 16u + static_cast<uint32_t>(hex_value(advance()));
+            if (cp > 0x10FFFFu) fail("Undefined Unicode code-point");
+        }
+        if (!has_digit || peek() != '}') fail("Invalid Unicode escape sequence");
+        advance();
+    } else {
+        for (int i = 0; i < 4; ++i) {
+            if (!is_hex_digit(peek())) fail("Invalid Unicode escape sequence");
+            cp = cp * 16u + static_cast<uint32_t>(hex_value(advance()));
+        }
+    }
+    return cp;
+}
+
 JsToken JsLexer::scan_identifier() {
     size_t start = m_cursor;
-    while (m_cursor < m_source.size() && is_ident_part(peek())) {
-        unsigned char c = static_cast<unsigned char>(peek());
-        // Unicode white space is made of bytes >= 0x80 too; stop before it.
-        if (c == 0xC2 && static_cast<unsigned char>(peek(1)) == 0xA0) break;
-        if (c == 0xE2 && static_cast<unsigned char>(peek(1)) == 0x80 &&
-            (static_cast<unsigned char>(peek(2)) == 0xA8 || static_cast<unsigned char>(peek(2)) == 0xA9)) break;
-        if (c == 0xEF && static_cast<unsigned char>(peek(1)) == 0xBB && static_cast<unsigned char>(peek(2)) == 0xBF) break;
+    std::string text;
+    bool has_escape = false;
+    bool slow_path = false;
+
+    // Fast path for the common case: pure ASCII identifier with no escapes.
+    unsigned char first = static_cast<unsigned char>(peek());
+    if (first < 0x80 && is_ascii_ident_start(first)) {
         advance();
+        while (m_cursor < m_source.size()) {
+            unsigned char c = static_cast<unsigned char>(peek());
+            if (c < 0x80 && is_ascii_ident_part(c)) {
+                advance();
+            } else if (c == '\\' || c >= 0x80) {
+                text.assign(m_source.substr(start, m_cursor - start));
+                slow_path = true;
+                break;
+            } else {
+                break;
+            }
+        }
+    } else {
+        slow_path = true;
+        if (first == '\\') {
+            uint32_t cp = scan_identifier_unicode_escape();
+            if (!is_js_id_start(cp)) fail("Invalid or unexpected token");
+            append_code_point(text, cp);
+            has_escape = true;
+        } else {
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            if (len == 0 || !is_js_id_start(cp)) fail("Invalid or unexpected token");
+            text.append(m_source.substr(m_cursor, len));
+            m_cursor += len;
+        }
+    }
+
+    if (slow_path) {
+        while (m_cursor < m_source.size()) {
+            unsigned char c = static_cast<unsigned char>(peek());
+            if (c < 0x80) {
+                if (is_ascii_ident_part(c)) {
+                    text += advance();
+                    continue;
+                }
+                if (c == '\\') {
+                    uint32_t cp = scan_identifier_unicode_escape();
+                    if (!is_js_id_continue(cp)) fail("Invalid or unexpected token");
+                    append_code_point(text, cp);
+                    has_escape = true;
+                    continue;
+                }
+                break;
+            }
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            if (len == 0 || !is_js_id_continue(cp)) break;
+            text.append(m_source.substr(m_cursor, len));
+            m_cursor += len;
+        }
+    } else {
+        text.assign(m_source.substr(start, m_cursor - start));
     }
 
     JsToken t;
     t.line = m_line;
-    t.text = std::string(m_source.substr(start, m_cursor - start));
+    t.text = std::move(text);
+    t.has_escape = has_escape;
     const auto& keywords = keyword_table();
     auto it = keywords.find(t.text);
     if (it != keywords.end()) {
-        t.type = it->second;
-        t.is_keyword = true;
+        if (!has_escape) {
+            t.type = it->second;
+            t.is_keyword = true;
+        } else if (it->second == JsTokenType::Let ||
+                   it->second == JsTokenType::Yield ||
+                   it->second == JsTokenType::Await) {
+            // Contextually reserved words with escapes never act as keywords,
+            // but remain valid identifiers outside contexts that reserve them.
+            t.type = JsTokenType::Identifier;
+        } else {
+            // Unconditionally reserved words with escapes are valid only as
+            // IdentifierName (property / member names), never as keywords or
+            // BindingIdentifier / IdentifierReference / LabelIdentifier.
+            t.type = JsTokenType::EscapedKeyword;
+            t.is_keyword = true;
+        }
     } else {
         t.type = JsTokenType::Identifier;
     }
@@ -393,13 +579,23 @@ JsToken JsLexer::scan_regex() {
     t.line = m_line;
     std::string pattern;
     bool in_class = false;
+    auto at_line_terminator = [&]() {
+        char ch = peek();
+        if (ch == '\n' || ch == '\r') return true;
+        if (static_cast<unsigned char>(ch) >= 0x80) {
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            return len > 0 && is_unicode_line_terminator(cp);
+        }
+        return false;
+    };
     while (true) {
         if (m_cursor >= m_source.size()) fail("Invalid regular expression: missing /");
         char c = peek();
-        if (c == '\n' || c == '\r') fail("Invalid regular expression: missing /");
+        if (at_line_terminator()) fail("Invalid regular expression: missing /");
         if (c == '\\') {
             pattern += advance();
-            if (m_cursor >= m_source.size() || peek() == '\n') fail("Invalid regular expression: missing /");
+            if (m_cursor >= m_source.size() || at_line_terminator()) fail("Invalid regular expression: missing /");
             pattern += advance();
             continue;
         }
@@ -412,7 +608,19 @@ JsToken JsLexer::scan_regex() {
         pattern += advance();
     }
     std::string flags;
-    while (is_ident_part(peek())) flags += advance();
+    while (m_cursor < m_source.size()) {
+        unsigned char fc = static_cast<unsigned char>(peek());
+        if (fc < 0x80) {
+            if (!is_ascii_ident_part(fc)) break;
+            flags += advance();
+        } else {
+            uint32_t cp = 0;
+            size_t len = decode_utf8(m_source, m_cursor, cp);
+            if (len == 0 || !is_js_id_continue(cp)) break;
+            flags.append(m_source.substr(m_cursor, len));
+            m_cursor += len;
+        }
+    }
     t.text = std::move(pattern);
     t.flags = std::move(flags);
     return t;
@@ -505,9 +713,9 @@ JsToken JsLexer::scan_token() {
         return finish(scan_template(true));
     }
 
-    if (is_ident_start(c)) return finish(scan_identifier());
+    if (starts_identifier_at(m_cursor)) return finish(scan_identifier());
 
-    if (c == '#' && is_ident_start(peek(1))) {
+    if (c == '#' && starts_identifier_at(m_cursor + 1)) {
         advance();
         JsToken name = scan_identifier();
         name.type = JsTokenType::PrivateName;

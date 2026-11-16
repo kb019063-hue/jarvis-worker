@@ -32,6 +32,7 @@
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsIdentifierTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -1390,6 +1391,70 @@ TEST(js_async_promises_and_json) {
     EventLoop::default_loop().run_microtasks();
     auto result_code = interp.eval("_code");
     assert(result_code.to_number() == 200.0);
+}
+
+TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var combinator_trace = [];
+        var saved_resolve = Promise.resolve;
+        function check(method) {
+            var steps = 0;
+            var iterable = {
+                next: function() {
+                    combinator_trace.push('next');
+                    if (steps++ === 0) return {value: 7, done: false};
+                    throw Error('advanced beyond the first value');
+                },
+                return: function() { combinator_trace.push('close'); return {done: true}; }
+            };
+            iterable[Symbol.iterator] = function() { return this; };
+            Promise.resolve = function(value) {
+                combinator_trace.push('resolve:' + value);
+                throw Error('stop');
+            };
+            Promise[method](iterable).catch(function(e) {
+                combinator_trace.push(method + ':' + e.message);
+            });
+        }
+        check('all'); check('allSettled'); check('any'); check('race');
+        Promise.resolve = saved_resolve;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("combinator_trace.join('|')").to_string() ==
+           "next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|"
+           "all:stop|allSettled:stop|any:stop|race:stop");
+
+    // Getting resolve is a single operation, before asking for the iterator.
+    js.eval_ast(R"JS(
+        var order = [];
+        Object.defineProperty(Promise, 'resolve', {configurable:true, get:function() {
+            order.push('get');
+            return function(value) { order.push('resolve:' + value); return saved_resolve.call(Promise, value); };
+        }});
+        var items = {i:0, next:function() {
+            order.push('next');
+            return this.i++ < 2 ? {value:this.i, done:false} : {done:true};
+        }};
+        items[Symbol.iterator] = function() { order.push('iterator'); return this; };
+        Promise.all(items);
+        Object.defineProperty(Promise, 'resolve', {value:saved_resolve, writable:true, configurable:true});
+    )JS");
+    assert(js.eval("order.join('|')").to_string() == "get|iterator|next|resolve:1|next|resolve:2|next");
+
+    // The returned promise's own then getter can throw. This happens *during*
+    // iteration, so IteratorClose must call return before rejecting.
+    js.eval_ast(R"JS(
+        var then_trace = [], item = Promise.resolve(1);
+        Object.defineProperty(item, 'then', {get:function() { then_trace.push('then'); throw Error('getter'); }});
+        var forever = {next:function() { then_trace.push('next'); return {value:item, done:false}; },
+                       return:function() { then_trace.push('close'); return {done:true}; }};
+        forever[Symbol.iterator] = function() { return this; };
+        Promise.any(forever).catch(function(e) { then_trace.push(e.message); });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
 }
 
 TEST(css_flex_wrapping_and_grid_layout) {
@@ -9644,6 +9709,184 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
 }
 
+TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
+        var mDeep = deepNonCap.exec("zzabczz");
+        var veryDeepResult = "";
+        try {
+            var r5k = new RegExp("(?:".repeat(5000) + "abc" + ")".repeat(5000));
+            veryDeepResult = r5k.exec("zzabczz")[0];
+        } catch (e) {
+            veryDeepResult = e.name === "SyntaxError" ? "abc" : e.name;
+        }
+        var s = "ab".repeat(60000);
+        var mLong = /^(?:a|b)+$/.test(s);
+        var mCap = /(?:a|b)*c/.exec(s + "c");
+        var mNamed = /^(?<part>[a-z]+)-\k<part>$/.exec("hello-hello");
+        var mLookbehind = /(?<=(x+)y)\1z/.exec("xxxyxxxz");
+        var out = [
+            mDeep ? mDeep[0] : "",
+            veryDeepResult,
+            String(mLong),
+            String(mCap ? mCap[0].length : -1),
+            mNamed ? mNamed.groups.part : "",
+            mLookbehind ? mLookbehind[0] + ":" + mLookbehind[1] : ""
+        ].join("|");
+    )JS");
+    assert(js.eval("out").to_string() == "abc|abc|true|120001|hello|xxxz:xxx");
+}
+
+TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(R"HTML(<!DOCTYPE html><html><head><style>
+        :root { font-size: 20px; --pad: 12px 24px; }
+        @layer base, theme;
+        @layer base {
+            .card > p.lead { color: rgb(255, 0, 0); background-color: rgb(10, 20, 30) !important; }
+        }
+        @layer theme {
+            .card > p { color: rgb(0, 128, 0); background-color: rgb(200, 200, 200) !important; }
+        }
+        .sibling + .target { margin-top: clamp(10px, 5vw, 30px); padding: var(--pad); }
+        .sibling ~ .later { width: 50dvh; border-radius: 50%; font-size: 150%; line-height: 1.5; }
+        ul > li:nth-child(2n + 1) { font-weight: bold; }
+        @media (400px <= width <= 1000px) and (height >= 500px) {
+            :is(#mq, #mq2) { display: flex; }
+        }
+        @supports (display: grid) and (not (bogus-prop: 1)) {
+            :where(#sup) { display: grid; }
+        }
+    </style></head><body>
+        <div class="card"><p class="lead">lead</p></div>
+        <div class="sibling">s</div><div class="target">t</div><div class="later">l</div>
+        <ul><li>1</li><li>2</li><li>3</li></ul>
+        <div id="mq"></div><div id="sup"></div>
+    </body></html>)HTML");
+
+    StyleResolver resolver;
+    resolver.set_viewport(800.0f, 600.0f);
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto root = doc->document_element();
+    auto root_style = resolver.resolve_style(root, nullptr);
+    assert(root_style.font_size == 20.0f);
+
+    auto body = doc->body();
+    auto body_style = resolver.resolve_style(body, &root_style);
+
+    auto card = doc->query_selector(".card");
+    auto card_style = resolver.resolve_style(card, &body_style);
+    auto lead = doc->query_selector(".lead");
+    auto lead_style = resolver.resolve_style(lead, &card_style);
+    // Cascade layers: later layer (theme) beats earlier layer (base) even with lower specificity,
+    // while for !important earlier layer (base) beats later layer (theme).
+    assert(lead_style.color.r == 0 && lead_style.color.g == 128 && lead_style.color.b == 0);
+    assert(lead_style.background_color.r == 10 && lead_style.background_color.g == 20 && lead_style.background_color.b == 30);
+
+    auto target = doc->query_selector(".target");
+    auto target_style = resolver.resolve_style(target, &body_style);
+    // 5vw of 800 = 40px clamped to 30px; var(--pad) expanded before shorthand padding.
+    assert(target_style.margin.top == 30.0f);
+    assert(target_style.padding.top == 12.0f && target_style.padding.right == 24.0f);
+
+    auto later = doc->query_selector(".later");
+    auto later_style = resolver.resolve_style(later, &body_style);
+    assert(later_style.width == 300.0f); // 50dvh of 600px
+    assert(later_style.border_radius_percent == 50.0f);
+    assert(later_style.font_size == 24.0f); // 150% of inherited 16px body font-size
+    assert(later_style.effective_line_height() == 36.0f); // 1.5 * 24px
+
+    auto lis = doc->get_elements_by_tag_name("li");
+    assert(lis.size() == 3);
+    assert(resolver.resolve_style(lis[0], &body_style).font_weight == 700);
+    assert(resolver.resolve_style(lis[1], &body_style).font_weight == 400);
+    assert(resolver.resolve_style(lis[2], &body_style).font_weight == 700);
+
+    assert(resolver.resolve_style(doc->get_element_by_id("mq"), &body_style).display == Display::Flex);
+    assert(resolver.resolve_style(doc->get_element_by_id("sup"), &body_style).display == Display::Grid);
+}
+
+TEST(inline_style_cssom_shorthands_and_aliases) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var el = document.createElement('div');
+        el.style.fontFamily = '"Helvetica Neue", Arial';
+        el.style.flex = '2 1 10px';
+        el.style.overflow = 'hidden auto';
+        el.style.inset = '1px 2px 3px 4px';
+        el.style.gap = '4px 8px';
+        el.style.borderRadius = '6px';
+        el.style.webkitTransform = 'translateX(10px)';
+        el.style.webkitTransition = 'opacity 200ms ease';
+        el.style.setProperty('--accent', 'rgb(1, 2, 3)');
+        var summary = [
+            el.style.fontFamily,
+            el.style.flexGrow, el.style.flexShrink, el.style.flexBasis,
+            el.style.overflowX, el.style.overflowY,
+            el.style.top, el.style.right, el.style.bottom, el.style.left,
+            el.style.rowGap, el.style.columnGap,
+            el.style.borderTopLeftRadius,
+            el.style.transform,
+            el.style.transitionDuration,
+            el.style.getPropertyValue('--accent')
+        ].join('|');
+    )JS");
+    assert(js.eval("summary").to_string() ==
+           "\"Helvetica Neue\", Arial|2|1|10px|hidden|auto|1px|2px|3px|4px|4px|8px|6px|translateX(10px)|200ms|rgb(1, 2, 3)");
+}
+
+TEST(html5_date_time_inputs_validation_and_stepping) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+        var negMonth = inp('month');
+        negMonth.valueAsNumber = -1;
+        var invalidLeap = inp('date', '2025-02-29').value;
+        var validLeap = inp('date', '2024-02-29').value;
+        var badMonth = inp('month', '2026-13').value;
+        var badWeek = inp('week', '2025-W53').value;
+        var okWeek = inp('week', '2026-W53').value;
+        var dtSpace = inp('datetime-local', '2026-03-04 05:06').value;
+        var d = inp('date', '2026-03-04'); d.stepUp(2); d.min = '2026-03-10';
+        var t = inp('time', '12:30'); t.step = '0.5'; t.stepUp();
+        var w = inp('week', '2025-W52'); w.stepUp();
+        var errs = [];
+        try { inp('text').valueAsDate = 'bad'; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('datetime-local').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = Infinity; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = 5; } catch (e) { errs.push(e.name); }
+        var result = [
+            negMonth.value, invalidLeap, validLeap, badMonth, badWeek, okWeek, dtSpace,
+            d.value, String(d.validity.rangeUnderflow), t.value, w.value, errs.join(',')
+        ].join('|');
+    )JS");
+    assert(js.eval("result").to_string() ==
+           "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
+}
+
 // =============================================================================
 // Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
 // =============================================================================
@@ -10701,6 +10944,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     JsInterpreter js(doc);
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
+
     start = std::chrono::steady_clock::now();
     assert(js.eval(
         "var e = document.createElement('div');"
@@ -11715,6 +11959,188 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     EventLoop::default_loop().tick();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 44: Unicode identifier tables, \u escapes in identifiers/private names,
+// escaped keyword/contextual-keyword rules, and Unicode line terminators.
+// ---------------------------------------------------------------------------
+
+TEST(js_unicode_identifier_tables_and_lexer_escapes) {
+    using namespace litebird;
+    // 1. Unicode 17.0 ID_Start / ID_Continue checks (ECMA-262 §12.7.1).
+    assert(is_js_id_start('a') && is_js_id_start('Z') && is_js_id_start('_') && is_js_id_start('$'));
+    assert(!is_js_id_start('0') && is_js_id_continue('0'));
+    assert(is_js_id_start(0x088Fu));       // Unicode 17.0 ID_Start
+    assert(is_js_id_start(0x1D49Cu));      // Astral mathematical script A
+    assert(!is_js_id_start(0x200Cu) && is_js_id_continue(0x200Cu)); // ZWNJ
+    assert(!is_js_id_start(0x200Du) && is_js_id_continue(0x200Du)); // ZWJ
+    assert(!is_js_id_start(0x2E2Fu) && !is_js_id_continue(0x2E2Fu)); // VERTICAL TILDE
+    assert(!is_js_id_start(0xD800u) && !is_js_id_continue(0xD800u)); // Surrogate
+    assert(!is_js_id_start(0x0023u) && !is_js_id_continue(0x0023u)); // '#'
+
+    // 2. Lexer token classification & source spans.
+    {
+        JsLexer lex(R"(\u0061\u{0000000062} \u0069f l\u0065t #\u{1D49C} #\u0069f)");
+        auto toks = lex.tokenize_all();
+        assert(toks.size() == 6); // 5 tokens + Eof
+        assert(toks[0].type == JsTokenType::Identifier && toks[0].text == "ab" && toks[0].has_escape);
+        assert(toks[1].type == JsTokenType::EscapedKeyword && toks[1].text == "if" &&
+               toks[1].is_keyword && toks[1].has_escape);
+        assert(toks[2].type == JsTokenType::Identifier && toks[2].text == "let" &&
+               !toks[2].is_keyword && toks[2].has_escape);
+        assert(toks[3].type == JsTokenType::PrivateName && toks[3].text == "#\xF0\x9D\x92\x9C" &&
+               !toks[3].is_keyword && toks[3].has_escape);
+        assert(toks[4].type == JsTokenType::PrivateName && toks[4].text == "#if" &&
+               !toks[4].is_keyword && toks[4].has_escape);
+    }
+
+    // 3. Invalid identifier escapes and non-ID Unicode chars must throw JsSyntaxError.
+    const char* bad_tokens[] = {
+        R"(\u0030)", R"(\u200C)", R"(\u200D)", R"(\u2E2F)", "\xE2\xB8\xAF",
+        R"(\uD835\uDC9C)", R"(\uD800)", R"(\u{110000})", R"(\u{})", R"(\u00)",
+        R"(\x61)", R"(a\u2E2F)", R"(a\u0020)", R"(1\u0061)",
+        R"(#\u0030)", R"(#\u200C)", R"(#\u2E2F)", R"(\u0023foo)"
+    };
+    for (const char* src : bad_tokens) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            (void)lex.tokenize_all();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_escaped_keywords_and_contextual_rules) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Valid IdentifierName positions (properties, member access, division after escaped keyword,
+    //    methods, getters, destructuring property keys, private fields/methods).
+    JsValue res = js.eval(R"js(
+        var o = { \u0069f: 12, cl\u0061ss() { return 3; }, get v\u0061r() { return 4; } };
+        var { \u0069f: x } = o;
+        class C {
+            #\u{1D49C} = 5;
+            #\u0069f = 6;
+            st\u0061tic() { return 7; }
+            g\u0065t() { return 8; }
+            \u0061sync() { return 9; }
+            c\u006Fnstructor(v) { this.v = v; }
+            sum() { return this.#\u{1D49C} + this.#if + this.static() + this.get() + this.async() + this.v; }
+        }
+        var p = { __pr\u006Fto__: { k: 10 } };
+        (o.\u0069f / 2) + o.cl\u0061ss() + o.v\u0061r + x + new C(1).sum() + p.k
+    )js");
+    assert(res.type == JsType::Number && res.to_number() == 6 + 3 + 4 + 12 + (5 + 6 + 7 + 8 + 9 + 1) + 10);
+
+    // 2. Escaped reserved words and contextual keywords must be rejected in syntax/binding/shorthand slots.
+    const char* bad_scripts[] = {
+        R"(v\u0061r x = 1;)",
+        R"(l\u0065t x = 1;)",
+        R"(c\u006Fnst x = 1;)",
+        R"(\u0069f (true) {})",
+        R"(var \u0069f = 1;)",
+        R"(({ \u0069f }))",
+        R"(var { \u0069f } = { if: 1 };)",
+        R"(\u0069f: 1;)",
+        R"(class C { st\u0061tic m() {} })",
+        R"(class C { g\u0065t x() {} })",
+        R"(class C { s\u0065t x(v) {} })",
+        R"(class C { \u0061sync m() {} })",
+        R"(({ g\u0065t x() {} }))",
+        R"(({ \u0061sync m() {} }))",
+        R"(\u0061sync function f() {})",
+        R"(\u0061sync x => x)",
+        R"(\u0061sync (x) => x)",
+        R"(for (var a \u006Ff [1]) {})",
+        R"(function f() { return new.t\u0061rget; })",
+        R"(let l\u0065t = 1;)",
+        R"(const l\u0065t = 1;)"
+    };
+    for (const char* src : bad_scripts) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Sloppy-mode contextual identifiers, class await, FunctionExpression own [Yield, Await],
+    //    escaped labels, Function.prototype.toString preservation, and Unicode whitespace/line terminators.
+    JsValue ok = js.eval(R"js(
+        var l\u0065t = 1, yi\u0065ld = 2, aw\u0061it = 3;
+        var clsName;
+        { class aw\u0061it {} clsName = aw\u0061it.name; }
+        var fnRes = 0;
+        class C {
+            static {
+                fnRes = (function await(await) { return await; })(42);
+            }
+        }
+        var genOk = false;
+        var g = { *m() { genOk = typeof (function yield() {}) === 'function'; } };
+        g.m().next();
+        var lbl = 0;
+        \u0061bc: { lbl = 1; break a\u0062c; lbl = 2; }
+        function f\u006Fo() { return 1; }
+        l\u0065t === 1 && yi\u0065ld === 2 && aw\u0061it === 3 &&
+        clsName === 'await' && fnRes === 42 && genOk && lbl === 1 &&
+        f\u006Fo.name === 'foo' && f\u006Fo.toString() === 'function f\\u006Fo() { return 1; }'
+    )js");
+    assert(ok.type == JsType::Boolean && ok.is_truthy());
+
+    // 2. Unicode whitespace (U+3000, U+2000), U+2028/U+2029 hashbang/ASI/string line continuation.
+    JsValue ws = js.eval("#!bang\xE2\x80\xA8var x = 1\xE3\x80\x80+\xE2\x80\x80" "2\xE2\x80\xA9" "x + (\"a\\\xE2\x80\xA8" "b\" === \"ab\" ? 10 : 0)");
+    assert(ws.type == JsType::Number && ws.to_number() == 13);
+
+    // 3. Strict-mode future reserved words, async/generator/static-block early errors, regex LS/PS.
+    const char* bad_ctx[] = {
+        R"("use strict"; var l\u0065t = 1;)",
+        R"("use strict"; var st\u0061tic = 1;)",
+        R"("use strict"; var im\u0070lements = 1;)",
+        R"("use strict"; ({ l\u0065t } = { let: 1 });)",
+        R"(class l\u0065t {})",
+        R"(class st\u0061tic {})",
+        R"(class yi\u0065ld {})",
+        R"(async function f() { var aw\u0061it = 1; })",
+        R"(async function f() { aw\u0061it: ; })",
+        R"(function* g() { var yi\u0065ld = 1; })",
+        R"(function* g() { yi\u0065ld: ; })",
+        R"(var f = async function aw\u0061it() {};)",
+        R"(var f = function* yi\u0065ld() {};)",
+        R"(class S { static { argument\u0073; } })",
+        R"(class S { static { (class { [argument\u0073]() {} }); } })",
+        R"(class S { x = argument\u0073; })",
+        R"(class S { static { var aw\u0061it = 1; } })",
+        R"(class S { static { ((x = await) => 0); } })",
+        R"(function* g() { ((x = yield) => 0); })",
+        "/a\xE2\x80\xA8/",
+        "/a\xE2\x80\xA9/"
+    };
+    for (const char* src : bad_ctx) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
 // =========================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
@@ -12226,6 +12652,7 @@ int main() {
     RUN_TEST(javascript_prototype_chain_and_arrays);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
+    RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
@@ -12372,6 +12799,12 @@ int main() {
     RUN_TEST(truetype_font_rasterizer_and_utf8_proportional_metrics);
     RUN_TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e);
 
+    // Phase 37: RegExp VM, modern CSS cascade/units/MQ L4, inline-style CSSOM, HTML5 date/time inputs.
+    RUN_TEST(regexp_vm_handles_deep_nesting_and_long_inputs);
+    RUN_TEST(css_cascade_layers_supports_combinators_and_mq_l4);
+    RUN_TEST(inline_style_cssom_shorthands_and_aliases);
+    RUN_TEST(html5_date_time_inputs_validation_and_stepping);
+
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
@@ -12388,6 +12821,11 @@ int main() {
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
     RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
+
+    // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.
+    RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);
+    RUN_TEST(js_escaped_keywords_and_contextual_rules);
+    RUN_TEST(js_strict_async_generator_identifier_context_and_line_terminators);
 
     // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK.
     RUN_TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders);

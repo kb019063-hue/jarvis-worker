@@ -648,6 +648,9 @@ private:
         bool is_async{false};
         bool is_generator{false};
         bool strict{false};
+        bool forbid_arguments{false};
+        bool forbid_await{false};
+        bool forbid_yield{false};
     };
 
     const JsToken& peek(size_t offset = 0) const;
@@ -662,6 +665,8 @@ private:
     [[noreturn]] void fail(const std::string& message) const;
     [[noreturn]] void fail_unexpected() const;
     void consume_semicolon();
+    bool is_strict() const;
+    void validate_identifier(const std::string& name, bool strict_ctx) const;
     std::string consume_binding_identifier(const char* what);
     bool is_property_name_token() const;
 

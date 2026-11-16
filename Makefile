@@ -119,14 +119,14 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 # URL cases that must pass (tests/url). The UTS #46 host handling makes all
 # of them pass.
 URL_FLOOR ?= 1188
-# Cases that must pass in the sanitizer build. One below what the normal build
+# Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. (906 pass there today, 907 in the normal
-# build, which is what the CI floor requires since finding 47.)
-JS_ASAN_FLOOR ?= 905
+# case that the normal build passes. Combined Phase 37 + Phase 45 scores 925/940
+# under ASan and 926/940 in Release. Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 924
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 640
+DOM_ASAN_FLOOR ?= 644
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -145,7 +145,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -185,6 +185,12 @@ conformance: $(TARGET)
 ## JavaScript scoreboard (tests/js-conformance; expectations taken from Node.js).
 js-conformance: $(TARGET)
 	@$(JS_CONFORMANCE)
+
+## The four Promise combinators must resolve each yielded element before next().
+## The hostile iterators in async.dat never end normally; old code skipped
+## resolve(), overran the iterator or timed out. All 34 cases must pass.
+verify-promise-iterators: $(TARGET)
+	@$(JS_CONFORMANCE) --filter async --quiet --timeout 3 --min-pass 34
 
 ## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
 ## Running it needs nothing but the binary. Checking or recording the
@@ -386,4 +392,5 @@ clean:
 	rm -rf build build-asan build-tsan
 
 help:
+	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
 	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

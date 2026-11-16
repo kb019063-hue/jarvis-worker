@@ -810,24 +810,46 @@ void setup_input(Iface& I) {
     });
     M.accessor("valueAsNumber",
         [](Realm&, Element& el) {
-            const std::string type = forms::input_type(el);
-            double number = 0;
-            if ((type == "number" || type == "range") && forms::parse_number(forms::value(el), number)) return num(number);
-            return num(std::numeric_limits<double>::quiet_NaN());
+            return num(forms::value_as_number(el));
         },
         [](Realm& r, Element& el, const JsValue& value) {
-            const std::string type = forms::input_type(el);
-            if (type != "number" && type != "range") {
-                throw_dom(r, "InvalidStateError", "This input element does not support Number values.");
-            }
             const double number = to_double(value);
             if (std::isinf(number)) js_throw_type_error("The provided double value is non-finite.");
-            forms::set_value(el, std::isnan(number) ? std::string() : forms::number_to_string(number));
+            const std::string type = forms::input_type(el);
+            if (!forms::has_value_as_number(type)) {
+                throw_dom(r, "InvalidStateError", "This input element does not support Number values.");
+            }
+            forms::set_value_as_number(el, number);
         });
     M.accessor("valueAsDate",
-        [](Realm&, Element&) { return null(); },
-        [](Realm& r, Element&, const JsValue&) {
-            throw_dom(r, "InvalidStateError", "This input element does not support Date values.");
+        [](Realm& r, Element& el) {
+            double ms = 0;
+            if (!forms::value_as_utc_ms(el, ms)) return null();
+            JsObject* cell = Heap::default_heap().allocate_object();
+            cell->prototype = r.intrinsics ? r.intrinsics->date_proto : JsIntrinsics::get().date_proto;
+            cell->klass = ObjectClass::Date;
+            cell->internal = std::make_shared<double>(ms);
+            return JsValue::make_object(cell);
+        },
+        [](Realm& r, Element& el, const JsValue& value) {
+            double ms = std::numeric_limits<double>::quiet_NaN();
+            bool is_null = value.is_nullish();
+            if (!is_null) {
+                if (!value.is_object() || !value.object_val || value.object_val->klass != ObjectClass::Date ||
+                    !value.object_val->internal) {
+                    js_throw_type_error("The provided value is not a Date.");
+                }
+                ms = *std::static_pointer_cast<double>(value.object_val->internal);
+            }
+            const std::string type = forms::input_type(el);
+            if (!forms::has_value_as_date(type)) {
+                throw_dom(r, "InvalidStateError", "This input element does not support Date values.");
+            }
+            if (is_null) {
+                forms::set_value(el, std::string());
+                return;
+            }
+            forms::set_value_as_utc_ms(el, ms);
         });
     M.method("stepUp", 0, [](Realm& r, Element& el, Args args) {
         const int count = js_arg(args, 0).is_undefined() ? 1 : to_long(args[0]);

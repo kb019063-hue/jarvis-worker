@@ -167,6 +167,7 @@ struct ComputedStyle {
     EdgeSizes border_width{0.0f};
     Color border_color{Color::black()};
     float border_radius{0.0f};
+    float border_radius_percent{-1.0f};
     BoxShadow box_shadow;
     float font_size{16.0f};
     int font_weight{400};
@@ -367,6 +368,7 @@ private:
                             std::size_t sheet_index, std::size_t& source_order);
     std::vector<IndexedSelector> indexed_candidates(const std::shared_ptr<Element>& element) const;
     bool matches_selector(const std::shared_ptr<Element>& element, const Selector& selector) const;
+    bool match_selector_impl(const std::shared_ptr<Element>& element, const Selector& selector, Specificity* out_spec) const;
     bool matches_simple_selector(const std::shared_ptr<Element>& element, const SimpleSelector& sel) const;
 
     void apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& val) const;
@@ -382,12 +384,21 @@ private:
     StyleSheet m_ua_sheet;
     std::vector<StyleSheet> m_author_sheets;
     SelectorIndex m_author_selector_index;
+    std::vector<std::string> m_layer_order;
     std::size_t m_next_author_selector_order{0};
     float m_viewport_width{800.0f};
     float m_viewport_height{600.0f};
     // Font size used to resolve em/ex/ch units for the element being resolved.
     mutable float m_em_base{16.0f};
-    float m_root_font_size{16.0f};
+    mutable float m_root_font_size{16.0f};
+    struct DescPrefixEntry {
+        const Node* parent{nullptr};
+        std::size_t prefix{0};
+    };
+    mutable std::unordered_map<const Element*, std::size_t> m_depth_cache;
+    mutable std::unordered_map<const Selector*, std::unordered_map<const Element*, DescPrefixEntry>> m_desc_prefix_cache;
+
+    int layer_rank(const std::string& layer_name) const;
 };
 
 } // namespace litebird

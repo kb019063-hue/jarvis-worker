@@ -39,12 +39,12 @@ The rest are documented with enough detail to act on.
 | 23 | 1.2% of 67,545 generated expressions disagreed with Node | **High** | ✅ Fixed where pages meet it (Phase 23); 0.15% left |
 | 24 | `node.appendChild(node)` ended the process, and so did any tree deeper than the stack: 300,000 nested `<div>` were a `SIGSEGV` | **High** | ✅ Fixed (Phase 25): cycles are refused, the parser stops nesting at 512, nothing that walks the DOM recurses |
 | 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
-| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
+| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | ✅ Fixed: lookbehind in Phase 24; bytecode VM on explicit heap stack in Phase 37 (finding 42; 30M catastrophic-backtracking step guard kept) |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | ✅ Fixed: block-in-inline split in Phase 36; float placement rewritten (band-edge sweep, exact landing, no step cap). The remaining inputs are smaller loops |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
-| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1,188 of 1,188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
+| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27/28/37): 644 of 644; URL data 1,188 of 1,188; date inputs & `el.style` shorthands fixed in Phase 37. Open: layout numbers in `getComputedStyle`, `sheet.cssRules`, `document.write`, SVG DOM |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout costs remain open (its tokenizer cost was fixed in Phase 39) |
@@ -54,11 +54,13 @@ The rest are documented with enough detail to act on.
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases remain (the tokenizer repeated-name cost was fixed in Phase 39) |
 | 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
+| 42 | Repeated regex groups overflowed the stack, modern CSS cascade/L4 selectors/units/MQ L4 were missing (and deep CSS blocks/selectors hit stack or quadratic bounds), `el.style` kept shorthands whole, and HTML5 date/time inputs acted as text inputs | **High** | ✅ Fixed (Phase 37) |
 | 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch wired in Phase 36; WebP/AVIF & text remain open |
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 | 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
+| 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 
 ---
 
@@ -1077,7 +1079,7 @@ reads it one character at a time, and some results are 90,000 characters.
 **Not part of this.** The audit's first table had two rows that are the same
 shape in other containers, and both are fixed in finding 33 (Phase 30).
 
-## 26. 🟡 Regular expressions over long input: lookbehind fixed, repeated groups still limited
+## 26. ✅ Regular expressions over long input: lookbehind fixed (Phase 24), bytecode VM removes repeated-group recursion (Phase 37)
 
 Found while testing finding 25. With the string no longer the cost, the
 matcher's own limits showed.
@@ -1117,7 +1119,15 @@ backtracking state on the heap instead of the native stack, which means
 compiling the expression and running it on an explicit stack: a rewrite of
 the matcher, not a patch.
 
-**Open: the step limit.** A match is abandoned after 30 million steps with
+**Fixed in Phase 37 (finding 42).** `src/js/BuiltinsRegExp.cpp` now compiles
+patterns to bytecode instructions (`InstOp`) executed iteratively by `exec_vm()`
+over an explicit heap `backtrack_stack`, with iterative AST node destruction so
+deeply nested non-capturing groups (`(?:` × 250) and 100,000+ repeated-group
+matches succeed without `RangeError`. Patterns nested deeper than
+`kMaxCompilerDepth` (1,000) still raise `SyntaxError`, and the 30-million
+`kMaxMatchSteps` guard remains.
+
+**The step limit (kept intentionally).** A match is abandoned after 30 million steps with
 the same `RangeError`. `/.*y/` on a line of 20,000 characters with no `y`
 needs 200 million; it throws after 0.2 s here and answers `false` after 0.46 s
 in Node. (Node is quadratic there too: 2 s at 40,000 characters, 39 s at
@@ -2438,8 +2448,131 @@ tree, in the sandbox.
   1702; web-platform-tests 4658 of 5192; 1,000 generated documents and 1,000
   round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs
   … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over
-  315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
+  `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
   sanitizer. It takes 19 minutes here.
+
+---
+
+## 42. ✅ Iterative RegExp bytecode VM, CSS L4 cascade/selectors/units, CSSOM `el.style` shorthands, and HTML5 date/time inputs
+
+**What was wrong.**
+1. **Repeated-group regex recursion (finding 26):** `BuiltinsRegExp.cpp` used
+   recursive CPS `Matcher` lambdas and recursive AST node `~Node()` destructors,
+   failing with `RangeError` past ~12,000–21,800 group iterations and risking
+   native stack overflow on deeply nested pattern ASTs.
+2. **Modern CSS cascade, selectors, units, and deep-input bounds:** `CssParser`,
+   `StyleSheet`, and `StyleResolver` lacked child/sibling combinators (`>`,
+   `+`, `~`), selector lists (`:is()`, `:where()`, multi-argument `:not()`,
+   `:host`), `@layer` statement/block precedence, `@supports` feature checks,
+   Media Queries Level 4 ranges (`400px <= width <= 1000px`) and `not`/`and`/
+   `or`, math functions (`min()`, `max()`, `clamp()`), dynamic viewport units
+   (`dvh`, `dvw`, `vmax`), percentage `border-radius`, and `:root` font-size
+   inheritance (`rem`). In addition, `parse_stylesheet_blocks` and
+   `match_selector_impl` recursed on nested `{}` blocks and long selector
+   chains, and unpruned `AllDescendant` matching took quadratic time when a
+   page had a descendant selector whose length matched a 200,000-element chain.
+3. **Inline `el.style` CSSOM gap (finding 31 / `inline-style.js`):**
+   `DomStyleBindings.cpp` stored shorthands (`flex`, `overflow`, `inset`, `gap`,
+   `border-radius`, `background`, `transition`, `text-decoration`, `list-style`,
+   `outline`, `margin`, `padding`, `border`, `font`) unexpanded, omitted
+   canonical `cssText`/`length`/`item()`/`removeProperty()`/`setProperty(..., 'important')`
+   and `--*` custom-property normalization, and ignored vendor aliases
+   (`-webkit-*`, `-moz-*`, `-ms-*`, `cssFloat`).
+4. **HTML5 date/time `<input>` behavior (finding 31 / `dates-and-svg.js`):**
+   `date`, `time`, `month`, `week`, and `datetime-local` inputs behaved like
+   plain text inputs without calendar/leap-year/ISO-week sanitization,
+   `valueAsDate`, `valueAsNumber`, `stepUp()`/`stepDown()`, or
+   `min`/`max`/`step` constraint validation.
+
+**The fixes.**
+- **RegExp VM (`src/js/BuiltinsRegExp.cpp`):** Replaced recursive CPS matchers
+  with a bytecode compiler (`InstOp` opcode stream covering literals, character
+  classes, anchors, word boundaries, quantifiers, lazy/greedy captures, named
+  backreferences, lookahead/lookbehind, and assertions) and an iterative heap
+  backtracking VM (`exec_vm`) bounded by `kMaxMatchSteps = 30,000,000`. AST
+  teardown uses an iterative free-worklist (`~RegexNode()`), and parser nesting
+  past `kMaxCompilerDepth = 1,000` throws `SyntaxError` without touching the
+  stack. Lookbehind continues to match right-to-left via sub-VMs.
+- **CSS Parser, Cascade & Selectors (`StyleSheet.hpp`, `CssParser.*`,
+  `StyleResolver.*`):**
+  - Converted `parse_stylesheet_blocks` to an explicit heap frame stack
+    preserving `@layer`/`@media`/`@supports` state and iterative
+    rule-text emission (`append_qualified_rule_text` with `reserve`), keeping
+    depth-200,000 nested `{}` stylesheets under ~10 MB RSS and `< 0.3 s`.
+  - Added `CombinatorKind` (`None`, `Child`, `AdjacentSibling`, `GeneralSibling`),
+    `:is()` / `:where()` / selector-list `:not()` / `:host`, `@layer` ordering
+    (unlayered normal beats layered normal; earlier layered `!important` beats
+    later layered `!important`), `@supports` condition evaluation, MQ L4 range
+    syntax + `not`/`and`/`or`, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`,
+    `border_radius_percent`, and iterative ancestor inheritance in
+    `resolve_style` (while keeping `line_height_number` and
+    `effective_line_height()`).
+  - Replaced recursive `match_selector_impl` with an explicit heap frame stack
+    and added `Selector::finalize_metadata()` (`min_ancestors`,
+    `cached_specificity`, `any_dynamic_specificity`) plus `StyleResolver`'s
+    per-tree `m_depth_cache` and `m_desc_prefix_cache` (`n > 32` `AllDescendant`
+    DP memoization), turning depth-200,000 `descendant selector as long as
+    the nest` from a 60s timeout into `0.0–0.1 s` (`5–14 MB`).
+- **CSSOM `el.style` (`src/js/DomStyleBindings.cpp`):** Implemented full
+  shorthand expansion/recomposition, CSSOM serialization/value normalization,
+  `-webkit-`/`-moz-`/`-ms-`/`cssFloat` aliases, `length`/`item()`,
+  `removeProperty`, `!important` priority, and custom-property (`--*`)
+  handling.
+- **Date/time `<input>` (`include/litebird/dom/FormState.hpp`,
+  `src/dom/FormState.cpp`, `src/js/DomFormBindings.cpp`):** Added WHATWG input
+  sanitization (civil calendar leap-year checks, ISO 8601 week counts,
+  `datetime-local` space-to-`T` normalization), `valueAsNumber`, `valueAsDate`,
+  `stepUp()`/`stepDown()` with millisecond-accurate stepping, and
+  `rangeUnderflow`/`rangeOverflow`/`stepMismatch` constraint validation plus
+  spec-compliant `TypeError`/`InvalidStateError` exceptions.
+
+**How verified (on the merged tree).** Every line was run on the merged tree
+with zero edits to `everyday*.dat` and with CI floors raised (`925 -> 926`,
+`640 -> 644`, ASan JS `923 -> 924`, ASan DOM `640 -> 644`):
+- `make test`: `All 174 engine test suites passed successfully!` (includes four
+  new suites: `regexp_vm_handles_deep_nesting_and_long_inputs`,
+  `css_cascade_layers_supports_combinators_and_mq_l4`,
+  `inline_style_cssom_shorthands_and_aliases`,
+  `html5_date_time_inputs_validation_and_stepping`).
+- `make js-conformance`: `926/940 (98.5%)`, `regexp.dat` `39/39 (100.0%)`,
+  everyday probe `90/90`, `0` crashes, `0` timeouts; `--reference "node -e"`
+  `940/940 (100.0%)`.
+- `make dom-conformance`: `644/644 (100.0%)`, everyday probe `68/68`,
+  `--reference` `644/644 (100.0%)` (new cases in `forms.dat` and `style.dat`).
+- Out-of-corpus jsdom comparisons (`tools/conformance/compare_with_jsdom.py`):
+  `tests/dom-conformance/open/dates-and-svg.js` matches jsdom on `6/6` date
+  lines (the remaining line is SVG DOM);
+  `tests/dom-conformance/open/inline-style.js` matches on `26/27` lines (the
+  single difference is `font-family: "Helvetica Neue", Arial;` retaining quotes
+  per CSSOM/Chromium where jsdom's `cssstyle` strips them).
+- Existing scoreboards unchanged: `make conformance` `1781/1792`,
+  `make diff-trees` `6000/6000`, `make url-conformance` `1188/1188`,
+  `make xml-conformance` `1702/1702`, `make diff-xml` `4000` docs (`0` differ) &
+  `3000/3000` round trips, `make wpt` `5421/5463` (`0` unlisted),
+  `make diff-strings` `50485/50580` (`95` differ), `make bench` (42),
+  `make bench-css` (20), `make bench-attributes` (6),
+  `make bench-tokenizer-attributes` (7), `make bench-surrogates` (3),
+  `make security-fetch` (3), `make security-worker` (17),
+  `make verify-media` (35), `make fuzz-media` (1,800), `make tsan`, and
+  `make deep` (`1332` runs over `465` pages at depth `200000`, `0` failed,
+  slowest `26.9 s`).
+- Sanitizers (ASan+UBSan, `detect_leaks=0`): `174/174` unit suites,
+  JS `925/940` (probe `90/90`, `0` crashes/timeouts), DOM `644/644`,
+  URL `1188/1188`, XML `1702/1702`, WPT `5421/5463`, `diff_xml` `1,000` docs &
+  `1,000` round trips, `fuzz` (`400` parser + `400` pipeline + `1927`/`600` XML +
+  `1800` media, `0` findings), and `make asan-deep` (`882` runs over `315` pages
+  at depth `10000`, `0` failed, slowest `3.6 s`).
+
+**What is still open.**
+- RegExp: catastrophic backtracking still terminates via `kMaxMatchSteps`
+  (`30,000,000`), patterns nested >`1,000` levels raise `SyntaxError`, and
+  flags `u`/`v`/`d` completeness remains under Wave 2.
+- CSS: `AllGeneralSibling` (`~` in selectors longer than 32 parts at extreme
+  depth) does not share `m_desc_prefix_cache`'s DP memoization; `:has()`,
+  `:focus-visible`, `@container`, CSS nesting, and `::part` are still open.
+- DOM: `getComputedStyle(el).width` layout metrics, `sheet.cssRules`,
+  `document.write`, and the SVG DOM (`className.baseVal`, `viewBox`,
+  `getBBox()`) remain open.
 
 ---
 
@@ -3083,3 +3216,250 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
 cross-origin `Location` setter navigation (`childWin.location = ...`),
 `MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc` CSP
 inheritance, and process-level site isolation remain open.
+
+---
+
+## 50. ✅ Unicode escapes in JavaScript identifiers and Unicode 17.0 identifier validation (Phase 44)
+
+**What was wrong.** `JsLexer` had no handling for `\uXXXX` or `\u{HexDigits}`
+escapes inside identifiers or `#PrivateName` tokens (`var \u0061 = 1`,
+`o.\u2118 = 3`, `{ \u{6F}: 2 }`, `class C { #\u{1D49C} = 1 }` all threw
+`SyntaxError: Invalid or unexpected token`), and `is_ident_start()` accepted
+every raw UTF-8 byte `>= 0x80` outside four hard-coded whitespace/line-terminator
+sequences (accepting non-ID code points like `U+2E2F` VERTICAL TILDE). Simply
+unescaping `\u` sequences in `JsLexer` would have broken ~215 negative Test262
+tests that previously passed by accident because `\` was rejected everywhere
+outside strings/templates/regexes: escaped reserved words (`v\u0061r`, `\u0069f`,
+`({ \u0069f })`), escaped contextual keywords (`st\u0061tic`, `g\u0065t`,
+`s\u0065t`, `\u0061sync`, `\u006Ff`, `new.t\u0061rget`), strict-mode future
+reserved words (`l\u0065t`, `im\u0070lements`, `st\u0061tic`, `yi\u0065ld`),
+`await`/`yield` in async/generator/arrow-parameter/static-block contexts,
+`arguments` inside class `static {}` blocks and field initializers, and invalid
+escaped code points (`\u0030`, `\u200C`, `\u2E2F`, `\u0023`, surrogate pairs
+`\uD835\uDC9C`).
+
+**What changed.**
+- Added `include/litebird/js/JsIdentifierTables.hpp`: compact `constexpr`
+  Unicode 17.0 sorted range tables (682 ranges for `ID_Start`, 795 ranges for
+  `ID_Continue` + `U+200C`/`U+200D`, generated from Node.js v22.22.3 / ICU
+  Unicode 17.0) with an ASCII `< 0x80` fast path and binary search.
+- Updated `include/litebird/js/JsLexer.hpp` and `src/js/JsLexer.cpp`:
+  - Added `JsTokenType::EscapedKeyword` and `JsToken::has_escape`.
+  - Kept a zero-overhead pure-ASCII fast path in `scan_identifier()` while
+    decoding well-formed UTF-8 and `\uXXXX`/`\u{...}` escapes (with arbitrary
+    leading zeros in `\u{...}`) on the slow path and validating against
+    `is_js_id_start` / `is_js_id_continue`.
+  - Extended `#PrivateName` scanning (`starts_identifier_at`), numeric literal
+    trailing-identifier rejection (`1\u0061`), regex flag scanning (disallowing
+    `\u` escapes), `regex_allowed()` (`obj.\u0069f / 2` as division), full
+    ECMA-262 non-ASCII `WhiteSpace`, and `U+2028`/`U+2029` line terminators in
+    `#!` hashbangs, comments, string line continuations, and regex literals.
+- Updated `include/litebird/js/JsParser.hpp` and `src/js/JsParser.cpp`:
+  - `check_identifier()` now requires `!peek().has_escape`, and all direct
+    `async` checks use `check_identifier("async")`.
+  - Added `validate_identifier()` enforcing strict-mode future reserved words,
+    generator `yield`, async/static-block `await`, `let`/`const` lexical `"let"`
+    prohibition, `FunctionExpression` own `[Yield, Await]` binding,
+    `ArrowParameters[?Yield, ?Await]` inheritance (reset for `ConciseBody`),
+    full-class strict mode (covering class name and `extends`), `case
+    JsTokenType::Await:` gated on `m_functions.back().is_async`, and
+    `ContainsArguments` early errors in class `static {}` blocks and field
+    initializers.
+
+**How it was verified.**
+- Differential TC39 Test262 (`tools/conformance/run_test262.py --binary before=/tmp/litebird-before --binary now=build/litebird` at pinned commit `2e58f87d8350`):
+  - **21 default directories (`make test262`)**: **10,835 → 12,275 / 15,686 (69.1% → 78.3%, +1,440 gained, 0 lost)**:
+    `language/statements/class` +589, `language/expressions/class` +583,
+    `language/expressions/object` +159, `language/expressions/assignment` +100,
+    `language/statements/function` +5, `language/expressions/function` +2,
+    `language/expressions/in` +1, `built-ins/Function` +1.
+  - **`language/{identifiers,keywords,future-reserved-words,reserved-words}`**:
+    **276 → 374 / 374 (73.8% → 100.0%, +98 gained, 0 lost)**.
+  - **`language/{identifiers,keywords,future-reserved-words,reserved-words,white-space,line-terminators,comments,asi}`**:
+    **496 → 627 / 635 (78.1% → 98.7%, +131 gained, 0 lost)**.
+  - **`language/expressions/{arrow-function,async-arrow-function}`**:
+    **323 → 337 / 403 (80.1% → 83.6%, +14 gained, 0 lost)**.
+  - **Whole Test262 suite (`built-ins language annexB`, 47,967 tests)**:
+    **26,012 → ~27,741 / 47,967 (54.2% → 57.8%, +1,730 gained)**. The single
+    remaining difference outside the 21 default dirs is
+    `built-ins/AsyncFunction/AsyncFunction-construct.js`, which previously
+    passed by accident because `async function(){}.constructor` is still
+    `Function` (no `%AsyncFunction%` constructor yet) and `parse_unary()`
+    erroneously accepted `await 1` inside non-async functions.
+- Added `tests/js-conformance/identifiers.dat` (14 cases, **14/14 in Node.js
+  v22.22.3** via `--reference "node -e"`, **14/14 in Litebird**), raising
+  `make js-conformance` from **907/921** to **921/935 (98.5%)** and raising
+  CI `--min-pass` from `907` to `921` and `JS_ASAN_FLOOR` from `905` to `919`.
+- Added 3 C++ unit test suites in `tests/test_suite.cpp` (`make test`: **169/169**
+  in Release; ASan+UBSan `test_suite` 100% passing with 0 findings).
+- Verified under Release and ASan+UBSan (`make test`, `make conformance`,
+  `make js-conformance`, `make dom-conformance`, `make url-conformance`,
+  `make wpt`, `make diff-strings`, `make bench`, `make bench-surrogates`,
+  ASan+UBSan `test_suite`, `js-conformance` 920/935, `dom-conformance` 640/640).
+
+**What remains open.**
+- Strict-mode parameter/function-name validation when `"use strict"` appears
+  inside a function's own body (e.g. `function f(static) { "use strict"; }`),
+  and prohibiting `eval`/`arguments` as strict-mode binding/assignment targets,
+  remain unimplemented.
+- Escaped `"use strict"` directive strings (`"use\x20strict"`) still enable
+  strict mode because `parse_statement_list` inspects cooked token text.
+- `%AsyncFunction%` and `%GeneratorFunction%` distinct constructors/prototypes
+  are tracked under the existing *"What a function is, in small"* task row.
+
+---
+
+## 51. ✅ Promise combinators resolved values only after consuming the iterable
+
+**The hole.** `Promise.all`, `any`, `race` and `allSettled` handed every value
+straight to `Promise::to_promise` inside `js_iterate`. That bypassed the
+constructor's overridable `resolve`; an iterator with no end was consumed
+forever before its first value could throw. A returned promise's `then`
+getter/call could not close the iterator either. Repro: for each method, use
+an iterator that yields 7, then throws on its next step, and a
+`Promise.resolve` override that throws `Error('stop')`. Node calls `return()`
+and rejects with "stop"; the old engine did not call `resolve`, reached the
+second step, and rejected with "advanced". See the four new cases in
+`tests/js-conformance/async.dat`.
+
+**The fix.** In `src/js/Promise.cpp`, read `resolve` once before the iterator
+and invoke it on each item before advancing; get `then` on the returned
+promise and attach the reaction within that same visitor. `js_iterate`
+already closes a non-array iterator if a visitor throws, so the result
+promise receives that exception after `return()`. A native promise keeps its
+cheap `Promise::subscribe` path (including explicit GC roots). An overridden
+`then` is called synchronously with two once-only, non-constructible
+callbacks; pending values retained through those callbacks are registered
+as roots on the combinator, not left opaque to the collector. The four
+methods share the same step and close behavior. No `JsOps.cpp` change is
+included: PR #50 claims it.
+
+**Verification.** `make verify-promise-iterators` prints `34/34` async cases
+with 0 crashes and timeouts and a 3-second limit (old binary: 30/34, two
+timeouts with that limit); the reference run
+`python3 tools/conformance/run_js_conformance.py --reference 'node -e'
+--filter async --quiet` prints `34/34`. The full corpus prints `911/925` (the
+same 14 pre-existing failures); CI's JavaScript floor rises 907 -> 911.
+`make test` passes 163 suites on the original base, then 167 after merging
+main (one suite from this change). A page not in the corpus through
+`tools/conformance/compare_with_jsdom.py` prints `4 lines, 4 the same` on
+the fixed binary versus `4 lines, 0 the same` before. The page has an
+actual DOM text update from each of the four methods, not just a computed
+marker. Run `python3 verify/build_promise_baseline.py` first to build the
+baseline binary (it prints `baseline binary: build/litebird-promise-before`).
+On the four combinators' 390 pinned test262 tests:
+`python3 tools/conformance/run_test262.py --binary
+before=build/litebird-promise-before --binary after=build/litebird
+--timeout 3 --jobs 2 built-ins/Promise/all built-ins/Promise/allSettled
+built-ins/Promise/any built-ins/Promise/race` prints 210 -> 293 pass, 84 new
+passes and one false former pass lost (below). A custom `then` retained its
+callbacks through `gc()` and later delivered 9 in an additional manual probe.
+
+The first full branch run, before merging later main (`make test conformance js-conformance
+verify-promise-iterators dom-conformance url-conformance xml-conformance wpt
+diff-trees diff-xml diff-strings deep asan fuzz tsan`) keeps the existing
+scoreboards: 163 suites, html5lib 1781/1792, JS 911/925, DOM 640/640,
+URL 1188/1188, XML 1702/1702, WPT 4658/5192 (0 unlisted); 6000 random
+trees and 4000 XML documents compared, 0 differences, and 1332 deep runs
+across 465 pages at depth 200000, 0 failed (slowest 20.7 s). `make asan`
+passes 163 suites, JS 910/925 (one fewer for deep recursion), DOM 640/640,
+URL 1188/1188, XML 1702/1702, WPT 4658/5192; 400 parser, 400 pipeline,
+600 XML and 1800 media fuzz cases with 0 findings; 882 deep runs across 315
+pages at depth 10000, 0 failed (slowest 3.1 s). The last release `fuzz`
+and `tsan` steps passed after the sanitizer run.
+
+After merging `main` at `4b803d7` (the frames and table-placement PRs),
+the release chain passed again: 167 suites, JS 911/925, WPT 5421/5463
+(87 files, 42 listed, 0 unlisted), html5lib 1781/1792, DOM 640/640,
+URL 1188/1188, XML 1702/1702; 6000 random trees and 4000 XML docs
+0 differences; 1332 deep runs 0 failed (slowest 20.2 s). On that merged tree `make asan` passed 167 suites, JS 910/925, DOM
+640/640, URL 1188/1188, XML 1702/1702, WPT 5421/5463 (0 unlisted),
+1000 XML differential docs with 0 DIFFER and 1000 round trips, 400/parser
++ 400/pipeline + 600/XML mutations with 0 findings and 1800 media fuzz
+cases clean, 882 deep runs 0 failed (slowest 2.4 s). `make fuzz` passed
+400/400/600 mutations with 0 findings; `make tsan` passed both stress
+harnesses under ThreadSanitizer and ASan. No ASan/UBSan/TSan report.
+
+After merging `main` at `020e0d5` (Phase 44's Unicode identifiers), a
+**third full chain** passed (`build/promise-third-chain.log`): 170 suites,
+JS 925/939, html5lib 1781/1792, DOM 640/640, URL 1188/1188, XML
+1702/1702, WPT 5421/5463 (0 unlisted), diff-trees 6000 pages and
+diff-xml 4000 docs 0 differing, deep 1332 runs 0 failed (slowest 16.6 s).
+ASan: 170 suites, JS 924/939, DOM/URL/XML/WPT unchanged, 1000 differential
+XML docs 0 DIFFER and 1000 round trips, 400/400/600 mutations 0 findings,
+1800 media fuzz clean, 882 deep runs 0 failed (slowest 2.7 s). The standalone
+`make fuzz` and `make tsan` passed. The normal CI JS floor is now **925**;
+the ASan floor was raised from 919 to **923** after the 924/939 sanitizer
+score was repeated with `--min-pass 923` (0 crashes/timeouts). No floor
+was lowered.
+
+**Still open.** `js_iterate`'s array fast path ignores an array's overridden
+`Symbol.iterator`: with `a=[1]` and an iterator yielding 9, `Promise.all(a)`
+returns `[1]` here and `[9]` in Node. The new task-table row names the
+shared helper, currently claimed by PR #50. A custom constructor's `resolve`
+is now invoked, but the result is still a base Promise: the pre-existing
+subclass row owns that change. Thus test262
+`built-ins/Promise/any/species-get-error.js` loses a former pass: on this
+engine an unhandled rejection is reported by a base Promise where the test's
+custom constructor discards it. This is disclosed, not silenced or presented
+as a conformance gain. Array holes and the general collector audit are also
+outside this change.
+
+## 53. ✅ A page was read as UTF-8 whatever it said it was (Phase 47)
+
+**The hole.** One decoder existed — `utf8_decode` — plus an XML declaration
+that could also name UTF-16 or Latin-1. An HTML page's `<meta charset>` was
+text nobody parsed, an HTTP `Content-Type`'s charset was dropped by the
+loader, `document.characterSet` did not exist, `CSS @charset` was a comment,
+and `data:` URLs only knew UTF-8. Two scoreboards measured it: the W3C XML
+suite skipped 16 documents as "an encoding this build cannot read", and
+web-platform-tests' `encoding/` directory, where a browser's tables are
+checked byte by byte, could not be run at all.
+
+**The fix.** `src/net/TextEncoding.cpp` implements the WHATWG Encoding
+Standard's decoder algorithms over tables generated from `whatwg/encoding`
+`@ be17ac5c49881336538acfc7b40dba3c8009144b` (`src/net/TextEncodingTables.cpp`,
+881 KB; 40 encodings, 228 labels, every index and every `gb18030` range, with
+`Big5`'s four two-code-point pointers and `ISO-8859-8-I`'s shared index
+written out). `HtmlParser::decode_bytes` follows HTML §13.2.3.1 and
+`prescan_meta_charset` is §13.2.3.2 over the first 1,024 bytes. XML validates
+`[81] EncName` before looking a label up and decodes fatally; a navigated
+`.xml` that fails gets the `<parsererror>` element browsers show. The same
+functions serve `data:` URLs, `XMLHttpRequest`, `<script src>`, `<iframe>`
+subdocuments and CSS `@charset`. `document.characterSet`/`charset`/
+`inputEncoding` report the result. `--content-type=<mime>` and a
+`<file>.headers` sidecar let the conformance runner hand a page the type a
+server would.
+
+**Verification.** W3C XML suite **1718/1718** (100.0%), 0 encoding skips, 261
+canonical forms compared, 2,585 documents run, 0 crashes and 0 timeouts — the
+16 documents that were skipped are read and each is still answered as the
+suite says; the Fuji Xerox `weekly-euc-jp`, `weekly-iso-2022-jp`,
+`weekly-shift_jis`, `weekly-utf-16` and `weekly-little-endian` documents now
+serialize to the exact 2,822 bytes of `weekly-utf-8.xml`. web-platform-tests
+**7968/8009 across 103 files, 41 listed failures and 0 unlisted** (5421/5463
+across 87 files before): 16 new `encoding/` files pass 2543/2543, including
+`big5-decode-extra.html` 2472/2472, the four `*-decode-errors.html` families,
+`utf-32.html` and `utf-32-from-win1252.html` 8/8, and
+`remove-only-one-bom.html` 3/3; `DOMParser-parseFromString-encoding.html`
+4/4 stops being an expected failure, so the list falls from 42 to 41. The
+37 vendored WPT files were fetched as raw blobs at
+`f2b7b7add021b5f40e30c65dd348135058996249` (the contents API transcodes the
+UTF-32 ones, which would have made the tests they belong to meaningless).
+`make test` passes **177** suites (174 before; three new ones cover the label
+table, the single-byte and multi-byte decoders' edge cases — `ISO-8859-6`'s
+unmapped `0xA1`, `gb18030`'s four-byte pushback, `Big5`'s two-code-point
+pointers — and the prescan, `characterSet`, XHR and subdocument paths).
+`make conformance` 1781/1792, JS 926/940, DOM 644/644, URL 1188/1188,
+`make diff-xml` 4000 documents with 0 DIFFER and 3000 round trips, `make wpt`
+as above, `make deep` 1,332 runs 0 failed. Floors raised, none lowered:
+`XML_FLOOR` 1702 -> **1718**, `WPT_FLOOR` 5421 -> **7968**.
+
+**Still open.** No encoders (nothing here needs to write legacy bytes, so the
+standard's encoder-side special cases are untested); `TextDecoder` and
+`TextEncoder` are not exposed to script, and the `encoding/` tests that need
+those globals are not vendored — the ones vendored iframe a document and
+read the text it decodes to. `XMLSerializer` does not consult
+`document.characterSet` for an output declaration, an encoding change on an
+already-parsed document is not modelled, and the prescan is one pass over the
+first 1,024 bytes with none of a browser's streaming. See `AGENTS.md`.

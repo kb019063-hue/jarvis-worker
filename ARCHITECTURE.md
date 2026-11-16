@@ -354,6 +354,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 179/179 unit suites; CI floor `1781 → 1792`) |
 
 ---
 
@@ -4427,6 +4428,68 @@ writes a declaration, an `encoding` change on an already-parsed document
 stops at 1,024 bytes with none of the streaming a browser needs when a page
 arrives in pieces.
 
+---
+
+## Phase 49 Architecture: Customizable `<select>` Content, Scope Boundaries, and `<selectedcontent>` Cloning
+
+### 1. The gap
+
+Litebird previously parsed `<select>` using pre-2025 HTML rules: `"select"` was
+not a default scope boundary (so `has_element_in_select_scope()` scanned up to
+`option`/`optgroup` instead of forwarding to `has_element_in_scope`), `Mode::InSelect`
+did not call `reconstruct_formatting_elements()`, `<keygen>` and `<textarea>`
+broke out of `<select>`, `stop_parsing()` left trailing open tags on the stack,
+and `<selectedcontent>` cloning was absent. Those gaps caused the remaining 11
+failures in the 1,792-case html5lib tree-construction corpus (`webkit02.dat`,
+`tests1.dat`, `tests_innerHTML_1.dat`, `tests7.dat`).
+
+### 2. Parser changes (`include/litebird/html/HtmlTreeBuilder.hpp`, `src/html/{HtmlTreeBuilder,HtmlTreeBuilderModes}.cpp`)
+
+- **Default scope boundary:** `"select"` is indexed in
+  `m_scope_boundary_indices[0]`, keeping `has_element_in_scope("select")` $O(1)$
+  and making `has_element_in_select_scope` delegate directly to
+  `has_element_in_scope`. Outer closing tags (`</font>`, `</p>`) cannot escape
+  or foster-close across an open `<select>`, and `<select>`/`</select>` inside an
+  open scope boundary inside `<select>` (such as `<select><div>` vs `<select><table>`)
+  follows §13.2.4.2.
+- **Customizable `Mode::InSelect`:** `process_character()` forwards non-NULL
+  characters inside `Mode::InSelect` to `process_in_select()`, which calls
+  `reconstruct_formatting_elements()` before character tokens and before
+  `<option>`, `<optgroup>`, and `<hr>` start tags. Only `<input>` breaks out of
+  `<select>`, while `<keygen>`, `<textarea>`, and arbitrary elements stay inside
+  `<select>` via `send_to_in_body()`.
+- **EOF cleanup & `<selectedcontent>` cloning:** `stop_parsing()` clears the open
+  element stack via `resize_open_elements(0)` so unclosed trailing `<option>`
+  elements run `pop_current_node()` cleanly. `m_saw_selectedcontent` avoids any
+  bookkeeping when a page contains no `<selectedcontent>`, and `m_select_states`
+  (erased when `<select>` pops) tracks the first `<selectedcontent>` and selection
+  state per open `<select>`.
+  - `clone_node_tree()` performs iterative deep cloning (`Element` namespaces,
+    prefixes, attributes and attribute namespaces, `is_value`, `FormControlState`,
+    `template_contents`, `Text`/CDATA, `Comment`, `ProcessingInstruction`,
+    `DocumentFragment`, `DocumentType`) so arbitrary nesting never overflows the
+    native stack.
+  - Both `update_selectedcontent_on_option_pop()` and
+    `sync_selectedcontent_on_pop()` ignore still-open `<option>`s
+    (`open_element_position(opt) >= 0`), ignore `<option>` / `<selectedcontent>`
+    nested inside another `<select>` or `<datalist>`, honor `multiple`, `size > 1`,
+    `select_none`, disabled `<option>`, and disabled ancestor `<optgroup>`s up to
+    the owning `<select>`, and fall back to a full `<select>` subtree rescan when
+    `m_script_ran` is true (in case inline scripts mutated `<select>` during
+    parsing).
+
+### 3. Verification
+
+- `make conformance`: **1792/1792 (100.0%)** across all 57 html5lib `.dat` files;
+  CI conformance floor raised `1781 → 1792`.
+- `make test`: **179/179** suites (adding
+  `customizable_select_scope_and_formatting_rules` and
+  `select_selectedcontent_cloning_and_edge_cases`).
+- `make diff-trees`: **6,000/6,000** (`0` differ vs corrected `parse5 8.1.1`);
+  with `--with-select --pages 1500`: `1,368/1,500` equal and `132` diffs (`49`
+  reduced patterns, all due to Litebird retaining elements/scope boundaries inside
+  `<select>` per current WHATWG HTML while `parse5 8.1.1` keeps legacy drops).
+
 ## Known gaps (the honest list)
 
 1. **Layout is still behind parsing.** Floats, block formatting contexts and
@@ -4470,23 +4533,20 @@ arrives in pieces.
    dimensions, margins, padding, percentage `font-size`, percentage/unitless
    `line-height` (Phase 36), and scalar percentage `border-radius` (Phase 37);
    two-axis elliptical `border-radius` (`50% / 25%`) remains deferred.
-6. **11 corpus cases still fail, all of them about `<select>`.**
-   `webkit02.dat` 43/49 (six: `<selectedcontent>` cloning and the other
-   rules of the 2025 customizable-`<select>` work), `tests1.dat` 110/112,
-   `tests_innerHTML_1.dat` 79/81 and `tests7.dat` 33/34. The standard
-   changed how the content of a `<select>` is parsed and Litebird has the
-   older rules. Everything else in the corpus passes. The corpus is not
-   the last word: the vendored copy is the last one html5lib-tests
-   published before its tree-construction tests moved to
+6. **All 1,792 cases of the vendored html5lib corpus now pass** (`100.0%`
+   after Phase 49 fixed the 11 `<select>` / `<selectedcontent>` cases in
+   `webkit02.dat`, `tests1.dat`, `tests_innerHTML_1.dat`, and `tests7.dat`).
+   The corpus is not the last word: the vendored copy is the last one
+   html5lib-tests published before its tree-construction tests moved to
    web-platform-tests (June 2026). That copy has 1,973 cases now and
-   Litebird passes 1,868 of them: 88 of the others need processing
-   instructions, which the standard's parser now makes and Litebird's does
-   not (the node type exists since Phase 28), and 6
-   need a script to run while the page is parsed. And a corpus does not
+   Litebird passed 1,868 of them before Phase 49 (leaving 88 that need
+   processing instructions, which the standard's parser now makes and
+   Litebird's does not — though the node type exists since Phase 28 — and 6
+   that need a script to run while the page is parsed). And a corpus does not
    hold everything: `<br/>` closing its parent had no case in it (Phase 26).
    `make diff-trees` compares random pages with parse5 for that reason.
-7. **Conformance is not rendering.** 99.4% of the parser corpus is a DOM
-   guarantee, not a promise that real pages look right.
+7. **Conformance is not rendering.** 100.0% of the vendored parser corpus is a
+   DOM guarantee, not a promise that real pages look right.
 8. **TrueType `.ttf` rendering has no `@font-face` or HarfBuzz shaping.** When a
    system `.ttf` font is present, `FontRenderer` rasterizes anti-aliased UTF-8
    glyphs at the computed `font-size`; when no `.ttf` file is available on the

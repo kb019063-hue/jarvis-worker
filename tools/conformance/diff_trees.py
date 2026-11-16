@@ -81,11 +81,11 @@ is the standard's text and nothing else, and the whitespace in a template is
 the one on which Blink does what parse5 does.
 
 Not corrected: `<select>`, `<optgroup>` and `<option>`. The standard changed
-how the content of a `<select>` is parsed, parse5 has the older rules, and
-Litebird has not caught up either (the 11 cases of the corpus it fails). They
-are left out of the pages unless --with-select is given; with it about one
-page in ten differs. --check-reference shows that these are the only cases
-of the corpus on which parse5 gives another tree.
+how the content of a `<select>` is parsed: Litebird now implements the current
+rules and passes all 1,792 corpus cases, while parse5 8.1.1 keeps the older
+rules. They are left out of the pages unless --with-select is given; with it
+about one page in ten differs. --check-reference shows that `<select>` is the
+only reason parse5 disagrees on 28 cases of the corpus.
 
 What it does not tell
 ---------------------

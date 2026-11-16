@@ -21,11 +21,13 @@ what Phase 23 did for the language: a corpus recorded from another
 implementation first, then new bindings written against it (see "The DOM
 scoreboard"). Phase 28 wrote the XML parser the DOM lacked, against the W3C's
 suite and two other parsers, and brought in the tests browsers share (see
-"XML").
+"XML"). Phase 49 implemented customizable `<select>` content and
+`<selectedcontent>` cloning, taking the html5lib tree-construction suite from
+99.4% to **100.0% (`1792 / 1792`)**.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1781 / 1792 (99.4%)** | html5lib/WPT derivation suite run by `make conformance` |
+| **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **926 / 940 (98.5%)**; nine of the 14 that fail were recorded in Phase 34 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **644 / 644**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
@@ -35,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 177 suites, all passing | `make test` |
+| Engine unit tests | 179 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -50,7 +52,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 177 engine suites
+make test            # 179 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -124,12 +126,12 @@ prototype chain: the parent of a class, the prototype of an object,
 TypeScript compile classes for older browsers, which stopped at their first
 class before. 67 of the 76 pass; the engine before Phase 34 passes 7.
 
-Every remaining failure can be inspected with
-`python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`. The residual
-0.6% is **11 cases, all of them about `<select>`**: the standard changed how
-the content of a `<select>` is parsed (the 2025 customizable-`<select>` work,
-with `<selectedcontent>` cloning) and Litebird has the older rules. They are
-catalogued in `ARCHITECTURE.md` rather than papered over.
+Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
+`python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
+inspects any subset. The final 11 cases (fixed in Phase 49) were all `<select>`:
+treating `<select>` as a default scope boundary, keeping arbitrary HTML/SVG/MathML
+content inside `<select>` with formatting-element reconstruction, and cloning the
+selected `<option>`'s children into `<selectedcontent>`.
 
 ### The DOM scoreboard
 
@@ -391,14 +393,15 @@ engines rather than self-referential. It is vendored under
 
 The vendored copy is the last one html5lib-tests published: in June 2026 its
 tree-construction tests moved into web-platform-tests, and that copy has
-grown to 1,973 cases since. Litebird passes 1,868 of them. Of the other 105,
-88 need processing instructions (`<?x?>` is a node of its own in the
-standard now, and a comment here), 6 need a script to run while the page is
-being parsed, and 11 are the `<select>` cases above. That copy is not
-vendored yet, so `make conformance` and CI still score the 1,792.
+grown to 1,973 cases since. Litebird passed 1,868 of them before Phase 49
+implemented the `<select>` / `<selectedcontent>` rules (leaving 88 that need
+processing instructions (`<?x?>` is a node of its own in the standard now, and a
+comment here) and 6 that need a script to run while the page is being parsed).
+That copy is not vendored yet, so `make conformance` and CI still score the
+1,792.
 
-> **Honest scope:** 99.4% on parser conformance means the DOM this engine builds
-> mostly matches a real browser's. It does **not** mean it renders real pages:
+> **Honest scope:** 100.0% on the vendored parser conformance corpus means the DOM this engine builds
+> matches a real browser's across those 1,792 cases. It does **not** mean it renders real pages:
 > floats and tables lay out with spans and collapsed borders (Phases 16 and 29),
 > percentages resolve (Phase 18) and `overflow` clips (Phase 18), but there is
 > no bidi, external stylesheets and scripts are not loaded, and the

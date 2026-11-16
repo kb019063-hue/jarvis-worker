@@ -153,10 +153,16 @@ std::string validation_message(const Element& control);
 /// The controls of `form` (or inside `fieldset`) that fail validation.
 std::vector<std::shared_ptr<Element>> invalid_controls(const Element& form_or_fieldset);
 
-// --- Numbers ----------------------------------------------------------------------
+// --- Numbers & Date/Time ----------------------------------------------------------
 /// HTML's "valid floating-point number".
 bool parse_number(const std::string& text, double& out);
 std::string number_to_string(double value);
+bool has_value_as_number(const std::string& type);
+bool has_value_as_date(const std::string& type);
+double value_as_number(const Element& input);
+bool set_value_as_number(Element& input, double value);
+bool value_as_utc_ms(const Element& input, double& out);
+bool set_value_as_utc_ms(Element& input, double ms);
 /// stepUp(n) / stepDown(n) with n negative. False when the type has no steps.
 bool step(Element& input, int count);
 

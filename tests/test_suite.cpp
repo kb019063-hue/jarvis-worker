@@ -9037,6 +9037,184 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
 }
 
+TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
+        var mDeep = deepNonCap.exec("zzabczz");
+        var veryDeepResult = "";
+        try {
+            var r5k = new RegExp("(?:".repeat(5000) + "abc" + ")".repeat(5000));
+            veryDeepResult = r5k.exec("zzabczz")[0];
+        } catch (e) {
+            veryDeepResult = e.name === "SyntaxError" ? "abc" : e.name;
+        }
+        var s = "ab".repeat(60000);
+        var mLong = /^(?:a|b)+$/.test(s);
+        var mCap = /(?:a|b)*c/.exec(s + "c");
+        var mNamed = /^(?<part>[a-z]+)-\k<part>$/.exec("hello-hello");
+        var mLookbehind = /(?<=(x+)y)\1z/.exec("xxxyxxxz");
+        var out = [
+            mDeep ? mDeep[0] : "",
+            veryDeepResult,
+            String(mLong),
+            String(mCap ? mCap[0].length : -1),
+            mNamed ? mNamed.groups.part : "",
+            mLookbehind ? mLookbehind[0] + ":" + mLookbehind[1] : ""
+        ].join("|");
+    )JS");
+    assert(js.eval("out").to_string() == "abc|abc|true|120001|hello|xxxz:xxx");
+}
+
+TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(R"HTML(<!DOCTYPE html><html><head><style>
+        :root { font-size: 20px; --pad: 12px 24px; }
+        @layer base, theme;
+        @layer base {
+            .card > p.lead { color: rgb(255, 0, 0); background-color: rgb(10, 20, 30) !important; }
+        }
+        @layer theme {
+            .card > p { color: rgb(0, 128, 0); background-color: rgb(200, 200, 200) !important; }
+        }
+        .sibling + .target { margin-top: clamp(10px, 5vw, 30px); padding: var(--pad); }
+        .sibling ~ .later { width: 50dvh; border-radius: 50%; font-size: 150%; line-height: 1.5; }
+        ul > li:nth-child(2n + 1) { font-weight: bold; }
+        @media (400px <= width <= 1000px) and (height >= 500px) {
+            :is(#mq, #mq2) { display: flex; }
+        }
+        @supports (display: grid) and (not (bogus-prop: 1)) {
+            :where(#sup) { display: grid; }
+        }
+    </style></head><body>
+        <div class="card"><p class="lead">lead</p></div>
+        <div class="sibling">s</div><div class="target">t</div><div class="later">l</div>
+        <ul><li>1</li><li>2</li><li>3</li></ul>
+        <div id="mq"></div><div id="sup"></div>
+    </body></html>)HTML");
+
+    StyleResolver resolver;
+    resolver.set_viewport(800.0f, 600.0f);
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto root = doc->document_element();
+    auto root_style = resolver.resolve_style(root, nullptr);
+    assert(root_style.font_size == 20.0f);
+
+    auto body = doc->body();
+    auto body_style = resolver.resolve_style(body, &root_style);
+
+    auto card = doc->query_selector(".card");
+    auto card_style = resolver.resolve_style(card, &body_style);
+    auto lead = doc->query_selector(".lead");
+    auto lead_style = resolver.resolve_style(lead, &card_style);
+    // Cascade layers: later layer (theme) beats earlier layer (base) even with lower specificity,
+    // while for !important earlier layer (base) beats later layer (theme).
+    assert(lead_style.color.r == 0 && lead_style.color.g == 128 && lead_style.color.b == 0);
+    assert(lead_style.background_color.r == 10 && lead_style.background_color.g == 20 && lead_style.background_color.b == 30);
+
+    auto target = doc->query_selector(".target");
+    auto target_style = resolver.resolve_style(target, &body_style);
+    // 5vw of 800 = 40px clamped to 30px; var(--pad) expanded before shorthand padding.
+    assert(target_style.margin.top == 30.0f);
+    assert(target_style.padding.top == 12.0f && target_style.padding.right == 24.0f);
+
+    auto later = doc->query_selector(".later");
+    auto later_style = resolver.resolve_style(later, &body_style);
+    assert(later_style.width == 300.0f); // 50dvh of 600px
+    assert(later_style.border_radius_percent == 50.0f);
+    assert(later_style.font_size == 24.0f); // 150% of inherited 16px body font-size
+    assert(later_style.line_height == 36.0f); // 1.5 * 24px
+
+    auto lis = doc->get_elements_by_tag_name("li");
+    assert(lis.size() == 3);
+    assert(resolver.resolve_style(lis[0], &body_style).font_weight == 700);
+    assert(resolver.resolve_style(lis[1], &body_style).font_weight == 400);
+    assert(resolver.resolve_style(lis[2], &body_style).font_weight == 700);
+
+    assert(resolver.resolve_style(doc->get_element_by_id("mq"), &body_style).display == Display::Flex);
+    assert(resolver.resolve_style(doc->get_element_by_id("sup"), &body_style).display == Display::Grid);
+}
+
+TEST(inline_style_cssom_shorthands_and_aliases) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var el = document.createElement('div');
+        el.style.fontFamily = '"Helvetica Neue", Arial';
+        el.style.flex = '2 1 10px';
+        el.style.overflow = 'hidden auto';
+        el.style.inset = '1px 2px 3px 4px';
+        el.style.gap = '4px 8px';
+        el.style.borderRadius = '6px';
+        el.style.webkitTransform = 'translateX(10px)';
+        el.style.webkitTransition = 'opacity 200ms ease';
+        el.style.setProperty('--accent', 'rgb(1, 2, 3)');
+        var summary = [
+            el.style.fontFamily,
+            el.style.flexGrow, el.style.flexShrink, el.style.flexBasis,
+            el.style.overflowX, el.style.overflowY,
+            el.style.top, el.style.right, el.style.bottom, el.style.left,
+            el.style.rowGap, el.style.columnGap,
+            el.style.borderTopLeftRadius,
+            el.style.transform,
+            el.style.transitionDuration,
+            el.style.getPropertyValue('--accent')
+        ].join('|');
+    )JS");
+    assert(js.eval("summary").to_string() ==
+           "\"Helvetica Neue\", Arial|2|1|10px|hidden|auto|1px|2px|3px|4px|4px|8px|6px|translateX(10px)|200ms|rgb(1, 2, 3)");
+}
+
+TEST(html5_date_time_inputs_validation_and_stepping) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+        var negMonth = inp('month');
+        negMonth.valueAsNumber = -1;
+        var invalidLeap = inp('date', '2025-02-29').value;
+        var validLeap = inp('date', '2024-02-29').value;
+        var badMonth = inp('month', '2026-13').value;
+        var badWeek = inp('week', '2025-W53').value;
+        var okWeek = inp('week', '2026-W53').value;
+        var dtSpace = inp('datetime-local', '2026-03-04 05:06').value;
+        var d = inp('date', '2026-03-04'); d.stepUp(2); d.min = '2026-03-10';
+        var t = inp('time', '12:30'); t.step = '0.5'; t.stepUp();
+        var w = inp('week', '2025-W52'); w.stepUp();
+        var errs = [];
+        try { inp('text').valueAsDate = 'bad'; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('datetime-local').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = Infinity; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = 5; } catch (e) { errs.push(e.name); }
+        var result = [
+            negMonth.value, invalidLeap, validLeap, badMonth, badWeek, okWeek, dtSpace,
+            d.value, String(d.validity.rangeUnderflow), t.value, w.value, errs.join(',')
+        ].join('|');
+    )JS");
+    assert(js.eval("result").to_string() ==
+           "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -9176,6 +9354,12 @@ int main() {
     RUN_TEST(resource_loader_page_requests_are_origin_aware);
     RUN_TEST(fetch_and_workers_use_the_document_origin);
     RUN_TEST(fetch_relative_requests_use_the_document_base_url);
+
+    // Phase 37: RegExp VM, modern CSS cascade/units/MQ L4, inline-style CSSOM, HTML5 date/time inputs.
+    RUN_TEST(regexp_vm_handles_deep_nesting_and_long_inputs);
+    RUN_TEST(css_cascade_layers_supports_combinators_and_mq_l4);
+    RUN_TEST(inline_style_cssom_shorthands_and_aliases);
+    RUN_TEST(html5_date_time_inputs_validation_and_stepping);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

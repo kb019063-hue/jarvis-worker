@@ -2,11 +2,13 @@
 #include <unordered_set>
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/CssText.hpp"
+#include "litebird/dom/Selector.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/FormState.hpp"
 #include <sstream>
 #include <cctype>
 #include <cmath>
+#include <climits>
 
 namespace litebird {
 
@@ -92,9 +94,30 @@ void StyleResolver::index_sheet(SelectorIndex& index, const StyleSheet& sheet,
 }
 
 void StyleResolver::add_stylesheet(const StyleSheet& sheet) {
+    m_depth_cache.clear();
+    m_desc_prefix_cache.clear();
+    for (const auto& layer : sheet.layers) {
+        if (!layer.empty() &&
+            std::find(m_layer_order.begin(), m_layer_order.end(), layer) == m_layer_order.end()) {
+            m_layer_order.push_back(layer);
+        }
+    }
+    for (const auto& rule : sheet.rules) {
+        if (!rule.layer_name.empty() &&
+            std::find(m_layer_order.begin(), m_layer_order.end(), rule.layer_name) == m_layer_order.end()) {
+            m_layer_order.push_back(rule.layer_name);
+        }
+    }
     m_author_sheets.push_back(sheet);
     index_sheet(m_author_selector_index, m_author_sheets.back(),
                 m_author_sheets.size() - 1, m_next_author_selector_order);
+}
+
+int StyleResolver::layer_rank(const std::string& layer_name) const {
+    if (layer_name.empty()) return -1;
+    auto it = std::find(m_layer_order.begin(), m_layer_order.end(), layer_name);
+    if (it == m_layer_order.end()) return -1;
+    return static_cast<int>(it - m_layer_order.begin());
 }
 
 std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
@@ -126,58 +149,125 @@ std::vector<StyleResolver::IndexedSelector> StyleResolver::indexed_candidates(
     std::sort(candidates.begin(), candidates.end(), [](const IndexedSelector& a, const IndexedSelector& b) {
         return a.source_order < b.source_order;
     });
+    candidates.erase(
+        std::unique(candidates.begin(), candidates.end(), [](const IndexedSelector& a, const IndexedSelector& b) {
+            return a.source_order == b.source_order;
+        }),
+        candidates.end());
     return candidates;
 }
 
 static bool match_nth_formula(int idx, std::string_view formula_text) {
-    std::string formula(css_trim_view(formula_text));
-    std::transform(formula.begin(), formula.end(), formula.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string_view sv = css_trim_view(formula_text);
+    if (sv.empty()) return false;
 
-    if (formula.empty()) return false;
-    if (formula == "odd") return (idx % 2 != 0);
-    if (formula == "even") return (idx % 2 == 0);
+    auto iequals = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if ((a[i] | 0x20) != b[i]) return false;
+        }
+        return true;
+    };
 
-    size_t n_pos = formula.find('n');
-    if (n_pos == std::string::npos) {
+    if (iequals(sv, "odd")) return (idx % 2 != 0);
+    if (iequals(sv, "even")) return (idx % 2 == 0);
+
+    size_t n_pos = std::string_view::npos;
+    for (size_t i = 0; i < sv.size(); ++i) {
+        if ((sv[i] | 0x20) == 'n') {
+            n_pos = i;
+            break;
+        }
+    }
+
+    auto parse_int_sv = [](std::string_view part, int& out) -> bool {
+        part = css_trim_view(part);
+        if (part.empty()) return false;
+        int sign = 1;
+        size_t i = 0;
+        if (part[i] == '+' || part[i] == '-') {
+            sign = (part[i] == '-') ? -1 : 1;
+            ++i;
+            while (i < part.size() && css_is_space(part[i])) ++i;
+        }
+        if (i >= part.size() || !std::isdigit(static_cast<unsigned char>(part[i]))) return false;
+        long val = 0;
+        while (i < part.size() && std::isdigit(static_cast<unsigned char>(part[i]))) {
+            val = std::min<long>(val * 10 + (part[i] - '0'), 100000000L);
+            ++i;
+        }
+        if (i != part.size()) return false;
+        out = sign * static_cast<int>(val);
+        return true;
+    };
+
+    if (n_pos == std::string_view::npos) {
+        int b = 0;
+        return parse_int_sv(sv, b) && idx == b;
+    }
+
+    int a = 1;
+    std::string_view prefix = css_trim_view(sv.substr(0, n_pos));
+    if (prefix.empty() || prefix == "+") {
+        a = 1;
+    } else if (prefix == "-") {
+        a = -1;
+    } else {
+        // In CSS An+B, no space is allowed between sign and integer before 'n'
         try {
-            int b = std::stoi(formula);
-            return idx == b;
+            size_t used = 0;
+            a = std::stoi(std::string(prefix), &used);
+            if (used != prefix.size()) return false;
         } catch (...) {
             return false;
         }
     }
 
-    int a = 1;
-    if (n_pos == 0) {
-        a = 1;
-    } else if (n_pos == 1 && formula[0] == '-') {
-        a = -1;
-    } else if (n_pos == 1 && formula[0] == '+') {
-        a = 1;
-    } else {
-        try {
-            a = std::stoi(formula.substr(0, n_pos));
-        } catch (...) {
-            a = 1;
-        }
-    }
-
     int b = 0;
-    std::string rest = formula.substr(n_pos + 1);
-    css_trim(rest);
+    std::string_view rest = css_trim_view(sv.substr(n_pos + 1));
     if (!rest.empty()) {
-        try {
-            b = std::stoi(rest);
-        } catch (...) {
-            b = 0;
-        }
+        if (!parse_int_sv(rest, b)) return false;
     }
 
     if (a == 0) return idx == b;
     int diff = idx - b;
     if (diff % a != 0) return false;
     return (diff / a) >= 0;
+}
+
+static bool match_attr_operator(const std::shared_ptr<Element>& element, const AttributeMatch& am) {
+    if (!element->has_attribute(am.name)) return false;
+    if (am.op.empty()) return true;
+    std::string found = element->get_attribute(am.name);
+    std::string wanted = am.value;
+    if (am.ignore_case) {
+        for (char& c : found) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : wanted) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (am.op == "=") return found == wanted;
+    if (am.op == "~=") {
+        if (wanted.empty()) return false;
+        size_t i = 0;
+        while (i < found.size()) {
+            while (i < found.size() && css_is_space(found[i])) ++i;
+            size_t start = i;
+            while (i < found.size() && !css_is_space(found[i])) ++i;
+            if (i > start && found.compare(start, i - start, wanted) == 0) return true;
+        }
+        return false;
+    }
+    if (am.op == "|=") {
+        return found == wanted ||
+               (found.size() > wanted.size() && found.compare(0, wanted.size(), wanted) == 0 &&
+                found[wanted.size()] == '-');
+    }
+    if (am.op == "^=") return !wanted.empty() && found.compare(0, wanted.size(), wanted) == 0;
+    if (am.op == "$=") {
+        return !wanted.empty() && found.size() >= wanted.size() &&
+               found.compare(found.size() - wanted.size(), wanted.size(), wanted) == 0;
+    }
+    if (am.op == "*=") return !wanted.empty() && found.find(wanted) != std::string::npos;
+    return false;
 }
 
 bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& element, const SimpleSelector& sel) const {
@@ -192,12 +282,18 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
             return false;
         }
     }
-    for (const auto& [attr_name, attr_val] : sel.attributes) {
-        if (!element->has_attribute(attr_name)) {
-            return false;
+    if (!sel.attribute_matches.empty()) {
+        for (const auto& am : sel.attribute_matches) {
+            if (!match_attr_operator(element, am)) return false;
         }
-        if (!attr_val.empty() && element->get_attribute(attr_name) != attr_val) {
-            return false;
+    } else {
+        for (const auto& [attr_name, attr_val] : sel.attributes) {
+            if (!element->has_attribute(attr_name)) {
+                return false;
+            }
+            if (!attr_val.empty() && element->get_attribute(attr_name) != attr_val) {
+                return false;
+            }
         }
     }
 
@@ -221,32 +317,67 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                 if (sibling_elements.empty() || sibling_elements.front() != element) return false;
             } else if (name == "last-child") {
                 if (sibling_elements.empty() || sibling_elements.back() != element) return false;
-            } else if (name == "nth-child") {
+            } else if (name == "only-child") {
+                if (sibling_elements.size() != 1 || sibling_elements.front() != element) return false;
+            } else if (name == "nth-child" || name == "nth-last-child") {
                 int idx = 1;
                 bool found = false;
                 for (size_t i = 0; i < sibling_elements.size(); ++i) {
                     if (sibling_elements[i] == element) {
-                        idx = static_cast<int>(i) + 1;
+                        idx = (name == "nth-last-child")
+                                  ? static_cast<int>(sibling_elements.size() - i)
+                                  : static_cast<int>(i) + 1;
                         found = true;
                         break;
                     }
                 }
                 if (!found || !match_nth_formula(idx, arg)) return false;
-            } else if (name == "nth-of-type") {
-                int idx = 1;
-                bool found = false;
+            } else if (name == "first-of-type") {
+                std::shared_ptr<Element> first;
+                for (const auto& sib : sibling_elements) {
+                    if (sib->tag_name() == element->tag_name()) { first = sib; break; }
+                }
+                if (first != element) return false;
+            } else if (name == "last-of-type") {
+                std::shared_ptr<Element> last;
+                for (const auto& sib : sibling_elements) {
+                    if (sib->tag_name() == element->tag_name()) last = sib;
+                }
+                if (last != element) return false;
+            } else if (name == "only-of-type") {
                 int count = 0;
+                bool mine = false;
                 for (const auto& sib : sibling_elements) {
                     if (sib->tag_name() == element->tag_name()) {
-                        count++;
-                        if (sib == element) {
-                            idx = count;
-                            found = true;
-                            break;
-                        }
+                        ++count;
+                        if (sib == element) mine = true;
+                    }
+                }
+                if (!mine || count != 1) return false;
+            } else if (name == "nth-of-type" || name == "nth-last-of-type") {
+                std::vector<std::shared_ptr<Element>> of_type;
+                for (const auto& sib : sibling_elements) {
+                    if (sib->tag_name() == element->tag_name()) of_type.push_back(sib);
+                }
+                int idx = 1;
+                bool found = false;
+                for (size_t i = 0; i < of_type.size(); ++i) {
+                    if (of_type[i] == element) {
+                        idx = (name == "nth-last-of-type")
+                                  ? static_cast<int>(of_type.size() - i)
+                                  : static_cast<int>(i) + 1;
+                        found = true;
+                        break;
                     }
                 }
                 if (!found || !match_nth_formula(idx, arg)) return false;
+            } else if (name == "empty") {
+                for (const auto& ch : element->children()) {
+                    if (ch->is_element()) return false;
+                    if (ch->is_text() && !ch->text_content().empty()) return false;
+                }
+            } else if (name == "root") {
+                if (!parent || !parent->is_document()) return false;
             } else if (name == "hover") {
                 if (!element->is_hovered()) return false;
             } else if (name == "focus") {
@@ -261,24 +392,65 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                 // The control's state now, not its `checked` attribute.
                 if (!forms::matches_checked(*element)) return false;
             } else if (name == "not") {
-                // Negation pseudo-class: if inner selector matches, then :not fails
-                SimpleSelector sub_sel;
                 if (!arg.empty()) {
-                    if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
-                    else if (arg[0] == '#') sub_sel.id = arg.substr(1);
-                    else sub_sel.tag_name = arg;
-                    if (matches_simple_selector(element, sub_sel)) return false;
+                    if (pc.compiled_arg) {
+                        if (pc.compiled_arg->matches(*element)) return false;
+                    } else {
+                        bool matched_sub = false;
+                        size_t comb_count = 0;
+                        for (char c : arg) {
+                            if (c == ' ' || c == '>' || c == '+' || c == '~') ++comb_count;
+                        }
+                        if (arg.size() <= 512 && comb_count <= 16) {
+                            SelectorList list;
+                            if (SelectorList::parse(arg, list)) {
+                                if (list.matches(*element)) return false;
+                                matched_sub = true;
+                            }
+                        }
+                        if (!matched_sub) {
+                            SimpleSelector sub_sel;
+                            if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
+                            else if (arg[0] == '#') sub_sel.id = arg.substr(1);
+                            else sub_sel.tag_name = arg;
+                            if (matches_simple_selector(element, sub_sel)) return false;
+                        }
+                    }
+                }
+            } else if (name == "is" || name == "where" || name == "matches") {
+                if (pc.compiled_arg) {
+                    if (!pc.compiled_arg->matches(*element)) return false;
+                } else {
+                    size_t comb_count = 0;
+                    for (char c : arg) {
+                        if (c == ' ' || c == '>' || c == '+' || c == '~') ++comb_count;
+                    }
+                    SelectorList list;
+                    if (arg.size() > 512 || comb_count > 16 || !SelectorList::parse(arg, list) || !list.matches(*element)) {
+                        return false;
+                    }
                 }
             } else if (name == "host") {
                 // Host pseudo-class matches if this element has a shadow root
                 if (!element->shadow_root()) return false;
                 if (!arg.empty()) {
-                    SimpleSelector sub_sel;
-                    if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
-                    else if (arg[0] == '#') sub_sel.id = arg.substr(1);
-                    else sub_sel.tag_name = arg;
-                    if (!matches_simple_selector(element, sub_sel)) return false;
+                    if (pc.compiled_arg) {
+                        if (!pc.compiled_arg->matches(*element)) return false;
+                    } else {
+                        SelectorList list;
+                        if (arg.size() <= 512 && SelectorList::parse(arg, list)) {
+                            if (!list.matches(*element)) return false;
+                        } else {
+                            SimpleSelector sub_sel;
+                            if (arg[0] == '.') sub_sel.classes.push_back(arg.substr(1));
+                            else if (arg[0] == '#') sub_sel.id = arg.substr(1);
+                            else sub_sel.tag_name = arg;
+                            if (!matches_simple_selector(element, sub_sel)) return false;
+                        }
+                    }
                 }
+            } else if (name == "before" || name == "after" || name == "first-line" || name == "first-letter") {
+                return false;
             }
         }
     }
@@ -287,46 +459,321 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
 }
 
 bool StyleResolver::matches_selector(const std::shared_ptr<Element>& element, const Selector& selector) const {
-    if (selector.parts.empty()) return false;
+    return match_selector_impl(element, selector, nullptr);
+}
 
-    // Check last part (target element)
-    if (!matches_simple_selector(element, selector.parts.back())) {
-        return false;
+bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element, const Selector& selector, Specificity* out_spec) const {
+    if (selector.parts.empty() || selector.has_pseudo_element || !element) return false;
+
+    const size_t n = selector.parts.size();
+    if (!matches_simple_selector(element, selector.parts.back())) return false;
+
+    auto add_part_spec = [](Specificity& total, const SimpleSelector& part, const Element& el) {
+        if (part.compiled) {
+            long packed = part.compiled->matching_specificity(el);
+            if (packed >= 0) {
+                total.ids += static_cast<int>(packed / 1000000L);
+                total.classes += static_cast<int>((packed / 1000L) % 1000L);
+                total.tags += static_cast<int>(packed % 1000L);
+                return;
+            }
+        }
+        auto s = part.specificity();
+        total.ids += s.ids;
+        total.classes += s.classes;
+        total.tags += s.tags;
+    };
+
+    bool any_dynamic = selector.any_dynamic_specificity;
+    if (!selector.metadata_computed && out_spec) {
+        any_dynamic = false;
+        for (const auto& part : selector.parts) {
+            if (part.has_dynamic_specificity) {
+                any_dynamic = true;
+                break;
+            }
+        }
+    }
+    if (out_spec && !any_dynamic) {
+        *out_spec = selector.specificity();
     }
 
-    if (selector.parts.size() == 1) {
+    if (n == 1) {
+        if (out_spec && any_dynamic) {
+            Specificity total;
+            add_part_spec(total, selector.parts[0], *element);
+            *out_spec = total;
+        }
         return true;
     }
 
-    // Descendant matching for earlier parts
-    int part_idx = static_cast<int>(selector.parts.size()) - 2;
-    auto curr = element->parent();
-
-    while (curr && part_idx >= 0) {
-        if (auto el = std::dynamic_pointer_cast<Element>(curr)) {
-            if (matches_simple_selector(el, selector.parts[part_idx])) {
-                part_idx--;
-            }
+    CombinatorKind kind = selector.combinator_kind;
+    size_t min_anc = selector.min_ancestors;
+    if (!selector.metadata_computed) {
+        bool all_desc = true;
+        bool all_det = true;
+        bool all_gsib = true;
+        min_anc = 0;
+        for (size_t i = 0; i + 1 < n; ++i) {
+            Combinator c = (i < selector.combinators.size()) ? selector.combinators[i] : Combinator::Descendant;
+            if (c == Combinator::Descendant || c == Combinator::Child) ++min_anc;
+            if (c != Combinator::Descendant) all_desc = false;
+            if (c != Combinator::Child && c != Combinator::AdjacentSibling) all_det = false;
+            if (c != Combinator::GeneralSibling) all_gsib = false;
         }
-        curr = curr->parent();
+        if (all_det) kind = CombinatorKind::AllDeterministic;
+        else if (all_desc) kind = CombinatorKind::AllDescendant;
+        else if (all_gsib) kind = CombinatorKind::AllGeneralSibling;
+        else kind = CombinatorKind::Mixed;
     }
 
-    return part_idx < 0;
+    if (min_anc > 0) {
+        auto dit = m_depth_cache.find(element.get());
+        if (dit != m_depth_cache.end() && dit->second < min_anc) {
+            return false;
+        }
+    }
+
+    auto parent_element = [](const Element& el) -> std::shared_ptr<Element> {
+        auto p = el.parent();
+        if (p && p->is_element()) return std::static_pointer_cast<Element>(p);
+        return nullptr;
+    };
+    auto prev_element_sibling = [](const Element& el) -> std::shared_ptr<Element> {
+        auto s = el.previous_sibling();
+        while (s) {
+            if (s->is_element()) return std::static_pointer_cast<Element>(s);
+            s = s->previous_sibling();
+        }
+        return nullptr;
+    };
+
+    const bool track_spec = (out_spec != nullptr && any_dynamic);
+    std::vector<std::shared_ptr<Element>> matched_els;
+    if (track_spec) matched_els.resize(n);
+
+    auto finalize_spec = [&]() {
+        if (!track_spec) return;
+        Specificity total;
+        for (size_t i = 0; i < n; ++i) {
+            add_part_spec(total, selector.parts[i], *matched_els[i]);
+        }
+        *out_spec = total;
+    };
+
+    if (kind == CombinatorKind::AllDeterministic) {
+        std::shared_ptr<Element> curr = element;
+        if (track_spec) matched_els[n - 1] = curr;
+        for (size_t idx = n - 1; idx > 0; --idx) {
+            Combinator comb = (idx - 1 < selector.combinators.size())
+                                  ? selector.combinators[idx - 1]
+                                  : Combinator::Descendant;
+            curr = (comb == Combinator::Child) ? parent_element(*curr) : prev_element_sibling(*curr);
+            if (!curr || !matches_simple_selector(curr, selector.parts[idx - 1])) return false;
+            if (track_spec) matched_els[idx - 1] = curr;
+        }
+        finalize_spec();
+        return true;
+    }
+
+    if (kind == CombinatorKind::AllDescendant) {
+        if (n > 32 && !track_spec && m_desc_prefix_cache.size() < 32) {
+            auto& pmap = m_desc_prefix_cache[&selector];
+            auto par = parent_element(*element);
+            size_t par_prefix = 0;
+            if (par) {
+                std::vector<std::shared_ptr<Element>> chain;
+                std::shared_ptr<Element> cur = par;
+                while (cur) {
+                    auto it = pmap.find(cur.get());
+                    if (it != pmap.end() && it->second.parent == cur->parent().get()) {
+                        par_prefix = it->second.prefix;
+                        break;
+                    }
+                    chain.push_back(cur);
+                    cur = parent_element(*cur);
+                }
+                for (size_t i = chain.size(); i > 0; --i) {
+                    const auto& node = chain[i - 1];
+                    if (par_prefix < n - 1 && matches_simple_selector(node, selector.parts[par_prefix])) {
+                        ++par_prefix;
+                    }
+                    pmap[node.get()] = {node->parent().get(), par_prefix};
+                }
+            }
+            return par_prefix >= n - 1;
+        }
+        std::shared_ptr<Element> curr = parent_element(*element);
+        if (track_spec) matched_els[n - 1] = element;
+        size_t idx = n - 1;
+        while (idx > 0 && curr) {
+            if (matches_simple_selector(curr, selector.parts[idx - 1])) {
+                if (track_spec) matched_els[idx - 1] = curr;
+                --idx;
+                if (idx == 0) {
+                    finalize_spec();
+                    return true;
+                }
+            }
+            curr = parent_element(*curr);
+        }
+        return false;
+    }
+
+    if (kind == CombinatorKind::AllGeneralSibling) {
+        std::shared_ptr<Element> curr = prev_element_sibling(*element);
+        if (track_spec) matched_els[n - 1] = element;
+        size_t idx = n - 1;
+        while (idx > 0 && curr) {
+            if (matches_simple_selector(curr, selector.parts[idx - 1])) {
+                if (track_spec) matched_els[idx - 1] = curr;
+                --idx;
+                if (idx == 0) {
+                    finalize_spec();
+                    return true;
+                }
+            }
+            curr = prev_element_sibling(*curr);
+        }
+        return false;
+    }
+
+    // General mixed-combinator matcher: iterative DFS with exact (Element*, idx) failure memoization.
+    struct FailKey {
+        const Element* el;
+        size_t idx;
+        bool operator==(const FailKey& o) const { return el == o.el && idx == o.idx; }
+    };
+    struct FailHash {
+        size_t operator()(const FailKey& k) const {
+            size_t h = reinterpret_cast<uintptr_t>(k.el);
+            h ^= k.idx * 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    struct Frame {
+        size_t idx;
+        std::shared_ptr<Element> el;
+        bool on_fail_mark;
+    };
+
+    std::unordered_set<FailKey, FailHash> failed;
+    std::vector<Frame> stack;
+    stack.push_back({n - 1, element, false});
+
+    std::vector<std::shared_ptr<Element>> candidates;
+    while (!stack.empty()) {
+        Frame f = std::move(stack.back());
+        stack.pop_back();
+
+        if (f.on_fail_mark) {
+            failed.insert({f.el.get(), f.idx});
+            continue;
+        }
+
+        if (failed.count({f.el.get(), f.idx})) continue;
+        if (track_spec) matched_els[f.idx] = f.el;
+        if (f.idx == 0) {
+            finalize_spec();
+            return true;
+        }
+
+        const size_t next_idx = f.idx - 1;
+        Combinator comb = (next_idx < selector.combinators.size())
+                              ? selector.combinators[next_idx]
+                              : Combinator::Descendant;
+
+        switch (comb) {
+            case Combinator::Child: {
+                auto pel = parent_element(*f.el);
+                if (pel && !failed.count({pel.get(), next_idx}) &&
+                    matches_simple_selector(pel, selector.parts[next_idx])) {
+                    stack.push_back({f.idx, std::move(f.el), true});
+                    stack.push_back({next_idx, std::move(pel), false});
+                } else {
+                    failed.insert({f.el.get(), f.idx});
+                }
+                break;
+            }
+            case Combinator::AdjacentSibling: {
+                auto prev = prev_element_sibling(*f.el);
+                if (prev && !failed.count({prev.get(), next_idx}) &&
+                    matches_simple_selector(prev, selector.parts[next_idx])) {
+                    stack.push_back({f.idx, std::move(f.el), true});
+                    stack.push_back({next_idx, std::move(prev), false});
+                } else {
+                    failed.insert({f.el.get(), f.idx});
+                }
+                break;
+            }
+            case Combinator::GeneralSibling: {
+                candidates.clear();
+                for (auto sib = prev_element_sibling(*f.el); sib; sib = prev_element_sibling(*sib)) {
+                    if (!failed.count({sib.get(), next_idx})) {
+                        if (matches_simple_selector(sib, selector.parts[next_idx])) {
+                            candidates.push_back(std::move(sib));
+                        } else {
+                            failed.insert({sib.get(), next_idx});
+                        }
+                    }
+                }
+                if (!candidates.empty()) {
+                    stack.push_back({f.idx, std::move(f.el), true});
+                    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+                        stack.push_back({next_idx, std::move(*it), false});
+                    }
+                } else {
+                    failed.insert({f.el.get(), f.idx});
+                }
+                break;
+            }
+            case Combinator::Descendant:
+            default: {
+                candidates.clear();
+                for (auto anc = parent_element(*f.el); anc; anc = parent_element(*anc)) {
+                    if (!failed.count({anc.get(), next_idx})) {
+                        if (matches_simple_selector(anc, selector.parts[next_idx])) {
+                            candidates.push_back(std::move(anc));
+                        } else {
+                            failed.insert({anc.get(), next_idx});
+                        }
+                    }
+                }
+                if (!candidates.empty()) {
+                    stack.push_back({f.idx, std::move(f.el), true});
+                    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+                        stack.push_back({next_idx, std::move(*it), false});
+                    }
+                } else {
+                    failed.insert({f.el.get(), f.idx});
+                }
+                break;
+            }
+        }
+    }
+
+    return false;
 }
 
 float StyleResolver::parse_length(std::string_view val, float default_val) const {
-    while (!val.empty() && std::isspace(val.front())) val.remove_prefix(1);
-    while (!val.empty() && std::isspace(val.back())) val.remove_suffix(1);
-    if (val.empty() || val == "auto") return default_val;
+    val = css_trim_view(val);
+    if (val.empty() || val == "auto" || val == "none" || val == "normal") return default_val;
 
-    if (val.find("calc(") != std::string_view::npos) {
-        std::string resolved = resolve_calc_functions(std::string(val), m_viewport_width);
-        // resolve_calc_functions replaces every calc(), so this comes back here
-        // at most once. It used to leave an unclosed `calc(` in place, and then
-        // this function called itself until the stack ran out: one missing
-        // parenthesis in a style attribute ended the process.
-        if (resolved.find("calc(") != std::string::npos) return default_val;
-        return parse_length(resolved, default_val);
+    {
+        std::string low(val);
+        for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (low.find("calc(") != std::string::npos || low.find("min(") != std::string::npos ||
+            low.find("max(") != std::string::npos || low.find("clamp(") != std::string::npos) {
+            std::string resolved = resolve_calc_functions(std::string(val), m_viewport_width);
+            std::string rlow = resolved;
+            for (char& c : rlow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (rlow == "invalid" || rlow.find("calc(") != std::string::npos ||
+                rlow.find("min(") != std::string::npos || rlow.find("max(") != std::string::npos ||
+                rlow.find("clamp(") != std::string::npos) {
+                return default_val;
+            }
+            return parse_length(resolved, default_val);
+        }
     }
 
     // Split the numeric part from its unit; the unit decides the scale factor.
@@ -341,7 +788,7 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
     std::string unit;
     for (std::size_t i = consumed; i < val.size(); ++i) {
         const char c = val[i];
-        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        if (css_is_space(c)) continue;
         if (c == '%') { unit = "%"; break; }
         unit.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
@@ -356,10 +803,18 @@ float StyleResolver::parse_length(std::string_view val, float default_val) const
     if (unit == "cm") return number * 96.0f / 2.54f;
     if (unit == "mm") return number * 96.0f / 25.4f;
     if (unit == "q") return number * 96.0f / 101.6f;
-    if (unit == "vw") return number * m_viewport_width / 100.0f;
-    if (unit == "vh") return number * m_viewport_height / 100.0f;
-    if (unit == "vmin") return number * std::min(m_viewport_width, m_viewport_height) / 100.0f;
-    if (unit == "vmax") return number * std::max(m_viewport_width, m_viewport_height) / 100.0f;
+    if (unit == "vw" || unit == "dvw" || unit == "svw" || unit == "lvw") {
+        return number * m_viewport_width / 100.0f;
+    }
+    if (unit == "vh" || unit == "dvh" || unit == "svh" || unit == "lvh") {
+        return number * m_viewport_height / 100.0f;
+    }
+    if (unit == "vmin" || unit == "dvmin" || unit == "svmin" || unit == "lvmin") {
+        return number * std::min(m_viewport_width, m_viewport_height) / 100.0f;
+    }
+    if (unit == "vmax" || unit == "dvmax" || unit == "svmax" || unit == "lvmax") {
+        return number * std::max(m_viewport_width, m_viewport_height) / 100.0f;
+    }
     // Percentages need a containing block, which a length parser does not
     // have; they are resolved by the layout stage instead.
     return number;
@@ -791,21 +1246,40 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         "border", "border-top", "border-right", "border-bottom", "border-left"};
     if (border_sides.count(prop)) {
         auto tokens = split_tokens(trim(val));
+        bool saw_none_or_hidden = false;
+        bool saw_width = false;
         for (const auto& raw_token : tokens) {
             const std::string token(trim(raw_token));
             if (token.empty()) continue;
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            if (lowered == "none" || lowered == "hidden" || lowered == "solid" || lowered == "dashed" ||
-                lowered == "dotted" || lowered == "double" || lowered == "groove" ||
-                lowered == "ridge" || lowered == "inset" || lowered == "outset") {
+            if (lowered == "none" || lowered == "hidden") {
+                saw_none_or_hidden = true;
+                continue;
+            }
+            if (lowered == "solid" || lowered == "dashed" || lowered == "dotted" ||
+                lowered == "double" || lowered == "groove" || lowered == "ridge" ||
+                lowered == "inset" || lowered == "outset") {
                 continue;  // border styles are not rendered yet
             }
             if (is_color_token(token)) {
                 out.emplace_back(prop == "border" ? "border-color" : prop + "-color", token);
+            } else if (lowered == "thin") {
+                saw_width = true;
+                out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "1px");
+            } else if (lowered == "medium") {
+                saw_width = true;
+                out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "3px");
+            } else if (lowered == "thick") {
+                saw_width = true;
+                out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "5px");
             } else {
+                saw_width = true;
                 out.emplace_back(prop == "border" ? "border-width" : prop + "-width", token);
             }
+        }
+        if (saw_none_or_hidden && !saw_width) {
+            out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "0px");
         }
         return true;
     }
@@ -822,18 +1296,31 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return true;
     }
 
-    // font: family defaults plus weight and size.
+    // font: family defaults plus weight, size and optional /line-height.
     if (prop == "font") {
         for (const auto& token : split_tokens(trim(val))) {
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
             if (lowered == "bold" || lowered == "bolder") out.emplace_back("font-weight", "700");
             else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
-            else if (lowered == "italic" || lowered == "oblique") continue;
-            else if (lowered.find_first_of("0123456789") != std::string::npos &&
-                     (lowered.ends_with("px") || lowered.ends_with("em") || lowered.ends_with("rem") ||
-                      lowered.ends_with("pt") || lowered.ends_with("%"))) {
-                out.emplace_back("font-size", token);
+            else if (lowered == "italic" || lowered == "oblique" || lowered == "small-caps") continue;
+            else {
+                std::string size_part = token;
+                std::string lh_part;
+                auto slash = token.find('/');
+                if (slash != std::string::npos) {
+                    size_part = token.substr(0, slash);
+                    lh_part = token.substr(slash + 1);
+                }
+                std::string size_low;
+                for (char c : size_part) size_low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                if (!size_low.empty() && size_low.find_first_of("0123456789") != std::string::npos &&
+                    (size_low.ends_with("px") || size_low.ends_with("em") || size_low.ends_with("rem") ||
+                     size_low.ends_with("pt") || size_low.ends_with("%") || size_low.ends_with("vw") ||
+                     size_low.ends_with("vh") || size_low.ends_with("dvh") || size_low.ends_with("dvw"))) {
+                    out.emplace_back("font-size", size_part);
+                    if (!lh_part.empty()) out.emplace_back("line-height", lh_part);
+                }
             }
         }
         return true;
@@ -861,15 +1348,23 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
 }
 
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
+    if (prop.starts_with("--")) {
+        style.custom_properties[prop] = raw_val;
+        return;
+    }
+    std::string resolved_val = raw_val;
+    if (resolved_val.find("var(") != std::string::npos) {
+        resolved_val = resolve_var_functions(resolved_val, style.custom_properties);
+    }
     // CSS custom properties are not shorthands.
     std::vector<std::pair<std::string, std::string>> longhands;
-    if (!prop.starts_with("--") && expand_shorthand(prop, raw_val, longhands)) {
+    if (expand_shorthand(prop, resolved_val, longhands)) {
         for (const auto& [longhand, longhand_value] : longhands) {
             apply_longhand(style, longhand, longhand_value);
         }
         return;
     }
-    apply_longhand(style, prop, raw_val);
+    apply_longhand(style, prop, resolved_val);
 }
 
 void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
@@ -882,25 +1377,25 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
     if (val.find("var(") != std::string::npos) {
         val = resolve_var_functions(val, style.custom_properties);
     }
-    if (val.find("calc(") != std::string::npos) {
+    if (val.find('(') != std::string::npos) {
         val = resolve_calc_functions(val, m_viewport_width);
     }
-
+    css_trim(val);
+    std::string val_lower = val;
+    for (char& c : val_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
     if (prop == "display") {
-        if (val == "block") style.display = Display::Block;
-        else if (val == "inline") style.display = Display::Inline;
-        else if (val == "flex") style.display = Display::Flex;
-        else if (val == "grid") style.display = Display::Grid;
-        else if (val == "none") style.display = Display::None;
-        else if (val == "inline-block") style.display = Display::InlineBlock;
-        else if (val == "inline-flex") style.display = Display::Flex;
-        else if (val == "inline-grid") style.display = Display::Grid;
-        else if (val == "table") style.display = Display::Table;
-        else if (val == "table-row") style.display = Display::TableRow;
-        else if (val == "table-cell") style.display = Display::TableCell;
-        else if (val == "table-row-group" || val == "table-header-group" ||
-                 val == "table-footer-group") style.display = Display::TableRowGroup;
+        if (val_lower == "block" || val_lower == "list-item") style.display = Display::Block;
+        else if (val_lower == "inline") style.display = Display::Inline;
+        else if (val_lower == "flex" || val_lower == "inline-flex") style.display = Display::Flex;
+        else if (val_lower == "grid" || val_lower == "inline-grid") style.display = Display::Grid;
+        else if (val_lower == "none") style.display = Display::None;
+        else if (val_lower == "inline-block") style.display = Display::InlineBlock;
+        else if (val_lower == "table") style.display = Display::Table;
+        else if (val_lower == "table-row") style.display = Display::TableRow;
+        else if (val_lower == "table-cell") style.display = Display::TableCell;
+        else if (val_lower == "table-row-group" || val_lower == "table-header-group" ||
+                 val_lower == "table-footer-group") style.display = Display::TableRowGroup;
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
         else if (val == "right") style.float_type = FloatType::Right;
@@ -996,9 +1491,11 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             }
         }
     } else if (prop == "color") {
-        style.color = Color::parse(val);
+        if (val_lower != "inherit" && val_lower != "currentcolor" && val_lower != "unset") {
+            style.color = (val_lower == "initial") ? Color::black() : Color::parse(val);
+        }
     } else if (prop == "background-color" || prop == "background") {
-        style.background_color = Color::parse(val);
+        style.background_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
     } else if (prop == "width" || prop == "height" || prop == "min-width" ||
                prop == "max-width" || prop == "min-height" || prop == "max-height") {
         // A percentage is recorded as a percentage and left "auto" in pixels;
@@ -1099,7 +1596,13 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             *percent = -1.0f;
         }
     } else if (prop == "border-radius") {
-        style.border_radius = parse_length(val, 0.0f);
+        if (is_percentage_value(val)) {
+            style.border_radius_percent = parse_length(val, 0.0f);
+            style.border_radius = 0.0f;
+        } else {
+            style.border_radius_percent = -1.0f;
+            style.border_radius = parse_length(val, 0.0f);
+        }
     } else if (prop == "box-shadow") {
         std::stringstream ss(val);
         std::string p1, p2, p3, p4;
@@ -1144,15 +1647,65 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
     } else if (prop == "border-left-width") {
         style.border_width.left = parse_length(val, 0.0f);
     } else if (prop == "border-color") {
-        style.border_color = Color::parse(val);
+        style.border_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
     } else if (prop == "border-top-color" || prop == "border-right-color" ||
                prop == "border-bottom-color" || prop == "border-left-color") {
-        style.border_color = Color::parse(val);
+        style.border_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
     } else if (prop == "font-size") {
-        style.font_size = parse_length(val, 16.0f);
+        if (val_lower == "inherit" || val_lower == "unset") {
+            // Inherited from parent via initial copy
+        } else if (val_lower == "initial" || val_lower == "medium") {
+            style.font_size = 16.0f;
+        } else if (val_lower == "xx-small") {
+            style.font_size = 9.0f;
+        } else if (val_lower == "x-small") {
+            style.font_size = 10.0f;
+        } else if (val_lower == "small") {
+            style.font_size = 13.0f;
+        } else if (val_lower == "large") {
+            style.font_size = 18.0f;
+        } else if (val_lower == "x-large") {
+            style.font_size = 24.0f;
+        } else if (val_lower == "xx-large") {
+            style.font_size = 32.0f;
+        } else if (val_lower == "xxx-large") {
+            style.font_size = 48.0f;
+        } else if (val_lower == "smaller") {
+            style.font_size = m_em_base / 1.2f;
+        } else if (val_lower == "larger") {
+            style.font_size = m_em_base * 1.2f;
+        } else if (is_percentage_value(val)) {
+            float pct = parse_length(val, 100.0f);
+            style.font_size = std::max(0.0f, m_em_base * (pct / 100.0f));
+        } else {
+            style.font_size = std::max(0.0f, parse_length(val, 16.0f));
+        }
+    } else if (prop == "line-height") {
+        if (val_lower == "normal") {
+            style.line_height = -1.0f;
+        } else if (is_percentage_value(val)) {
+            float pct = parse_length(val, 120.0f);
+            style.line_height = style.font_size * (pct / 100.0f);
+        } else {
+            // Check unitless multiplier vs unit length
+            bool has_unit = false;
+            std::size_t consumed = 0;
+            float num = 0.0f;
+            try {
+                num = std::stof(val, &consumed);
+                for (std::size_t k = consumed; k < val.size(); ++k) {
+                    if (!css_is_space(val[k])) { has_unit = true; break; }
+                }
+                if (!has_unit) {
+                    style.line_height = num * style.font_size;
+                } else {
+                    style.line_height = parse_length(val, -1.0f);
+                }
+            } catch (...) {}
+        }
     } else if (prop == "font-weight") {
-        if (val == "bold") style.font_weight = 700;
-        else if (val == "normal") style.font_weight = 400;
+        if (val_lower == "bold" || val_lower == "bolder") style.font_weight = 700;
+        else if (val_lower == "normal" || val_lower == "lighter") style.font_weight = 400;
         else {
             try { style.font_weight = std::stoi(val); } catch (...) {}
         }
@@ -1477,9 +2030,13 @@ struct CalcLexer {
     size_t pos{0};
     int depth{0};
     bool invalid{false};
+    float em_base{16.0f};
+    float root_font_size{16.0f};
+    float viewport_w{800.0f};
+    float viewport_h{600.0f};
 
     void skip_whitespace() {
-        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) {
+        while (pos < text.size() && css_is_space(text[pos])) {
             pos++;
         }
     }
@@ -1529,6 +2086,46 @@ static float parse_calc_group(CalcLexer& lex, float ref_size) {
     return val;
 }
 
+static float parse_calc_math_fn(CalcLexer& lex, float ref_size, const std::string& fn) {
+    if (lex.depth >= kMaxCalcDepth) {
+        lex.fail();
+        return 0.0f;
+    }
+    lex.depth++;
+    std::vector<float> args;
+    for (;;) {
+        args.push_back(parse_calc_expr(lex, ref_size));
+        if (lex.invalid) break;
+        if (lex.peek() == ',') {
+            lex.get();
+            continue;
+        }
+        if (lex.peek() == ')') {
+            lex.get();
+        }
+        break;
+    }
+    lex.depth--;
+    if (args.empty()) return 0.0f;
+    if (fn == "min") {
+        float m = args[0];
+        for (size_t i = 1; i < args.size(); ++i) m = std::min(m, args[i]);
+        return m;
+    }
+    if (fn == "max") {
+        float m = args[0];
+        for (size_t i = 1; i < args.size(); ++i) m = std::max(m, args[i]);
+        return m;
+    }
+    if (fn == "clamp") {
+        if (args.size() >= 3) {
+            return std::max(args[0], std::min(args[1], args[2]));
+        }
+        return args[0];
+    }
+    return args[0];
+}
+
 static float parse_calc_primary(CalcLexer& lex, float ref_size) {
     // A run of signs is read in a loop. (It used to be one call per sign, so a
     // long enough run of `-` overflowed the stack.)
@@ -1566,25 +2163,45 @@ static float parse_calc_primary(CalcLexer& lex, float ref_size) {
 
     std::string token(lex.text.substr(start, lex.pos - start));
     if (token.empty()) return 0.0f;
+    std::string token_lower = token;
+    for (char& c : token_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-    // calc() inside calc() is a pair of parentheses.
-    if (token == "calc" && lex.pos < lex.text.size() && lex.text[lex.pos] == '(') {
-        lex.pos++;
-        value = parse_calc_group(lex, ref_size);
-        return negative ? -value : value;
+    if (lex.pos < lex.text.size() && lex.text[lex.pos] == '(') {
+        if (token_lower == "calc") {
+            lex.pos++;
+            value = parse_calc_group(lex, ref_size);
+            return negative ? -value : value;
+        }
+        if (token_lower == "min" || token_lower == "max" || token_lower == "clamp") {
+            lex.pos++;
+            value = parse_calc_math_fn(lex, ref_size, token_lower);
+            return negative ? -value : value;
+        }
     }
 
     try {
-        if (token.ends_with("px")) {
-            value = std::stof(token.substr(0, token.size() - 2));
-        } else if (token.ends_with("%")) {
-            value = (std::stof(token.substr(0, token.size() - 1)) / 100.0f) * ref_size;
-        } else if (token.ends_with("em") || token.ends_with("rem")) {
-            value = std::stof(token.substr(0, token.size() - (token.ends_with("rem") ? 3 : 2))) * 16.0f;
-        } else if (token.ends_with("pt")) {
-            value = std::stof(token.substr(0, token.size() - 2)) * 1.33333f;
+        std::size_t consumed = 0;
+        const float num = std::stof(token_lower, &consumed);
+        const std::string_view unit = std::string_view(token_lower).substr(consumed);
+        if (unit.empty() || unit == "px") value = num;
+        else if (unit == "%") value = (num / 100.0f) * ref_size;
+        else if (unit == "em") value = num * lex.em_base;
+        else if (unit == "rem") value = num * lex.root_font_size;
+        else if (unit == "ex" || unit == "ch") value = num * lex.em_base * 0.5f;
+        else if (unit == "pt") value = num * (96.0f / 72.0f);
+        else if (unit == "pc") value = num * 16.0f;
+        else if (unit == "in") value = num * 96.0f;
+        else if (unit == "cm") value = num * (96.0f / 2.54f);
+        else if (unit == "mm") value = num * (96.0f / 25.4f);
+        else if (unit == "q") value = num * (96.0f / 101.6f);
+        else if (unit == "vw" || unit == "dvw" || unit == "svw" || unit == "lvw") value = num * lex.viewport_w / 100.0f;
+        else if (unit == "vh" || unit == "dvh" || unit == "svh" || unit == "lvh") value = num * lex.viewport_h / 100.0f;
+        else if (unit == "vmin" || unit == "dvmin" || unit == "svmin" || unit == "lvmin") {
+            value = num * std::min(lex.viewport_w, lex.viewport_h) / 100.0f;
+        } else if (unit == "vmax" || unit == "dvmax" || unit == "svmax" || unit == "lvmax") {
+            value = num * std::max(lex.viewport_w, lex.viewport_h) / 100.0f;
         } else {
-            value = std::stof(token);
+            value = num;
         }
     } catch (...) {
         value = 0.0f;
@@ -1620,32 +2237,57 @@ static float parse_calc_expr(CalcLexer& lex, float ref_size) {
 } // namespace
 
 float StyleResolver::evaluate_calc_expression(std::string_view expr, float reference_size, bool* valid) const {
-    CalcLexer lex{expr, 0};
+    CalcLexer lex{expr, 0, 0, false, m_em_base, m_root_font_size, m_viewport_width, m_viewport_height};
     const float value = parse_calc_expr(lex, reference_size);
     if (valid) *valid = !lex.invalid;
     return lex.invalid ? 0.0f : value;
 }
 
-// Replaces each calc(...) in `value` by its result in px. A calc() that is
-// still open where the value ends is closed there, which is how CSS reads an
-// unterminated function. One that nests too deeply to evaluate is replaced by
-// a word no property accepts, so the declaration has no effect.
-//
-// The result is built by appending. (It used to be edited in place, and an
-// unclosed `calc(` was skipped and searched for again from five characters
-// further on, so a value made of N of them cost N*N steps.)
+// Replaces each calc(...), min(...), max(...), clamp(...) in `value` by its result in px.
 std::string StyleResolver::resolve_calc_functions(const std::string& value, float reference_size) const {
+    auto is_ident_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+    };
+    auto find_math_fn = [&](size_t from, size_t& fn_len) -> size_t {
+        static const char* const fns[] = {"calc(", "clamp(", "min(", "max("};
+        size_t best = std::string::npos;
+        size_t best_len = 0;
+        for (size_t idx = from; idx < value.size(); ++idx) {
+            if (idx > 0 && is_ident_char(value[idx - 1])) continue;
+            for (const char* name : fns) {
+                const size_t nlen = std::char_traits<char>::length(name);
+                if (idx + nlen <= value.size()) {
+                    bool match = true;
+                    for (size_t k = 0; k < nlen; ++k) {
+                        char vc = value[idx + k];
+                        char fc = name[k];
+                        if (fc != '(') vc = static_cast<char>(std::tolower(static_cast<unsigned char>(vc)));
+                        if (vc != fc) { match = false; break; }
+                    }
+                    if (match) {
+                        best = idx;
+                        best_len = nlen;
+                        fn_len = best_len;
+                        return best;
+                    }
+                }
+            }
+        }
+        return std::string::npos;
+    };
+
     std::string result;
     size_t at = 0;
     for (;;) {
-        const size_t calc_pos = value.find("calc(", at);
-        if (calc_pos == std::string::npos) {
+        size_t fn_len = 0;
+        const size_t fn_pos = find_math_fn(at, fn_len);
+        if (fn_pos == std::string::npos) {
             result.append(value, at, std::string::npos);
             break;
         }
-        result.append(value, at, calc_pos - at);
+        result.append(value, at, fn_pos - at);
 
-        const size_t content_start = calc_pos + 5;
+        const size_t content_start = fn_pos + fn_len;
         int paren_depth = 1;
         size_t i = content_start;
         for (; i < value.size() && paren_depth > 0; ++i) {
@@ -1656,8 +2298,11 @@ std::string StyleResolver::resolve_calc_functions(const std::string& value, floa
         const size_t content_end = closed ? i - 1 : value.size();
 
         bool valid = true;
-        const float val = evaluate_calc_expression(
-            std::string_view(value).substr(content_start, content_end - content_start), reference_size, &valid);
+        // For min(/max(/clamp(, evaluate the whole function call expression; for calc(, evaluate inside.
+        std::string_view expr_slice = (fn_len == 5 && (value[fn_pos] | 0x20) == 'c')
+                                          ? std::string_view(value).substr(content_start, content_end - content_start)
+                                          : std::string_view(value).substr(fn_pos, (closed ? i : value.size()) - fn_pos);
+        const float val = evaluate_calc_expression(expr_slice, reference_size, &valid);
         result += valid ? std::to_string(val) + "px" : std::string("invalid");
         at = closed ? i : value.size();
     }
@@ -1665,6 +2310,33 @@ std::string StyleResolver::resolve_calc_functions(const std::string& value, floa
 }
 
 ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style) const {
+    if (!parent_style && element) {
+        auto p = element->parent();
+        if (p && p->is_element()) {
+            std::vector<std::shared_ptr<Element>> ancestors;
+            while (p && p->is_element()) {
+                ancestors.push_back(std::static_pointer_cast<Element>(p));
+                p = p->parent();
+            }
+            ComputedStyle inherited;
+            for (std::size_t i = ancestors.size(); i > 0; --i) {
+                inherited = resolve_style(ancestors[i - 1], i == ancestors.size() ? nullptr : &inherited);
+            }
+            return resolve_style(element, &inherited);
+        }
+        m_depth_cache.clear();
+        m_desc_prefix_cache.clear();
+        m_depth_cache[element.get()] = 0;
+    } else if (parent_style && element) {
+        auto p = element->parent();
+        if (p && p->is_element()) {
+            auto dit = m_depth_cache.find(static_cast<const Element*>(p.get()));
+            if (dit != m_depth_cache.end()) {
+                m_depth_cache[element.get()] = dit->second + 1;
+            }
+        }
+    }
+
     ComputedStyle style;
     // Relative (em/ex/ch) lengths resolve against the inherited font size.
     m_em_base = parent_style ? parent_style->font_size : 16.0f;
@@ -1675,10 +2347,13 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
+        style.line_height = parent_style->line_height;
         style.custom_properties = parent_style->custom_properties;
     }
 
     struct MatchedRule {
+        int tier;       // 0: UA, 1: layered normal, 2: unlayered normal, 4: unlayered !important, 5: layered !important
+        int layer_key;  // normal: rank ascending; !important: -rank ascending (earlier layers win)
         Specificity spec;
         int order;
         const Declaration* decl;
@@ -1691,7 +2366,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         for (const auto& sel : rule.selectors) {
             if (matches_selector(element, sel)) {
                 for (const auto& decl : rule.declarations) {
-                    matched.push_back({Specificity{0, 0, 0}, order++, &decl});
+                    matched.push_back({0, 0, Specificity{0, 0, 0}, order++, &decl});
                 }
             }
         }
@@ -1713,10 +2388,10 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         for (const auto& sheet : shadow_scope->parsed_stylesheets()) {
             for (const auto& rule : sheet.rules) {
                 for (const auto& sel : rule.selectors) {
-                    if (matches_selector(element, sel)) {
-                        auto spec = sel.specificity();
+                    Specificity spec;
+                    if (match_selector_impl(element, sel, &spec)) {
                         for (const auto& decl : rule.declarations) {
-                            matched.push_back({spec, order++, &decl});
+                            matched.push_back({decl.important ? 4 : 2, 0, spec, order++, &decl});
                         }
                     }
                 }
@@ -1738,10 +2413,20 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
             if (!media_matches) continue;
 
             const auto& sel = rule.selectors[candidate.selector_index];
-            if (matches_selector(element, sel)) {
-                auto spec = sel.specificity();
+            Specificity spec;
+            if (match_selector_impl(element, sel, &spec)) {
+                const int rank = layer_rank(rule.layer_name);
                 for (const auto& decl : rule.declarations) {
-                    matched.push_back({spec, order++, &decl});
+                    int tier = 0;
+                    int lkey = 0;
+                    if (!decl.important) {
+                        tier = (rank >= 0) ? 1 : 2;
+                        lkey = (rank >= 0) ? rank : 0;
+                    } else {
+                        tier = (rank < 0) ? 4 : 5;
+                        lkey = (rank < 0) ? 0 : -rank;
+                    }
+                    matched.push_back({tier, lkey, spec, order++, &decl});
                 }
             }
         }
@@ -1751,10 +2436,10 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
             for (const auto& sheet : element->shadow_root()->parsed_stylesheets()) {
                 for (const auto& rule : sheet.rules) {
                     for (const auto& sel : rule.selectors) {
-                        if (matches_selector(element, sel)) {
-                            auto spec = sel.specificity();
+                        Specificity spec;
+                        if (match_selector_impl(element, sel, &spec)) {
                             for (const auto& decl : rule.declarations) {
-                                matched.push_back({spec, order++, &decl});
+                                matched.push_back({decl.important ? 4 : 2, 0, spec, order++, &decl});
                             }
                         }
                     }
@@ -1763,16 +2448,14 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         }
     }
 
-    // Stable sort by specificity, then source order
+    // Stable sort by cascade tier, layer order, specificity, then source order
     std::stable_sort(matched.begin(), matched.end(), [](const MatchedRule& a, const MatchedRule& b) {
+        if (a.tier != b.tier) return a.tier < b.tier;
+        if (a.layer_key != b.layer_key) return a.layer_key < b.layer_key;
         if (a.spec == b.spec) return a.order < b.order;
         return a.spec < b.spec;
     });
 
-    // The cascade, in ascending priority: author normal, inline normal,
-    // author !important, inline !important. (CSS Cascade 4, "cascade sorting
-    // order".) Within each tier the declarations are already sorted by
-    // specificity and then source order.
     auto apply_all = [&](const std::vector<const Declaration*>& declarations) {
         for (const auto* declaration : declarations) {
             apply_declaration(style, declaration->property, declaration->value);
@@ -1785,7 +2468,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         (m.decl->important ? important_author : normal_author).push_back(m.decl);
     }
 
-    // 3. Inline style attribute (highest priority: specificity 1000, 0, 0)
+    // 3. Inline style attribute
     std::vector<Declaration> inline_declarations;
     std::string inline_style = element->get_attribute("style");
     if (!inline_style.empty()) {
@@ -1821,8 +2504,16 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
             rest.push_back(declaration);
         }
     }
+    if (element->tag_name() == "html") {
+        m_root_font_size = style.font_size;
+    }
     m_em_base = style.font_size;
     apply_all(rest);
+
+    if (style.border_radius_percent >= 0.0f && style.width > 0.0f) {
+        float ref = style.height > 0.0f ? std::min(style.width, style.height) : style.width;
+        style.border_radius = ref * (style.border_radius_percent / 100.0f);
+    }
 
     if (style.has_transform && !style.transform_str.empty()) {
         style.transform_matrix = parse_transform_matrix(style.transform_str);

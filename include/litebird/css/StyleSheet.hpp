@@ -1,12 +1,23 @@
 #pragma once
 
 #include "litebird/common/Color.hpp"
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <tuple>
 #include <algorithm>
 
 namespace litebird {
+
+class SelectorList;
+
+enum class Combinator : uint8_t {
+    Descendant = 0,
+    Child,
+    AdjacentSibling,
+    GeneralSibling
+};
 
 struct Specificity {
     int ids{0};
@@ -31,6 +42,14 @@ struct Specificity {
 struct PseudoClass {
     std::string name; // "first-child", "last-child", "nth-child", "nth-of-type", "hover", "focus", "active", "disabled", "checked", "not"
     std::string argument;
+    std::shared_ptr<SelectorList> compiled_arg;
+};
+
+struct AttributeMatch {
+    std::string name;
+    std::string op; // "", "=", "~=", "|=", "^=", "$=", "*="
+    std::string value;
+    bool ignore_case{false};
 };
 
 struct SimpleSelector {
@@ -39,21 +58,78 @@ struct SimpleSelector {
     std::vector<std::string> classes;
     std::vector<std::pair<std::string, std::string>> attributes;
     std::vector<PseudoClass> pseudo_classes;
+    std::vector<AttributeMatch> attribute_matches;
+    std::shared_ptr<SelectorList> compiled;
+    bool has_dynamic_specificity{false};
 
     Specificity specificity() const {
         Specificity s;
         if (!id.empty()) s.ids += 1;
-        s.classes += static_cast<int>(classes.size() + attributes.size() + pseudo_classes.size());
+        const std::size_t attr_count = !attribute_matches.empty() ? attribute_matches.size() : attributes.size();
+        s.classes += static_cast<int>(classes.size() + attr_count);
+        for (const auto& pc : pseudo_classes) {
+            if (pc.name != "where") s.classes += 1;
+        }
         if (!tag_name.empty() && tag_name != "*") s.tags += 1;
         return s;
     }
 };
 
+enum class CombinatorKind : uint8_t {
+    Single = 0,
+    AllDescendant,
+    AllDeterministic,
+    AllGeneralSibling,
+    Mixed
+};
+
 struct Selector {
-    // Chain of simple selectors for descendant matching: e.g. "div .card p"
+    // Chain of simple selectors with combinators: e.g. "div > .card + p"
     std::vector<SimpleSelector> parts;
+    std::vector<Combinator> combinators;
+    std::shared_ptr<SelectorList> compiled;
+    bool has_host{false};
+    bool has_pseudo_element{false};
+    bool metadata_computed{false};
+    bool any_dynamic_specificity{false};
+    CombinatorKind combinator_kind{CombinatorKind::Single};
+    std::size_t min_ancestors{0};
+    Specificity cached_specificity;
+
+    void finalize_metadata() {
+        metadata_computed = true;
+        any_dynamic_specificity = false;
+        min_ancestors = 0;
+        cached_specificity = Specificity{};
+        for (const auto& part : parts) {
+            if (part.has_dynamic_specificity) any_dynamic_specificity = true;
+            auto s = part.specificity();
+            cached_specificity.ids += s.ids;
+            cached_specificity.classes += s.classes;
+            cached_specificity.tags += s.tags;
+        }
+        if (parts.size() <= 1) {
+            combinator_kind = CombinatorKind::Single;
+            return;
+        }
+        bool all_desc = true;
+        bool all_det = true;
+        bool all_gsib = true;
+        for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+            Combinator c = (i < combinators.size()) ? combinators[i] : Combinator::Descendant;
+            if (c == Combinator::Descendant || c == Combinator::Child) ++min_ancestors;
+            if (c != Combinator::Descendant) all_desc = false;
+            if (c != Combinator::Child && c != Combinator::AdjacentSibling) all_det = false;
+            if (c != Combinator::GeneralSibling) all_gsib = false;
+        }
+        if (all_det) combinator_kind = CombinatorKind::AllDeterministic;
+        else if (all_desc) combinator_kind = CombinatorKind::AllDescendant;
+        else if (all_gsib) combinator_kind = CombinatorKind::AllGeneralSibling;
+        else combinator_kind = CombinatorKind::Mixed;
+    }
 
     Specificity specificity() const {
+        if (metadata_computed) return cached_specificity;
         Specificity total;
         for (const auto& part : parts) {
             auto s = part.specificity();
@@ -77,14 +153,36 @@ struct MediaQuery {
     float max_height{-1.0f};
     float min_height{-1.0f};
     std::string media_type{"all"};
+    bool min_width_exclusive{false};
+    bool max_width_exclusive{false};
+    bool min_height_exclusive{false};
+    bool max_height_exclusive{false};
+    bool negated{false};
+    bool always_false{false};
+    int orientation{0}; // 0 = any, 1 = portrait, 2 = landscape
+    std::vector<MediaQuery> alternatives;
+
+    bool matches_single(float viewport_w, float viewport_h = 0.0f, const std::string& type = "screen") const {
+        bool ok = true;
+        if (always_false) ok = false;
+        if (ok && !media_type.empty() && media_type != "all" && media_type != type) ok = false;
+        if (ok && max_width >= 0.0f && (max_width_exclusive ? (viewport_w >= max_width) : (viewport_w > max_width))) ok = false;
+        if (ok && min_width >= 0.0f && (min_width_exclusive ? (viewport_w <= min_width) : (viewport_w < min_width))) ok = false;
+        if (ok && max_height >= 0.0f && (max_height_exclusive ? (viewport_h >= max_height) : (viewport_h > max_height))) ok = false;
+        if (ok && min_height >= 0.0f && (min_height_exclusive ? (viewport_h <= min_height) : (viewport_h < min_height))) ok = false;
+        if (ok && orientation == 1 && viewport_h < viewport_w) ok = false;
+        if (ok && orientation == 2 && viewport_w < viewport_h) ok = false;
+        return negated ? !ok : ok;
+    }
 
     bool matches(float viewport_w, float viewport_h = 0.0f, const std::string& type = "screen") const {
-        if (!media_type.empty() && media_type != "all" && media_type != type) return false;
-        if (max_width >= 0.0f && viewport_w > max_width) return false;
-        if (min_width >= 0.0f && viewport_w < min_width) return false;
-        if (max_height >= 0.0f && viewport_h > max_height) return false;
-        if (min_height >= 0.0f && viewport_h < min_height) return false;
-        return true;
+        if (!alternatives.empty()) {
+            for (const auto& alt : alternatives) {
+                if (alt.matches_single(viewport_w, viewport_h, type)) return true;
+            }
+            return false;
+        }
+        return matches_single(viewport_w, viewport_h, type);
     }
 };
 
@@ -102,11 +200,13 @@ struct Rule {
     std::vector<Selector> selectors;
     std::vector<Declaration> declarations;
     std::vector<MediaQuery> media_queries;
+    std::string layer_name;
 };
 
 struct StyleSheet {
     std::vector<Rule> rules;
     std::vector<KeyframesRule> keyframes;
+    std::vector<std::string> layers;
 };
 
 } // namespace litebird

@@ -443,7 +443,17 @@ const JsValue* JsValue::current_derived_this() {
     if (new_target && slot && context.callee) {
         for (auto entry = t_in_place.rbegin(); entry != t_in_place.rend(); ++entry) {
             if (entry->new_target != new_target->identity()) continue;
-            if (!is_interface_of(*context.callee, entry->object)) break;
+            if (!is_interface_of(*context.callee, entry->object)) {
+                // Another interface than the element's is not given the
+                // element, also when `super(...)` came with it (a class that
+                // extends Event, or HTMLElement where the definition is for
+                // a button, given to customElements.define): it builds on an
+                // object of its own, as it would with no upgrade going on.
+                if (context.derived_this && context.derived_this->object_val.get() == entry->object.object_val.get()) {
+                    context.derived_this = nullptr;
+                }
+                break;
+            }
             if (entry->handed_out) js_throw_type_error("This instance is already constructed");
             entry->handed_out = true;
             if (!context.derived_this || context.derived_this->object_val.get() != entry->object.object_val.get()) {
@@ -456,7 +466,8 @@ const JsValue* JsValue::current_derived_this() {
     // super(...): the object the subclass's constructor was given.
     if (context.derived_this) return context.derived_this;
     if (!slot || !new_target) return nullptr;
-    // construct_for(): the native asks, so the object is made now, with the
+    // construct_for(), or an interface that may not have the object
+    // super(...) came with: the object is made now, with the
     // prototype new.target has at this moment. Reading that can run a getter,
     // which is a call with a context of its own; this one is back when it
     // returns.

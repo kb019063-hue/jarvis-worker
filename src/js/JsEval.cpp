@@ -902,11 +902,13 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         JsValue in_place;
         JsValue built = parent.construct_as_super(args, receiver, new_target, &in_place);
         if (in_place.is_object()) {
-            // The interface did not build on the object it was offered: an
-            // element is being upgraded to new.target, and this constructor
-            // was reached with Reflect.construct on an object of its own
-            // (JsValue.cpp, "Constructions in place"). The element is what
-            // this construction makes, and `this` from here on.
+            // The interface did not build on the object it was offered,
+            // because an element is being upgraded to new.target (JsValue.cpp,
+            // "Constructions in place"). Either this constructor was reached
+            // with Reflect.construct, on an object of its own, and the
+            // interface took the element: the element is what this
+            // construction makes. Or the interface is not the element's and
+            // made another object. Whichever it built on is `this` from here.
             made = in_place;
         } else if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
             JsObject* from = built.object_val;

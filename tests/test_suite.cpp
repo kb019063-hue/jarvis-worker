@@ -12317,6 +12317,26 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     assert(text("[notes.join(), $('ev') instanceof Ev, $('ev').matches(':defined'), $('wrong').localName, typeof "
                 "$('wrong').click, nameOf(function () { new Wrong(); })].join()") ==
            "false,true,true,true,true,button,function,TypeError");
+
+    // The same for a class, whose super() comes with the element: an
+    // interface that is not the element's builds on an object of its own.
+    // HTMLElement then finds a definition for a button and refuses; Event
+    // makes an event, the constructor runs to its end on that, and the
+    // upgrade fails because what it made is not the element. Until Phase 43
+    // the element's own object was made the event.
+    js.eval_ast(R"(
+        var ranWrong = 0, event = null;
+        class WrongClass extends HTMLElement { constructor() { super(); ranWrong++; } }
+        customElements.define('wrong-c', WrongClass, { extends: 'button' });
+        class NotAnElement extends Event { constructor() { super('x'); event = this; } }
+        customElements.define('x-not', NotAnElement);
+        host.innerHTML = '<button is="wrong-c" id="wrongc"></button><x-not id="not"></x-not>';
+        var not = host.lastChild;
+    )");
+    assert(text("[ranWrong, host.firstChild.localName, event === not, event instanceof NotAnElement, event.type, "
+                "host.querySelectorAll('x-not:defined').length, host.querySelectorAll('x-not').length, "
+                "Element.prototype.getAttribute.call(not, 'id')].join()") ==
+           "0,button,false,true,x,0,1,not");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {

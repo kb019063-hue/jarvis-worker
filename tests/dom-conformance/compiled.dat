@@ -544,3 +544,28 @@ console.log(right.right, right.matches(':defined'), right instanceof Right, righ
 #expect
 TypeError undefined button
 true true true submit
+
+#name a class whose interface is not the element's builds on an object of its own, and the upgrade fails
+#html
+<html><head><title>Upgrade</title></head><body><button is="wrong-c" id="wrongc">w</button><x-not id="not"></x-not><x-ok id="ok"></x-ok></body></html>
+#code
+var ran = 0;
+class Wrong extends HTMLElement { constructor() { super(); ran++; } }
+customElements.define('wrong-c', Wrong, { extends: 'button' });
+console.log(ran, document.getElementById('wrongc').localName, typeof document.getElementById('wrongc').click);
+var made;
+class NotAnElement extends Event { constructor() { super('x'); ran++; made = this; } }
+customElements.define('x-not', NotAnElement);
+var e = document.body.querySelector('x-not');
+console.log(ran, made === e, made instanceof NotAnElement, made.type, document.querySelectorAll('x-not:defined').length);
+Element.prototype.setAttribute.call(e, 'k', 'v');
+console.log(document.body.innerHTML.indexOf('<x-not id="not" k="v"></x-not>') >= 0, document.querySelectorAll('x-not').length);
+class Ok extends HTMLElement { constructor() { super(); this.ok = true; } }
+customElements.define('x-ok', Ok);
+var ok = document.getElementById('ok');
+console.log(ok.ok, ok instanceof Ok, new Ok().localName, document.createElement('x-ok').ok);
+#expect
+0 button function
+1 false true x 0
+true 1
+true true x-ok true

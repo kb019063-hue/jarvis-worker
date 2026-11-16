@@ -370,12 +370,13 @@ public:
     /// subclass instance and the native object are one; the others build
     /// their own and the caller takes over its state.
     ///
-    /// When `new_target` is being constructed in place (see construct()) and
-    /// `derived_this` is not the object that is about, the native builds on
-    /// that object instead and it is left in `in_place`: it is what this
-    /// construction makes. That happens when a class is constructed with
+    /// When `new_target` is being constructed in place (see construct()),
+    /// the native may build on another object than `derived_this`, and that
+    /// object is left in `in_place`: it is what this construction makes. It
+    /// is the element under construction when a class was constructed with
     /// `Reflect.construct(Class, args, NewTarget)` while an element is being
-    /// upgraded to NewTarget.
+    /// upgraded to NewTarget, and a new object when the native is not the
+    /// element's interface and `derived_this` is the element.
     JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
                                const JsValue* new_target = nullptr, JsValue* in_place = nullptr) const;
     /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,

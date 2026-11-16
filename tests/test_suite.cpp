@@ -4849,7 +4849,7 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                         const auto found = list.find(name);
                         assert((found == list.end()) == (in_model == model.end()));
                         if (found != list.end()) {
-                            assert(found->second == in_model->second);
+                            assert(found->value == in_model->second);
                             assert(found - list.begin() == in_model - model.begin());
                             if (random() % 4 == 0) {
                                 list.erase(found);
@@ -4869,61 +4869,69 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
             }
             std::size_t at = 0;
             for (const auto& item : list) {
-                assert(item == model[at]);
-                assert(list[at] == model[at]);
+                assert(item.name == model[at].first && item.value == model[at].second);
+                assert(list[at].name == model[at].first && list[at].value == model[at].second);
                 ++at;
             }
             assert(at == model.size());
         }
     }
 
-    // 2. The side table of namespaces, against a plain vector.
+    // 2. Attributes are kept by (namespace, local name), so one qualified
+    //    name may be used once in each namespace, and the list keeps the
+    //    order the attributes arrived in. Against a plain vector.
     {
         std::mt19937 random(7);
-        for (int round = 0; round < 100; ++round) {
-            AttributeNamespaces table;
-            struct Row { std::string qualified, uri; };
+        for (int round = 0; round < 40; ++round) {
+            auto element = std::make_shared<Element>("e");
+            struct Row {
+                std::string ns, local, name, value;
+            };
             std::vector<Row> model;
-            const int names = round < 50 ? 10 + round : 300;
-            for (int step = 0; step < 2000; ++step) {
-                const int n = static_cast<int>(random() % names);
+            const int count = round < 20 ? 6 + round : 120;
+            const int steps = round < 20 ? 200 : 2000;
+            for (int step = 0; step < steps; ++step) {
+                const int n = static_cast<int>(random() % count);
                 const std::string local = "a" + std::to_string(n);
-                const std::string qualified = (n % 3 == 0 ? "" : "p" + std::to_string(n % 3) + ":") + local;
-                const auto in_model = std::find_if(model.begin(), model.end(), [&](const Row& row) { return row.qualified == qualified; });
-                switch (random() % 5) {
+                const std::string ns = n % 3 == 0 ? std::string() : "urn:" + std::to_string(n % 4);
+                // A prefix needs a namespace: in no namespace the whole name
+                // is the local name.
+                const std::string name = (ns.empty() || n % 2 == 0 ? "" : "p" + std::to_string(n % 4) + ":") + local;
+                auto found = std::find_if(model.begin(), model.end(),
+                                          [&](const Row& row) { return row.ns == ns && row.local == local; });
+                switch (random() % 4) {
                     case 0: case 1: {
-                        // One namespace per name most of the time; now and then another.
-                        const std::string uri = "urn:" + std::to_string(random() % 8 == 0 ? (n + 1) % 4 : n % 4);
-                        table.set(qualified, uri);
-                        if (in_model == model.end()) model.push_back({qualified, uri});
-                        else in_model->uri = uri;
+                        const std::string value = std::to_string(step);
+                        element->set_attribute_ns(ns, name, value);
+                        if (found == model.end()) model.push_back({ns, local, name, value});
+                        else found->value = value;
                         break;
                     }
                     case 2: {
-                        table.erase(qualified);
-                        if (in_model != model.end()) model.erase(in_model);
-                        break;
-                    }
-                    case 3: {
-                        const std::string* found = table.find(qualified);
-                        assert((found == nullptr) == (in_model == model.end()));
-                        if (found) assert(*found == in_model->uri);
+                        element->remove_attribute_ns(ns, local);
+                        if (found != model.end()) model.erase(found);
                         break;
                     }
                     default: {
-                        // A name has one local part here, so namespace and
-                        // local name find at most one entry.
-                        for (int k = 0; k < 4; ++k) {
-                            const std::string uri = "urn:" + std::to_string(k);
-                            const std::string* found = table.find_expanded(uri, local);
-                            const bool expected = in_model != model.end() && in_model->uri == uri;
-                            assert((found != nullptr) == expected);
-                            if (found) assert(*found == qualified);
+                        const Attribute* attribute = element->find_attribute_ns(ns, local);
+                        assert((attribute != nullptr) == (found != model.end()));
+                        if (attribute) {
+                            assert(attribute->value == found->value);
+                            assert(attribute->namespace_uri() == ns);
+                            assert(attribute->local_name() == local);
                         }
                         break;
                     }
                 }
-                assert(table.size() == model.size());
+                assert(element->attributes().size() == model.size());
+                std::size_t at = 0;
+                for (const Attribute& attribute : element->attributes()) {
+                    assert(attribute.namespace_uri() == model[at].ns);
+                    assert(attribute.local_name() == model[at].local);
+                    assert(attribute.value == model[at].value);
+                    ++at;
+                }
+                assert(at == model.size());
             }
         }
     }
@@ -4950,6 +4958,123 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                    " n.hasAttributeNS('urn:n' + (10000 % 7), 'a10000'), n.getAttribute('p3:a17'), n.attributes[9999].localName].join(' ')").to_string() ==
            "10000 17  true false 17 a9999");
     assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
+}
+
+TEST(attributes_are_kept_by_namespace_and_local_name) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
+    js.notify_document_loaded();
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. One qualified name, two namespaces: both attributes exist, in the
+    //    order they were added, and the name-addressed methods answer about
+    //    the first of them. (The DOM Standard, "set an attribute".)
+    assert(S("var e = document.createElement('div');"
+             "e.setAttributeNS('urn:a', 'x', 'first');"
+             "e.setAttribute('x', 'second');"
+             "e.setAttributeNS('urn:b', 'x', 'third');"
+             "[e.attributes.length, e.getAttribute('x'), e.hasAttribute('x'),"
+             " e.getAttributeNames().join(','),"
+             " e.getAttributeNS('urn:a', 'x'), e.getAttributeNS(null, 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|second|true|x,x|second||third");
+    //    setAttribute changes that first one in place, in its own namespace:
+    //    it does not add, and it does not move the attribute.
+    assert(S("e.setAttribute('x', 'changed');"
+             "[e.attributes.length, e.getAttributeNS('urn:a', 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|changed|third");
+    //    removeAttribute takes the first; toggleAttribute removes the first.
+    assert(S("e.removeAttribute('x'); [e.attributes.length, e.getAttribute('x'), String(e.getAttributeNS('urn:a', 'x')),"
+             " e.getAttributeNames().join(',')].join('|')") ==
+           "1|third|null|x");
+    assert(S("e.toggleAttribute('x'); [e.attributes.length, e.hasAttribute('x'), String(e.getAttributeNS('urn:b', 'x'))].join('|')") ==
+           "0|false|null");
+
+    // 2. Each attribute knows its own namespace, prefix and local name, and
+    //    the list keeps the order even when two names are the same string.
+    assert(S("var n = document.createElementNS('urn:d', 'e');"
+             "n.setAttributeNS('urn:a', 'p:id', '1');"
+             "n.setAttributeNS('', 'id', '2');"
+             "[n.attributes.length, String(n.attributes[0].namespaceURI), String(n.attributes[0].prefix), n.attributes[0].localName,"
+             " String(n.attributes[1].namespaceURI), String(n.attributes[1].prefix), n.attributes[1].localName,"
+             " n.attributes[0].ownerElement === n, n.attributes[0].ownerDocument === document].join('|')") ==
+           "2|urn:a|p|id|null|null|id|true|true");
+
+    // 3. A NamedNodeMap is keyed by qualified name: one own property per
+    //    name, after the indices, not enumerable, and it answers with the
+    //    first attribute of that name.
+    assert(S("var m = document.createElement('div'); m.setAttribute('a', '1'); m.setAttribute('b', '2');"
+             "var map = m.attributes;"
+             "[Object.getOwnPropertyNames(map).join(','), map.hasOwnProperty('a'), map.hasOwnProperty('0'),"
+             " Object.getOwnPropertyDescriptor(map, 'a').enumerable, Object.getOwnPropertyDescriptor(map, '0').enumerable,"
+             " map.a.value, map[1].value, map.length].join('|')") ==
+           "0,1,a,b|true|true|false|true|1|2|2");
+
+    // 4. An Attr is one object per (element, namespace, local name): two
+    //    attributes with one qualified name are two objects, and a removed
+    //    attribute keeps its value and loses its element.
+    assert(S("var d = document.createElement('div');"
+             "d.setAttributeNS('urn:a', 'x', 'one'); d.setAttributeNS('urn:b', 'x', 'two');"
+             "var a1 = d.getAttributeNodeNS('urn:a', 'x'), a2 = d.getAttributeNodeNS('urn:b', 'x');"
+             "[a1 === a2, a1 !== d.getAttributeNodeNS('urn:a', 'x'), d.getAttributeNode('x') === a1,"
+             " String(d.getAttributeNode('x').namespaceURI)].join('|')") ==
+           "false|false|true|urn:a");
+    assert(S("d.removeAttributeNS('urn:a', 'x');"
+             "[a1.value, String(a1.ownerElement), a1.isConnected, d.getAttributeNode('x') === a2].join('|')") ==
+           "one|null|false|true");
+
+    // 5. setAttributeNode returns what it replaced; setAttributeNodeNS keeps
+    //    the replaced attribute's place and takes the new name, so the old
+    //    qualified name is gone and lookups follow the new order.
+    assert(S("var r = document.createElement('div');"
+             "r.setAttribute('keep', 'k'); r.setAttributeNS('urn:t', 'p:id', 'namespaced');"
+             "var made = document.createAttributeNS('urn:t', 'id'); made.value = 'replacement';"
+             "var replaced = r.setAttributeNodeNS(made);"
+             "[replaced.name, replaced.value, String(r.getAttribute('p:id')), r.getAttribute('id'),"
+             " r.getAttributeNS('urn:t', 'id'), r.getAttributeNames().join(',')].join('|')") ==
+           "p:id|namespaced|null|replacement|replacement|keep,id");
+
+    // 6. An HTMLCollection's named properties are own properties too, and
+    //    they do not enumerate.
+    assert(S("var h = document.getElementById('host');"
+             "h.innerHTML = '<i id=\"only\"></i>';"
+             "var list = h.getElementsByTagName('i');"
+             "[Object.getOwnPropertyNames(list).join(','), list.hasOwnProperty('only'), 'only' in list,"
+             " Object.getOwnPropertyDescriptor(list, 'only').enumerable, list.only.id].join('|')") ==
+           "0,only|true|true|false|only");
+
+    // 7. A custom element's attributeChangedCallback and a MutationObserver
+    //    record both see the namespace, which a qualified name alone cannot
+    //    tell apart.
+    assert(S("var seen = [];"
+             "class C extends HTMLElement { static get observedAttributes() { return ['x', 'p:x']; }"
+             "  attributeChangedCallback(name, oldValue, newValue, ns) { seen.push([name, oldValue, newValue, ns].join('~')); } }"
+             "customElements.define('x-c', C);"
+             "var c = document.createElement('x-c'); document.body.appendChild(c);"
+             "c.setAttributeNS('urn:a', 'x', '1'); c.setAttributeNS('urn:b', 'x', '2'); c.removeAttribute('x');"
+             "seen.join('|')") == "x~~1~urn:a|x~~2~urn:b|x~1~~urn:a");
+    assert(S("var records = [];"
+             "var t = document.createElement('div'); document.body.appendChild(t);"
+             "var o = new MutationObserver(function (list) { list.forEach(function (r) {"
+             "  records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); }); });"
+             "o.observe(t, { attributes: true, attributeOldValue: true });"
+             "t.setAttributeNS('urn:a', 'p:x', 'one'); t.setAttributeNS('urn:a', 'p:x', 'two'); t.removeAttributeNS('urn:a', 'x');"
+             "o.takeRecords().forEach(function (r) { records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); });"
+             "records.join('|')") ==
+           "p:x~urn:a~|p:x~urn:a~one|p:x~urn:a~two");
+
+    // 8. importNode copies a detached attribute into the document; adoptNode
+    //    moves one, and returns the same object.
+    assert(S("var other = document.implementation.createDocument('urn:d', 'r', null);"
+             "var attr = other.createAttributeNS('urn:a', 'p:x'); attr.value = 'v';"
+             "var copy = document.importNode(attr);"
+             "[copy !== attr, copy.name, copy.namespaceURI, copy.prefix, copy.localName, copy.value,"
+             " copy.ownerElement, copy.ownerDocument === document, String(attr.ownerDocument === other)].join('|')") ==
+           "true|p:x|urn:a|p|x|v||true|true");
+    assert(S("var a2 = other.createAttribute('plain');"
+             "document.adoptNode(a2) === a2 && a2.ownerDocument === document") == "true");
 }
 
 TEST(xml_http_request_answers_data_urls_and_nothing_else) {
@@ -10854,18 +10979,18 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         while (!model.empty()) {
             const bool front = ((removed_front + removed_back) % 3) != 2;
             const auto at = front ? model.begin() : model.end() - 1;
-            const std::string name = at->first;
+            const std::string name = at->name;
             if ((removed_front + removed_back) % 2 == 0) {
                 auto found = list.find(name);
                 assert(found != list.end());
                 const bool was_front = at == model.begin();
                 const bool was_back = at == model.end() - 1;
                 const std::string next_name = was_front
-                    ? (model.size() > 1 ? std::next(at)->first : std::string())
+                    ? (model.size() > 1 ? std::next(at)->name : std::string())
                     : std::string();
                 auto next = list.erase(found);
                 if (was_front && !next_name.empty()) {
-                    assert(next != list.end() && next->first == next_name);
+                    assert(next != list.end() && next->name == next_name);
                 } else if (was_back) {
                     assert(next == list.end());
                 }
@@ -10876,7 +11001,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             }
             // The model erase uses the name because the list's erase may
             // compact its storage and invalidate the endpoint we read above.
-            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.name == name; });
             assert(model_at != model.end());
             model.erase(model_at);
             assert(list.size() == model.size());
@@ -10884,14 +11009,15 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             assert(list.count(name) == 0);
             assert(list.erase(name) == 0);
             for (std::size_t i = 0; i < model.size(); ++i) {
-                assert(list[i] == model[i]);
-                auto found = list.find(model[i].first);
+                assert(list[i].name == model[i].name && list[i].value == model[i].value);
+                auto found = list.find(model[i].name);
                 assert(found != list.end() && found - list.begin() == static_cast<std::ptrdiff_t>(i));
-                assert(found->second == model[i].second);
+                assert(found->value == model[i].value);
             }
             std::size_t walked = 0;
             for (const auto& item : list) {
-                assert(item == model[walked++]);
+                const Attribute& expected = model[walked++];
+                assert(item.name == expected.name && item.value == expected.value);
             }
             assert(walked == model.size());
             if (!model.empty()) {
@@ -10899,9 +11025,9 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
                 // appended while the ends are being drained; its number must
                 // be greater than every surviving one. Most steps shrink the
                 // model, so this loop terminates.
-                const std::string kept = model.back().first;
+                const std::string kept = model.back().name;
                 list[kept] = "updated";
-                model.back().second = "updated";
+                model.back().value = "updated";
                 assert(list.count(kept) == 1);
                 if ((removed_front + removed_back) % 7 == 0) {
                     const std::string returned = front ? ("front" + std::to_string(removed_front)) : ("back" + std::to_string(removed_back));
@@ -10913,7 +11039,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         }
         assert(list.empty());
         list["after-clear"] = "ok";
-        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].name == "after-clear" && std::as_const(list)[std::size_t{0}].value == "ok");
     }
 
     // Copy and assignment preserve the visible order/values and remain
@@ -10941,7 +11067,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     move_assigned.clear();
     assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
     move_assigned["fresh"] = "1";
-    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].name == "fresh");
 
     // The index can be built after a dead prefix already exists: stay below
     // the scan threshold while erasing the front, grow past it, then search.
@@ -10949,7 +11075,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
     for (int i = 0; i < 10; ++i) late.erase(late.begin());
     for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
-    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].name == "l10");
     assert(late.count("l50") == 1); // builds the index with a nonzero start
     for (int i = 10; i < 51; ++i) {
         assert(late.erase("l" + std::to_string(i)) == 1);
@@ -10974,7 +11100,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     for (int i = 0; i < 50000; ++i) {
         assert(direct.erase("a" + std::to_string(i)) == 1);
         assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
-        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].name == "a" + std::to_string(i + 1));
     }
     const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     assert(direct.empty());
@@ -13238,6 +13364,7 @@ int main() {
     RUN_TEST(xml_dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(selectors_know_namespaces);
     RUN_TEST(attribute_lists_keep_their_order_and_stay_fast);
+    RUN_TEST(attributes_are_kept_by_namespace_and_local_name);
     RUN_TEST(xml_http_request_answers_data_urls_and_nothing_else);
     RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(ranges_follow_the_tree);

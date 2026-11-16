@@ -807,7 +807,10 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     }
 
     JsObject* cell = property_cell();
-    if (cell && cell->exotic) cell->exotic->keys(cell, keys);
+    if (cell && cell->exotic) {
+        if (include_non_enumerable) cell->exotic->own_keys(cell, keys);
+        else cell->exotic->keys(cell, keys);
+    }
     if (cell && cell->is_array) {
         for (size_t i = 0; i < cell->array_elements.size(); ++i) keys.push_back(std::to_string(i));
         if (include_non_enumerable) keys.emplace_back("length");

@@ -1908,9 +1908,11 @@ of them by reading the code.
 - **In the JavaScript engine, a function cannot have a function as its
   prototype**: `Object.getPrototypeOf(TypeError) !== Error`. 18 subtests.
   (Fixed in Phase 34, finding 41.)
-- **An `Attr` is not a `Node`**, two attributes of one element cannot share
-  a qualified name in two namespaces, and collections do not list their
-  names as own properties: 33 subtests.
+- **An `Attr` is not a `Node`**, two attributes of one element could not
+  share a qualified name in two namespaces, and collections did not list
+  their names as own properties: 33 subtests. Fixed in Phase 51 (finding
+  57); what is left of that block is that a write to an index of an
+  `HTMLCollection` is refused in silence in strict mode (2 subtests).
 - **Removing all 50,000 attributes of an element from the front took 9 s**
   at Phase 28; from the back, 22 ms of 25,000. Fixed in Phase 35 (finding 40).
 - **The HTML tokenizer searched for a repeated attribute name** by comparing

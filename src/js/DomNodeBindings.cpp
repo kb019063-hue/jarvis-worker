@@ -162,17 +162,9 @@ bool nodes_equal(const Node& a, const Node& b) {
                 // Attributes are the same by namespace, local name and
                 // value: the prefix is not part of it.
                 if (ex.attributes().size() != ey.attributes().size()) return false;
-                for (const auto& [name, value] : ex.attributes()) {
-                    const std::string& uri = ex.attribute_namespace(name);
-                    const std::string* other = nullptr;
-                    if (uri.empty()) {
-                        other = ey.attribute_namespace(name).empty() ? ey.attribute(name) : nullptr;
-                    } else {
-                        const auto colon = name.find(':');
-                        const std::string local = colon == std::string::npos ? name : name.substr(colon + 1);
-                        if (const std::string* stored = ey.find_attribute_ns(uri, local)) other = ey.attribute(*stored);
-                    }
-                    if (!other || *other != value) return false;
+                for (const auto& attribute : ex.attributes()) {
+                    const Attribute* other = ey.find_attribute_ns(attribute.namespace_uri(), std::string(attribute.local_name()));
+                    if (!other || other->value != attribute.value) return false;
                 }
                 break;
             }
@@ -575,7 +567,6 @@ std::shared_ptr<Node> clone_node(Realm& realm, const Node& node, bool deep, cons
                 element->set_prefix(from.prefix());
                 element->set_other_namespace_uri(from.other_namespace_uri());
                 element->m_attributes = from.m_attributes;
-                element->copy_attribute_namespaces(from);
                 if (const FormControlState* state = from.form_state()) {
                     // What a control holds is cloned with it.
                     FormControlState& made = element->ensure_form_state();

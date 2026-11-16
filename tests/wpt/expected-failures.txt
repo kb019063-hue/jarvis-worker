@@ -5,39 +5,9 @@
 # would make the failures go away. "glob:" before a name makes it a pattern.
 # tools/conformance/run_wpt.py fails when a subtest fails that is not here,
 # and when one that is here passes.
-dom/nodes/Document-adoptNode.html	Adopting an Element should adopt its Attr nodes.	attr-is-not-a-node
-dom/nodes/Document-adoptNode.html	Inserting an Element into another document should adopt its Attr nodes.	attr-is-not-a-node
-dom/nodes/Document-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	named-properties
-dom/nodes/Document-getElementsByTagName.html	hasOwnProperty, getOwnPropertyDescriptor, getOwnPropertyNames	named-properties
-dom/nodes/Document-importNode.html	Import an Attr node with namespace/prefix correctly.	attr-is-not-a-node
-dom/nodes/Element-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	named-properties
-dom/nodes/Element-getElementsByTagName.html	hasOwnProperty, getOwnPropertyDescriptor, getOwnPropertyNames	named-properties
-dom/nodes/Element-removeAttribute.html	removeAttribute should remove the first attribute, irrespective of namespace, when the first attribute is not in a namespace	one-name-two-namespaces
-dom/nodes/Element-removeAttribute.html	removeAttribute should remove the first attribute, irrespective of namespace, when the first attribute is in a namespace	one-name-two-namespaces
-dom/nodes/Element-setAttribute.html	setAttribute should change the first attribute, irrespective of namespace	one-name-two-namespaces
-dom/nodes/Element-setAttributeNodeNS.html	Replacing an attribute prefix preserves name lookup order with namespacedFirst=false	one-name-two-namespaces
-dom/nodes/Element-setAttributeNodeNS.html	Replacing an attribute prefix preserves name lookup order with namespacedFirst=true	one-name-two-namespaces
+dom/nodes/Document-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	strict-write
+dom/nodes/Element-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	strict-write
 dom/nodes/Node-childNodes.html	Iterator behavior of Node.childNodes	nodelist-iterator
-dom/nodes/Node-cloneNode.html	createAttribute	attr-is-not-a-node
-dom/nodes/Node-cloneNode.html	createAttributeNS	attr-is-not-a-node
-dom/nodes/Node-isSameNode.html	attributes should be compared on reference	attr-is-not-a-node
-dom/nodes/Node-lookupNamespaceURI.html	Disconnected Attr has no namespace URI matching "xml"	attr-is-not-a-node
-dom/nodes/Node-lookupNamespaceURI.html	Disconnected Attr has no namespace URI matching "xmlns"	attr-is-not-a-node
-dom/nodes/Node-lookupNamespaceURI.html	Connected Attr has namespace URI matching "xml"	attr-is-not-a-node
-dom/nodes/Node-lookupNamespaceURI.html	Connected Attr no namespace URI matching "xmlns"	attr-is-not-a-node
-dom/nodes/attributes.html	toggleAttribute should set the first attribute with the given name	one-name-two-namespaces
-dom/nodes/attributes.html	setAttribute should set the first attribute with the given name	one-name-two-namespaces
-dom/nodes/attributes.html	First set attribute is returned by getAttribute	one-name-two-namespaces
-dom/nodes/attributes.html	First set attribute is returned with mapped attribute set first	one-name-two-namespaces
-dom/nodes/attributes.html	First set attribute is returned with mapped attribute set later	one-name-two-namespaces
-dom/nodes/attributes.html	getAttributeNames tests	one-name-two-namespaces
-dom/nodes/attributes.html	Own property correctness with basic attributes	named-properties
-dom/nodes/attributes.html	Own property correctness with non-namespaced attribute before same-name namespaced one	one-name-two-namespaces
-dom/nodes/attributes.html	Own property correctness with namespaced attribute before same-name non-namespaced one	one-name-two-namespaces
-dom/nodes/attributes.html	Own property correctness with two namespaced attributes with the same name-with-prefix	one-name-two-namespaces
-dom/nodes/attributes.html	Own property names should only include all-lowercase qualified names for an HTML element in an HTML document	named-properties
-dom/nodes/attributes.html	Own property names should include all qualified names for a non-HTML element in an HTML document	named-properties
-dom/nodes/attributes.html	Own property names should include all qualified names for an HTML element in a non-HTML document	named-properties
 domparsing/XMLSerializer-serializeToString.html	Check if an attribute with namespace and no prefix is serialized with the nearest-declared prefix even if the prefix is assigned to another namespace.	serializer-another-tree
 domparsing/XMLSerializer-serializeToString.html	Check if the prefix of an attribute is NOT preserved in a case where neither its prefix nor its namespace URI is not already used.	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization takes into account of the same prefix declared in an ancestor element	serializer-standard-moved

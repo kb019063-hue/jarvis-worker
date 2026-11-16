@@ -14329,6 +14329,38 @@ TEST(customizable_select_scope_and_formatting_rules) {
         "| <option>\n");
 }
 
+TEST(cloning_for_selectedcontent_keeps_attribute_namespaces) {
+    using namespace litebird;
+
+    // `<selectedcontent>` clones the selected option's children (Phase 49,
+    // `clone_node_tree`). An attribute carries its own namespace since Phase
+    // 51 — there is no side table to copy — so a clone that copied only names
+    // and values would lose the namespaces of `xml:lang` and `xlink:href`.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><select><button><selectedcontent></selectedcontent></button>"
+                 "<option selected>x<svg xml:lang=\"en\"><use xlink:href=\"#i\"/></svg></option></select>");
+    js.notify_document_loaded();
+    assert(js.eval(
+        "var sc = document.querySelector('selectedcontent');"
+        "var svg = sc.querySelector('svg'), use = sc.querySelector('use');"
+        "[sc.childNodes.length, svg.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang'),"
+        " svg.getAttribute('xml:lang'), svg.namespaceURI, use.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),"
+        " use.getAttribute('xlink:href'), use.namespaceURI, use.ownerDocument === document].join('|')").to_string() ==
+        "2|en|en|http://www.w3.org/2000/svg|#i|#i|http://www.w3.org/2000/svg|true");
+
+    // The clone is a copy, not a move: the option keeps its own subtree, and
+    // the two do not share attributes.
+    assert(js.eval(
+        "var option = document.querySelector('option');"
+        "var original = option.querySelector('svg');"
+        "original.setAttributeNS('urn:x', 'p:a', '1');"
+        "[original !== sc.querySelector('svg'), sc.querySelector('svg').hasAttributeNS('urn:x', 'a'),"
+        " sc.querySelector('svg').getAttributeNames().join(',')].join('|')").to_string() ==
+        "true|false|xml:lang");
+}
+
 TEST(select_selectedcontent_cloning_and_edge_cases) {
     using namespace litebird;
 
@@ -14715,6 +14747,7 @@ int main() {
     // Phase 49: customizable <select> content and <selectedcontent> cloning.
     RUN_TEST(customizable_select_scope_and_formatting_rules);
     RUN_TEST(select_selectedcontent_cloning_and_edge_cases);
+    RUN_TEST(cloning_for_selectedcontent_keeps_attribute_namespaces);
 
     // Phase 50: CSS Color 4/5 color spaces, OKLCH gamut mapping, color-mix(), relative colors, light-dark().
     RUN_TEST(css_color4_spaces_gamut_and_serialization);

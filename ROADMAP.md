@@ -79,7 +79,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 22 | **HTTPS** — TLS with certificate validation (adopt a stack or platform APIs). This phase *is* the project, not a detail. | L–XL |
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. | M |
-| 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml`); 495 of the 552 WPT failures hang off this and #26. | M–L |
+| 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
 

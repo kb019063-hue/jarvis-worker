@@ -287,22 +287,32 @@ void setup_document(Iface& I) {
     });
     I.node_accessor(doc, "cookie",
         [](Realm& r, Node& self) {
-            if (&self != r.document.get()) return str("");
+            Document& d = as_document(self);
+            if (d.has_opaque_origin()) {
+                throw_dom(r, "SecurityError", "Failed to read the 'cookie' property from 'Document': The document is sandboxed and lacks the 'allow-same-origin' flag.");
+            }
+            if (!browsing_realm_of(d)) return str("");
             return str(CookieJar::default_jar().get_document_cookie());
         },
         [](Realm& r, Node& self, const JsValue& value) {
-            if (&self == r.document.get()) CookieJar::default_jar().set_document_cookie(to_str(value));
+            Document& d = as_document(self);
+            if (d.has_opaque_origin()) {
+                throw_dom(r, "SecurityError", "Failed to set the 'cookie' property on 'Document': The document is sandboxed and lacks the 'allow-same-origin' flag.");
+            }
+            if (browsing_realm_of(d)) CookieJar::default_jar().set_document_cookie(to_str(value));
         });
-    I.node_getter(doc, "defaultView", [](Realm& r, Node& self) {
-        return &self == r.document.get() ? window_of(r) : null();
+    I.node_getter(doc, "defaultView", [](Realm&, Node& self) {
+        if (Realm* view = browsing_realm_of(as_document(self))) return window_of(*view);
+        return null();
     });
     I.node_accessor(doc, "location",
-        [](Realm& r, Node& self) {
-            if (&self != r.document.get() || !r.window.is_object()) return null();
-            return r.window.get_property("location");
+        [](Realm&, Node& self) {
+            Realm* view = browsing_realm_of(as_document(self));
+            if (!view || !view->window.is_object()) return null();
+            return view->window.get_property("location");
         },
-        [](Realm& r, Node& self, const JsValue& value) {
-            if (&self == r.document.get()) navigate_to(r, value);
+        [](Realm&, Node& self, const JsValue& value) {
+            if (Realm* view = browsing_realm_of(as_document(self))) navigate_to(*view, value);
         });
     I.node_getter(doc, "currentScript", [](Realm& r, Node& self) { return wrap(r, as_document(self).current_script()); });
     I.node_getter(doc, "activeElement", [](Realm& r, Node& self) {
@@ -314,12 +324,16 @@ void setup_document(Iface& I) {
         if (auto body = body_element(document)) return wrap(r, body);
         return wrap(r, document.document_element());
     });
-    I.node_method(doc, "hasFocus", 0, [](Realm& r, Node& self, Args) { return boolean(&self == r.document.get()); });
+    I.node_method(doc, "hasFocus", 0, [](Realm&, Node& self, Args) {
+        return boolean(browsing_realm_of(as_document(self)) != nullptr);
+    });
     // A document starts out hidden, and only one that is shown in a window
     // becomes visible: the page's own is, one that a script made is not.
-    I.node_getter(doc, "hidden", [](Realm& r, Node& self) { return boolean(&self != r.document.get()); });
-    I.node_getter(doc, "visibilityState", [](Realm& r, Node& self) {
-        return str(&self == r.document.get() ? "visible" : "hidden");
+    I.node_getter(doc, "hidden", [](Realm&, Node& self) {
+        return boolean(browsing_realm_of(as_document(self)) == nullptr);
+    });
+    I.node_getter(doc, "visibilityState", [](Realm&, Node& self) {
+        return str(browsing_realm_of(as_document(self)) != nullptr ? "visible" : "hidden");
     });
     I.node_accessor(doc, "designMode",
         [](Realm&, Node&) { return str("off"); },
@@ -589,8 +603,20 @@ void setup_document(Iface& I) {
 // DOMParser and XMLSerializer
 // ---------------------------------------------------------------------------
 
+struct DomParserState : JsExotic {
+    std::shared_ptr<Document> relevant_document;
+    uint64_t realm_id{0};
+};
+
 JsValue construct_plain(Realm& realm, const InterfaceDef& def, Args, const JsValue* derived) {
-    JsValue object = realm.make(def.name, nullptr, derived);
+    std::shared_ptr<JsExotic> state;
+    if (std::string_view(def.name) == "DOMParser") {
+        auto dp = std::make_shared<DomParserState>();
+        dp->relevant_document = realm.document;
+        dp->realm_id = realm.id;
+        state = std::move(dp);
+    }
+    JsValue object = realm.make(def.name, std::move(state), derived);
     set_slot(object, "brand", str(def.name));
     return object;
 }
@@ -604,6 +630,12 @@ void setup_dom_parser(Iface& I) {
     I.method("parseFromString", 2, [](Realm& r, Args args) {
         require_brand("DOMParser");
         require_args(args, 2, "DOMParser.parseFromString");
+        DomParserState* dp_state = state_of<DomParserState>(JsValue::current_this());
+        Realm* owner_realm = dp_state ? find_realm(dp_state->realm_id) : nullptr;
+        Realm& target_realm = (owner_realm && owner_realm->alive) ? *owner_realm : r;
+        std::shared_ptr<Document> rel_doc = (dp_state && dp_state->relevant_document)
+                                                ? dp_state->relevant_document
+                                                : target_realm.document;
         const JsString text = js_to_js_string(args[0]);
         const std::string type = to_str(args[1]);
         static const char* const kTypes[] = {"text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"};
@@ -614,13 +646,13 @@ void setup_dom_parser(Iface& I) {
                                 "' is not a valid enum value of type SupportedType.");
         }
         // Scripts in a document made this way never run.
-        const std::string url = r.document ? r.document->url() : std::string("about:blank");
+        const std::string url = rel_doc ? rel_doc->url() : std::string("about:blank");
         if (type == "text/html") {
             auto document = HtmlParser::parse(text.str(), false);
             document->set_url(url);
             document->set_ready_state("complete");
             set_owner_of_tree(document);
-            return wrap(r, document);
+            return wrap(target_realm, document);
         }
         auto document = std::make_shared<Document>();
         document->set_content_type(type);
@@ -644,7 +676,7 @@ void setup_dom_parser(Iface& I) {
             root->append_child(message);
             document->append_child(root);
         }
-        return wrap(r, document);
+        return wrap(target_realm, document);
     });
 }
 

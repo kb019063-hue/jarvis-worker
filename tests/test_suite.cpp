@@ -11543,6 +11543,274 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     EventLoop::default_loop().tick();
 }
 
+// =========================================================================
+// Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
+//           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
+// =========================================================================
+
+TEST(iframe_browsing_context_hierarchy_and_navigation) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    // 1. Recursive load ordering (grandchild -> child -> parent), WindowProxy
+    //    stability across navigation, window.frames[i] / window[name],
+    //    <template> inertness, and detached iframe cleanup.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example.test/index.html");
+    JsInterpreter js(doc);
+
+    const std::string html = R"html(<!doctype html>
+<html><body>
+  <template id="tmpl"><iframe id="inert" srcdoc="<p>no</p>"></iframe></template>
+  <iframe id="f1" name="alpha" srcdoc="<script>parent.events.push('child-inline');</script><iframe id='gc' srcdoc='<script>top.events.push(&quot;grandchild-inline&quot;); window.onload = function(){ top.events.push(&quot;grandchild-win-load&quot;); };</script>'></iframe><script>document.getElementById('gc').onload = function(){ parent.events.push('grandchild-el-load'); }; window.onload = function(){ parent.events.push('child-win-load'); };</script>"></iframe>
+  <script>
+    window.events = [];
+    document.addEventListener('DOMContentLoaded', function() { events.push('parent-dcl'); });
+    window.addEventListener('load', function() { events.push('parent-win-load'); });
+    var f1 = document.getElementById('f1');
+    f1.addEventListener('load', function() { events.push('child-el-load'); });
+    // Synchronous initial about:blank exists immediately upon connection.
+    window.syncHasWin = (f1.contentWindow !== null && f1.contentDocument !== null);
+    window.savedProxy = f1.contentWindow;
+    window.tmplHasWin = (document.getElementById('tmpl').content.querySelector('iframe').contentWindow !== null);
+  </script>
+</body></html>)html";
+
+    js.load_page(html, true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    assert(js.eval("syncHasWin === true").is_truthy());
+    assert(js.eval("tmplHasWin === false").is_truthy());
+    assert(js.eval("window.length === 1").is_truthy());
+    assert(js.eval("window[0] === f1.contentWindow").is_truthy());
+    assert(js.eval("window.alpha === f1.contentWindow").is_truthy());
+    assert(js.eval("f1.contentWindow.parent === window").is_truthy());
+    assert(js.eval("f1.contentWindow.top === window").is_truthy());
+    assert(js.eval("f1.contentWindow.frameElement === f1").is_truthy());
+    assert(js.eval("f1.contentWindow[0].top === window").is_truthy());
+    assert(js.eval("f1.contentWindow[0].parent === f1.contentWindow").is_truthy());
+    assert(js.eval("events.join(',')").to_string() ==
+           "parent-dcl,child-inline,grandchild-inline,grandchild-win-load,grandchild-el-load,child-win-load,child-el-load,parent-win-load");
+
+    // 2. Navigating `srcdoc` replaces Document while keeping `WindowProxy` === `savedProxy`.
+    js.eval(R"js(
+        window.oldChildDoc = f1.contentDocument;
+        f1.setAttribute('name', 'beta');
+        f1.setAttribute('srcdoc', '<p id="updated">second</p>');
+    )js");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    assert(js.eval("f1.contentWindow === savedProxy").is_truthy());
+    assert(js.eval("f1.contentDocument !== oldChildDoc").is_truthy());
+    assert(js.eval("f1.contentDocument.getElementById('updated').textContent").to_string() == "second");
+    assert(js.eval("window.beta === savedProxy && window.alpha === undefined").is_truthy());
+
+    // 3. Detaching the iframe marks the child window closed and clears contentWindow/contentDocument.
+    js.eval("f1.remove();");
+    assert(js.eval("f1.contentWindow === null && f1.contentDocument === null").is_truthy());
+    assert(js.eval("savedProxy.closed === true").is_truthy());
+    assert(js.eval("window.length === 0").is_truthy());
+
+    // 4. Recursive self-nesting depth cap prevents unbounded recursion.
+    const auto tmp_dir = std::filesystem::temp_directory_path() / "litebird_phase42_depth_test";
+    std::filesystem::create_directories(tmp_dir);
+    {
+        std::ofstream ofs(tmp_dir / "loop.html");
+        ofs << "<!doctype html><script>top.depthCount = (top.depthCount || 0) + 1;</script>"
+               "<iframe src=\"/loop.html\"></iframe>";
+    }
+    ResourceLoader::set_origin_root_for_testing("https://loop.example.test", tmp_dir.string());
+    {
+        auto loop_doc = std::make_shared<Document>();
+        loop_doc->set_url("https://loop.example.test/loop.html");
+        JsInterpreter loop_js(loop_doc);
+        loop_js.load_page("<script>window.depthCount = 0;</script><iframe src='/loop.html'></iframe>", true);
+        loop_js.notify_document_loaded();
+        EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+        const double depth_seen = loop_js.eval("depthCount").to_number();
+        assert(depth_seen == 16.0);
+    }
+    ResourceLoader::clear_origin_roots_for_testing();
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(iframe_sandbox_origin_isolation_and_postmessage) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    const auto tmp_dir = std::filesystem::temp_directory_path() / "litebird_phase42_origin_test";
+    std::filesystem::create_directories(tmp_dir / "public");
+    {
+        std::ofstream ofs(tmp_dir / "secret.txt");
+        ofs << "OUTSIDE_ROOT_SECRET";
+    }
+    {
+        std::ofstream ofs(tmp_dir / "public" / "xorig.html");
+        ofs << R"html(<!doctype html><script>
+            window.addEventListener('message', function(e) {
+                e.source.postMessage({echo: e.data, seenOrigin: e.origin, myOrigin: window.origin}, e.origin);
+            });
+        </script><p id="secret">cross-origin-body</p>)html";
+    }
+
+    ResourceLoader::set_origin_root_for_testing("https://other.example.test", (tmp_dir / "public").string());
+
+    // Path traversal (both `..` and a symlink pointing outside the mapped root) must be rejected.
+    std::error_code sym_ec;
+    std::filesystem::create_symlink(tmp_dir / "secret.txt", tmp_dir / "public" / "escape_link.txt", sym_ec);
+    {
+        ResourceRequestContext ctx;
+        ctx.document_url = "https://other.example.test/xorig.html";
+        ResourceResponse escaped = ResourceLoader::load_for_page("https://other.example.test/../secret.txt", ctx);
+        assert(!escaped.success && escaped.body.empty());
+        if (!sym_ec) {
+            ResourceResponse sym_escaped = ResourceLoader::load_for_page("https://other.example.test/escape_link.txt", ctx);
+            assert(!sym_escaped.success && sym_escaped.status_code == 404 && sym_escaped.body.empty());
+        }
+    }
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://main.example.test/page.html");
+    JsInterpreter js(doc);
+
+    const std::string html = R"html(<!doctype html><html><body>
+      <iframe id="nojs" sandbox srcdoc="<script>parent.ranBlocked = true;</script><p>hi</p>"></iframe>
+      <iframe id="opaque" sandbox="allow-scripts" srcdoc="<script>
+        window.cookieErr = '';
+        window.storageErr = '';
+        try { var c = document.cookie; } catch (e) { window.cookieErr = e.name; }
+        try { var s = window.localStorage; } catch (e) { window.storageErr = e.name; }
+        parent.postMessage({kind: 'sandbox', origin: window.origin, cookieErr: window.cookieErr, storageErr: window.storageErr}, '*');
+      </script>"></iframe>
+      <iframe id="same" sandbox="allow-scripts allow-same-origin" srcdoc="<p id='ok'>allowed</p>"></iframe>
+      <iframe id="xorig" src="https://other.example.test/xorig.html"></iframe>
+      <script>
+        window.ranBlocked = false;
+        window.sandboxMsg = null;
+        window.echoMsg = null;
+        window.addEventListener('message', function(e) {
+          if (e.data && e.data.kind === 'sandbox') {
+            window.sandboxMsg = {data: e.data, origin: e.origin, fromOpaque: e.source === document.getElementById('opaque').contentWindow};
+          } else if (e.data && e.data.echo) {
+            window.echoMsg = {data: e.data, origin: e.origin, fromXorig: e.source === document.getElementById('xorig').contentWindow};
+          }
+        });
+      </script>
+    </body></html>)html";
+
+    js.load_page(html, true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    // 1. `sandbox` without `allow-scripts` blocks script execution; without `allow-same-origin`
+    //    gives an opaque origin hiding `contentDocument`.
+    assert(js.eval("ranBlocked === false").is_truthy());
+    assert(js.eval("document.getElementById('nojs').contentDocument === null").is_truthy());
+    assert(js.eval("document.getElementById('nojs').sandbox.contains('allow-scripts') === false").is_truthy());
+    assert(js.eval("document.getElementById('opaque').contentDocument === null").is_truthy());
+    assert(js.eval("sandboxMsg !== null && sandboxMsg.origin === 'null' && sandboxMsg.fromOpaque === true").is_truthy());
+    assert(js.eval("sandboxMsg.data.origin === 'null'").is_truthy());
+    assert(js.eval("sandboxMsg.data.cookieErr === 'SecurityError'").is_truthy());
+    assert(js.eval("sandboxMsg.data.storageErr === 'SecurityError'").is_truthy());
+
+    // 2. `sandbox="allow-scripts allow-same-origin"` preserves same-origin DOM access.
+    assert(js.eval("document.getElementById('same').contentDocument.getElementById('ok').textContent").to_string() == "allowed");
+
+    // 3. Cross-origin iframe hides `contentDocument`, blocks `contentWindow.document`,
+    //    enforces `targetOrigin` on `postMessage`, and delivers matching `postMessage`.
+    assert(js.eval("document.getElementById('xorig').contentDocument === null").is_truthy());
+    assert(js.eval("document.getElementById('xorig').getSVGDocument() === null").is_truthy());
+    assert(js.eval("(function(){ try { void document.getElementById('xorig').contentWindow.document; return 'NONE'; } catch(e) { return e.name; } })()").to_string() == "SecurityError");
+
+    // Mismatched targetOrigin must be dropped silently; matching targetOrigin must round-trip.
+    js.eval(R"js(
+        var xw = document.getElementById('xorig').contentWindow;
+        xw.postMessage('wrong-origin', 'https://wrong.example.test');
+        xw.postMessage('hello-xorig', 'https://other.example.test');
+    )js");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    assert(js.eval("echoMsg !== null && echoMsg.origin === 'https://other.example.test' && echoMsg.fromXorig === true").is_truthy());
+    assert(js.eval("echoMsg.data.echo === 'hello-xorig' && echoMsg.data.seenOrigin === 'https://main.example.test' && echoMsg.data.myOrigin === 'https://other.example.test'").is_truthy());
+
+    ResourceLoader::clear_origin_roots_for_testing();
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    // 1. Zero-leak GC check across parent + nested child + grandchild realms,
+    //    cross-realm node adoption, relevant-realm constructors, and closures.
+    JsIntrinsics::get();
+    Heap& heap = Heap::default_heap();
+    heap.collect_garbage();
+    heap.collect_garbage();
+    const std::size_t permanent_cells = heap.stats().alive_cells;
+
+    for (int round = 0; round < 3; ++round) {
+        {
+            auto doc = std::make_shared<Document>();
+            doc->set_url("https://gc.example.test/root.html");
+            JsInterpreter js(doc);
+            js.load_page(R"html(<!doctype html><html><body>
+              <iframe id="child" srcdoc="<div id='item'>from-child</div><iframe srcdoc='<p>leaf</p>'></iframe><script>class CustomBox {} window.box = new CustomBox();</script>"></iframe>
+            </body></html>)html", true);
+            js.notify_document_loaded();
+            EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+            assert(js.eval("var cw = document.getElementById('child').contentWindow; var cd = document.getElementById('child').contentDocument; cd.body instanceof cw.HTMLElement").is_truthy());
+            assert(js.eval("(new cw.Comment('x')).ownerDocument === cd && (new cw.Text('y')).ownerDocument === cd").is_truthy());
+            assert(js.eval("(new cw.DOMParser()).parseFromString('<r/>', 'text/xml').URL === 'about:srcdoc'").is_truthy());
+            assert(js.eval("var item = cd.getElementById('item'); document.body.appendChild(item); item.ownerDocument === document").is_truthy());
+        }
+        EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+        heap.collect_garbage();
+        heap.collect_garbage();
+        assert(heap.stats().alive_cells == permanent_cells);
+    }
+
+    // 2. XHTML `load_xml_page` executes `<![CDATA[...]]>` scripts in XML mode,
+    //    and `LayoutTree` + `BitmapRenderer` paints an `<iframe>`'s subdocument pixels.
+    {
+        auto xdoc = std::make_shared<Document>();
+        xdoc->set_url("https://xhtml.example.test/app.xhtml");
+        xdoc->set_viewport_size(200.0f, 160.0f);
+        JsInterpreter xjs(xdoc);
+        const std::string xhtml = R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body style="margin:0; background:#ffffff;">
+  <iframe id="paintFrame" width="80" height="60" style="border:none; display:block;"
+          srcdoc="&lt;body style='margin:0'&gt;&lt;div style='width:80px;height:60px;background:#ff0000'&gt;&lt;/div&gt;&lt;/body&gt;"></iframe>
+  <script><![CDATA[
+    window.xmlModeTag = document.createElement('MixedCase').tagName;
+  ]]></script>
+</body>
+</html>)xml";
+        xjs.load_xml_page(xhtml, "application/xhtml+xml", true);
+        xjs.notify_document_loaded();
+        EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+        assert(xjs.eval("xmlModeTag").to_string() == "MixedCase");
+
+        StyleResolver resolver = DocumentStyles::build_resolver(*xdoc, &xdoc->stylesheet_cache(), 200.0f, 160.0f);
+        auto layout_root = LayoutTree::build(xdoc, resolver, 200.0f, 160.0f);
+        DisplayList dl = DisplayList::build(layout_root);
+        BitmapRenderer bmp(200, 160);
+        bmp.clear(Color::white());
+        bmp.render(dl);
+
+        const Color inside = bmp.get_pixel(20, 20);
+        const Color outside = bmp.get_pixel(120, 20);
+        assert(inside.r == 255 && inside.g == 0 && inside.b == 0);
+        assert(outside.r == 255 && outside.g == 255 && outside.b == 255);
+    }
+
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+    heap.collect_garbage();
+    heap.collect_garbage();
+    assert(heap.stats().alive_cells == permanent_cells);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -11726,6 +11994,11 @@ int main() {
     RUN_TEST(worker_options_module_policy_and_global_scope);
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
+
+    // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
+    RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
+    RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
+    RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

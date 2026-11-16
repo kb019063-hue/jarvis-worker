@@ -4,8 +4,10 @@
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include <cctype>
 
@@ -248,6 +250,66 @@ void populate_special_element_box(
         box->style.width = svg_w;
         box->style.height = svg_h;
         box->image = SvgRenderer::render(element, svg_w, svg_h);
+    } else if (!element->is_foreign() && tag == "iframe") {
+        box->box_type = BoxType::ImageNode;
+        float frame_w = box->style.width;
+        float frame_h = box->style.height;
+        if (frame_w < 0.0f) {
+            if (element->has_attribute("width")) {
+                try { frame_w = std::stof(element->get_attribute("width")); } catch (...) {}
+            }
+            if (frame_w < 0.0f) frame_w = 300.0f;
+        }
+        if (frame_h < 0.0f) {
+            if (element->has_attribute("height")) {
+                try { frame_h = std::stof(element->get_attribute("height")); } catch (...) {}
+            }
+            if (frame_h < 0.0f) frame_h = 150.0f;
+        }
+        box->style.width = frame_w;
+        box->style.height = frame_h;
+
+        static thread_local int t_iframe_layout_depth = 0;
+        if (auto subdoc = element->content_document(); subdoc && t_iframe_layout_depth < 8 && !stack_is_exhausted()) {
+            const int rw = std::clamp(static_cast<int>(frame_w), 0, 2048);
+            const int rh = std::clamp(static_cast<int>(frame_h), 0, 2048);
+            if (rw > 0 && rh > 0 && RasterBudget::allows(rw, rh)) {
+                auto img = std::make_shared<ImageData>();
+                if (img->budget.resize(static_cast<std::int64_t>(rw) * static_cast<std::int64_t>(rh))) {
+                    ++t_iframe_layout_depth;
+                    struct DepthGuard { ~DepthGuard() { --t_iframe_layout_depth; } } guard;
+                    subdoc->set_viewport_size(static_cast<float>(rw), static_cast<float>(rh));
+                    StyleResolver sub_resolver = DocumentStyles::build_resolver(
+                        *subdoc, &subdoc->stylesheet_cache(), static_cast<float>(rw), static_cast<float>(rh)
+                    );
+                    auto sub_root = LayoutTree::build(
+                        subdoc, sub_resolver, static_cast<float>(rw), static_cast<float>(rh)
+                    );
+                    subdoc->mark_layout_clean();
+                    if (sub_root) {
+                        DisplayList sub_list = DisplayList::build(sub_root);
+                        BitmapRenderer bmp(rw, rh);
+                        bmp.clear(Color::white());
+                        bmp.render(sub_list);
+                        img->width = rw;
+                        img->height = rh;
+                        img->pixels.resize(static_cast<std::size_t>(rw) * static_cast<std::size_t>(rh));
+                        for (int y = 0; y < rh; ++y) {
+                            for (int x = 0; x < rw; ++x) {
+                                const Color c = bmp.get_pixel(x, y);
+                                img->pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(rw) +
+                                            static_cast<std::size_t>(x)] =
+                                    (static_cast<uint32_t>(c.a) << 24) |
+                                    (static_cast<uint32_t>(c.r) << 16) |
+                                    (static_cast<uint32_t>(c.g) << 8) |
+                                    static_cast<uint32_t>(c.b);
+                            }
+                        }
+                        box->image = std::move(img);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -432,7 +494,7 @@ void LayoutTree::build_boxes(
                     box->append_child(LayoutBox::create_text(nullptr, label, ctrl_text));
                 }
             }
-        } else if (tag != "svg") {
+        } else if (tag != "svg" && (element->is_foreign() || tag != "iframe")) {
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
@@ -465,7 +527,7 @@ void LayoutTree::build_boxes(
             normalize_block_children(box, box->style);
         }
 
-        if (tag == "img" || tag == "canvas" || tag == "svg") {
+        if (tag == "img" || tag == "canvas" || tag == "svg" || (!element->is_foreign() && tag == "iframe")) {
             populate_special_element_box(element, box);
         }
 

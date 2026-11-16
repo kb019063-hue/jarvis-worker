@@ -27,17 +27,93 @@ struct HistoryEntry {
     JsValue state;
 };
 
+struct ChildFrameEntry {
+    std::weak_ptr<Element> element;
+    std::shared_ptr<JsInterpreter> interpreter;
+    uint64_t navigation_generation{0};
+    bool delaying_parent_load{false};
+};
+
 struct WindowPart : RealmPart {
     std::vector<HistoryEntry> history;
     std::size_t history_index{0};
     ScriptRunner run_script;
     std::string name;
+    bool name_explicitly_set{false};
     /// Elements by id, for `window.someId`: built when first asked after the
     /// tree changed.
     std::unordered_map<std::string, std::weak_ptr<Element>> ids;
     uint64_t ids_version{0};
+    bool dcl_fired{false};
     bool load_fired{false};
+    bool pending_window_load{false};
+    int delaying_load_count{0};
+    int frame_depth{0};
+    uint64_t parent_realm_id{0};
+    std::weak_ptr<Element> frame_element;
+    std::function<void()> on_window_load_complete;
+    std::unordered_map<const Element*, ChildFrameEntry> child_frames;
 };
+
+static constexpr int kMaxNestedFrameDepth = 16;
+
+std::vector<JsValue> collect_child_frame_windows(Realm& realm) {
+    std::vector<JsValue> out;
+    if (!realm.alive || !realm.document) return out;
+    WindowPart* part = realm.find_part<WindowPart>();
+    if (!part || part->child_frames.empty()) return out;
+    for_each_descendant(*realm.document, [&](Node& node) {
+        if (is_html_element(node, "iframe")) {
+            auto& el = static_cast<Element&>(node);
+            auto it = part->child_frames.find(&el);
+            if (it != part->child_frames.end() && it->second.interpreter) {
+                const JsValue& w = it->second.interpreter->global_object();
+                if (w.is_object()) out.push_back(w);
+            }
+        }
+        return true;
+    });
+    return out;
+}
+
+JsValue find_named_child_frame_window(Realm& realm, const std::string& target_name) {
+    if (target_name.empty() || !realm.alive || !realm.document) return undefined();
+    WindowPart* part = realm.find_part<WindowPart>();
+    if (!part || part->child_frames.empty()) return undefined();
+    JsValue match = undefined();
+    for_each_descendant(*realm.document, [&](Node& node) {
+        if (!is_html_element(node, "iframe")) return true;
+        auto& el = static_cast<Element&>(node);
+        auto it = part->child_frames.find(&el);
+        if (it == part->child_frames.end() || !it->second.interpreter) return true;
+        Realm& child_r = it->second.interpreter->dom_realm();
+        const std::string& win_name = child_r.part<WindowPart>().name;
+        const std::string* attr_name = el.attribute("name");
+        const std::string effective_name = !win_name.empty() ? win_name : (attr_name ? *attr_name : std::string());
+        if (effective_name == target_name) {
+            match = it->second.interpreter->global_object();
+            return false;
+        }
+        return true;
+    });
+    return match;
+}
+
+bool effective_origin_url(const Document& doc, Url& out) {
+    if (doc.has_opaque_origin()) return false;
+    const std::string& u = doc.url();
+    if ((u == "about:blank" || u == "about:srcdoc" || u.rfind("data:", 0) == 0) &&
+        !doc.inherited_origin_url().empty()) {
+        return Url::parse(doc.inherited_origin_url(), nullptr, out);
+    }
+    return Url::parse(u, nullptr, out);
+}
+
+std::string effective_origin_string(const Realm& realm) {
+    if (!realm.document || realm.document->has_opaque_origin()) return "null";
+    Url u;
+    return effective_origin_url(*realm.document, u) ? u.origin() : std::string("null");
+}
 
 // ---------------------------------------------------------------------------
 // The global object as a host object
@@ -87,10 +163,42 @@ JsValue css_namespace(Realm& realm) {
 struct WindowExotic : JsExotic {
     Realm* realm{nullptr};
 
-    // Global variables are properties of the window: those declared with
-    // `var` or `function`, and those made by assignment. `let`, `const` and
-    // `class` declare a name every script sees that is not a property.
+    static bool is_cross_origin_safelisted(const std::string& name) {
+        return name == "window" || name == "self" || name == "frames" ||
+               name == "close" || name == "closed" || name == "focus" || name == "blur" ||
+               name == "postMessage" || name == "length" || name == "top" ||
+               name == "opener" || name == "parent";
+    }
+
+    // Indexed child browsing contexts (`window[0]`, `frames[0]`) come first,
+    // then HTML §7.2.3 cross-origin checks, then global variables declared
+    // with `var` or `function` or assignment.
     bool get(JsObject*, const std::string& name, JsValue& out) override {
+        if (!realm || !realm->alive) return false;
+        std::size_t index = 0;
+        if (parse_index(name, index)) {
+            const auto frames = collect_child_frame_windows(*realm);
+            if (index < frames.size()) {
+                out = frames[index];
+                return true;
+            }
+        }
+        Realm& caller = current_realm();
+        if (!same_effective_origin(caller, *realm)) {
+            if (!name.empty() && (name[0] == '%' || name[0] == '@')) return false;
+            if (name == "then") {
+                out = undefined();
+                return true;
+            }
+            if (is_cross_origin_safelisted(name)) return false;
+            JsValue child_win = find_named_child_frame_window(*realm, name);
+            if (!child_win.is_undefined()) {
+                out = child_win;
+                return true;
+            }
+            throw_dom(caller, "SecurityError",
+                      "Blocked a frame from accessing property '" + name + "' on a cross-origin Window.");
+        }
         auto scope = realm->global_scope.lock();
         if (!scope) return false;
         auto* binding = scope->find_own(name);
@@ -99,14 +207,22 @@ struct WindowExotic : JsExotic {
         return true;
     }
     bool set(JsObject*, const std::string& name, const JsValue& value) override {
-        auto scope = realm->global_scope.lock();
+        if (realm && realm->alive) {
+            Realm& caller = current_realm();
+            if (!same_effective_origin(caller, *realm)) {
+                if (name == "location") return false;
+                throw_dom(caller, "SecurityError",
+                          "Blocked a frame from setting property '" + name + "' on a cross-origin Window.");
+            }
+        }
+        auto scope = realm ? realm->global_scope.lock() : nullptr;
         if (!scope) return false;
         auto* binding = scope->find_own(name);
         if (!binding || binding->is_lexical) return false;
         if (!binding->is_const && !binding->is_readonly) binding->value = value;
         return true;
     }
-    // Asked when nothing else has the name: an interface, or an element.
+    // Asked when nothing else has the name: an interface, a named child frame, or an element.
     bool get_last(JsObject* self, const std::string& name, JsValue& out) override {
         if (!realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return false;
         if (const InterfaceDef* def = find_interface_or_alias(name)) {
@@ -121,6 +237,11 @@ struct WindowExotic : JsExotic {
             remember(self, name, out);
             return true;
         }
+        JsValue child_win = find_named_child_frame_window(*realm, name);
+        if (child_win.is_object()) {
+            out = child_win;
+            return true;
+        }
         if (auto element = element_with_id(name)) {
             out = wrap(*realm, element);
             return true;
@@ -129,12 +250,17 @@ struct WindowExotic : JsExotic {
     }
     bool has(JsObject*, const std::string& name) override {
         if (!realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return false;
+        std::size_t index = 0;
+        if (parse_index(name, index)) {
+            if (index < collect_child_frame_windows(*realm).size()) return true;
+        }
         if (auto scope = realm->global_scope.lock()) {
             auto* binding = scope->find_own(name);
             if (binding && !binding->is_lexical) return true;
         }
         if (find_interface_or_alias(name)) return true;
         if (name == "Option" || name == "Image" || name == "Audio" || name == "CSS") return true;
+        if (find_named_child_frame_window(*realm, name).is_object()) return true;
         return element_with_id(name) != nullptr;
     }
 
@@ -174,10 +300,20 @@ struct WindowExotic : JsExotic {
     }
 };
 
-void require_window(Realm& realm) {
+Realm& resolve_window_realm(Realm& fallback) {
     const JsValue& self = JsValue::current_this();
-    if (self.is_nullish()) return;
-    if (!realm.window.is_object() || self.object_val != realm.window.object_val) throw_illegal_invocation("Window");
+    if (self.is_nullish()) return fallback;
+    if (auto* wx = state_of<WindowExotic>(self)) {
+        if (wx->realm && wx->realm->alive && wx->realm->window.is_object() &&
+            self.object_val == wx->realm->window.object_val) {
+            return *wx->realm;
+        }
+    }
+    throw_illegal_invocation("Window");
+}
+
+void require_window(Realm& realm) {
+    (void)resolve_window_realm(realm);
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,71 +1299,134 @@ void setup_request(Iface& I) {
 const char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 void setup_window(Iface& I) {
-    for (const char* name : {"window", "self", "frames", "parent", "top", "globalThis"}) {
+    for (const char* name : {"window", "self", "frames", "globalThis"}) {
         I.getter(name, [](Realm& r) {
-            require_window(r);
-            return r.window;
+            Realm& wr = resolve_window_realm(r);
+            return wr.window;
         });
     }
+    I.getter("parent", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
+        WindowPart& part = wr.part<WindowPart>();
+        if (part.parent_realm_id != 0) {
+            Realm* parent = find_realm(part.parent_realm_id);
+            auto fe = part.frame_element.lock();
+            if (!parent || !parent->alive || !fe || !fe->is_connected()) return null();
+            return parent->window;
+        }
+        return wr.window;
+    });
+    I.getter("top", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
+        Realm* cur = &wr;
+        for (int hops = 0; hops <= kMaxNestedFrameDepth; ++hops) {
+            WindowPart& part = cur->part<WindowPart>();
+            if (part.parent_realm_id == 0) return cur->window;
+            Realm* parent = find_realm(part.parent_realm_id);
+            auto fe = part.frame_element.lock();
+            if (!parent || !parent->alive || !fe || !fe->is_connected()) return null();
+            cur = parent;
+        }
+        return cur->window;
+    });
     I.getter("document", [](Realm& r) {
-        require_window(r);
-        return wrap(r, r.document);
+        Realm& wr = resolve_window_realm(r);
+        Realm& caller = caller_realm_or(r);
+        if (!same_effective_origin(caller, wr)) {
+            throw_dom(caller, "SecurityError", "Blocked a frame from accessing a cross-origin frame's document.");
+        }
+        return wrap(wr, wr.document);
     });
     I.accessor("location",
         [](Realm& r) {
-            require_window(r);
-            return cached(r.window, "location", [&]() { return branded(r, "Location"); });
+            Realm& wr = resolve_window_realm(r);
+            return cached(wr.window, "location", [&]() { return branded(wr, "Location"); });
         },
         [](Realm& r, const JsValue& value) {
-            require_window(r);
-            navigate_to(r, value);
+            Realm& wr = resolve_window_realm(r);
+            navigate_to(wr, value);
         });
     I.getter("history", [](Realm& r) {
-        require_window(r);
-        return cached(r.window, "history", [&]() { return branded(r, "History"); });
+        Realm& wr = resolve_window_realm(r);
+        return cached(wr.window, "history", [&]() { return branded(wr, "History"); });
     });
     I.getter("navigator", [](Realm& r) {
-        require_window(r);
-        return cached(r.window, "navigator", [&]() { return branded(r, "Navigator"); });
+        Realm& wr = resolve_window_realm(r);
+        return cached(wr.window, "navigator", [&]() { return branded(wr, "Navigator"); });
     });
     I.alias("clientInformation", "navigator");
     I.getter("screen", [](Realm& r) {
-        require_window(r);
-        return cached(r.window, "screen", [&]() { return branded(r, "Screen"); });
+        Realm& wr = resolve_window_realm(r);
+        return cached(wr.window, "screen", [&]() { return branded(wr, "Screen"); });
     });
     I.getter("customElements", [](Realm& r) {
-        require_window(r);
-        return custom_elements_object(r);
+        Realm& wr = resolve_window_realm(r);
+        return custom_elements_object(wr);
     });
     I.getter("localStorage", [](Realm& r) {
-        require_window(r);
-        return storage_object(r, "localStorage", Storage::local_storage());
+        Realm& wr = resolve_window_realm(r);
+        if (wr.document && wr.document->has_opaque_origin()) {
+            throw_dom(wr, "SecurityError", "Failed to read the 'localStorage' property from 'Window': The document is sandboxed and lacks the 'allow-same-origin' flag.");
+        }
+        return storage_object(wr, "localStorage", Storage::local_storage());
     });
     I.getter("sessionStorage", [](Realm& r) {
-        require_window(r);
-        return storage_object(r, "sessionStorage", Storage::session_storage());
+        Realm& wr = resolve_window_realm(r);
+        if (wr.document && wr.document->has_opaque_origin()) {
+            throw_dom(wr, "SecurityError", "Failed to read the 'sessionStorage' property from 'Window': The document is sandboxed and lacks the 'allow-same-origin' flag.");
+        }
+        return storage_object(wr, "sessionStorage", Storage::session_storage());
     });
     I.accessor("name",
         [](Realm& r) {
-            require_window(r);
-            return str(r.part<WindowPart>().name);
+            Realm& wr = resolve_window_realm(r);
+            return str(wr.part<WindowPart>().name);
         },
         [](Realm& r, const JsValue& value) {
-            require_window(r);
-            r.part<WindowPart>().name = to_str(value);
+            Realm& wr = resolve_window_realm(r);
+            WindowPart& part = wr.part<WindowPart>();
+            part.name = to_str(value);
+            part.name_explicitly_set = true;
         });
     I.accessor("status", [](Realm&) { return str(""); }, [](Realm&, const JsValue&) {});
-    I.getter("closed", [](Realm&) { return boolean(false); });
-    I.getter("length", [](Realm&) { return num(0); });
+    I.getter("closed", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
+        WindowPart& part = wr.part<WindowPart>();
+        if (part.parent_realm_id != 0) {
+            Realm* parent = find_realm(part.parent_realm_id);
+            auto fe = part.frame_element.lock();
+            if (!parent || !parent->alive || !fe || !fe->is_connected()) return boolean(true);
+        }
+        return boolean(false);
+    });
+    I.getter("length", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
+        return num(static_cast<double>(collect_child_frame_windows(wr).size()));
+    });
     I.accessor("opener", [](Realm&) { return null(); }, [](Realm&, const JsValue&) {});
-    I.getter("frameElement", [](Realm&) { return null(); });
+    I.getter("frameElement", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
+        Realm& caller = caller_realm_or(r);
+        if (!same_effective_origin(caller, wr)) {
+            throw_dom(caller, "SecurityError", "Blocked a frame from accessing a cross-origin frameElement.");
+        }
+        WindowPart& part = wr.part<WindowPart>();
+        if (part.parent_realm_id == 0) return null();
+        Realm* parent = find_realm(part.parent_realm_id);
+        auto fe = part.frame_element.lock();
+        if (!parent || !parent->alive || !fe || !fe->is_connected()) return null();
+        if (!same_effective_origin(*parent, wr)) return null();
+        return wrap(*parent, fe);
+    });
     I.getter("isSecureContext", [](Realm& r) {
+        Realm& wr = resolve_window_realm(r);
         Url url;
-        return boolean(current_url(r, url) && (url.scheme == "https" || url.host == "localhost"));
+        return boolean(wr.document && effective_origin_url(*wr.document, url) &&
+                       (url.scheme == "https" || url.host == "localhost"));
     });
     I.getter("origin", [](Realm& r) {
-        Url url;
-        return str(current_url(r, url) ? url.origin() : std::string("null"));
+        Realm& wr = resolve_window_realm(r);
+        return str(effective_origin_string(wr));
     });
     I.getter("event", [](Realm& r) {
         require_window(r);
@@ -1284,17 +1483,55 @@ void setup_window(Iface& I) {
     I.method("prompt", 0, [](Realm&, Args) { return null(); });
     I.method("open", 0, [](Realm&, Args) { return null(); });
     I.method("postMessage", 1, [](Realm& r, Args args) {
-        require_window(r);
+        Realm& target_wr = resolve_window_realm(r);
+        Realm& sender_wr = caller_realm_or(r);
         require_args(args, 1, "postMessage");
+        std::string target_origin_arg = "*";
+        if (args.size() >= 2 && !args[1].is_undefined()) {
+            if (args[1].is_object()) {
+                JsValue opt = member(args[1], "targetOrigin");
+                if (!opt.is_undefined()) target_origin_arg = to_str(opt);
+            } else {
+                target_origin_arg = to_str(args[1]);
+            }
+        }
+        std::string required_origin;
+        if (target_origin_arg == "*") {
+            required_origin.clear();
+        } else if (target_origin_arg == "/") {
+            required_origin = effective_origin_string(sender_wr);
+        } else {
+            Url parsed_target;
+            if (!Url::parse(target_origin_arg, nullptr, parsed_target)) {
+                throw_dom(sender_wr, "SyntaxError",
+                          "Failed to execute 'postMessage' on 'Window': Invalid target origin '" + target_origin_arg + "'.");
+            }
+            required_origin = parsed_target.origin();
+        }
         const JsValue data = args[0];
-        Realm* realm = &r;
-        EventLoop::default_loop().post_task([realm, data]() {
-            if (!realm->alive || !realm->window.is_object()) return;
-            Url url;
-            const std::string origin = current_url(*realm, url) ? url.origin() : std::string("null");
-            dispatch(*realm, realm->window,
-                     make_event(*realm, "MessageEvent", "message", false, false,
-                                {{"data", data}, {"origin", str(origin)}, {"source", realm->window}}),
+        const uint64_t target_id = target_wr.id;
+        const uint64_t sender_id = sender_wr.id;
+        const std::string sender_origin = effective_origin_string(sender_wr);
+        const bool same_sender_target = (&sender_wr == &target_wr);
+        EventLoop::default_loop().post_task([target_id, sender_id, data, sender_origin, required_origin, same_sender_target]() {
+            Realm* target = find_realm(target_id);
+            if (!target || !target->alive || !target->window.is_object()) return;
+            if (!required_origin.empty()) {
+                const std::string actual = effective_origin_string(*target);
+                if (required_origin == "null") {
+                    if (!same_sender_target) return;
+                } else if (actual != required_origin) {
+                    return;
+                }
+            }
+            Realm* sender = find_realm(sender_id);
+            const JsValue source_win = (sender && sender->alive && sender->window.is_object()) ? sender->window : null();
+            JsIntrinsics* prev = &JsIntrinsics::get();
+            if (target->intrinsics) JsIntrinsics::set_current(target->intrinsics);
+            struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+            dispatch(*target, target->window,
+                     make_event(*target, "MessageEvent", "message", false, false,
+                                {{"data", data}, {"origin", str(sender_origin)}, {"source", source_win}}),
                      true);
         });
         return undefined();
@@ -1507,26 +1744,371 @@ void run_inserted_script(Realm& realm, Element& script) {
     if (realm.alive && realm.document) realm.document->set_current_script(previous);
 }
 
+namespace {
+
+void finish_window_load_if_ready(Realm& realm) {
+    if (!realm.alive || !realm.document || !realm.window.is_object()) return;
+    WindowPart& part = realm.part<WindowPart>();
+    if (part.load_fired || !part.pending_window_load || part.delaying_load_count > 0) return;
+    part.pending_window_load = false;
+    part.load_fired = true;
+
+    JsIntrinsics* prev = &JsIntrinsics::get();
+    if (realm.intrinsics) JsIntrinsics::set_current(realm.intrinsics);
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+
+    JsValue document = wrap(realm, realm.document);
+    if (realm.document->ready_state() != "complete") {
+        realm.document->set_ready_state("complete");
+        fire(realm, document, "readystatechange");
+    }
+    dispatch(realm, realm.window, make_event(realm, "Event", "load", false, false), true, &document);
+    dispatch(realm, realm.window,
+             make_event(realm, "PageTransitionEvent", "pageshow", false, false, {{"persisted", boolean(false)}}), true, &document);
+
+    if (part.on_window_load_complete) {
+        auto cb = std::move(part.on_window_load_complete);
+        cb();
+    }
+}
+
+void release_parent_load_delay(Realm& parent_realm, ChildFrameEntry& entry) {
+    if (!entry.delaying_parent_load) return;
+    entry.delaying_parent_load = false;
+    WindowPart& parent_part = parent_realm.part<WindowPart>();
+    if (parent_part.delaying_load_count > 0) --parent_part.delaying_load_count;
+    finish_window_load_if_ready(parent_realm);
+}
+
+struct IframeSandboxFlags {
+    bool sandboxed{false};
+    bool allow_scripts{true};
+    bool allow_same_origin{true};
+};
+
+IframeSandboxFlags parse_iframe_sandbox(const Element& iframe) {
+    IframeSandboxFlags flags;
+    const std::string* raw = iframe.attribute("sandbox");
+    if (!raw) return flags;
+    flags.sandboxed = true;
+    flags.allow_scripts = false;
+    flags.allow_same_origin = false;
+    for (const std::string& tok : split_tokens(*raw)) {
+        const std::string lower = ascii_lower(tok);
+        if (lower == "allow-scripts") flags.allow_scripts = true;
+        else if (lower == "allow-same-origin") flags.allow_same_origin = true;
+    }
+    return flags;
+}
+
+void init_iframe_document_context(Realm& parent_realm, const Element& iframe, Document& child_doc,
+                                  const IframeSandboxFlags& sandbox) {
+    float vw = 300.0f;
+    float vh = 150.0f;
+    long parsed_dim = 0;
+    if (const std::string* w = iframe.attribute("width"); w && parse_html_integer(*w, parsed_dim) && parsed_dim > 0) {
+        vw = static_cast<float>(parsed_dim);
+    }
+    if (const std::string* h = iframe.attribute("height"); h && parse_html_integer(*h, parsed_dim) && parsed_dim > 0) {
+        vh = static_cast<float>(parsed_dim);
+    }
+    child_doc.set_viewport_size(vw, vh);
+
+    if (!sandbox.allow_same_origin || (parent_realm.document && parent_realm.document->has_opaque_origin())) {
+        child_doc.set_opaque_origin(true);
+    }
+    if (parent_realm.document) {
+        const std::string& pu = parent_realm.document->url();
+        const std::string origin_src =
+            ((pu == "about:blank" || pu == "about:srcdoc" || pu.rfind("data:", 0) == 0) &&
+             !parent_realm.document->inherited_origin_url().empty())
+                ? parent_realm.document->inherited_origin_url()
+                : pu;
+        if (!child_doc.has_opaque_origin()) {
+            child_doc.set_inherited_origin_url(origin_src);
+        }
+        Url base;
+        if (document_base_url(parent_realm, iframe, base)) {
+            child_doc.set_fallback_base_url(base.href());
+        }
+    }
+}
+
+std::shared_ptr<Document> create_blank_frame_document(Realm& parent_realm, const Element& iframe,
+                                                      const IframeSandboxFlags& sandbox,
+                                                      const std::string& blank_url = "about:blank") {
+    auto doc = std::make_shared<Document>();
+    doc->set_url(blank_url);
+    init_iframe_document_context(parent_realm, iframe, *doc, sandbox);
+    HtmlParser::parse_into(doc, "", false, nullptr);
+    for (const auto& ch : doc->children()) ch->set_owner_document(doc);
+    doc->install_default_layout_updater();
+    return doc;
+}
+
+void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initial_insertion) {
+    WindowPart& parent_part = parent_realm.part<WindowPart>();
+    auto it = parent_part.child_frames.find(&iframe);
+    if (it == parent_part.child_frames.end() || !it->second.interpreter) return;
+    ChildFrameEntry& entry = it->second;
+
+    const uint64_t gen = ++entry.navigation_generation;
+    if (!entry.delaying_parent_load) {
+        entry.delaying_parent_load = true;
+        ++parent_part.delaying_load_count;
+    }
+
+    const uint64_t parent_id = parent_realm.id;
+    std::weak_ptr<Element> weak_iframe = shared(iframe);
+
+    EventLoop::default_loop().post_task([parent_id, weak_iframe, gen, initial_insertion]() {
+        Realm* pr = find_realm(parent_id);
+        if (!pr || !pr->alive || !pr->document) return;
+        auto iframe_ptr = weak_iframe.lock();
+        if (!iframe_ptr) return;
+        WindowPart& ppart = pr->part<WindowPart>();
+        auto found = ppart.child_frames.find(iframe_ptr.get());
+        if (found == ppart.child_frames.end() || !found->second.interpreter || found->second.navigation_generation != gen) {
+            return;
+        }
+        if (!iframe_ptr->is_connected() || document_of(*pr, *iframe_ptr) != pr->document) {
+            release_parent_load_delay(*pr, found->second);
+            return;
+        }
+
+        const IframeSandboxFlags sandbox = parse_iframe_sandbox(*iframe_ptr);
+        std::shared_ptr<JsInterpreter> child_interp = found->second.interpreter;
+
+        // Install completion hook so child window load fires BEFORE iframe load,
+        // and iframe load fires BEFORE parent window load.
+        Realm& child_realm = child_interp->dom_realm();
+        child_realm.part<WindowPart>().on_window_load_complete = [parent_id, weak_iframe, gen]() {
+            Realm* pr_inner = find_realm(parent_id);
+            if (!pr_inner || !pr_inner->alive) return;
+            auto el = weak_iframe.lock();
+            if (!el) return;
+            WindowPart& pp = pr_inner->part<WindowPart>();
+            auto f = pp.child_frames.find(el.get());
+            if (f == pp.child_frames.end() || f->second.navigation_generation != gen) return;
+
+            if (el->is_connected() && document_of(*pr_inner, *el) == pr_inner->document) {
+                JsIntrinsics* prev = &JsIntrinsics::get();
+                if (pr_inner->intrinsics) JsIntrinsics::set_current(pr_inner->intrinsics);
+                struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+                JsScriptScope scope;
+                fire(*pr_inner, *el, "load");
+            }
+            // Re-lookup in case `iframe.onload` removed or re-navigated `el`.
+            if (!pr_inner->alive) return;
+            auto f_after = pr_inner->part<WindowPart>().child_frames.find(el.get());
+            if (f_after != pr_inner->part<WindowPart>().child_frames.end() &&
+                f_after->second.navigation_generation == gen) {
+                release_parent_load_delay(*pr_inner, f_after->second);
+            }
+        };
+
+        // 1. `srcdoc` takes precedence over `src` whenever present.
+        if (const std::string* srcdoc = iframe_ptr->attribute("srcdoc")) {
+            const std::string markup = *srcdoc;
+            auto new_doc = std::make_shared<Document>();
+            new_doc->set_url("about:srcdoc");
+            init_iframe_document_context(*pr, *iframe_ptr, *new_doc, sandbox);
+            iframe_ptr->set_content_document(new_doc);
+            child_interp->navigate_document(new_doc);
+            // Re-install completion callback after navigate_document cleared load flags.
+            child_interp->dom_realm().part<WindowPart>().on_window_load_complete =
+                std::move(child_realm.part<WindowPart>().on_window_load_complete);
+            // Wait: `child_realm` IS `child_interp->dom_realm()`, so `on_window_load_complete`
+            // is on the same `WindowPart`! Re-assign cleanly below:
+            auto install_cb = [&]() {
+                child_interp->dom_realm().part<WindowPart>().on_window_load_complete = [parent_id, weak_iframe, gen]() {
+                    Realm* pr_inner = find_realm(parent_id);
+                    if (!pr_inner || !pr_inner->alive) return;
+                    auto el = weak_iframe.lock();
+                    if (!el) return;
+                    auto f = pr_inner->part<WindowPart>().child_frames.find(el.get());
+                    if (f == pr_inner->part<WindowPart>().child_frames.end() || f->second.navigation_generation != gen) return;
+                    if (el->is_connected() && document_of(*pr_inner, *el) == pr_inner->document) {
+                        JsIntrinsics* prev = &JsIntrinsics::get();
+                        if (pr_inner->intrinsics) JsIntrinsics::set_current(pr_inner->intrinsics);
+                        struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+                        JsScriptScope scope;
+                        fire(*pr_inner, *el, "load");
+                    }
+                    if (!pr_inner->alive) return;
+                    auto f_after = pr_inner->part<WindowPart>().child_frames.find(el.get());
+                    if (f_after != pr_inner->part<WindowPart>().child_frames.end() &&
+                        f_after->second.navigation_generation == gen) {
+                        release_parent_load_delay(*pr_inner, f_after->second);
+                    }
+                };
+            };
+            install_cb();
+            child_interp->load_page(markup, sandbox.allow_scripts);
+            child_interp->notify_document_loaded();
+            return;
+        }
+
+        // 2. Determine target URL from `src` (missing or empty `src=""` means `about:blank`).
+        const std::string* src_attr = iframe_ptr->attribute("src");
+        const std::string raw_src = src_attr ? strip_ascii_space(*src_attr) : std::string();
+        Url target_url;
+        bool is_about_blank = raw_src.empty();
+        if (!is_about_blank) {
+            if (!parse_url(*pr, *iframe_ptr, raw_src, target_url)) {
+                is_about_blank = true;
+            } else if (target_url.scheme == "about" && target_url.pathname() == "blank") {
+                is_about_blank = true;
+            }
+        }
+
+        if (is_about_blank) {
+            const std::string blank_href = (!raw_src.empty() && target_url.scheme == "about")
+                                               ? target_url.href()
+                                               : std::string("about:blank");
+            if (initial_insertion) {
+                if (child_interp->document() && child_interp->document()->url() != blank_href) {
+                    child_interp->document()->set_url(blank_href);
+                }
+                // HTML Standard §4.8.5: initial insertion with no `src` or `src=""`
+                // completes synchronously without firing a redundant navigation,
+                // EXCEPT dynamic `appendChild(iframe)` still fires `load` on `iframe`
+                // in browsers (`Comment-Text-constructor.js`)! Firing `notify_document_loaded()`
+                // triggers `on_window_load_complete` -> `iframe` `load` -> releases parent delay!
+                child_interp->notify_document_loaded();
+                return;
+            }
+            auto blank_doc = create_blank_frame_document(*pr, *iframe_ptr, sandbox, blank_href);
+            iframe_ptr->set_content_document(blank_doc);
+            auto saved_cb = std::move(child_realm.part<WindowPart>().on_window_load_complete);
+            child_interp->navigate_document(blank_doc);
+            child_interp->dom_realm().part<WindowPart>().on_window_load_complete = std::move(saved_cb);
+            child_interp->notify_document_loaded();
+            return;
+        }
+
+        if (target_url.scheme == "javascript") {
+            if (sandbox.allow_scripts && same_effective_origin(*pr, child_realm)) {
+                std::string code_pct = target_url.pathname() + target_url.search();
+                // Evaluate javascript: URL in child realm; if result is string, replace document.
+                JsIntrinsics* prev = &JsIntrinsics::get();
+                JsIntrinsics::set_current(&child_interp->intrinsics());
+                auto hex_val = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+                    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+                    return -1;
+                };
+                std::string decoded_js;
+                decoded_js.reserve(code_pct.size());
+                for (std::size_t i = 0; i < code_pct.size(); ++i) {
+                    if (code_pct[i] == '%' && i + 2 < code_pct.size()) {
+                        const int hi = hex_val(code_pct[i + 1]);
+                        const int lo = hex_val(code_pct[i + 2]);
+                        if (hi >= 0 && lo >= 0) {
+                            decoded_js.push_back(static_cast<char>((hi << 4) | lo));
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    decoded_js.push_back(code_pct[i]);
+                }
+                JsValue res = child_interp->eval_ast(decoded_js);
+                JsIntrinsics::set_current(prev);
+                if (res.type == JsType::String) {
+                    auto js_doc = std::make_shared<Document>();
+                    js_doc->set_url(child_interp->document() ? child_interp->document()->url() : "about:blank");
+                    init_iframe_document_context(*pr, *iframe_ptr, *js_doc, sandbox);
+                    iframe_ptr->set_content_document(js_doc);
+                    auto saved_cb = std::move(child_realm.part<WindowPart>().on_window_load_complete);
+                    child_interp->navigate_document(js_doc);
+                    child_interp->dom_realm().part<WindowPart>().on_window_load_complete = std::move(saved_cb);
+                    child_interp->load_page(res.string_val.str(), sandbox.allow_scripts);
+                }
+            }
+            child_interp->notify_document_loaded();
+            return;
+        }
+
+        // 3. Fetch HTTP(S), data:, or allowed local file: document.
+        ResourceRequestContext ctx;
+        if (pr->document && !pr->document->has_opaque_origin()) {
+            const std::string& pu = pr->document->url();
+            ctx.document_url = ((pu == "about:blank" || pu == "about:srcdoc" || pu.rfind("data:", 0) == 0) &&
+                                !pr->document->inherited_origin_url().empty())
+                                   ? pr->document->inherited_origin_url()
+                                   : pu;
+        }
+        ctx.base_url = ctx.document_url;
+        ctx.mode = RequestMode::NoCors;
+
+        const std::string fetch_href = target_url.href(true);
+        ResourceResponse resp = ResourceLoader::load_for_page(fetch_href, ctx);
+        auto saved_cb = std::move(child_realm.part<WindowPart>().on_window_load_complete);
+
+        if (!resp.network_ok) {
+            auto err_doc = create_blank_frame_document(*pr, *iframe_ptr, sandbox, "about:blank");
+            err_doc->set_opaque_origin(true);
+            iframe_ptr->set_content_document(err_doc);
+            child_interp->navigate_document(err_doc);
+            child_interp->dom_realm().part<WindowPart>().on_window_load_complete = std::move(saved_cb);
+            child_interp->notify_document_loaded();
+            return;
+        }
+
+        std::string final_url = resp.url.empty() ? target_url.href() : resp.url;
+        if (target_url.has_fragment && resp.url == target_url.href(true)) {
+            final_url += "#" + target_url.fragment;
+        }
+
+        auto new_doc = std::make_shared<Document>();
+        new_doc->set_url(final_url);
+        init_iframe_document_context(*pr, *iframe_ptr, *new_doc, sandbox);
+        iframe_ptr->set_content_document(new_doc);
+        child_interp->navigate_document(new_doc);
+        child_interp->dom_realm().part<WindowPart>().on_window_load_complete = std::move(saved_cb);
+
+        MimeType mime;
+        const bool parsed_mime = MimeType::parse(resp.content_type, mime);
+        if (parsed_mime && mime.is_xml()) {
+            child_interp->load_xml_page(resp.body, mime.essence(), sandbox.allow_scripts);
+        } else {
+            std::string charset_label;
+            if (parsed_mime) {
+                if (const std::string* cs = mime.parameter("charset")) charset_label = *cs;
+            }
+            const std::string html_text = charset_label.empty()
+                                              ? resp.body
+                                              : decode_text(resp.body, encoding_name_for_label(charset_label));
+            child_interp->load_page(html_text, sandbox.allow_scripts);
+        }
+        child_interp->notify_document_loaded();
+    });
+}
+
+} // namespace
+
 void fire_load_events(Realm& realm) {
     if (!realm.alive || !realm.document || !realm.window.is_object()) return;
     WindowPart& part = realm.part<WindowPart>();
     if (part.load_fired) return;
-    part.load_fired = true;
-    JsValue document = wrap(realm, realm.document);
-    auto set_ready_state = [&](const char* state) {
-        if (realm.document->ready_state() == state) return;
-        realm.document->set_ready_state(state);
-        fire(realm, document, "readystatechange");
-    };
-    // The parser is done and every script has run.
-    set_ready_state("interactive");
-    fire(realm, document, "DOMContentLoaded", true, false);
-    // Nothing is still arriving (no external style sheets, scripts or images
-    // are fetched), so the page is complete as soon as it is interactive.
-    set_ready_state("complete");
-    dispatch(realm, realm.window, make_event(realm, "Event", "load", false, false), true, &document);
-    dispatch(realm, realm.window,
-             make_event(realm, "PageTransitionEvent", "pageshow", false, false, {{"persisted", boolean(false)}}), true, &document);
+
+    JsIntrinsics* prev = &JsIntrinsics::get();
+    if (realm.intrinsics) JsIntrinsics::set_current(realm.intrinsics);
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+
+    if (!part.dcl_fired) {
+        part.dcl_fired = true;
+        JsValue document = wrap(realm, realm.document);
+        if (realm.document->ready_state() != "interactive" && realm.document->ready_state() != "complete") {
+            realm.document->set_ready_state("interactive");
+            fire(realm, document, "readystatechange");
+        }
+        fire(realm, document, "DOMContentLoaded", true, false);
+    }
+
+    part.pending_window_load = true;
+    finish_window_load_if_ready(realm);
 }
 
 namespace {
@@ -1554,9 +2136,17 @@ void attach_window(Realm& realm, const JsValue& global, const std::shared_ptr<Do
     WindowPart& part = realm.part<WindowPart>();
     part.history.clear();
     part.history_index = 0;
+    part.ids.clear();
+    part.ids_version = 0;
+    part.dcl_fired = false;
     part.load_fired = false;
+    part.pending_window_load = false;
+    part.delaying_load_count = 0;
+    part.on_window_load_complete = nullptr;
+    part.child_frames.clear();
     if (document) {
         document->set_has_window(true);
+        document->set_browsing_realm_id(realm.id);
         // From here on the address is kept as a URL writes itself:
         // "HTTP://Example.test" is "http://example.test/".
         Url address;
@@ -1575,6 +2165,144 @@ void attach_window(Realm& realm, const JsValue& global, const std::shared_ptr<Do
             }));
     }
     js_uncaught_handler = &handle_uncaught;
+}
+
+Realm* browsing_realm_of(const Document& document) {
+    Realm* r = find_realm(document.browsing_realm_id());
+    if (!r || !r->alive || r->document.get() != &document || !r->window.is_object()) return nullptr;
+    return r;
+}
+
+bool same_effective_origin(const Realm& a, const Realm& b) {
+    if (&a == &b) return true;
+    if (!a.document || !b.document) return false;
+    if (a.document->has_opaque_origin() || b.document->has_opaque_origin()) return false;
+    auto eff_str = [](const Document& d) -> const std::string& {
+        const std::string& u = d.url();
+        if ((u == "about:blank" || u == "about:srcdoc" || u.rfind("data:", 0) == 0) &&
+            !d.inherited_origin_url().empty()) {
+            return d.inherited_origin_url();
+        }
+        return u;
+    };
+    const std::string& ua = eff_str(*a.document);
+    const std::string& ub = eff_str(*b.document);
+    if (ua == ub) return true;
+    Url pa, pb;
+    if (!Url::parse(ua, nullptr, pa) || !Url::parse(ub, nullptr, pb)) return false;
+    if (pa.scheme == "file" && pb.scheme == "file") return true;
+    const std::string oa = pa.origin();
+    return oa != "null" && oa == pb.origin();
+}
+
+void note_iframe_connected(Realm& realm, Element& iframe, bool connected) {
+    if (!realm.alive) return;
+    WindowPart& part = realm.part<WindowPart>();
+
+    if (!connected) {
+        auto it = part.child_frames.find(&iframe);
+        if (it == part.child_frames.end()) return;
+        ++it->second.navigation_generation;
+        if (it->second.interpreter) {
+            const JsValue& w = it->second.interpreter->global_object();
+            if (w.is_object() && w.object_val) {
+                w.object_val->properties["closed"] = boolean(true);
+            }
+        }
+        iframe.set_content_document(nullptr);
+        const bool was_delaying = it->second.delaying_parent_load;
+        part.child_frames.erase(it);
+        if (was_delaying) {
+            if (part.delaying_load_count > 0) --part.delaying_load_count;
+            finish_window_load_if_ready(realm);
+        }
+        return;
+    }
+
+    // Only an `<iframe>` connected to an active browsing-context Document gets a
+    // nested browsing context (never inside `<template>` or `DOMParser`).
+    if (!realm.window.is_object() || !realm.document || !iframe.is_connected()) return;
+    if (document_of(realm, iframe) != realm.document) return;
+    if (part.frame_depth >= kMaxNestedFrameDepth) return;
+    if (part.child_frames.count(&iframe) != 0) return;
+
+    const IframeSandboxFlags sandbox = parse_iframe_sandbox(iframe);
+    auto init_doc = create_blank_frame_document(realm, iframe, sandbox, "about:blank");
+
+    JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
+    auto child_interp = std::make_shared<JsInterpreter>(init_doc);
+    JsIntrinsics::set_current(prev_intrinsics);
+
+    Realm& child_realm = child_interp->dom_realm();
+    WindowPart& child_part = child_realm.part<WindowPart>();
+    child_part.parent_realm_id = realm.id;
+    child_part.frame_element = shared(iframe);
+    child_part.frame_depth = part.frame_depth + 1;
+    if (const std::string* nm = iframe.attribute("name"); nm && !nm->empty()) {
+        child_part.name = *nm;
+    }
+
+    iframe.set_content_document(init_doc);
+
+    ChildFrameEntry entry;
+    entry.element = shared(iframe);
+    entry.interpreter = std::move(child_interp);
+    part.child_frames.emplace(&iframe, std::move(entry));
+
+    schedule_iframe_navigation(realm, iframe, true);
+}
+
+void note_iframe_attribute_changed(Realm& realm, Element& iframe, const std::string& name) {
+    if (!realm.alive || !realm.window.is_object() || !realm.document || !iframe.is_connected()) return;
+    WindowPart& part = realm.part<WindowPart>();
+    auto it = part.child_frames.find(&iframe);
+    if (it == part.child_frames.end() || !it->second.interpreter) return;
+
+    if (name == "name") {
+        WindowPart& child_part = it->second.interpreter->dom_realm().part<WindowPart>();
+        if (!child_part.name_explicitly_set) {
+            const std::string* nm = iframe.attribute("name");
+            child_part.name = nm ? *nm : std::string();
+        }
+        return;
+    }
+
+    if (name == "srcdoc") {
+        schedule_iframe_navigation(realm, iframe, false);
+        return;
+    }
+
+    if (name == "src") {
+        // When `srcdoc` is present, `src` changes are ignored until `srcdoc` is removed.
+        if (iframe.has_attribute("srcdoc")) return;
+        schedule_iframe_navigation(realm, iframe, false);
+    }
+}
+
+JsValue iframe_content_window(Realm& caller_realm, Element& iframe) {
+    if (!iframe.is_connected()) return null();
+    Realm* owner_realm = realm_if_any(iframe);
+    if (!owner_realm || !owner_realm->alive) owner_realm = &caller_realm;
+    WindowPart* part = owner_realm->find_part<WindowPart>();
+    if (!part) return null();
+    auto it = part->child_frames.find(&iframe);
+    if (it == part->child_frames.end() || !it->second.interpreter) return null();
+    const JsValue& w = it->second.interpreter->global_object();
+    return w.is_object() ? w : null();
+}
+
+JsValue iframe_content_document(Realm& caller_realm, Element& iframe) {
+    if (!iframe.is_connected()) return null();
+    Realm* owner_realm = realm_if_any(iframe);
+    if (!owner_realm || !owner_realm->alive) owner_realm = &caller_realm;
+    WindowPart* part = owner_realm->find_part<WindowPart>();
+    if (!part) return null();
+    auto it = part->child_frames.find(&iframe);
+    if (it == part->child_frames.end() || !it->second.interpreter) return null();
+    Realm& child_realm = it->second.interpreter->dom_realm();
+    Realm& effective_caller = caller_realm_or(caller_realm);
+    if (!same_effective_origin(effective_caller, child_realm) || !child_realm.document) return null();
+    return wrap(child_realm, child_realm.document);
 }
 
 void register_window_interfaces() {

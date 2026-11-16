@@ -3276,7 +3276,7 @@ upgrade), the element's interface is handed that element, once, whether
 `super()` or `Reflect.construct` reached it: the HTML standard's
 construction stack, kept beside the call context because the files of the
 DOM bindings belonged to another open pull request. Four files of `src/js`
-and one header; ARCHITECTURE.md, Phase 43, has the design.
+and two headers; ARCHITECTURE.md, Phase 43, has the design.
 
 ### What each instrument found
 

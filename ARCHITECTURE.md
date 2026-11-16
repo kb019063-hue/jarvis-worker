@@ -4283,16 +4283,15 @@ in a call, the named function when there is one, the callee otherwise.
 `eval_super_call` reads the binding where `super(...)` stands and hands a
 copy up.
 
-**The way in is a slot, for now.** The callable that `make_function` gives a
-script function reads the context and calls `invoke_function`, and that is
-where the value should be an argument. `invoke_function` is declared in
-`include/litebird/js/JsInterpreter.hpp`, a file another open pull request
-was changing while this was written, so its signature was left alone: the
-value goes from the one function to the other through a thread-local pointer
-(`NewTargetForEntry` in `src/js/JsEval.cpp`), set right before the call and
-taken as the first thing the callee does, with nothing between the two but
-the call. `invoke_function` has no other caller. The slot should become an
-argument when that header is free.
+**The way in is an argument.** The callable that `make_function` gives a
+script function reads the context and calls `invoke_function`, its only
+caller, with one argument more: a pointer to the named function, null when
+`new.target` is the callee or the call is no construction. It points at what
+the caller of `construct()` holds, which stays for as long as the call runs,
+so nothing is copied on the way in. (The first version of this passed it
+through a thread-local slot and a copy, because the header that declares
+`invoke_function` belonged to another open pull request; section 7 has what
+that cost.)
 
 The bytecode VM is not involved: the compiler leaves a function that says
 `new.target` or `super` to the interpreter.
@@ -4314,17 +4313,20 @@ The bytecode VM is not involved: the compiler leaves a function that says
   the thing it constructs. Both are told `new.target` now. (An interface can
   come back with another object than the one it was handed; that is
   section 5.)
-- **What the constructor returns.** `invoke_function` returns the
-  constructor's `this` binding when a derived constructor's body returned
-  nothing. Whoever called `construct()` (`new`, `Reflect.construct`, a
-  subclass's `super(...)`) already preferred an object that comes back to
-  the one it had passed in, so the object a parent three classes up returned
-  travels down through each `super(...)` to the `new` expression.
+- **What the constructor returns.** When a derived constructor's body
+  returned nothing and `super(...)` bound `this` to another object than the
+  constructor was entered with, `invoke_function` returns that object.
+  Whoever called `construct()` (`new`, `Reflect.construct`, a subclass's
+  `super(...)`) already preferred an object that comes back to the one it
+  had passed in, so the object a parent three classes up returned travels
+  down through each `super(...)` to the `new` expression.
 
 `this` is bound when the parent has returned, and only once. The scope of a
-derived constructor has a flag for it, a binding named `%this.bound` (not a
-name a script can write, and a scope is not an object a script can reach).
-`eval_super_call` sets it after the parent has run and throws a
+derived constructor has a field for it (`JsEnvironment::this_binding`:
+unbound, bound, or bound to another object than the constructor was entered
+with), and `super(...)` finds that scope by walking out through the blocks
+and arrow functions it stands in. `eval_super_call` sets it after the parent
+has run and throws a
 `ReferenceError` if it was set already: the language runs the parent the
 second time and refuses the result, and a script can count the runs. The
 second run is given a spare object, so that what the first one made is left
@@ -4336,9 +4338,6 @@ an object nor undefined is a `TypeError`. A class that extends null gets
 both without a line of its own: its default constructor calls a parent that
 is not a constructor, and one written out either returns an object or never
 binds `this`.
-
-The flag is a binding and not a field of the scope for the reason the slot
-of section 2 exists: `JsEnvironment` is declared in the same header.
 
 What this does not do: reading `this` before `super(...)` has run is still
 not an error (section 8).
@@ -4543,9 +4542,6 @@ case each in `construct.dat`.
   hides its own slots and private names: `var m = {}; m['#/route'] =
   'home'; JSON.stringify(m)` is `{}`. (Met while looking at how a private
   name is stored; added to the row on the engine's slots.)
-- **The slot of section 2 and the flag of section 3** should be an argument
-  of `invoke_function` and a field of the scope, once
-  `include/litebird/js/JsInterpreter.hpp` can be changed.
 
 What Phase 34 listed and this did not touch: a built-in does not make the
 subclass it was called on and there is no `Symbol.species`, `instanceof`

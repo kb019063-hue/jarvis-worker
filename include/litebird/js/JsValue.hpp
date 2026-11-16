@@ -415,11 +415,13 @@ public:
     static const JsValue* current_new_target();
     /// For script functions: consumes the pending call context. Returns false
     /// (and leaves `this_out` undefined) when the function was entered without
-    /// going through call_with_this()/construct(). `new_target_out` gets what
-    /// `new.target` is in the function: undefined in a plain call, otherwise
-    /// the function `new` was applied to (see construct()).
+    /// going through call_with_this()/construct(). `new_target_out` gets the
+    /// function `new` was applied to when that is not the callee (see
+    /// construct()), and null otherwise: in a plain call, and when it is the
+    /// callee. It points at what the caller of construct() holds, which
+    /// stays for as long as the call runs.
     static bool take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out = nullptr,
-                                  JsValue* new_target_out = nullptr);
+                                  const JsValue** new_target_out = nullptr);
 
     JsValue get_property(const std::string& name) const;
     void set_property(const std::string& name, JsValue val);

@@ -45,35 +45,6 @@ struct FlagScope {
 };
 
 // ---------------------------------------------------------------------------
-// new.target, on its way into a function
-// ---------------------------------------------------------------------------
-//
-// A script function is entered through the callable make_function() gives it.
-// That reads the call context (who is `this`, was it `new`, and on behalf of
-// which function) and calls invoke_function(), which is the only caller it
-// has. What `new.target` is inside goes from the one to the other through
-// this slot instead of an argument: set right before the call, taken at its
-// top, on one thread, with nothing in between.
-
-struct NewTargetForEntry {
-    static thread_local const JsValue* pending;
-    explicit NewTargetForEntry(const JsValue& value) { pending = value.is_function() ? &value : nullptr; }
-    ~NewTargetForEntry() { pending = nullptr; }
-    /// Null when the function was not entered with `new`.
-    static const JsValue* take() {
-        const JsValue* value = pending;
-        pending = nullptr;
-        return value;
-    }
-};
-thread_local const JsValue* NewTargetForEntry::pending = nullptr;
-
-/// In the scope of a derived class's constructor: has `super(...)` returned?
-/// That is the moment `this` is bound, and it happens once. (A name no script
-/// can write: `%` is not part of an identifier, and a scope is not an object.)
-const char* const kThisIsBound = "%this.bound";
-
-// ---------------------------------------------------------------------------
 // Active scopes
 // ---------------------------------------------------------------------------
 //
@@ -331,15 +302,15 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     fd.native_fn = [this, alive = m_alive, shared_node, closure](const std::vector<JsValue>& args) {
         JsValue this_val;
         JsValue callee;
-        JsValue new_target;
+        // Whoever called construct() holds this for as long as the call runs.
+        const JsValue* new_target = nullptr;
         bool is_construct = false;
         JsValue::take_call_context(this_val, is_construct, &callee, &new_target);
         // The interpreter that created this function is gone: a timer or a
         // listener outlived it. There is nothing left to run the body with.
         if (!alive->load()) return JsValue::make_undefined();
-        NewTargetForEntry hand_over(new_target);
         return invoke_function(shared_node, closure ? closure->shared_from_this() : nullptr, callee, this_val,
-                               is_construct, args);
+                               is_construct, args, new_target);
     };
     return fn;
 }
@@ -373,9 +344,7 @@ void JsInterpreter::bind_parameters(const FunctionNode& node, const EnvPtr& env,
 
 JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& closure,
                                        const JsValue& callee, const JsValue& this_val, bool is_construct,
-                                       const std::vector<JsValue>& args) {
-    // Before anything else can enter a function: see NewTargetForEntry.
-    const JsValue* new_target = NewTargetForEntry::take();
+                                       const std::vector<JsValue>& args, const JsValue* new_target) {
     CallDepthGuard depth_guard(*this);
     JsIntrinsics::set_current(m_realm.get());
 
@@ -407,7 +376,7 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
             // another. Undefined in a plain call.
             env->define("%new.target", !is_construct ? JsValue::make_undefined() : new_target ? *new_target : callee);
         }
-        if (node->is_derived_constructor) env->define(kThisIsBound, JsValue::make_boolean(false));
+        if (node->is_derived_constructor) env->this_binding = JsEnvironment::ThisBinding::Unbound;
         if (node->uses_super && callee.is_function()) {
             env->define("%home", callee.get_property("%home"));
         }
@@ -441,21 +410,23 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     JsValue result = run_function_body(*node, env);
     // What a derived constructor made is its `this` as `super(...)` left it,
     // which need not be the object it was entered with: a parent's
-    // constructor can return another (eval_super_call). Whoever called
-    // construct() uses an object that comes back in preference to its own.
-    // It may return an object of its choice instead, or nothing; and if it
-    // returns nothing, `super(...)` has to have run.
+    // constructor can return another (eval_super_call), and then that one
+    // comes back from here. Whoever called construct() uses an object that
+    // comes back in preference to its own. The constructor may return an
+    // object of its choice instead, or nothing; and if it returns nothing,
+    // `super(...)` has to have run.
     if (is_construct && node->is_derived_constructor && !result.is_object_like()) {
         if (!result.is_undefined()) {
             js_throw_type_error("Derived constructors may only return object or undefined");
         }
-        const auto* bound = env->find_own(kThisIsBound);
-        if (bound && !bound->value.is_truthy()) {
+        if (env->this_binding == JsEnvironment::ThisBinding::Unbound) {
             js_throw_error(JsErrorKind::ReferenceError,
                            "Must call super constructor in derived class before accessing 'this' or returning from "
                            "derived constructor");
         }
-        if (const auto* self = env->find_own("this"); self && self->value.is_object_like()) return self->value;
+        if (env->this_binding == JsEnvironment::ThisBinding::BoundToAnother) {
+            if (const auto* self = env->find_own("this"); self && self->value.is_object_like()) return self->value;
+        }
     }
     return result;
 }
@@ -876,8 +847,9 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     // same, as the language has it, and is refused when the parent comes
     // back. It is given an object of its own to work on, so that what the
     // first one made is left as it was.
+    JsEnvironment* const constructor_scope = env->derived_constructor_scope();
     JsValue spare;
-    if (auto* bound = env->lookup(kThisIsBound); bound && bound->value.is_truthy()) {
+    if (constructor_scope && constructor_scope->this_binding != JsEnvironment::ThisBinding::Unbound) {
         spare = JsValue::make_object();
         const JsValue proto = new_target ? new_target->get_property("prototype") : JsValue::make_undefined();
         if (proto.is_object_like()) {
@@ -951,14 +923,15 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             }
         }
     }
-    // The parent has run; now `this` is bound. (The scope is looked at again:
-    // the parent's constructor may have added to it, or bound `this` itself
-    // through an arrow function it was passed.)
-    if (auto* bound = env->lookup(kThisIsBound)) {
-        if (bound->value.is_truthy()) {
+    // The parent has run; now `this` is bound. (The flag is read again: the
+    // parent's constructor may have bound `this` itself, through an arrow
+    // function it was passed.)
+    if (constructor_scope) {
+        if (constructor_scope->this_binding != JsEnvironment::ThisBinding::Unbound) {
             js_throw_error(JsErrorKind::ReferenceError, "Super constructor may only be called once");
         }
-        bound->value = JsValue::make_boolean(true);
+        constructor_scope->this_binding = made.is_object_like() ? JsEnvironment::ThisBinding::BoundToAnother
+                                                                : JsEnvironment::ThisBinding::Bound;
     }
     if (made.is_object_like()) {
         this_val = made;

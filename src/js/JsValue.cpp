@@ -538,12 +538,12 @@ const JsValue* JsValue::current_new_target() {
 }
 
 bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsValue* callee_out,
-                                JsValue* new_target_out) {
+                                const JsValue** new_target_out) {
     if (!t_call_context.fresh) {
         this_out = JsValue::make_undefined();
         is_construct_out = false;
         if (callee_out) *callee_out = JsValue::make_undefined();
-        if (new_target_out) *new_target_out = JsValue::make_undefined();
+        if (new_target_out) *new_target_out = nullptr;
         return false;
     }
     t_call_context.fresh = false;
@@ -551,9 +551,8 @@ bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsVal
     is_construct_out = t_call_context.is_construct;
     if (callee_out) *callee_out = t_call_context.callee ? *t_call_context.callee : JsValue::make_undefined();
     if (new_target_out) {
-        if (!t_call_context.is_construct) *new_target_out = JsValue::make_undefined();
-        else if (t_call_context.new_target) *new_target_out = *t_call_context.new_target;
-        else *new_target_out = t_call_context.callee ? *t_call_context.callee : JsValue::make_undefined();
+        const JsValue* named = t_call_context.is_construct ? t_call_context.new_target : nullptr;
+        *new_target_out = named && named->is_function() ? named : nullptr;
     }
     return true;
 }

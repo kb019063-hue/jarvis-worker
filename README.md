@@ -29,12 +29,12 @@ suite and two other parsers, and brought in the tests browsers share (see
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **911 / 925 (98.5%)**; nine of the 14 that fail were recorded in Phase 34 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **640 / 640**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`) | **4658 / 5192 subtests**; the 534 others listed with a reason, 495 of them frames. 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`) | **5421 / 5463 subtests** across 87 files; the 42 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1702 / 1702** of the W3C suite's documents that apply; 2,585 run | downloaded by `make xml-conformance` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 163 suites, all passing | `make test` |
+| Engine unit tests | 167 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -49,7 +49,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 163 engine suites
+make test            # 167 engine suites
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
 make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
@@ -224,7 +224,7 @@ It was written against references, and each has a command:
 | The W3C XML Conformance Test Suite | 1702 / 1702 of the documents that apply to such a parser; all 2,585 are run, none crashes it | `make xml-conformance` |
 | Expat 2.5.0 and libxml2 2.14.6, on 4,000 generated documents, half of them damaged | 3,958 read as both read them, 13 on which the two disagree, 29 with a version number outside the grammar (refused), 0 that differ | `make diff-xml` |
 | Itself: 3,000 trees made to break a serializer, written and read back | 3,000 come back the same tree, read by Litebird and by Expat | `make diff-xml` |
-| web-platform-tests, `dom/nodes` and `domparsing` (76 files, with `testharness.js`) | 4658 / 5192 subtests; each of the 534 others is listed with a reason | `make wpt` |
+| web-platform-tests, `dom/nodes` and `domparsing` (87 files, with `testharness.js`) | 5421 / 5463 subtests; each of the 42 others is listed with a reason | `make wpt` |
 | jsdom 31.0.0 | 57 recorded cases, all pass | `make dom-conformance` |
 | Nothing: the W3C suite's documents with bytes changed, cut short and pasted over, in the sanitizer build | 600 mutants and 1,927 documents as they are: no crash, no sanitizer report, and every document the same tree after it is written and read | `make asan` (`tools/fuzz/fuzz_xml.py`) |
 
@@ -255,12 +255,14 @@ Five things about these numbers:
   declares. Where two references
   disagree the standard was read, and the documents say which way it went
   (`tests/wpt/README.md`, `tests/dom-conformance/README.md`).
-- **534 web-platform-tests subtests fail**, and 495 of them for one reason:
-  the test loads an XML document into a frame, and Litebird has neither
-  frames with documents nor a way to load a page as XML. 33 fail on what an
-  `Attr` and a `NamedNodeMap` are here, 1 on the page's encoding, and 5 are
-  the ones above. (18 more failed on a fault of the JavaScript engine, a
-  function that could not be a prototype, until Phase 34.)
+- **42 web-platform-tests subtests fail** across 87 files (down from 534 once
+  Phase 42 added nested frame documents and XML/XHTML frame loading, resolving
+  all 495 `frames` failures): 33 fail on what an `Attr` and a `NamedNodeMap`
+  are here, 1 on the page's encoding, 1 on an upstream WPT `.xhtml` test
+  checking the parent frame's `DOMException` constructor (`innerhtml-05.xhtml`),
+  and 7 on serializer edge cases documented above (`tests/wpt/README.md`).
+  (18 more failed on a fault of the JavaScript engine, a function that could
+  not be a prototype, until Phase 34.)
 - **`XMLHttpRequest` answers `data:` URLs and nothing else.** No request
   leaves the process or reads a file, and a unit test asserts it. Requests
   over the network are open, and so is something found on the way:
@@ -846,7 +848,8 @@ promise rejects. A custom `then` is invoked while the iterator is open.
 `make verify-promise-iterators` prints `34/34` async cases with a 3-second
 limit; four new cases use hostile iterators and expectations independently
 checked with Node. The old binary passes 30/34, with timeouts. The full JS
-score is 911/925; `make test` passes 163 suites. A page outside the corpus,
+score is 911/925; `make test` passes 167 suites after the Phase 42
+frames and table-layout merges (163 before them). A page outside the corpus,
 through `tools/conformance/compare_with_jsdom.py`, prints `4 lines, 4 the
 same` after the fix, versus 0 before. A custom array iterator is still
 ignored by `js_iterate`'s array fast path, and subclassed Promises still

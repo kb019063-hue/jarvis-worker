@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include "litebird/dom/Node.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/Dimensions.hpp"
@@ -130,6 +131,17 @@ public:
     /// width by this factor (always recomputed from the style, so relayout is
     /// idempotent).
     float border_scale{1.0f};
+    /// Used border widths for one box, or empty to use style.border_width.
+    /// Collapsed tables resolve the shared edges once (widest wins) and hand
+    /// the winner to every cell it touches; the half-paint model stays.
+    std::optional<EdgeSizes> border_override{};
+    /// Winning border colours per edge (collapsed border resolution hands the
+    /// winner its colour along with its width).
+    std::optional<EdgeColors> border_color_override{};
+    /// Force the used width from layout() to fill the containing width,
+    /// ignoring style.width. Fixed table layout: a cell's own width must
+    /// not resize its column after the first row was read.
+    bool ignore_own_width{false};
 
     /// A table cell resolves percentage lengths against the *table's* width,
     /// not against the column width it happens to be laid out with (CSS 2.1

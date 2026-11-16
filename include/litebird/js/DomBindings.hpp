@@ -337,10 +337,34 @@ struct ReactionScope {
     }
 };
 
+inline JsIntrinsics*& caller_intrinsics_slot() {
+    static thread_local JsIntrinsics* t_caller = nullptr;
+    return t_caller;
+}
+inline Realm& caller_realm_or(Realm& fallback) {
+    if (JsIntrinsics* ci = caller_intrinsics_slot(); ci && ci->dom_realm) {
+        auto* cr = static_cast<Realm*>(ci->dom_realm);
+        if (cr->alive) return *cr;
+    }
+    return fallback;
+}
+
 template <typename Fn> JsValue make_function(Realm& realm, const char* name, int length, Fn fn) {
     Realm* r = &realm;
     return js_make_native(name, length, [r, fn](Args args) -> JsValue {
         if (!r->alive) return JsValue::make_undefined();
+        JsIntrinsics* prev_intrinsics = &JsIntrinsics::get();
+        JsIntrinsics* prev_caller = caller_intrinsics_slot();
+        caller_intrinsics_slot() = prev_intrinsics;
+        if (r->intrinsics) JsIntrinsics::set_current(r->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* prev;
+            JsIntrinsics* caller;
+            ~RestoreIntrinsics() {
+                JsIntrinsics::set_current(prev);
+                caller_intrinsics_slot() = caller;
+            }
+        } restore_intrinsics{prev_intrinsics, prev_caller};
         ReactionScope reactions(*r);
         try {
             JsValue result = fn(*r, args);
@@ -834,6 +858,13 @@ void run_inserted_script(Realm& realm, Element& script);
 bool is_classic_script(const Element& script);
 using ScriptRunner = std::function<void(const std::string& source)>;
 void set_script_runner(Realm& realm, ScriptRunner runner);
+/// Nested frame browsing context hooks & accessors (`<iframe>`).
+void note_iframe_connected(Realm& realm, Element& iframe, bool connected);
+void note_iframe_attribute_changed(Realm& realm, Element& iframe, const std::string& name);
+JsValue iframe_content_window(Realm& caller_realm, Element& iframe);
+JsValue iframe_content_document(Realm& caller_realm, Element& iframe);
+Realm* browsing_realm_of(const Document& document);
+bool same_effective_origin(const Realm& a, const Realm& b);
 
 // --- DomObserverBindings.cpp ------------------------------------------------------
 void register_observer_interfaces();

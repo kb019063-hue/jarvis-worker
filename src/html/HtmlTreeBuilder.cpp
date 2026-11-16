@@ -1308,7 +1308,7 @@ std::shared_ptr<Node> clone_node_tree(const Node& source, const std::shared_ptr<
                 element->set_tag_name_verbatim(from.tag_name());
                 element->set_prefix(from.prefix());
                 element->set_other_namespace_uri(from.other_namespace_uri());
-                element->m_attributes = from.m_attributes;      // the namespaces are in the list (Phase 51)
+                element->m_attributes = from.m_attributes;
                 if (!from.is_value().empty()) element->set_is_value(from.is_value());
                 if (const FormControlState* state = from.form_state()) {
                     FormControlState& made = element->ensure_form_state();

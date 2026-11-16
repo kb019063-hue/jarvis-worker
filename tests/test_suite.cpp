@@ -13797,6 +13797,225 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
 }
 
 // ============================================================================
+// Phase 50: CSS Color 4/5 color spaces, gamut mapping, color-mix(), relative colors
+// ============================================================================
+
+static void test_css_color4_spaces_gamut_and_serialization() {
+    using namespace litebird;
+    auto parse_ok = [](std::string_view expr, CssColor& out) {
+        return CssColor::parse(expr, out);
+    };
+
+    // 1. Legacy & modern rgb/rgba/hsl/hsla/hwb including angle units and `none`
+    CssColor c;
+    assert(parse_ok("rgb(255 50% 0 / 50%)", c));
+    assert(c.serialize_computed() == "rgba(255, 128, 0, 0.5)");
+    assert(parse_ok("rgb(128 none none)", c));
+    assert(c.serialize_computed() == "color(srgb 0.501961 none none)");
+    assert(parse_ok("hsl(0.5turn 100% 50%)", c));
+    assert(c.serialize_computed() == "rgb(0, 255, 255)");
+    assert(parse_ok("hsl(200grad 100% 50%)", c));
+    assert(c.serialize_computed() == "rgb(0, 255, 255)");
+    assert(parse_ok("hsl(120 none 50%)", c));
+    assert(c.serialize_computed() == "hsl(120 none 50%)");
+    assert(parse_ok("hwb(120 30% 50%)", c));
+    assert(c.serialize_computed() == "rgb(77, 128, 77)");
+    assert(parse_ok("hwb(0 70% 60%)", c));
+    assert(c.serialize_computed() == "rgb(137, 137, 137)");
+    assert(parse_ok("hwb(120 none 50%)", c));
+    assert(c.serialize_computed() == "hwb(120 none 50%)");
+    assert(parse_ok("rgb(/* R */ 0, /* G */ 51, /* B */ 255)", c));
+    assert(c.serialize_computed() == "rgb(0, 51, 255)");
+
+    // 2. lab/lch/oklab/oklch & all 9 predefined color() spaces
+    assert(parse_ok("lab(50% 100% -100%)", c));
+    assert(c.serialize_computed() == "lab(50 125 -125)");
+    assert(parse_ok("lch(50% 50% 0.5turn)", c));
+    assert(c.serialize_computed() == "lch(50 75 180)");
+    assert(parse_ok("oklab(50% 50% -50% / 50%)", c));
+    assert(c.serialize_computed() == "oklab(0.5 0.2 -0.2 / 0.5)");
+    assert(parse_ok("oklch(60% 50% 120deg / 80%)", c));
+    assert(c.serialize_computed() == "oklch(0.6 0.2 120 / 0.8)");
+    assert(parse_ok("color(xyz 0.2 0.4 0.6)", c));
+    assert(c.serialize_computed() == "color(xyz-d65 0.2 0.4 0.6)");
+    assert(parse_ok("color(display-p3-linear 0.25 0.5 0.75)", c));
+    assert(c.serialize_computed() == "color(display-p3-linear 0.25 0.5 0.75)");
+
+    // 3. Cross-space exact round-trips (sRGB -> OKLab -> Lab -> Display P3 -> ProPhoto -> Rec2020 -> sRGB)
+    assert(parse_ok("rebeccapurple", c));
+    CssColor rt = c.convert_to(ColorSpace::Oklab)
+                   .convert_to(ColorSpace::Oklch)
+                   .convert_to(ColorSpace::Lab)
+                   .convert_to(ColorSpace::Lch)
+                   .convert_to(ColorSpace::DisplayP3)
+                   .convert_to(ColorSpace::A98Rgb)
+                   .convert_to(ColorSpace::ProphotoRgb)
+                   .convert_to(ColorSpace::Rec2020)
+                   .convert_to(ColorSpace::XyzD50)
+                   .convert_to(ColorSpace::XyzD65)
+                   .convert_to(ColorSpace::Srgb);
+    assert(std::fabs(rt.c[0] - 0.4) < 1e-5);
+    assert(std::fabs(rt.c[1] - 0.2) < 1e-5);
+    assert(std::fabs(rt.c[2] - 0.6) < 1e-5);
+
+    // 4. CSS Color 4 §13.2 OKLCH binary-search chroma reduction gamut mapping
+    assert(parse_ok("color(display-p3 1 0 0)", c));
+    const Color p3_red = c.to_srgb8();
+    assert(p3_red.r >= 245 && p3_red.g <= 30 && p3_red.b <= 20 && p3_red.a == 255);
+    assert(parse_ok("oklch(0.7 0.35 145)", c));
+    const Color wide_green = c.to_srgb8();
+    // Chroma reduction preserves perceptual lightness/green hue (unlike clipping which skews channels)
+    assert(wide_green.g > wide_green.r && wide_green.g > wide_green.b && wide_green.a == 255);
+
+    // 5. Strict syntax rejection & hostile recursion guard
+    const char* bad[] = {
+        "", "notacolor", "#12345", "rgb(255, 50%, 0)", "rgb(255, none, 0)",
+        "hsl(120, 50, 50)", "hwb(120, 10%, 20%)", "lab(50, 20, 30)",
+        "oklch(0.5 0.1 50%)", "color(unknown 1 0 0)", "rgb(255px 0 0)",
+        "color-mix(in srgb shorter hue, red, blue)", "color-mix(in srgb, red -10%, blue)",
+        "rgb(from red r, g, b)", "light-dark(white, notacolor)", "rgb(calc(10+20) 0 0)"
+    };
+    for (const char* expr : bad) {
+        assert(!CssColor::parse(expr, c));
+    }
+    std::string deep;
+    for (int i = 0; i < 45; ++i) deep += "color-mix(in srgb, ";
+    deep += "red, blue";
+    for (int i = 0; i < 45; ++i) deep += ")";
+    assert(!CssColor::parse(deep, c));
+}
+
+static void test_css_color5_mix_relative_and_light_dark() {
+    using namespace litebird;
+    CssColor c;
+
+    // 1. color-mix(): spaces, percentage normalization, premultiplied alpha, hue interpolation, multi-arg
+    assert(CssColor::parse("color-mix(in srgb, red 25%, blue)", c));
+    assert(c.serialize_computed() == "color(srgb 0.25 0 0.75)");
+    assert(CssColor::parse("color-mix(in srgb, red 20%, blue 20%)", c));
+    assert(c.serialize_computed() == "color(srgb 0.5 0 0.5 / 0.4)");
+    assert(CssColor::parse("color-mix(in hsl longer hue, red, white)", c));
+    assert(c.serialize_computed() == "color(srgb 0.625 0.875 0.875)");
+    assert(CssColor::parse("color-mix(in hsl longer hue, red, transparent)", c));
+    assert(c.serialize_computed() == "color(srgb 0 1 1 / 0.5)");
+    assert(CssColor::parse("color-mix(in oklch shorter hue, oklch(0.6 0.2 350), oklch(0.8 0.1 10))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.15 0)");
+    assert(CssColor::parse("color-mix(in oklch longer hue, oklch(0.6 0.2 350), oklch(0.8 0.1 10))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.15 180)");
+    assert(CssColor::parse("color-mix(in srgb, red, green, blue)", c));
+    assert(c.serialize_computed() == "color(srgb 0.333333 0.16732 0.333333)");
+    assert(CssColor::parse("color-mix(in oklch, teal calc(-10%), olive 0%)", c));
+    assert(c.space == ColorSpace::Oklch && std::fabs(c.alpha) < 1e-6);
+
+    // 2. Relative color syntax + CSS Values 4 math functions
+    assert(CssColor::parse("rgb(from rebeccapurple r g b)", c));
+    assert(c.serialize_computed() == "color(srgb 0.4 0.2 0.6)");
+    assert(CssColor::parse("rgb(from rgb(from rebeccapurple r g b / calc(alpha + 0.5)) r g b / calc(alpha - 0.5))", c));
+    assert(c.serialize_computed() == "color(srgb 0.4 0.2 0.6 / 0.5)");
+    assert(CssColor::parse("hsl(from rebeccapurple h s none)", c));
+    assert(c.serialize_computed() == "hsl(270 50% none)");
+    assert(CssColor::parse("oklch(from oklch(0.6 0.2 30) calc(l + 0.1) calc(c / 2) calc(h + 180))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.1 210)");
+    assert(CssColor::parse("lab(clamp(0, abs(-50), 100) pow(2, 4) hypot(15, 20))", c));
+    assert(c.serialize_computed() == "lab(50 16 25)");
+    assert(CssColor::parse("color(from color(display-p3 0.2 0.4 0.6 / 0.5) display-p3 calc(r + 0.1) g b / calc(alpha * 2))", c));
+    assert(c.serialize_computed() == "color(display-p3 0.3 0.4 0.6)");
+
+    // 3. light-dark() and currentcolor context resolution
+    const CssColor red_cc = CssColor::from_srgb8(Color::red());
+    ColorResolveContext light_ctx{&red_cc, false};
+    ColorResolveContext dark_ctx{&red_cc, true};
+    assert(CssColor::parse("light-dark(white, black)", c, light_ctx));
+    assert(c.serialize_computed() == "rgb(255, 255, 255)");
+    assert(CssColor::parse("light-dark(white, black)", c, dark_ctx));
+    assert(c.serialize_computed() == "rgb(0, 0, 0)");
+    assert(CssColor::parse("color-mix(in srgb, currentcolor 50%, white)", c, light_ctx));
+    assert(c.serialize_computed() == "color(srgb 1 0.5 0.5)");
+    assert(CssColor::parse("oklch(from currentcolor calc(l + 0.1) c h)", c, light_ctx));
+    assert(c.space == ColorSpace::Oklch && std::fabs(c.c[0] - 0.727955) < 1e-4);
+}
+
+static void test_css_color45_style_resolver_dom_and_svg_integration() {
+    using namespace litebird;
+
+    // 1. StyleResolver: shorthands, box-shadow, drop-shadow, currentcolor-in-mix, light-dark + color-scheme, invalid rejection
+    auto doc = HtmlParser::parse(R"html(<!DOCTYPE html><html><head><style>
+        #a {
+            color: red;
+            background: color-mix(in srgb, currentcolor 50%, white);
+            border: 2px solid oklch(0.627955 0.257683 29.233885);
+            box-shadow: 3px 4px 5px color-mix(in srgb, blue 50%, transparent);
+            filter: drop-shadow(2px 6px 4px rgb(10 20 30 / 50%));
+        }
+        #a { color: not-a-real-color; }
+        #dark { color-scheme: dark; color: light-dark(black, white); }
+        #dark_child { background-color: light-dark(rgb(10, 20, 30), rgb(200, 210, 220)); }
+    </style></head><body><div id="a"></div><div id="dark"><span id="dark_child"></span></div></body></html>)html");
+
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+    auto el_a = doc->get_element_by_id("a");
+    auto st_a = resolver.resolve_style(el_a);
+    assert(st_a.color == Color(255, 0, 0, 255)); // invalid second rule rejected
+    assert(st_a.background_color == Color(255, 128, 128, 255));
+    assert(st_a.border_width.top == 2.0f && st_a.border_color == Color(255, 0, 0, 255));
+    assert(st_a.box_shadow.has_shadow && st_a.box_shadow.x_offset == 3.0f && st_a.box_shadow.y_offset == 4.0f);
+    assert(st_a.box_shadow.color.b == 255 && st_a.box_shadow.color.a == 128);
+    assert(st_a.filters.size() == 1 && st_a.filters[0].type == FilterType::DropShadow);
+    assert(st_a.filters[0].dx == 2.0f && st_a.filters[0].dy == 6.0f && st_a.filters[0].blur_radius == 4.0f);
+    assert(st_a.filters[0].color == Color(10, 20, 30, 128));
+
+    auto el_dark = doc->get_element_by_id("dark");
+    auto st_dark = resolver.resolve_style(el_dark);
+    assert(st_dark.dark_color_scheme && st_dark.color == Color(255, 255, 255, 255));
+    auto el_dark_child = doc->get_element_by_id("dark_child");
+    auto st_dark_child = resolver.resolve_style(el_dark_child, &st_dark);
+    assert(st_dark_child.dark_color_scheme && st_dark_child.background_color == Color(200, 210, 220, 255));
+
+    // 2. DOM CSSOM (el.style + getComputedStyle) end-to-end via JS
+    JsInterpreter js(doc);
+    assert(js.eval(R"js(
+        const d = document.createElement('div');
+        document.body.appendChild(d);
+        d.style.color = 'oklch(0.6 0.2 120)';
+        const s1 = d.style.color;
+        d.style.color = 'not-a-color';
+        const s1_kept = d.style.color;
+        d.style.backgroundColor = 'color-mix(in srgb, red 25%, blue)';
+        const s2 = d.style.backgroundColor;
+        d.style.borderColor = 'rgb(from rebeccapurple r g b)';
+        const s3 = d.style.borderColor;
+
+        const box = document.createElement('div');
+        box.style.color = 'red';
+        box.style.backgroundColor = 'color-mix(in srgb, currentcolor 50%, white)';
+        document.body.appendChild(box);
+        const cs_mix = getComputedStyle(box).backgroundColor;
+
+        const dm = document.createElement('div');
+        dm.style.colorScheme = 'dark';
+        dm.style.color = 'light-dark(black, oklch(0.9 0.05 240))';
+        document.body.appendChild(dm);
+        const cs_ld = getComputedStyle(dm).color;
+
+        [s1, s1_kept, s2, s3, cs_mix, cs_ld].join('|');
+    )js").to_string() ==
+        "oklch(0.6 0.2 120)|oklch(0.6 0.2 120)|color(srgb 0.25 0 0.75)|color(srgb 0.4 0.2 0.6)|color(srgb 1 0.5 0.5)|oklch(0.9 0.05 240)");
+
+    // 3. SVG renderer with CSS Color 4/5 fills & currentColor inside color-mix()
+    auto svg_doc = HtmlParser::parse(
+        R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" style="color: red">
+            <rect x="0" y="0" width="10" height="10" fill="oklch(0.627955 0.257683 29.233885)"/>
+            <rect x="10" y="0" width="10" height="10" fill="color-mix(in srgb, currentColor 50%, white)"/>
+        </svg>)svg");
+    auto svg_el = svg_doc->query_selector("svg");
+    assert(svg_el);
+    auto svg_img = SvgRenderer::render(svg_el, 20.0f, 10.0f);
+    assert(svg_img && svg_img->width == 20 && svg_img->height == 10);
+    assert(Color::from_argb(svg_img->get_pixel(5, 5)) == Color(255, 0, 0, 255));
+    assert(Color::from_argb(svg_img->get_pixel(15, 5)) == Color(255, 128, 128, 255));
+}
+
+// ============================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
 // ============================================================================
 
@@ -14496,6 +14715,11 @@ int main() {
     // Phase 49: customizable <select> content and <selectedcontent> cloning.
     RUN_TEST(customizable_select_scope_and_formatting_rules);
     RUN_TEST(select_selectedcontent_cloning_and_edge_cases);
+
+    // Phase 50: CSS Color 4/5 color spaces, OKLCH gamut mapping, color-mix(), relative colors, light-dark().
+    RUN_TEST(css_color4_spaces_gamut_and_serialization);
+    RUN_TEST(css_color5_mix_relative_and_light_dark);
+    RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -262,59 +262,7 @@ bool may_be_negative(const std::string& property) {
     return s_never.count(property) == 0;
 }
 
-int hex_digit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-std::string rgb_text(double r, double g, double b, double alpha) {
-    auto channel = [](double value) {
-        return format_number(std::round(std::min(255.0, std::max(0.0, value))));
-    };
-    if (alpha >= 1) return "rgb(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ")";
-    const double rounded = std::round(std::max(0.0, alpha) * 1000) / 1000;
-    return "rgba(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ", " + format_number(rounded) + ")";
-}
-
-// Splits the arguments of a function on commas, whitespace and "/".
-std::vector<std::string> function_arguments(const std::string& inside) {
-    std::vector<std::string> out;
-    std::string current;
-    for (char c : inside) {
-        if (c == ',' || c == '/' || is_ascii_space(c)) {
-            if (!current.empty()) out.push_back(current);
-            current.clear();
-        } else {
-            current += c;
-        }
-    }
-    if (!current.empty()) out.push_back(current);
-    return out;
-}
-
-bool parse_channel(const std::string& text, double scale, double& out) {
-    std::size_t at = 0;
-    double number = 0;
-    if (!parse_css_number(text, at, number)) return false;
-    const std::string unit = text.substr(at);
-    if (unit == "%") out = number / 100 * scale;
-    else if (unit.empty()) out = number;
-    else return false;
-    return true;
-}
-
-double hue_to_channel(double p, double q, double t) {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1.0 / 6) return p + (q - p) * 6 * t;
-    if (t < 1.0 / 2) return q;
-    if (t < 2.0 / 3) return p + (q - p) * (2.0 / 3 - t) * 6;
-    return p;
-}
-
-// A colour, written the way a browser gives it back.
+// A colour, written the way a browser gives it back (CSS Color 4 / 5).
 bool normalize_color(const std::string& text, std::string& out) {
     const std::string lower = ascii_lower(text);
     unsigned named = 0;
@@ -328,65 +276,25 @@ bool normalize_color(const std::string& text, std::string& out) {
         out = text;
         return true;
     }
-    if (!lower.empty() && lower[0] == '#') {
-        const std::string digits = lower.substr(1);
-        for (char c : digits) {
-            if (hex_digit(c) < 0) return false;
-        }
-        double channels[4] = {0, 0, 0, 255};
-        if (digits.size() == 3 || digits.size() == 4) {
-            for (std::size_t i = 0; i < digits.size(); ++i) channels[i] = hex_digit(digits[i]) * 17;
-        } else if (digits.size() == 6 || digits.size() == 8) {
-            for (std::size_t i = 0; i < digits.size() / 2; ++i) {
-                channels[i] = hex_digit(digits[2 * i]) * 16 + hex_digit(digits[2 * i + 1]);
-            }
-        } else {
-            return false;
-        }
-        // Eight bits of alpha are written with two decimals when two are
-        // enough to get the same eight bits back, and with three otherwise:
-        // #11223380 is 0.5, not 0.502.
-        double alpha = 1;
-        if (channels[3] < 255) {
-            const double hundredths = std::round(channels[3] * 100 / 255.0);
-            alpha = std::round(hundredths * 255 / 100.0) == channels[3] ? hundredths / 100
-                                                                         : std::round(channels[3] * 1000 / 255.0) / 1000;
-        }
-        out = rgb_text(channels[0], channels[1], channels[2], alpha);
+    // Deferred light-dark(): validate both branches strictly and preserve
+    // the specified expression so getComputedStyle resolves against color-scheme.
+    if (is_function_value(lower, "light-dark")) {
+        if (!CssColor::is_valid_syntax(text)) return false;
+        out = text;
         return true;
     }
-    const bool is_rgb = is_function_value(lower, "rgb") || is_function_value(lower, "rgba");
-    const bool is_hsl = is_function_value(lower, "hsl") || is_function_value(lower, "hsla");
-    if (!is_rgb && !is_hsl) return false;
-    const auto open = lower.find('(');
-    const auto arguments = function_arguments(lower.substr(open + 1, lower.size() - open - 2));
-    if (arguments.size() != 3 && arguments.size() != 4) return false;
-    double alpha = 1;
-    if (arguments.size() == 4 && !parse_channel(arguments[3], 1, alpha)) return false;
-    if (is_rgb) {
-        double r = 0, g = 0, b = 0;
-        if (!parse_channel(arguments[0], 255, r) || !parse_channel(arguments[1], 255, g) || !parse_channel(arguments[2], 255, b)) {
-            return false;
-        }
-        out = rgb_text(r, g, b, alpha);
+    CssColor parsed;
+    if (CssColor::parse(text, parsed) && !parsed.is_currentcolor) {
+        out = parsed.serialize_computed();
         return true;
     }
-    std::size_t at = 0;
-    double hue = 0, saturation = 0, lightness = 0;
-    if (!parse_css_number(arguments[0], at, hue)) return false;
-    if (!parse_channel(arguments[1], 1, saturation) || !parse_channel(arguments[2], 1, lightness)) return false;
-    if (arguments[1].back() != '%' || arguments[2].back() != '%') return false;
-    hue = std::fmod(std::fmod(hue, 360) + 360, 360) / 360;
-    double r = lightness, g = lightness, b = lightness;
-    if (saturation != 0) {
-        const double q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-        const double p = 2 * lightness - q;
-        r = hue_to_channel(p, q, hue + 1.0 / 3);
-        g = hue_to_channel(p, q, hue);
-        b = hue_to_channel(p, q, hue - 1.0 / 3);
+    // Valid color-mix() or relative color referencing currentcolor: preserve
+    // the specified expression for computed-value resolution against `color`.
+    if (CssColor::is_valid_syntax(text)) {
+        out = text;
+        return true;
     }
-    out = rgb_text(r * 255, g * 255, b * 255, alpha);
-    return true;
+    return false;
 }
 
 bool one_of(const std::string& value, std::initializer_list<const char*> options) {
@@ -2814,8 +2722,34 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
             return name == "color" ? std::string("rgb(0, 0, 0)") : computed_value(realm, from, block, "color", depth + 1);
         }
         if (lower == "transparent") return "rgba(0, 0, 0, 0)";
-        unsigned rgb = 0;
-        if (Color::named_color_value(lower, rgb)) return rgb_text((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 1);
+        ColorResolveContext ctx;
+        if (lower.find("light-dark(") != std::string::npos) {
+            const std::string scheme = ascii_lower(computed_value(realm, from, block, "color-scheme", depth + 1));
+            ctx.dark_scheme = (scheme == "dark" || scheme == "only dark");
+        }
+        CssColor cc;
+        if (lower.find("currentcolor") != std::string::npos) {
+            std::string cc_str = "rgb(0, 0, 0)";
+            if (name == "color") {
+                std::shared_ptr<Node> keep;
+                if (const Element* parent_el = parent_element_of(from, keep)) {
+                    Block parent_block;
+                    compute_block(realm, *parent_el, parent_block, tree_root_of(from));
+                    cc_str = computed_value(realm, *parent_el, parent_block, "color", depth + 1);
+                }
+            } else {
+                cc_str = computed_value(realm, from, block, "color", depth + 1);
+            }
+            if (CssColor::parse(cc_str, cc)) ctx.current_color = &cc;
+        }
+        CssColor parsed;
+        if (CssColor::parse(value, parsed, ctx)) {
+            if (parsed.is_currentcolor) {
+                return name == "color" ? std::string("rgb(0, 0, 0)")
+                                       : computed_value(realm, from, block, "color", depth + 1);
+            }
+            return parsed.serialize_computed();
+        }
         return value;
     }
     if (name == "font-size") return px_text(font_size_px(realm, from));

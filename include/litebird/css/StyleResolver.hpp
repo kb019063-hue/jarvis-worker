@@ -147,6 +147,7 @@ struct ComputedStyle {
     Display display{Display::Inline};
     Color color{Color::black()};
     Color background_color{Color::transparent()};
+    bool dark_color_scheme{false};
     float width{-1.0f};  // -1 indicates auto
     float height{-1.0f}; // -1 indicates auto
     EdgeSizes margin{0.0f};

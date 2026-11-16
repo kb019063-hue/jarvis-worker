@@ -1012,6 +1012,23 @@ static void parse_grid_template(std::string_view val,
 
 static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
     std::vector<FilterFunction> filters;
+    auto split_paren_tokens = [](std::string_view text) {
+        std::vector<std::string> tokens;
+        std::string current;
+        int depth = 0;
+        for (char c : text) {
+            if (c == '(') ++depth;
+            else if (c == ')' && depth > 0) --depth;
+            if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                if (!current.empty()) { tokens.push_back(std::move(current)); current.clear(); }
+            } else {
+                current.push_back(c);
+            }
+        }
+        if (!current.empty()) tokens.push_back(std::move(current));
+        return tokens;
+    };
+
     std::string s(val);
     size_t i = 0;
     while (i < s.size()) {
@@ -1022,7 +1039,17 @@ static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
         std::string name = s.substr(i, open_p - i);
         css_trim(name);
 
-        size_t close_p = s.find(')', open_p);
+        // Match the closing ')' accounting for nested function calls such as
+        // drop-shadow(2px 4px oklch(0.6 0.2 30)) or rgba(0, 0, 0, 0.5).
+        size_t close_p = std::string::npos;
+        int depth = 0;
+        for (size_t k = open_p; k < s.size(); ++k) {
+            if (s[k] == '(') ++depth;
+            else if (s[k] == ')') {
+                --depth;
+                if (depth == 0) { close_p = k; break; }
+            }
+        }
         if (close_p == std::string::npos) break;
         std::string arg = s.substr(open_p + 1, close_p - (open_p + 1));
         css_trim(arg);
@@ -1088,26 +1115,21 @@ static std::vector<FilterFunction> parse_css_filters(std::string_view val) {
             fn.amount = v;
         } else if (name == "drop-shadow") {
             fn.type = FilterType::DropShadow;
-            std::stringstream ss(arg);
-            std::string tok1, tok2, tok3;
-            if (ss >> tok1 >> tok2) {
-                try { fn.dx = std::stof(tok1); } catch (...) {}
-                try { fn.dy = std::stof(tok2); } catch (...) {}
-                if (ss >> tok3) {
-                    if (std::isdigit(static_cast<unsigned char>(tok3[0])) || tok3[0] == '-') {
-                        try { fn.blur_radius = std::stof(tok3); } catch (...) {}
-                        std::string color_part;
-                        std::getline(ss, color_part);
-                        css_trim(color_part);
-                        if (!color_part.empty()) {
-                            fn.color = Color::parse(color_part);
-                        } else {
-                            fn.color = Color::black();
-                        }
-                    } else {
-                        fn.color = Color::parse(tok3);
-                    }
+            fn.color = Color::black();
+            const auto toks = split_paren_tokens(arg);
+            std::vector<float> lengths;
+            for (const auto& tok : toks) {
+                Color parsed;
+                if (Color::looks_like_color(tok) && Color::try_parse(tok, parsed)) {
+                    fn.color = parsed;
+                } else {
+                    try { lengths.push_back(std::stof(tok)); } catch (...) {}
                 }
+            }
+            if (lengths.size() >= 2) {
+                fn.dx = lengths[0];
+                fn.dy = lengths[1];
+                if (lengths.size() >= 3) fn.blur_radius = lengths[2];
             }
         }
         if (fn.type != FilterType::None) {
@@ -1181,17 +1203,7 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return tokens;
     };
     auto is_color_token = [](const std::string& token) {
-        if (token.empty()) return false;
-        if (token[0] == '#') return true;
-        if (token.rfind("rgb", 0) == 0 || token.rfind("hsl", 0) == 0) return true;
-        std::string lowered;
-        for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        static const std::unordered_set<std::string> named = {
-            "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
-            "gray", "grey", "silver", "maroon", "navy", "teal", "olive", "lime",
-            "aqua", "fuchsia", "transparent", "currentcolor", "pink", "brown",
-            "gold", "indigo", "violet", "cyan", "magenta", "beige", "ivory"};
-        return named.count(lowered) > 0;
+        return Color::looks_like_color(token);
     };
 
     // One-to-four value box shorthands: top, right, bottom, left.
@@ -1499,12 +1511,26 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                 }
             }
         }
+    } else if (prop == "color-scheme") {
+        if (val_lower == "dark" || val_lower == "only dark") {
+            style.dark_color_scheme = true;
+        } else if (val_lower != "inherit") {
+            style.dark_color_scheme = false;
+        }
     } else if (prop == "color") {
-        if (val_lower != "inherit" && val_lower != "currentcolor" && val_lower != "unset") {
-            style.color = (val_lower == "initial") ? Color::black() : Color::parse(val);
+        if (val_lower == "initial") {
+            style.color = Color::black();
+        } else if (val_lower != "inherit" && val_lower != "currentcolor" && val_lower != "unset") {
+            Color parsed;
+            if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
+                style.color = parsed;
+            }
         }
     } else if (prop == "background-color" || prop == "background") {
-        style.background_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
+        Color parsed;
+        if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
+            style.background_color = parsed;
+        }
     } else if (prop == "width" || prop == "height" || prop == "min-width" ||
                prop == "max-width" || prop == "min-height" || prop == "max-height") {
         // A percentage is recorded as a percentage and left "auto" in pixels;
@@ -1613,38 +1639,76 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             style.border_radius = parse_length(val, 0.0f);
         }
     } else if (prop == "box-shadow") {
-        std::stringstream ss(val);
-        std::string p1, p2, p3, p4;
-        if (ss >> p1 >> p2) {
-            style.box_shadow.has_shadow = true;
-            style.box_shadow.x_offset = parse_length(p1, 0.0f);
-            style.box_shadow.y_offset = parse_length(p2, 0.0f);
-            if (ss >> p3) {
-                if (std::isdigit(p3[0]) || p3[0] == '-') {
-                    style.box_shadow.blur = parse_length(p3, 0.0f);
-                    if (ss >> p4) {
-                        style.box_shadow.color = Color::parse(p4);
-                    } else {
-                        style.box_shadow.color = Color(0, 0, 0, 100);
-                    }
+        // Parenthesis-aware token split so `rgba(...)`, `oklch(...)`,
+        // `color-mix(...)`, and relative colors stay intact as single tokens.
+        std::vector<std::string> toks;
+        {
+            std::string cur;
+            int depth = 0;
+            for (char c : val) {
+                if (c == '(') ++depth;
+                else if (c == ')' && depth > 0) --depth;
+                if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                    if (!cur.empty()) { toks.push_back(std::move(cur)); cur.clear(); }
                 } else {
-                    style.box_shadow.color = Color::parse(p3);
+                    cur.push_back(c);
                 }
-            } else {
-                style.box_shadow.color = Color(0, 0, 0, 100);
             }
+            if (!cur.empty()) toks.push_back(std::move(cur));
+        }
+        std::vector<float> lengths;
+        Color shadow_color(0, 0, 0, 100);
+        for (const auto& tok : toks) {
+            std::string low;
+            for (char c : tok) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (low == "inset" || low == "none") continue;
+            Color parsed;
+            if (Color::looks_like_color(tok) &&
+                Color::try_parse(tok, parsed, style.color, style.dark_color_scheme)) {
+                shadow_color = parsed;
+            } else {
+                lengths.push_back(parse_length(tok, 0.0f));
+            }
+        }
+        if (lengths.size() >= 2) {
+            style.box_shadow.has_shadow = true;
+            style.box_shadow.x_offset = lengths[0];
+            style.box_shadow.y_offset = lengths[1];
+            style.box_shadow.blur = lengths.size() >= 3 ? lengths[2] : 0.0f;
+            style.box_shadow.color = shadow_color;
         }
     } else if (prop == "border") {
-        // e.g. "1px solid black" or "2px #333"
-        std::stringstream ss(val);
-        std::string part;
-        while (ss >> part) {
-            if (std::isdigit(part[0])) {
+        // e.g. "1px solid black" or "2px solid oklch(0.6 0.2 30)"
+        std::string cur;
+        int depth = 0;
+        auto process_part = [&](const std::string& part) {
+            if (part.empty()) return;
+            std::string low;
+            for (char c : part) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (low == "solid" || low == "none" || low == "dashed" || low == "dotted" ||
+                low == "double" || low == "groove" || low == "ridge" ||
+                low == "inset" || low == "outset" || low == "hidden") {
+                return;
+            }
+            Color parsed;
+            if (Color::looks_like_color(part) &&
+                Color::try_parse(part, parsed, style.color, style.dark_color_scheme)) {
+                style.border_color = parsed;
+            } else if (std::isdigit(static_cast<unsigned char>(part[0]))) {
                 style.border_width = EdgeSizes(parse_length(part, 0.0f));
-            } else if (part != "solid" && part != "none" && part != "dashed") {
-                style.border_color = Color::parse(part);
+            }
+        };
+        for (char c : val) {
+            if (c == '(') ++depth;
+            else if (c == ')' && depth > 0) --depth;
+            if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                process_part(cur);
+                cur.clear();
+            } else {
+                cur.push_back(c);
             }
         }
+        process_part(cur);
     } else if (prop == "border-width") {
         style.border_width = parse_box_edges(val);
     } else if (prop == "border-top-width") {
@@ -1655,11 +1719,12 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         style.border_width.bottom = parse_length(val, 0.0f);
     } else if (prop == "border-left-width") {
         style.border_width.left = parse_length(val, 0.0f);
-    } else if (prop == "border-color") {
-        style.border_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
-    } else if (prop == "border-top-color" || prop == "border-right-color" ||
+    } else if (prop == "border-color" || prop == "border-top-color" || prop == "border-right-color" ||
                prop == "border-bottom-color" || prop == "border-left-color") {
-        style.border_color = (val_lower == "currentcolor") ? style.color : Color::parse(val);
+        Color parsed;
+        if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
+            style.border_color = parsed;
+        }
     } else if (prop == "font-size") {
         if (val_lower == "inherit" || val_lower == "unset") {
             // Inherited from parent via initial copy
@@ -2360,6 +2425,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     // Inherit properties from parent
     if (parent_style) {
         style.color = parent_style->color;
+        style.dark_color_scheme = parent_style->dark_color_scheme;
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
         style.text_align = parent_style->text_align;
@@ -2521,17 +2587,25 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     auto sets_font_size = [](const std::string& prop) {
         return prop == "font-size" || prop == "font";
     };
+    std::vector<const Declaration*> scheme_decls;
+    std::vector<const Declaration*> color_decls;
     std::vector<const Declaration*> font_decls;
     std::vector<const Declaration*> rest;
     for (const auto* declaration : cascade_order) {
         if (declaration->property.rfind("--", 0) == 0) {
             apply_declaration(style, declaration->property, declaration->value);
+        } else if (declaration->property == "color-scheme") {
+            scheme_decls.push_back(declaration);
+        } else if (declaration->property == "color") {
+            color_decls.push_back(declaration);
         } else if (sets_font_size(declaration->property)) {
             font_decls.push_back(declaration);
         } else {
             rest.push_back(declaration);
         }
     }
+    apply_all(scheme_decls);
+    apply_all(color_decls);
     apply_all(font_decls);
     if (element->tag_name() == "html") {
         m_root_font_size = style.font_size;

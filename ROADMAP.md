@@ -45,7 +45,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 3 | **Windowed shell** — a real window with keyboard/mouse/touch, focus, scrolling, cursor; terminal renderer kept as a fallback. | L |
 | 4 | **Image codecs** — PNG, GIF (animated), WebP (JPEG optional, AVIF later). Today: BMP/PPM only. Oracle: WPT `image/`. | M–L |
 | 5 | **Compositor / tiling + damage tracking** — tile raster, repaint regions, scroll compositing; GPU path (Skia/ANGLE) or CPU tiles first. | L–XL |
-| 6 | **Canvas 2D completion** — text/path/hit-test gaps vs WPT `canvas/`. | M |
+| 6 | **Canvas 2D completion** — path/hit-test gaps vs WPT `canvas/`. The text gap (`fillText`/`strokeText`/`measureText` and the `font`/`textAlign`/`textBaseline` state) is done — Phase 46. | M |
 
 ## Wave 2 — JavaScript is a platform
 
@@ -89,7 +89,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 28 | **Processing instructions in the HTML parser** (`<?target data>`) + migrate html5lib→WPT corpus. | M |
-| 29 | **`Attr` is a `Node`**; one qualified name in two namespaces; `NamedNodeMap`/`HTMLCollection` own-props (open task). | M |
+| 29 | ~~**`Attr` is a `Node`**; one qualified name in two namespaces; `NamedNodeMap`/`HTMLCollection` own-props~~ (Phase 51). | M |
 | 30 | **Shadow DOM complete** — slots, `::part`, event retargeting, constructable stylesheets. | M–L |
 | 31 | **Selection + `contenteditable` stack** — `Selection` API, ranges, caret, input events. The authoring gap nobody notices until they try to edit rich text. | L–XL |
 | 32 | **SVG completeness + MathML** — text/gradients/viewBox transforms in render; MathML parse-only. | M |

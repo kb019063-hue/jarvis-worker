@@ -353,9 +353,12 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
+| **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 179/179 unit suites) |
 | **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
-| **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (181/181 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
+| **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 181/181 unit suites; CI floor `1781 → 1792`) |
+| **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 
 ---
 
@@ -2540,10 +2543,16 @@ Release build, on the machine the checks ran on; "before" is `main`
   through `DOMParser`, `createDocument()` and `XMLHttpRequest`, not by
   opening `feed.xml` or `drawing.svg`. That, and frames with documents in
   them, is what 495 of the 552 failing web-platform-tests subtests need.
-- **An `Attr` is not a `Node`** (10 subtests), **two attributes of one
-  element cannot share a qualified name** in different namespaces (14: only
-  a script can make such a pair), and a `NamedNodeMap` or an
-  `HTMLCollection` does not list its names as own properties (8).
+- **A refused write is refused in silence.** Writing to an index of an
+  `HTMLCollection` that is out of range, or to any computed property, is
+  ignored where a browser throws a `TypeError` in strict mode (2 subtests).
+  The write path is `JsValue::set_property` and `JsEval.cpp`, which is
+  claimed by another change.
+- **An `Attr` is not a `Node`** was true to Phase 50: `attr.cloneNode()`,
+  `importNode(attr)` and an `Attr` adopted with its element all work since
+  Phase 51, and so do two attributes of one element with one qualified name
+  in different namespaces and the named own properties of a `NamedNodeMap`
+  and an `HTMLCollection`.
 - **A function cannot have a function as its prototype** in the JavaScript
   engine: `Object.getPrototypeOf(TypeError) !== Error`, and for a class,
   `Object.getPrototypeOf(Derived) !== Base`. 18 subtests fail on it, each an
@@ -4430,6 +4439,70 @@ writes a declaration, an `encoding` change on an already-parsed document
 stops at 1,024 bytes with none of the streaming a browser needs when a page
 arrives in pieces.
 
+---
+
+## Phase 49 Architecture: Customizable `<select>` Content, Scope Boundaries, and `<selectedcontent>` Cloning
+
+### 1. The gap
+
+Litebird previously parsed `<select>` using pre-2025 HTML rules: `"select"` was
+not a default scope boundary (so `has_element_in_select_scope()` scanned up to
+`option`/`optgroup` instead of forwarding to `has_element_in_scope`), `Mode::InSelect`
+did not call `reconstruct_formatting_elements()`, `<keygen>` and `<textarea>`
+broke out of `<select>`, `stop_parsing()` left trailing open tags on the stack,
+and `<selectedcontent>` cloning was absent. Those gaps caused the remaining 11
+failures in the 1,792-case html5lib tree-construction corpus (`webkit02.dat`,
+`tests1.dat`, `tests_innerHTML_1.dat`, `tests7.dat`).
+
+### 2. Parser changes (`include/litebird/html/HtmlTreeBuilder.hpp`, `src/html/{HtmlTreeBuilder,HtmlTreeBuilderModes}.cpp`)
+
+- **Default scope boundary:** `"select"` is indexed in
+  `m_scope_boundary_indices[0]`, keeping `has_element_in_scope("select")` $O(1)$
+  and making `has_element_in_select_scope` delegate directly to
+  `has_element_in_scope`. Outer closing tags (`</font>`, `</p>`) cannot escape
+  or foster-close across an open `<select>`, and `<select>`/`</select>` inside an
+  open scope boundary inside `<select>` (such as `<select><div>` vs `<select><table>`)
+  follows §13.2.4.2.
+- **Customizable `Mode::InSelect`:** `process_character()` forwards non-NULL
+  characters inside `Mode::InSelect` to `process_in_select()`, which calls
+  `reconstruct_formatting_elements()` before character tokens and before
+  `<option>`, `<optgroup>`, and `<hr>` start tags. Only `<input>` breaks out of
+  `<select>`, while `<keygen>`, `<textarea>`, and arbitrary elements stay inside
+  `<select>` via `send_to_in_body()`.
+- **EOF cleanup & `<selectedcontent>` cloning:** `stop_parsing()` clears the open
+  element stack via `resize_open_elements(0)` so unclosed trailing `<option>`
+  elements run `pop_current_node()` cleanly. `m_saw_selectedcontent` avoids any
+  bookkeeping when a page contains no `<selectedcontent>`, and `m_select_states`
+  (erased when `<select>` pops) tracks the first `<selectedcontent>` and selection
+  state per open `<select>`.
+  - `clone_node_tree()` performs iterative deep cloning (`Element` namespaces,
+    prefixes, attributes and attribute namespaces, `is_value`, `FormControlState`,
+    `template_contents`, `Text`/CDATA, `Comment`, `ProcessingInstruction`,
+    `DocumentFragment`, `DocumentType`) so arbitrary nesting never overflows the
+    native stack.
+  - Both `update_selectedcontent_on_option_pop()` and
+    `sync_selectedcontent_on_pop()` ignore still-open `<option>`s
+    (`open_element_position(opt) >= 0`), ignore `<option>` / `<selectedcontent>`
+    nested inside another `<select>` or `<datalist>`, honor `multiple`, `size > 1`,
+    `select_none`, disabled `<option>`, and disabled ancestor `<optgroup>`s up to
+    the owning `<select>`, and fall back to a full `<select>` subtree rescan when
+    `m_script_ran` is true (in case inline scripts mutated `<select>` during
+    parsing).
+
+### 3. Verification
+
+- `make conformance`: **1792/1792 (100.0%)** across all 57 html5lib `.dat` files;
+  CI conformance floor raised `1781 → 1792`.
+- `make test`: **181/181** suites (adding
+  `customizable_select_scope_and_formatting_rules` and
+  `select_selectedcontent_cloning_and_edge_cases`).
+- `make diff-trees`: **6,000/6,000** (`0` differ vs corrected `parse5 8.1.1`);
+  with `--with-select --pages 1500`: `1,368/1,500` equal and `132` diffs (`49`
+  reduced patterns, all due to Litebird retaining elements/scope boundaries inside
+  `<select>` per current WHATWG HTML while `parse5 8.1.1` keeps legacy drops).
+
+---
+
 ## Phase 50 Architecture: CSS Color 4/5 (`oklch`/`oklab`/`lab`/`lch`/`hwb`/`color()`, `color-mix()`, relative colors, `light-dark()`)
 
 Phase 50 (AUDIT.md, finding 56) unifies color parsing, conversion, gamut
@@ -4507,7 +4580,7 @@ raster pipeline.
     Release and ASan+UBSan).
 - Live upstream WPT `css/css-color/parsing/color-computed-*.html` (6 suites):
   **4,860 / 4,860 (100.00%)**.
-- `make test`: **181/181** unit suites (3 new Phase 50 suites), Release and
+- `make test`: **185/185** unit suites (3 new Phase 50 suites), Release and
   ASan+UBSan clean.
 
 ## Known gaps (the honest list)
@@ -4553,23 +4626,20 @@ raster pipeline.
    dimensions, margins, padding, percentage `font-size`, percentage/unitless
    `line-height` (Phase 36), and scalar percentage `border-radius` (Phase 37);
    two-axis elliptical `border-radius` (`50% / 25%`) remains deferred.
-6. **11 corpus cases still fail, all of them about `<select>`.**
-   `webkit02.dat` 43/49 (six: `<selectedcontent>` cloning and the other
-   rules of the 2025 customizable-`<select>` work), `tests1.dat` 110/112,
-   `tests_innerHTML_1.dat` 79/81 and `tests7.dat` 33/34. The standard
-   changed how the content of a `<select>` is parsed and Litebird has the
-   older rules. Everything else in the corpus passes. The corpus is not
-   the last word: the vendored copy is the last one html5lib-tests
-   published before its tree-construction tests moved to
+6. **All 1,792 cases of the vendored html5lib corpus now pass** (`100.0%`
+   after Phase 49 fixed the 11 `<select>` / `<selectedcontent>` cases in
+   `webkit02.dat`, `tests1.dat`, `tests_innerHTML_1.dat`, and `tests7.dat`).
+   The corpus is not the last word: the vendored copy is the last one
+   html5lib-tests published before its tree-construction tests moved to
    web-platform-tests (June 2026). That copy has 1,973 cases now and
-   Litebird passes 1,868 of them: 88 of the others need processing
-   instructions, which the standard's parser now makes and Litebird's does
-   not (the node type exists since Phase 28), and 6
-   need a script to run while the page is parsed. And a corpus does not
+   Litebird passed 1,868 of them before Phase 49 (leaving 88 that need
+   processing instructions, which the standard's parser now makes and
+   Litebird's does not — though the node type exists since Phase 28 — and 6
+   that need a script to run while the page is parsed). And a corpus does not
    hold everything: `<br/>` closing its parent had no case in it (Phase 26).
    `make diff-trees` compares random pages with parse5 for that reason.
-7. **Conformance is not rendering.** 99.4% of the parser corpus is a DOM
-   guarantee, not a promise that real pages look right.
+7. **Conformance is not rendering.** 100.0% of the vendored parser corpus is a
+   DOM guarantee, not a promise that real pages look right.
 8. **TrueType `.ttf` rendering has no `@font-face` or HarfBuzz shaping.** When a
    system `.ttf` font is present, `FontRenderer` rasterizes anti-aliased UTF-8
    glyphs at the computed `font-size`; when no `.ttf` file is available on the
@@ -4622,7 +4692,123 @@ raster pipeline.
    finding 28.
 
 ---
+## Phase 46 Architecture: Canvas 2D Text — `fillText`, `strokeText`, `measureText`
 
+ROADMAP.md Wave 1, row 6 names the text gap as the largest part of what
+Canvas 2D was missing; this phase does that part (path and hit-test gaps
+remain — row 6 stays open for them). Before it, a canvas could draw every
+shape it has and no text at all: `ctx.fillText(...)` was `undefined`, so a
+page that drew a label, a chart axis or a captcha painted nothing and any
+script that measured its own strings threw `TypeError`.
+
+### 1. What was added
+
+- **`src/render/FontRenderer.cpp`** — two public accessors:
+  `em_ascent_descent(font_size, weight)` returns the scaled em metrics
+  (ascent above the baseline, descent below it, positive), falling back to
+  (0.8em, 0.2em) when no `.ttf` loaded; `glyph_advance_px(cp, size, weight)`
+  returns the advance at the exact size. `measure_text` now goes through the
+  same path, so what measures is what draws. The system font is always the
+  engine's regular/bold pair (Phase 36) — no family list, kerning or
+  ligatures, as before.
+- **`include/litebird/render/Canvas2D.hpp` / `.cpp`** — new drawing state
+  `font` (`10px sans-serif` default), `text_align` (`start`) and
+  `text_baseline` (`alphabetic`), saved/restored with the rest of the state,
+  and three operations:
+  - `fill_text(text, x, y [, maxWidth])` / `stroke_text(...)` — alignment
+    resolves the pen position from `x` (`center` halves the advance, `right`
+    and `end` subtract it; `direction`/RTL is not implemented, so `start` is
+    `left` and `end` is `right`); the baseline resolves from `y`
+    (`top` puts the em box top at `y`, `middle` centres it, `bottom` puts its
+    bottom at `y`, `alphabetic` uses `y` directly, `hanging` is approximated
+    at 0.8em above the alphabetic baseline, `ideographic` at the bottom of
+    the em box). Text respects `globalAlpha`, `clip()`, both gradient and
+    solid paints, and the CTM. `maxWidth` requests a horizontal condense of
+    the whole run (true scaling down to a floor of 0.02×, not re-spacing).
+  - `measure_text(text)` — `TextMetrics`: `width` (natural advance),
+    `actualBoundingBoxLeft/Right/Ascent/Descent` (ink boxes relative to the
+    natural pen origin; the alignment point is not applied, values can be
+    negative), `fontBoundingBoxAscent/Descent` and `emHeightAscent/Descent`
+    (em metrics), `hangingBaseline` (0.8em approximation),
+    `ideographicBaseline` (descent) and `alphabeticBaseline` (0).
+- **The `font` attribute** parses the CSS font shorthand subset: `style`
+  (normal/italic/oblique, oblique widths ignored), `font-variant` and
+  `stretch` (accepted, otherwise ignored), `weight` (normal/bold/bolder/
+  lighter/100–1000; ≥600 selects the bold face), `size` **required**, in
+  px/pt/em/rem/% with an optional `/line-height` (validated for syntax, not
+  rendered), then a non-empty family list that is parsed and reflected but
+  not used for rasterisation. An invalid font string is ignored and the old
+  value kept, per the spec; the same for unknown `textAlign`/`textBaseline`
+  values.
+- **Rasterisation.** Glyphs are drawn into a tight AA coverage buffer
+  (capped at 16384×512 px; a wider run truncates on the right for painting,
+  measurement is unaffected), then blitted through the CTM by inverse
+  mapping of the destination bounding box — the same inverse-map idiom
+  `drawImage` uses. A device pixel maps back to the whole horizontal source
+  span and takes the maximum coverage there, so down-sampling (condensing)
+  never drops stems; the y axis samples the row nearest the inverse-mapped
+  position. Gradients are sampled in user space, as `rasterize_paths` does,
+  and `globalCompositeOperation`, clip and alpha run through the ordinary
+  `set_pixel_safe` path.
+- **`strokeText`** is an honest approximation, documented as such: a band
+  centred on the binary glyph boundary (dilate(mask, d) minus erode(mask, d),
+  d = half the line width, clamped to 16 px; lineWidth ≤ 1 yields the inner
+  boundary ring). It is not a stroked vector outline — no joins or mitres on
+  glyph corners. Placement, CTM, clip and paint are identical to `fillText`.
+
+### 2. What this does not do (plainly)
+
+- No `direction`: RTL/bidi is unparsed, `start` ≡ `left`.
+- No kerning or ligatures; advance is the sum of glyph advances, and the
+  same sum is used by measure and by draw.
+- The family list is a no-op for rasterisation — the engine still has one
+  regular and one bold system font (Phase 36).
+- Rotated/sheared CTM places the run correctly but samples the axis-aligned
+  coverage texture by nearest sampling: visibly blocky at large scales.
+  True vector glyph rendering under rotation is future work.
+- `strokeText` is the band approximation described above.
+- Text metrics beyond those listed (e.g. boxes relative to the alignment
+  point) are approximated relative to the natural origin.
+- Rasterised runs are capped at 16384×512 px.
+
+### 3. How it is verified
+
+```
+make test          # 179 engine suites, all passing (one new)
+make conformance   # html5lib 1781/1792, unchanged
+make js-conformance # 926/940, unchanged
+make dom-conformance # 644/644, unchanged
+make url-conformance # 1188/1188, unchanged
+make xml-conformance # 1718/1718, unchanged
+make wpt           # 7968/8009, the 41 listed failures, 0 unlisted
+make diff-trees    # 6,000 of 6,000 pages equal to the corrected parse5
+make diff-xml      # 4,000 documents, 0 differ; 3,000/3,000 round trips
+make deep          # 1,332 runs over 465 pages at depth 200,000, 0 failed (slowest 23.7 s)
+make asan          # ASan/UBSan green on this tree: XML ≥ 1718, WPT ≥ 7968 with 0 unlisted,
+                   # JS ≥ 924, DOM ≥ 644, diff-xml 1,000 documents 0 DIFFER, round trip
+                   # 1,000/1,000, fuzz 0 findings, asan-deep 882 runs over 315 pages,
+                   # 0 failed (slowest 3.5 s; see AUDIT.md finding 52)
+```
+
+(Numbers as run on this branch; see AUDIT.md finding 52 for what each one
+prints.) The new unit suite
+`canvas_text_filltext_stroketext_measuretext_and_font_state` covers the
+default and restored state, measurement ordering and metric boxes, painting
+with a solid and with a gradient fill, alignment and baseline placement,
+`maxWidth` condensing, the stroke band widening with `lineWidth`, setter
+validation from JavaScript, and `measureText`'s property set end to end.
+A generated page (heading, gradient display type, stroked text, centered and
+condensed lines) rendered with `--render-png` shows glyphs painted along the
+baseline with the gradient applied across the run.
+
+### 4. Task queue
+
+`ROADMAP.md` row 6 now reads path/hit-test gaps; the AGENTS.md row was
+rewritten to what is left (WebP/AVIF, SVG `<text>`). No expectation was
+re-recorded, no `.dat` corpus file was touched, and no floor was lowered;
+the unit scoreboard went from 178 to 179 suites.
+
+---
 ## Phase 48 Architecture: Sized-Float Placement Index
 
 `LayoutBox::layout_block` builds a per-block `FloatPlacementIndex` lazily when
@@ -4673,3 +4859,150 @@ was the already-correct band-edge sweep, **not** the old 46-second capped
 slide that let floats escape. Unit tests cover mixed sides, `clear:left` and
 `clear:right`, negative margins including a negative intrusion, and the
 existing rows beyond 1,024 and zero-height band behavior.
+## Phase 51 Architecture: The Attribute Model — Namespaces, `Attr` Objects, and Named Properties
+
+### 1. The hole
+
+An element kept its attributes in a `std::vector<std::pair<std::string,
+std::string>>`: the qualified name and the value. The namespace was in a side
+table, `AttributeNamespaces`, keyed by the qualified name — so an element could
+hold only one attribute per qualified name, whatever namespace it stood in, and
+the second `setAttributeNS('ab', 'attr', …)` replaced the first. The standard
+keys an attribute list by *expanded name*, (namespace, local name), and the
+qualified name is only how a script finds one. That one wrong key cost 33
+web-platform-tests subtests in four shapes: two attributes with one qualified
+name in different namespaces (14), an `Attr` that must be an object and not a
+`Node` — `attr.cloneNode()`, `attr.lookupNamespaceURI()`, `importNode(attr)`,
+an `Attr` adopted with its element (10), the named own properties of a
+`NamedNodeMap` and an `HTMLCollection` (8), and the strict-mode write to an
+index of a collection (1, still open).
+
+### 2. One attribute, one record
+
+`include/litebird/dom/AttributeList.hpp` now stores
+
+```cpp
+struct Attribute {
+    std::string name;            // the qualified name, as written
+    std::string value;
+    const std::string* ns;       // an interned namespace name, or null
+    std::uint32_t local_at;      // where the local name starts in `name`
+};
+```
+
+with `has_namespace()`, `namespace_uri()`, `local_name()` and
+`is_expanded()`. The namespace name is interned once per program
+(`intern_namespace_name`, a function-local set behind a mutex), so an SVG
+document with 100,000 `xlink:href` attributes holds `"http://www.w3.org/1999/
+xlink"` once and every attribute points at it. `local_at` is the offset after
+the prefix colon, or 0 when there is no namespace: in no namespace the whole
+name *is* the local name, which is what `setAttribute('a:b', …)` and
+`setAttributeNS(null, 'a:b', …)` both mean. `AttributeNamespaces` is gone.
+
+The index that a long list builds (Phase 35 keeps the vectors and the logical
+start offset) now holds two maps: the qualified name to the number of the first
+attribute with it, and the expanded name to the one attribute that has it. A
+qualified name that appears more than once — only a script can make that —
+records `kRepeated`, and looking it up takes the scan it always did. Everything
+else is unchanged: numbers only grow, `position()` bisects them, a front erase
+advances the start, copy drops the index, and an empty list allocates nothing.
+`rename(iterator, name, local_at)` is new: `setAttributeNodeNS` replacing an
+attribute keeps its place and its namespace and takes the new qualified name,
+which the tests of `Element-setAttributeNodeNS.html` check because the *order*
+of the lookups changes with it.
+
+`Element` lost `copy_attribute_namespaces` and gained the expanded-name API:
+`find_attribute(name)`, `find_attribute_ns(ns, local)`, `set_attribute_ns`,
+`add_attribute`, `remove_attribute_ns`, `attribute_namespace`,
+`set_attribute_value(const Attribute&, value)` and `replace_attribute`. The
+by-name methods (`getAttribute`, `hasAttribute`, `removeAttribute`,
+`toggleAttribute`, `setAttribute`, `getAttributeNode`) find the **first**
+attribute whose qualified name matches and act on that one, in its own
+namespace — `setAttribute` changes its value and neither adds an attribute nor
+moves it.
+
+### 3. What a hook is told, and what an `Attr` is
+
+`DomHooks::attribute_changed` is now
+`void (*)(Element&, const AttributeChange&)` with
+
+```cpp
+struct AttributeChange {
+    const std::string* name;          // qualified
+    const std::string* namespace_uri; // null when in no namespace
+    const std::string* local_name;
+    const std::string* old_value;     // null when it was added
+    const std::string* new_value;     // null when it was removed
+};
+```
+
+`Node.cpp` copies every string before the hook runs, because the hook may
+re-enter and change the element again. Both consumers now see the namespace:
+`attributeChangedCallback(name, oldValue, newValue, namespace)` gets its fourth
+argument (it was always `null`), and a `MutationRecord`'s `attributeNamespace`
+reports it (it was always `null` too).
+
+`AttrState` is (owner element, namespace, local name) — the old cache slot
+`"attr:" + qualified_name` on the element's object could not hold two
+attributes. `getAttributeNode` and `getAttributeNodeNS` therefore return one
+object per attribute, `isSameNode` compares identity, `cloneNode()` makes a
+detached copy with the same names and value, `lookupNamespaceURI` asks the
+element the attribute is on, `importNode` copies an `Attr` into the document,
+`adoptNode` moves a detached one, and adopting an element carries its
+attributes along because an attribute's document is its element's.
+`removeAttributeNS` leaves the `Attr` object detached with its last value and a
+null `ownerElement`.
+
+### 4. Named properties
+
+`JsExotic` gained two hooks: `own_keys` (every computed name, enumerable or
+not) and `computed_property` (whether a name enumerates and can be written).
+`Object.getOwnPropertyNames` asks for the first, `Object.getOwnPropertyDescriptor`
+for the second, and `Object.keys`/`for…in` still ask `keys`, which reports only
+the enumerable ones. A `NamedNodeMap` lists its indices and then its qualified
+names — one entry per name, in insertion order, and on an HTML element of an
+HTML document only the names that are already lower case; an `HTMLCollection`
+lists its indices and then the `id`s and `name`s of its elements. Both
+properties are `[LegacyUnenumerableNamedProperties]`: `enumerable: false`,
+`configurable: true`, so `for…in` skips them and `hasOwnProperty` says yes.
+
+### 5. What it moved
+
+| Scoreboard | Before | After |
+| :--- | ---: | ---: |
+| web-platform-tests | 7968/8009, 41 listed | **7998/8009 in 103 files**, 11 listed, 0 unlisted |
+| — `dom/nodes/attributes.html` | 60/67 | **77/77** |
+| — `Document-`/`Element-getElementsByTagName.html` | 2 listed each | **1 listed each** (the strict-mode write) |
+| Unit suites | 177 | **179** |
+
+`tests/wpt/expected-failures.txt` went from 41 rows to 11. The words
+`one-name-two-namespaces`, `attr-is-not-a-node` and `named-properties` are gone
+from it; the two subtests that are left of that block are listed as
+`strict-write`. The new unit suite is
+`attributes_are_kept_by_namespace_and_local_name`: the same qualified name in
+two namespaces (get, set, remove and toggle on the first), an attribute's own
+namespace/prefix/local name, the named own properties and their descriptors of
+a `NamedNodeMap` and of an `HTMLCollection`, `Attr` identity and detachment,
+`setAttributeNodeNS` reordering, and the namespace in a custom element's
+callback and in a `MutationRecord`. The randomized model test in
+`attribute_lists_keep_their_order_and_stay_fast` now compares an `Element`'s
+attributes against a vector of (namespace, local name, value) rows instead of
+the deleted side table.
+
+### 6. What is still open
+
+A write that a property refuses is refused in silence: assigning to an
+out-of-range index of an `HTMLCollection` does not throw in strict mode (2
+subtests, `strict-write`), and the same is true of a write to a non-writable
+property anywhere else in the engine. `JsExotic::set` returns "handled" and has
+no way to say "refused", and the strictness of the assignment is known only in
+`JsEval.cpp` — a file claimed by another change. An `Attr`'s `childNodes` is
+empty rather than a `Text` node holding its value: this engine keeps an
+attribute's value in one place, and `value`/`textContent` read it.
+`getAttributeNames` and a `NamedNodeMap`'s names still store the qualified name
+the script wrote rather than the name in the namespace's canonical form, which
+no test asks for yet. Two attributes of one element with one qualified name in
+different namespaces cannot be written as XML — a parser refuses the repeated
+name — so `tools/fuzz/xml_roundtrip.py` now makes one `xmlns` or the other and
+never both; before this phase the second replaced the first, so the corpus
+never met the case. The 3,000-tree round trip still comes back 3,000/3,000.

@@ -59,6 +59,8 @@ struct RecordState : JsExotic {
     std::string name;
     bool has_old_value{false};
     std::string old_value;
+    bool has_namespace{false};
+    std::string attribute_namespace;
     void trace(Heap& heap) override {
         heap.mark_value(target);
         heap.mark_value(added);
@@ -99,8 +101,8 @@ void setup_mutation_record(Iface& I) {
         return record.has_name ? str(record.name) : null();
     });
     I.getter("attributeNamespace", [](Realm&) {
-        this_record();
-        return null();
+        const RecordState& record = this_record();
+        return record.has_namespace ? str(record.attribute_namespace) : null();
     });
     I.getter("oldValue", [](Realm&) {
         const RecordState& record = this_record();
@@ -149,6 +151,8 @@ struct RecordData {
     explicit RecordData(const char* kind) : type(kind) {}
     const char* type;
     const std::string* name{nullptr};
+    /// The namespace of the attribute, empty when it stands in none.
+    const std::string* namespace_uri{nullptr};
     const std::string* old_value{nullptr};
     const NodeVector* added{nullptr};
     const NodeVector* removed{nullptr};
@@ -201,6 +205,10 @@ void queue_record(Realm& realm, Node& target, const RecordData& data) {
             if (data.name) {
                 made->has_name = true;
                 made->name = *data.name;
+            }
+            if (data.namespace_uri && !data.namespace_uri->empty()) {
+                made->has_namespace = true;
+                made->attribute_namespace = *data.namespace_uri;
             }
             if (wants_old && data.old_value) {
                 made->has_old_value = true;
@@ -418,8 +426,10 @@ void run_upgrade(Realm& realm, Element& element, const std::shared_ptr<Definitio
             part.queue.push_back(std::move(reaction));
         };
         if (definition->attribute_changed.is_function()) {
-            for (const auto& [name, value] : element.attributes()) {
-                if (observes(*definition, name)) add(definition->attribute_changed, {str(name), null(), str(value), null()});
+            for (const auto& attribute : element.attributes()) {
+                if (observes(*definition, attribute.name)) {
+                    add(definition->attribute_changed, {str(attribute.name), null(), str(attribute.value), null()});
+                }
             }
         }
         if (element.is_connected() && definition->connected.is_function()) add(definition->connected, {});
@@ -795,20 +805,28 @@ void note_children_changed(Node& parent, const NodeVector& added, const NodeVect
     queue_record(*realm, parent, data);
 }
 
-void note_attribute_changed(Element& element, const std::string& name, const std::string* old_value,
-                            const std::string* new_value) {
+void note_attribute_changed(Element& element, const AttributeChange& change) {
+    const std::string& name = *change.name;
+    const std::string* old_value = change.old_value;
+    const std::string* new_value = change.new_value;
     Realm* realm = realm_if_any(element);
     if (!realm || !realm->alive) return;
     if (ObserverPart* part = realm->find_part<ObserverPart>()) {
         if (!part->active.empty()) {
             RecordData data("attributes");
             data.name = &name;
+            data.namespace_uri = change.namespace_uri;
             data.old_value = old_value;
             queue_record(*realm, element, data);
         }
     }
     if (name.size() > 2 && name[0] == 'o' && name[1] == 'n') event_handler_attribute_changed(*realm, element, name);
-    if (!new_value && old_value) detach_attr_object(*realm, element, name, *old_value);
+    if (!new_value && old_value) {
+        // The namespace is null when the attribute stands in none; the object
+        // it was kept as is found by the empty name then.
+        detach_attr_object(*realm, element, change.namespace_uri ? *change.namespace_uri : std::string(),
+                           *change.local_name, *old_value);
+    }
     if (is_html_element(element, "iframe") && (name == "src" || name == "srcdoc" || name == "name")) {
         note_iframe_attribute_changed(*realm, element, name);
     }
@@ -816,7 +834,8 @@ void note_attribute_changed(Element& element, const std::string& name, const std
         auto definition = definition_for(*realm, element);
         if (definition && observes(*definition, name)) {
             enqueue_callback(*realm, element, definition, definition->attribute_changed,
-                             {str(name), nullable_str(old_value), nullable_str(new_value), null()});
+                             {str(name), nullable_str(old_value), nullable_str(new_value),
+                              nullable_str(change.namespace_uri)});
         }
     }
 }

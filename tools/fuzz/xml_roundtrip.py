@@ -78,9 +78,14 @@ DRIVER = r"""
       if (kind < 0.22) {
         el.setAttributeNS(XMLNS, 'xmlns:' + pick(['p', 'q', 'r', 'ns1', 'ns2']), pick(['urn:a', 'urn:b', 'urn:c', 'urn:z']));
       } else if (kind < 0.34) {
-        el.setAttributeNS(XMLNS, 'xmlns', pick(['', 'urn:a', 'urn:b', XHTML]));
+        // An element may hold one `xmlns` in the XMLNS namespace and one in no
+        // namespace: two attributes with one qualified name, which no XML text
+        // can write (a parser refuses the repeated name). Such a tree is
+        // legal in the DOM and impossible to serialize, so it is not made
+        // here; the pair is exercised by the attribute unit suite instead.
+        if (!el.hasAttribute('xmlns')) el.setAttributeNS(XMLNS, 'xmlns', pick(['', 'urn:a', 'urn:b', XHTML]));
       } else if (kind < 0.38) {
-        el.setAttribute('xmlns', pick(['urn:a', 'urn:q', '']));
+        if (!el.hasAttribute('xmlns')) el.setAttribute('xmlns', pick(['urn:a', 'urn:q', '']));
       } else if (kind < 0.43) {
         el.setAttributeNS(XML, 'xml:lang', pick(['en', 'fr']));
       } else {

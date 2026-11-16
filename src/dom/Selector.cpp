@@ -453,12 +453,10 @@ bool match_attribute(const Element& element, const AttributePart& part) {
     if (part.any_namespace) {
         // Any attribute with this local name: what is after the prefix when
         // the attribute has a namespace, and the whole name when it has none.
-        for (const auto& [name, value] : element.attributes()) {
-            const bool namespaced = !element.attribute_namespace(name).empty();
-            const auto colon = namespaced ? name.find(':') : std::string::npos;
-            const bool same_name = colon == std::string::npos ? name == wanted
-                                                              : name.compare(colon + 1, std::string::npos, wanted) == 0;
-            if (same_name && match_attribute_value(part, value)) return true;
+        for (const auto& attribute : element.attributes()) {
+            const bool same_name = attribute.has_namespace() ? attribute.local_name() == wanted
+                                                             : attribute.name == wanted;
+            if (same_name && match_attribute_value(part, attribute.value)) return true;
         }
         return false;
     }

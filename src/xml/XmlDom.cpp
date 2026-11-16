@@ -100,10 +100,10 @@ bool locate_prefix(const Element& start, const std::string& namespace_uri, std::
             prefix = element->prefix();
             return true;
         }
-        for (const auto& [name, value] : element->attributes()) {
-            if (name.compare(0, 6, "xmlns:") != 0 || value != namespace_uri) continue;
-            if (element->attribute_namespace(name) != kXmlnsNamespace) continue;
-            prefix = name.substr(6);
+        for (const auto& attribute : element->attributes()) {
+            if (attribute.name.compare(0, 6, "xmlns:") != 0 || attribute.value != namespace_uri) continue;
+            if (attribute.namespace_uri() != kXmlnsNamespace) continue;
+            prefix = attribute.name.substr(6);
             return true;
         }
         auto parent = element->parent();
@@ -221,10 +221,10 @@ std::shared_ptr<Node> parse_xml_fragment(const std::shared_ptr<Document>& docume
     std::shared_ptr<Node> hold;
     for (const Element* at = &context; at;) {
         if (!element_namespace_uri(*at).empty()) add(at->prefix(), element_namespace_uri(*at));
-        for (const auto& [name, value] : at->attributes()) {
-            if (at->attribute_namespace(name) != kXmlnsNamespace) continue;
-            if (name == "xmlns") add(std::string(), value);
-            else if (name.compare(0, 6, "xmlns:") == 0) add(name.substr(6), value);
+        for (const auto& attribute : at->attributes()) {
+            if (attribute.namespace_uri() != kXmlnsNamespace) continue;
+            if (attribute.name == "xmlns") add(std::string(), attribute.value);
+            else if (attribute.name.compare(0, 6, "xmlns:") == 0) add(attribute.name.substr(6), attribute.value);
         }
         auto parent = at->parent();
         if (!parent || !parent->is_element()) break;
@@ -600,9 +600,11 @@ private:
         // `declared` is the standard's "local prefixes map".
         std::unordered_map<std::string, std::string> declared;
         const std::string* local_default = nullptr;
-        for (const auto& [name, value] : attributes) {
+        for (const auto& attribute : attributes) {
+            const std::string& name = attribute.name;
+            const std::string& value = attribute.value;
             if (name.size() < 5 || name.compare(0, 5, "xmlns") != 0) continue;
-            const std::string& uri = element.attribute_namespace(name);
+            const std::string& uri = attribute.namespace_uri();
             if (name.size() == 5) {
                 // The default namespace declaration; one a script set with
                 // setAttribute("xmlns", ...) stands in no namespace and is
@@ -685,8 +687,10 @@ private:
         // written; only attributes with a namespace can be such a pair.
         std::vector<std::pair<const std::string*, std::string>> seen_few;
         std::unordered_set<std::string> seen_many;
-        for (const auto& [name, value] : attributes) {
-            const std::string& uri = element.attribute_namespace(name);
+        for (const auto& attribute : attributes) {
+            const std::string& name = attribute.name;
+            const std::string& value = attribute.value;
+            const std::string& uri = attribute.namespace_uri();
             if (uri.empty()) {
                 if (name == "xmlns") {
                     if (ignore_default_declaration) continue;

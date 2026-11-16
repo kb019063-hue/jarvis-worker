@@ -110,6 +110,18 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     if (object.is_function() && object.function_data() && (key == "name" || key == "length")) {
         return data(object.get_property(key), false, false, true);
     }
+    // A property the object computes instead of storing: the indices and
+    // names of a list, of a NamedNodeMap or of an HTMLCollection. The value
+    // is what reading it gives, and it is configurable as every such
+    // property is.
+    if (cell && cell->exotic && cell->exotic->has(cell, key)) {
+        bool enumerable = true;
+        bool writable = false;
+        if (cell->exotic->computed_property(cell, key, enumerable, writable)) {
+            return data(object.get_property(key), writable, enumerable, true);
+        }
+        return JsValue::make_undefined();
+    }
     return JsValue::make_undefined();
 }
 

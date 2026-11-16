@@ -94,12 +94,13 @@ jobs:
         # failed to parse, so every run reported "workflow file issue" and no job
         # ever executed. Keep it as a block scalar.
         #
-        # The floor is the number that pass today: the 11 that do not are all
-        # about <select>, and a case that stops passing is a regression.
+        # The floor is all 1,792 cases of the vendored corpus: Phase 49 fixed the
+        # last 11 (<select> content and <selectedcontent> cloning), so any case
+        # that stops passing is a regression.
         run: |
           set -euo pipefail
           python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
-          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['passed'] >= 1781 else 1)"
+          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['passed'] >= 1792 else 1)"
       - name: Random pages against parse5
         # The corpus is the inputs somebody wrote. This is 6,000 pages and
         # fragments nobody wrote, a few dozen misnested tags each, parsed here

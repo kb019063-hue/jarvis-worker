@@ -30,6 +30,18 @@ enum class NodeType {
     ProcessingInstruction
 };
 
+/// One attribute change, for the hooks: the qualified name, the namespace it
+/// stands in (empty for none) and its local name, plus the values around the
+/// change (`old_value` null when the attribute was added, `new_value` null
+/// when it was removed). The pointers live for the call.
+struct AttributeChange {
+    const std::string* name{nullptr};
+    const std::string* namespace_uri{nullptr};
+    const std::string* local_name{nullptr};
+    const std::string* old_value{nullptr};
+    const std::string* new_value{nullptr};
+};
+
 /// What the tree tells the script bindings. A member that is null is skipped,
 /// so a program with no scripting pays one test per event.
 struct DomHooks {
@@ -50,10 +62,7 @@ struct DomHooks {
     void (*children_changed)(Node& parent, const std::vector<std::shared_ptr<Node>>& added,
                              const std::vector<std::shared_ptr<Node>>& removed,
                              const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next) = nullptr;
-    /// `old_value` is null for an attribute that was added, `new_value` for
-    /// one that was removed.
-    void (*attribute_changed)(Element& element, const std::string& name, const std::string* old_value,
-                              const std::string* new_value) = nullptr;
+    void (*attribute_changed)(Element& element, const AttributeChange& change) = nullptr;
     void (*character_data_changed)(Node& node, const std::string& old_value) = nullptr;
     /// An element entered (true) or left (false) a document.
     void (*connected)(Element& element, bool connected) = nullptr;

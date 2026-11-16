@@ -619,47 +619,138 @@ const Document* Node::as_document() const {
     return m_type == NodeType::Document ? static_cast<const Document*>(this) : nullptr;
 }
 
-void Element::set_attribute(const std::string& name, std::string value) {
-    std::string old_val;
-    auto it = m_attributes.find(name);
-    if (it != m_attributes.end()) old_val = it->second;
+/// Where the local name starts in a qualified name with a namespace: after
+/// the colon, or 0 when the name has no prefix.
+static std::uint32_t local_name_at(const std::string& name) {
+    const auto colon = name.find(':');
+    return colon == std::string::npos ? 0 : static_cast<std::uint32_t>(colon + 1);
+}
 
-    const bool had_old = it != m_attributes.end();
-    m_attributes[name] = value;
+void Element::set_attribute(const std::string& name, std::string value) {
+    // `setAttribute`: the first attribute with this qualified name changes
+    // its value, keeping its namespace; otherwise a new one stands in no
+    // namespace and goes at the end.
+    auto it = m_attributes.find(name);
+    Attribute* existing = it == m_attributes.end() ? nullptr : &*it;
+    const bool had_old = existing != nullptr;
+    std::string old_val;
+    if (existing) old_val = existing->value;
+
+    if (existing) {
+        existing->value = std::move(value);
+        attribute_changed(*existing, had_old ? &old_val : nullptr);
+        return;
+    }
+    m_attributes.push_back(name, nullptr, 0, std::move(value));
+    attribute_changed(m_attributes[m_attributes.size() - 1], nullptr);
+}
+
+void Element::set_attribute_ns(const std::string& namespace_uri, const std::string& qualified_name, std::string value) {
+    // `setAttributeNS`: an attribute is found by its namespace and local name,
+    // so two prefixes for one namespace are one attribute, and two namespaces
+    // for one qualified name are two.
+    const std::string* uri = namespace_uri.empty() ? nullptr : intern_namespace_name(namespace_uri);
+    const std::uint32_t local_at = uri ? static_cast<std::uint32_t>(qualified_name.find(':')) + 1 : 0;
+    auto it = m_attributes.find_expanded(uri, std::string_view(qualified_name).substr(local_at));
+    std::string old_val;
+    if (it != m_attributes.end()) {
+        old_val = it->value;
+        it->value = std::move(value);
+        attribute_changed(*it, &old_val);
+        return;
+    }
+    m_attributes.push_back(qualified_name, uri, local_at, std::move(value));
+    attribute_changed(m_attributes[m_attributes.size() - 1], nullptr);
+}
+
+void Element::add_attribute(const std::string& namespace_uri, const std::string& qualified_name, std::string value) {
+    set_attribute_ns(namespace_uri, qualified_name, std::move(value));
+}
+
+void Element::set_attribute_value(const Attribute& attribute, std::string value) {
+    auto it = m_attributes.find_expanded(attribute.ns, attribute.local_name());
+    if (it == m_attributes.end()) return;
+    std::string old_val = it->value;
+    it->value = std::move(value);
+    attribute_changed(*it, &old_val);
+}
+
+void Element::replace_attribute(const Attribute& attribute, const std::string& name, std::string value) {
+    auto it = m_attributes.find_expanded(attribute.ns, attribute.local_name());
+    if (it == m_attributes.end()) return;
+    std::string old_val = it->value;
+    const std::uint32_t local_at = attribute.ns ? local_name_at(name) : 0;
+    m_attributes.rename(it, name, local_at);
+    auto renamed = m_attributes.find_expanded(attribute.ns, std::string_view(name).substr(local_at));
+    if (renamed == m_attributes.end()) return;
+    renamed->value = std::move(value);
+    attribute_changed(*renamed, &old_val);
+}
+
+void Element::attribute_changed(const Attribute& attribute, const std::string* old_value) {
+    // Everything is read out of `attribute` before anything runs: the forms
+    // code below can add an attribute to this element (an input's value is
+    // written back as one), which moves the storage `attribute` points into.
+    // The namespace name is the exception: it is interned, so the pointer is
+    // good for as long as the program runs, and null is how "no namespace"
+    // reaches a hook.
+    const std::string name = attribute.name;
+    const std::string value = attribute.value;
+    const std::string local = std::string(attribute.local_name());
+    const std::string* ns = attribute.ns;
+    const bool had_old = old_value != nullptr;
+    const std::string old_val = had_old ? *old_value : std::string();
     mark_needs_layout();
     bump_tree_version();
-    if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, had_old, old_val);
-
+    if (m_tag_name == "input" || m_tag_name == "option") {
+        forms::attribute_changed(*this, name, had_old, old_val);
+    }
     if (auto hook = hooks().attribute_changed) {
-        // The element may be changed again by what the hook runs.
+        const AttributeChange change{&name, ns, &local, had_old ? &old_val : nullptr, &value};
         auto keep = shared_from_this();
-        hook(*this, name, had_old ? &old_val : nullptr, &value);
+        hook(*this, change);
     }
 }
 
 void Element::remove_attribute(const std::string& name) {
     auto it = m_attributes.find(name);
     if (it == m_attributes.end()) return;
-    std::string old_val = it->second;
+    const Attribute removed = *it;
     m_attributes.erase(it);
+    attribute_removed(removed, removed.value);
+}
+
+void Element::remove_attribute_ns(const std::string& namespace_uri, const std::string& local_name) {
+    const std::string* uri = namespace_uri.empty() ? nullptr : intern_namespace_name(namespace_uri);
+    auto it = m_attributes.find_expanded(uri, local_name);
+    if (it == m_attributes.end()) return;
+    const Attribute removed = *it;
+    m_attributes.erase(it);
+    attribute_removed(removed, removed.value);
+}
+
+void Element::attribute_removed(const Attribute& attribute, const std::string& old_value) {
+    // Read out first, and this one is being removed: the `attribute` it is
+    // given is often the record that erase() is about to erase.
+    const std::string name = attribute.name;
+    const std::string local = std::string(attribute.local_name());
+    const std::string* ns = attribute.ns;
     mark_needs_layout();
     bump_tree_version();
-    if (m_tag_name == "input" || m_tag_name == "option") forms::attribute_changed(*this, name, true, old_val);
-
+    if (m_tag_name == "input" || m_tag_name == "option") {
+        forms::attribute_changed(*this, name, true, old_value);
+    }
     auto keep = shared_from_this();
-    if (auto hook = hooks().attribute_changed) hook(*this, name, &old_val, nullptr);
-    // The namespace goes last: what the hook tells (an Attr object that is
-    // being detached) still asks for it. And only if the hook did not put
-    // the attribute back.
-    if (m_rare && !m_rare->attribute_namespaces.empty() && m_attributes.find(name) == m_attributes.end()) {
-        m_rare->attribute_namespaces.erase(name);
+    if (auto hook = hooks().attribute_changed) {
+        const AttributeChange change{&name, ns, &local, &old_value, nullptr};
+        hook(*this, change);
     }
 }
 
-const std::string* AttributeNamespaces::intern(const std::string& uri) {
-    // A node-based set: the strings stay where they are as it grows, and
-    // are never changed, so a pointer to one can be read from any thread.
-    // Adding one is what the lock is for (a worker is a thread).
+const std::string* intern_namespace_name(const std::string& uri) {
+    // A node-based set: the strings stay where they are as it grows, and are
+    // never changed, so a pointer to one can be read from any thread. Adding
+    // one is what the lock is for (a worker is a thread).
     static std::mutex lock;
     static std::unordered_set<std::string> names;
     const std::lock_guard<std::mutex> guard(lock);
@@ -667,34 +758,14 @@ const std::string* AttributeNamespaces::intern(const std::string& uri) {
 }
 
 const std::string& Element::attribute_namespace(const std::string& qualified_name) const {
-    if (m_rare && !m_rare->attribute_namespaces.empty()) {
-        if (const std::string* uri = m_rare->attribute_namespaces.find(qualified_name)) return *uri;
-    }
-    return empty_string();
+    auto it = m_attributes.find(qualified_name);
+    return it == m_attributes.end() ? empty_string() : it->namespace_uri();
 }
 
-void Element::set_attribute_ns(const std::string& namespace_uri, const std::string& qualified_name, std::string value) {
-    if (!namespace_uri.empty()) rare().attribute_namespaces.set(qualified_name, namespace_uri);
-    set_attribute(qualified_name, std::move(value));
-}
-
-const std::string* Element::find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const {
-    auto stored = [&](const std::string& name) -> const std::string* {
-        const auto it = m_attributes.find(name);
-        return it == m_attributes.end() ? nullptr : &it->first;
-    };
-    // An attribute in no namespace has no prefix: its whole name is its
-    // local name, colons and all.
-    if (namespace_uri.empty()) {
-        const std::string* name = stored(local_name);
-        return name && attribute_namespace(*name).empty() ? name : nullptr;
-    }
-    if (m_rare && !m_rare->attribute_namespaces.empty()) {
-        if (const std::string* qualified = m_rare->attribute_namespaces.find_expanded(namespace_uri, local_name)) {
-            if (const std::string* name = stored(*qualified)) return name;
-        }
-    }
-    return nullptr;
+const Attribute* Element::find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const {
+    const std::string* uri = namespace_uri.empty() ? nullptr : intern_namespace_name(namespace_uri);
+    auto it = m_attributes.find_expanded(uri, local_name);
+    return it == m_attributes.end() ? nullptr : &*it;
 }
 
 bool Node::is_cdata_section() const {
@@ -783,18 +854,18 @@ void append_start_tag(const Element& element, bool xml, bool declare_namespace, 
              : "http://www.w3.org/1999/xhtml";
         out += '"';
     }
-    for (const auto& [name, value] : element.attributes()) {
+    for (const auto& attribute : element.attributes()) {
         out += ' ';
         // "The attribute's serialized name": the local name, with xml:,
         // xmlns: or xlink: before it for those three namespaces whatever
         // prefix the attribute has, and the qualified name for any other.
-        const std::string& uri = element.attribute_namespace(name);
+        const std::string& name = attribute.name;
+        const std::string& value = attribute.value;
+        const std::string& uri = attribute.namespace_uri();
         if (uri.empty()) {
             out += name;
         } else {
-            const auto colon = name.find(':');
-            const std::string_view local = colon == std::string::npos ? std::string_view(name)
-                                                                      : std::string_view(name).substr(colon + 1);
+            const std::string_view local = attribute.local_name();
             if (uri == "http://www.w3.org/XML/1998/namespace") {
                 out += "xml:";
                 out += local;
@@ -1050,8 +1121,8 @@ std::shared_ptr<ShadowRoot> Element::attach_shadow(const std::string& mode_str) 
 
 void Element::dump_open(std::ostream& os, const std::string& indent, bool has_content) const {
     os << indent << "<" << m_tag_name;
-    for (const auto& [k, v] : m_attributes) {
-        os << " " << k << "=\"" << v << "\"";
+    for (const auto& attribute : m_attributes) {
+        os << " " << attribute.name << "=\"" << attribute.value << "\"";
     }
     os << (has_content ? ">\n" : " />\n");
 }

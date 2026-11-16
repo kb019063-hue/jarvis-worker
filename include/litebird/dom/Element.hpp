@@ -133,37 +133,58 @@ public:
 
     std::string get_attribute(const std::string& name) const {
         auto it = m_attributes.find(name);
-        return it != m_attributes.end() ? it->second : "";
+        return it != m_attributes.end() ? it->value : "";
     }
 
     /// The value of `name`, or null when the element has no such attribute.
     const std::string* attribute(const std::string& name) const {
         auto it = m_attributes.find(name);
-        return it != m_attributes.end() ? &it->second : nullptr;
+        return it != m_attributes.end() ? &it->value : nullptr;
     }
 
-    void set_attribute(const std::string& name, std::string value);
-    void remove_attribute(const std::string& name);
+    /// The first attribute with this qualified name, whatever its namespace:
+    /// what `getAttribute` and `hasAttribute` ask for. Null when there is none.
+    const Attribute* find_attribute(const std::string& name) const {
+        auto it = m_attributes.find(name);
+        return it == m_attributes.end() ? nullptr : &*it;
+    }
 
-    // Attributes are kept under their qualified names ("xlink:href"). The
-    // few that have a namespace have it recorded next to the list: what the
-    // XML parser read with a prefix, and what setAttributeNS was given. (So
-    // an element cannot hold two attributes whose qualified names are the
-    // same and whose namespaces differ; only a script can ask for that.)
-    /// The namespace of the attribute stored as `qualified_name`; empty for
-    /// an attribute in no namespace.
+    // An attribute is identified by its expanded name (namespace and local
+    // name), as the DOM standard says: `setAttributeNS("ab", "attr", …)` and
+    // `setAttributeNS("kl", "attr", …)` are two attributes, and the first of
+    // them answers to `getAttribute("attr")`. The namespace of an attribute
+    // with none is the empty string; the empty string and null are one there,
+    // because DOMString? is turned into a string before it gets here.
+
+    /// The namespace of the attribute first stored as `qualified_name`;
+    /// empty for one in no namespace.
     const std::string& attribute_namespace(const std::string& qualified_name) const;
-    /// Sets an attribute and its namespace. An empty namespace is none.
+
+    /// `setAttribute`: the first attribute with this qualified name changes
+    /// its value (keeping its namespace), or a new one in no namespace is
+    /// added at the end.
+    void set_attribute(const std::string& name, std::string value);
+    /// `setAttributeNS`: the attribute with this namespace and local name
+    /// changes its value, or a new one is added at the end. An empty
+    /// namespace is none, and the qualified name keeps its prefix.
     void set_attribute_ns(const std::string& namespace_uri, const std::string& qualified_name, std::string value);
-    /// The stored name of the attribute with this namespace and local name;
+    /// `setAttributeNode`: adds an attribute that has no place on this
+    /// element yet, at the end, or changes the one with its expanded name.
+    void add_attribute(const std::string& namespace_uri, const std::string& qualified_name, std::string value);
+    /// `removeAttribute`: the first attribute with this qualified name.
+    void remove_attribute(const std::string& name);
+    /// `removeAttributeNS`: the attribute with this namespace and local name.
+    void remove_attribute_ns(const std::string& namespace_uri, const std::string& local_name);
+    /// The attribute with this namespace (empty for none) and local name;
     /// null when there is none.
-    const std::string* find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const;
-    /// Copies the namespaces of `other`'s attributes: for a clone.
-    void copy_attribute_namespaces(const Element& other) {
-        if (other.m_rare && !other.m_rare->attribute_namespaces.empty()) {
-            rare().attribute_namespaces = other.m_rare->attribute_namespaces;
-        }
-    }
+    const Attribute* find_attribute_ns(const std::string& namespace_uri, const std::string& local_name) const;
+
+    /// Changes the value of an attribute that is there, by expanded name.
+    void set_attribute_value(const Attribute& attribute, std::string value);
+    /// `setAttributeNodeNS` on an attribute that is already there: it keeps
+    /// its place and its namespace, and takes the new qualified name and
+    /// value. (The prefix is the attribute's, not its namespace's.)
+    void replace_attribute(const Attribute& attribute, const std::string& name, std::string value);
 
     /// In the order they were added; see AttributeList.hpp.
     const AttributeList& attributes() const {
@@ -192,7 +213,7 @@ public:
     const std::string& is_value() const {
         if (m_rare && !m_rare->is_value.empty()) return m_rare->is_value;
         auto attribute = m_attributes.find("is");
-        return attribute == m_attributes.end() ? empty_string() : attribute->second;
+        return attribute == m_attributes.end() ? empty_string() : attribute->value;
     }
     void set_is_value(std::string value) {
         if (value.empty() && !m_rare) return;
@@ -230,7 +251,7 @@ public:
         // a microsecond for what is a substring scan. Tokenise in place instead.
         auto it = m_attributes.find("class");
         if (it == m_attributes.end()) return false;
-        const std::string& attr = it->second;
+        const std::string& attr = it->value;
         if (class_name.empty()) return false;
 
         size_t pos = 0;
@@ -309,6 +330,13 @@ protected:
     void dump_close(std::ostream& os, const std::string& indent) const override;
 
 private:
+    /// What every change to an attribute does after the list is updated:
+    /// layout, the tree version, a form control's state, and the hook that
+    /// tells a script (the `Attr` objects and MutationObserver).
+    void attribute_changed(const Attribute& attribute, const std::string* old_value);
+    void attribute_removed(const Attribute& attribute, const std::string& old_value);
+
+private:
     /// HTML treats class as a space-separated token list; only ASCII whitespace
     /// separates tokens (a non-breaking space is a legitimate class character).
     static bool is_class_separator(char c) {
@@ -329,8 +357,6 @@ public:
         std::string is_value;
         std::string prefix;
         std::string other_namespace;
-        /// Qualified name and namespace of each attribute that has one.
-        AttributeNamespaces attribute_namespaces;
         /// Layout border widths (stored only when non-zero so Element pays 0 bytes).
         EdgeSizes layout_border;
         /// Weak reference to nested browsing context Document for `<iframe>` layout/paint.

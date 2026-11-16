@@ -4849,7 +4849,7 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                         const auto found = list.find(name);
                         assert((found == list.end()) == (in_model == model.end()));
                         if (found != list.end()) {
-                            assert(found->second == in_model->second);
+                            assert(found->value == in_model->second);
                             assert(found - list.begin() == in_model - model.begin());
                             if (random() % 4 == 0) {
                                 list.erase(found);
@@ -4869,61 +4869,69 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
             }
             std::size_t at = 0;
             for (const auto& item : list) {
-                assert(item == model[at]);
-                assert(list[at] == model[at]);
+                assert(item.name == model[at].first && item.value == model[at].second);
+                assert(list[at].name == model[at].first && list[at].value == model[at].second);
                 ++at;
             }
             assert(at == model.size());
         }
     }
 
-    // 2. The side table of namespaces, against a plain vector.
+    // 2. Attributes are kept by (namespace, local name), so one qualified
+    //    name may be used once in each namespace, and the list keeps the
+    //    order the attributes arrived in. Against a plain vector.
     {
         std::mt19937 random(7);
-        for (int round = 0; round < 100; ++round) {
-            AttributeNamespaces table;
-            struct Row { std::string qualified, uri; };
+        for (int round = 0; round < 40; ++round) {
+            auto element = std::make_shared<Element>("e");
+            struct Row {
+                std::string ns, local, name, value;
+            };
             std::vector<Row> model;
-            const int names = round < 50 ? 10 + round : 300;
-            for (int step = 0; step < 2000; ++step) {
-                const int n = static_cast<int>(random() % names);
+            const int count = round < 20 ? 6 + round : 120;
+            const int steps = round < 20 ? 200 : 2000;
+            for (int step = 0; step < steps; ++step) {
+                const int n = static_cast<int>(random() % count);
                 const std::string local = "a" + std::to_string(n);
-                const std::string qualified = (n % 3 == 0 ? "" : "p" + std::to_string(n % 3) + ":") + local;
-                const auto in_model = std::find_if(model.begin(), model.end(), [&](const Row& row) { return row.qualified == qualified; });
-                switch (random() % 5) {
+                const std::string ns = n % 3 == 0 ? std::string() : "urn:" + std::to_string(n % 4);
+                // A prefix needs a namespace: in no namespace the whole name
+                // is the local name.
+                const std::string name = (ns.empty() || n % 2 == 0 ? "" : "p" + std::to_string(n % 4) + ":") + local;
+                auto found = std::find_if(model.begin(), model.end(),
+                                          [&](const Row& row) { return row.ns == ns && row.local == local; });
+                switch (random() % 4) {
                     case 0: case 1: {
-                        // One namespace per name most of the time; now and then another.
-                        const std::string uri = "urn:" + std::to_string(random() % 8 == 0 ? (n + 1) % 4 : n % 4);
-                        table.set(qualified, uri);
-                        if (in_model == model.end()) model.push_back({qualified, uri});
-                        else in_model->uri = uri;
+                        const std::string value = std::to_string(step);
+                        element->set_attribute_ns(ns, name, value);
+                        if (found == model.end()) model.push_back({ns, local, name, value});
+                        else found->value = value;
                         break;
                     }
                     case 2: {
-                        table.erase(qualified);
-                        if (in_model != model.end()) model.erase(in_model);
-                        break;
-                    }
-                    case 3: {
-                        const std::string* found = table.find(qualified);
-                        assert((found == nullptr) == (in_model == model.end()));
-                        if (found) assert(*found == in_model->uri);
+                        element->remove_attribute_ns(ns, local);
+                        if (found != model.end()) model.erase(found);
                         break;
                     }
                     default: {
-                        // A name has one local part here, so namespace and
-                        // local name find at most one entry.
-                        for (int k = 0; k < 4; ++k) {
-                            const std::string uri = "urn:" + std::to_string(k);
-                            const std::string* found = table.find_expanded(uri, local);
-                            const bool expected = in_model != model.end() && in_model->uri == uri;
-                            assert((found != nullptr) == expected);
-                            if (found) assert(*found == qualified);
+                        const Attribute* attribute = element->find_attribute_ns(ns, local);
+                        assert((attribute != nullptr) == (found != model.end()));
+                        if (attribute) {
+                            assert(attribute->value == found->value);
+                            assert(attribute->namespace_uri() == ns);
+                            assert(attribute->local_name() == local);
                         }
                         break;
                     }
                 }
-                assert(table.size() == model.size());
+                assert(element->attributes().size() == model.size());
+                std::size_t at = 0;
+                for (const Attribute& attribute : element->attributes()) {
+                    assert(attribute.namespace_uri() == model[at].ns);
+                    assert(attribute.local_name() == model[at].local);
+                    assert(attribute.value == model[at].value);
+                    ++at;
+                }
+                assert(at == model.size());
             }
         }
     }
@@ -4950,6 +4958,123 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                    " n.hasAttributeNS('urn:n' + (10000 % 7), 'a10000'), n.getAttribute('p3:a17'), n.attributes[9999].localName].join(' ')").to_string() ==
            "10000 17  true false 17 a9999");
     assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
+}
+
+TEST(attributes_are_kept_by_namespace_and_local_name) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
+    js.notify_document_loaded();
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. One qualified name, two namespaces: both attributes exist, in the
+    //    order they were added, and the name-addressed methods answer about
+    //    the first of them. (The DOM Standard, "set an attribute".)
+    assert(S("var e = document.createElement('div');"
+             "e.setAttributeNS('urn:a', 'x', 'first');"
+             "e.setAttribute('x', 'second');"
+             "e.setAttributeNS('urn:b', 'x', 'third');"
+             "[e.attributes.length, e.getAttribute('x'), e.hasAttribute('x'),"
+             " e.getAttributeNames().join(','),"
+             " e.getAttributeNS('urn:a', 'x'), e.getAttributeNS(null, 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|second|true|x,x|second||third");
+    //    setAttribute changes that first one in place, in its own namespace:
+    //    it does not add, and it does not move the attribute.
+    assert(S("e.setAttribute('x', 'changed');"
+             "[e.attributes.length, e.getAttributeNS('urn:a', 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|changed|third");
+    //    removeAttribute takes the first; toggleAttribute removes the first.
+    assert(S("e.removeAttribute('x'); [e.attributes.length, e.getAttribute('x'), String(e.getAttributeNS('urn:a', 'x')),"
+             " e.getAttributeNames().join(',')].join('|')") ==
+           "1|third|null|x");
+    assert(S("e.toggleAttribute('x'); [e.attributes.length, e.hasAttribute('x'), String(e.getAttributeNS('urn:b', 'x'))].join('|')") ==
+           "0|false|null");
+
+    // 2. Each attribute knows its own namespace, prefix and local name, and
+    //    the list keeps the order even when two names are the same string.
+    assert(S("var n = document.createElementNS('urn:d', 'e');"
+             "n.setAttributeNS('urn:a', 'p:id', '1');"
+             "n.setAttributeNS('', 'id', '2');"
+             "[n.attributes.length, String(n.attributes[0].namespaceURI), String(n.attributes[0].prefix), n.attributes[0].localName,"
+             " String(n.attributes[1].namespaceURI), String(n.attributes[1].prefix), n.attributes[1].localName,"
+             " n.attributes[0].ownerElement === n, n.attributes[0].ownerDocument === document].join('|')") ==
+           "2|urn:a|p|id|null|null|id|true|true");
+
+    // 3. A NamedNodeMap is keyed by qualified name: one own property per
+    //    name, after the indices, not enumerable, and it answers with the
+    //    first attribute of that name.
+    assert(S("var m = document.createElement('div'); m.setAttribute('a', '1'); m.setAttribute('b', '2');"
+             "var map = m.attributes;"
+             "[Object.getOwnPropertyNames(map).join(','), map.hasOwnProperty('a'), map.hasOwnProperty('0'),"
+             " Object.getOwnPropertyDescriptor(map, 'a').enumerable, Object.getOwnPropertyDescriptor(map, '0').enumerable,"
+             " map.a.value, map[1].value, map.length].join('|')") ==
+           "0,1,a,b|true|true|false|true|1|2|2");
+
+    // 4. An Attr is one object per (element, namespace, local name): two
+    //    attributes with one qualified name are two objects, and a removed
+    //    attribute keeps its value and loses its element.
+    assert(S("var d = document.createElement('div');"
+             "d.setAttributeNS('urn:a', 'x', 'one'); d.setAttributeNS('urn:b', 'x', 'two');"
+             "var a1 = d.getAttributeNodeNS('urn:a', 'x'), a2 = d.getAttributeNodeNS('urn:b', 'x');"
+             "[a1 === a2, a1 !== d.getAttributeNodeNS('urn:a', 'x'), d.getAttributeNode('x') === a1,"
+             " String(d.getAttributeNode('x').namespaceURI)].join('|')") ==
+           "false|false|true|urn:a");
+    assert(S("d.removeAttributeNS('urn:a', 'x');"
+             "[a1.value, String(a1.ownerElement), a1.isConnected, d.getAttributeNode('x') === a2].join('|')") ==
+           "one|null|false|true");
+
+    // 5. setAttributeNode returns what it replaced; setAttributeNodeNS keeps
+    //    the replaced attribute's place and takes the new name, so the old
+    //    qualified name is gone and lookups follow the new order.
+    assert(S("var r = document.createElement('div');"
+             "r.setAttribute('keep', 'k'); r.setAttributeNS('urn:t', 'p:id', 'namespaced');"
+             "var made = document.createAttributeNS('urn:t', 'id'); made.value = 'replacement';"
+             "var replaced = r.setAttributeNodeNS(made);"
+             "[replaced.name, replaced.value, String(r.getAttribute('p:id')), r.getAttribute('id'),"
+             " r.getAttributeNS('urn:t', 'id'), r.getAttributeNames().join(',')].join('|')") ==
+           "p:id|namespaced|null|replacement|replacement|keep,id");
+
+    // 6. An HTMLCollection's named properties are own properties too, and
+    //    they do not enumerate.
+    assert(S("var h = document.getElementById('host');"
+             "h.innerHTML = '<i id=\"only\"></i>';"
+             "var list = h.getElementsByTagName('i');"
+             "[Object.getOwnPropertyNames(list).join(','), list.hasOwnProperty('only'), 'only' in list,"
+             " Object.getOwnPropertyDescriptor(list, 'only').enumerable, list.only.id].join('|')") ==
+           "0,only|true|true|false|only");
+
+    // 7. A custom element's attributeChangedCallback and a MutationObserver
+    //    record both see the namespace, which a qualified name alone cannot
+    //    tell apart.
+    assert(S("var seen = [];"
+             "class C extends HTMLElement { static get observedAttributes() { return ['x', 'p:x']; }"
+             "  attributeChangedCallback(name, oldValue, newValue, ns) { seen.push([name, oldValue, newValue, ns].join('~')); } }"
+             "customElements.define('x-c', C);"
+             "var c = document.createElement('x-c'); document.body.appendChild(c);"
+             "c.setAttributeNS('urn:a', 'x', '1'); c.setAttributeNS('urn:b', 'x', '2'); c.removeAttribute('x');"
+             "seen.join('|')") == "x~~1~urn:a|x~~2~urn:b|x~1~~urn:a");
+    assert(S("var records = [];"
+             "var t = document.createElement('div'); document.body.appendChild(t);"
+             "var o = new MutationObserver(function (list) { list.forEach(function (r) {"
+             "  records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); }); });"
+             "o.observe(t, { attributes: true, attributeOldValue: true });"
+             "t.setAttributeNS('urn:a', 'p:x', 'one'); t.setAttributeNS('urn:a', 'p:x', 'two'); t.removeAttributeNS('urn:a', 'x');"
+             "o.takeRecords().forEach(function (r) { records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); });"
+             "records.join('|')") ==
+           "p:x~urn:a~|p:x~urn:a~one|p:x~urn:a~two");
+
+    // 8. importNode copies a detached attribute into the document; adoptNode
+    //    moves one, and returns the same object.
+    assert(S("var other = document.implementation.createDocument('urn:d', 'r', null);"
+             "var attr = other.createAttributeNS('urn:a', 'p:x'); attr.value = 'v';"
+             "var copy = document.importNode(attr);"
+             "[copy !== attr, copy.name, copy.namespaceURI, copy.prefix, copy.localName, copy.value,"
+             " copy.ownerElement, copy.ownerDocument === document, String(attr.ownerDocument === other)].join('|')") ==
+           "true|p:x|urn:a|p|x|v||true|true");
+    assert(S("var a2 = other.createAttribute('plain');"
+             "document.adoptNode(a2) === a2 && a2.ownerDocument === document") == "true");
 }
 
 TEST(xml_http_request_answers_data_urls_and_nothing_else) {
@@ -10854,18 +10979,18 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         while (!model.empty()) {
             const bool front = ((removed_front + removed_back) % 3) != 2;
             const auto at = front ? model.begin() : model.end() - 1;
-            const std::string name = at->first;
+            const std::string name = at->name;
             if ((removed_front + removed_back) % 2 == 0) {
                 auto found = list.find(name);
                 assert(found != list.end());
                 const bool was_front = at == model.begin();
                 const bool was_back = at == model.end() - 1;
                 const std::string next_name = was_front
-                    ? (model.size() > 1 ? std::next(at)->first : std::string())
+                    ? (model.size() > 1 ? std::next(at)->name : std::string())
                     : std::string();
                 auto next = list.erase(found);
                 if (was_front && !next_name.empty()) {
-                    assert(next != list.end() && next->first == next_name);
+                    assert(next != list.end() && next->name == next_name);
                 } else if (was_back) {
                     assert(next == list.end());
                 }
@@ -10876,7 +11001,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             }
             // The model erase uses the name because the list's erase may
             // compact its storage and invalidate the endpoint we read above.
-            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.name == name; });
             assert(model_at != model.end());
             model.erase(model_at);
             assert(list.size() == model.size());
@@ -10884,14 +11009,15 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             assert(list.count(name) == 0);
             assert(list.erase(name) == 0);
             for (std::size_t i = 0; i < model.size(); ++i) {
-                assert(list[i] == model[i]);
-                auto found = list.find(model[i].first);
+                assert(list[i].name == model[i].name && list[i].value == model[i].value);
+                auto found = list.find(model[i].name);
                 assert(found != list.end() && found - list.begin() == static_cast<std::ptrdiff_t>(i));
-                assert(found->second == model[i].second);
+                assert(found->value == model[i].value);
             }
             std::size_t walked = 0;
             for (const auto& item : list) {
-                assert(item == model[walked++]);
+                const Attribute& expected = model[walked++];
+                assert(item.name == expected.name && item.value == expected.value);
             }
             assert(walked == model.size());
             if (!model.empty()) {
@@ -10899,9 +11025,9 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
                 // appended while the ends are being drained; its number must
                 // be greater than every surviving one. Most steps shrink the
                 // model, so this loop terminates.
-                const std::string kept = model.back().first;
+                const std::string kept = model.back().name;
                 list[kept] = "updated";
-                model.back().second = "updated";
+                model.back().value = "updated";
                 assert(list.count(kept) == 1);
                 if ((removed_front + removed_back) % 7 == 0) {
                     const std::string returned = front ? ("front" + std::to_string(removed_front)) : ("back" + std::to_string(removed_back));
@@ -10913,7 +11039,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         }
         assert(list.empty());
         list["after-clear"] = "ok";
-        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].name == "after-clear" && std::as_const(list)[std::size_t{0}].value == "ok");
     }
 
     // Copy and assignment preserve the visible order/values and remain
@@ -10941,7 +11067,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     move_assigned.clear();
     assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
     move_assigned["fresh"] = "1";
-    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].name == "fresh");
 
     // The index can be built after a dead prefix already exists: stay below
     // the scan threshold while erasing the front, grow past it, then search.
@@ -10949,7 +11075,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
     for (int i = 0; i < 10; ++i) late.erase(late.begin());
     for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
-    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].name == "l10");
     assert(late.count("l50") == 1); // builds the index with a nonzero start
     for (int i = 10; i < 51; ++i) {
         assert(late.erase("l" + std::to_string(i)) == 1);
@@ -10974,7 +11100,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     for (int i = 0; i < 50000; ++i) {
         assert(direct.erase("a" + std::to_string(i)) == 1);
         assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
-        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].name == "a" + std::to_string(i + 1));
     }
     const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     assert(direct.empty());
@@ -11516,6 +11642,243 @@ static void test_canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings() {
     assert(interp.eval("pxR").to_number() == 255.0);
     const double pxA = interp.eval("pxA").to_number();
     assert(pxA >= 120.0 && pxA <= 135.0);
+}
+
+static int canvas_lit_pixels(const litebird::CanvasRenderingContext2D& ctx) {
+    int count = 0;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) ++count;
+        }
+    }
+    return count;
+}
+
+static void canvas_ink_extent(const litebird::CanvasRenderingContext2D& ctx, int& min_x, int& max_x, int& min_y,
+                              int& max_y) {
+    min_x = ctx.width();
+    max_x = -1;
+    min_y = ctx.height();
+    max_y = -1;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+}
+
+TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
+    using namespace litebird;
+
+    // 1. The default state and the C++ members.
+    {
+        CanvasRenderingContext2D ctx(80, 40);
+        assert(ctx.font == "10px sans-serif");
+        assert(ctx.text_align == "start");
+        assert(ctx.text_baseline == "alphabetic");
+    }
+
+    // 2. measure_text: empty measures zero, width grows with glyph count,
+    //    and the metric boxes are populated.
+    {
+        CanvasRenderingContext2D ctx(400, 40);
+        const float empty_w = ctx.measure_text("").width;
+        const float narrow = ctx.measure_text("i").width;
+        const float wide = ctx.measure_text("WWWWWWWW").width;
+        assert(empty_w == 0.0f);
+        assert(narrow > 0.0f);
+        assert(wide > narrow);
+        const auto m = ctx.measure_text("Hello");
+        assert(m.width > 0.0f);
+        assert(m.actual_bounding_box_right > 0.0f);
+        assert(m.actual_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_descent > 0.0f);
+        assert(m.em_height_ascent == m.font_bounding_box_ascent);
+    }
+
+    // 3. fill_text paints with the current fill style.
+    {
+        CanvasRenderingContext2D ctx(120, 50);
+        ctx.font = "20px sans-serif";
+        ctx.fill_style = Color(255, 0, 0);
+        assert(canvas_lit_pixels(ctx) == 0);
+        ctx.fill_text("Hi", 5.0f, 40.0f);
+        assert(canvas_lit_pixels(ctx) > 10);
+    }
+
+    // 4. textAlign start vs center: the same pen x-position shifts the ink.
+    {
+        CanvasRenderingContext2D a(140, 40), b(140, 40);
+        a.font = "16px sans-serif";
+        b.font = "16px sans-serif";
+        a.text_align = "start";
+        b.text_align = "center";
+        a.fill_text("X", 70.0f, 30.0f);
+        b.fill_text("X", 70.0f, 30.0f);
+        int amin, amax, ay0, ay1, bmin, bmax, by0, by1;
+        canvas_ink_extent(a, amin, amax, ay0, ay1);
+        canvas_ink_extent(b, bmin, bmax, by0, by1);
+        assert(amax > amin && bmax > bmin);
+        assert(bmin < amin); // centered ink starts left of left-aligned ink
+        assert(bmax <= amax); // and ends no further right
+    }
+
+    // 5. textBaseline changes the vertical placement for the same y.
+    {
+        CanvasRenderingContext2D top_ctx(120, 60), alpha_ctx(120, 60), bottom_ctx(120, 60);
+        top_ctx.font = "16px sans-serif";
+        alpha_ctx.font = "16px sans-serif";
+        bottom_ctx.font = "16px sans-serif";
+        top_ctx.text_baseline = "top";
+        alpha_ctx.text_baseline = "alphabetic";
+        bottom_ctx.text_baseline = "bottom";
+        top_ctx.fill_text("Xg", 5.0f, 30.0f);
+        alpha_ctx.fill_text("Xg", 5.0f, 30.0f);
+        bottom_ctx.fill_text("Xg", 5.0f, 30.0f);
+        int t0, t1, t2, t3, a0, a1, a2, a3, b0, b1, b2, b3;
+        canvas_ink_extent(top_ctx, t0, t1, t2, t3);
+        canvas_ink_extent(alpha_ctx, a0, a1, a2, a3);
+        canvas_ink_extent(bottom_ctx, b0, b1, b2, b3);
+        assert(t2 > a2); // "top" ink starts lower than baseline-aligned ink
+        assert(b3 <= 31); // "bottom" ink ends at the em box bottom (the y passed), allowing ink overshoot
+    }
+
+    // 6. maxWidth condenses the run horizontally.
+    {
+        CanvasRenderingContext2D natural(320, 40), condensed(320, 40);
+        natural.font = "16px sans-serif";
+        condensed.font = "16px sans-serif";
+        natural.fill_text("WWWWWWWWWW", 0.0f, 30.0f);
+        condensed.fill_text("WWWWWWWWWW", 0.0f, 30.0f, 30.0f);
+        int n0, n1, n2, n3, c0, c1, c2, c3;
+        canvas_ink_extent(natural, n0, n1, n2, n3);
+        canvas_ink_extent(condensed, c0, c1, c2, c3);
+        assert(n1 > 0 && c1 > 0);
+        assert(c1 < n1);    // condensed ink is narrower
+        assert(c1 <= 36);   // and stays (almost) inside the requested width
+    }
+
+    // 7. strokeText paints an outline; a wider lineWidth paints more of it.
+    {
+        CanvasRenderingContext2D thin(200, 40), thick(200, 40);
+        thin.font = "24px sans-serif";
+        thick.font = "24px sans-serif";
+        thin.line_width = 1.0f;
+        thick.line_width = 6.0f;
+        thin.stroke_text("MMMM", 2.0f, 30.0f);
+        thick.stroke_text("MMMM", 2.0f, 30.0f);
+        const int thin_px = canvas_lit_pixels(thin);
+        const int thick_px = canvas_lit_pixels(thick);
+        assert(thin_px > 0);
+        assert(thick_px > thin_px);
+    }
+
+    // 8. A gradient fillStyle paints along the text, not flat.
+    {
+        CanvasRenderingContext2D g(400, 40);
+        g.font = "20px sans-serif";
+        auto grad = g.create_linear_gradient(0.0f, 0.0f, 400.0f, 0.0f);
+        grad->add_color_stop(0.0f, Color(255, 0, 0));
+        grad->add_color_stop(1.0f, Color(0, 0, 255));
+        g.fill_gradient = grad;
+        g.fill_text("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", 0.0f, 30.0f);
+        int min_x, max_x, min_y, max_y;
+        canvas_ink_extent(g, min_x, max_x, min_y, max_y);
+        assert(max_x > min_x + 50);
+        // Find a strongly covered pixel in the left third and in the right third.
+        auto strong_pixel = [&](int x0, int x1, int& r, int& b) {
+            for (int x = x0; x < x1; ++x) {
+                for (int y = 0; y < g.height(); ++y) {
+                    const uint32_t px = g.image_data()->get_pixel(x, y);
+                    if ((px >> 24) == 255) {
+                        const Color c = Color::from_argb(px);
+                        r = c.r;
+                        b = c.b;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        int lr = 0, lb = 0, rr = 0, rb = 0;
+        assert(strong_pixel(min_x, min_x + 60, lr, lb));
+        assert(strong_pixel(max_x - 60, max_x + 1, rr, rb));
+        assert(lr > lb); // left ink is reddish
+        assert(rb > rr); // right ink is bluish
+    }
+
+    // 9. save()/restore() round-trip the text state.
+    {
+        CanvasRenderingContext2D c(40, 20);
+        c.font = "bold 18px sans-serif";
+        c.text_align = "end";
+        c.text_baseline = "top";
+        c.save();
+        c.font = "9px sans-serif";
+        c.text_align = "center";
+        c.text_baseline = "bottom";
+        assert(c.font == "9px sans-serif");
+        c.restore();
+        assert(c.font == "bold 18px sans-serif");
+        assert(c.text_align == "end");
+        assert(c.text_baseline == "top");
+    }
+
+    // 10. End-to-end through the JS bindings: setters validate, text renders.
+    auto doc = HtmlParser::parse("<body><canvas id='c' width='120' height='60'></canvas></body>");
+    JsInterpreter interp(doc);
+    interp.eval(R"(
+        var ctx = document.getElementById('c').getContext('2d');
+        ctx.font = 'bold 20px sans-serif';
+        var fontAfterSet = ctx.font;
+        ctx.font = 'totally not a font';
+        var fontAfterInvalid = ctx.font;
+        ctx.textAlign = 'right';
+        ctx.textAlign = 'bogus-align';
+        var alignAfterInvalid = ctx.textAlign;
+        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'bogus-baseline';
+        var baselineAfterInvalid = ctx.textBaseline;
+        ctx.fillStyle = '#00ff00';
+        ctx.fillText('Hello', 5, 40);
+        ctx.fillText('Hello', 5, 40, 4);
+        ctx.strokeText('Hello', 70, 40);
+        ctx.fillText();
+        var m = ctx.measureText('Hello');
+        var w = m.width;
+        var wide = ctx.measureText('WWWWWWWW').width;
+        var narrow = ctx.measureText('i').width;
+        var boxRight = m.actualBoundingBoxRight;
+        var boxLeft = m.actualBoundingBoxLeft;
+        var boxAsc = m.actualBoundingBoxAscent;
+        var fontAsc = m.fontBoundingBoxAscent;
+        var alphaBase = m.alphabeticBaseline;
+        var emptyW = ctx.measureText('').width;
+    )");
+    assert(interp.eval("fontAfterSet").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("fontAfterInvalid").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("alignAfterInvalid").to_string() == "right");
+    assert(interp.eval("baselineAfterInvalid").to_string() == "middle");
+    assert(interp.eval("w").to_number() > 0.0);
+    assert(interp.eval("wide").to_number() > interp.eval("narrow").to_number());
+    assert(interp.eval("boxRight").to_number() > 0.0);
+    assert(interp.eval("boxLeft").to_number() <= interp.eval("boxRight").to_number());
+    assert(interp.eval("boxAsc").to_number() >= 0.0);
+    assert(interp.eval("fontAsc").to_number() > 0.0);
+    assert(interp.eval("alphaBase").to_number() == 0.0);
+    assert(interp.eval("emptyW").to_number() == 0.0);
+
+    auto canvas_el = doc->get_element_by_id("c");
+    assert(canvas_el != nullptr);
+    auto ctx_ptr = canvas_el->canvas_context();
+    assert(ctx_ptr != nullptr);
+    assert(canvas_lit_pixels(*ctx_ptr) > 5); // both fill and stroke drew green pixels
 }
 
 static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
@@ -12885,6 +13248,269 @@ TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset) {
     fs::remove_all(tmp_dir);
 }
 
+TEST(customizable_select_scope_and_formatting_rules) {
+    using namespace litebird;
+
+    // 1. <select> is a default scope boundary: outer </font> cannot run
+    //    adoption agency across <select>.
+    const std::string font_select = tree_of("<font><select><option>a</option></font></select>");
+    assert(font_select ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <font>\n"
+        "|       <select>\n"
+        "|         <option>\n"
+        "|           \"a\"\n");
+
+    // 2. Outer </p> inside <select> cannot close <p> outside <select>.
+    const std::string p_select = tree_of("<!doctype html><p><select><div></p></select>x");
+    assert(contains(p_select,
+        "|     <p>\n"
+        "|       <select>\n"
+        "|         <div>\n"
+        "|           <p>\n"
+        "|       \"x\"\n"));
+
+    // 3. A nested <select> finds the enclosing <select> in scope across <b><option>
+    //    (and <button>), closes it, and reconstructs active formatting outside.
+    const std::string nested = tree_of("<select><b><option><select><option></b></select>X");
+    assert(nested ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <b>\n"
+        "|         <option>\n"
+        "|     <b>\n"
+        "|       <option>\n"
+        "|     \"X\"\n");
+
+    // 4. Reconstruct active formatting elements inside "in select" for
+    //    <option>, <optgroup>, <hr>, and character tokens.
+    assert(tree_of("<select><div><i></div><option>option") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <div>\n"
+        "|         <i>\n"
+        "|       <i>\n"
+        "|         <option>\n"
+        "|           \"option\"\n");
+
+    const std::string char_reconstruct = tree_of("<!doctype html><select><div><i></div>abc");
+    assert(contains(char_reconstruct,
+        "|       <i>\n"
+        "|         \"abc\"\n"));
+
+    const std::string optgroup_reconstruct = tree_of("<!doctype html><select><div><i></div><optgroup><option>x");
+    assert(contains(optgroup_reconstruct,
+        "|       <i>\n"
+        "|         <optgroup>\n"
+        "|           <option>\n"
+        "|             \"x\"\n"));
+
+    const std::string hr_reconstruct = tree_of("<!doctype html><select><div><i></div><hr>");
+    assert(contains(hr_reconstruct,
+        "|       <i>\n"
+        "|         <hr>\n"));
+
+    // 5. <keygen> and <textarea> remain inside <select> (document & fragment),
+    //    while <input> still closes <select> in documents and is ignored in fragments.
+    assert(tree_of("<select><keygen>") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <keygen>\n");
+
+    assert(fragment_tree_of("<keygen><option>", "select") ==
+        "| <keygen>\n"
+        "| <option>\n");
+
+    assert(fragment_tree_of("<textarea><option>", "select") ==
+        "| <textarea>\n"
+        "|   \"<option>\"\n");
+
+    assert(tree_of("<!doctype html><select><input>X") ==
+        "| <!DOCTYPE html>\n"
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|     <input>\n"
+        "|     \"X\"\n");
+
+    assert(fragment_tree_of("<input><option>", "select") ==
+        "| <option>\n");
+}
+
+TEST(select_selectedcontent_cloning_and_edge_cases) {
+    using namespace litebird;
+
+    // 1. Unclosed trailing <option> clones into <selectedcontent> at EOF,
+    //    including adoption-agency-rearranged children.
+    assert(tree_of("<select><button><selectedcontent></button><option>X") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>x<i>i<b>ib</i>b") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"x\"\n"
+        "|           <i>\n"
+        "|             \"i\"\n"
+        "|             <b>\n"
+        "|               \"ib\"\n"
+        "|           <b>\n"
+        "|             \"b\"\n"
+        "|       <option>\n"
+        "|         \"x\"\n"
+        "|         <i>\n"
+        "|           \"i\"\n"
+        "|           <b>\n"
+        "|             \"ib\"\n"
+        "|         <b>\n"
+        "|           \"b\"\n");
+
+    // 2. First enabled <option> vs explicit `selected` attribute.
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         \"Y\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option selected>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"Y\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         selected=\"\"\n"
+        "|         \"Y\"\n");
+
+    const std::string first_explicit =
+        tree_of("<!doctype html><select><button><selectedcontent></button><option selected>X<option>Y");
+    assert(contains(first_explicit, "<selectedcontent>\n|           \"X\"\n"));
+
+    // 3. Disabled <option> / <optgroup disabled>, <datalist>, and <template> isolation.
+    const std::string disabled_opt = tree_of(
+        "<!doctype html><select><button><selectedcontent></button><option disabled>X<option>Y");
+    assert(contains(disabled_opt, "<selectedcontent>\n|           \"Y\"\n"));
+
+    const std::string disabled_grp = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<optgroup disabled><option>A</option></optgroup><option>B</option></select>");
+    assert(contains(disabled_grp, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_datalist = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<datalist><option>D</option></datalist><option>B</option></select>");
+    assert(contains(with_datalist, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_template = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<template><option>T</option></template><option>B</option></select>");
+    assert(contains(with_template, "<selectedcontent>\n|           \"B\"\n"));
+
+    // 4. multiple / size>1 / no options preserve fallback content.
+    const std::string fallback_multi = tree_of(
+        "<!doctype html><select multiple><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_multi, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    const std::string fallback_size2 = tree_of(
+        "<!doctype html><select size='2'><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_size2, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    // 5. <selectedcontent> appearing after <option>, plus sibling and <template>/DOM-nested <select> isolation.
+    const std::string after_option = tree_of(
+        "<!doctype html><select><option>X</option><button><selectedcontent></selectedcontent></button></select>");
+    assert(contains(after_option, "<selectedcontent>\n|           \"X\"\n"));
+
+    auto sibling_doc = HtmlParser::parse(
+        "<!doctype html>"
+        "<select id='s1'><button><selectedcontent id='sc1'></button><option>First</option></select>"
+        "<select id='s2'><button><selectedcontent id='sc2'></button><option>Second</option></select>"
+        "<select id='s3'><button><selectedcontent id='sc3'></button>"
+        "<template><select><button><selectedcontent id='sct'></button><option>Tpl</option></select></template>"
+        "<option>Outer</option></select>");
+    auto sc1 = sibling_doc->get_element_by_id("sc1");
+    auto sc2 = sibling_doc->get_element_by_id("sc2");
+    auto sc3 = sibling_doc->get_element_by_id("sc3");
+    assert(sc1 && sc2 && sc3);
+    assert(sc1->text_content() == "First");
+    assert(sc2->text_content() == "Second");
+    assert(sc3->text_content() == "Outer");
+
+    // 6. <option> containing <template> clones its template contents cleanly,
+    //    and <script> mutation / DOM-nested <select> during parse re-evaluates accurately.
+    const std::string with_tpl_child = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<option><template><span>T</span></template>Label</option></select>");
+    assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
+
+    {
+        auto doc = std::make_shared<Document>();
+        JsInterpreter js(doc);
+        js.load_page(
+            "<!doctype html><select><button><selectedcontent id='sc'></button>"
+            "<option id='o1'>First</option>"
+            "<div id='slot'></div>"
+            "<script>"
+            "document.getElementById('o1').setAttribute('selected', '');"
+            "var inner = document.createElement('select');"
+            "var btn = document.createElement('button');"
+            "var sc2 = document.createElement('selectedcontent');"
+            "sc2.id = 'sc2'; btn.appendChild(sc2); inner.appendChild(btn);"
+            "var opt = document.createElement('option'); opt.textContent = 'Inner'; inner.appendChild(opt);"
+            "document.getElementById('slot').appendChild(inner);"
+            "</script>"
+            "<option>Second</option></select>",
+            true);
+        assert(doc->get_element_by_id("sc")->text_content() == "First");
+        assert(doc->get_element_by_id("sc2")->text_content().empty());
+    }
+
+    // 7. Stress: 5,000 options + deeply nested markup inside <option> stay fast
+    //    and respect kMaxTreeDepth without overflowing the native stack.
+    std::string deep_select = "<!doctype html><select><button><selectedcontent id='sc'></button><option id='deep'>";
+    for (int i = 0; i < 600; ++i) deep_select += "<div>";
+    deep_select += "DeepPick";
+    for (int i = 0; i < 600; ++i) deep_select += "</div>";
+    deep_select += "</option>";
+    for (int i = 0; i < 5000; ++i) deep_select += "<option>Other</option>";
+    deep_select += "</select>";
+    auto deep_doc = HtmlParser::parse(deep_select);
+    auto deep_sc = deep_doc->get_element_by_id("sc");
+    assert(deep_sc && deep_sc->text_content() == "DeepPick");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -12957,6 +13583,7 @@ int main() {
     RUN_TEST(xml_dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(selectors_know_namespaces);
     RUN_TEST(attribute_lists_keep_their_order_and_stay_fast);
+    RUN_TEST(attributes_are_kept_by_namespace_and_local_name);
     RUN_TEST(xml_http_request_answers_data_urls_and_nothing_else);
     RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(ranges_follow_the_tree);
@@ -13069,6 +13696,7 @@ int main() {
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
+    RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
 
@@ -13092,6 +13720,10 @@ int main() {
     RUN_TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders);
     RUN_TEST(html_meta_charset_prescan_and_xml_encname_multibyte_decoding);
     RUN_TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset);
+
+    // Phase 49: customizable <select> content and <selectedcontent> cloning.
+    RUN_TEST(customizable_select_scope_and_formatting_rules);
+    RUN_TEST(select_selectedcontent_cloning_and_edge_cases);
 
     // Phase 50: CSS Color 4/5 color spaces, OKLCH gamut mapping, color-mix(), relative colors, light-dark().
     RUN_TEST(css_color4_spaces_gamut_and_serialization);

@@ -4401,6 +4401,7 @@ and jsdom's (all of these are cases of `compiled.dat`):
 | A second instance of the class made while it is being upgraded | Before the constructor reached its interface: the inner instance is the element being upgraded, and the constructor's own request is the one refused. After: the inner one is refused. For a class and for a compiled constructor alike |
 | The constructor throws after it got its element | The upgrade fails; later constructions get elements of their own |
 | A class whose parent is `Map`, `Error`, `Array`, `Text` or `DocumentFragment`, given to `customElements.define` | `this` in its constructor is a map (an error, an array, a text node) of its own; the element is not touched, and its upgrade fails |
+| A frame (Phase 42 gave each its own interfaces and registry; unit suite only, jsdom does not load the frame) | The interface that is given an element is the one of the element's realm: a compiled constructor on the frame's `HTMLElement` upgrades an element of the frame, and the page can define the same name with another. One that asks the page's `HTMLElement` for an element of the frame gets none (`Illegal constructor`): the standard looks the definition up in the registry of the interface that is called |
 | The constructor reaches its interface from the body of a generator or of an async function | The same element, though that body runs on another thread. A generator that was started during an upgrade and is resumed after it makes an element of its own |
 
 **What is left** is in how `run_upgrade` calls the constructor, which is in

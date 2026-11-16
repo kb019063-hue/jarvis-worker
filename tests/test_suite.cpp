@@ -12854,6 +12854,46 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     assert(text("[$('lategen') instanceof LateGen, afterwards instanceof LateGen, afterwards !== $('lategen'), "
                 "afterwards.localName, afterwards.isConnected, new Gen().made, new Async().made].join()") ==
            "true,true,true,x-late-gen,false,gen,async");
+
+    // A frame has interfaces and a registry of its own (Phase 42), and the
+    // interface that is given an element is the one of the element's realm.
+    // A compiled constructor on the frame's HTMLElement upgrades an element
+    // of the frame; the same name can be defined in the page with another
+    // constructor; and one that asks the page's HTMLElement for an element
+    // of the frame gets none, because the standard looks the definition up
+    // in the registry of the interface that is called. An upgrade in the
+    // frame can make an element of the page on the way.
+    js.eval_ast(R"(
+        var frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        var fw = frame.contentWindow, fdoc = frame.contentDocument;
+        var FOld = inherit(function () { var self = Reflect.construct(fw.HTMLElement, [], new.target); self.made = 'frame'; return self; }, fw.HTMLElement);
+        fw.customElements.define('x-fold', FOld);
+        fdoc.body.innerHTML = '<x-fold></x-fold>';
+        var inFrame = fdoc.body.firstChild;
+        var POld = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'page'; return self; }, HTMLElement);
+        customElements.define('x-fold', POld);
+        host.innerHTML = '<x-fold></x-fold>';
+        var inPage = host.firstChild;
+        var Cross = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'cross'; return self; }, HTMLElement);
+        fw.customElements.define('x-cross', Cross);
+        var across = [];
+        var Both = inherit(function () {
+            var other = new POld(), self = Reflect.construct(fw.HTMLElement, [], new.target);
+            across.push(other !== self, other.made, other.ownerDocument === document);
+            self.made = 'both';
+            return self;
+        }, fw.HTMLElement);
+        fw.customElements.define('x-both', Both);
+        fdoc.body.innerHTML = '<x-cross></x-cross><x-both></x-both>';
+    )");
+    assert(text("[fw.HTMLElement !== HTMLElement, inFrame.made, inFrame instanceof FOld, inFrame.matches(':defined'), new "
+                "FOld().ownerDocument === fdoc, fdoc.createElement('x-fold').made, inPage.made, inPage instanceof POld, "
+                "inPage instanceof FOld].join()") ==
+           "true,frame,true,true,true,frame,page,true,false");
+    assert(text("[fdoc.body.firstChild.made, fdoc.body.firstChild.matches(':defined'), fdoc.body.lastChild.made, "
+                "fdoc.body.lastChild instanceof Both, across.join()].join()") ==
+           ",false,both,true,true,page,true");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {

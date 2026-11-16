@@ -61,6 +61,7 @@ The rest are documented with enough detail to act on.
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
 | 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
+| 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 
 ---
@@ -1319,6 +1320,10 @@ top and overflows, the way CSS 2.1 9.5.1 handles it. One pre-existing
 expectation codified the old quantization: a 250-pixel float C below floats
 that end at 89.5 used to land at 90 (the slide's one-pixel step) and now
 lands exactly at 89.5.
+
+Phase 48 subsequently indexed these nonempty bands for placement: the same
+10,000-float page takes 0.096 s end-to-end rather than 5.244 s on the
+Phase 48 baseline, without changing its positions (finding 54).
 
 Removing the first child moves every other child up, because children are a
 vector. The spaces were trimmed one character at a time from the front of a
@@ -3463,6 +3468,18 @@ read the text it decodes to. `XMLSerializer` does not consult
 already-parsed document is not modelled, and the prescan is one pass over the
 first 1,024 bytes with none of a browser's streaming. See `AGENTS.md`.
 
+## Finding 54 — repeated sized-float band sweeps (Phase 48)
+
+The old correctness repair (finding 28) had already removed the 512-step cap
+and placed every float at the exact first fitting band edge; its remaining
+performance problem was rebuilding and sorting every prior nonempty band's
+endpoints for each new sized float. Phase 48 keeps that placement behavior,
+but indexes constant-capacity vertical intervals with a treap that can skip
+whole subtrees without a fitting edge. See `ARCHITECTURE.md`, Phase 48, for
+the generator, exact baseline/new timings, differential command and the
+remaining O(number of intersecting intervals) insertion cost. No table-layout,
+encoding, Canvas, or JavaScript semantics were changed.
+
 ## 55. ✅ `<select>` content and `<selectedcontent>` cloning followed pre-2025 rules (Phase 49)
 
 **The hole.** Litebird parsed `<select>` using the pre-2025 HTML rules:
@@ -3500,7 +3517,7 @@ the tree builder to the current WHATWG HTML `<select>` rules:
 **Verification.** `make conformance` **1792/1792 (100.0%)** across all 57
 html5lib `.dat` files (`webkit02.dat` 49/49, `tests1.dat` 112/112,
 `tests_innerHTML_1.dat` 81/81, `tests7.dat` 34/34); CI conformance floor
-raised `1781 -> 1792`. `make test` **179/179** suites (adding
+raised `1781 -> 1792`. `make test` **180/180** suites (adding
 `customizable_select_scope_and_formatting_rules` and
 `select_selectedcontent_cloning_and_edge_cases`). `make js-conformance`
 **926/940**, `make dom-conformance` **644/644**, `make url-conformance`
@@ -3511,7 +3528,7 @@ reduced patterns all matching current HTML `<select>` element retention / scope
 boundary vs `parse5`'s legacy drops), `make verify-media` **35/35**,
 `make fuzz-media` **1800/1800**, `make diff-strings` **50485/50580** (`95`
 known Unicode diffs), `make deep` **1332/1332** runs at 200k depth (0 failed),
-`make tsan` green, and ASan+UBSan (`build-asan`) green on all 179 unit suites,
+`make tsan` green, and ASan+UBSan (`build-asan`) green on all 180 unit suites,
 tree-construction (`1792/1792`), DOM (`644/644`), URL (`1188/1188`), JS
 (`925/940`), WPT (`7968/8009` on merged CI/Release floor), `fuzz_parser` (400),
 `fuzz_pipeline` (400), `fuzz_xml` (600), `verify-media` (35), `fuzz-media`

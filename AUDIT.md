@@ -39,12 +39,12 @@ The rest are documented with enough detail to act on.
 | 23 | 1.2% of 67,545 generated expressions disagreed with Node | **High** | ✅ Fixed where pages meet it (Phase 23); 0.15% left |
 | 24 | `node.appendChild(node)` ended the process, and so did any tree deeper than the stack: 300,000 nested `<div>` were a `SIGSEGV` | **High** | ✅ Fixed (Phase 25): cycles are refused, the parser stops nesting at 512, nothing that walks the DOM recurses |
 | 25 | A string was copied on every read: loops over long strings were quadratic | **High (perf)** | ✅ Fixed (Phase 24) |
-| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | 🟡 Lookbehind fixed (Phase 24); repeated groups still limited |
+| 26 | Regular expressions over long input: quadratic lookbehind, limits on repeated groups | **Medium** | ✅ Fixed: lookbehind in Phase 24; bytecode VM on explicit heap stack in Phase 37 (finding 42; 30M catastrophic-backtracking step guard kept) |
 | 27 | Pages hostile by size: a crash in an unclosed `calc(`, a 60-byte page that crashed the parser, bitmaps as large as the page asked for, loops that cost the square of their input | **High** | ✅ Fixed (Phase 25) |
 | 28 | A block inside an inline box is not laid out; many sized floats in one box and a few other inputs still cost the square of their length | **Medium** | ✅ Fixed: block-in-inline split in Phase 36; float placement rewritten (band-edge sweep, exact landing, no step cap). The remaining inputs are smaller loops |
 | 29 | About one random page in 115 got another tree than an independent parser builds: an end tag that meets an open SVG or MathML element, `</button>` with an element still open inside, and three smaller things | **Medium** | ✅ Fixed (Phase 26) |
 | 30 | `<br/>` closed the paragraph it stood in: a void element written with a slash closed its parent. `innerHTML` parsed everything as the content of a `<body>`, so a table filled through it came out as loose text. Fourteen smaller things, most of them with no case in the corpus | **High** | ✅ Fixed (Phase 26) |
-| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27): 572 of 572; URL data 1,188 of 1,188. Open: XML in `DOMParser`, date inputs, `el.style` shorthands, layout numbers |
+| 31 | The DOM a script sees: 61 of 572 cases recorded from jsdom passed. `querySelector('ul li')` found nothing, `classList`, `dataset`, `children`, `closest`, `append`, `new CustomEvent`, `location`, `getComputedStyle` did not exist, `innerHTML` read back text unescaped, nothing was an `instanceof` anything. URLs were resolved by cutting strings: `?q=1` on `/app/page.html` gave `/app/?q=1`. Scripts ran after the whole page was parsed | **Critical** | ✅ Fixed (Phase 27/28/37): 644 of 644; URL data 1,188 of 1,188; date inputs & `el.style` shorthands fixed in Phase 37. Open: layout numbers in `getComputedStyle`, `sheet.cssRules`, `document.write`, SVG DOM |
 | 32 | Tables could not span: `colspan` and `rowspan` were read by nothing, `rowspan="0"` was ignored, a spanning cell pushed no column widths, `border-collapse` and `border-spacing` did not exist, a cell with a border lost it (cells were laid out directly instead of through `layout()`), and a percentage width inside a cell resolved against the column instead of the table | **Medium** | ✅ Fixed (Phase 29), re-landed from PR #16 |
 | 33 | Deleting from a large property map rebuilt the index on every `delete`, and `shift()` moved the whole array tail each call | **High (perf)** | ✅ Fixed (Phase 30) |
 | 35 | CSS trim sites erased the first character repeatedly, shifting the whole remainder; 300,000 spaces cost seconds in selectors, grid, filters, durations and transforms | **Medium (perf)** | ✅ Fixed (Phase 31); the separate finding-28 layout costs remain open (its tokenizer cost was fixed in Phase 39) |
@@ -54,6 +54,7 @@ The rest are documented with enough detail to act on.
 | 39 | `:nth-child(2n + 1)` read a sign separated from its digits by spaces as offset 0, and invalid formulas silently defaulted | **Medium** | ✅ Fixed; `:nth-of-type()` shares the fix |
 | 40 | Removing attributes from the front of a long list shifted both the item vector and the index-number vector; 50,000 front removals took seconds while the back was milliseconds | **Medium (perf)** | ✅ Fixed (Phase 35); middle erases remain (the tokenizer repeated-name cost was fixed in Phase 39) |
 | 41 | A function could not be a prototype: `Object.getPrototypeOf(Derived)` was not `Base` and could not be called, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, `Function.prototype` was an object. Classes compiled by Babel and TypeScript stopped at their first class; every `assert_throws_js` of web-platform-tests failed | **High** | ✅ Fixed (Phase 34). Open: `new.target` in a parent's constructor, `Symbol.species`, `Symbol.hasInstance`, bound functions are never collected |
+| 42 | Repeated regex groups overflowed the stack, modern CSS cascade/L4 selectors/units/MQ L4 were missing (and deep CSS blocks/selectors hit stack or quadratic bounds), `el.style` kept shorthands whole, and HTML5 date/time inputs acted as text inputs | **High** | ✅ Fixed (Phase 37) |
 | 43 | Real-web raster/vector rendering gaps: no JPEG or GIF decoder, incomplete Canvas 2D CTM/path/stroke/clip/accessors, and missing SVG paths/arcs/gradients/`<use>`/`<clipPath>` | **High** | ✅ Fixed (Phase 38); `ImageDecoder.cpp` dispatch wired in Phase 36; WebP/AVIF & text remain open |
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
@@ -1078,7 +1079,7 @@ reads it one character at a time, and some results are 90,000 characters.
 **Not part of this.** The audit's first table had two rows that are the same
 shape in other containers, and both are fixed in finding 33 (Phase 30).
 
-## 26. 🟡 Regular expressions over long input: lookbehind fixed, repeated groups still limited
+## 26. ✅ Regular expressions over long input: lookbehind fixed (Phase 24), bytecode VM removes repeated-group recursion (Phase 37)
 
 Found while testing finding 25. With the string no longer the cost, the
 matcher's own limits showed.
@@ -1118,7 +1119,15 @@ backtracking state on the heap instead of the native stack, which means
 compiling the expression and running it on an explicit stack: a rewrite of
 the matcher, not a patch.
 
-**Open: the step limit.** A match is abandoned after 30 million steps with
+**Fixed in Phase 37 (finding 42).** `src/js/BuiltinsRegExp.cpp` now compiles
+patterns to bytecode instructions (`InstOp`) executed iteratively by `exec_vm()`
+over an explicit heap `backtrack_stack`, with iterative AST node destruction so
+deeply nested non-capturing groups (`(?:` × 250) and 100,000+ repeated-group
+matches succeed without `RangeError`. Patterns nested deeper than
+`kMaxCompilerDepth` (1,000) still raise `SyntaxError`, and the 30-million
+`kMaxMatchSteps` guard remains.
+
+**The step limit (kept intentionally).** A match is abandoned after 30 million steps with
 the same `RangeError`. `/.*y/` on a line of 20,000 characters with no `y`
 needs 200 million; it throws after 0.2 s here and answers `false` after 0.46 s
 in Node. (Node is quadratic there too: 2 s at 40,000 characters, 39 s at
@@ -2439,8 +2448,131 @@ tree, in the sandbox.
   1702; web-platform-tests 4658 of 5192; 1,000 generated documents and 1,000
   round trips; `fuzz: 400 mutations, 0 finding(s)`, `pipeline fuzz: 400 runs
   … 0 finding(s)`, `fuzz xml: 600 mutations … 0 finding(s)`; `882 runs over
-  315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
+  `882 runs over 315 pages at depth 10000 on a 2 MB stack, 0 failed`. No report from either
   sanitizer. It takes 19 minutes here.
+
+---
+
+## 42. ✅ Iterative RegExp bytecode VM, CSS L4 cascade/selectors/units, CSSOM `el.style` shorthands, and HTML5 date/time inputs
+
+**What was wrong.**
+1. **Repeated-group regex recursion (finding 26):** `BuiltinsRegExp.cpp` used
+   recursive CPS `Matcher` lambdas and recursive AST node `~Node()` destructors,
+   failing with `RangeError` past ~12,000–21,800 group iterations and risking
+   native stack overflow on deeply nested pattern ASTs.
+2. **Modern CSS cascade, selectors, units, and deep-input bounds:** `CssParser`,
+   `StyleSheet`, and `StyleResolver` lacked child/sibling combinators (`>`,
+   `+`, `~`), selector lists (`:is()`, `:where()`, multi-argument `:not()`,
+   `:host`), `@layer` statement/block precedence, `@supports` feature checks,
+   Media Queries Level 4 ranges (`400px <= width <= 1000px`) and `not`/`and`/
+   `or`, math functions (`min()`, `max()`, `clamp()`), dynamic viewport units
+   (`dvh`, `dvw`, `vmax`), percentage `border-radius`, and `:root` font-size
+   inheritance (`rem`). In addition, `parse_stylesheet_blocks` and
+   `match_selector_impl` recursed on nested `{}` blocks and long selector
+   chains, and unpruned `AllDescendant` matching took quadratic time when a
+   page had a descendant selector whose length matched a 200,000-element chain.
+3. **Inline `el.style` CSSOM gap (finding 31 / `inline-style.js`):**
+   `DomStyleBindings.cpp` stored shorthands (`flex`, `overflow`, `inset`, `gap`,
+   `border-radius`, `background`, `transition`, `text-decoration`, `list-style`,
+   `outline`, `margin`, `padding`, `border`, `font`) unexpanded, omitted
+   canonical `cssText`/`length`/`item()`/`removeProperty()`/`setProperty(..., 'important')`
+   and `--*` custom-property normalization, and ignored vendor aliases
+   (`-webkit-*`, `-moz-*`, `-ms-*`, `cssFloat`).
+4. **HTML5 date/time `<input>` behavior (finding 31 / `dates-and-svg.js`):**
+   `date`, `time`, `month`, `week`, and `datetime-local` inputs behaved like
+   plain text inputs without calendar/leap-year/ISO-week sanitization,
+   `valueAsDate`, `valueAsNumber`, `stepUp()`/`stepDown()`, or
+   `min`/`max`/`step` constraint validation.
+
+**The fixes.**
+- **RegExp VM (`src/js/BuiltinsRegExp.cpp`):** Replaced recursive CPS matchers
+  with a bytecode compiler (`InstOp` opcode stream covering literals, character
+  classes, anchors, word boundaries, quantifiers, lazy/greedy captures, named
+  backreferences, lookahead/lookbehind, and assertions) and an iterative heap
+  backtracking VM (`exec_vm`) bounded by `kMaxMatchSteps = 30,000,000`. AST
+  teardown uses an iterative free-worklist (`~RegexNode()`), and parser nesting
+  past `kMaxCompilerDepth = 1,000` throws `SyntaxError` without touching the
+  stack. Lookbehind continues to match right-to-left via sub-VMs.
+- **CSS Parser, Cascade & Selectors (`StyleSheet.hpp`, `CssParser.*`,
+  `StyleResolver.*`):**
+  - Converted `parse_stylesheet_blocks` to an explicit heap frame stack
+    preserving `@layer`/`@media`/`@supports` state and iterative
+    rule-text emission (`append_qualified_rule_text` with `reserve`), keeping
+    depth-200,000 nested `{}` stylesheets under ~10 MB RSS and `< 0.3 s`.
+  - Added `CombinatorKind` (`None`, `Child`, `AdjacentSibling`, `GeneralSibling`),
+    `:is()` / `:where()` / selector-list `:not()` / `:host`, `@layer` ordering
+    (unlayered normal beats layered normal; earlier layered `!important` beats
+    later layered `!important`), `@supports` condition evaluation, MQ L4 range
+    syntax + `not`/`and`/`or`, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`,
+    `border_radius_percent`, and iterative ancestor inheritance in
+    `resolve_style` (while keeping `line_height_number` and
+    `effective_line_height()`).
+  - Replaced recursive `match_selector_impl` with an explicit heap frame stack
+    and added `Selector::finalize_metadata()` (`min_ancestors`,
+    `cached_specificity`, `any_dynamic_specificity`) plus `StyleResolver`'s
+    per-tree `m_depth_cache` and `m_desc_prefix_cache` (`n > 32` `AllDescendant`
+    DP memoization), turning depth-200,000 `descendant selector as long as
+    the nest` from a 60s timeout into `0.0–0.1 s` (`5–14 MB`).
+- **CSSOM `el.style` (`src/js/DomStyleBindings.cpp`):** Implemented full
+  shorthand expansion/recomposition, CSSOM serialization/value normalization,
+  `-webkit-`/`-moz-`/`-ms-`/`cssFloat` aliases, `length`/`item()`,
+  `removeProperty`, `!important` priority, and custom-property (`--*`)
+  handling.
+- **Date/time `<input>` (`include/litebird/dom/FormState.hpp`,
+  `src/dom/FormState.cpp`, `src/js/DomFormBindings.cpp`):** Added WHATWG input
+  sanitization (civil calendar leap-year checks, ISO 8601 week counts,
+  `datetime-local` space-to-`T` normalization), `valueAsNumber`, `valueAsDate`,
+  `stepUp()`/`stepDown()` with millisecond-accurate stepping, and
+  `rangeUnderflow`/`rangeOverflow`/`stepMismatch` constraint validation plus
+  spec-compliant `TypeError`/`InvalidStateError` exceptions.
+
+**How verified (on the merged tree).** Every line was run on the merged tree
+with zero edits to `everyday*.dat` and with CI floors raised (`925 -> 926`,
+`640 -> 644`, ASan JS `923 -> 924`, ASan DOM `640 -> 644`):
+- `make test`: `All 174 engine test suites passed successfully!` (includes four
+  new suites: `regexp_vm_handles_deep_nesting_and_long_inputs`,
+  `css_cascade_layers_supports_combinators_and_mq_l4`,
+  `inline_style_cssom_shorthands_and_aliases`,
+  `html5_date_time_inputs_validation_and_stepping`).
+- `make js-conformance`: `926/940 (98.5%)`, `regexp.dat` `39/39 (100.0%)`,
+  everyday probe `90/90`, `0` crashes, `0` timeouts; `--reference "node -e"`
+  `940/940 (100.0%)`.
+- `make dom-conformance`: `644/644 (100.0%)`, everyday probe `68/68`,
+  `--reference` `644/644 (100.0%)` (new cases in `forms.dat` and `style.dat`).
+- Out-of-corpus jsdom comparisons (`tools/conformance/compare_with_jsdom.py`):
+  `tests/dom-conformance/open/dates-and-svg.js` matches jsdom on `6/6` date
+  lines (the remaining line is SVG DOM);
+  `tests/dom-conformance/open/inline-style.js` matches on `26/27` lines (the
+  single difference is `font-family: "Helvetica Neue", Arial;` retaining quotes
+  per CSSOM/Chromium where jsdom's `cssstyle` strips them).
+- Existing scoreboards unchanged: `make conformance` `1781/1792`,
+  `make diff-trees` `6000/6000`, `make url-conformance` `1188/1188`,
+  `make xml-conformance` `1702/1702`, `make diff-xml` `4000` docs (`0` differ) &
+  `3000/3000` round trips, `make wpt` `5421/5463` (`0` unlisted),
+  `make diff-strings` `50485/50580` (`95` differ), `make bench` (42),
+  `make bench-css` (20), `make bench-attributes` (6),
+  `make bench-tokenizer-attributes` (7), `make bench-surrogates` (3),
+  `make security-fetch` (3), `make security-worker` (17),
+  `make verify-media` (35), `make fuzz-media` (1,800), `make tsan`, and
+  `make deep` (`1332` runs over `465` pages at depth `200000`, `0` failed,
+  slowest `26.9 s`).
+- Sanitizers (ASan+UBSan, `detect_leaks=0`): `174/174` unit suites,
+  JS `925/940` (probe `90/90`, `0` crashes/timeouts), DOM `644/644`,
+  URL `1188/1188`, XML `1702/1702`, WPT `5421/5463`, `diff_xml` `1,000` docs &
+  `1,000` round trips, `fuzz` (`400` parser + `400` pipeline + `1927`/`600` XML +
+  `1800` media, `0` findings), and `make asan-deep` (`882` runs over `315` pages
+  at depth `10000`, `0` failed, slowest `3.6 s`).
+
+**What is still open.**
+- RegExp: catastrophic backtracking still terminates via `kMaxMatchSteps`
+  (`30,000,000`), patterns nested >`1,000` levels raise `SyntaxError`, and
+  flags `u`/`v`/`d` completeness remains under Wave 2.
+- CSS: `AllGeneralSibling` (`~` in selectors longer than 32 parts at extreme
+  depth) does not share `m_desc_prefix_cache`'s DP memoization; `:has()`,
+  `:focus-visible`, `@container`, CSS nesting, and `::part` are still open.
+- DOM: `getComputedStyle(el).width` layout metrics, `sheet.cssRules`,
+  `document.write`, and the SVG DOM (`className.baseVal`, `viewBox`,
+  `getBBox()`) remain open.
 
 ---
 

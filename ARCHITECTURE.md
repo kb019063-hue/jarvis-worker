@@ -349,6 +349,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
+| **Phase 37** | **Iterative RegExp VM, modern CSS cascade/units, CSSOM `el.style`, and HTML5 date/time inputs:** replaces recursive CPS regex matching and recursive AST destruction with an iterative bytecode VM and heap backtracking stack; adds CSS child/sibling combinators (`>`, `+`, `~`), `:is()`/`:where()`/selector-list `:not()`/`:host`, `@layer`, `@supports`, MQ L4 range/boolean evaluation, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`, iterative CSS block/selector parsing + `min_ancestors` / `AllDescendant` DP caching; expands `el.style` shorthands, canonical CSSOM values, and vendor aliases; and implements `date`/`time`/`month`/`week`/`datetime-local` input sanitization, `valueAsDate`/`valueAsNumber`, `stepUp()`/`stepDown()`, and constraint validation. | ✅ Completed (174/174 unit suites; JS corpus 926/940, `regexp.dat` 39/39; DOM corpus 644/644) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
@@ -3602,6 +3603,71 @@ changed.
 
 ---
 
+## Phase 37 Architecture: Iterative RegExp VM, Modern CSS Cascade & Units, CSSOM `el.style`, and HTML5 Date/Time Inputs
+
+Phase 37 closes four cross-subsystem correctness, stack-safety, and real-web
+DOM gaps documented in `AUDIT.md` (finding 42):
+
+### 1. Iterative Bytecode RegExp VM (`src/js/BuiltinsRegExp.cpp`)
+- **Bytecode ISA & Compiler:** Compiles parsed `RegexNode` ASTs into flat
+  `InstOp` bytecode sequences (literals, character classes, anchors, `\b`/`\B`,
+  fixed/greedy/non-greedy quantifiers, capture groups, named backreferences,
+  lookahead, and right-to-left lookbehind sub-programs).
+- **Iterative Teardown & Heap Backtracking:** `~RegexNode()` frees AST graphs
+  via an explicit heap worklist (`std::vector`) rather than stack recursion;
+  `exec_vm()` runs iteratively against a heap `backtrack_stack` guarded by
+  `kMaxMatchSteps = 30,000,000`, while `kMaxCompilerDepth = 1,000` turns
+  deeply nested groups into a clean `SyntaxError` without touching the stack.
+
+### 2. Modern CSS Cascade, Selectors L4, Units & Deep-Input Pruning (`StyleSheet.hpp`, `CssParser.*`, `StyleResolver.*`)
+- **Parser & AST:** Replaces recursive block parsing with an explicit heap
+  frame stack inside `parse_stylesheet_blocks` (`append_qualified_rule_text`
+  with capacity reservation), supports `@layer` (block and statement ordering),
+  `@supports` feature queries (`and`/`or`/`not`), Media Queries Level 4 ranges
+  (`400px <= width <= 1000px`) and `not`/`and`/`or`, child/sibling combinators
+  (`>`, `+`, `~`), selector lists inside `:is()`, `:where()`, and `:not()`,
+  and `:host`.
+- **Cascade, Units & Values:** Adds cascade-layer priority (unlayered normal >
+  layered normal; earlier layered `!important` > later layered `!important`),
+  `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`,
+  and iterative `:root`/ancestor inheritance for `rem`/`em` while preserving
+  `line_height_number` and `effective_line_height()`.
+- **Bounded-Stack & Non-Quadratic Selector Matching:** `match_selector_impl`
+  runs on an explicit heap frame stack; `Selector::finalize_metadata()` caches
+  `min_ancestors`, `cached_specificity`, and `any_dynamic_specificity`; and
+  `StyleResolver` clears per-tree `m_depth_cache` + `m_desc_prefix_cache`
+  (DP prefix memoization for `AllDescendant` chains longer than 32 parts),
+  reducing depth-200,000 descendant matching from timeout to `0.0–0.1 s`.
+
+### 3. CSSOM `el.style` Shorthand Expansion & Normalization (`src/js/DomStyleBindings.cpp`)
+- Expands/recomposes CSS shorthands (`flex`, `overflow`, `inset`, `gap`,
+  `borderRadius`, `background`, `transition`, `textDecoration`, `listStyle`,
+  `outline`, `margin`, `padding`, `border`, `font`) for inline `el.style`,
+  canonicalizes `cssText`/`length`/`item()`/`removeProperty()`/`!important`/
+  custom `--*` properties, and maps `-webkit-`/`-moz-`/`-ms-`/`cssFloat` aliases.
+
+### 4. HTML5 Date/Time `<input>` Semantics (`FormState.*`, `src/js/DomFormBindings.cpp`)
+- Implements WHATWG sanitization, `valueAsNumber`, `valueAsDate`,
+  `stepUp()`/`stepDown()`, and `rangeUnderflow`/`rangeOverflow`/`stepMismatch`
+  validity for `date`, `time`, `month`, `week`, and `datetime-local` (plus
+  `TypeError`/`InvalidStateError` checks).
+
+### 5. Verification (Merged Tree)
+- **Release:** `make test` `174/174`; `make js-conformance` `926/940` (`regexp.dat`
+  `39/39`, probe `90/90`, `--reference "node -e"` `940/940`);
+  `make dom-conformance` `644/644` (probe `68/68`, `--reference` `644/644`);
+  `dates-and-svg.js` matches `jsdom` on `6/6` date checks; `inline-style.js`
+  matches on `26/27` lines; `make conformance` `1781/1792`, `make diff-trees`
+  `6000/6000`, `make url-conformance` `1188/1188`, `make xml-conformance`
+  `1702/1702`, `make diff-xml` `0 DIFFER` (`4000`) & `3000/3000`, `make wpt`
+  `5421/5463`, `make deep` `1332/1332` (depth `200,000`, slowest `26.9 s`).
+- **ASan+UBSan (`detect_leaks=0`):** `174/174` suites, JS `925/940`, DOM
+  `644/644`, URL `1188/1188`, XML `1702/1702`, WPT `5421/5463`, `fuzz` `0`
+  findings (`400`+`400`+`1927`/`600`+`1800`), `make asan-deep` `882/882` (slowest
+  `3.6 s`), and `make tsan` clean.
+
+---
+
 ## Phase 38 Architecture: Real-Web JPEG/GIF Decoding, SVG & Canvas 2D
 
 Phase 38 replaces Litebird's toy vector/canvas rasterizers and fills the missing
@@ -4275,14 +4341,16 @@ test; the subclass construction is separate work.
    per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
    boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
    handles everyday layouts but not full CSS2.2/CSS3 edge cases.
-2. **JavaScript is interpreted, and one regular-expression limit remains.**
+2. **JavaScript is interpreted, and catastrophic-backtracking limits remain.**
    Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
    on loops and calls. Long strings are no longer quadratic (Phase 24), and
    neither are deleting many keys from one object or emptying a long array
-   with `shift()` (Phase 30). In regular expressions, a group
-   repeated more than about 12,000 times (`(?:a|b)*` over a long string) ends
-   in a `RangeError` where V8 answers, because the matcher recurses; a single
-   character or class under `*` has no such limit (AUDIT.md, finding 26).
+   with `shift()` (Phase 30). In regular expressions, Phase 37 (finding 42)
+   replaced the recursive CPS matcher with an iterative bytecode VM on an
+   explicit heap backtracking stack, eliminating native stack exhaustion on
+   repeated groups (`(?:a|b)+` on 120,000 characters succeeds cleanly); an
+   intentional `kMaxMatchSteps = 30,000,000` step guard still bounds
+   catastrophic backtracking with `RangeError` (AUDIT.md, finding 26 & 42).
 3. **Single process, no sandbox.** Chrome's original headline feature was
    process-per-tab isolation. Untrusted input is parsed in-process. Page-initiated
    `fetch()`, `XMLHttpRequest`, `Worker`, stylesheet, script, and `<img>` loads
@@ -4298,8 +4366,9 @@ test; the subclass construction is separate work.
    neither is what a pending timer holds (Phase 34, section 9).
 5. **Percentage lengths are resolved in layout, not the cascade** (the cascade
    has no containing block to resolve against) -- that is now correct for box
-   dimensions, margins and padding, but percentage `font-size`, `line-height`
-   and `border-radius` are still not resolved anywhere.
+   dimensions, margins, padding, percentage `font-size`, percentage/unitless
+   `line-height` (Phase 36), and scalar percentage `border-radius` (Phase 37);
+   two-axis elliptical `border-radius` (`50% / 25%`) remains deferred.
 6. **11 corpus cases still fail, all of them about `<select>`.**
    `webkit02.dat` 43/49 (six: `<selectedcontent>` cloning and the other
    rules of the 2025 customizable-`<select>` work), `tests1.dat` 110/112,
@@ -4325,22 +4394,24 @@ test; the subclass construction is separate work.
    right-to-left bidi shaping are not implemented.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
-   It passes all 640 cases of its corpus (Phases 27, 28 and 34) and 5,421 of
+   It passes all 644 cases of its corpus (Phases 27, 28, 34 and 37) and 5,421 of
    the 5,463 subtests of `dom/nodes` and `domparsing` across 87 files; the corpus
    can only ask what jsdom can answer and what somebody thought to ask, and the
    rest of web-platform-tests has not been run. Phase 36 added on-demand layout
    (`getBoundingClientRect()`, `offset*`, `client*`), external classic/deferred
    `<script src>` and `<link rel="stylesheet">` + `@import`, CLI/shell XML & SVG
-   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 42
-   added nested browsing contexts (`<iframe>` `contentDocument`/`contentWindow`/
-   `srcdoc`/`sandbox`, cross-origin `WindowProxy` checks, `postMessage`, subdocument
-   layout/rasterization, and `.xhtml` script execution). Still missing:
-   `document.write`, style sheet objects (`sheet.cssRules`), CORS preflight
-   `OPTIONS`, four text encodings only, date and time inputs without their
-   values, `el.style` shorthands kept whole. Absent: `TextEncoder`, `crypto`,
-   `indexedDB`, `MessageChannel`, XPath, Web Animations, `ElementInternals`, and
-   what needs typed arrays (`ArrayBuffer`). The full lists are in Phase 27,
-   section 12, Phase 28, section 10, Phase 36, section 9, and Phase 42.
+   document loading, and HTTP/HTTPS + CORS `fetch()` and `XMLHttpRequest`; Phase 37
+   added `el.style` shorthand expansion/aliases and HTML5 date/time `<input>`
+   semantics; Phase 42 added nested browsing contexts (`<iframe>`
+   `contentDocument`/`contentWindow`/`srcdoc`/`sandbox`, cross-origin
+   `WindowProxy` checks, `postMessage`, subdocument layout/rasterization, and
+   `.xhtml` script execution). Still missing: `getComputedStyle(el).width`
+   layout metrics, `document.write`, style sheet objects (`sheet.cssRules`), SVG
+   DOM (`className.baseVal`, `viewBox`, `getBBox()`), CORS preflight `OPTIONS`,
+   and four text encodings only. Absent: `TextEncoder`, `crypto`, `indexedDB`,
+   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
+   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
+   Phase 28, section 10, Phase 36, section 9, and Phase 42.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
    corners are in Phase 23, section 10. Around classes: `new.target` is the

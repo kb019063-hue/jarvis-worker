@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 namespace litebird {
 
@@ -107,32 +109,347 @@ ValueMode value_mode(const std::string& type) {
 
 bool is_number_type(const std::string& type) { return type == "number" || type == "range"; }
 
+bool is_datetime_type(const std::string& type) {
+    return type == "date" || type == "time" || type == "month" || type == "week" || type == "datetime-local";
+}
+
+bool is_steppable_type(const std::string& type) { return is_number_type(type) || is_datetime_type(type); }
+
+constexpr double kMsPerDay = 86400000.0;
+constexpr double kMsPerWeek = 604800000.0;
+
+bool is_leap_year(int64_t y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); }
+
+int days_in_month(int64_t y, unsigned m) {
+    static constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m < 1 || m > 12) return 0;
+    return m == 2 && is_leap_year(y) ? 29 : kDays[m - 1];
+}
+
+int64_t floor_div_i64(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    int64_t r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) --q;
+    return q;
+}
+
+int64_t floor_mod_i64(int64_t a, int64_t b) { return a - floor_div_i64(a, b) * b; }
+
+// Howard Hinnant's civil-from-days / days-from-civil (1970-01-01 == 0).
+int64_t days_from_civil(int64_t y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+void civil_from_days(int64_t z, int64_t& y, unsigned& m, unsigned& d) {
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = static_cast<int64_t>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    y += (m <= 2);
+}
+
+int iso_weekday(int64_t days) { return static_cast<int>(floor_mod_i64(days + 3, 7)); } // 0=Mon..6=Sun
+
+int iso_weeks_in_year(int64_t y) {
+    const int wd_jan1 = iso_weekday(days_from_civil(y, 1, 1));
+    return (wd_jan1 == 3 || (is_leap_year(y) && wd_jan1 == 2)) ? 53 : 52;
+}
+
+int64_t days_from_iso_week(int64_t y, unsigned w) {
+    const int64_t jan4 = days_from_civil(y, 1, 4);
+    const int64_t week1_monday = jan4 - iso_weekday(jan4);
+    return week1_monday + static_cast<int64_t>(w - 1) * 7;
+}
+
+void iso_week_from_days(int64_t days, int64_t& iso_year, unsigned& iso_week) {
+    const int64_t thu_days = days + (3 - iso_weekday(days));
+    unsigned m = 0, d = 0;
+    civil_from_days(thu_days, iso_year, m, d);
+    const int64_t jan1 = days_from_civil(iso_year, 1, 1);
+    iso_week = static_cast<unsigned>((thu_days - jan1) / 7 + 1);
+}
+
+bool parse_uint_range(const std::string& text, std::size_t from, std::size_t count, int64_t& out) {
+    if (from + count > text.size() || count == 0) return false;
+    int64_t v = 0;
+    for (std::size_t i = from; i < from + count; ++i) {
+        if (text[i] < '0' || text[i] > '9') return false;
+        if (v > 1000000000LL) return false;
+        v = v * 10 + (text[i] - '0');
+    }
+    out = v;
+    return true;
+}
+
+bool all_digits(const std::string& text, std::size_t from, std::size_t count) {
+    if (from + count > text.size()) return false;
+    for (std::size_t i = from; i < from + count; ++i) if (text[i] < '0' || text[i] > '9') return false;
+    return true;
+}
+
+bool parse_date_parts(const std::string& text, int64_t& y, unsigned& m, unsigned& d) {
+    // HTML spec valid date string: YYYY-MM-DD (at least 4 year digits, year > 0).
+    const std::size_t dash1 = text.find('-');
+    if (dash1 == std::string::npos || dash1 < 4) return false;
+    if (text.size() != dash1 + 6 || text[dash1 + 3] != '-') return false;
+    int64_t year = 0, month = 0, day = 0;
+    if (!parse_uint_range(text, 0, dash1, year) || year < 1) return false;
+    if (!parse_uint_range(text, dash1 + 1, 2, month) || month < 1 || month > 12) return false;
+    if (!parse_uint_range(text, dash1 + 4, 2, day) || day < 1 || day > days_in_month(year, static_cast<unsigned>(month))) {
+        return false;
+    }
+    y = year;
+    m = static_cast<unsigned>(month);
+    d = static_cast<unsigned>(day);
+    return true;
+}
+
+bool parse_month_parts(const std::string& text, int64_t& y, unsigned& m) {
+    const std::size_t dash = text.find('-');
+    if (dash == std::string::npos || dash < 4 || text.size() != dash + 3) return false;
+    int64_t year = 0, month = 0;
+    if (!parse_uint_range(text, 0, dash, year) || year < 1) return false;
+    if (!parse_uint_range(text, dash + 1, 2, month) || month < 1 || month > 12) return false;
+    y = year;
+    m = static_cast<unsigned>(month);
+    return true;
+}
+
+bool parse_week_parts(const std::string& text, int64_t& y, unsigned& w) {
+    const std::size_t dash = text.find('-');
+    if (dash == std::string::npos || dash < 4 || text.size() != dash + 4 || text[dash + 1] != 'W') return false;
+    int64_t year = 0, week = 0;
+    if (!parse_uint_range(text, 0, dash, year) || year < 1) return false;
+    if (!parse_uint_range(text, dash + 2, 2, week) || week < 1 || week > iso_weeks_in_year(year)) return false;
+    y = year;
+    w = static_cast<unsigned>(week);
+    return true;
+}
+
+bool parse_time_parts(const std::string& text, int& hh, int& mm, int& ss, int& ms) {
+    if (text.size() < 5 || !all_digits(text, 0, 2) || text[2] != ':' || !all_digits(text, 3, 2)) return false;
+    int64_t h = 0, m = 0, s = 0;
+    if (!parse_uint_range(text, 0, 2, h) || h > 23) return false;
+    if (!parse_uint_range(text, 3, 2, m) || m > 59) return false;
+    int msec = 0;
+    if (text.size() > 5) {
+        if (text.size() < 8 || text[5] != ':' || !all_digits(text, 6, 2)) return false;
+        if (!parse_uint_range(text, 6, 2, s) || s > 59) return false;
+        if (text.size() > 8) {
+            if (text[8] != '.' || text.size() < 10 || text.size() > 12 || !all_digits(text, 9, text.size() - 9)) {
+                return false;
+            }
+            const std::size_t frac_len = text.size() - 9;
+            int64_t frac = 0;
+            parse_uint_range(text, 9, frac_len, frac);
+            if (frac_len == 1) msec = static_cast<int>(frac * 100);
+            else if (frac_len == 2) msec = static_cast<int>(frac * 10);
+            else msec = static_cast<int>(frac);
+        }
+    }
+    hh = static_cast<int>(h);
+    mm = static_cast<int>(m);
+    ss = static_cast<int>(s);
+    ms = msec;
+    return true;
+}
+
+bool parse_datetime_local_parts(const std::string& text, int64_t& y, unsigned& m, unsigned& d,
+                                int& hh, int& mm, int& ss, int& ms, std::string* normalized_out = nullptr) {
+    std::size_t sep = text.find('T');
+    if (sep == std::string::npos) sep = text.find(' ');
+    if (sep == std::string::npos) return false;
+    const std::string date_part = text.substr(0, sep);
+    const std::string time_part = text.substr(sep + 1);
+    if (!parse_date_parts(date_part, y, m, d) || !parse_time_parts(time_part, hh, mm, ss, ms)) return false;
+    if (normalized_out) *normalized_out = date_part + "T" + time_part;
+    return true;
+}
+
+std::string format_year(int64_t y) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%04lld", static_cast<long long>(y));
+    return buf;
+}
+
+std::string format_date_days(int64_t days) {
+    int64_t y = 0;
+    unsigned m = 0, d = 0;
+    civil_from_days(days, y, m, d);
+    if (y < 1 || y > 275760) return {};
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s-%02u-%02u", format_year(y).c_str(), m, d);
+    return buf;
+}
+
+std::string format_month_count(int64_t months) {
+    const int64_t y = 1970 + floor_div_i64(months, 12);
+    const unsigned m = static_cast<unsigned>(floor_mod_i64(months, 12) + 1);
+    if (y < 1 || y > 275760) return {};
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s-%02u", format_year(y).c_str(), m);
+    return buf;
+}
+
+std::string format_week_days(int64_t days) {
+    int64_t y = 0;
+    unsigned w = 0;
+    iso_week_from_days(days, y, w);
+    if (y < 1 || y > 275760) return {};
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s-W%02u", format_year(y).c_str(), w);
+    return buf;
+}
+
+std::string format_time_ms(int64_t ms_of_day) {
+    const int64_t wrapped = floor_mod_i64(ms_of_day, 86400000);
+    const int ms = static_cast<int>(wrapped % 1000);
+    const int total_sec = static_cast<int>(wrapped / 1000);
+    const int hh = total_sec / 3600;
+    const int mm = (total_sec / 60) % 60;
+    const int ss = total_sec % 60;
+    char buf[32];
+    if (ss == 0 && ms == 0) {
+        std::snprintf(buf, sizeof(buf), "%02d:%02d", hh, mm);
+    } else if (ms == 0) {
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hh, mm, ss);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d", hh, mm, ss, ms);
+        std::string out(buf);
+        while (!out.empty() && out.back() == '0') out.pop_back();
+        return out;
+    }
+    return buf;
+}
+
+std::string format_datetime_local_ms(int64_t ms) {
+    const int64_t days = floor_div_i64(ms, 86400000);
+    const int64_t rem = floor_mod_i64(ms, 86400000);
+    const std::string date_str = format_date_days(days);
+    if (date_str.empty()) return {};
+    return date_str + "T" + format_time_ms(rem);
+}
+
+bool parse_type_value(const std::string& type, const std::string& text, double& out) {
+    if (is_number_type(type)) return parse_number(text, out);
+    if (type == "date") {
+        int64_t y = 0; unsigned m = 0, d = 0;
+        if (!parse_date_parts(text, y, m, d)) return false;
+        out = static_cast<double>(days_from_civil(y, m, d)) * kMsPerDay;
+        return true;
+    }
+    if (type == "month") {
+        int64_t y = 0; unsigned m = 0;
+        if (!parse_month_parts(text, y, m)) return false;
+        out = static_cast<double>((y - 1970) * 12 + static_cast<int64_t>(m) - 1);
+        return true;
+    }
+    if (type == "week") {
+        int64_t y = 0; unsigned w = 0;
+        if (!parse_week_parts(text, y, w)) return false;
+        out = static_cast<double>(days_from_iso_week(y, w)) * kMsPerDay;
+        return true;
+    }
+    if (type == "time") {
+        int hh = 0, mm = 0, ss = 0, ms = 0;
+        if (!parse_time_parts(text, hh, mm, ss, ms)) return false;
+        out = static_cast<double>(((hh * 60 + mm) * 60 + ss) * 1000 + ms);
+        return true;
+    }
+    if (type == "datetime-local") {
+        int64_t y = 0; unsigned m = 0, d = 0;
+        int hh = 0, mm = 0, ss = 0, ms = 0;
+        if (!parse_datetime_local_parts(text, y, m, d, hh, mm, ss, ms)) return false;
+        const int64_t day_ms = days_from_civil(y, m, d) * 86400000LL;
+        const int64_t tod_ms = ((hh * 60LL + mm) * 60LL + ss) * 1000LL + ms;
+        out = static_cast<double>(day_ms + tod_ms);
+        return true;
+    }
+    return false;
+}
+
+std::string format_type_value(const std::string& type, double value) {
+    if (!std::isfinite(value)) return {};
+    if (is_number_type(type)) return number_to_string(value);
+    if (type == "date") {
+        const double days = std::floor(value / kMsPerDay);
+        if (std::fabs(days) > 1e8) return {};
+        return format_date_days(static_cast<int64_t>(days));
+    }
+    if (type == "month") {
+        const double months = std::trunc(value);
+        if (std::fabs(months) > 1e7) return {};
+        return format_month_count(static_cast<int64_t>(months));
+    }
+    if (type == "week") {
+        // Round half-day differences away or floor to UTC day representing the week's Monday.
+        const double days = std::floor(value / kMsPerDay);
+        if (std::fabs(days) > 1e8) return {};
+        return format_week_days(static_cast<int64_t>(days));
+    }
+    if (type == "time") {
+        const double trunc_ms = std::floor(value);
+        if (std::fabs(trunc_ms) > 1e15) return {};
+        return format_time_ms(static_cast<int64_t>(trunc_ms));
+    }
+    if (type == "datetime-local") {
+        const double trunc_ms = std::floor(value);
+        if (std::fabs(trunc_ms) > 1e15) return {};
+        return format_datetime_local_ms(static_cast<int64_t>(trunc_ms));
+    }
+    return {};
+}
+
 double attr_number(const Element& element, const char* name, double fallback) {
     const std::string* text = element.attribute(name);
     double out = 0;
     return text && parse_number(*text, out) ? out : fallback;
 }
 
-bool has_attr_number(const Element& element, const char* name, double& out) {
+bool has_attr_type_value(const Element& element, const char* name, const std::string& type, double& out) {
     const std::string* text = element.attribute(name);
-    return text && parse_number(*text, out);
+    return text && parse_type_value(type, *text, out);
 }
 
-// "Allowed value step" of a number or range input; 0 for step="any".
-double step_of(const Element& input) {
+double default_step_for(const std::string& type) {
+    return (type == "time" || type == "datetime-local") ? 60.0 : 1.0;
+}
+
+double step_scale_factor(const std::string& type) {
+    if (type == "date") return kMsPerDay;
+    if (type == "week") return kMsPerWeek;
+    if (type == "time" || type == "datetime-local") return 1000.0;
+    return 1.0;
+}
+
+// "Allowed value step" of a steppable input; 0 for step="any".
+double step_of(const Element& input, const std::string& type) {
+    const double def = default_step_for(type);
+    const double scale = step_scale_factor(type);
     const std::string* text = input.attribute("step");
-    if (!text) return 1;
+    if (!text) return def * scale;
     if (lower(*text) == "any") return 0;
     double value = 0;
-    if (!parse_number(*text, value) || value <= 0) return 1;
-    return value;
+    if (!parse_number(*text, value) || value <= 0) return def * scale;
+    return value * scale;
 }
 
-double step_base(const Element& input) {
+double step_base(const Element& input, const std::string& type) {
     double out = 0;
-    if (has_attr_number(input, "min", out)) return out;
-    if (has_attr_number(input, "value", out)) return out;
-    return input_type(input) == "range" ? 0 : 0;
+    if (has_attr_type_value(input, "min", type, out)) return out;
+    if (has_attr_type_value(input, "value", type, out)) return out;
+    if (type == "week") return -259200000.0; // 1969-12-29T00:00:00Z (Monday of 1970-W01)
+    return 0.0;
 }
 
 bool is_valid_color(const std::string& text) {
@@ -144,23 +461,14 @@ bool is_valid_color(const std::string& text) {
     return true;
 }
 
-bool all_digits(const std::string& text, std::size_t from, std::size_t count) {
-    if (from + count > text.size()) return false;
-    for (std::size_t i = from; i < from + count; ++i) if (text[i] < '0' || text[i] > '9') return false;
-    return true;
-}
-
 bool is_valid_date(const std::string& text) {
-    return text.size() == 10 && all_digits(text, 0, 4) && text[4] == '-' && all_digits(text, 5, 2) &&
-           text[7] == '-' && all_digits(text, 8, 2);
+    int64_t y = 0; unsigned m = 0, d = 0;
+    return parse_date_parts(text, y, m, d);
 }
 
 bool is_valid_time(const std::string& text) {
-    if (text.size() < 5 || !all_digits(text, 0, 2) || text[2] != ':' || !all_digits(text, 3, 2)) return false;
-    if (text.size() == 5) return true;
-    if (text[5] != ':' || !all_digits(text, 6, 2)) return false;
-    if (text.size() == 8) return true;
-    return text[8] == '.' && text.size() > 9 && text.size() <= 12 && all_digits(text, 9, text.size() - 9);
+    int hh = 0, mm = 0, ss = 0, ms = 0;
+    return parse_time_parts(text, hh, mm, ss, ms);
 }
 
 std::string sanitize(const Element& input, const std::string& type, const std::string& raw) {
@@ -177,7 +485,7 @@ std::string sanitize(const Element& input, const std::string& type, const std::s
         double value = 0;
         if (!parse_number(raw, value)) value = max < min ? min : min + (max - min) / 2;
         value = std::min(std::max(value, min), max);
-        const double step = step_of(input);
+        const double step = step_of(input, "range");
         if (step > 0) {
             const double base = min;
             double aligned = base + std::round((value - base) / step) * step;
@@ -191,17 +499,18 @@ std::string sanitize(const Element& input, const std::string& type, const std::s
     if (type == "date") return is_valid_date(raw) ? raw : std::string();
     if (type == "time") return is_valid_time(raw) ? raw : std::string();
     if (type == "datetime-local") {
-        auto t = raw.find('T');
-        if (t == std::string::npos) t = raw.find(' ');
-        if (t == std::string::npos || !is_valid_date(raw.substr(0, t)) || !is_valid_time(raw.substr(t + 1))) return std::string();
-        return raw.substr(0, t) + "T" + raw.substr(t + 1);
+        int64_t y = 0; unsigned m = 0, d = 0;
+        int hh = 0, mm = 0, ss = 0, ms = 0;
+        std::string normalized;
+        return parse_datetime_local_parts(raw, y, m, d, hh, mm, ss, ms, &normalized) ? normalized : std::string();
     }
     if (type == "month") {
-        return raw.size() == 7 && all_digits(raw, 0, 4) && raw[4] == '-' && all_digits(raw, 5, 2) ? raw : std::string();
+        int64_t y = 0; unsigned m = 0;
+        return parse_month_parts(raw, y, m) ? raw : std::string();
     }
     if (type == "week") {
-        return raw.size() == 8 && all_digits(raw, 0, 4) && raw[4] == '-' && raw[5] == 'W' && all_digits(raw, 6, 2)
-                   ? raw : std::string();
+        int64_t y = 0; unsigned w = 0;
+        return parse_week_parts(raw, y, w) ? raw : std::string();
     }
     return raw;
 }
@@ -920,15 +1229,24 @@ Validity validity(const Element& control) {
         }
     }
 
-    if (is_number_type(type)) {
+    if (is_steppable_type(type)) {
         double number = 0;
-        if (parse_number(current, number)) {
-            double bound = 0;
-            if (has_attr_number(control, "min", bound) && number < bound) out.range_underflow = true;
-            if (has_attr_number(control, "max", bound) && number > bound) out.range_overflow = true;
-            const double step = step_of(control);
+        if (parse_type_value(type, current, number)) {
+            double min = 0, max = 0;
+            const bool has_min = has_attr_type_value(control, "min", type, min);
+            const bool has_max = has_attr_type_value(control, "max", type, max);
+            if (type == "time" && has_min && has_max && min > max) {
+                if (number < min && number > max) {
+                    out.range_underflow = true;
+                    out.range_overflow = true;
+                }
+            } else {
+                if (has_min && number < min) out.range_underflow = true;
+                if (has_max && number > max) out.range_overflow = true;
+            }
+            const double step = step_of(control, type);
             if (step > 0) {
-                const double steps = (number - step_base(control)) / step;
+                const double steps = (number - step_base(control, type)) / step;
                 if (std::fabs(steps - std::round(steps)) > 1e-9 * std::max(1.0, std::fabs(steps))) out.step_mismatch = true;
             }
         }
@@ -958,7 +1276,7 @@ std::vector<std::shared_ptr<Element>> invalid_controls(const Element& form_or_fi
     return out;
 }
 
-// --- Numbers ----------------------------------------------------------------------
+// --- Numbers & Date/Time ----------------------------------------------------------
 
 bool parse_number(const std::string& text, double& out) {
     // -?digits(.digits)?([eE][+-]?digits)? or -?.digits...
@@ -1003,23 +1321,107 @@ std::string number_to_string(double value) {
     return buffer;
 }
 
+bool has_value_as_number(const std::string& type) { return is_steppable_type(type); }
+
+bool has_value_as_date(const std::string& type) {
+    return type == "date" || type == "month" || type == "week" || type == "time";
+}
+
+double value_as_number(const Element& input) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    if (!is_html(input, "input")) return nan;
+    const std::string type = input_type(input);
+    if (!has_value_as_number(type)) return nan;
+    double out = 0;
+    if (!parse_type_value(type, input_value(input, type), out)) return nan;
+    return out;
+}
+
+bool set_value_as_number(Element& input, double value) {
+    if (!is_html(input, "input")) return false;
+    const std::string type = input_type(input);
+    if (!has_value_as_number(type)) return false;
+    if (std::isnan(value)) {
+        set_value(input, std::string());
+        return true;
+    }
+    const std::string formatted = format_type_value(type, value);
+    set_value(input, formatted);
+    return true;
+}
+
+bool value_as_utc_ms(const Element& input, double& out) {
+    if (!is_html(input, "input")) return false;
+    const std::string type = input_type(input);
+    if (!has_value_as_date(type)) return false;
+    const std::string current = input_value(input, type);
+    if (current.empty()) return false;
+    if (type == "month") {
+        int64_t y = 0; unsigned m = 0;
+        if (!parse_month_parts(current, y, m)) return false;
+        out = static_cast<double>(days_from_civil(y, m, 1)) * kMsPerDay;
+        return true;
+    }
+    return parse_type_value(type, current, out);
+}
+
+bool set_value_as_utc_ms(Element& input, double ms) {
+    if (!is_html(input, "input")) return false;
+    const std::string type = input_type(input);
+    if (!has_value_as_date(type)) return false;
+    if (!std::isfinite(ms)) {
+        set_value(input, std::string());
+        return true;
+    }
+    if (type == "date") {
+        const double days = std::floor(ms / kMsPerDay);
+        if (std::fabs(days) > 1e8) { set_value(input, std::string()); return true; }
+        set_value(input, format_date_days(static_cast<int64_t>(days)));
+        return true;
+    }
+    if (type == "time") {
+        const double trunc_ms = std::floor(ms);
+        if (std::fabs(trunc_ms) > 1e15) { set_value(input, std::string()); return true; }
+        set_value(input, format_time_ms(static_cast<int64_t>(trunc_ms)));
+        return true;
+    }
+    if (type == "week") {
+        const double days = std::floor(ms / kMsPerDay);
+        if (std::fabs(days) > 1e8) { set_value(input, std::string()); return true; }
+        set_value(input, format_week_days(static_cast<int64_t>(days)));
+        return true;
+    }
+    if (type == "month") {
+        const double days = std::floor(ms / kMsPerDay);
+        if (std::fabs(days) > 1e8) { set_value(input, std::string()); return true; }
+        int64_t y = 0; unsigned m = 0, d = 0;
+        civil_from_days(static_cast<int64_t>(days), y, m, d);
+        if (y < 1 || y > 275760) { set_value(input, std::string()); return true; }
+        set_value(input, format_month_count((y - 1970) * 12 + static_cast<int64_t>(m) - 1));
+        return true;
+    }
+    return false;
+}
+
 bool step(Element& input, int count) {
     if (!is_html(input, "input")) return false;
     const std::string type = input_type(input);
-    if (!is_number_type(type)) return false;
-    const double step_size = step_of(input);
+    if (!is_steppable_type(type)) return false;
+    const double step_size = step_of(input, type);
     if (step_size <= 0) return false;
     double min = 0, max = 0;
-    const bool has_min = has_attr_number(input, "min", min) || type == "range";
-    const bool has_max = has_attr_number(input, "max", max) || type == "range";
+    bool has_min = has_attr_type_value(input, "min", type, min);
+    bool has_max = has_attr_type_value(input, "max", type, max);
     if (type == "range") {
+        has_min = true;
+        has_max = true;
         min = attr_number(input, "min", 0);
         max = attr_number(input, "max", 100);
     }
-    if (has_min && has_max && min > max) return true;
-    const double base = step_base(input);
+    if (has_min && has_max && min > max && type != "time") return true;
+    const double base = step_base(input, type);
     double number = 0;
-    if (!parse_number(input_value(input, type), number)) number = 0;
+    if (!parse_type_value(type, input_value(input, type), number)) number = 0;
 
     const double steps = (number - base) / step_size;
     const bool aligned = std::fabs(steps - std::round(steps)) <= 1e-9 * std::max(1.0, std::fabs(steps));
@@ -1029,9 +1431,15 @@ bool step(Element& input, int count) {
     } else {
         number += count * step_size;
     }
-    if (has_min && number < min) number = base + std::ceil((min - base) / step_size - 1e-9) * step_size;
-    if (has_max && number > max) number = base + std::floor((max - base) / step_size + 1e-9) * step_size;
-    set_value(input, number_to_string(number));
+    if (type == "time" && has_min && has_max && min > max) {
+        // Wrap within 24h for reversed time range; clamp only into [min, 86400000) U [0, max].
+        number = std::fmod(std::fmod(number, kMsPerDay) + kMsPerDay, kMsPerDay);
+    } else {
+        if (has_min && number < min) number = base + std::ceil((min - base) / step_size - 1e-9) * step_size;
+        if (has_max && number > max) number = base + std::floor((max - base) / step_size + 1e-9) * step_size;
+    }
+    const std::string formatted = format_type_value(type, number);
+    if (!formatted.empty() || is_number_type(type)) set_value(input, formatted);
     return true;
 }
 

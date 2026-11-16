@@ -117,14 +117,14 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 # URL cases that must pass (tests/url). The UTS #46 host handling makes all
 # of them pass.
 URL_FLOOR ?= 1188
-# Cases that must pass in the sanitizer build. One below what the normal build
+# Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. Phase 45's merged tree scores 924/939
-# under ASan and 925/939 in Release. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 923
+# case that the normal build passes. Combined Phase 37 + Phase 45 scores 925/940
+# under ASan and 926/940 in Release. Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 924
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 640
+DOM_ASAN_FLOOR ?= 644
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.

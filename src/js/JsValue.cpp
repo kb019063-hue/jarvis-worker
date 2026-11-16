@@ -235,7 +235,8 @@ struct CallContext {
     const JsValue* callee{nullptr};   // the function being called; valid for the call's duration
     const JsValue* derived_this{nullptr};   // see JsValue::construct_as_super
     const JsValue* new_target{nullptr};     // see JsValue::construct; null when it is the callee
-    JsValue* derived_slot{nullptr};         // see JsValue::construct_for: where derived_this is made on demand
+    JsValue* derived_slot{nullptr};         // see JsValue::current_derived_this: where an object it chooses is kept
+    bool derived_asked{false};              // current_derived_this() has answered for this call
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
 };
@@ -251,6 +252,7 @@ struct CallContextScope {
         t_call_context.derived_this = nullptr;
         t_call_context.new_target = nullptr;
         t_call_context.derived_slot = nullptr;
+        t_call_context.derived_asked = false;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
     }
@@ -359,17 +361,23 @@ bool JsValue::current_is_construct() {
 //
 // construct(args, this) with a `this` that is a platform object already asks
 // the constructor to make that very object what it constructs: this is how an
-// element that exists is upgraded to a custom element. A class gets there by
-// itself, because `super()` hands `this` up and the interface's constructor
-// finds it in current_derived_this(). A constructor compiled for older
-// browsers does not pass `this` on. It calls
-// `Reflect.construct(HTMLElement, [], new.target)` and uses what comes back,
-// and the one thing that ties that call to the construction it is part of is
-// new.target. So a construction in place is noted here for as long as it
-// runs, under the function `new` is being applied to, and construct_for()
-// offers its object to the native that asks, once. This is the HTML
-// standard's "construction stack": there each definition has one, and a
-// definition is found by its constructor, which is new.target.
+// element that exists is upgraded to a custom element. The constructor of the
+// element's interface is what does it, and it is reached in one of two ways,
+// neither of which says by itself which object is meant:
+//
+//  - through `super(...)` from a class, with the `this` that class's
+//    constructor was given. That is the element when the class is the one
+//    being constructed, and a new object when the class was itself reached
+//    with Reflect.construct, from a subclass compiled for older browsers;
+//  - through `Reflect.construct(HTMLElement, [], new.target)` from a
+//    constructor compiled that way, with no object at all.
+//
+// What ties either to the construction it is part of is new.target. So a
+// construction in place is noted here for as long as it runs, under the
+// function `new` is being applied to, and the interface that asks for the
+// object it is to build on (current_derived_this) is given that one, once.
+// This is the HTML standard's "construction stack": there each definition has
+// one, and a definition is found by its constructor, which is new.target.
 
 namespace {
 
@@ -401,30 +409,57 @@ struct InPlaceScope {
     InPlaceScope& operator=(const InPlaceScope&) = delete;
 };
 
+/// Is `callee` the constructor of the interface the element `object` belongs
+/// to: HTMLElement for an element with a name of its own, the interface of
+/// its tag for a customized built-in? No other constructor has any business
+/// with an element that is under construction; `Reflect.construct(Event, [],
+/// new.target)` in the constructor of a custom element makes an event.
+bool is_interface_of(const JsValue& callee, const JsValue& object) {
+    const Node* node = object.object_val ? object.object_val->dom_node.get() : nullptr;
+    if (!node || !node->is_element()) return false;
+    const auto& element = static_cast<const Element&>(*node);
+    if (element.is_foreign()) return false;
+    const dom::Realm* realm = dom::realm_if_any(*node);
+    if (!realm || !realm->alive) return false;
+    // Looked up, not made: a constructor the realm never built is not the
+    // one that is asking.
+    const auto found = realm->ctors.find(dom::html_interface_for_tag(element.tag_name()));
+    return found != realm->ctors.end() && found->second.identity() == callee.identity();
+}
+
 }  // namespace
 
 const JsValue* JsValue::current_derived_this() {
-    if (t_call_context.derived_this || !t_call_context.derived_slot) return t_call_context.derived_this;
+    CallContext& context = t_call_context;
+    if (context.derived_asked) return context.derived_this;
+    context.derived_asked = true;
+    const JsValue* new_target = context.new_target;
+    JsValue* slot = context.derived_slot;
+    // Is the function `new` is applied to being constructed in place right
+    // now, on an element of the interface that asks? Then that element is
+    // the object, whatever this call was given, and only once: a constructor
+    // that reaches its interface a second time, or makes another instance of
+    // its own class while it runs, is refused, as the standard has it.
+    if (new_target && slot && context.callee) {
+        for (auto entry = t_in_place.rbegin(); entry != t_in_place.rend(); ++entry) {
+            if (entry->new_target != new_target->identity()) continue;
+            if (!is_interface_of(*context.callee, entry->object)) break;
+            if (entry->handed_out) js_throw_type_error("This instance is already constructed");
+            entry->handed_out = true;
+            if (!context.derived_this || context.derived_this->object_val.get() != entry->object.object_val.get()) {
+                *slot = entry->object;
+                context.derived_this = slot;
+            }
+            return context.derived_this;
+        }
+    }
+    // super(...): the object the subclass's constructor was given.
+    if (context.derived_this) return context.derived_this;
+    if (!slot || !new_target) return nullptr;
     // construct_for(): the native asks, so the object is made now, with the
     // prototype new.target has at this moment. Reading that can run a getter,
     // which is a call with a context of its own; this one is back when it
     // returns.
-    JsValue* slot = t_call_context.derived_slot;
-    const JsValue* new_target = t_call_context.new_target;
-    t_call_context.derived_slot = nullptr;          // asked once
-    if (!new_target) return nullptr;
-    // Is this function being constructed in place right now? Then the object
-    // it runs on is the one, whatever prototype it has, and only once: a
-    // constructor that asks a second time, or makes another instance of its
-    // own class while it runs, is refused, as the standard has it.
-    for (auto entry = t_in_place.rbegin(); entry != t_in_place.rend(); ++entry) {
-        if (entry->new_target != new_target->identity()) continue;
-        if (entry->handed_out) js_throw_type_error("This instance is already constructed");
-        entry->handed_out = true;
-        *slot = entry->object;
-        t_call_context.derived_this = slot;
-        return slot;
-    }
     const JsValue proto = new_target->get_property("prototype");
     // Nothing usable there: the native's own prototype is the right one, and
     // it gets that by building its object as if none had been offered. Null
@@ -436,7 +471,7 @@ const JsValue* JsValue::current_derived_this() {
     }
     *slot = JsValue::make_object();
     slot->object_val->prototype = target;
-    t_call_context.derived_this = slot;
+    context.derived_this = slot;
     return slot;
 }
 
@@ -571,15 +606,19 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
 }
 
 JsValue JsValue::construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
-                                    const JsValue* new_target) const {
+                                    const JsValue* new_target, JsValue* in_place) const {
     static const JsValue undefined_this;
     if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
     if (fn) {
+        JsValue taken;      // what the native built on, when that was not derived_this
         CallContextScope scope(undefined_this, true, this);
         t_call_context.derived_this = &derived_this;
         t_call_context.new_target = new_target;
-        return fn(args);
+        t_call_context.derived_slot = &taken;
+        JsValue result = fn(args);
+        if (in_place && taken.is_object()) *in_place = taken;
+        return result;
     }
     return construct(args, &derived_this, new_target);
 }

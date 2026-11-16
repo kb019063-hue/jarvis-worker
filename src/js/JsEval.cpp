@@ -899,8 +899,16 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         // take over its state so `this` becomes that kind of object. A host
         // constructor (Event, HTMLElement) is handed `this` and makes it the
         // object it constructs, and then there is nothing to take over.
-        JsValue built = parent.construct_as_super(args, receiver, new_target);
-        if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
+        JsValue in_place;
+        JsValue built = parent.construct_as_super(args, receiver, new_target, &in_place);
+        if (in_place.is_object()) {
+            // The interface did not build on the object it was offered: an
+            // element is being upgraded to new.target, and this constructor
+            // was reached with Reflect.construct on an object of its own
+            // (JsValue.cpp, "Constructions in place"). The element is what
+            // this construction makes, and `this` from here on.
+            made = in_place;
+        } else if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
             JsObject* from = built.object_val;
             JsObject* to = receiver.object_val;
             for (const auto& entry : from->properties) {

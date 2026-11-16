@@ -156,9 +156,9 @@ jobs:
         # of the length, not on a slow runner. It also compares results.
         run: make bench
       - name: Surrogate halves appended one at a time stay linear
-        # The same scripts at two sizes a doubling apart, best of three, with
-        # a limit of one second: 20,000 pairs take about 20 ms and 40,000 about
-        # 35 ms, where copying the text at every pair took 5.6 s and 23 s.
+        # Six scripts (20k, 40k, kept prefixes, read between halves, indexOf
+        # between halves, and substring slice read then completed), best of
+        # three, with a limit of one second against Node.js.
         run: make bench-surrogates
       - name: Promise combinators resolve before advancing the iterator
         # Four reference-checked adversarial cases in async.dat: an unbounded

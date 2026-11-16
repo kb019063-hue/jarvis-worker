@@ -372,12 +372,13 @@ bench-attributes: $(TARGET)
 bench-tokenizer-attributes: $(TARGET)
 	@python3 tools/bench/bench_tokenizer_attributes.py --reps 3 --max-ms 1000
 
-## A string built half a surrogate pair at a time, at two sizes a doubling
-## apart. The character the halves spell starts inside the text already
-## written, so every pair used to copy the whole string: 20,000 pairs took
-## 5.6 s and 40,000 took 23 s (AUDIT.md, finding 47). They now take about 20
-## and 35 ms; the limit is a second, so this fails on a cost that grows with
-## the square of the length and not on a slow runner. Results face Node.js.
+## A string built half a surrogate pair at a time across six cases (including
+## reading, indexOf, and slicing from substring between halves). Under the
+## old UTF-8 storage, writing a surrogate half settled or left a 3-byte UTF-8
+## tail inside the block so every pair copied (5.6 s / 23 s at 20k/40k in
+## Phase 41; 893 ms at 20k when read between halves). Phase 53 stores non-ASCII
+## text in UTF-16 so all six cases complete in place well within the one-second
+## guard. Results face Node.js.
 bench-surrogates: $(TARGET)
 	@python3 tools/bench/bench_strings.py --only surrogate --reps 3 --max-ms 1000
 

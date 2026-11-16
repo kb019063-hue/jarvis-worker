@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 191 suites, all passing | `make test` |
+| Engine unit tests | 192 suites, all passing | `make test` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
@@ -53,7 +53,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 191 engine suites
+make test            # 192 engine suites
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
@@ -68,7 +68,7 @@ make bench           # string-heavy scripts timed against Node; fails if one is 
 make bench-css       # CSS whitespace runs: same paint as compact pages, each under 3 s
 make bench-attributes # attribute-list end removals: expected DOM checksums, each under 3 s
 make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
-make bench-surrogates # a string built half a surrogate pair at a time: results face Node, each under 1 s
+make bench-surrogates # six surrogate-pair scripts (including reads and substring slices between halves): results face Node, each under 1 s
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
@@ -691,7 +691,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 191 engine test suites
+# Run the 192 engine test suites
 make test
 ```
 
@@ -758,14 +758,14 @@ make test
 make test
 ```
 
-Output (191 suites; the first and last lines shown):
+Output (192 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 191 engine test suites passed successfully!
+All 192 engine test suites passed successfully!
 ```
 
 ```bash
@@ -858,6 +858,37 @@ wider, which costs about 5% across the string benchmarks that were already
 there. Reading a half-owed string before completing the
 pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
+
+
+### UTF-16 storage for non-ASCII strings (Phase 53)
+
+Phase 53 (finding 59) stores non-ASCII `JsString` buffers as two-byte UTF-16
+code units instead of UTF-8 while keeping ASCII buffers one byte per unit and
+the 24-byte `JsString` handle unchanged (replacing Phase 41's `m_pending`
+field with an atomic cached UTF-8 byte length). Reading `length`, indexing,
+`charCodeAt`, `indexOf`, slicing, and regex matching all operate directly on
+the 1-byte or 2-byte storage without generating UTF-8, while host `.view()` /
+`c_str()` callers populate a lazy UTF-8 cache (with `Utf8Slice` fallback when
+an unpaired trailing high surrogate is requested so the prefix never freezes
+a surrogate stub before the low half arrives). Because a trailing high half in
+UTF-16 is an ordinary 2-byte unit rather than a 3-byte UTF-8 surrogate that
+would have to be rewritten into a 4-byte pair, appending `'\uDE00'` after
+reading, calling `indexOf`, or slicing with `substring` writes the low half in
+place (and a sole-thread CAS tail rewind reclaims a dropped temporary tail when
+safe).
+
+`make bench-surrogates` now runs six cases (20k, 40k, keep-each-prefix, read
+between halves, `indexOf` between halves, and a `substring` piece read then
+completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
+17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
+before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
+ASan+UBSan, `make test` passes 192/192 suites, and `make diff-strings` prints
+`50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
+s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
+the variable slot and operand temporary during `+=` (though single-owner C++
+rewinds), and calling `.view()` repeatedly while a buffer ends in an unpaired
+high half allocates a slice per call. Details are in `ARCHITECTURE.md`,
+Phase 53, and `AUDIT.md`, finding 59.
 
 
 ### Promise combinators must resolve before the next item (Phase 45)

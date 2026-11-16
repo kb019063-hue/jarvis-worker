@@ -9050,6 +9050,47 @@ TEST(many_sized_floats_pack_without_escaping_the_box) {
     assert(wide->dimensions.content.x == wide_box->dimensions.content.x);
 }
 
+TEST(indexed_float_bands_preserve_mixed_clear_and_negative_margins) {
+    using namespace litebird;
+    auto check = [](const std::string& html,
+                    const std::vector<std::tuple<const char*, float, float>>& expected) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto box = find_box_by_id(root, "box");
+        assert(box);
+        for (const auto& [id, x, y] : expected) {
+            auto child = find_box_by_id(root, id);
+            assert(child);
+            assert(child->dimensions.content.x - box->dimensions.content.x == x);
+            assert(child->dimensions.content.y - box->dimensions.content.y == y);
+        }
+    };
+    // Different band bottoms on opposite sides; a negative margin lets the
+    // third float fit at y=0. The later wide right float must land at the
+    // exact 50px edge, and both kinds of clearance advance the cursor.
+    check(R"(<body style="margin:0"><div id="box" style="width:300px;overflow:hidden">
+        <div id="left" style="float:left;width:130px;height:50px"></div>
+        <div id="right" style="float:right;width:90px;height:80px"></div>
+        <div id="middle" style="float:left;width:90px;height:10px;margin-left:-20px"></div>
+        <div id="later" style="float:right;width:180px;height:15px"></div>
+        <div id="clearleft" style="clear:left;height:5px"></div>
+        <div id="tail" style="float:left;width:210px;height:10px;margin-left:-15px"></div>
+        <div id="clearright" style="clear:right;height:7px"></div>
+    </div></body>)", {{"left", 0, 0}, {"right", 210, 0}, {"middle", 110, 0},
+                    {"later", 30, 50}, {"clearleft", 0, 50}, {"tail", -15, 65},
+                    {"clearright", 0, 80}});
+    // The first margin box has *negative* left intrusion. Its next sibling
+    // starts at that negative edge; an empty partition must not clamp it to 0.
+    check(R"(<body style="margin:0"><div id="box" style="width:100px">
+        <div id="negative" style="float:left;width:10px;height:20px;margin-left:-25px"></div>
+        <div id="next" style="float:left;width:30px;height:10px"></div>
+        <div id="opposite" style="float:right;width:70px;height:30px"></div>
+        <div id="follow" style="float:left;width:45px;height:10px"></div>
+    </div></body>)", {{"negative", -25, 0}, {"next", -15, 0},
+                    {"opposite", 30, 0}, {"follow", 0, 30}});
+}
+
 TEST(floats_of_no_height_cost_nothing_and_still_count) {
     using namespace litebird;
 
@@ -12963,6 +13004,7 @@ int main() {
     RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
     RUN_TEST(many_sized_floats_pack_without_escaping_the_box);
+    RUN_TEST(indexed_float_bands_preserve_mixed_clear_and_negative_margins);
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_owes_a_trailing_high_half_until_it_is_read);

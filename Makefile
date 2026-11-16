@@ -147,7 +147,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -180,6 +180,11 @@ $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 
 test: $(TEST_TARGET)
 	@./$(TEST_TARGET)
+
+## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
+## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
+bench-floats: $(TARGET)
+	@python3 tools/bench/bench_sized_floats.py $(TARGET) --out $(BUILD_DIR)/bench-floats --sizes 1000 10000 --max-seconds 4
 
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
@@ -412,4 +417,4 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

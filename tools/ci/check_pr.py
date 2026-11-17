@@ -36,6 +36,11 @@ Everything is asked of GitHub through `gh` (which has to be logged in), and
 nothing of the local clone: a sandbox's clone is shallow, and a shallow clone
 answers "is `main` in this commit" wrongly. Run it inside the repository, so
 that `gh` knows which one is meant.
+
+The one exception is the set of numbers taken, which comes from
+`tools/next_ids.py --taken --ref main` — that tool reads `main` out of git
+rather than off the disk, and it is the allocator the rest of the repository
+uses, so the two cannot drift apart.
 """
 
 from __future__ import annotations
@@ -45,6 +50,10 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+NEXT_IDS = ROOT / "tools" / "next_ids.py"      # the one allocator
 
 # AGENTS.md, "The files every pull request changes", and the two it leaves out.
 SHARED = {
@@ -124,18 +133,41 @@ def same_files(mine: set[str], theirs: set[str]) -> list[str]:
     return sorted(shared)
 
 
-def on_main() -> tuple[dict[int, str], dict[int, str]]:
-    """The phase and finding numbers `main` has, with the start of the title of each."""
-    architecture = file_at("ARCHITECTURE.md", "main")
-    audit = file_at("AUDIT.md", "main")
-    phases: dict[int, str] = {}
-    # A phase is on `main` when the table has a row for it or a section is headed by it.
-    for number, title in re.findall(r"(?m)^\| \*\*Phase (\d+)\*\* \| (.{0,60})", architecture):
-        phases[int(number)] = title
-    for number, title in re.findall(r"(?m)^## Phase (\d+)\b[ :—-]*(?:Architecture[: ]*)?(.{0,60})", architecture):
-        phases.setdefault(int(number), title.strip())
-    findings = {int(n): t for n, t in re.findall(r"(?m)^## (\d+)\. (.{0,60})", audit)}
-    return phases, findings
+def on_main() -> tuple[set[int], set[int]]:
+    """The phase and finding numbers `main` has taken.
+
+    Asked of `tools/next_ids.py`, which is the one allocator in the
+    repository. This used to parse ARCHITECTURE.md and AUDIT.md here with
+    `^## Phase (\\d+)` and `^## (\\d+)\\.`, and quietly went blind when the
+    phase and finding write-ups moved out of those two documents into
+    `docs/phases/` and `docs/findings/`: every heading it looked for was
+    gone, so it reported nothing taken and would have handed out numbers
+    that were already somebody else's. One allocator, asked from both
+    places, cannot disagree with itself like that.
+
+    `main` and not the working tree, because the question is what `main`
+    has and a sandbox's clone may be behind it. `--no-prs`, because the
+    open claims are folded in separately below: without it, a pull request
+    is told that the number it has just claimed is already taken — by
+    itself.
+    """
+    result = subprocess.run(
+        [sys.executable, str(NEXT_IDS), "--taken", "--ref", "main", "--no-prs"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if result.returncode not in (0, 1) or not result.stdout.strip():
+        # A warning about `gh` exits 1 with the numbers still printed, so 1 is
+        # not failure here. Anything else is, and there is no honest answer to
+        # give: saying "nothing is taken" would let a duplicate number through.
+        sys.exit(f"could not ask {NEXT_IDS.name} what is taken:\n"
+                 f"{result.stderr.strip() or result.stdout.strip()}")
+    try:
+        taken = json.loads(result.stdout)
+    except ValueError:
+        sys.exit(f"{NEXT_IDS.name} answered with something that is not JSON:\n{result.stdout[:400]}")
+    if result.stderr.strip():
+        print(f"note: {result.stderr.strip()}", file=sys.stderr)
+    return set(taken["phases"]), set(taken["findings"])
 
 
 def open_claims() -> list[dict]:
@@ -157,7 +189,7 @@ def next_free(taken: set[int]) -> int:
     return max(taken, default=0) + 1
 
 
-def taken_numbers(claims: list[dict], main_phases: dict, main_findings: dict) -> tuple[set[int], set[int]]:
+def taken_numbers(claims: list[dict], main_phases: set[int], main_findings: set[int]) -> tuple[set[int], set[int]]:
     phases = set(main_phases) | {c["phase"] for c in claims if c["phase"] is not None}
     findings = set(main_findings) | {c["finding"] for c in claims if c["finding"] is not None}
     return phases, findings
@@ -178,7 +210,7 @@ class Report:
         print(f"    {text}")
 
 
-def claim_problems(claim: dict, claims: list[dict], main_phases: dict, main_findings: dict) -> list[tuple[bool, str]]:
+def claim_problems(claim: dict, claims: list[dict], main_phases: set[int], main_findings: set[int]) -> list[tuple[bool, str]]:
     """What is wrong with a claim: (does this pull request have to change, what)."""
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
@@ -189,7 +221,7 @@ def claim_problems(claim: dict, claims: list[dict], main_phases: dict, main_find
         if number is None:
             continue
         if number in on:
-            problems.append((True, f"{kind} {number} is on main: {on[number].strip()[:50]}"))
+            problems.append((True, f"{kind} {number} is on main already"))
         for other in others:
             if other[key] != number:
                 continue
@@ -337,7 +369,7 @@ def check_merge(number: int) -> int:
         if mine is None:
             continue
         if mine in on:
-            report.no(f"{kind} {mine} is on main already: {on[mine].strip()[:60]}")
+            report.no(f"{kind} {mine} is on main already")
         else:
             report.ok(f"{kind} {mine} is not on main")
     for other in open_claims():

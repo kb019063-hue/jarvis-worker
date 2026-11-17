@@ -59,7 +59,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
-| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
+| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62); `MessageChannel`/`MessagePort` and out-of-process site isolation remain open |
 | 49 | `new.target` was the function that was running: an abstract class refused its own subclasses and `Reflect.construct(F, [], G)` did not name `G` inside `F`. `super()` dropped an object the parent's constructor returned, `this` could be bound twice or never, and a custom element compiled for older browsers could neither be made nor upgraded | **High** | ✅ Fixed (Phase 43); `this` before `super()`, `eval` in a function and private names remain |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 | 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
@@ -67,6 +67,7 @@ The rest are documented with enough detail to act on.
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
+| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
 
 ---
 
@@ -3225,10 +3226,10 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
   `600` XML + `1,800` media fuzz runs, `0` findings), and `make deep`.
 
 **What is still open.** Cross-origin `Object.getOwnPropertyDescriptor` /
-`Reflect.ownKeys` filtering on `WindowProxy` (`[[OwnPropertyKeys]]` exotic trap),
-cross-origin `Location` setter navigation (`childWin.location = ...`),
-`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc` CSP
-inheritance, and process-level site isolation remain open.
+`Reflect.ownKeys` filtering on `WindowProxy` was closed in Phase 56 (finding
+62); cross-origin `Location` navigation is limited to a fragment move,
+`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc`
+CSP inheritance, and process-level site isolation remain open.
 
 ---
 
@@ -4225,3 +4226,73 @@ with it.
 
 **Still open.**
 - The 26 remaining failures in Test262 `built-ins/RegExp` are outside the RegExp engine: 12 cross-realm `$262.createRealm` tests, 10 `BigInt` literal tests, 2 `JsValue.cpp` null-prototype `__proto__` own-property reads (`groups-object.js`, `indices-groups-object.js`), 1 `BuiltinsArray.cpp` dense-array descriptor check (`indices-array-properties.js`), and 1 `globalThis` `RegExp` own-property descriptor check (`prop-desc.js`). Four Test262 tests are skipped by the harness (3 with embedded NUL bytes, 1 `RGI_Emoji.js` > 128 KB argv limit that passes via `--run-script`).
+
+## 62. ✅ Every cross-origin `Window` and `Location` described itself with the ordinary own-keys walk (Phase 56)
+
+**The hole.** Phase 42 made cross-origin reads and writes refuse
+(`WindowExotic::get`/`set` throw `SecurityError` for non-safelisted names,
+finding 48). Everything that *describes* a cross-origin object was still the
+ordinary path, so a parent could enumerate, describe and mutate what it may
+not name:
+
+```js
+const w = document.querySelector('iframe').contentWindow;   // cross-origin
+Object.getOwnPropertyNames(w);   // the child's ordinary own keys — not the spec's list
+Object.getOwnPropertyDescriptor(w, 'length');   // whatever was stored, or undefined
+Object.defineProperty(w, 'name', { value: 'owned' });  // writes into the child's own map
+Object.freeze(w);                // flips the child's cell bits from another realm
+Object.getPrototypeOf(w);        // the child realm's Window.prototype (spec: null)
+for (const k in w) …;            // enumerated the child's interface members
+const L = w.location;
+L.href;                          // the child's full address, no error
+L.pathname; L.origin; L.reload(); // same, plus a callable
+```
+
+**The fix.** One cross-origin predicate drives every reflection seam; see
+`ARCHITECTURE.md`, Phase 56, for the mechanics.
+
+- `dom::cross_origin_own_keys` (DomWindowBindings.cpp, declared in
+  `DomBindings.hpp`) answers for a cross-origin `Window`/`Location` and fills
+  the list `[[OwnPropertyKeys]]` must return: the child navigable indices
+  ascending, then (when the caller wants non-enumerable names too) the
+  cross-origin table names in spec order, then `then`. Every reflection site
+  consults it instead of (or before) the ordinary walk: `Object.keys`/
+  `values`/`entries`/`assign`, `getOwnPropertyNames`/`getOwnPropertyDescriptors`,
+  `Reflect.ownKeys`, `getOwnPropertyDescriptor`, `for…in`, spread, object
+  rest, `JSON.stringify`.
+- `descriptor_for` answers for a cross-origin object with spec-shaped
+  descriptors: indices are enumerable data descriptors holding the child
+  proxy; `then` is a configurable, non-enumerable `undefined`; an attribute
+  entry of the table is an accessor descriptor with a native get wrapper (and,
+  for `location`, a set wrapper); a method entry is a configurable,
+  non-enumerable data descriptor holding the child's function.
+  `Object.defineProperty`/`Reflect.defineProperty` on a cross-origin object
+  always throw `SecurityError` before reading the descriptor (HTML
+  §7.2.3.6/§7.2.4.6).
+- `Location` gained `LocationExotic`: cross-origin it exposes only `then`,
+  `href` (set, not get — reading throws `SecurityError`) and `replace()`.
+- `has()` reports only indices, table names, `then` and named child navigables;
+  `delete` throws `SecurityError`; `Object.freeze`/`seal`/`preventExtensions`
+  throw `TypeError`; `setPrototypeOf` refuses (`Reflect` answers `false`);
+  `getPrototypeOf` answers `null`; `instanceof` is `false`; `for…in`
+  enumerates only the indices.
+- `location` joined the cross-origin attribute safelist it was missing
+  (`win.location = url` already navigated the child via the set path; reading
+  it threw `SecurityError` in error, and `'location' in win` was `false`).
+
+**Verification.** `tests/cross_origin_windows.cpp` — **80 checks** over a
+parent realm at `https://app.example.test` and a cross-origin child at
+`https://other.example.test` (served from a temporary origin root; the child
+has one named `srcdoc` grandchild), run by `make test`; `tests/test_suite.cpp`
+is untouched here. Full merged-tree verification (Release): `make test`
+**198/198**; `js-conformance` **999/1014**; `dom-conformance` **669/669**;
+`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
+**7998/8009** (11 fail as listed, 0 unlisted).
+
+**Still open.** Cross-document navigation (`childWin.location = url` with a
+non-fragment URL — `navigate()` is fragment-only by design); the three symbol
+keys in `Reflect.ownKeys` (no symbol key is reported anywhere in the engine);
+`in` on a non-exposed name answers `false` rather than throwing; a
+`[[CrossOriginPropertyDescriptorMap]]` cache (wrapper identities differ from
+the child's functions); `MessageChannel`/`MessagePort`; process-level site
+isolation.

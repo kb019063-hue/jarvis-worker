@@ -36,6 +36,7 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsIdentifierTables.hpp"
 #include "litebird/js/RegExpUnicodeTables.hpp"
+#include "litebird/js/StringUnicodeTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -15135,6 +15136,185 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
 }
 
 // ============================================================================
+// Phase 60: Unicode 17.0 String normalize(), case mapping & CLDR 48 collation
+// ============================================================================
+
+TEST(string_unicode17_normalization_tables_and_api) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    // Direct Unicode 17.0 property & table sanity checks
+    assert(canonical_combining_class('a') == 0);
+    assert(canonical_combining_class(0x0301) == 230); // COMBINING ACUTE ACCENT
+    assert(canonical_combining_class(0x0323) == 220); // COMBINING DOT BELOW
+    assert(canonical_combining_class(0x1D185) == 230); // MUSICAL SYMBOL COMBINING DOIT
+    assert(is_cased('A') && is_cased('a') && is_cased(0x03A3) && is_cased(0x10400));
+    assert(!is_cased('0') && !is_cased(' '));
+    assert(is_case_ignorable(0x180E) && is_case_ignorable('\'') && is_case_ignorable(0x0301));
+    assert(is_soft_dotted('i') && is_soft_dotted('j') && is_soft_dotted(0x012F) && is_soft_dotted(0x1D456));
+    assert(!is_soft_dotted('I'));
+
+    // Direct UTF-16 normalization API: NFC, NFD, NFKC, NFKD, Hangul, exclusions, lone surrogates
+    std::u16string out;
+    // ASCII fast path returns false (unchanged)
+    std::u16string ascii = u"hello world";
+    assert(!normalize_utf16(ascii.data(), ascii.size(), NormForm::NFC, out));
+
+    // Canonical composition + ordering
+    std::u16string decomposed = u"e\u0301\u0323";
+    assert(normalize_utf16(decomposed.data(), decomposed.size(), NormForm::NFD, out));
+    assert(out == u"e\u0323\u0301");
+    assert(normalize_utf16(decomposed.data(), decomposed.size(), NormForm::NFC, out));
+    assert(out == u"\u1EB9\u0301");
+
+    // Hangul LVT round-trip
+    std::u16string hangul = u"\uAC01";
+    assert(normalize_utf16(hangul.data(), hangul.size(), NormForm::NFD, out));
+    assert(out == u"\u1100\u1161\u11A8");
+    std::u16string jamo = out;
+    assert(normalize_utf16(jamo.data(), jamo.size(), NormForm::NFC, out));
+    assert(out == u"\uAC01");
+
+    // Compatibility vs canonical
+    std::u16string lig = u"\uFB01\u00BD";
+    assert(!normalize_utf16(lig.data(), lig.size(), NormForm::NFC, out));
+    assert(normalize_utf16(lig.data(), lig.size(), NormForm::NFKC, out));
+    assert(out == u"fi1\u20442");
+
+    // Full_Composition_Exclusion (U+0958 -> U+0915 U+093C, stays decomposed in NFC)
+    std::u16string excl = u"\u0958";
+    assert(normalize_utf16(excl.data(), excl.size(), NormForm::NFC, out));
+    assert(out == u"\u0915\u093C");
+
+    // Lone surrogates preserved
+    std::u16string surr = {0xD800, u'e', 0x0301, 0xDC00};
+    assert(normalize_utf16(surr.data(), surr.size(), NormForm::NFC, out));
+    std::u16string surr_exp = {0xD800, 0x00E9, 0xDC00};
+    assert(out == surr_exp);
+
+    // JS-level String.prototype.normalize
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var norm_ok =
+            "e\u0301".normalize() === "\u00E9" &&
+            "\u00E9".normalize("NFD") === "e\u0301" &&
+            "\u212B".normalize("NFC") === "\u00C5" &&
+            "\u1E9B\u0323".normalize("NFD") === "\u017F\u0323\u0307" &&
+            "\uFB03".normalize("NFKC") === "ffi" &&
+            "\uAC00".normalize("NFD") === "\u1100\u1161";
+        var norm_err = false;
+        try { "a".normalize("BAD"); } catch (e) { norm_err = e instanceof RangeError; }
+    )JS");
+    assert(js.eval("norm_ok && norm_err").is_truthy());
+}
+
+TEST(string_unicode17_full_and_locale_case_mapping) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    // Direct UTF-16 case API checks
+    std::u16string sharp_s = u"\u00DF";
+    assert(to_upper_utf16(sharp_s.data(), sharp_s.size()) == u"SS");
+    std::u16string sigma = u"\u039F\u0394\u03A5\u03A3\u03A3\u0395\u03A5\u03A3";
+    assert(to_lower_utf16(sigma.data(), sigma.size()) == u"\u03BF\u03B4\u03C5\u03C3\u03C3\u03B5\u03C5\u03C2");
+
+    // Turkish/Azeri
+    std::u16string tr_in = u"I\u0307I\u0130";
+    assert(to_lower_utf16(tr_in.data(), tr_in.size(), CaseLocale::Turkish) == u"i\u0131i");
+    std::u16string tr_i = u"i";
+    assert(to_upper_utf16(tr_i.data(), tr_i.size(), CaseLocale::Turkish) == u"\u0130");
+
+    // Lithuanian
+    std::u16string lt_in = u"I\u0300\u00CC";
+    assert(to_lower_utf16(lt_in.data(), lt_in.size(), CaseLocale::Lithuanian) == u"i\u0307\u0300i\u0307\u0300");
+    std::u16string lt_up = u"i\u0323\u0307";
+    assert(to_upper_utf16(lt_up.data(), lt_up.size(), CaseLocale::Lithuanian) == u"I\u0323");
+
+    // Greek (el) diphthongs, disjunctive eta, consonant diacritic stripping
+    std::u16string el_diph = u"\u03AC\u03B9 \u03AE \u03B1\u03AE \u03A3\u0301";
+    assert(to_upper_utf16(el_diph.data(), el_diph.size(), CaseLocale::Greek) == u"\u0391\u03AA \u0389 \u0391\u0397 \u03A3");
+
+    // JS-level end-to-end including Final_Sigma U+180E, astral scripts, and multi-locale BCP-47 validation
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var case_ok =
+            "A\u180E\u03A3".toLowerCase() === "a\u180E\u03C2" &&
+            "A\u180E\u03A3B".toLowerCase() === "a\u180E\u03C3b" &&
+            "\u{10400}".toLowerCase() === "\u{10428}" &&
+            "\u{10428}".toUpperCase() === "\u{10400}" &&
+            "i".toLocaleUpperCase("tr-TR") === "\u0130" &&
+            "\u0130".toLocaleLowerCase("az-Latn-AZ") === "i" &&
+            "I\u0300".toLocaleLowerCase("lt-LT") === "i\u0307\u0300" &&
+            "\u039C\u03AC\u03B9\u03BF\u03C2".toLocaleUpperCase("el-GR") === "\u039C\u0391\u03AA\u039F\u03A3";
+        var all_locales_validated = false;
+        try { "".toLocaleLowerCase(["en-US", "not a valid locale"]); }
+        catch (e) { all_locales_validated = e instanceof RangeError; }
+        var b = new Boolean(true);
+        b.toUpperCase = String.prototype.toUpperCase;
+        var this_ok = b.toUpperCase() === "TRUE";
+    )JS");
+    assert(js.eval("case_ok && all_locales_validated && this_ok").is_truthy());
+}
+
+TEST(string_cldr48_uca_collation_and_ecma402_validation) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    auto cmp = [](std::u16string_view a, std::u16string_view b, CollationOptions opts = {}) {
+        return locale_compare_utf16(a.data(), a.size(), b.data(), b.size(), opts);
+    };
+
+    // Canonical equivalence, case, accents, contractions, UCA 17.0 implicit weights
+    assert(cmp(u"a", u"b") < 0);
+    assert(cmp(u"a", u"A") < 0);
+    assert(cmp(u"A", u"b") < 0);
+    assert(cmp(u"\u00E9", u"e\u0301") == 0);
+    assert(cmp(u"\u013F", u"L\u00B7") == 0);
+    assert(cmp(u"\uAC00", u"\u1100\u1161") == 0);
+    assert(cmp(u"\u4E00", u"\u3400") < 0);
+
+    // Sensitivity, ignorePunctuation, numeric, caseFirst
+    CollationOptions base_opt;
+    base_opt.sensitivity = CollationSensitivity::Base;
+    assert(cmp(u"a", u"\u00E1", base_opt) == 0);
+    assert(cmp(u"a", u"A", base_opt) == 0);
+
+    CollationOptions case_opt;
+    case_opt.sensitivity = CollationSensitivity::Case;
+    assert(cmp(u"a", u"\u00E1", case_opt) == 0);
+    assert(cmp(u"a", u"A", case_opt) < 0);
+
+    CollationOptions ip_opt;
+    ip_opt.ignore_punctuation = true;
+    assert(cmp(u"a-b!", u"ab?", ip_opt) == 0);
+
+    CollationOptions num_opt;
+    num_opt.numeric = true;
+    assert(cmp(u"file2", u"file10", num_opt) < 0);
+    assert(cmp(u"file02", u"file2", num_opt) == 0);
+
+    CollationOptions upper_opt;
+    upper_opt.case_first = 1;
+    assert(cmp(u"a", u"A", upper_opt) > 0);
+
+    // JS-level end-to-end validation & non-constructor checks
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var coll_ok =
+            "o\u0308".localeCompare("\u00F6") === 0 &&
+            "file2".localeCompare("file10", "und", { numeric: true }) < 0 &&
+            "a-b".localeCompare("ab", "und", { ignorePunctuation: true }) === 0 &&
+            "a".localeCompare("A", "en-u-kf-upper") > 0;
+        var err_ok = true;
+        try { new String.prototype.normalize(); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { new String.prototype.localeCompare(); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { "a".localeCompare("b", null); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { "a".localeCompare("b", "und", { sensitivity: "bogus" }); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof RangeError); }
+    )JS");
+    assert(js.eval("coll_ok && err_ok").is_truthy());
+}
+
+// ============================================================================
 // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
 // ============================================================================
 
@@ -15371,6 +15551,246 @@ TEST(js_temporal_dead_zone_in_control_flow_and_patterns) {
            "loops:0:0:ReferenceError,1:10:ReferenceError,2:20:ReferenceError "
            "catchParam:ReferenceError catchBlk:ReferenceError catchOk:err "
            "param:ReferenceError paramSelf:ReferenceError");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 63: iteration asks the value for its iterator (finding 69)
+// ---------------------------------------------------------------------------
+
+TEST(js_iteration_asks_the_value_for_its_iterator) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    // js_iterate() and its neighbours ask the current realm which functions
+    // it installed. Inside eval() that is the interpreter's realm; the direct
+    // calls below have to say so themselves.
+    JsIntrinsics* previous_realm = &JsIntrinsics::get();
+    JsIntrinsics::set_current(&js.intrinsics());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous_realm};
+
+    auto numbers = [](const std::vector<JsValue>& values) {
+        std::string out;
+        for (const JsValue& value : values) out += (out.empty() ? "" : ",") + value.to_string();
+        return out;
+    };
+    auto visited = [&](const JsValue& iterable, size_t stop_after = 1000) {
+        std::vector<JsValue> seen;
+        js_iterate(iterable, [&](const JsValue& item) {
+            seen.push_back(item);
+            return seen.size() < stop_after;
+        });
+        return numbers(seen);
+    };
+    auto throws_type_error = [&](const std::function<void()>& body) {
+        try {
+            body();
+        } catch (const JsThrow& thrown) {
+            return thrown.value.get_property("name").to_string() == "TypeError";
+        }
+        return false;
+    };
+
+    // The plain case: an array and a string are read directly, and finding
+    // that out runs nothing.
+    JsValue plain = js.eval("var plain = [1, 2, 3]; plain");
+    assert(js_iterates_as_builtin(plain));
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    assert(js_iterates_as_builtin(js.eval("[]")));
+    assert(!js_iterates_as_builtin(js.eval("({ length: 1, 0: 'a' })")));
+    assert(!js_iterates_as_builtin(js.eval("new Map()")));
+    assert(!js_iterates_as_builtin(js.eval("new String('wrapped')")));
+    assert(!js_iterates_as_builtin(JsValue::make_number(5)));
+    assert(!js_iterates_as_builtin(JsValue::make_undefined()));
+    assert(numbers(js_iterable_to_vector(plain)) == "1,2,3");
+    assert(visited(plain) == "1,2,3");
+    assert(visited(plain, 2) == "1,2");
+    assert(visited(JsValue::make_string("a\xF0\x9F\x98\x80z")) == "a,\xF0\x9F\x98\x80,z");
+    JsValue method;
+    assert(js_iterator_method(plain, method) && method.is_function());
+    assert(method.identity() == js.intrinsics().array_iterator_method.identity());
+
+    // An array that was given an iterator is asked for it. Until Phase 63
+    // every one of these read the elements: 1,2.
+    JsValue own = js.eval("var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; yield 7; }; own");
+    assert(!js_iterates_as_builtin(own));
+    assert(numbers(js_iterable_to_vector(own)) == "9,8,7");
+    assert(visited(own) == "9,8,7");
+    assert(text("var seen = []; for (var x of own) seen.push(x); seen.join()") == "9,8,7");
+    assert(text("[...own].join() + '|' + Math.max(...own) + '|' + Array.from(own).join() + '|' + new Set(own).size") ==
+           "9,8,7|9|9,8,7|3");
+    assert(text("function* gen() { yield* own; } [...gen()].join()") == "9,8,7");
+    assert(text("var entries = [['a', 1]]; entries[Symbol.iterator] = function* () { yield ['z', 26]; };"
+                "JSON.stringify(Object.fromEntries(entries)) + [...new Map(entries).keys()].join()") == "{\"z\":26}z");
+    // The array that asked is `this`, and another array's iterator may be what it hands out.
+    assert(text("var a = [1]; var self; a[Symbol.iterator] = function () { self = this; return [5, 6][Symbol.iterator](); };"
+                "[...a].join() + ':' + (self === a)") == "5,6:true");
+    // Other arrays are not affected by it.
+    assert(js_iterates_as_builtin(plain));
+
+    // The same method put back, a getter that hands it out, a subclass
+    // without one: the long way round to the elements. The getter is read
+    // once for each iteration and never by the question that runs no script.
+    JsValue same = js.eval("var same = [4, 5]; same[Symbol.iterator] = Array.prototype[Symbol.iterator]; same");
+    assert(!js_iterates_as_builtin(same));
+    assert(visited(same) == "4,5");
+    JsValue lazy = js.eval("var reads = 0; var lazy = [6, 7];"
+                           "Object.defineProperty(lazy, Symbol.iterator, { get: function () { reads++; return Array.prototype[Symbol.iterator]; } }); lazy");
+    assert(!js_iterates_as_builtin(lazy));
+    assert(text("reads") == "0");
+    assert(visited(lazy) == "6,7");
+    assert(numbers(js_iterable_to_vector(lazy)) == "6,7");
+    assert(text("reads") == "2");
+    assert(text("class Plain extends Array {} var sub = new Plain(); sub.push(1, 2, 3); [...sub].join()") == "1,2,3");
+    assert(text("Object.getPrototypeOf(sub) === Plain.prototype") == "true");
+    assert(!js_iterates_as_builtin(js.eval("sub")));
+    assert(text("class Odd extends Array { *[Symbol.iterator]() { yield 'x'; yield this.length; } }"
+                "var odd = new Odd(3); [...odd].join() + '|' + Array.from(odd).join()") == "x,3|x,3");
+
+    // On the prototype: every array has it, and the plain case comes back
+    // when it does.
+    js.eval("var original = Array.prototype[Symbol.iterator];"
+            "Array.prototype[Symbol.iterator] = function* () { yield 'p'; yield this.length; };");
+    assert(!js_iterates_as_builtin(plain));
+    assert(visited(plain) == "p,3");
+    assert(numbers(js_iterable_to_vector(plain)) == "p,3");
+    assert(text("[...[1, 2]].join() + '|' + new Set([4, 4, 4]).size") == "p,2|2");
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain));
+    assert(text("[...[1, 2]].join()") == "1,2");
+
+    // Without one an array is not iterable, and a value that is not a
+    // function there is a TypeError as well.
+    js.eval("delete Array.prototype[Symbol.iterator];");
+    assert(!js_iterates_as_builtin(plain));
+    assert(!js_iterator_method(plain, method) && method.is_undefined());
+    assert(throws_type_error([&] { visited(plain); }));
+    assert(throws_type_error([&] { js_iterable_to_vector(plain); }));
+    assert(text("try { [...[1]]; 'no error' } catch (e) { e.name + ': ' + e.message }") ==
+           "TypeError: [object Array] is not iterable");
+    js.eval("Array.prototype[Symbol.iterator] = 5;");
+    assert(throws_type_error([&] { js_iterator_method(plain, method); }));
+    assert(throws_type_error([&] { visited(plain); }));
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain) && visited(plain) == "1,2,3");
+
+    // Strings, and the primitives that have no iterator until a script
+    // gives their prototype one.
+    js.eval("var stringOriginal = String.prototype[Symbol.iterator];"
+            "String.prototype[Symbol.iterator] = function* () { yield 'z'; yield this.length; };");
+    assert(!js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(visited(JsValue::make_string("ab")) == "z,2");
+    assert(text("[...'ab'].join() + '|' + Array.from('abc').join() + '|' + new Set('aab').size") == "z,2|z,3|2");
+    js.eval("String.prototype[Symbol.iterator] = stringOriginal;");
+    assert(js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(text("[...'ab'].join()") == "a,b");
+    assert(!js_iterator_method(JsValue::make_number(3), method));
+    assert(throws_type_error([&] { visited(JsValue::make_number(3)); }));
+    assert(!js_iterator_method(JsValue::make_undefined(), method));
+    assert(!js_iterator_method(JsValue::make_null(), method));
+    js.eval("Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };");
+    assert(js_iterator_method(JsValue::make_number(3), method));
+    assert(visited(JsValue::make_number(3)) == "0,1,2");
+    assert(text("[...3].join() + '|' + new Set(4).size") == "0,1,2|4");
+    js.eval("delete Number.prototype[Symbol.iterator];");
+
+    // What is not an iterator: an object that only has next(), and a property
+    // whose name is the text 'Symbol.iterator'. Both were iterated before.
+    assert(throws_type_error([&] { visited(js.eval("({ next: function () { return { done: true }; } })")); }));
+    assert(throws_type_error([&] { visited(js.eval("({ 'Symbol.iterator': function* () { yield 1; } })")); }));
+    assert(text("async function* ag() { yield 1; } try { [...ag()]; 'no error' } catch (e) { e.name }") == "TypeError");
+
+    // A loop that stops early closes the iterator, once; return() has to be
+    // callable and to give back an object. A loop that an error ends closes
+    // it too, and the error is the one that is seen.
+    js.eval(R"(
+        var closed = 0;
+        function endless(ret) {
+            var o = {};
+            o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; };
+            return o;
+        }
+        var counting = endless(function () { closed++; return {}; });
+    )");
+    assert(visited(js.eval("counting"), 2) == "1,1");
+    assert(text("closed") == "1");
+    assert(throws_type_error([&] { visited(js.eval("endless(function () { return 5; })"), 1); }));
+    assert(throws_type_error([&] { visited(js.eval("endless(7)"), 1); }));
+    assert(visited(js.eval("endless(undefined)"), 1) == "1");
+    assert(visited(js.eval("endless(null)"), 1) == "1");
+    bool body_error_seen = false;
+    try {
+        js_iterate(js.eval("endless(function () { closed++; throw new Error('from return'); })"), [](const JsValue&) -> bool {
+            js_throw_error(JsErrorKind::RangeError, "from the body");
+        });
+    } catch (const JsThrow& thrown) {
+        body_error_seen = thrown.value.get_property("message").to_string() == "from the body";
+    }
+    assert(body_error_seen);
+    assert(text("closed") == "2");
+    // An iterator that fails itself is not closed.
+    assert(text("var o = {}; o[Symbol.iterator] = function () { return { next: function () { throw new Error('next'); },"
+                "return: function () { closed += 100; return {}; } }; };"
+                "try { for (var x of o) {} } catch (e) { e.message + closed }") == "next2");
+
+    // An array that changes under the loop is read as the array iterator
+    // reads it: by index, against the length it has now.
+    assert(text("var grow = [1, 2, 3]; var got = []; for (var x of grow) { got.push(x); if (x === 1) grow.push(4); } got.join()") ==
+           "1,2,3,4");
+    assert(text("var shrink = [1, 2, 3, 4]; got = []; for (var x of shrink) { got.push(x); shrink.shift(); } got.join()") == "1,3");
+    // Given an iterator in the middle of a loop, the loop that is running is
+    // not changed and the next one is.
+    assert(text("var late = [1, 2]; got = []; for (var x of late) { got.push(x); late[Symbol.iterator] = function* () { yield 'late'; }; }"
+                "got.concat([...late]).join()") == "1,2,late");
+
+    // The functions the realm compares with outlive a collection, replaced
+    // on the prototype or not.
+    js.eval("Array.prototype[Symbol.iterator] = function* () { yield 'gone'; };");
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js.intrinsics().array_iterator_method.is_function());
+    assert(js_iterates_as_builtin(plain));
+    assert(text("gc(); [...plain, ...'ab'].join()") == "1,2,3,a,b");
+}
+
+TEST(js_iteration_of_another_realms_array) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://iteration.example.test/root.html");
+    JsInterpreter js(doc);
+    js.load_page(R"html(<!doctype html><html><body>
+      <iframe id="child" srcdoc="<script>var theirs = [1, 2, 3]; var custom = [1, 2]; custom[Symbol.iterator] = function* () { yield 'c'; };</script>"></iframe>
+    </body></html>)html", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // An array made in the frame has the frame's Array.prototype. Read from
+    // this realm it is not the plain case (its iterator is not the function
+    // this realm installed), so it is asked, and the answer is its elements.
+    assert(text("var cw = document.getElementById('child').contentWindow; cw.theirs instanceof cw.Array && !(cw.theirs instanceof Array)") == "true");
+    assert(text("[...cw.theirs].join() + '|' + Array.from(cw.theirs).join() + '|' + new Set(cw.theirs).size") == "1,2,3|1,2,3|3");
+    assert(text("var got = []; for (var x of cw.theirs) got.push(x); got.join()") == "1,2,3");
+    assert(text("[...cw.custom].join()") == "c");
+    {
+        JsIntrinsics* previous = &JsIntrinsics::get();
+        JsIntrinsics::set_current(&js.intrinsics());
+        struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous};
+        assert(js_iterates_as_builtin(js.eval("[1]")));
+        assert(!js_iterates_as_builtin(js.eval("cw.theirs")));
+    }
+
+    // Each realm has an iterator of its own to replace: the frame's arrays
+    // follow the frame's prototype, and this realm's arrays do not.
+    js.eval("cw.Array.prototype[Symbol.iterator] = function* () { yield 'frame'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|7,8");
+    js.eval("var mine = Array.prototype[Symbol.iterator]; Array.prototype[Symbol.iterator] = function* () { yield 'top'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|top");
+    js.eval("Array.prototype[Symbol.iterator] = mine;");
+    assert(text("[...[7, 8]].join()") == "7,8");
 }
 
 int main() {
@@ -15614,6 +16034,15 @@ int main() {
     RUN_TEST(js_derived_this_temporal_dead_zone);
     RUN_TEST(js_lexical_temporal_dead_zone_blocks_and_classes);
     RUN_TEST(js_temporal_dead_zone_in_control_flow_and_patterns);
+
+    // Phase 60: Unicode 17.0 String normalize(), full/locale case mapping, and CLDR 48 UCA localeCompare().
+    RUN_TEST(string_unicode17_normalization_tables_and_api);
+    RUN_TEST(string_unicode17_full_and_locale_case_mapping);
+    RUN_TEST(string_cldr48_uca_collation_and_ecma402_validation);
+
+    // Phase 63: iteration asks the value for its iterator.
+    RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
+    RUN_TEST(js_iteration_of_another_realms_array);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

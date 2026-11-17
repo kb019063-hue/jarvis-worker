@@ -100,7 +100,8 @@ written one does.
 - `construct.dat`'s recorded failure *"new.target and super() inside eval"* now
   passes — its first two columns were `false false` before and are `true true`
   now — so `make js-conformance` counts it among the 26 that changed.
-- `make test` → **209 suites** (`208 → 209`), the new one being
+- `make test` → **210 suites** (`209 → 210` on the merged tree, where Phase 64
+  added one too), the new one being
   `js_direct_eval_runs_in_the_callers_scope`: the same ground as
   `eval.dat` in one script, whose expected string was produced by running that
   script under Node.
@@ -112,7 +113,8 @@ written one does.
 - `make conformance` 1792 / 1792, `make dom-conformance` 669 / 669,
   `make url-conformance` 1188 / 1188, `make xml-conformance` 1718 / 1718,
   unchanged.
-- `make asan-core` (ASan+UBSan) green: 209 suites, JS **1123 / 1150** — the one
+- `make asan-core` (ASan+UBSan) green: 209 suites (before the merge of Phase
+  64), JS **1123 / 1150** — the one
   case below Release is `deep-nesting.dat`'s recursion-depth case, which the
   sanitizer build has always missed — DOM 669 / 669, XML 1718 / 1718, WPT
   9550 / 9744, both fuzzers 0 findings. `JS_ASAN_FLOOR` in the `Makefile` moved

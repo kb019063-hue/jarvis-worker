@@ -46,8 +46,8 @@ on `window`.
 `tests/js-conformance/eval.dat` (38 cases, all passing, every expectation from
 Node.js — `--reference "node -e"` prints 1150 / 1150) and `construct.dat`'s
 recorded failure *"new.target and super() inside eval"* now passing. `make test`
-**208 → 209** suites (`js_direct_eval_runs_in_the_callers_scope`, its expected
-string produced by running the same script under Node). `make wpt` 9550 / 9744
+**209 → 210** suites on the merged tree (`js_direct_eval_runs_in_the_callers_scope`,
+its expected string produced by running the same script under Node). `make wpt` 9550 / 9744
 before and after — neither gained nor lost. `make conformance` 1792 / 1792,
 `make dom-conformance` 669 / 669, `make url-conformance` 1188 / 1188 all
 unchanged.

@@ -36,6 +36,7 @@ SRCS = src/common/Color.cpp \
        src/render/FontRenderer.cpp \
        src/render/JpegDecoder.cpp \
        src/render/GifDecoder.cpp \
+       src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \

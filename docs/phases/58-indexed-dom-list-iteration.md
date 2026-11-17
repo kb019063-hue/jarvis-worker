@@ -21,7 +21,7 @@ ordinary array-like objects including holes. An independent out-of-corpus
 `compare_with_jsdom.py` probe (identity, live NodeList/token iteration, and
 `forEach` boundaries) matched jsdom 31.0.0 on **12/12** output lines.
 
-**Verification:** `make test` **207/207**; `make wpt` **9539/9744** across
+**Verification:** `make test` **209/209**; `make wpt` **9539/9744** across
 190 files (205 listed failures, 0 unlisted), up from **9538/9744** (206
 listed). Remaining indexed-collection WPT failures are `strict-write` (2),
 which needs the exotic property-write refusal path, not iteration. Other

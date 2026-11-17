@@ -14,7 +14,7 @@ length once but rereads each property, skips absent indices and supplies the
 original receiver to the callback. Other Array methods and non-iterable
 HTMLCollection / NamedNodeMap methods are deliberately unchanged.
 
-**Verification.** `make test` **207/207** including the new mutation,
+**Verification.** `make test` **209/209** including the new mutation,
 identity, and array-like regression suite; out-of-corpus
 `compare_with_jsdom.py` iterator/list probe **12/12** lines match jsdom
 31.0.0; `make wpt` **9539/9744** across 190 files, **205 listed**, **0

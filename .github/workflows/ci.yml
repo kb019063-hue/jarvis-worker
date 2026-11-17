@@ -138,12 +138,13 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 999 of 1014 pass (raised by 25 in finding 61 with
-        # tests/js-conformance/regexp_unicode.dat, on top of finding 50/51/42/49).
+        # does not vary: 1003 of 1017 pass (raised by 25 in finding 61 with
+        # tests/js-conformance/regexp_unicode.dat and 4 in finding 65 across
+        # construct.dat and lexical.dat, on top of finding 50/51/42/49).
         # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 999
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1003
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a

@@ -68,6 +68,7 @@ The rest are documented with enough detail to act on.
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
 | 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
+| 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
 
 ---
 
@@ -4296,3 +4297,29 @@ keys in `Reflect.ownKeys` (no symbol key is reported anywhere in the engine);
 `[[CrossOriginPropertyDescriptorMap]]` cache (wrapper identities differ from
 the child's functions); `MessageChannel`/`MessagePort`; process-level site
 isolation.
+
+---
+
+## 65. ✅ Derived constructor `this` before `super()` and `let`/`const`/`class` TDZ (Phase 59)
+
+**The hole.** Phase 43 introduced `JsEnvironment::this_binding` for derived constructors and noted (`ARCHITECTURE.md`, Phase 43, §8) that the engine still had no uninitialized binding state:
+
+- In a derived constructor, `this.x = 1; super();`, `() => this`, `super.m()`, `super[expr]`, and `return this` before `super(...)` read/wrote the pre-allocated instance or evaluated `expr` instead of throwing a `ReferenceError`.
+- In blocks, functions, loops, `switch` bodies, `catch` clauses, parameter defaults, and top-level scripts, `let`, `const`, and `class` bindings did not exist until execution reached their declaration statement, so `typeof z` returned `"undefined"`, a block `let` failed to shadow outer bindings above its line, `let x = x` read the outer `x` or `undefined`, and `c = 2; const c = 1` succeeded in sloppy mode by creating an implicit global.
+
+**The fix.** Implemented across `include/litebird/js/{JsInterpreter,JsParser}.hpp` and `src/js/{JsParser,JsEval}.cpp`:
+
+- Added `Binding::is_initialized` (using existing struct tail padding, zero `sizeof(Binding)` growth), `AssignResult::Uninitialized`, and `declare_lexical` / `initialize_lexical` / `mark_uninitialized` on `JsEnvironment`, checking `!is_initialized` before `is_const` in `try_assign` so TDZ writes to `const` throw `ReferenceError` rather than `TypeError`.
+- Marked derived constructor `"this"` uninitialized on entry until `eval_super_call` binds it, and updated `SuperMember` evaluation (read, call, and `resolve_reference` writes) to check `"this"` before evaluating computed property keys.
+- Collected `lexical_decls` in `JsParser` for `BlockStmt` (including `Program` and function bodies) and `SwitchStmt`, and pre-declared uninitialized lexical bindings on entry to scripts, functions, async/generator frames, non-simple parameter lists, blocks, `switch`, `for`/`for-of`/`for-in` heads (rooted in `EnvScope`), `try/catch` destructuring params/blocks, and `class` `extends`/computed-key environments (before initializing static fields and `static {}` blocks).
+
+**Verification.**
+
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **1017/1017**.
+- `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
+- Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
+
+**Still open.**
+- Separate `<script>` tags evaluate `run_program` per script, so referencing a `let` declared in a later `<script>` throws `"x is not defined"` (`ReferenceError`) rather than `"Cannot access 'x' before initialization"`, and redeclaring the same lexical name across two `<script>` tags overwrites `m_global_env` instead of raising a `SyntaxError`.
+- Direct `eval` scope (tracked separately in `AGENTS.md`) and parse-time early `SyntaxError` for `{ let x; { var x; } }` remain open.

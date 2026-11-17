@@ -740,3 +740,26 @@ var t = new Twice(), m = new M(), e = new E(), l = new L();
 console.log(t.items.join('+'), runs, t.err, '|', m.get(1), m.size, m.err, '|', e.message, e.err, '|', l.length, l.err);
 #expect
 1+mine 2 ReferenceError | 2 1 ReferenceError | first ReferenceError | 2 ReferenceError
+
+#name this in derived constructor arrows default params and nested classes
+#code
+class Base { constructor(fail) { if (fail) throw new Error("boom"); this.ok = 42; } }
+let log = [];
+class Derived extends Base {
+  constructor(fn = () => this) {
+    function inner() { return typeof this; }
+    log.push(inner());
+    try { fn(); log.push("arrow"); } catch (e) { log.push(e.name); }
+    try { typeof this; log.push("typeof"); } catch (e) { log.push(e.name); }
+    try { super(true); } catch (e) { log.push(e.message); }
+    try { fn(); log.push("still"); } catch (e) { log.push("afterthrow:" + e.name); }
+    class Inner extends Base { constructor() { super(false); this.inner = true; } }
+    log.push(new Inner().inner);
+    (() => super(false))();
+    log.push(fn() === this, this.ok);
+  }
+}
+new Derived();
+console.log(log.join(" "));
+#expect
+undefined ReferenceError ReferenceError boom afterthrow:ReferenceError true true 42

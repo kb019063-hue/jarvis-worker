@@ -150,7 +150,8 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to write RGBA\n";
             return 2;
         }
-        std::cout << res.image->width << " " << res.image->height << " lossless\n";
+        std::cout << res.image->width << " " << res.image->height
+                  << (res.lossy ? " lossy\n" : " lossless\n");
         return 0;
     }
 

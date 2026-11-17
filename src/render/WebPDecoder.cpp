@@ -1,5 +1,8 @@
 #include "litebird/render/WebPDecoder.hpp"
 
+
+#include "litebird/render/Vp8Decoder.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -357,6 +360,10 @@ public:
     Vp8lDecoder(const uint8_t* data, size_t size) : br_(data, size) {}
 
     bool decode_image(std::vector<uint32_t>& pixels, int& width, int& height, std::string& error);
+    // An ALPH chunk's lossless payload is a VP8L image stream without the
+    // signature and dimension header: the container supplies them, and the
+    // alpha value travels in the green channel.
+    bool decode_alpha_stream(int width, int height, std::vector<uint8_t>& plane, std::string& error);
 
 private:
     bool fail(const char* message) {
@@ -396,6 +403,21 @@ private:
     BitReader br_;
     std::string error_;
 };
+
+bool Vp8lDecoder::decode_alpha_stream(int width, int height, std::vector<uint8_t>& plane, std::string& error) {
+    std::vector<uint32_t> decoded;
+    if (!decode_stream(width, height, true, decoded)) {
+        error = error_;
+        return false;
+    }
+    if (decoded.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        error = "the ALPH image does not match the picture size";
+        return false;
+    }
+    plane.resize(decoded.size());
+    for (size_t i = 0; i < decoded.size(); ++i) plane[i] = static_cast<uint8_t>((decoded[i] >> 8) & 0xff);
+    return true;
+}
 
 bool Vp8lDecoder::read_image_header(int& width, int& height) {
     if (br_.read(8) != 0x2f) return fail("bad VP8L signature");
@@ -934,6 +956,108 @@ bool Vp8lDecoder::inverse_transform(
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// The alpha plane of a lossy image (the `ALPH` chunk).
+//
+// The plane is stored at full resolution, either raw or as a VP8L stream whose
+// green channel is the alpha value, and prefixed by a one-byte header naming
+// the compression, a spatial predictor to undo and an optional level-reduction
+// step. Only the "no preprocessing" case is lossless to reverse, so the other
+// is refused by name rather than silently returning flatter alpha.
+// ---------------------------------------------------------------------------
+bool decode_alpha_plane(
+    const Chunk& chunk,
+    int width,
+    int height,
+    std::vector<uint8_t>& plane,
+    std::string& error
+) {
+    if (chunk.size < 1) {
+        error = "the ALPH chunk is empty";
+        return false;
+    }
+    const uint8_t header = chunk.data[0];
+    const int compression = header & 0x03;
+    const int filter = (header >> 2) & 0x03;
+    const int preprocessing = (header >> 4) & 0x03;
+    if (((header >> 6) & 0x03) != 0) {
+        error = "the ALPH header has reserved bits set";
+        return false;
+    }
+    if (preprocessing != 0) {
+        error = "the ALPH chunk asks for level-reduction preprocessing";
+        return false;
+    }
+    const uint8_t* payload = chunk.data + 1;
+    const size_t payload_size = chunk.size - 1;
+    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<uint8_t> raw;
+
+    if (compression == 0) {
+        if (payload_size != pixel_count) {
+            error = "the uncompressed ALPH plane is the wrong size";
+            return false;
+        }
+        raw.assign(payload, payload + payload_size);
+    } else if (compression == 1) {
+        Vp8lDecoder decoder(payload, payload_size);
+        if (!decoder.decode_alpha_stream(width, height, raw, error)) return false;
+    } else {
+        error = "the ALPH chunk uses an unknown compression method";
+        return false;
+    }
+
+    plane.assign(pixel_count, 0);
+    // The three spatial filters invert the encoder's predictors. All of them fall
+    // back to the horizontal filter on the first row, which has no row above it.
+    const auto unfilter_horizontal = [&](const uint8_t* in, uint8_t* out, const uint8_t* prev) {
+        int pred = prev != nullptr ? prev[0] : 0;
+        for (int x = 0; x < width; ++x) {
+            out[x] = static_cast<uint8_t>(pred + in[x]);
+            pred = out[x];
+        }
+    };
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* in = raw.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
+        uint8_t* out = plane.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
+        const uint8_t* prev = y > 0 ? out - width : nullptr;
+        switch (filter) {
+            case 0:  // none: the plane is stored as it is
+                std::memcpy(out, in, static_cast<size_t>(width));
+                break;
+            case 1:  // horizontal: each pixel predicts from the one to its left
+                unfilter_horizontal(in, out, prev);
+                break;
+            case 2:  // vertical: each row predicts from the row above
+                if (prev == nullptr) {
+                    unfilter_horizontal(in, out, nullptr);
+                    break;
+                }
+                for (int x = 0; x < width; ++x) out[x] = static_cast<uint8_t>(prev[x] + in[x]);
+                break;
+            default: {  // gradient: left + above - above-left, modulo 256
+                if (prev == nullptr) {
+                    unfilter_horizontal(in, out, nullptr);
+                    break;
+                }
+                int top = prev[0];
+                int top_left = top;
+                int left = top;
+                for (int x = 0; x < width; ++x) {
+                    top = prev[x];
+                    const int predicted = left + top - top_left;
+                    left = static_cast<uint8_t>(in[x] + predicted);
+                    top_left = top;
+                    out[x] = static_cast<uint8_t>(left);
+                }
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -949,8 +1073,10 @@ const char* WebPDecoder::status_string(Status status) {
     switch (status) {
         case Status::Ok: return "ok";
         case Status::NotWebP: return "not a WebP file";
-        case Status::UnsupportedLossy: return "lossy VP8 is not supported";
+        case Status::UnsupportedLossy: return "lossy VP8 stream is not supported";
         case Status::UnsupportedAnimation: return "animated WebP is not supported";
+        case Status::UnsupportedAlpha:
+            return "lossy WebP alpha with level-reduction preprocessing is not supported";
         case Status::TooLarge: return "image is too large";
         case Status::Truncated: return "truncated WebP file";
         case Status::Corrupt: return "corrupt WebP bitstream";
@@ -979,8 +1105,7 @@ WebPDecoder::Status WebPDecoder::probe(const uint8_t* data, size_t size) {
     }
     if (has_animation) return Status::UnsupportedAnimation;
     if (!complete) return Status::Truncated;
-    if (has_lossless) return Status::Ok;
-    if (has_lossy) return Status::UnsupportedLossy;
+    if (has_lossless || has_lossy) return Status::Ok;
     return Status::Corrupt;
 }
 
@@ -1002,7 +1127,8 @@ WebPDecoder::DecodeResult WebPDecoder::decode_detailed(const uint8_t* data, size
 
     bool animation = false;
     const Chunk* lossless = nullptr;
-    bool lossy = false;
+    const Chunk* lossy = nullptr;
+    const Chunk* alpha_chunk = nullptr;
     int canvas_width = 0;
     int canvas_height = 0;
     for (const Chunk& chunk : chunks) {
@@ -1020,7 +1146,9 @@ WebPDecoder::DecodeResult WebPDecoder::decode_detailed(const uint8_t* data, size
         } else if (std::memcmp(chunk.fourcc, "VP8L", 4) == 0) {
             if (lossless == nullptr) lossless = &chunk;
         } else if (std::memcmp(chunk.fourcc, "VP8 ", 4) == 0) {
-            lossy = true;
+            if (lossy == nullptr) lossy = &chunk;
+        } else if (std::memcmp(chunk.fourcc, "ALPH", 4) == 0) {
+            if (alpha_chunk == nullptr) alpha_chunk = &chunk;
         }
     }
 
@@ -1029,14 +1157,63 @@ WebPDecoder::DecodeResult WebPDecoder::decode_detailed(const uint8_t* data, size
         result.error = "animated WebP: only still images are decoded";
         return result;
     }
-    if (lossless == nullptr) {
-        if (lossy) {
-            result.status = Status::UnsupportedLossy;
-            result.error = "lossy VP8 image: the lossy codec is not implemented";
-        } else {
-            result.status = Status::Corrupt;
-            result.error = "no VP8L or VP8 image chunk";
+    if (lossless == nullptr && lossy != nullptr) {
+        // A lossy image: decode the VP8 key frame, then fold in the alpha plane
+        // if the file carries one.
+        Vp8Decoder::Frame frame;
+        std::string vp8_error;
+        const Vp8Decoder::Status vp8_status =
+            Vp8Decoder::decode(lossy->data, lossy->size, frame, vp8_error);
+        if (vp8_status != Vp8Decoder::Status::Ok) {
+            switch (vp8_status) {
+                case Vp8Decoder::Status::Truncated: result.status = Status::Truncated; break;
+                case Vp8Decoder::Status::TooLarge: result.status = Status::TooLarge; break;
+                case Vp8Decoder::Status::NotKeyFrame:
+                case Vp8Decoder::Status::UnsupportedProfile:
+                case Vp8Decoder::Status::Corrupt:
+                default: result.status = Status::Corrupt; break;
+            }
+            result.error = "lossy VP8: " + vp8_error;
+            return result;
         }
+        if (canvas_width > 0 && canvas_height > 0 &&
+            (frame.width > canvas_width || frame.height > canvas_height)) {
+            result.status = Status::Corrupt;
+            result.error = "image is larger than its VP8X canvas";
+            return result;
+        }
+        std::vector<uint8_t> alpha;
+        const uint8_t* alpha_pixels = nullptr;
+        if (alpha_chunk != nullptr) {
+            std::string alpha_error;
+            if (!decode_alpha_plane(*alpha_chunk, frame.width, frame.height, alpha, alpha_error)) {
+                result.status = alpha_error.find("level-reduction") != std::string::npos
+                                    ? Status::UnsupportedAlpha
+                                    : Status::Corrupt;
+                result.error = alpha_error;
+                return result;
+            }
+            alpha_pixels = alpha.data();
+        }
+        std::vector<uint32_t> pixels;
+        Vp8Decoder::to_argb(frame, alpha_pixels, frame.width, pixels);
+        if (pixels.size() != static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height)) {
+            result.status = Status::Corrupt;
+            result.error = "the lossy decode produced the wrong number of pixels";
+            return result;
+        }
+        auto image = std::make_shared<ImageData>();
+        image->width = frame.width;
+        image->height = frame.height;
+        image->pixels = std::move(pixels);
+        result.image = std::move(image);
+        result.status = Status::Ok;
+        result.lossy = true;
+        return result;
+    }
+    if (lossless == nullptr) {
+        result.status = Status::Corrupt;
+        result.error = "no VP8L or VP8 image chunk";
         return result;
     }
 

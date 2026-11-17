@@ -137,17 +137,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `tests/test_suite.cpp`, `tests/js-conformance/README.md`). Renumber on
   your branch *before* you merge `main`, while every `Phase N` in the tree
   is still yours.
-- **A claim nobody can read.** #65 and #71 have no `Task:`, `Files:` and
-  `Phase P, finding F` lines. So nothing said that #71 changes
-  `src/js/JsEval.cpp`, which #68 names, and `src/js/JsOps.cpp`, which #70
-  names. Without those lines the other agents work as if the pull request
+- **A claim nobody can read.** #65 and #71 had no `Task:`, `Files:` and
+  `Phase P, finding F` lines. So nothing said that #71 changed
+  `src/js/JsEval.cpp`, which #68 named, and `src/js/JsOps.cpp`, which #70
+  named. Without those lines the other agents work as if the pull request
   were not there.
-- **A claim nobody holds.** #66 has the task #67 has since merged, and was
-  still open afterwards. #63 has one commit, from the minute it was opened,
-  and names three files that five other rows of the table need. An open pull
-  request is a claim for as long as it is open: close the one you give up,
-  and when your session moves to a new branch, close what the old branch
-  left open.
+- **A claim nobody holds.** #66 has the task #67 has since merged, and is
+  still open. #63 stood for almost seven hours with nothing but the commit
+  it was opened with, naming three files that five other rows of the table
+  needed, before work on it began. An open pull request is a claim for as
+  long as it is open: close the one you give up, say in it when it has to
+  wait, and when your session moves to a new branch, close what the old
+  branch left open.
 
 **`main`**
 
@@ -165,6 +166,19 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   last, before anything else, and the person we work for should hear of it.
   Look for a repair that exists (`gh pr list`, `git log origin/main`) before
   writing one.
+- **A page that "reported nothing" in the sanitizer job was the engine's
+  real-time limit, not chance.** The job failed that way on `main` at
+  `73e23a2` and on #73's first commit: the engine stops a page's callbacks
+  after 10 seconds of real time, in silence and with exit status 0, and the
+  heaviest web-platform-test page spends 7 of them on its load handlers in
+  the sanitizer build on an idle machine. Since Phase 63 `run_wpt.py`
+  passes its own timeout as that limit (`--wall-limit`), and the engine
+  says on standard error when the limit ended a run. The other runners
+  still use the default: when a case of theirs ends with no output and exit
+  status 0, look for that line. Read a failed job's annotations before
+  anything else ("What done means" has the command), and when a job failed
+  for a reason outside the tree, `gh run rerun RUN --failed` runs it again
+  without the other six.
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
@@ -183,6 +197,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   origin/BRANCH`. So commit and push after every step, and keep nothing that
   matters only in `/tmp`. The clone is shallow: `git fetch --deepen=60 origin
   main` before a merge or a `git log`.
+- **It can be suspended, and its clock is not.** When a turn ends, what was
+  running stops where it was and goes on when the next turn begins, hours
+  later by the clock. A check that measures time then reports nonsense:
+  `make asan` came back with two deep pages "timed out" after 6,703
+  seconds. Do not leave a long check running across the end of a turn, and
+  run again any check that was.
 - **It is small: 2 cores, 3.9 GB.** `make deep` with its two jobs runs out of
   memory on one page; `python3 tools/fuzz/deep_pages.py --jobs 1` does not.
   Nothing else runs beside `make asan`, `make deep` or a timing. `make fuzz`
@@ -199,14 +219,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   fewer, in the directories on classes and async generators: other code had
   been leaning on what was fixed.
   `python3 tools/conformance/run_test262.py --binary before=MAIN --binary now=build/litebird built-ins language annexB`,
-  about nine minutes.
+  about twelve minutes.
 - **Measure what a change costs against `main`'s binary before calling it
   done**, with a second copy of `main`'s binary beside it to see how far a
   binary is from itself (3 to 5% here). The first version of Phase 43 was up
-  to 39% slower, and nobody had asked. A loop that allocates gets slower the
+  to 39% slower, and nobody had asked. A loop that allocates can get slower the
   longer it runs, because memory is only reclaimed by `gc()` (Known gaps, 4):
-  one over a `Map` took 13 microseconds a turn for its first thousand turns
-  and 264 for turns 7,000 to 15,000. Call `gc()` between measures.
+  one over a `Map` took 12 microseconds a loop for its first thousand loops
+  and 154 for its eighth thousand (the row on iterating a `Map` below says
+  why). Keep such loops short and call `gc()` between measures.
 - **A number is copied from a log, with the commit it was measured on.**
   Twice a sentence was written from memory with a number no run had printed,
   and one of them reached `main` (the cost paragraph of Phase 43, corrected
@@ -245,10 +266,11 @@ Rows that share files should not be in work at the same time.
 | **`Array.from` decides for itself what is iterable.** Whatever `is_array()` or is a string it takes for iterable without asking. So with the iterator deleted from `Array.prototype`, `Array.from([1, 2])` is a `TypeError` where the language reads the array as array-like and gives `[1, 2]` (`main` before Phase 63 gave that, by never asking anything), and the same for a string. A number whose prototype was given an iterator is not asked (`Array.from(3)` is `[]`). And it collects every value before it maps the first: a mapper that throws does not close the iterator, and an iterator without an end hangs it where the mapper would have stopped it | `src/js/BuiltinsArray.cpp` (`Array.from`) | ARCHITECTURE.md, Phase 63, section 6; three failing cases of `iteration.dat` | `js_iterator_method(source, method)` is the language's GetMethod: no method means array-like, for an array as for anything else. With a method, map inside the visitor of `js_iterate`, which closes the iterator when the visitor throws. Not done in Phase 63 because `BuiltinsArray.cpp` belonged to an open pull request then (#63) |
 | **The default constructor of a subclass spreads its arguments.** For a class that has no constructor the parser writes `constructor(...args) { super(...args); }`, and since Phase 63 a spread asks the array for its iterator. So a script that replaced `Array.prototype[Symbol.iterator]` is called by `new Derived(1, 2)`, once for each default constructor on the way up, where the language hands the arguments on without iterating ("does not use argument evaluation", in the words of the test); a replacement that throws makes every such `new` throw. test262's `language/statements/class/subclass/default-constructor-spread-override.js` passed before Phase 63, when nothing asked an array, and fails now | `src/js/JsParser.cpp` (where the default constructor is made), `src/js/JsEval.cpp` (`eval_arguments`) | ARCHITECTURE.md, Phase 63, section 6; one failing case of `iteration.dat` | Mark the spread the parser makes (a flag on its `SpreadExpr`) and, for a marked one, copy the rest array's elements in `eval_arguments` without `js_iterate`. A constructor that a script writes with the same text has to keep asking. Not done in Phase 63 because both files belonged to an open pull request then (#68) |
 | **`yield*` in an async generator does not ask for `Symbol.asyncIterator`.** It runs the sync protocol (`js_iterate`) whatever kind of generator it is in. `yield* inner()` over another async generator is a `TypeError` (`… is not iterable`); on `main` before Phase 63 it never returned, because an object with `next` and no `Symbol.iterator` was taken for an iterator and a promise has no `done`. Three test262 tests of async delegation passed only through that and fail since Phase 63 (`yield-star-getiter-async-return-method-is-null.js`, `yield-star-normal-notdone-iter-value-throws.js`, `yield-star-promise-not-unwrapped.js`), and one that failed passes, for no better reason | `src/js/JsEval.cpp` (`eval_yield`) | ARCHITECTURE.md, Phase 63, section 6; one failing case of `iteration.dat` | In an async generator: the method under `kAsyncIteratorKey`, or without one the sync method with each result awaited; `next`, `throw` and `return` handed on, each result awaited, the value yielded without a second await. `for await`, in the same file, already finds the async iterator. Not done in Phase 63 because `JsEval.cpp` belonged to open pull requests then (#68, #71) |
-| **What an iterator is, in small**: `Array.prototype[Symbol.iterator]` is not `Array.prototype.values` (they are two functions, and its `name` is `@@iterator`), `Map.prototype[Symbol.iterator]` is not `entries`, and `Set`'s `values` and `keys` are not one function. An array iterator has `next` as a property of its own, where the language has one `next` on a prototype that a script can replace, and every kind of iterator has the same prototype (`Object.prototype.toString` gives `[object Object]`). Every built-in iterable also has a property whose name is the text `Symbol.iterator`, which `Object.getOwnPropertyNames` lists; and the symbol itself is a property named `@@iterator`, so `'@@iterator' in []` is true and an object with a property of that name is iterable. `arguments` has no `Symbol.iterator` of its own. An object whose prototype is an array has no `length` and no elements. `String.prototype.trim.call(['x', 'y'])` is `[object Object]` | `src/js/BuiltinsArray.cpp`, `src/js/BuiltinsCollections.cpp`, `src/js/BuiltinsString.cpp` (`this_string`), `src/js/JsValue.cpp` | ARCHITECTURE.md, Phase 63, section 6; six failing cases of `iteration.dat` | The day array iterators take `next` from a prototype they share, `js_iterates_as_builtin` has to compare that function too (the comment in it says so): the direct read is right now because nothing a script can reach stands between the installed method and the elements. Since Phase 63 nothing reads the properties named `Symbol.iterator` except `Array.from` and `IterationCursor` (the rows above) and `has_property` in `JsValue.cpp` |
+| **What an iterator is, in small**: `Array.prototype[Symbol.iterator]` is not `Array.prototype.values` (they are two functions, and its `name` is `@@iterator`), `Map.prototype[Symbol.iterator]` is not `entries`, and `Set`'s `values` and `keys` are not one function. An array iterator has `next` as a property of its own, where the language has one `next` on a prototype that a script can replace, and every kind of iterator has the same prototype (`Object.prototype.toString` gives `[object Object]`). Every built-in iterable also has a property whose name is the text `Symbol.iterator`, which `Object.getOwnPropertyNames` lists; and the symbol itself is a property named `@@iterator`, so `'@@iterator' in []` is true and an object with a property of that name is iterable. `arguments` has no `Symbol.iterator` of its own. An object whose prototype is an array has no `length` and no elements | `src/js/BuiltinsArray.cpp`, `src/js/BuiltinsCollections.cpp`, `src/js/JsValue.cpp` | ARCHITECTURE.md, Phase 63, section 6; five failing cases of `iteration.dat` | The day array iterators take `next` from a prototype they share, `js_iterates_as_builtin` has to compare that function too (the comment in it says so): the direct read is right now because nothing a script can reach stands between the installed method and the elements. Since Phase 63 nothing reads the properties named `Symbol.iterator` except `Array.from` and `IterationCursor` (the rows above) and `has_property` in `JsValue.cpp` |
 | **A refused property write is refused in silence**: assigning to an out-of-range index of an `HTMLCollection` (`l[5] = x`) must throw a `TypeError` in strict mode, and does nothing at all here (2 subtests, word `strict-write`). `JsExotic::set` answers "handled" with no way to say "refused", and the strictness of the assignment is read in `JsEval.cpp`. The attribute block beside it — `Attr` as an object with `cloneNode`/`isSameNode`/`lookupNamespaceURI`, one qualified name in two namespaces, `NamedNodeMap`/`HTMLCollection` named own properties, `importNode(attr)`, an `Attr` adopted with its element — landed in Phase 51 | `src/js/DomCollectionBindings.cpp`, `include/litebird/js/Heap.hpp` (`JsExotic`), `src/js/JsValue.cpp`, `src/js/JsEval.cpp` | ARCHITECTURE.md, Phase 51, sections 3, 4 and 6; AUDIT.md, finding 57 | The write path (`JsValue::set_property`, `JsEval.cpp`) was claimed by PR #50 (Phase 43) when this row was written; that has merged, and the files are free |
 | **What the DOM corpus cannot ask**: `getComputedStyle(el).width` is still `auto` (used values are available via `getBoundingClientRect()`/`offset*`/`client*` since Phase 36), style sheet objects (`sheet.cssRules`, `insertRule`), `document.write`, the SVG DOM (`className.baseVal`, `viewBox`, `getBBox()`: `tests/dom-conformance/open/dates-and-svg.js`) | `src/js/Dom*Bindings.cpp`, `src/main.cpp`, `src/shell/` | ARCHITECTURE.md, Phase 27, section 12 & Phase 36 | jsdom does none of the first two, so each needs a reference of its own before it is built |
 | **Every box carries its own copy of a 920-byte computed style**: 100,000 times `word <b>bold</b>` takes 1.3 GB | `src/layout/`, `src/css/` | AUDIT.md, findings 12 and 28 | Same files as the layout rows |
+| **Iterating a `Map` or a `Set` gets slower every time it is done.** `for (e of map)` over a `Map` of three entries takes 12 microseconds a loop for the first thousand loops and 154 for the eighth thousand (a `Set`: 8 and 129), where `map.forEach` stays at 2.5 and `for…of` over an array at 1.1. `CollectionData::new_cursor` keeps a weak reference to the cursor of every iterator that was ever made on the collection, so that removing entries can move them, and from the 64th on it walks the whole list for each new iterator to drop the dead ones; none is dead before a collection, and there is none without `gc()` (the row below). After `gc()` the same loop is back at 20. Pruning when the list has doubled since the last pruning would make it constant | `src/js/BuiltinsCollections.cpp` | AUDIT.md, finding 69 ("What each instrument found"); `./build/litebird --run-js` of the loop in that row | Found by a benchmark of Phase 63 whose line for a `Map` did not finish. Small, and nothing else needs the file |
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 passed before Phase 49's `<select>` work): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Touches `src/html/HtmlTokenizer.cpp`, `src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp`. The node type is there since Phase 28 (`include/litebird/dom/ProcessingInstruction.hpp`, its interface, `<?target data>` in the markup serializer); what is left is the tokenizer and the tree builder |
 | **Lossy `VP8`, animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; AUDIT.md, findings 43, 44 & 60 | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the lossy and animated variants. Canvas 2D text is done (Phase 46, finding 52). What is left: the lossy `VP8` codec (a VP8 video keyframe), animated WebP (`ANMF` compositing), AVIF, and SVG `<text>` |

@@ -372,7 +372,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 56** | **Cross-origin `Window` and `Location` reflection.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 56 Architecture") |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 | **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
-| **Phase 63** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (TBD56-row) |
+| **Phase 63** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (206/206 unit suites; JS corpus 1085/1112, `iteration.dat` 65/78 against 28 before; test262 10 more and 4 fewer of 47,967, the four being rows of the task table; 0.94 to 1.06 of `main`'s time over two runs) |
 
 ---
 
@@ -6294,17 +6294,17 @@ put a counting function on `Array.prototype` and expect it to count nothing.
 ### 5. Verification and cost
 
 Every number here is printed by the command beside it, on this branch with
-`main` at `73e23a2` (Phase 55) merged in. "Before" is the release binary of
+`main` at `b1745d3` (Phase 60) merged in. "Before" is the release binary of
 that `main`.
 
 | Command | Before | Now |
 | :--- | :--- | :--- |
-| `make test` | 198 suites | `All 200 engine test suites passed successfully!` |
-| `make js-conformance` | 999 / 1014 | `JS conformance, full corpus: 1063/1092 (97.3%)  [27 files, 0 crashes, 0 timeouts]` |
-| `python3 tools/conformance/run_js_conformance.py --filter iteration` | TBD56-main-iter | 64 / 78 |
+| `make test` | 204 suites | `All 206 engine test suites passed successfully!` and `Cross-origin Window/Location suite: 80 checks, 0 failure(s).` |
+| `make js-conformance` | 1020 / 1034 | `JS conformance, full corpus: 1085/1112 (97.6%)  [28 files, 0 crashes, 0 timeouts]` |
+| `python3 tools/conformance/run_js_conformance.py --filter iteration` | 28 / 78, 2 timeouts | 65 / 78 |
 | the same with `--reference "node -e"`: the file itself, run by Node | | 78 / 78 |
-| `make asan` (the unit suites, both corpora and the fuzzers under ASan and UBSan) | JS floor 997 | TBD56-asan |
-| `make dom-conformance`, `make wpt`, `make conformance` | 669 / 669, 7998 / 8009, 1792 / 1792 | TBD56-suites |
+| `make dom-conformance`; `make wpt` | 669 / 669; 9538 / 9744 | the same |
+| `python3 tools/conformance/compare_with_jsdom.py` on a page that is in no corpus (below) | 17 lines, 9 the same | 17 lines, 17 the same |
 
 **The corpus.** `tests/js-conformance/iteration.dat` has 78 cases. Each was
 added through `tools/conformance/add_js_case.py`, which runs the script in
@@ -6313,7 +6313,7 @@ cover the three places a script can put an iterator (the array, a subclass,
 the prototype) through each consumer (`for…of`, spread in a call and in an
 array, `yield*`, `Array.from`, `Map`, `Set`, `Object.fromEntries`, the
 `Promise` combinators), the same for strings, the protocol's order of reads,
-closing, and the plain cases that must not change. The 14 that fail are the
+closing, and the plain cases that must not change. The 13 that fail are the
 cases of section 6, and they are in the file so that whoever takes one of
 those rows has the test already.
 
@@ -6329,27 +6329,80 @@ iterates the frame's arrays from the top document.
 
 **test262**, the whole of `built-ins`, `language` and `annexB`
 (`python3 tools/conformance/run_test262.py --binary before=… --binary now=…
---timeout 6 built-ins language annexB`): TBD56-test262
+--timeout 6 built-ins language annexB`): `47967 tests run, 830 skipped
+(modules)`; before, `29444 pass (61.4%)`; now, `29450 pass (61.4%)`; `10 pass
+in now and not in before; 4 pass in before and not in now`. Nine of the ten
+are what the change is for: `for…of` and `yield*` asking
+(`language/statements/for-of/dstr/{const,let,var}-ary-init-iter-get-err-array-prototype.js`,
+`language/expressions/yield/star-in-rltn-expr.js`), the two checks of
+IteratorClose (`for-of/iterator-close-non-object.js`,
+`for-of/iterator-close-non-throw-get-method-non-callable.js`), an array
+whose `Symbol.iterator` getter throws
+(`built-ins/Promise/{allSettled,any}/iter-arg-is-poisoned.js`), and one of
+async delegation (section 6, item 3). The tenth,
+`built-ins/String/prototype/repeat/empty-string-returns-empty.js`, timed out
+in the run of `main` and is the machine, as are 14 tests of `built-ins/Array`
+and `built-ins/Map` that moved between crash, timeout and fail. The four
+that are lost are the three of section 6, item 3, and the one of item 2.
 
-The first run was over the 25 directories that are about iteration, and it
-said eight gained and none lost. The four lost were in directories that are
-not: three under `async-generator` and one under `class/subclass`. A change
-to something this widely called is measured over the whole suite or not at
-all.
+The first run, earlier in the work, was over the 25 directories that are
+about iteration, and it said eight gained and none lost. The four lost were
+in directories that are not: three under `async-generator` and one under
+`class/subclass`. A change to something this widely called is measured over
+the whole suite or not at all.
 
-**A page that is not in a corpus.** TBD56-jsdom
+**A page that is not in a corpus.** `js_iterable_to_vector` is also how the
+DOM's bindings read a sequence argument: the pairs of `new
+URLSearchParams(pairs)`, the parts of `new Blob(parts)`, a
+`MutationObserver`'s `attributeFilter`, a custom element's
+`observedAttributes`. A page of 17 lines hands each of them an array with an
+iterator of its own, an instance of a subclass that has one, and plain
+arrays while `Array.prototype[Symbol.iterator]` is replaced by a function
+that counts. jsdom and this branch print the same 17 lines; `main` prints 9
+of them. The page is not in the DOM corpus, which would move that corpus's
+floors; the unit suite holds `js_iterable_to_vector` itself.
+
+**The sanitizers.** `make asan` was run here on the tree before the last
+merge of `main` (this branch with `73e23a2`). Its first part, `asan-core`,
+passed whole: `JS conformance, full corpus: 1062/1092` under ASan against
+1063 in the release build (the one case is the deep recursion that a
+sanitizer build's stack frames are too large for, as on `main`), the DOM
+corpus 669/669, web-platform-tests 7998/8009, and no finding from either
+fuzzer. Its second part, the deep pages, was cut off when the sandbox was
+suspended and was not repeated here. On the merged tree the sanitizer job
+of CI is the whole run, deep pages included; the pull request names it.
 
 **Cost.** The plain case pays for the check: three pointer comparisons, one
 lookup in the array's own property table when it has one, and one lookup in
 `Array.prototype`'s table. The first version asked with a full property read
 every time, and a `for…of` over three elements took 1.16 of `main`'s time;
-that is why the check is structural. Least time of TBD56-rounds processes
-each, in nanoseconds for one operation, `main`'s binary beside a second copy
-of the same file to show what the measure itself varies by:
+that is why the check is structural. Least time of 5 processes each, in
+nanoseconds for one operation, twice over; beside `main`'s binary a second
+copy of the same file, to show what the measure itself varies by:
 
-TBD56-timing-table
+| One operation | `main`, ns | this branch, ns | branch / `main`, two runs | second copy of `main` / `main`, two runs |
+| :--- | ---: | ---: | :--- | :--- |
+| `for (x of a)`, 3 elements | 707 | 723 | 1.02, 1.03 | 1.00, 1.01 |
+| `for (x of a)`, 1,000 elements | 162,000 | 154,667 | 0.95, 0.97 | 0.98, 1.00 |
+| `f(...a)`, 3 elements | 933 | 957 | 1.03, 1.03 | 1.00, 1.00 |
+| `Math.max(...a)`, 1,000 elements | 37,333 | 38,000 | 1.02, 0.97 | 1.02, 0.95 |
+| `[...a]`, 3 elements | 1,100 | 1,133 | 1.03, 1.02 | 1.02, 0.99 |
+| `[...a]`, 1,000 elements | 45,500 | 46,000 | 1.01, 0.94 | 0.99, 0.97 |
+| `Array.from(a)`, 3 elements | 800 | 847 | 1.06, 1.04 | 1.02, 0.99 |
+| `new Set(a)`, 3 elements | 1,500 | 1,560 | 1.04, 1.03 | 0.99, 1.01 |
+| `new Map(pairs)`, 3 pairs | 1,717 | 1,750 | 1.02, 1.00 | 0.98, 1.03 |
+| `for (c of 'abc')` | 733 | 733 | 1.00, 1.00 | 1.00, 1.00 |
+| `[...'abc']` | 713 | 753 | 1.06, 0.99 | 1.02, 0.98 |
+| a generator that does `yield* a`, made and run to its end | 148,000 | 151,000 | 1.02, 1.01 | 1.03, 0.96 |
+| `Promise.all(a)`, 3 elements | 4,000 | 4,200 | 1.05, 1.04 | 1.02, 1.03 |
+| control: `var [x, y] = a` | 383 | 370 | 0.97, 0.97 | 1.00, 1.00 |
+| `for (e of map)`, 3 entries (not an array: the protocol) | 24,000 | 24,000 | 1.00, 1.03 | 0.97, 1.03 |
+| control: `for (i = 0; i < 3; i++)` | 1,307 | 1,263 | 0.97, 0.97 | 1.02, 0.99 |
 
-The lines marked "control" run none of the changed code.
+The two lines marked "control" run none of the changed code. Over both runs
+this branch is between 0.94 and 1.06 of `main`, and the second copy of
+`main` between 0.95 and 1.03 of the first: what the check costs is at the
+edge of what this machine can measure.
 
 ### 6. What is still open
 
@@ -6393,5 +6446,61 @@ meet and a test suite does meet. They come first for that reason.
    `next`; the built-in iterables also have a property named by the text
    `Symbol.iterator`, and the symbol is itself the text `@@iterator`;
    `arguments` has no iterator of its own; an object whose prototype is an
-   array has no elements; a `String.prototype` method called on an array
-   reads it as `[object Object]`.
+   array has no elements. (A seventh, a `String.prototype` method called on
+   an array reading it as `[object Object]`, was repaired by Phase 60 while
+   this was in work, and its case passes.)
+
+### 7. Beside the task: the limit that failed the sanitizer job
+
+The sanitizer job of CI failed on `main` at `73e23a2` and on the first
+commit of #73, both on 17 November, with one web-platform-test page
+reporting nothing:
+
+```text
+  encoding/legacy-mb-tchinese/big5/big5-decode-extra.html: (harness)
+    ERROR: the harness reported nothing:  |
+Web Platform Tests: 5526/5538 subtests pass in 103 files; 11 fail as listed, 1 fail and are not listed
+FAIL: 5526 subtests pass, the floor is 7998
+```
+
+Those lines are an annotation of the failed job; the step that writes them
+(`tools/ci/annotate_failure.py`, Phase 43) is why they can be read at all.
+A commit that added nothing to that tree (the claim of #72) passed seven
+minutes later, so nobody could have found the cause in a diff.
+
+**What it was.** `EventLoop::run_until_idle()` has, beside its budget of
+loop time, a limit on real time: 10 seconds by default, looked at between
+turns. Past it the loop returns; the host said nothing about it and exited
+with status 0. The page has 2,472 subtests behind `<body onload>` and an iframe, so its
+load handlers run in the loop's first turn, and in the sanitizer build they
+take 7.3 s on this sandbox when nothing else runs. On a busier machine they
+take more than 10, the loop ends after that turn, and the turn that would
+have run the tests and reported never starts. Reproduced here with four busy
+loops beside the sanitizer binary: the load handlers took 18.8 s, and the
+page ended with exit status 0 and nothing on standard output, as in CI.
+
+**What changed**, in `src/main.cpp` and `tools/conformance/run_wpt.py`, and
+nothing in the loop itself:
+
+- `--wall-limit=SECONDS` sets that limit for the one-shot modes (`--run-js`,
+  `--run-script`, rendering a page once). The default is still 10.
+- When the limit is what ended the loop with callbacks still due, one line
+  on standard error says so: `litebird: the event loop was stopped after 10
+  s of real time with callbacks still due (--wall-limit=SECONDS allows
+  more)`. The exit status is what it was.
+- `run_wpt.py` passes its own timeout for a file (60 s; 600 s in the
+  sanitizer run) as the limit. A page that is too slow is then stopped by
+  the runner, which reports it as `TIMEOUT` under its name.
+
+**Verified** with a page whose `onload` spins for 1.5 s behind an iframe and
+then sets a timer that prints: with `--wall-limit=1` nothing is printed but
+the line above, with the default the timer runs. `make wpt` prints the same
+score with the flag as `main` does without it (9538/9744). It has no
+automatic test: the limit is chosen in `main()`, which no suite calls.
+
+**Not done.** The runners of the other corpora (`run_dom_conformance.py`,
+`run_js_conformance.py`, `run_url_conformance.py`, `run_test262.py`) still
+run under the default of 10 s. None has shown the failure; the line on
+standard error is what will name it if one does. And whether the two
+failures of the sanitizer job on `main` on 16 November were this one is not
+known: they left nothing to read.

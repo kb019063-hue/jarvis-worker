@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **999 / 1014 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1063 / 1092 (97.3%)**; of the 29 that fail, ten were recorded in Phases 34 and 43 for what classes still lack and 14 in Phase 56 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7998 / 8009 subtests** across 103 files; the 11 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 198 suites, all passing | `make test` |
+| Engine unit tests | 200 suites, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
@@ -54,7 +54,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 198 engine suites
+make test            # 200 engine suites
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
@@ -80,7 +80,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 989 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1092 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -100,14 +100,20 @@ Read the number for what it is:
   and none fewer in those directories; Phase 44: 1,440 more pass and none
   fewer in those 21 directories, plus 374/374 = 100.0% in
   `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: 43 more in the whole suite and none fewer).
-- **Five of the 15 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
+  Phase 43: 43 more in the whole suite and none fewer; Phase 56:
+  TBD56-readme-test262).
+- **Five of the 29 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 24 were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
   things; ARCHITECTURE.md, Phase 34, section 9). Two are in `construct.dat`:
   `this` used before `super()` has run, and `eval` inside a function, which
-  sees nothing of the function (Phase 43, section 8).
+  sees nothing of the function (Phase 43, section 8). Fourteen are in
+  `iteration.dat`: the places that still read an array without asking it
+  for its iterator (array destructuring, `Array.from`), `yield*` in an async
+  generator, and what the built-in iterators themselves get wrong (Phase 56,
+  section 6). Each of the 24 belongs to a row of the task table in
+  `AGENTS.md`.
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -141,6 +147,13 @@ class before. 68 of the 76 pass; the engine before Phase 34 passes 7.
 object a parent's constructor returns, when `this` is bound, and three more
 programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
 engine before Phase 43 passes 13.
+
+78 cases (`iteration.dat`, Phase 56) are about who decides how a value is
+iterated: an iterator a script put on an array, on a subclass of `Array`, on
+`Array.prototype` or on `String.prototype`, through each construct that
+iterates; the order in which the protocol reads and calls; closing an
+iterator that is left early; and the plain cases, which must not change. 64
+of the 78 pass; the engine before Phase 56 passes TBD56-readme-before.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -697,7 +710,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 198 engine test suites
+# Run the 200 engine test suites
 make test
 ```
 
@@ -764,14 +777,14 @@ make test
 make test
 ```
 
-Output (195 suites; the first and last lines shown):
+Output (200 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 195 engine test suites passed successfully!
+All 200 engine test suites passed successfully!
 ```
 
 ```bash
@@ -1091,6 +1104,45 @@ name is a property that `obj['#p']` reads. Those and what else was found on the 
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.
+
+### Iteration asks the value for its iterator (Phase 56)
+
+`for…of`, spread, `yield*`, `Array.from`, `new Map`, `new Set`,
+`Object.fromEntries` and the `Promise` combinators read an array's elements
+and a string's characters without asking for `Symbol.iterator`. An iterator
+that a script put on an array, on a subclass of `Array` or on
+`Array.prototype` was never called, and neither was one on
+`String.prototype`. Now the value is asked, once, and the loop is the
+language's: `next` is read once, `done` before `value`, and leaving early
+calls `return()` and checks what it is and what it gives back. A plain array
+or string is still read directly, after a check that runs no script
+(TBD56-readme-cost).
+
+Three smaller things around it are right now too. An object that has `next`
+and no `Symbol.iterator` is not iterable: spreading an async generator used
+to hang, and throws. A property *named* `Symbol.iterator` is not the method.
+A number is asked through its prototype instead of being refused.
+
+```bash
+./build/litebird --run-js 'class Rows extends Array { *[Symbol.iterator]() { for (var i = this.length; i--; ) yield this[i]; } }
+var r = new Rows(); r.push("a", "b", "c");
+var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; };
+console.log([...r].join(), Array.from(r).join(), [...own].join(), Math.max(...own))'
+# c,b,a c,b,a 9,8 9        (before: a,b,c a,b,c 1,2 2)
+make js-conformance      # 1063 / 1092; iteration.dat 64 / 78
+```
+
+What got worse, in three cases a test suite meets and a page hardly will:
+with the iterator deleted from `Array.prototype`, `Array.from([1, 2])` throws
+where it should read the array by index; a class without a constructor calls
+a replaced `Array.prototype[Symbol.iterator]` when it is constructed, because
+its default constructor is written with a spread; and `yield*` in an async
+generator, which never asked for `Symbol.asyncIterator`, lost the one shape
+of iterable it handled by accident. Still as it was: array destructuring
+does not ask the array, and the `Map` and `Set` constructors do not call
+`set` and `add`. All of it is in the 14 failing cases of `iteration.dat` and
+in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 56, has
+the design, and `AUDIT.md`, finding 62, says what found what.
 
 ### The encodings pages are written in (Phase 47)
 

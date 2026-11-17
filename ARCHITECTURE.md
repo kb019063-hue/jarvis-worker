@@ -369,6 +369,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 | **Phase 54** | **Lossless WebP: the container and the `VP8L` bitstream.** The row was not added when the phase merged; Phase 56 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 54 Architecture") |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 56** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (TBD56-row) |
 
 ---
 
@@ -5825,3 +5826,236 @@ full modern ECMAScript conformance across six pillars:
      `BuiltinsString.cpp` to delegate `String.prototype.{match, matchAll,
      replace, replaceAll, search, split}` through `GetMethod` on object
      arguments.
+
+---
+
+## Phase 56 Architecture: Iteration Asks the Value for Its Iterator
+
+### 1. What was wrong
+
+`for (x of v)`, `[...v]`, `f(...v)`, `yield* v`, `Array.from(v)`, `new Set(v)`
+and `Promise.all(v)` are one operation in the language: ask `v` for the
+function under `Symbol.iterator`, call it, and call `next()` on what comes
+back until it says `done`. In the engine they all end in two functions of
+`src/js/JsOps.cpp`, `js_iterate` and `js_iterable_to_vector`, and both began
+with a shortcut. An array was not asked: its elements were read by index. A
+string was not asked either: its code points were read.
+
+For an array that nobody has touched that is the same thing, faster. It stops
+being the same when a script says otherwise, and a script can say so in three
+places:
+
+```js
+var a = [1, 2];
+a[Symbol.iterator] = function* () { yield 9; yield 8; };       // on the array
+class Rows extends Array { *[Symbol.iterator]() { /* … */ } }  // on a subclass
+Array.prototype[Symbol.iterator] = wrapped;                    // on the prototype
+[...a]            // 1,2 on main, whichever of the three; 9,8 in Node for the first
+```
+
+AUDIT finding 51 had met it from the other side: Phase 45 made `Promise.all`
+resolve each element before it asks for the next, for every iterable but the
+one that is passed to it most.
+
+The forty lines around the shortcut were also wrong in four smaller ways:
+
+- An object that has a `next` method and no `Symbol.iterator` was taken to be
+  its own iterator. So `[...asyncGenerator()]` did not throw: it called
+  `next()`, got a promise, found no `done` on it, and went on for ever.
+- A property whose name is the text `Symbol.iterator` was accepted as the
+  method.
+- A number or a boolean was refused without being asked. A script can give
+  `Number.prototype` an iterator.
+- When a loop stopped early, `return` was called if it was a function and
+  left alone if it was anything else, and what it gave back was not looked
+  at. The language has a `TypeError` for a `return` that is neither callable
+  nor missing, and for a result that is not an object.
+
+### 2. One question, and an answer that runs nothing
+
+The question is `js_iterator_method(value, method)`, the language's
+GetMethod(value, @@iterator): one property read, so that a getter runs once;
+no method when the property is undefined or null; a `TypeError` when it is
+anything else that cannot be called. A primitive is asked through its
+prototype, with itself as the receiver.
+
+The shortcut stays, behind a second function,
+`js_iterates_as_builtin(value)`: true when reading the value directly gives
+what iterating it would, *and finding that out ran no script*. For an array
+it is the lookup `value[Symbol.iterator]` would make, taken one step at a
+time and given up at the first step that is not the plain one:
+
+1. the cell is not a host object and has no legacy getters (those answer
+   before the stored properties do);
+2. its prototype is this realm's `Array.prototype`: not a subclass, not an
+   array of another frame, not one whose prototype was set;
+3. it has no property of its own under the key (the table is searched, the
+   property is not read, so a getter there does not run);
+4. `Array.prototype` holds, under the key, a data property whose value is the
+   function the realm put there.
+
+For a string it is step 4 on `String.prototype`, since a primitive has no
+properties of its own. "The function the realm put there" is remembered by
+`JsIntrinsics::install()` in two new members, `array_iterator_method` and
+`string_iterator_method`, which the realm reports to the collector as roots:
+a script that replaces the method on the prototype must not be able to make
+the original unreachable and so let another function take its address.
+
+When the answer is no, the value is asked with `js_iterator_method`. If what
+it hands out is the installed function after all (a subclass that has no
+iterator of its own, a getter that returns the built-in one, the built-in one
+assigned back), the elements are still read directly. Otherwise the protocol
+runs.
+
+**Why reading directly is the same.** The installed array iterator reads
+`elements[i]` against the length the array has at that moment, each time
+`next()` is called, and its `next` is a property of the iterator object
+itself: no function a script can reach stands between the method and the
+elements. `visit_elements` reads the same way, so an array that grows or
+shrinks under the loop is seen as the iterator would see it. The day array
+iterators take `next` from a prototype they share, as the language has it,
+that function has to be compared too; the comment in
+`js_iterates_as_builtin` says so, and so does the row.
+
+**Realms.** Every realm installs functions of its own. An array made in
+another frame has that frame's `Array.prototype`, so from here it is not the
+plain case: it is asked, its own realm's iterator is called, and the elements
+come through the protocol. Slower, and right:
+`js_iteration_of_another_realms_array` replaces the iterator in the frame
+and in the top document in turn and checks that each array follows its own.
+
+### 3. The protocol
+
+`iterate_with` is GetIterator and the loop over IteratorStep with the method
+already in hand:
+
+- the method is called with the value as `this` (for a string the string
+  itself, not an object made from it) and no arguments, and what it returns
+  has to be an object;
+- `next` is read once; each result has to be an object; `done` is read
+  before `value`, and `value` is not read when the iterator is done;
+- a loop the consumer ends (`break`, `return`, a visitor that answers false)
+  closes the iterator with what the language calls IteratorClose: a missing
+  `return` is nothing, one that cannot be called is a `TypeError`, and so is
+  a result that is not an object;
+- a loop that an error ends closes it too, and that error is the one the
+  script sees, whatever `return` is, does or throws;
+- an iterator that fails itself (`next()` throws, a result is not an object,
+  `done` or `value` throws) is not closed.
+
+### 4. What does not change
+
+The plain case runs the code it ran before, after the check. An array that
+changes under the loop, holes, strings by code point: the corpus has them
+beside the new cases, and they pass on `main` and here. `js_iterable_to_vector`
+still copies a plain array in one piece.
+
+What never asked for an iterator still does not: `apply`, `Reflect.apply`,
+`Reflect.construct`, `bind`, rest parameters, template objects and the array
+methods read their arrays by index, as the language has it. Two corpus cases
+put a counting function on `Array.prototype` and expect it to count nothing.
+
+### 5. Verification and cost
+
+Every number here is printed by the command beside it, on this branch with
+`main` at `73e23a2` (Phase 55) merged in. "Before" is the release binary of
+that `main`.
+
+| Command | Before | Now |
+| :--- | :--- | :--- |
+| `make test` | 198 suites | `All 200 engine test suites passed successfully!` |
+| `make js-conformance` | 999 / 1014 | `JS conformance, full corpus: 1063/1092 (97.3%)  [27 files, 0 crashes, 0 timeouts]` |
+| `python3 tools/conformance/run_js_conformance.py --filter iteration` | TBD56-main-iter | 64 / 78 |
+| the same with `--reference "node -e"`: the file itself, run by Node | | 78 / 78 |
+| `make asan` (the unit suites, both corpora and the fuzzers under ASan and UBSan) | JS floor 997 | TBD56-asan |
+| `make dom-conformance`, `make wpt`, `make conformance` | 669 / 669, 7998 / 8009, 1792 / 1792 | TBD56-suites |
+
+**The corpus.** `tests/js-conformance/iteration.dat` has 78 cases. Each was
+added through `tools/conformance/add_js_case.py`, which runs the script in
+Node and stores what Node printed, so no expectation was typed in. They
+cover the three places a script can put an iterator (the array, a subclass,
+the prototype) through each consumer (`for…of`, spread in a call and in an
+array, `yield*`, `Array.from`, `Map`, `Set`, `Object.fromEntries`, the
+`Promise` combinators), the same for strings, the protocol's order of reads,
+closing, and the plain cases that must not change. The 14 that fail are the
+cases of section 6, and they are in the file so that whoever takes one of
+those rows has the test already.
+
+**The unit suites.** `js_iteration_asks_the_value_for_its_iterator` calls the
+four C++ functions directly, which a script cannot: that
+`js_iterates_as_builtin` runs no getter (a counter stays at 0), that a
+subclass without an iterator is asked and then read directly, that the plain
+case comes back when the prototype's method is put back, that an early stop
+closes the iterator once, and that the two remembered functions survive a
+collection while a replacement sits on the prototype.
+`js_iteration_of_another_realms_array` loads a page with a frame and
+iterates the frame's arrays from the top document.
+
+**test262**, the whole of `built-ins`, `language` and `annexB`
+(`python3 tools/conformance/run_test262.py --binary before=… --binary now=…
+--timeout 6 built-ins language annexB`): TBD56-test262
+
+The first run was over the 25 directories that are about iteration, and it
+said eight gained and none lost. The four lost were in directories that are
+not: three under `async-generator` and one under `class/subclass`. A change
+to something this widely called is measured over the whole suite or not at
+all.
+
+**A page that is not in a corpus.** TBD56-jsdom
+
+**Cost.** The plain case pays for the check: three pointer comparisons, one
+lookup in the array's own property table when it has one, and one lookup in
+`Array.prototype`'s table. The first version asked with a full property read
+every time, and a `for…of` over three elements took 1.16 of `main`'s time;
+that is why the check is structural. Least time of TBD56-rounds processes
+each, in nanoseconds for one operation, `main`'s binary beside a second copy
+of the same file to show what the measure itself varies by:
+
+TBD56-timing-table
+
+The lines marked "control" run none of the changed code.
+
+### 6. What is still open
+
+Six things, each in a file that an open pull request held while this was
+written, and each a row of AGENTS.md with its failing cases in
+`iteration.dat`. The first three are where this change made something
+**worse than it was on `main`**, in one case each that a page is unlikely to
+meet and a test suite does meet. They come first for that reason.
+
+1. **`Array.from`** (`BuiltinsArray.cpp`) decides what is iterable by
+   `is_array()` and by type before it calls `js_iterable_to_vector`. With an
+   iterator on the array it is right now, because that function asks. With
+   the iterator *deleted* from `Array.prototype` it is a `TypeError`, where
+   the language reads the array as array-like, and where `main` gave the
+   elements because nothing was asked. It also does not ask a number, and
+   maps only after it has collected everything.
+2. **The default constructor of a subclass** is written by the parser as
+   `constructor(...args) { super(...args); }`, and a spread now asks. A
+   replaced `Array.prototype[Symbol.iterator]` is therefore called by
+   `new Derived(...)`. The language's default constructor "does not use
+   argument evaluation", in the words of test262's
+   `default-constructor-spread-override.js`, which passed on `main` (where
+   nothing asked an array) and fails here. The repair is a flag on the
+   spread the parser makes (`JsParser.cpp`, `JsEval.cpp`).
+3. **`yield*` in an async generator** (`eval_yield`, `JsEval.cpp`) runs the
+   sync protocol and never asks for `Symbol.asyncIterator`. Delegating to
+   another async generator never returned on `main`, through the bare
+   iterator of section 1; it is a `TypeError` now. Neither is what the
+   language says. Three test262 tests of async delegation passed only
+   because their iterable happened to carry a `next` that answers without a
+   promise, and fail now; a fourth, which failed, passes for the same kind
+   of reason.
+4. **Array destructuring** (`IterationCursor`, `JsEval.cpp`) has an array
+   mode of its own: `var [x] = a` reads `a`'s elements whatever `a` says.
+5. **The `Map` and `Set` constructors** do not call `set` and `add`
+   (`BuiltinsCollections.cpp`; the row "A built-in does not make the subclass
+   it was called on" already had it), so a replaced one is not called and
+   cannot stop the iteration.
+6. **What an iterator is, in small**: `Array.prototype[Symbol.iterator]` and
+   `Array.prototype.values` are two functions; an array iterator owns its
+   `next`; the built-in iterables also have a property named by the text
+   `Symbol.iterator`, and the symbol is itself the text `@@iterator`;
+   `arguments` has no iterator of its own; an object whose prototype is an
+   array has no elements; a `String.prototype` method called on an array
+   reads it as `[object Object]`.

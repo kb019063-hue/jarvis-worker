@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 
 namespace litebird {
 
@@ -679,6 +681,44 @@ FontRenderer& FontRenderer::instance() {
     return s_instance;
 }
 
+namespace {
+
+// Where a host keeps TrueType faces. Walked once, at construction, and only
+// for the *paths*: a face is parsed when a codepoint needs it, not before, so
+// a host with hundreds of fonts costs a directory walk and nothing else.
+const char* const kFontDirectories[] = {
+    "/usr/share/fonts/truetype",
+    "/usr/share/fonts/TTF",
+    "/usr/share/fonts",
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+};
+
+/// Every `.ttf` under the system font directories, except the two the primary
+/// faces came from — a face is no use as a fallback for itself.
+std::vector<std::string> discover_system_fonts(const std::string& exclude_a,
+                                               const std::string& exclude_b) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const char* dir : kFontDirectories) {
+        if (!std::filesystem::is_directory(dir, ec)) continue;
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end;
+             !ec && it != end;
+             it.increment(ec)) {
+            if (ec) break;
+            const std::string ext = it->path().extension().string();
+            if (ext != ".ttf" && ext != ".TTF") continue;
+            std::string path = it->path().string();
+            if (path == exclude_a || path == exclude_b) continue;
+            out.push_back(std::move(path));
+            if (out.size() >= FontRenderer::kMaxFallbackFaces) return out;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
 FontRenderer::FontRenderer() {
     static const char* kRegularPaths[] = {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -700,11 +740,57 @@ FontRenderer::FontRenderer() {
     };
 
     for (const char* path : kRegularPaths) {
-        if (m_regular.load_file(path)) break;
+        if (m_regular.load_file(path)) {
+            m_regular_path = path;
+            break;
+        }
     }
     for (const char* path : kBoldPaths) {
-        if (m_bold.load_file(path)) break;
+        if (m_bold.load_file(path)) {
+            m_bold_path = path;
+            break;
+        }
     }
+
+    m_fallback_paths = discover_system_fonts(m_regular_path, m_bold_path);
+}
+
+void FontRenderer::set_fallbacks(std::vector<std::string> paths) {
+    m_fallback_paths = std::move(paths);
+    m_fallbacks.clear();
+    m_next_fallback = 0;
+    // A cached glyph may have come from a face that is no longer in the set.
+    m_cache.clear();
+}
+
+const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold) const {
+    const TrueTypeFont* primary = (bold && m_bold.is_loaded())
+                                      ? &m_bold
+                                      : (m_regular.is_loaded() ? &m_regular : nullptr);
+    if (primary && primary->has_glyph(codepoint)) return primary;
+
+    // Already loaded as a result of an earlier miss.
+    for (const TrueTypeFont& face : m_fallbacks) {
+        if (face.has_glyph(codepoint)) return &face;
+    }
+
+    // Not covered by anything loaded yet. Load more of what discovery found,
+    // one at a time, and stop at the first that covers it: a page that never
+    // leaves Latin never pays for the CJK faces on the host.
+    std::error_code ec;
+    while (m_next_fallback < m_fallback_paths.size() &&
+           m_fallbacks.size() < kMaxFallbackFaces) {
+        const std::string& path = m_fallback_paths[m_next_fallback++];
+        if (!std::filesystem::is_regular_file(path, ec)) continue;
+        TrueTypeFont face;
+        if (!face.load_file(path)) continue;
+        m_fallbacks.push_back(std::move(face));
+        if (m_fallbacks.back().has_glyph(codepoint)) return &m_fallbacks.back();
+    }
+
+    // No face covers it. The primary draws its `.notdef` (or nothing), which
+    // is what happened to every such codepoint before fallback existed.
+    return primary;
 }
 
 std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int font_weight) const {
@@ -722,9 +808,7 @@ std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int fon
 
 float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight) const {
     const bool want_bold = font_weight >= 600;
-    const TrueTypeFont* font = (want_bold && m_bold.is_loaded())
-                                   ? &m_bold
-                                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    const TrueTypeFont* font = face_for(codepoint, want_bold);
     if (font) return font->glyph_advance(codepoint, font_size);
     return std::max(1.0f, font_size * 0.55f);
 }
@@ -753,10 +837,9 @@ const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, b
     }
 
     GlyphBitmap bmp;
-    if (bold && m_bold.is_loaded()) {
-        bmp = m_bold.rasterize_glyph(codepoint, px);
-    } else if (m_regular.is_loaded()) {
-        bmp = m_regular.rasterize_glyph(codepoint, px);
+    const TrueTypeFont* face = face_for(codepoint, bold);
+    if (face) {
+        bmp = face->rasterize_glyph(codepoint, px);
     } else {
         bmp = rasterize_fallback_8x8(codepoint, px, bold);
     }

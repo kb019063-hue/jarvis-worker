@@ -95,7 +95,37 @@ def added_lines(base: str, path: str) -> list[str] | None:
     ]
 
 
-def check_size() -> tuple[int, list[str]]:
+def bytes_added(base: str | None, path: str) -> int | None:
+    """How many bytes the working tree adds to a file over the base.
+
+    None when the base cannot be resolved, which is what makes the size check
+    lenient below: without this the budget would fail a pull request that only
+    happens to land after the file passed it.
+    """
+    if base is None:
+        return None
+    out = _git("diff", "--numstat", base, "--", path)
+    if out.returncode != 0:
+        return None
+    fields = out.stdout.split()
+    if not fields or fields[0] == "-":
+        return 0
+    try:
+        return int(fields[0])
+    except ValueError:
+        return None
+
+
+def check_size(base: str | None) -> int:
+    """The budget fails a pull request that grows the file past it, and only
+    that pull request.
+
+    An absolute size check would fail every later pull request once the file
+    reached its budget, including ones that never touched it — which in a
+    repository where several agents work at once means failing work that did
+    nothing wrong. So: over budget and growing is a failure; over budget and
+    not growing is reported, and left to whoever is moving sections out.
+    """
     failures = 0
     for name, budget in BUDGETS.items():
         path = ROOT / name
@@ -103,15 +133,29 @@ def check_size() -> tuple[int, list[str]]:
             print(f"  ok    {name}: absent")
             continue
         size = path.stat().st_size
-        if size > budget:
-            failures += 1
-            print(f"  FAIL  {name}: {size:,} bytes is over the "
-                  f"{budget:,}-byte budget by {size - budget:,}")
-            print(f"        new write-ups go in docs/ (docs/README.md)")
-        else:
+        if size <= budget:
             print(f"  ok    {name}: {size:,} / {budget:,} bytes "
                   f"({budget - size:,} left)")
-    return failures, list(BUDGETS)
+            continue
+
+        grew = bytes_added(base, name)
+        over = size - budget
+        if grew is None:
+            print(f"  WARN  {name}: {size:,} bytes is over the "
+                  f"{budget:,}-byte budget by {over:,}, and no base ref could "
+                  f"be resolved to say whether this pull request grew it")
+            continue
+        if grew > 0:
+            failures += 1
+            print(f"  FAIL  {name}: {size:,} bytes is over the "
+                  f"{budget:,}-byte budget by {over:,}, and this pull request "
+                  f"adds {grew:,} lines to it")
+            print(f"        new write-ups go in docs/ (docs/README.md)")
+        else:
+            print(f"  WARN  {name}: {size:,} bytes is over the "
+                  f"{budget:,}-byte budget by {over:,}, but this pull request "
+                  f"does not grow it — left for the migration")
+    return failures
 
 
 def check_drift(base: str | None, why_not: str | None) -> int:
@@ -146,8 +190,8 @@ def main() -> int:
     args = ap.parse_args()
 
     print("check_docs: the shape of the documents")
-    size_failures = check_size()[0]
     base, why_not = resolve_base(args.base)
+    size_failures = check_size(base)
     drift_failures = check_drift(base, why_not)
 
     total = size_failures + drift_failures

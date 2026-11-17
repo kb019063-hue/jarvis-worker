@@ -999,6 +999,7 @@ static void parse_grid_template(std::string_view val,
             i++;
         }
         std::string token = s.substr(token_start, i - token_start);
+        if (!token.empty() && token.front() == '[') continue; // a line name is not a track
         auto def = parse_single_grid_track(token);
         defs.push_back(def);
 

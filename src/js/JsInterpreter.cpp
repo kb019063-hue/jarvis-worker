@@ -1022,15 +1022,20 @@ void JsInterpreter::init_language_builtins() {
     m_global_env->define_readonly("NaN", JsValue::make_number(std::numeric_limits<double>::quiet_NaN()));
     m_global_env->define_readonly("Infinity", JsValue::make_number(std::numeric_limits<double>::infinity()));
 
-    // eval(source): runs in the global scope and propagates exceptions.
-    m_global_env->define("eval", js_make_native("eval", 1, [this](const std::vector<JsValue>& args) {
+    // eval(source): a direct call runs in the caller's scope, an indirect one
+    // in the global scope (ECMA-262 §19.2.1; see eval_source). The function is
+    // kept as well as installed: a script that replaces the global `eval` has
+    // not replaced which function the direct call syntax belongs to.
+    JsValue eval_function = js_make_native("eval", 1, [this](const std::vector<JsValue>& args) {
         if (args.empty() || args[0].type != JsType::String) return js_arg(args, 0);
         try {
-            return run(args[0].string_val.str());
+            return eval_source(args[0].string_val.str());
         } catch (const JsSyntaxError& error) {
             js_throw_error(JsErrorKind::SyntaxError, error.what());
         }
-    }));
+    });
+    m_eval_function = eval_function;
+    m_global_env->define("eval", eval_function);
 
     // new Function("a", "b", "return a + b")
     JsValue function_ctor = js_make_native("Function", 1, [this](const std::vector<JsValue>& args) {

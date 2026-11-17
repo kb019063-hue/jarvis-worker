@@ -359,6 +359,31 @@ public:
     /// Runs a script and lets exceptions propagate to the caller as JsThrow.
     JsValue run(std::string_view source);
 
+    /// `eval(...)`, direct and indirect (ECMA-262 §19.2.1). A direct eval --
+    /// one whose callee is the identifier `eval` of the running code -- is
+    /// not a script: it is evaluated in the running function's environment
+    /// and shares its `this`, `arguments`, `new.target`, `super` and its
+    /// strictness, and the `var`s it declares are that function's. An
+    /// indirect eval (`(0, eval)(...)`, `window.eval`, an alias) is global
+    /// code, which is what `run` does. `eval_call_stack` says which of the
+    /// two the evaluation at the top of the stack is; JsEval.cpp pushes and
+    /// pops it around every call expression.
+    struct EvalFrame {
+        const JsEnvironment* environment{nullptr};
+        bool direct{false};
+    };
+    static std::vector<EvalFrame>& eval_call_stack();
+
+    /// The function the realm installed as `eval`, kept from the global
+    /// binding: a call is direct when its callee is that function, whether or
+    /// not a script has since assigned something else to the global name.
+    JsValue m_eval_function;
+
+    /// Evaluates `source` as `eval` was called: inline when the innermost
+    /// frame says the call was direct and its environment is the one the
+    /// running function's code sees, global code otherwise.
+    JsValue eval_source(const std::string& source);
+
     JsValue execute(const AstNode* node, std::shared_ptr<JsEnvironment> env);
 
     std::shared_ptr<JsEnvironment> global_env() const { return m_global_env; }
@@ -468,6 +493,9 @@ private:
 
     // --- Programs and functions -------------------------------------------
     JsValue run_program(const Program& program);
+    /// The same, in `scope` rather than the global one: what a direct eval
+    /// does (see eval_source). `direct_eval` says the text is an eval's.
+    JsValue run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope, bool direct_eval);
     JsValue make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                           const std::string& name_hint = std::string());
     /// `new_target` is what `new.target` is inside when that is not the

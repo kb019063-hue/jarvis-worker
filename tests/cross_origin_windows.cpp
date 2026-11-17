@@ -76,7 +76,11 @@ int main() {
     {
         std::ofstream replaced(child_dir / "replaced.html");
         replaced << "<!doctype html><script>parent.postMessage('replaced:' + location.pathname,"
-                    " 'https://app.example.test');</script>";
+                    " 'https://app.example.test');"
+                    "window.addEventListener('message', function(e) {"
+                    " e.data.shared.leaf = 22;"
+                    " parent.postMessage({kind:'clone-report', data:e.data}, 'https://app.example.test');"
+                    "});</script>";
     }
     {
         std::ofstream replacement(child_dir / "replacement.html");
@@ -102,7 +106,11 @@ int main() {
   window.same = document.getElementById('s').contentWindow;
   window.d = (o, k) => Object.getOwnPropertyDescriptor(o, k);
   window.navigation_messages = [];
-  window.addEventListener('message', function(e) { navigation_messages.push(e.data); });
+  window.clone_report = null;
+  window.addEventListener('message', function(e) {
+    if (e.data && e.data.kind === 'clone-report') clone_report = e.data.data;
+    else navigation_messages.push(e.data);
+  });
 </script>
 )html", true);
     js.notify_document_loaded();
@@ -257,6 +265,37 @@ int main() {
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
     expect_eq(js, "cross-origin Location.href loads the target document",
               "navigation_messages.join(',')", "navigated:/navigated.html,replaced:/replaced.html");
+
+    // Window.postMessage serializes immediately and the replacement child
+    // receives a fresh graph in its own realm. Its report crosses back through
+    // another packet, so neither side can retain the other side's object.
+    js.eval(R"js(
+      window.clone_send = { kind: 'clone-payload', shared: { leaf: 7 },
+                            missing: undefined, nan: 0 / 0, neg: -0 };
+      clone_send.alias = clone_send.shared;
+      clone_send.self = clone_send;
+      w.postMessage(clone_send, '*');
+      clone_send.shared.leaf = 99;
+    )js");
+    check("cross-origin Window structured-clone postMessage does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_ok(js, "cross-origin Window postMessage returns a distinct graph",
+              "clone_report !== clone_send && clone_report.self === clone_report && "
+              "clone_report.shared === clone_report.alias && clone_report.shared !== clone_send.shared && "
+              "clone_report.shared.leaf === 22 && clone_send.shared.leaf === 99 && "
+              "('missing' in clone_report) && clone_report.missing === undefined && "
+              "clone_report.nan !== clone_report.nan && clone_report.neg === 0 && 1 / clone_report.neg < 0");
+
+    js.eval(R"js(
+      window.clone_function_error = ''; window.clone_transfer_error = '';
+      try { w.postMessage(function() {}, '*'); }
+      catch (e) { clone_function_error = e.name + ':' + e.code; }
+      try { w.postMessage({ x: 1 }, '*', [{}]); }
+      catch (e) { clone_transfer_error = e.name + ':' + e.code; }
+    )js");
+    expect_eq(js, "Window.postMessage refuses function values", "clone_function_error", "DataCloneError:25");
+    expect_eq(js, "Window.postMessage refuses non-empty transfer lists", "clone_transfer_error", "DataCloneError:25");
+
     js.eval("L.replace('https://other.example.test/replacement.html');");
     check("cross-origin Location.replace does not throw", !js.last_eval_failed());
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));

@@ -9,6 +9,7 @@
 
 #include "litebird/js/JsValue.hpp"
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -262,6 +263,54 @@ JsValue js_new_symbol(const std::string& description);
 JsValue js_symbol_for_key(const std::string& key, const std::string& description);
 /// The symbol whose property key is `key`, if `key` is a symbol key.
 bool js_symbol_from_key(const std::string& key, JsValue& out);
+
+// ---------------------------------------------------------------------------
+// Structured clone packets
+// ---------------------------------------------------------------------------
+//
+// A worker owns a different JS agent, so a JsValue cannot cross its thread:
+// its cell and function handles belong to the sender's agent. This neutral
+// packet holds no JsValues and can safely sit in either event queue. It also
+// gives same-agent message delivery the web-platform copy semantics instead of
+// accidentally sharing an object graph.
+//
+// The currently supported clone set is ECMAScript primitives (except symbols),
+// ordinary objects, and arrays. Repeated references and cycles are represented
+// by node indexes. Host/exotic objects, functions, symbols, and transferables
+// are deliberately rejected by the writer rather than being JSON-coerced.
+struct JsStructuredClone {
+    enum class Kind : uint8_t {
+        Undefined,
+        Null,
+        Boolean,
+        Number,
+        String,
+        Object,
+        Array,
+    };
+
+    struct Node {
+        Kind kind{Kind::Undefined};
+        bool boolean{false};
+        double number{0.0};
+        std::string string;
+        std::vector<std::size_t> elements;
+        std::vector<std::pair<std::string, std::size_t>> properties;
+    };
+
+    std::vector<Node> nodes;
+    std::size_t root{0};
+};
+
+/// Writes `value` into a thread-neutral structured-clone packet. Returns false
+/// for an unsupported value and fills `error`; a getter invoked while reading
+/// an enumerable own property may still throw its ordinary script exception.
+bool js_write_structured_clone(const JsValue& value, JsStructuredClone& out, std::string& error);
+
+/// Materializes a packet in the current agent/realm. Packets emitted by
+/// js_write_structured_clone are valid; a malformed packet becomes undefined
+/// rather than following an untrusted index.
+JsValue js_read_structured_clone(const JsStructuredClone& clone);
 
 // ---------------------------------------------------------------------------
 // Intrinsics

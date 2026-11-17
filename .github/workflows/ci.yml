@@ -49,10 +49,10 @@ jobs:
         # A web document must not read a marker file by path, file: URL, or
         # relative reference; a file: document keeps local access.
         run: make security-fetch
-      - name: Worker MIME/module policy, EventTarget dispatch, and startup/exit stability
-        # Verifies WHATWG JavaScript MIME enforcement over HTTP/data:, module
-        # worker rejection, importScripts origin/MIME checks, error listener
-        # dispatch, and 60x concurrent 4-worker startup/exit runs (0 crashes).
+      - name: Worker MIME/static-module policy, EventTarget dispatch, and startup/exit stability
+        # Verifies WHATWG JavaScript MIME enforcement over HTTP/data:, a static
+        # module-worker graph, classic importScripts origin/MIME checks, error
+        # listener dispatch, and 60x concurrent 4-worker startup/exit runs (0 crashes).
         run: make security-worker
       - name: JPEG, GIF, and SVG differential verification and mutation fuzzing
         # Verifies Baseline/Progressive JPEG and GIF87a/89a decoding pixel-by-pixel

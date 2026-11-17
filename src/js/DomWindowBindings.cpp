@@ -15,6 +15,7 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Storage.hpp"
 
+#include <cstdlib>
 #include <deque>
 #include <thread>
 
@@ -614,12 +615,40 @@ void setup_location(Iface& I) {
 // MessageChannel and MessagePort
 // ---------------------------------------------------------------------------
 //
-// A port is an EventTarget with one peer.  The endpoint state deliberately
-// keeps the port object alive while a message task is queued; queued values
-// are otherwise opaque to the collector because the task owns a C++ closure.
-// This is same-agent messaging for now: transfer lists and structured cloning
-// stay with the worker/structured-clone work rather than accidentally sharing
-// objects between agents.
+// A port is an EventTarget with one peer. Its same-agent queue uses the same
+// neutral packet form as worker messages, so the recipient observes an
+// independent structured clone rather than the sender's object identity. The
+// port object itself stays rooted by the task; ports themselves are not yet
+// transferred across agents.
+
+[[noreturn]] void throw_message_data_clone(Realm& realm, std::string_view receiver,
+                                           const std::string& reason) {
+    throw_dom(realm, "DataCloneError",
+              "Failed to execute 'postMessage' on '" + std::string(receiver) + "': " + reason);
+    std::abort(); // throw_dom always throws; makes the noreturn contract explicit.
+}
+
+void reject_nonempty_message_transfer_list(Realm& realm, const JsValue& transfer,
+                                           std::string_view receiver) {
+    if (transfer.is_undefined()) return;
+    // The argument is a Web IDL sequence. Iterating it preserves TypeError for
+    // a non-iterable value; transferables themselves are still deliberately
+    // unsupported, so only an empty list is a no-op.
+    if (!js_iterable_to_vector(transfer).empty()) {
+        throw_message_data_clone(realm, receiver, "transfer lists are not supported.");
+    }
+}
+
+std::shared_ptr<JsStructuredClone> clone_message_or_throw(Realm& realm, const JsValue& value,
+                                                           std::string_view receiver) {
+    auto packet = std::make_shared<JsStructuredClone>();
+    std::string error;
+    if (!js_write_structured_clone(value, *packet, error)) {
+        throw_message_data_clone(realm, receiver,
+                                 error.empty() ? "The value could not be cloned." : error);
+    }
+    return packet;
+}
 
 struct MessageChannelState : JsExotic {};
 
@@ -627,14 +656,13 @@ struct MessagePortState : JsExotic {
     uint64_t realm_id{0};
     std::weak_ptr<MessagePortState> peer;
     JsValue object;
-    std::deque<JsValue> pending;
+    std::deque<std::shared_ptr<JsStructuredClone>> pending;
     bool started{false};
     bool closed{false};
     bool delivery_queued{false};
 
     void trace(Heap& heap) override {
         heap.mark_value(object);
-        for (const JsValue& value : pending) heap.mark_value(value);
     }
 };
 
@@ -662,10 +690,11 @@ void queue_message_port_delivery(const std::shared_ptr<MessagePortState>& state)
         // One event per task gives a listener an observable task boundary: a
         // message posted by that listener, or a close(), cannot be folded
         // into the delivery that is already underway.
-        JsValue data = std::move(state->pending.front());
+        std::shared_ptr<JsStructuredClone> packet = std::move(state->pending.front());
         state->pending.pop_front();
+        const JsValue data = packet ? js_read_structured_clone(*packet) : undefined();
         dispatch(*realm, target,
-                 make_event(*realm, "MessageEvent", "message", false, false, {{"data", std::move(data)}}), true);
+                 make_event(*realm, "MessageEvent", "message", false, false, {{"data", data}}), true);
         queue_message_port_delivery(state);
     }, {js_roots({target})});
 }
@@ -715,13 +744,14 @@ void setup_message_channel(Iface& I) {
 }
 
 void setup_message_port(Iface& I) {
-    I.method("postMessage", 1, [](Realm&, Args args) {
+    I.method("postMessage", 1, [](Realm& realm, Args args) {
         require_args(args, 1, "MessagePort.postMessage");
+        reject_nonempty_message_transfer_list(realm, js_arg(args, 1), "MessagePort");
         MessagePortState& source = message_port_state();
         if (source.closed) return undefined();
         std::shared_ptr<MessagePortState> peer = source.peer.lock();
         if (!peer || peer->closed) return undefined();
-        peer->pending.push_back(args[0]);
+        peer->pending.push_back(clone_message_or_throw(realm, args[0], "MessagePort"));
         // addEventListener follows MessagePort's explicit-start path:
         // onmessage assignment starts a port, while listeners need start().
         queue_message_port_delivery(peer);
@@ -1743,12 +1773,15 @@ void setup_window(Iface& I) {
         Realm& sender_wr = caller_realm_or(r);
         require_args(args, 1, "postMessage");
         std::string target_origin_arg = "*";
+        JsValue transfer = undefined();
         if (args.size() >= 2 && !args[1].is_undefined()) {
             if (args[1].is_object()) {
                 JsValue opt = member(args[1], "targetOrigin");
                 if (!opt.is_undefined()) target_origin_arg = to_str(opt);
+                transfer = member(args[1], "transfer");
             } else {
                 target_origin_arg = to_str(args[1]);
+                transfer = js_arg(args, 2);
             }
         }
         std::string required_origin;
@@ -1764,12 +1797,13 @@ void setup_window(Iface& I) {
             }
             required_origin = parsed_target.origin();
         }
-        const JsValue data = args[0];
+        reject_nonempty_message_transfer_list(sender_wr, transfer, "Window");
+        auto message = clone_message_or_throw(sender_wr, args[0], "Window");
         const uint64_t target_id = target_wr.id;
         const uint64_t sender_id = sender_wr.id;
         const std::string sender_origin = effective_origin_string(sender_wr);
         const bool same_sender_target = (&sender_wr == &target_wr);
-        EventLoop::default_loop().post_task([target_id, sender_id, data, sender_origin, required_origin, same_sender_target]() {
+        EventLoop::default_loop().post_task([target_id, sender_id, message = std::move(message), sender_origin, required_origin, same_sender_target]() {
             Realm* target = find_realm(target_id);
             if (!target || !target->alive || !target->window.is_object()) return;
             if (!required_origin.empty()) {
@@ -1785,6 +1819,7 @@ void setup_window(Iface& I) {
             JsIntrinsics* prev = &JsIntrinsics::get();
             if (target->intrinsics) JsIntrinsics::set_current(target->intrinsics);
             struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
+            const JsValue data = message ? js_read_structured_clone(*message) : undefined();
             dispatch(*target, target->window,
                      make_event(*target, "MessageEvent", "message", false, false,
                                 {{"data", data}, {"origin", str(sender_origin)}, {"source", source_win}}),

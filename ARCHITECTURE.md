@@ -349,21 +349,30 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 33** | **Page resource loads are origin-aware:** `fetch()` and `new Worker()` no longer send arbitrary paths to the filesystem. `ResourceLoader::load_for_page` requires the document address, resolves relative references against the document/base URL, blocks web documents from `file:`/local paths, and keeps local-file access only for documents the embedder loaded from `file:`; trusted CLI/TUI navigation is a separate `load_navigation` entry point. A failed worker load is an error, not inline source. | ✅ Completed (132/132 unit suites; `make security-fetch` 3 checks, 0 failures) |
 | **Phase 34** | **A function can be a prototype:** a function is a value and a prototype link points at a heap cell, so `Object.getPrototypeOf(Derived)` was not `Base`, `Object.getPrototypeOf(TypeError)` was not `Error`, a static member was found one parent up and no further, and `Function.prototype` was an object. A function's cell now knows the function it stands for (`JsValue::as_prototype`, `JsObject::function_value`, with no object and no value growing), the collector takes the pair apart, a class is linked to its parent instead of keeping it in a hidden `%super`, `super()` calls whatever the prototype is when it runs, `Reflect.construct` honours its third argument, `Object.defineProperty` follows the standard's ValidateAndApplyPropertyDescriptor, and the DOM's interface objects have their parents as prototypes. Classes compiled by Babel and TypeScript run. | ✅ Completed (144/144 unit suites; JS corpus 907 of 921 with 76 new cases; web-platform-tests 4658 of 5192; DOM corpus 640 of 640; 108 more of 15,686 test262 tests and none fewer) |
 | **Phase 35** | **Attribute-list end removals are linear:** the item list and the lazy index's ascending numbers are vectors with a logical start offset: a front erase advances the offset and compacts only when the dead prefix reaches the live tail, a back erase pops, and an empty list allocates nothing; lookup, value-update, copy/move, order and random-access iterators are unchanged. Draining 50,000 attributes from the front went from about 7.1 s to 0.09 s whole-process on the verification machine; the back stayed cheap. A middle removal still moves the tail. | ✅ Completed (135/135 unit suites; `make bench-attributes` 6 cases, 0 failures) |
+| **Phase 36** | **Usable browser pipeline: HTTPS/HTTP 1.1/CORS, subresources, live reflow, TrueType and the web GUI.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 36 Architecture") |
 | **Phase 37** | **Iterative RegExp VM, modern CSS cascade/units, CSSOM `el.style`, and HTML5 date/time inputs:** replaces recursive CPS regex matching and recursive AST destruction with an iterative bytecode VM and heap backtracking stack; adds CSS child/sibling combinators (`>`, `+`, `~`), `:is()`/`:where()`/selector-list `:not()`/`:host`, `@layer`, `@supports`, MQ L4 range/boolean evaluation, `min()`/`max()`/`clamp()`, `dvh`/`dvw`/`vmax`, percentage `border-radius`, iterative CSS block/selector parsing + `min_ancestors` / `AllDescendant` DP caching; expands `el.style` shorthands, canonical CSSOM values, and vendor aliases; and implements `date`/`time`/`month`/`week`/`datetime-local` input sanitization, `valueAsDate`/`valueAsNumber`, `stepUp()`/`stepDown()`, and constraint validation. | ✅ Completed (174/174 unit suites; JS corpus 926/940, `regexp.dat` 39/39; DOM corpus 644/644) |
 | **Phase 38** | **Real-web JPEG/GIF decoders, upgraded Canvas 2D & SVG vector renderer:** standalone Baseline/Progressive JPEG and GIF87a/89a decoders verified pixel-by-pixel against `libjpeg` and ImageMagick, plus CTM-aware Canvas 2D and SVG paths/arcs/gradients/`<use>`/`<clipPath>`. | ✅ Completed (139/139 unit suites; `make verify-media` 35/35; `make fuzz-media` 1,800 release / 4,500 ASan) |
 | **Phase 39** | **The tokenizer's repeated attribute names are linear:** the HTML tokenizer dropped a repeated attribute name by comparing it with every attribute already accepted, which is the square of the count. A tag with 32 or more accepted attributes now keeps a hash set of views of their names, rebuilt when the attribute vector grows under it; shorter tags keep the scan. One element with 50,000 attributes went from 3,474 ms to 93 ms whole-process, an end tag with that many from 3,170 ms to 25 ms, and many small tags did not change. First-wins, ASCII case folding, order and every value spelling are unchanged. | ✅ Completed (159/159 unit suites; `make bench-tokenizer-attributes` 7 cases, 0 failures) |
 | **Phase 40** | **Worker MIME/module policy, EventTarget dispatch, and shutdown crash fix:** enforces the 16 WHATWG JavaScript MIME types and HTTP 2xx status on `Worker` scripts and `importScripts(...)`, parses `WorkerOptions` (`{type, name}`), rejects `{type:"module"}` cleanly with an error event instead of silently running classic JS, dispatches both `onerror`/`onmessage` and `addEventListener`/`removeEventListener` (`once`, `handleEvent`, `preventDefault`, `stopImmediatePropagation`) on page and worker scopes, supports nested worker wake/teardown, breaks the `inst` ↔ `WorkerObject` leak cycle, and joins active worker threads cleanly before static destruction (fixing the exit-time `SIGSEGV` / `heap-use-after-free` crash). | ✅ Completed (157/157 unit suites; `make security-worker` 17/17 checks, 200/200 4-worker startup/exit runs, 0 crashes in Release & ASan+UBSan) |
 | **Phase 41** | **A string built half a surrogate pair at a time is linear:** a join no longer writes a high surrogate half that ends its result; the handle owes the half (`m_pending`), and settling happens on first read. Half-at-a-time appends went from 77–252 ms at 5–20k pairs to 17–28 ms (cross-bench numbers in `AUDIT.md`, finding 47). | ✅ Completed (162/162 unit suites) |
+| **Phase 42** | **Nested browsing contexts (`<iframe>`), cross-realm DOM wrappers, origin isolation, and `.xhtml` execution.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 42") |
 | **Phase 43** | **`new.target`, and what a constructor makes:** `new.target` is the function `new` was applied to (through `super(...)`, `Reflect.construct(F, args, G)` and a bound function), an object a parent's constructor returns becomes `this` in the child, `this` is bound once (a second `super()`, none, and a returned primitive throw), `Reflect.construct` of a DOM interface with a `new.target` makes the object, and a custom element compiled for older browsers is made and upgraded (the standard's construction stack, kept beside the call context). | ✅ Completed (191/191 unit suites; JS corpus 974/989, `construct.dat` 47/49 against 13 before; DOM corpus 669/669, `compiled.dat` 25/25 against 2 before; test262 43 more and none fewer of 47,967) |
 | **Phase 44** | **Unicode 17.0 identifier validation, `\uXXXX` / `\u{...}` identifier escapes, escaped keyword/contextual-keyword rules, and Unicode whitespace/line terminators:** adds compact `constexpr` Unicode 17.0 `ID_Start` (682 ranges) and `ID_Continue` + ZWNJ/ZWJ (795 ranges) tables (`JsIdentifierTables.hpp`), full UTF-8 + `\uXXXX`/`\u{...}` decoding in `JsLexer` (including `#\u...` private names and arbitrary leading zeros in `\u{...}`), `JsTokenType::EscapedKeyword` and `JsToken::has_escape` enforcement across `JsParser` (rejecting escaped reserved words and contextual keywords outside `IdentifierName`, enforcing strict-mode future reserved words, async/generator/arrow-parameter `[Yield, Await]` and `static {}`/field-initializer `ContainsArguments` early errors), and full ECMA-262 Unicode `WhiteSpace` and `U+2028`/`U+2029` line-terminator handling. | ✅ Completed (165/165 unit suites; JS corpus 921/935 with 14 new Node-verified cases in `identifiers.dat`; Test262 default 21 dirs 10,835→12,275 / 15,686 (+1,440, 0 regressions); `language/{identifiers,keywords,future-reserved-words,reserved-words}` 374/374 = 100.0%) |
+| **Phase 45** | **Resolve a Promise iterator one item at a time.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 45 Architecture") |
 | **Phase 46** | **Canvas 2D text:** `fillText`/`strokeText`/`measureText` with the `font` (CSS shorthand subset), `textAlign` and `textBaseline` canvas state — rasterised with the Phase 36 TrueType AA rasterizer into an AA coverage buffer, blitted through the CTM by inverse mapping (max-filtered down-sampling, user-space gradient sampling), with `maxWidth` horizontal condensing, solid/gradient paint, clip and `globalAlpha` honoured. SVG/path/hit-test gaps of row 6 remain. | ✅ Completed (finding 52; 179/179 unit suites) |
+| **Phase 47** | **The WHATWG Encoding Standard, the `<meta charset>` prescan, and XML/WPT encodings.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 47 Architecture") |
 | **Phase 48** | **Indexed sized-float placement:** partition each block’s vertical bands into intervals and augment a balanced treap with the best available width; find the first fitting band edge after the flow cursor instead of sorting and sweeping every previous band for every new float. The existing bands for line wrapping, zero-height accounting and clearance remain unchanged. | ✅ Completed (178/178 engine suites; 10,000 same-size floats 5.244 → 0.096 s end-to-end; six 1k/3k and three 10k out-of-corpus layout dumps identical) |
 | **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 181/181 unit suites; CI floor `1781 → 1792`) |
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
+| **Phase 51** | **The attribute model: namespaces, `Attr` objects, and named properties.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 51 Architecture") |
+| **Phase 52** | **Repairing `main` after the Phase 49 and Phase 51 merges.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 52 Architecture") |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
+| **Phase 54** | **Lossless WebP: the container and the `VP8L` bitstream.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 54 Architecture") |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 56** | **Cross-origin `Window` and `Location` reflection.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 56 Architecture") |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 | **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
+| **Phase 63** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (206/206 unit suites; JS corpus 1085/1112, `iteration.dat` 65/78 against 28 before; test262 10 more and 4 fewer of 47,967, the four being rows of the task table; 0.94 to 1.06 of `main`'s time over two runs) |
 
 ---
 
@@ -4662,16 +4671,21 @@ copies were within 3%, had them between 1.00 and 1.10: `new` on functions
 and classes at 1.04 to 1.06, a subclass of `Map` at 1.09, a class on a
 function that returns another object at 1.10, `Reflect.construct` at 1.06 to
 1.08, the custom-element measures at 1.08 to 1.09, plain calls at 1.02 to
-1.04. A third, between the two, had a subclass of `Error` at 1.11, which the
-table has at 1.03. Three of the measures run none of the changed code (an
-object literal, `new Map()`, `new Event()`); over the four runs made while
-this was written they stand between 0.96 and 1.04, and that much is the
-machine and where the linker put things. So no row says much by itself. What
-the runs have in common is that `new` on a custom element class, `innerHTML`
-with custom elements and `Reflect.construct(Array, [], G)` are at 1.06 to
-1.09 in each, and that nothing is above 1.11: carrying `new.target` and
-binding `this` once costs a construction about a tenth at most, and this
-machine cannot say how much less.
+1.04. Three of the measures run none of the changed code (an object literal,
+`new Map()`, `new Event()`); in the table they stand between 0.96 and 1.03,
+and that much is the machine and where the linker put things. So no row says
+much by itself. What the two runs have in common is that `new` on a custom
+element class, `innerHTML` with custom elements and
+`Reflect.construct(Array, [], G)` are at 1.06 to 1.09 in each, and that
+nothing is above 1.10: carrying `new.target` and binding `this` once costs a
+construction about a tenth at most, and this machine cannot say how much
+less.
+
+(Corrected in Phase 63. As merged, this paragraph also spoke of a third run
+with a subclass of `Error` at 1.11, of four runs of the three measures, and
+said nothing was above 1.11. Those sentences were written from memory: the
+two runs described above are the ones there is a record of, and their
+largest ratios are 1.09 and 1.10.)
 
 A construction in place (an upgrade) takes a lock to note itself and one
 each time an interface asks which object it is to build on. While none is
@@ -4862,6 +4876,9 @@ subclass or custom constructor still return a base Promise, the existing
 pass: its custom constructor ignores rejection, but our base Promise reports
 an unhandled rejection. We do not suppress the rejection or special-case a
 test; the subclass construction is separate work.
+
+(Phase 63 took the array fast path out of the way: an array with an iterator
+of its own is asked for it, and `Promise.all(a)` above resolves to `[9]`.)
 
 ---
 
@@ -5814,6 +5831,8 @@ full modern ECMAScript conformance across six pillars:
      replace, replaceAll, search, split}` through `GetMethod` on object
      arguments.
 
+---
+
 ## Phase 56 Architecture: Cross-Origin `Window` and `Location` Reflection
 
 ### 1. What Phase 42 left open
@@ -6143,3 +6162,345 @@ Following the zero-runtime-dependency table pattern of `IdnaTables.{hpp,cpp}` an
 - **No `Intl` namespace / `Intl.Collator` object**: the 4 remaining failures in `intl402/String/prototype/localeCompare` construct or spy on `Intl.Collator` directly. `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Segmenter`, and `Intl.Collator` remain Wave 2 Row 10 work.
 - **Locale-specific CLDR collation tailorings**: `localeCompare()` implements the full CLDR 48 root collation order (DUCET + CLDR root contractions + `-u-kf`/`-u-kn` + all ECMA-402 options), which matches `en`/`und` and default ICU root collation, but language-specific tailorings (e.g. Swedish `å`/`ä`/`ö` after `z`, German phonebook `ä ≈ ae`, Spanish traditional `ch`, Japanese Hiragana/Katakana quaternary weights) are not yet tabulated.
 - **`usage: "search"`**: accepted by options validation and mapped to root collation; locale-specific search tailorings depend on CLDR tailoring tables.
+
+---
+
+## Phase 63 Architecture: Iteration Asks the Value for Its Iterator
+
+### 1. What was wrong
+
+`for (x of v)`, `[...v]`, `f(...v)`, `yield* v`, `Array.from(v)`, `new Set(v)`
+and `Promise.all(v)` are one operation in the language: ask `v` for the
+function under `Symbol.iterator`, call it, and call `next()` on what comes
+back until it says `done`. In the engine they all end in two functions of
+`src/js/JsOps.cpp`, `js_iterate` and `js_iterable_to_vector`, and both began
+with a shortcut. An array was not asked: its elements were read by index. A
+string was not asked either: its code points were read.
+
+For an array that nobody has touched that is the same thing, faster. It stops
+being the same when a script says otherwise, and a script can say so in three
+places:
+
+```js
+var a = [1, 2];
+a[Symbol.iterator] = function* () { yield 9; yield 8; };       // on the array
+class Rows extends Array { *[Symbol.iterator]() { /* … */ } }  // on a subclass
+Array.prototype[Symbol.iterator] = wrapped;                    // on the prototype
+[...a]            // 1,2 on main, whichever of the three; 9,8 in Node for the first
+```
+
+AUDIT finding 51 had met it from the other side: Phase 45 made `Promise.all`
+resolve each element before it asks for the next, for every iterable but the
+one that is passed to it most.
+
+The forty lines around the shortcut were also wrong in four smaller ways:
+
+- An object that has a `next` method and no `Symbol.iterator` was taken to be
+  its own iterator. So `[...asyncGenerator()]` did not throw: it called
+  `next()`, got a promise, found no `done` on it, and went on for ever.
+- A property whose name is the text `Symbol.iterator` was accepted as the
+  method.
+- A number or a boolean was refused without being asked. A script can give
+  `Number.prototype` an iterator.
+- When a loop stopped early, `return` was called if it was a function and
+  left alone if it was anything else, and what it gave back was not looked
+  at. The language has a `TypeError` for a `return` that is neither callable
+  nor missing, and for a result that is not an object.
+
+### 2. One question, and an answer that runs nothing
+
+The question is `js_iterator_method(value, method)`, the language's
+GetMethod(value, @@iterator): one property read, so that a getter runs once;
+no method when the property is undefined or null; a `TypeError` when it is
+anything else that cannot be called. A primitive is asked through its
+prototype, with itself as the receiver.
+
+The shortcut stays, behind a second function,
+`js_iterates_as_builtin(value)`: true when reading the value directly gives
+what iterating it would, *and finding that out ran no script*. For an array
+it is the lookup `value[Symbol.iterator]` would make, taken one step at a
+time and given up at the first step that is not the plain one:
+
+1. the cell is not a host object and has no legacy getters (those answer
+   before the stored properties do);
+2. its prototype is this realm's `Array.prototype`: not a subclass, not an
+   array of another frame, not one whose prototype was set;
+3. it has no property of its own under the key (the table is searched, the
+   property is not read, so a getter there does not run);
+4. `Array.prototype` holds, under the key, a data property whose value is the
+   function the realm put there.
+
+For a string it is step 4 on `String.prototype`, since a primitive has no
+properties of its own. "The function the realm put there" is remembered by
+`JsIntrinsics::install()` in two new members, `array_iterator_method` and
+`string_iterator_method`, which the realm reports to the collector as roots:
+a script that replaces the method on the prototype must not be able to make
+the original unreachable and so let another function take its address.
+
+When the answer is no, the value is asked with `js_iterator_method`. If what
+it hands out is the installed function after all (a subclass that has no
+iterator of its own, a getter that returns the built-in one, the built-in one
+assigned back), the elements are still read directly. Otherwise the protocol
+runs.
+
+**Why reading directly is the same.** The installed array iterator reads
+`elements[i]` against the length the array has at that moment, each time
+`next()` is called, and its `next` is a property of the iterator object
+itself: no function a script can reach stands between the method and the
+elements. `visit_elements` reads the same way, so an array that grows or
+shrinks under the loop is seen as the iterator would see it. The day array
+iterators take `next` from a prototype they share, as the language has it,
+that function has to be compared too; the comment in
+`js_iterates_as_builtin` says so, and so does the row.
+
+**Realms.** Every realm installs functions of its own. An array made in
+another frame has that frame's `Array.prototype`, so from here it is not the
+plain case: it is asked, its own realm's iterator is called, and the elements
+come through the protocol. Slower, and right:
+`js_iteration_of_another_realms_array` replaces the iterator in the frame
+and in the top document in turn and checks that each array follows its own.
+
+### 3. The protocol
+
+`iterate_with` is GetIterator and the loop over IteratorStep with the method
+already in hand:
+
+- the method is called with the value as `this` (for a string the string
+  itself, not an object made from it) and no arguments, and what it returns
+  has to be an object;
+- `next` is read once; each result has to be an object; `done` is read
+  before `value`, and `value` is not read when the iterator is done;
+- a loop the consumer ends (`break`, `return`, a visitor that answers false)
+  closes the iterator with what the language calls IteratorClose: a missing
+  `return` is nothing, one that cannot be called is a `TypeError`, and so is
+  a result that is not an object;
+- a loop that an error ends closes it too, and that error is the one the
+  script sees, whatever `return` is, does or throws;
+- an iterator that fails itself (`next()` throws, a result is not an object,
+  `done` or `value` throws) is not closed.
+
+### 4. What does not change
+
+The plain case runs the code it ran before, after the check. An array that
+changes under the loop, holes, strings by code point: the corpus has them
+beside the new cases, and they pass on `main` and here. `js_iterable_to_vector`
+still copies a plain array in one piece.
+
+What never asked for an iterator still does not: `apply`, `Reflect.apply`,
+`Reflect.construct`, `bind`, rest parameters, template objects and the array
+methods read their arrays by index, as the language has it. Two corpus cases
+put a counting function on `Array.prototype` and expect it to count nothing.
+
+### 5. Verification and cost
+
+Every number here is printed by the command beside it, on this branch with
+`main` at `b1745d3` (Phase 60) merged in. "Before" is the release binary of
+that `main`.
+
+| Command | Before | Now |
+| :--- | :--- | :--- |
+| `make test` | 204 suites | `All 206 engine test suites passed successfully!` and `Cross-origin Window/Location suite: 80 checks, 0 failure(s).` |
+| `make js-conformance` | 1020 / 1034 | `JS conformance, full corpus: 1085/1112 (97.6%)  [28 files, 0 crashes, 0 timeouts]` |
+| `python3 tools/conformance/run_js_conformance.py --filter iteration` | 28 / 78, 2 timeouts | 65 / 78 |
+| the same with `--reference "node -e"`: the file itself, run by Node | | 78 / 78 |
+| `make dom-conformance`; `make wpt` | 669 / 669; 9538 / 9744 | the same |
+| `python3 tools/conformance/compare_with_jsdom.py` on a page that is in no corpus (below) | 17 lines, 9 the same | 17 lines, 17 the same |
+
+**The corpus.** `tests/js-conformance/iteration.dat` has 78 cases. Each was
+added through `tools/conformance/add_js_case.py`, which runs the script in
+Node and stores what Node printed, so no expectation was typed in. They
+cover the three places a script can put an iterator (the array, a subclass,
+the prototype) through each consumer (`for…of`, spread in a call and in an
+array, `yield*`, `Array.from`, `Map`, `Set`, `Object.fromEntries`, the
+`Promise` combinators), the same for strings, the protocol's order of reads,
+closing, and the plain cases that must not change. The 13 that fail are the
+cases of section 6, and they are in the file so that whoever takes one of
+those rows has the test already.
+
+**The unit suites.** `js_iteration_asks_the_value_for_its_iterator` calls the
+four C++ functions directly, which a script cannot: that
+`js_iterates_as_builtin` runs no getter (a counter stays at 0), that a
+subclass without an iterator is asked and then read directly, that the plain
+case comes back when the prototype's method is put back, that an early stop
+closes the iterator once, and that the two remembered functions survive a
+collection while a replacement sits on the prototype.
+`js_iteration_of_another_realms_array` loads a page with a frame and
+iterates the frame's arrays from the top document.
+
+**test262**, the whole of `built-ins`, `language` and `annexB`
+(`python3 tools/conformance/run_test262.py --binary before=… --binary now=…
+--timeout 6 built-ins language annexB`): `47967 tests run, 830 skipped
+(modules)`; before, `29444 pass (61.4%)`; now, `29450 pass (61.4%)`; `10 pass
+in now and not in before; 4 pass in before and not in now`. Nine of the ten
+are what the change is for: `for…of` and `yield*` asking
+(`language/statements/for-of/dstr/{const,let,var}-ary-init-iter-get-err-array-prototype.js`,
+`language/expressions/yield/star-in-rltn-expr.js`), the two checks of
+IteratorClose (`for-of/iterator-close-non-object.js`,
+`for-of/iterator-close-non-throw-get-method-non-callable.js`), an array
+whose `Symbol.iterator` getter throws
+(`built-ins/Promise/{allSettled,any}/iter-arg-is-poisoned.js`), and one of
+async delegation (section 6, item 3). The tenth,
+`built-ins/String/prototype/repeat/empty-string-returns-empty.js`, timed out
+in the run of `main` and is the machine, as are 14 tests of `built-ins/Array`
+and `built-ins/Map` that moved between crash, timeout and fail. The four
+that are lost are the three of section 6, item 3, and the one of item 2.
+
+The first run, earlier in the work, was over the 25 directories that are
+about iteration, and it said eight gained and none lost. The four lost were
+in directories that are not: three under `async-generator` and one under
+`class/subclass`. A change to something this widely called is measured over
+the whole suite or not at all.
+
+**A page that is not in a corpus.** `js_iterable_to_vector` is also how the
+DOM's bindings read a sequence argument: the pairs of `new
+URLSearchParams(pairs)`, the parts of `new Blob(parts)`, a
+`MutationObserver`'s `attributeFilter`, a custom element's
+`observedAttributes`. A page of 17 lines hands each of them an array with an
+iterator of its own, an instance of a subclass that has one, and plain
+arrays while `Array.prototype[Symbol.iterator]` is replaced by a function
+that counts. jsdom and this branch print the same 17 lines; `main` prints 9
+of them. The page is not in the DOM corpus, which would move that corpus's
+floors; the unit suite holds `js_iterable_to_vector` itself.
+
+**The sanitizers.** `make asan` was run here on the tree before the last
+merge of `main` (this branch with `73e23a2`). Its first part, `asan-core`,
+passed whole: `JS conformance, full corpus: 1062/1092` under ASan against
+1063 in the release build (the one case is the deep recursion that a
+sanitizer build's stack frames are too large for, as on `main`), the DOM
+corpus 669/669, web-platform-tests 7998/8009, and no finding from either
+fuzzer. Its second part, the deep pages, was cut off when the sandbox was
+suspended and was not repeated here. On the merged tree the sanitizer job
+of CI is the whole run, deep pages included; the pull request names it.
+
+**Cost.** The plain case pays for the check: three pointer comparisons, one
+lookup in the array's own property table when it has one, and one lookup in
+`Array.prototype`'s table. The first version asked with a full property read
+every time, and a `for…of` over three elements took 1.16 of `main`'s time;
+that is why the check is structural. Least time of 5 processes each, in
+nanoseconds for one operation, twice over; beside `main`'s binary a second
+copy of the same file, to show what the measure itself varies by:
+
+| One operation | `main`, ns | this branch, ns | branch / `main`, two runs | second copy of `main` / `main`, two runs |
+| :--- | ---: | ---: | :--- | :--- |
+| `for (x of a)`, 3 elements | 707 | 723 | 1.02, 1.03 | 1.00, 1.01 |
+| `for (x of a)`, 1,000 elements | 162,000 | 154,667 | 0.95, 0.97 | 0.98, 1.00 |
+| `f(...a)`, 3 elements | 933 | 957 | 1.03, 1.03 | 1.00, 1.00 |
+| `Math.max(...a)`, 1,000 elements | 37,333 | 38,000 | 1.02, 0.97 | 1.02, 0.95 |
+| `[...a]`, 3 elements | 1,100 | 1,133 | 1.03, 1.02 | 1.02, 0.99 |
+| `[...a]`, 1,000 elements | 45,500 | 46,000 | 1.01, 0.94 | 0.99, 0.97 |
+| `Array.from(a)`, 3 elements | 800 | 847 | 1.06, 1.04 | 1.02, 0.99 |
+| `new Set(a)`, 3 elements | 1,500 | 1,560 | 1.04, 1.03 | 0.99, 1.01 |
+| `new Map(pairs)`, 3 pairs | 1,717 | 1,750 | 1.02, 1.00 | 0.98, 1.03 |
+| `for (c of 'abc')` | 733 | 733 | 1.00, 1.00 | 1.00, 1.00 |
+| `[...'abc']` | 713 | 753 | 1.06, 0.99 | 1.02, 0.98 |
+| a generator that does `yield* a`, made and run to its end | 148,000 | 151,000 | 1.02, 1.01 | 1.03, 0.96 |
+| `Promise.all(a)`, 3 elements | 4,000 | 4,200 | 1.05, 1.04 | 1.02, 1.03 |
+| control: `var [x, y] = a` | 383 | 370 | 0.97, 0.97 | 1.00, 1.00 |
+| `for (e of map)`, 3 entries (not an array: the protocol) | 24,000 | 24,000 | 1.00, 1.03 | 0.97, 1.03 |
+| control: `for (i = 0; i < 3; i++)` | 1,307 | 1,263 | 0.97, 0.97 | 1.02, 0.99 |
+
+The two lines marked "control" run none of the changed code. Over both runs
+this branch is between 0.94 and 1.06 of `main`, and the second copy of
+`main` between 0.95 and 1.03 of the first: what the check costs is at the
+edge of what this machine can measure.
+
+### 6. What is still open
+
+Six things, each in a file that an open pull request held while this was
+written, and each a row of AGENTS.md with its failing cases in
+`iteration.dat`. The first three are where this change made something
+**worse than it was on `main`**, in one case each that a page is unlikely to
+meet and a test suite does meet. They come first for that reason.
+
+1. **`Array.from`** (`BuiltinsArray.cpp`) decides what is iterable by
+   `is_array()` and by type before it calls `js_iterable_to_vector`. With an
+   iterator on the array it is right now, because that function asks. With
+   the iterator *deleted* from `Array.prototype` it is a `TypeError`, where
+   the language reads the array as array-like, and where `main` gave the
+   elements because nothing was asked. It also does not ask a number, and
+   maps only after it has collected everything.
+2. **The default constructor of a subclass** is written by the parser as
+   `constructor(...args) { super(...args); }`, and a spread now asks. A
+   replaced `Array.prototype[Symbol.iterator]` is therefore called by
+   `new Derived(...)`. The language's default constructor "does not use
+   argument evaluation", in the words of test262's
+   `default-constructor-spread-override.js`, which passed on `main` (where
+   nothing asked an array) and fails here. The repair is a flag on the
+   spread the parser makes (`JsParser.cpp`, `JsEval.cpp`).
+3. **`yield*` in an async generator** (`eval_yield`, `JsEval.cpp`) runs the
+   sync protocol and never asks for `Symbol.asyncIterator`. Delegating to
+   another async generator never returned on `main`, through the bare
+   iterator of section 1; it is a `TypeError` now. Neither is what the
+   language says. Three test262 tests of async delegation passed only
+   because their iterable happened to carry a `next` that answers without a
+   promise, and fail now; a fourth, which failed, passes for the same kind
+   of reason.
+4. **Array destructuring** (`IterationCursor`, `JsEval.cpp`) has an array
+   mode of its own: `var [x] = a` reads `a`'s elements whatever `a` says.
+5. **The `Map` and `Set` constructors** do not call `set` and `add`
+   (`BuiltinsCollections.cpp`; the row "A built-in does not make the subclass
+   it was called on" already had it), so a replaced one is not called and
+   cannot stop the iteration.
+6. **What an iterator is, in small**: `Array.prototype[Symbol.iterator]` and
+   `Array.prototype.values` are two functions; an array iterator owns its
+   `next`; the built-in iterables also have a property named by the text
+   `Symbol.iterator`, and the symbol is itself the text `@@iterator`;
+   `arguments` has no iterator of its own; an object whose prototype is an
+   array has no elements. (A seventh, a `String.prototype` method called on
+   an array reading it as `[object Object]`, was repaired by Phase 60 while
+   this was in work, and its case passes.)
+
+### 7. Beside the task: the limit that failed the sanitizer job
+
+The sanitizer job of CI failed on `main` at `73e23a2` and on the first
+commit of #73, both on 17 November, with one web-platform-test page
+reporting nothing:
+
+```text
+  encoding/legacy-mb-tchinese/big5/big5-decode-extra.html: (harness)
+    ERROR: the harness reported nothing:  |
+Web Platform Tests: 5526/5538 subtests pass in 103 files; 11 fail as listed, 1 fail and are not listed
+FAIL: 5526 subtests pass, the floor is 7998
+```
+
+Those lines are an annotation of the failed job; the step that writes them
+(`tools/ci/annotate_failure.py`, Phase 43) is why they can be read at all.
+A commit that added nothing to that tree (the claim of #72) passed seven
+minutes later, so nobody could have found the cause in a diff.
+
+**What it was.** `EventLoop::run_until_idle()` has, beside its budget of
+loop time, a limit on real time: 10 seconds by default, looked at between
+turns. Past it the loop returns; the host said nothing about it and exited
+with status 0. The page has 2,472 subtests behind `<body onload>` and an iframe, so its
+load handlers run in the loop's first turn, and in the sanitizer build they
+take 7.3 s on this sandbox when nothing else runs. On a busier machine they
+take more than 10, the loop ends after that turn, and the turn that would
+have run the tests and reported never starts. Reproduced here with four busy
+loops beside the sanitizer binary: the load handlers took 18.8 s, and the
+page ended with exit status 0 and nothing on standard output, as in CI.
+
+**What changed**, in `src/main.cpp` and `tools/conformance/run_wpt.py`, and
+nothing in the loop itself:
+
+- `--wall-limit=SECONDS` sets that limit for the one-shot modes (`--run-js`,
+  `--run-script`, rendering a page once). The default is still 10.
+- When the limit is what ended the loop with callbacks still due, one line
+  on standard error says so: `litebird: the event loop was stopped after 10
+  s of real time with callbacks still due (--wall-limit=SECONDS allows
+  more)`. The exit status is what it was.
+- `run_wpt.py` passes its own timeout for a file (60 s; 600 s in the
+  sanitizer run) as the limit. A page that is too slow is then stopped by
+  the runner, which reports it as `TIMEOUT` under its name.
+
+**Verified** with a page whose `onload` spins for 1.5 s behind an iframe and
+then sets a timer that prints: with `--wall-limit=1` nothing is printed but
+the line above, with the default the timer runs. `make wpt` prints the same
+score with the flag as `main` does without it (9538/9744). It has no
+automatic test: the limit is chosen in `main()`, which no suite calls.
+
+**Not done.** The runners of the other corpora (`run_dom_conformance.py`,
+`run_js_conformance.py`, `run_url_conformance.py`, `run_test262.py`) still
+run under the default of 10 s. None has shown the failure; the line on
+standard error is what will name it if one does. And whether the two
+failures of the sanitizer job on `main` on 16 November were this one is not
+known: they left nothing to read.

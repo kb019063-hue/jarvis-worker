@@ -930,85 +930,192 @@ bool js_symbol_from_key(const std::string& key, JsValue& out) {
 // Iteration
 // ---------------------------------------------------------------------------
 
-void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit) {
-    if (iterable.is_array()) {
-        // Index-based so that an array growing during iteration is still safe.
-        for (size_t i = 0; i < iterable.object_val->array_elements.size(); ++i) {
-            JsValue item = iterable.object_val->array_elements[i];
-            if (!visit(item)) return;
-        }
-        return;
-    }
-    if (iterable.type == JsType::String) {
-        // Strings iterate by code point, not by UTF-16 code unit. The text is
-        // well-formed UTF-8, so a code point is one sequence of bytes. The
-        // handle is held here because `visit` runs script, which may drop the
-        // last other reference to the text.
-        const JsString text = iterable.string_val;
-        const std::string_view s = text.view();
-        size_t i = 0;
-        while (i < s.size()) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
-            if (i + len > s.size()) len = s.size() - i;
-            JsValue item = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
-            if (!visit(item)) return;
-            i += len;
-        }
-        return;
-    }
+namespace {
 
-    JsValue iterator;
-    if (iterable.is_object_like()) {
-        JsValue method = iterable.get_property(kIteratorKey);
-        if (!method.is_function()) method = iterable.get_property("Symbol.iterator");
-        if (method.is_function()) {
-            iterator = method.call_with_this(iterable, {});
-        } else if (iterable.get_property("next").is_function()) {
-            iterator = iterable;        // a bare iterator object
-        }
-    }
-    if (!iterator.is_object_like()) {
-        js_throw_type_error(js_describe_thrown(iterable) + " is not iterable");
-    }
+/// The property key of `Symbol.iterator`, as the std::string that property
+/// lookups take. Made on first use, not when the program is loaded, so that
+/// it is there whatever asks first.
+const std::string& iterator_name() {
+    static const std::string name = kIteratorKey;
+    return name;
+}
 
+/// An array's elements, in order. Read by index each time round, because
+/// `visit` runs script and the array may grow or shrink under it; the array
+/// iterator reads it the same way.
+void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
+    for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
+        JsValue item = array.object_val->array_elements[i];
+        if (!visit(item)) return;
+    }
+}
+
+/// A string's code points, in order, which is what the string iterator
+/// yields. The text is well-formed UTF-8, so a code point is one sequence of
+/// bytes. The handle is held here because `visit` runs script, which may drop
+/// the last other reference to the text.
+void visit_code_points(const JsValue& string, const std::function<bool(const JsValue&)>& visit) {
+    const JsString text = string.string_val;
+    const std::string_view s = text.view();
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+        if (i + len > s.size()) len = s.size() - i;
+        JsValue item = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
+        if (!visit(item)) return;
+        i += len;
+    }
+}
+
+/// IteratorClose (ECMA-262 7.4.11) for a loop that stops early and has no
+/// error of its own: what `return` is and what it gives back are checked, and
+/// what it throws is thrown.
+void close_iterator(const JsValue& iterator) {
+    JsValue method = iterator.get_property("return");
+    if (method.is_nullish()) return;
+    if (!method.is_function()) js_throw_type_error(js_describe_thrown(method) + " is not a function");
+    JsValue result = method.call_with_this(iterator, {});
+    if (!result.is_object_like()) {
+        js_throw_type_error("Iterator result " + js_describe_thrown(result) + " is not an object");
+    }
+}
+
+/// The same for a loop that an error is ending. That error is the one the
+/// script sees: whatever `return` is, does or throws is dropped.
+void close_iterator_quietly(const JsValue& iterator) {
+    try {
+        JsValue method = iterator.get_property("return");
+        if (method.is_function()) method.call_with_this(iterator, {});
+    } catch (...) {
+    }
+}
+
+/// GetIterator and the loop over IteratorStep (ECMA-262 7.4.3, 7.4.8), with
+/// the method already looked up. `next` is read once. An iterator is closed
+/// when the loop leaves it unfinished, and not when it failed itself: an
+/// error out of next(), `done` or `value` leaves `return` alone.
+void iterate_with(const JsValue& iterable, const JsValue& method, const std::function<bool(const JsValue&)>& visit) {
+    JsValue iterator = method.call_with_this(iterable, {});
+    if (!iterator.is_object_like()) js_throw_type_error("Result of the Symbol.iterator method is not an object");
     JsValue next = iterator.get_property("next");
-    if (!next.is_function()) js_throw_type_error("iterator.next is not a function");
-
-    auto close = [&]() {
-        JsValue ret = iterator.get_property("return");
-        if (ret.is_function()) ret.call_with_this(iterator, {});
-    };
 
     while (true) {
-        JsValue step = next.call_with_this(iterator, {});
-        if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
+        JsValue step = js_call(next, iterator, {});
+        if (!step.is_object_like()) {
+            js_throw_type_error("Iterator result " + js_describe_thrown(step) + " is not an object");
+        }
         if (step.get_property("done").is_truthy()) return;
         JsValue value = step.get_property("value");
         bool keep_going;
         try {
             keep_going = visit(value);
         } catch (...) {
-            try { close(); } catch (...) {}
+            close_iterator_quietly(iterator);
             throw;
         }
         if (!keep_going) {
-            close();
+            close_iterator(iterator);
             return;
         }
     }
 }
 
-std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
-    if (iterable.is_array()) {
-        return std::vector<JsValue>(iterable.object_val->array_elements.begin(),
-                                    iterable.object_val->array_elements.end());
+/// Whether `proto` still holds, as a plain data property, the method the
+/// realm installed under @@iterator.
+bool holds_installed_method(const JsObject* proto, const JsValue& installed) {
+    if (proto->exotic || proto->has_legacy_getters || !installed.is_function()) return false;
+    auto it = proto->properties.find(iterator_name());
+    return it != proto->properties.end() && !(it->flags & PropertyMap::Accessor) &&
+           it->second.is_function() && it->second.identity() == installed.identity();
+}
+
+/// The second question, for a value the first one could not answer without
+/// running script: `method` is what the lookup found for it.
+bool method_is_installed(const JsValue& value, const JsValue& method) {
+    if (!method.is_function()) return false;
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (value.is_array()) return method.identity() == realm.array_iterator_method.identity();
+    if (value.type == JsType::String) return method.identity() == realm.string_iterator_method.identity();
+    return false;
+}
+
+[[noreturn]] void throw_not_iterable(const JsValue& value) {
+    js_throw_type_error(js_describe_thrown(value) + " is not iterable");
+}
+
+} // namespace
+
+bool js_iterator_method(const JsValue& value, JsValue& method) {
+    method = value.is_nullish() ? JsValue::make_undefined() : value.get_property(iterator_name());
+    if (method.is_nullish()) return false;
+    if (!method.is_function()) throw_not_iterable(value);
+    return true;
+}
+
+bool js_iterates_as_builtin(const JsValue& value) {
+    // An iterator made by either installed method reads the value the way
+    // visit_elements() and visit_code_points() do, and its next() is its own
+    // property: nothing a script can reach stands between the method and the
+    // elements. Should those iterators ever take `next` from a prototype they
+    // share, as the language has it, that function has to be compared here too.
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (value.type == JsType::String) {
+        // A primitive has no properties of its own: the lookup starts at the prototype.
+        return holds_installed_method(realm.string_proto, realm.string_iterator_method);
     }
+    if (!value.is_array()) return false;
+    // The lookup an array's `Symbol.iterator` would take, step by step, given
+    // up at the first thing that is not the plain case: a host object, a
+    // property of the array's own by that name (found without running it), or
+    // a prototype that is not this realm's Array.prototype (a subclass, an
+    // array of another realm, one whose prototype was set).
+    const JsObject* cell = value.object_val.get();
+    if (cell->exotic || cell->has_legacy_getters || cell->prototype != realm.array_proto) return false;
+    if (!cell->properties.empty() && cell->properties.find(iterator_name()) != cell->properties.end()) return false;
+    return holds_installed_method(realm.array_proto, realm.array_iterator_method);
+}
+
+void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit) {
+    const bool is_string = iterable.type == JsType::String;
+    if (js_iterates_as_builtin(iterable)) {
+        if (is_string) visit_code_points(iterable, visit);
+        else visit_elements(iterable, visit);
+        return;
+    }
+    JsValue method;
+    if (!js_iterator_method(iterable, method)) throw_not_iterable(iterable);
+    if (method_is_installed(iterable, method)) {
+        // The long way round to the same answer: a subclass, a getter that
+        // hands out the installed method, the method assigned back.
+        if (is_string) visit_code_points(iterable, visit);
+        else visit_elements(iterable, visit);
+        return;
+    }
+    iterate_with(iterable, method, visit);
+}
+
+std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
     std::vector<JsValue> out;
-    js_iterate(iterable, [&](const JsValue& v) {
+    auto collect = [&](const JsValue& v) {
         out.push_back(v);
         return true;
-    });
+    };
+    const bool is_string = iterable.type == JsType::String;
+    bool direct = js_iterates_as_builtin(iterable);
+    JsValue method;
+    if (!direct) {
+        if (!js_iterator_method(iterable, method)) throw_not_iterable(iterable);
+        direct = method_is_installed(iterable, method);
+    }
+    if (!direct) {
+        iterate_with(iterable, method, collect);
+    } else if (is_string) {
+        visit_code_points(iterable, collect);
+    } else {
+        // Nothing runs between the first element and the last: one copy.
+        out.assign(iterable.object_val->array_elements.begin(), iterable.object_val->array_elements.end());
+    }
     return out;
 }
 
@@ -1120,6 +1227,8 @@ JsIntrinsics::JsIntrinsics() {
     heap.add_root_provider(this, [this](std::vector<JsValue*>& roots) {
         for (auto& value : m_roots) roots.push_back(&value);
         for (auto& entry : globals) roots.push_back(&entry.second);
+        roots.push_back(&array_iterator_method);
+        roots.push_back(&string_iterator_method);
     });
 }
 
@@ -1159,6 +1268,9 @@ void JsIntrinsics::install() {
     install_error_builtins(*this);
     install_array_builtins(*this);
     install_string_builtins(*this);
+    // What js_iterate() compares with: see js_iterates_as_builtin().
+    array_iterator_method = js_object_value(array_proto).get_property(kIteratorKey);
+    string_iterator_method = js_object_value(string_proto).get_property(kIteratorKey);
     install_number_builtins(*this);
     install_collection_builtins(*this);
     install_regexp_builtins(*this);

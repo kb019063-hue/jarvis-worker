@@ -220,10 +220,37 @@ void js_append_code_point(std::string& out, uint32_t code_point);
 // Iteration
 // ---------------------------------------------------------------------------
 
-/// Runs the iteration protocol over `iterable`. `visit` returns false to stop
-/// early, in which case the iterator's return() method is called.
+/// Runs the iteration protocol over `iterable`: asks it for its
+/// `Symbol.iterator` method (a TypeError when it has none), calls that, and
+/// calls next() until `done`. `visit` returns false to stop early, in which
+/// case the iterator's return() method is called; it is called as well when
+/// `visit` throws.
+///
+/// An array and a string are read directly, with no iterator made, for as
+/// long as the method they answer with is the one the realm installed: see
+/// js_iterates_as_builtin().
 void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit);
 std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable);
+
+/// GetMethod(value, @@iterator) (ECMA-262 7.3.11): the function `value` hands
+/// out its iterator with, looked up once, so a getter for it runs once. False,
+/// with `method` undefined, when there is none: the property is undefined or
+/// null, or the value itself is. A TypeError when it is anything else that is
+/// not a function. A primitive is asked through its prototype, so a string
+/// has one and a number has one when a script gave `Number.prototype` one.
+bool js_iterator_method(const JsValue& value, JsValue& method);
+
+/// True when reading `value` directly gives what iterating it would, and
+/// finding that out ran no script: `value` is an array, or a string, whose
+/// `Symbol.iterator` is, by a plain lookup, still the function this realm put
+/// on `Array.prototype`, or on `String.prototype`. False for everything the
+/// plain lookup does not settle: a method replaced on the prototype or on the
+/// one array, a subclass, a getter, an array of another realm. Then the value
+/// is asked: js_iterator_method(), and the method is called.
+///
+/// Code that walks an array's elements in place of iterating it asks this
+/// first. What it may not do is decide by `is_array()` alone.
+bool js_iterates_as_builtin(const JsValue& value);
 /// The property key used for Symbol.iterator.
 extern const char* const kIteratorKey;
 extern const char* const kAsyncIteratorKey;
@@ -264,6 +291,12 @@ struct JsIntrinsics {
     JsObject* weakset_proto{nullptr};
     JsObject* promise_proto{nullptr};
     JsObject* error_protos[7]{};          // indexed by JsErrorKind
+
+    /// `Array.prototype[Symbol.iterator]` and `String.prototype[Symbol.iterator]`
+    /// as install() left them. Not where a script's replacement goes: these
+    /// are what js_iterates_as_builtin() compares the current method with.
+    JsValue array_iterator_method;
+    JsValue string_iterator_method;
 
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;

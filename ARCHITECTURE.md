@@ -361,7 +361,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 181/181 unit suites; CI floor `1781 → 1792`) |
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
-| **Phase 55** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (198/198 unit suites; `make js-conformance` 978/992, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
+| **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 
 ---
 
@@ -4682,8 +4683,8 @@ Found on the way, the same on `main`, and in the task table now, as rows of
 their own or added to the row they belong to. The first two have a failing
 case each in `construct.dat`.
 
-- **`this` can be used before `super(...)` has run.** *(Fixed in Phase 55 /
-  finding 61; kept here for context from Phase 43.)* In a derived constructor
+- **`this` can be used before `super(...)` has run.** *(Fixed in Phase 59 /
+  finding 65; kept here for context from Phase 43.)* In a derived constructor
   `this.x = 1; super();` writes to the object `new` made, where the language has
   a `ReferenceError`; an arrow function that reads `this` and `super.m` behave
   the same. The engine has no binding that exists and cannot be read yet: `let`
@@ -5743,11 +5744,82 @@ that only accompanies a lossy image, and AVIF (an AV1 still image). SVG
 
 ---
 
-## Phase 55 Architecture: Temporal Dead Zone for Derived `this` and Lexical Bindings
+## Phase 55 Architecture: Complete RegExp Flags (`d`/`u`/`v`), Unicode 17.0 Property Escapes & Case Folding, and ES2025 RegExp Features (Finding 61)
+
+Phase 55 upgrades Litebird's iterative backtracking RegExp engine (Phase 37) to
+full modern ECMAScript conformance across six pillars:
+
+1. **Deduplicated Unicode 17.0 tables (`include/litebird/js/RegExpUnicodeTables.hpp`, `src/js/RegExpUnicodeTables.cpp`, generated by `tools/generate_regexp_unicode_tables.py`):**
+   - Stores 22,207 shared sorted `(lo, hi)` code-point ranges covering all 80
+     `General_Category` aliases, 98 Binary properties, 344 `Script` aliases,
+     344 `Script_Extensions` aliases, and all 7 ES2024 Properties of Strings
+     (`Basic_Emoji`, `Emoji_Keycap_Sequence`, `RGI_Emoji_Modifier_Sequence`,
+     `RGI_Emoji_Flag_Sequence`, `RGI_Emoji_Tag_Sequence`,
+     `RGI_Emoji_ZWJ_Sequence`, `RGI_Emoji` — 2,760 multi-code-point sequences
+     and 11,196 flattened code points, with `RGI_Emoji` referencing the exact
+     disjoint union of the other six).
+   - Provides both Unicode 17.0 Simple Case Folding (1,482 equivalence classes,
+     2,994 code points) and legacy ECMA-262 non-Unicode `Canonicalize` (1,144
+     classes, 2,313 code units), with O(log N + K) range-closure helpers
+     (`for_each_{unicode,legacy}_case_equiv_in_range`) so character classes
+     close at compile time and execute runtime membership in O(log R) binary
+     search.
+   - Enforces strict ECMA-262 property-escape name matching (exact case and
+     underscores), `u`-mode vs `v`-mode escape rules, `\w`/`\W`/`\b`/`\B`
+     Unicode case folding (`U+017F` `ſ`, `U+212A` `K`), and distinct `iu` vs
+     `iv` complement ordering (`\P{...}` and `[^...]`).
+2. **ES2024 `v` (`unicodeSets`) flag and `RegExpOp::MatchStringSet`:**
+   - Enforces `u`/`v` mutual exclusion, nested `[...]` (updating `count_groups`
+     and `scan_has_named_groups` with `int class_depth`), set subtraction (`--`)
+     and intersection (`&&` with `[lookahead != &]`), `\q{...}` string literal
+     disjunctions, reserved single/double punctuator errors, and static
+     `MayContainStrings` validation (forbidding negation `[^...]` whenever the
+     static rule permits strings, even after subtraction).
+   - Compiles string-containing `ClassSet`s into a single `MatchStringSet`
+     bytecode instruction backed by `StringSet` (`by_first` / `by_last` maps
+     keyed by canonicalized edge code point in descending string-length order),
+     using `m_ends_pool` + `BtKind::StringSetChoice` for longest-first forward
+     and lookbehind backtracking without expanding 2,760+ emoji sequences into
+     alternation bytecode.
+3. **ES2022 `d` (`hasIndices`) flag:**
+   - `build_match_array` attaches `match.indices` and `match.indices.groups`
+     via `CreateDataProperty` (`define_property`), sharing the exact `[s, e]`
+     pair array objects between `indices[i]` and `indices.groups[name]` per
+     ECMA-262 §22.2.2.7.2.
+4. **ES2025 Duplicate Named Capturing Groups & Unicode `RegExpIdentifierName`:**
+   - `PatternParser` propagates alternative-scoped `NameSet`s across
+     disjunction branches so identical group names are permitted in distinct
+     branches of `|` while rejected inside the same alternative or nested
+     groups; `BackRef` resolves multi-group `\k<name>` against whichever
+     branch captured; `parse_group_name()` validates full Unicode `ID_Start` /
+     `ID_Continue` (`JsIdentifierTables.hpp`) with `\uXXXX` and `\u{...}`
+     escapes.
+5. **ES2025 Inline Modifiers (`(?ims-ims:...)`):**
+   - Carries a 3-bit `mode_flags` (`i`, `m`, `s`) field on AST `Node` and
+     compiled `RegExpInsn`, scoping modifier toggles cleanly across nested
+     groups, character classes, lookarounds, backreferences, and `SimpleRepeat`
+     (and disabling the literal-start fast path whenever the leading atom is
+     case-insensitive).
+6. **ES2025 `RegExp.escape(S)`, Parse-Time Literal Validation, and `Symbol.*` Dispatch:**
+   - Adds `js_regexp_validate(pattern, flags, err)` (`include/litebird/js/JsBuiltins.hpp`)
+     invoked by `JsParser.cpp` on `JsTokenType::Regex` so invalid regex
+     literals throw `SyntaxError` at parse time before script evaluation.
+   - Implements `RegExp.escape(S)`, installs well-known `Symbol.{match,
+     matchAll, replace, search, split, species}`, non-constructor built-in
+     methods (`function_cell()->not_constructor = true`), generic
+     `RegExp.prototype[Symbol.*]` methods, `RegExp.prototype` flag/source
+     getters (`"get ..."` names, canonical `dgimsuvy` order), and updates
+     `BuiltinsString.cpp` to delegate `String.prototype.{match, matchAll,
+     replace, replaceAll, search, split}` through `GetMethod` on object
+     arguments.
+
+---
+
+## Phase 59 Architecture: Temporal Dead Zone for Derived `this` and Lexical Bindings (Finding 65)
 
 ### 1. Why TDZ checks were missing
 
-Prior to Phase 55, `JsEnvironment::Binding` tracked only `is_const`,
+Prior to Phase 59, `JsEnvironment::Binding` tracked only `is_const`,
 `is_readonly`, and `is_lexical` (`include/litebird/js/JsInterpreter.hpp`).
 Entering a block, function, or script only hoisted `var` and `function`
 declarations; `let`, `const`, and `class` declarations added bindings only when
@@ -5815,14 +5887,14 @@ execution reached their declaration statement. As a result:
 
 ### 4. Verification & remaining boundaries
 
-- `make test`: **198/198** unit suites pass in both Release and ASan+UBSan
-  (`build-asan/test_suite`), including three new Phase 55 suites
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan
+  (`build-asan/test_suite`), including three new Phase 59 suites
   (`js_derived_this_temporal_dead_zone`,
   `js_lexical_temporal_dead_zone_blocks_and_classes`,
   `js_temporal_dead_zone_in_control_flow_and_patterns`).
-- `make js-conformance`: **978/992** Release (**977/992** ASan+UBSan;
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan;
   `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**),
-  verified **992/992** under Node.js (`--reference "node -e"`). Only `eval`
+  verified **1017/1017** under Node.js (`--reference "node -e"`). Only `eval`
   inside a function remains open in `construct.dat`.
 - `make test262` (against pre-change `main` binary): **12,359 / 15,686**
   default 21 dirs (**+43 pass**, **0 regressions**); **8,195 / 10,622** across
@@ -5833,7 +5905,7 @@ execution reached their declaration statement. As a result:
 - Release & ASan+UBSan regression checks: `dom-conformance` **669/669**,
   `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt`
   **7998/8009** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`
-  and `make diff-strings` (`50,485/50,580`), `fuzz_parser` (400) &
+  and `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) &
   `fuzz_pipeline` (400) **0** findings, targeted + 150 random `asan-deep` runs
   **0** failures.
 - **Still open / boundaries:**

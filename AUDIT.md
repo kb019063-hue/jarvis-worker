@@ -67,7 +67,7 @@ The rest are documented with enough detail to act on.
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
-| 61 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 55): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
+| 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
 
 ---
 
@@ -4195,7 +4195,41 @@ with it.
 
 ---
 
-## 61. ✅ Derived constructor `this` before `super()` and `let`/`const`/`class` TDZ (Phase 55)
+## 61. ✅ RegExp lacked Unicode 17.0 property escapes, `v`/`d` flags, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, parse-time literal validation, and `Symbol.*` dispatch (Phase 55)
+
+**Problem.** Before Phase 55, Litebird's RegExp engine (`src/js/BuiltinsRegExp.cpp`) only recognized six flags (`g`, `i`, `m`, `s`, `u`, `y`), had no Unicode property-escape tables (`\p{L}` approximated a small handful of BMP ranges and rejected scripts, binary properties, and Properties of Strings), folded case only for ASCII letters, did not support ES2024 `v` (`unicodeSets`), ES2022 `d` (`hasIndices`), ES2025 `(?ims-ims:...)` modifiers, ES2025 duplicate named capturing groups, or ES2025 `RegExp.escape()`, did not validate regex literals at parse time in `JsParser.cpp`, and lacked well-known `Symbol.{match, matchAll, replace, search, split, species}` methods and `String.prototype` symbol delegation. As a result, Test262 scored only **739 / 1,879 (39.3%)** on `built-ins/RegExp` and **68 / 240 (28.3%)** on `language/literals/regexp`, and `make diff-strings` carried 24 `\p{L}` RegExp mismatches (`95` total diffs).
+
+**Fix.**
+- Generated compact deduplicated Unicode 17.0 RegExp tables (`include/litebird/js/RegExpUnicodeTables.hpp`, `src/js/RegExpUnicodeTables.cpp`, via `tools/generate_regexp_unicode_tables.py`): 22,207 shared ranges covering 80 `General_Category`, 98 Binary, 344 `Script`, and 344 `Script_Extensions` aliases, all 7 Properties of Strings (2,760 multi-CP sequences, 11,196 flattened code points), 1,482 Unicode 17.0 simple case-folding classes, and 1,144 legacy non-Unicode `Canonicalize` classes.
+- Upgraded `src/js/BuiltinsRegExp.cpp`:
+  - Normalized O(log R) `CharClass` with compile-time case closure (`close_case`), Unicode `\w`/`\W`/`\b`/`\B` folding on `ſ`/`K`, strict `u`-mode escapes/ranges, and exact `iu` vs `iv` complement ordering.
+  - Full ES2024 `v` (`unicodeSets`) parser & matcher: `ClassSet` (`--`, `&&` with `[lookahead != &]`, nested `[...]`, `\q{...}`, Properties of Strings, static `MayContainStrings` negation checks, reserved double punctuators, `u`+`v` mutual exclusion) compiled to a single indexed `RegExpOp::MatchStringSet` instruction supporting longest-first forward and lookbehind backtracking via `m_ends_pool`.
+  - Full ES2022 `d` (`hasIndices`): `match.indices` and `match.indices.groups` created with `CreateDataProperty` (`define_property`) sharing identical `[start, end]` pair arrays.
+  - Full ES2025 duplicate named capturing groups across disjunction branches, multi-group `\k<name>`, and Unicode `RegExpIdentifierName` (`JsIdentifierTables.hpp` + `\uXXXX`/`\u{...}` escapes).
+  - Full ES2025 inline modifiers `(?ims-ims:...)` via 3-bit `mode_flags` on `Node` and `RegExpInsn`.
+  - Full ES2025 `RegExp.escape(S)`, `RegExp[Symbol.species]`, `Symbol.{match, matchAll, replace, search, split, species}`, non-constructor built-in methods (`not_constructor = true`), generic `RegExp.prototype[Symbol.*]` methods, and spec-accurate flag/source getters (`get ...` names, canonical `dgimsuvy` order).
+- Added `js_regexp_validate(pattern, flags, err)` (`include/litebird/js/JsBuiltins.hpp`) and wired parse-time regex literal validation into `src/js/JsParser.cpp`.
+- Updated `src/js/BuiltinsString.cpp` (`split`, `replace`, `replaceAll`, `match`, `matchAll`, `search`) to delegate through `GetMethod` on object arguments (`Symbol.*`), enforce `flags` checks on `matchAll`/`replaceAll`, and mark methods non-constructible.
+
+**Verification.**
+- **Test262** (`2e58f87d8350`, Unicode 17.0):
+  - `built-ins/RegExp`: **739 → 1,849 / 1,879 (98.4%, +1,110 tests / +59.1%)** (`fail 26, skip 4`; 100% of runnable RegExp feature tests pass; `RGI_Emoji.js` also verified directly via `--run-script`).
+  - `language/literals/regexp`: **68 → 237 / 240 (98.8%, +169 tests / +70.5%, 0 fail, 3 skip)**.
+  - `built-ins/String/prototype/{match,matchAll,replace,replaceAll,search,split}`: **333 / 339 (98.2%, 6 fail — all BigInt literals)**.
+- **Differential & spec verification (`make verify-regexp`, `tools/conformance/verify_regexp.py`)**: **588 / 588** matched vs Node.js v22.22.3 (`88` curated + `500` seeded fuzz; also verified at `2,088 / 2,088` with `--fuzz-count 2000`, `0` discrepancies) + **112 / 112** ES2025 spec checks (modifiers, duplicate named groups, `RegExp.escape()`).
+- **Corpora & floors**:
+  - `tests/js-conformance/regexp_unicode.dat`: **25 / 25** passing on both Node.js (`1,014 / 1,014`) and Litebird (`999 / 1,014`, everyday `90 / 90`; CI floor raised `974 → 999`, ASan floor `972 → 997`).
+  - `make diff-strings`: **50,509 / 50,580** equal to Node.js (`71` differ, down from `95` — all 24 `\p{L}` RegExp diffs eliminated; `STRING_DIFF_CEILING` lowered `95 → 71`).
+  - `make test`: **198 / 198** unit suites (added 3 Phase 55 suites).
+  - `make dom-conformance`: **669 / 669**; `make wpt`: **7,998 / 8,009** (`0` unlisted failures).
+  - **ASan + UBSan**: `build-asan/test_suite` **198 / 198**, `verify_regexp.py` **588 / 588 + 112 / 112**, `js-conformance` **998 / 1,014** (`--min-pass 997`), `0` sanitizer errors.
+
+**Still open.**
+- The 26 remaining failures in Test262 `built-ins/RegExp` are outside the RegExp engine: 12 cross-realm `$262.createRealm` tests, 10 `BigInt` literal tests, 2 `JsValue.cpp` null-prototype `__proto__` own-property reads (`groups-object.js`, `indices-groups-object.js`), 1 `BuiltinsArray.cpp` dense-array descriptor check (`indices-array-properties.js`), and 1 `globalThis` `RegExp` own-property descriptor check (`prop-desc.js`). Four Test262 tests are skipped by the harness (3 with embedded NUL bytes, 1 `RGI_Emoji.js` > 128 KB argv limit that passes via `--run-script`).
+
+---
+
+## 65. ✅ Derived constructor `this` before `super()` and `let`/`const`/`class` TDZ (Phase 59)
 
 **The hole.** Phase 43 introduced `JsEnvironment::this_binding` for derived constructors and noted (`ARCHITECTURE.md`, Phase 43, §8) that the engine still had no uninitialized binding state:
 
@@ -4210,10 +4244,10 @@ with it.
 
 **Verification.**
 
-- `make test`: **198/198** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
-- `make js-conformance`: **978/992** Release (**977/992** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **992/992**.
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **1017/1017**.
 - `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
-- Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **7998/8009** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,485/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
+- Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **7998/8009** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
 
 **Still open.**
 - Separate `<script>` tags evaluate `run_program` per script, so referencing a `let` declared in a later `<script>` throws `"x is not defined"` (`ReferenceError`) rather than `"Cannot access 'x' before initialization"`, and redeclaring the same lexical name across two `<script>` tags overwrites `m_global_env` instead of raising a `SyntaxError`.

@@ -1,4 +1,5 @@
 #include "litebird/js/JsParser.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsOps.hpp"
 #include <algorithm>
 
@@ -1734,6 +1735,10 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             break;
         case JsTokenType::Regex: {
             const JsToken& t = advance();
+            std::string regex_err;
+            if (!js_regexp_validate(t.text, t.flags, regex_err)) {
+                fail(regex_err);
+            }
             result = std::make_unique<RegexLiteralExpr>(t.text, t.flags);
             break;
         }

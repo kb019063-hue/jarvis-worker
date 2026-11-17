@@ -158,18 +158,44 @@ JsString pad(const JsString& s, Args args, bool at_start) {
     return at_start ? JsString::concat(std::string_view(padding), s) : JsString::concat(s, std::string_view(padding));
 }
 
-JsValue split_string(const JsString& s, Args args) {
-    const JsValue& separator = js_arg(args, 0);
-    double limit = js_arg(args, 1).is_undefined() ? 4294967295.0 : js_to_uint32(js_to_number(js_arg(args, 1)));
-    if (js_is_regexp(separator)) return js_regexp_split(separator, s, limit);
+JsValue get_symbol_method(const JsValue& obj, const char* key) {
+    if (!obj.is_object_like()) return JsValue::make_undefined();
+    JsValue fn = obj.get_property(key);
+    if (fn.is_nullish()) return JsValue::make_undefined();
+    if (!fn.is_function()) {
+        js_throw_type_error(std::string("Property ") + key + " is not a function");
+    }
+    return fn;
+}
 
+JsValue require_object_coercible_this(const char* method) {
+    JsValue me = JsValue::current_this();
+    if (me.is_nullish()) {
+        js_throw_type_error(std::string("String.prototype.") + method + " called on null or undefined");
+    }
+    return me;
+}
+
+JsValue split_string(const JsValue& receiver, Args args) {
+    const JsValue& separator = js_arg(args, 0);
+    const JsValue& limit_arg = js_arg(args, 1);
+    if (separator.is_object_like()) {
+        JsValue splitter = get_symbol_method(separator, kSymbolSplitKey);
+        if (!splitter.is_undefined()) {
+            return splitter.call_with_this(separator, {receiver, limit_arg});
+        }
+    }
+
+    const JsString s = js_to_js_string(receiver);
+    double limit = limit_arg.is_undefined() ? 4294967295.0 : js_to_uint32(js_to_number(limit_arg));
+    const JsString sep_str = separator.is_undefined() ? JsString() : js_to_js_string(separator);
     std::vector<JsValue> parts;
     if (limit == 0) return JsValue::make_array(parts);
     if (separator.is_undefined()) {
         parts.push_back(JsValue::make_string(s));
         return JsValue::make_array(parts);
     }
-    const Utf16View sep(js_to_js_string(separator));
+    const Utf16View sep(sep_str);
     const Utf16View view(s);
     if (sep.empty()) {
         // Split into UTF-16 code units, as the specification says.
@@ -191,13 +217,23 @@ JsValue split_string(const JsString& s, Args args) {
     return JsValue::make_array(parts);
 }
 
-JsValue replace_string(const JsString& s, const JsValue& pattern, const JsValue& replacement, bool all) {
-    if (js_is_regexp(pattern)) {
-        if (all && !pattern.get_property("global").is_truthy()) {
-            js_throw_type_error("replaceAll must be called with a global RegExp");
+JsValue replace_string(const JsValue& receiver, const JsValue& pattern, const JsValue& replacement, bool all) {
+    if (!pattern.is_nullish()) {
+        if (all && js_is_regexp(pattern)) {
+            JsValue flags_val = pattern.get_property("flags");
+            if (flags_val.is_nullish()) {
+                js_throw_type_error("String.prototype.replaceAll called with a RegExp with null/undefined flags");
+            }
+            if (js_to_string(flags_val).find('g') == std::string::npos) {
+                js_throw_type_error("replaceAll must be called with a global RegExp");
+            }
         }
-        return js_regexp_replace(pattern, s, replacement);
+        JsValue replacer = get_symbol_method(pattern, kSymbolReplaceKey);
+        if (!replacer.is_undefined()) {
+            return replacer.call_with_this(pattern, {receiver, replacement});
+        }
     }
+    const JsString s = js_to_js_string(receiver);
     const JsString needle_string = js_to_js_string(pattern);
     const bool functional = replacement.is_function();
     const std::u16string templ = functional ? std::u16string() : Utf16View(js_to_js_string(replacement)).copy();
@@ -594,36 +630,76 @@ void install_string_builtins(JsIntrinsics& realm) {
         if (a == b) return JsValue::make_number(0);
         return JsValue::make_number(JsString::compare(a.view(), b.view()) > 0 ? -1 : 1);
     });
-    js_define_method(sp, "split", 2, [](Args args) { return split_string(this_string("split"), args); });
-    js_define_method(sp, "replace", 2, [](Args args) {
-        return replace_string(this_string("replace"), js_arg(args, 0), js_arg(args, 1), false);
-    });
-    js_define_method(sp, "replaceAll", 2, [](Args args) {
-        return replace_string(this_string("replaceAll"), js_arg(args, 0), js_arg(args, 1), true);
-    });
-    js_define_method(sp, "match", 1, [](Args args) {
-        const JsString s = this_string("match");
-        JsValue regex = js_is_regexp(js_arg(args, 0)) ? js_arg(args, 0)
-                      : js_regexp_create(js_arg(args, 0).is_undefined() ? "(?:)" : js_to_string(js_arg(args, 0)), "");
-        return js_regexp_match(regex, s);
-    });
-    js_define_method(sp, "matchAll", 1, [](Args args) {
-        const JsString s = this_string("matchAll");
-        JsValue regex = js_arg(args, 0);
-        if (js_is_regexp(regex)) {
-            if (!regex.get_property("global").is_truthy()) {
-                js_throw_type_error("String.prototype.matchAll called with a non-global RegExp argument");
-            }
-        } else {
-            regex = js_regexp_create(js_to_string(regex), "g");
+    auto define_str_method = [&](const char* name, int length, JsValue::NativeFn fn) {
+        JsValue v = js_make_native(name, length, std::move(fn));
+        if (JsObject* cell = v.function_cell()) cell->not_constructor = true;
+        auto& entry = sp->properties.entry(name);
+        entry.second = std::move(v);
+        entry.flags = PropertyMap::Hidden;
+    };
+    auto invoke_symbol = [](const JsValue& rx, const char* key, const JsString& s) {
+        JsValue fn = rx.get_property(key);
+        if (!fn.is_function()) {
+            js_throw_type_error(std::string("Property ") + key + " is not a function");
         }
-        return js_regexp_match_all(regex, s);
+        return fn.call_with_this(rx, {JsValue::make_string(s)});
+    };
+    define_str_method("split", 2, [](Args args) {
+        return split_string(require_object_coercible_this("split"), args);
     });
-    js_define_method(sp, "search", 1, [](Args args) {
-        const JsString s = this_string("search");
-        JsValue regex = js_is_regexp(js_arg(args, 0)) ? js_arg(args, 0)
-                      : js_regexp_create(js_arg(args, 0).is_undefined() ? "(?:)" : js_to_string(js_arg(args, 0)), "");
-        return JsValue::make_number(js_regexp_search(regex, s));
+    define_str_method("replace", 2, [](Args args) {
+        return replace_string(require_object_coercible_this("replace"), js_arg(args, 0), js_arg(args, 1), false);
+    });
+    define_str_method("replaceAll", 2, [](Args args) {
+        return replace_string(require_object_coercible_this("replaceAll"), js_arg(args, 0), js_arg(args, 1), true);
+    });
+    define_str_method("match", 1, [invoke_symbol](Args args) {
+        JsValue receiver = require_object_coercible_this("match");
+        const JsValue& regexp = js_arg(args, 0);
+        if (regexp.is_object_like()) {
+            JsValue matcher = get_symbol_method(regexp, kSymbolMatchKey);
+            if (!matcher.is_undefined()) {
+                return matcher.call_with_this(regexp, {receiver});
+            }
+        }
+        JsString s = js_to_js_string(receiver);
+        JsValue rx = js_regexp_create(regexp.is_undefined() ? "" : js_to_string(regexp), "");
+        return invoke_symbol(rx, kSymbolMatchKey, s);
+    });
+    define_str_method("matchAll", 1, [invoke_symbol](Args args) {
+        JsValue receiver = require_object_coercible_this("matchAll");
+        const JsValue& regexp = js_arg(args, 0);
+        if (regexp.is_object_like()) {
+            if (js_is_regexp(regexp)) {
+                JsValue flags_val = regexp.get_property("flags");
+                if (flags_val.is_nullish()) {
+                    js_throw_type_error("String.prototype.matchAll called with a RegExp with null/undefined flags");
+                }
+                if (js_to_string(flags_val).find('g') == std::string::npos) {
+                    js_throw_type_error("String.prototype.matchAll called with a non-global RegExp argument");
+                }
+            }
+            JsValue matcher = get_symbol_method(regexp, kSymbolMatchAllKey);
+            if (!matcher.is_undefined()) {
+                return matcher.call_with_this(regexp, {receiver});
+            }
+        }
+        JsString s = js_to_js_string(receiver);
+        JsValue rx = js_regexp_create(regexp.is_undefined() ? "" : js_to_string(regexp), "g");
+        return invoke_symbol(rx, kSymbolMatchAllKey, s);
+    });
+    define_str_method("search", 1, [invoke_symbol](Args args) {
+        JsValue receiver = require_object_coercible_this("search");
+        const JsValue& regexp = js_arg(args, 0);
+        if (regexp.is_object_like()) {
+            JsValue searcher = get_symbol_method(regexp, kSymbolSearchKey);
+            if (!searcher.is_undefined()) {
+                return searcher.call_with_this(regexp, {receiver});
+            }
+        }
+        JsString s = js_to_js_string(receiver);
+        JsValue rx = js_regexp_create(regexp.is_undefined() ? "" : js_to_string(regexp), "");
+        return invoke_symbol(rx, kSymbolSearchKey, s);
     });
 
     // Strings iterate by code point.

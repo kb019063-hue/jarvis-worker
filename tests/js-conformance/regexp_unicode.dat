@@ -1,0 +1,298 @@
+#name RegExp flags canonical order and d/u/v getters
+#code
+var r1 = /abc/yvgsimd;
+var r2 = new RegExp("x", "uimgsd");
+console.log(r1.flags, r1.hasIndices, r1.unicode, r1.unicodeSets, r2.flags, r2.unicode, r2.unicodeSets)
+#expect
+dgimsvy true false true dgimsu true false
+
+#name u and v flags are mutually exclusive
+#code
+var a = false, b = false;
+try { new RegExp("a", "uv"); } catch (e) { a = e instanceof SyntaxError; }
+try { eval("/a/vu"); } catch (e) { b = e instanceof SyntaxError; }
+console.log(a, b)
+#expect
+true true
+
+#name RegExp.prototype flag getters and source on prototype and non-objects
+#code
+var p = RegExp.prototype;
+var err = false;
+try { Object.getOwnPropertyDescriptor(p, "unicodeSets").get.call({}); } catch (e) { err = e instanceof TypeError; }
+console.log(p.source, p.flags, p.hasIndices, p.unicode, p.unicodeSets, err, Object.getOwnPropertyDescriptor(p, "unicodeSets").get.name)
+#expect
+(?:)  undefined undefined undefined true get unicodeSets
+
+#name Unicode General_Category property escapes
+#code
+console.log(
+  /^\p{Lu}+$/u.test("ABCΔΩ"),
+  /^\p{Lu}+$/u.test("abc"),
+  /^\p{gc=Sc}+$/u.test("$€£¥"),
+  /^\p{General_Category=Decimal_Number}+$/u.test("0123٠١٢٣"),
+  /^\p{L}+$/u.test("Hello世界Привет"),
+  /\P{L}/u.test("abc1")
+)
+#expect
+true false true true true true
+
+#name Unicode Binary property escapes
+#code
+console.log(
+  /^\p{ASCII}+$/u.test("hello123"),
+  /^\p{ASCII}+$/u.test("héllo"),
+  /^\p{Hex_Digit}+$/u.test("09afAF"),
+  /^\p{ID_Start}\p{ID_Continue}*$/u.test("αβ_1"),
+  /^\p{White_Space}+$/u.test(" \t\n\u3000"),
+  /\p{Emoji}/u.test("😀")
+)
+#expect
+true false true true true true
+
+#name Unicode Script and Script_Extensions property escapes
+#code
+console.log(
+  /^\p{Script=Greek}+$/u.test("Αλφα"),
+  /^\p{sc=Cyrillic}+$/u.test("Привет"),
+  /^\p{sc=Han}+$/u.test("漢字"),
+  /^\p{Script_Extensions=Hiragana}+$/u.test("あいうー"),
+  /^\p{sc=Hiragana}+$/u.test("あいうー"),
+  /^\p{scx=Common}+$/u.test("123 ")
+)
+#expect
+true true true true false true
+
+#name Invalid Unicode property names throw SyntaxError
+#code
+var errs = 0;
+for (var p of ["\\p{NotAProperty}", "\\p{gc=Bad}", "\\p{letter}", "\\p{L_}", "\\P{RGI_Emoji}"]) {
+  try { new RegExp(p, "v"); } catch (e) { if (e instanceof SyntaxError) errs++; }
+}
+console.log(errs)
+#expect
+5
+
+#name Unicode case folding in u+i mode including astral and word escapes
+#code
+console.log(
+  /\w/iu.test("\u017f"),
+  /\w/iu.test("\u212a"),
+  /\W/iu.test("\u017f"),
+  /\W/iu.test("s"),
+  /\b\u017f\b/iu.test(" \u017f "),
+  /\u{10400}/iu.test("\u{10428}"),
+  /[\u{10400}-\u{10405}]/iu.test("\u{1042A}"),
+  /\p{Lu}/iu.test("a")
+)
+#expect
+true true false false true true true true
+
+#name Complement order difference between iu and iv flags
+#code
+console.log(
+  /\P{Lowercase_Letter}/iu.test("a"),
+  /\P{Lowercase_Letter}/iv.test("a"),
+  /\P{Lowercase_Letter}/iv.test("A"),
+  /[^\p{Lowercase_Letter}]/iu.test("a"),
+  /[^\p{Lowercase_Letter}]/iv.test("a"),
+  /[^\p{Lowercase_Letter}]/iv.test("A"),
+  /[^a]/iu.test("A"),
+  /[^a]/iv.test("A")
+)
+#expect
+true false false false false false false false
+
+#name v-mode character class subtraction and intersection
+#code
+var decNonAscii = /^[\p{Decimal_Number}--[0-9]]+$/v;
+var greekUpper = /^[\p{Script=Greek}&&\p{Uppercase_Letter}]+$/v;
+var asciiLowerNoVowels = /^[[a-z]--[aeiou]]+$/v;
+console.log(
+  decNonAscii.test("٠١٢٣"),
+  decNonAscii.test("123"),
+  greekUpper.test("ΑΒΓΩ"),
+  greekUpper.test("αβγ"),
+  asciiLowerNoVowels.test("bcdfg"),
+  asciiLowerNoVowels.test("abc")
+)
+#expect
+true false true false true false
+
+#name v-mode string literal sets with q escape and longest-first ordering
+#code
+var re = /^[\q{abc|ab|a|xy}]+$/v;
+var m1 = /[\q{a|ab|abc}]/v.exec("abc");
+var m2 = /[\q{ab|a|}]/v.exec("x");
+var sub = /^[\q{ab|cd|ef}--\q{cd}]+$/v;
+var inter = /^[\q{ab|cd|ef}&&\q{cd|ef|gh}]+$/v;
+console.log(re.test("abcxyab"), m1[0], m2[0], sub.test("abef"), sub.test("cd"), inter.test("cdef"), inter.test("ab"))
+#expect
+true abc  true false true false
+
+#name v-mode case-insensitive string set operations
+#code
+var r1 = /[\q{ab}--\q{AB}]/iv;
+var r2 = /[\q{ab}&&\q{AB}]/iv;
+var r3 = /[\q{Hello}]/iv;
+console.log(r1.test("ab"), r1.test("AB"), r2.test("aB"), r3.test("hELLo"))
+#expect
+false false true true
+
+#name v-mode Properties of Strings and RGI_Emoji
+#code
+console.log(
+  /^\p{Emoji_Keycap_Sequence}$/v.test("1\uFE0F\u20E3"),
+  /^\p{RGI_Emoji_Flag_Sequence}$/v.test("\u{1F1FA}\u{1F1F8}"),
+  /^\p{RGI_Emoji_Modifier_Sequence}$/v.test("\u{1F44D}\u{1F3FD}"),
+  /^\p{RGI_Emoji_ZWJ_Sequence}$/v.test("\u{1F468}\u200D\u{1F4BB}"),
+  /^\p{RGI_Emoji}+$/v.test("😀1\uFE0F\u20E3\u{1F1FA}\u{1F1F8}\u{1F468}\u200D\u{1F4BB}"),
+  /^\p{Basic_Emoji}$/v.test("❤\uFE0F"),
+  /^\p{RGI_Emoji}$/v.test("A")
+)
+#expect
+true true true true true true false
+
+#name v-mode static MayContainStrings forbids negation
+#code
+var e1 = false, e2 = false, e3 = false, ok = false;
+try { new RegExp("[^\\p{RGI_Emoji}]", "v"); } catch (e) { e1 = e instanceof SyntaxError; }
+try { new RegExp("[^\\q{ab|a}]", "v"); } catch (e) { e2 = e instanceof SyntaxError; }
+try { new RegExp("[^[\\p{RGI_Emoji}--\\p{RGI_Emoji}]]", "v"); } catch (e) { e3 = e instanceof SyntaxError; }
+ok = new RegExp("[^[\\p{Basic_Emoji}&&[a-z]]]", "v").test("x");
+console.log(e1, e2, e3, ok)
+#expect
+true true true true
+
+#name v-mode syntax restrictions and reserved double punctuators
+#code
+var bad = ["[(]", "[a&&&b]", "[a--b--c-d]", "[!!]", "[##]", "[&&]", "[,,]", "[a-z&&b-c]"];
+var count = 0;
+for (var p of bad) {
+  try { new RegExp(p, "v"); } catch (e) { if (e instanceof SyntaxError) count++; }
+}
+console.log(count, /^[\(\)\[\]\{\}\/\-\\\|]+$/v.test("()[]{}/-\\|"))
+#expect
+8 true
+
+#name v-mode lookbehind with string sets
+#code
+var m = /(?<=[\q{ab|abc}])X/v.exec("abcX");
+var m2 = /(?<=[\q{a|ab}])X/v.exec("abX");
+console.log(m[0], m.index, m2[0], m2.index)
+#expect
+X 3 X 2
+
+#name hasIndices d flag with numbered and named groups
+#code
+var re = /(?<word>[a-z]+)-(?<num>\d+)?/d;
+var m1 = re.exec("hi foo-42!");
+var m2 = re.exec("hi bar-!");
+console.log(
+  m1.indices[0].join(","),
+  m1.indices[1].join(","),
+  m1.indices[2].join(","),
+  m1.indices.groups.word === m1.indices[1],
+  m1.indices.groups.num === m1.indices[2],
+  m2.indices[2],
+  m2.indices.groups.num
+)
+#expect
+3,9 3,6 7,9 true true undefined undefined
+
+#name hasIndices d flag with astral code points uses UTF-16 code units
+#code
+var m = /(?<e>😀)(?<x>a)/du.exec("x😀a");
+console.log(m.indices[0].join(","), m.indices[1].join(","), m.indices[2].join(","), m.indices.groups.e.join(","))
+#expect
+1,4 1,3 3,4 1,3
+
+#name hasIndices d flag with matchAll
+#code
+var out = [];
+for (var m of "a1 b22".matchAll(/([a-z])(\d+)/gd)) {
+  out.push(m.indices[0].join("-") + ":" + m.indices[2].join("-"));
+}
+console.log(out.join(","))
+#expect
+0-2:1-2,3-6:4-6
+
+#name Unicode named capture groups with escapes and Unicode ID_Start
+#code
+var m = /(?<\u{0061}b>\d+)-(?<αβ>\w+)/u.exec("12-hi");
+console.log(m.groups.ab, m.groups.αβ, /(?<\u0078>.)\k<x>/.test("aa"))
+#expect
+12 hi true
+
+#name Well-known Symbol.match matchAll replace search split dispatch
+#code
+var custom = {
+  flags: "g",
+  [Symbol.match](s) { return "M:" + s; },
+  [Symbol.matchAll](s) { return "MA:" + s; },
+  [Symbol.replace](s, r) { return "R:" + s + ":" + r; },
+  [Symbol.search](s) { return s.length * 10; },
+  [Symbol.split](s, lim) { return [s, lim]; }
+};
+console.log(
+  "hi".match(custom),
+  "hi".matchAll(custom),
+  "hi".replace(custom, "X"),
+  "hi".search(custom),
+  "hi".split(custom, 3).join(",")
+)
+#expect
+M:hi MA:hi R:hi:X 20 hi,3
+
+#name RegExp.prototype well-known Symbol methods on generic objects
+#code
+var fake = {
+  flags: "g",
+  global: true,
+  lastIndex: 0,
+  calls: 0,
+  exec(s) {
+    this.calls++;
+    if (this.calls === 1) { this.lastIndex = 1; return ["x"]; }
+    return null;
+  }
+};
+console.log(RegExp.prototype[Symbol.match].call(fake, "xyz").join(","), fake.calls)
+#expect
+x 2
+
+#name RegExp[Symbol.species] and RegExp constructor identity
+#code
+var r = /abc/g;
+var same = RegExp(r) === r;
+var diff = new RegExp(r) !== r;
+var diffFlags = RegExp(r, "i").flags;
+console.log(RegExp[Symbol.species] === RegExp, same, diff, diffFlags)
+#expect
+true true true i
+
+#name RegExp.prototype.flags generic property access order
+#code
+var order = [];
+var o = {};
+for (var k of ["hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "sticky"]) {
+  (function(name) {
+    Object.defineProperty(o, name, { get() { order.push(name); return name === "hasIndices" || name === "sticky"; } });
+  })(k);
+}
+var f = Object.getOwnPropertyDescriptor(RegExp.prototype, "flags").get.call(o);
+console.log(f, order.join(","), /a/yvmsigd.flags)
+#expect
+dy hasIndices,global,ignoreCase,multiline,dotAll,unicode,sticky dgimsvy
+
+#name Parse-time SyntaxError on invalid regex literals
+#code
+var bad = 0;
+for (var src of ["/(/;", "/[a-b-c]/v;", "/\\p{Nope}/u;", "/a/gg;", "/a/uv;"]) {
+  try { eval("throw new Error('evaluated'); " + src); } catch (e) {
+    if (e instanceof SyntaxError) bad++;
+  }
+}
+console.log(bad)
+#expect
+5

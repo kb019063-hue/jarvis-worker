@@ -138,12 +138,12 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 999 of 1014 pass (raised by 25 in finding 61 with
-        # tests/js-conformance/regexp_unicode.dat, on top of finding 50/51/42/49).
+        # does not vary: 1016 of 1031 pass (raised by 17 in finding 66 with
+        # tests/js-conformance/string_unicode.dat, on top of finding 61/50/51/42/49).
         # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 999
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1016
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -163,15 +163,20 @@ jobs:
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on
-        # the spot. The ceiling in the Makefile is the number that differ
-        # today (dropped from 95 to 71 in Phase 55 once Unicode 17.0 RegExp
-        # property escapes landed).
+        # the spot. Phase 55 dropped the ceiling from 95 to 71; Phase 60 landed
+        # Unicode 17.0 normalization, full/locale case mapping, and CLDR 48 root
+        # collation, bringing the ceiling to 0 (50,580/50,580 equal to Node).
         run: make diff-strings
       - name: RegExp Unicode 17.0, v-mode, d-mode, and ES2025 differential & spec verification
         # Cross-checks 88 curated + 500 seeded fuzz Unicode/v-mode/d-mode
         # RegExp patterns against Node.js (0 discrepancies) plus 112 direct
         # ES2025 assertions (modifiers, duplicate named groups, RegExp.escape).
         run: make verify-regexp
+      - name: String Unicode 17.0 normalization, case mapping, and CLDR 48 collation verification
+        # Exhaustively sweeps all 1,114,112 code points x 11 ops (12.25M checks),
+        # 1,112 curated+fuzz multi-char strings, 1,038 collation pairs, and 25
+        # ECMA-262/ECMA-402 validation checks against Node.js (0 discrepancies).
+        run: make verify-string-unicode
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report

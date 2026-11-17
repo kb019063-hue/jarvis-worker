@@ -38,6 +38,14 @@ public:
     float glyph_advance(uint32_t codepoint, float font_size_px) const;
     GlyphBitmap rasterize_glyph(uint32_t codepoint, int pixel_size) const;
 
+    /// True when this face has a glyph for `codepoint` that is not `.notdef`.
+    ///
+    /// Per-glyph fallback turns on this question. Before it existed the one
+    /// loaded face was asked for every codepoint, and a codepoint outside its
+    /// `cmap` rasterized to an empty bitmap — the glyph was not drawn wrong, it
+    /// was not drawn at all. Asking first is what lets another face answer.
+    bool has_glyph(uint32_t codepoint) const { return glyph_index(codepoint) != 0; }
+
 private:
     struct Vec2 {
         float x{0.0f};
@@ -82,10 +90,34 @@ private:
 
 class FontRenderer {
 public:
+    /// How many faces fallback will load at most, however many the host has.
+    /// Loading is lazy — a face is parsed when a codepoint needs it — so this
+    /// caps the worst case of a page that asks for a face nobody has.
+    static constexpr std::size_t kMaxFallbackFaces = 24;
+
     static FontRenderer& instance();
 
     /// True if at least the regular system TrueType font was loaded.
     bool has_truetype_font() const { return m_regular.is_loaded(); }
+
+    /// The faces tried, in order, for a codepoint the primary face does not
+    /// cover. Discovery fills this with the system's `.ttf` files at
+    /// construction; `set_fallbacks` replaces it. The faces themselves are
+    /// loaded as they are needed and not up front, because a host can have
+    /// hundreds of fonts and a page usually needs none of them.
+    void set_fallbacks(std::vector<std::string> paths);
+    const std::vector<std::string>& fallback_paths() const { return m_fallback_paths; }
+
+    /// Which face would draw `codepoint`: the primary when it covers it, else
+    /// the first fallback that does, else the primary — so that a codepoint no
+    /// face covers still draws one `.notdef` box, from a predictable face,
+    /// rather than nothing. Null when no face is loaded at all.
+    ///
+    /// The line box is *not* taken from this face: `em_ascent_descent` stays on
+    /// the primary, which is what CSS asks for — one line box per line, from
+    /// the element's own font, not from whichever face happened to supply a
+    /// rare codepoint inside it.
+    const TrueTypeFont* face_for(uint32_t codepoint, bool bold) const;
 
     /// Measures exact horizontal advance of UTF-8 text in pixels.
     float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400);
@@ -118,6 +150,11 @@ private:
 
     TrueTypeFont m_regular;
     TrueTypeFont m_bold;
+    std::string m_regular_path;  ///< where `m_regular` came from; not a fallback for itself
+    std::string m_bold_path;
+    std::vector<std::string> m_fallback_paths;
+    mutable std::vector<TrueTypeFont> m_fallbacks;  ///< grown lazily, on the first miss
+    mutable std::size_t m_next_fallback{0};
     std::unordered_map<uint64_t, GlyphBitmap> m_cache;
     static constexpr std::size_t kMaxCachedGlyphs = 4096;
 };

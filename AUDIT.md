@@ -59,7 +59,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
-| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62), while permitted child navigation and same-agent `MessageChannel`/`MessagePort` landed in Phase 61 (finding 67). Structured clone/transferred ports and out-of-process site isolation remain open |
+| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62); `MessageChannel`/`MessagePort` and out-of-process site isolation remain open |
 | 49 | `new.target` was the function that was running: an abstract class refused its own subclasses and `Reflect.construct(F, [], G)` did not name `G` inside `F`. `super()` dropped an object the parent's constructor returned, `this` could be bound twice or never, and a custom element compiled for older browsers could neither be made nor upgraded | **High** | ✅ Fixed (Phase 43); `this` before `super()`, `eval` in a function and private names remain |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 | 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
@@ -67,9 +67,8 @@ The rest are documented with enough detail to act on.
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
-| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. Phase 61 adds permitted non-fragment child navigation without widening reads. 110 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
+| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
 | 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
-| 67 | An allowed cross-origin `childWindow.location = url` / `Location.href = url` / `Location.replace(url)` with a non-fragment URL silently did nothing because `navigate()` only implemented fragments; no script-visible `MessageChannel` or `MessagePort` existed | **Medium (web-platform compatibility)** | ✅ Fixed (Phase 61): a live iframe child delegates permitted cross-document Location writes into its existing navigation scheduler without mutating `src` or replacing its WindowProxy. `MessageChannel` now supplies entangled EventTarget ports with queued FIFO same-agent messages, `start()`, `close()` and `onmessage`; transfer lists, structured cloning, cross-agent transport and meaningful `messageerror` remain open. `make test`: 204/204 engine suites plus 110/110 focused cross-origin/channel checks |
 
 ---
 
@@ -2856,10 +2855,9 @@ at its `24×18` intrinsic size and reports `24×18` from
 - **ES module workers:** `{ type: "module" }` is now explicitly refused with an
   error event instead of silently running classic JS; actual module worker
   execution waits for an ES module loader in the JS engine.
-- **Structured clone & worker messaging ports:** worker `postMessage` still
-  serializes via JSON (no `ArrayBuffer`, transferables, cyclic object graphs,
-  transferred `MessagePort`, or `SharedWorker`). Phase 61 supplies only
-  same-agent `MessageChannel` / `MessagePort` values in a page realm.
+- **Structured clone & messaging ports:** `postMessage` still serializes via
+  JSON (no `ArrayBuffer`, transferables, cyclic object graphs, `MessagePort`,
+  or `SharedWorker`).
 - **Defense-in-depth for process-wide registries:** `symbol_registry()` in
   `src/js/JsOps.cpp` and `s_registry` in `src/js/DomBindings.cpp` are still
   destroyed at static teardown; Phase 40 warms them before registering
@@ -3230,9 +3228,9 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
 
 **What is still open.** Cross-origin `Object.getOwnPropertyDescriptor` /
 `Reflect.ownKeys` filtering on `WindowProxy` was closed in Phase 56 (finding
-62), and Phase 61 adds permitted child `Location` navigation plus same-agent
-`MessageChannel` / `MessagePort`. Structured clone / transferable ports,
-`srcdoc` CSP inheritance, and process-level site isolation remain open.
+62); cross-origin `Location` navigation is limited to a fragment move,
+`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc`
+CSP inheritance, and process-level site isolation remain open.
 
 ---
 
@@ -3652,6 +3650,10 @@ engine an unhandled rejection is reported by a base Promise where the test's
 custom constructor discards it. This is disclosed, not silenced or presented
 as a conformance gain. Array holes and the general collector audit are also
 outside this change.
+
+(Finding 69, Phase 63: the array fast path now asks. `Promise.all(a)` above
+resolves to `[9]`, and a `resolve` that throws closes the iterator the array
+handed out.)
 
 ---
 ## 52. ✅ Canvas 2D could draw every shape except text
@@ -4160,12 +4162,11 @@ was a 1x1 image whose alpha literal decoded as "corrupt" while the palette entry
 three bits later — `#123456` — came out right, which is what pointed at the
 missing rule rather than at an off-by-one in the container.
 
-**Refusals rather than wrong pictures.** Lossy `VP8` (a keyframe of the VP8
-video codec: macroblock prediction, DCT, loop filter) is reported as
-`UnsupportedLossy`, animated WebP (`ANIM`/`ANMF`) as `UnsupportedAnimation`, a
-short file as `Truncated`, and a dimension or a decoded-pixel budget past the
-limit as `TooLarge`. `WebPDecoder::probe()` returns the same classification
-without decoding.
+**Refusals rather than wrong pictures.** Animated WebP (`ANIM`/`ANMF`) is
+reported as `UnsupportedAnimation`, a short file as `Truncated`, and a dimension
+or a decoded-pixel budget past the limit as `TooLarge`; lossy `VP8` was
+`UnsupportedLossy` until Phase 57 decoded it and took the status out.
+`WebPDecoder::probe()` returns the same classification without decoding.
 
 **Verification.** `make verify-media` gained 30 checks (63 in total): 17
 generated lossless images — palettes of 2, 4, 16 and 256 colours, alpha ramps
@@ -4191,10 +4192,10 @@ dimension bomb, a header-only stream). The rest of the scoreboard is unchanged:
 differ, `make diff-xml` 0 DIFFER and 3000/3000 round trips, `make deep` 1332
 runs 0 failed, `make asan` green.
 
-**Still open.** The lossy `VP8` codec, animated WebP (frame compositing and
-disposal), AVIF (an AV1 still image, a different codec entirely), and an
-`ALPH` chunk, which only accompanies a lossy image and is therefore refused
-with it.
+**Still open.** Animated WebP (frame compositing and disposal) and AVIF (an
+AV1 still image, a different codec entirely). The lossy `VP8` codec and the
+`ALPH` chunk that only accompanies a lossy image were closed by Phase 57:
+[`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md).
 
 ---
 
@@ -4229,6 +4230,8 @@ with it.
 
 **Still open.**
 - The 26 remaining failures in Test262 `built-ins/RegExp` are outside the RegExp engine: 12 cross-realm `$262.createRealm` tests, 10 `BigInt` literal tests, 2 `JsValue.cpp` null-prototype `__proto__` own-property reads (`groups-object.js`, `indices-groups-object.js`), 1 `BuiltinsArray.cpp` dense-array descriptor check (`indices-array-properties.js`), and 1 `globalThis` `RegExp` own-property descriptor check (`prop-desc.js`). Four Test262 tests are skipped by the harness (3 with embedded NUL bytes, 1 `RGI_Emoji.js` > 128 KB argv limit that passes via `--run-script`).
+
+---
 
 ## 62. ✅ Every cross-origin `Window` and `Location` described itself with the ordinary own-keys walk (Phase 56)
 
@@ -4280,26 +4283,25 @@ L.pathname; L.origin; L.reload(); // same, plus a callable
   `getPrototypeOf` answers `null`; `instanceof` is `false`; `for…in`
   enumerates only the indices.
 - `location` joined the cross-origin attribute safelist it was missing
-  (`win.location = url` reached the permitted set path; Phase 61 makes its
-  non-fragment target load the child document; reading it still throws
-  `SecurityError`, and `'location' in win` was `false`).
+  (`win.location = url` already navigated the child via the set path; reading
+  it threw `SecurityError` in error, and `'location' in win` was `false`).
 
-**Verification.** `tests/cross_origin_windows.cpp` now has **110 checks** over a
+**Verification.** `tests/cross_origin_windows.cpp` — **80 checks** over a
 parent realm at `https://app.example.test` and a cross-origin child at
 `https://other.example.test` (served from a temporary origin root; the child
-has one named `srcdoc` grandchild), run by `make test`. It includes the Phase
-61 direct child Location paths over both `src` and `srcdoc`, continued
-cross-origin read refusal, plus asynchronous/GC-safe MessageChannel,
-EventTarget, start and close cases. `tests/test_suite.cpp` is untouched here.
-Merged-tree Release verification after Phase 61: `make test` **204/204** engine suites
-plus the **110/110** focused checks.
+has one named `srcdoc` grandchild), run by `make test`; `tests/test_suite.cpp`
+is untouched here. Full merged-tree verification (Release): `make test`
+**198/198**; `js-conformance` **999/1014**; `dom-conformance` **669/669**;
+`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
+**7998/8009** (11 fail as listed, 0 unlisted).
 
-**Still open.** The three symbol keys in `Reflect.ownKeys` (no symbol key is
-reported anywhere in the engine); `in` on a non-exposed name answers `false`
-rather than throwing; a `[[CrossOriginPropertyDescriptorMap]]` cache (wrapper
-identities differ from the child's functions); process-level site isolation;
-and MessagePort transfer lists, structured cloning, cross-agent transport and
-meaningful `messageerror` dispatch.
+**Still open.** Cross-document navigation (`childWin.location = url` with a
+non-fragment URL — `navigate()` is fragment-only by design); the three symbol
+keys in `Reflect.ownKeys` (no symbol key is reported anywhere in the engine);
+`in` on a non-exposed name answers `false` rather than throwing; a
+`[[CrossOriginPropertyDescriptorMap]]` cache (wrapper identities differ from
+the child's functions); `MessageChannel`/`MessagePort`; process-level site
+isolation.
 
 ---
 
@@ -4318,7 +4320,7 @@ meaningful `messageerror` dispatch.
 
 **Verification.**
 
-- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make test`: **201/201** unit suites passed at the time in both Release and ASan+UBSan (`build-asan/test_suite`; 208/208 after the phases merged since), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
 - `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **1017/1017**.
 - `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
 - Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
@@ -4362,36 +4364,146 @@ These gaps accounted for all **71 remaining diffs** in `make diff-strings` (`50,
 
 ---
 
-## 67. ✅ Allowed cross-origin child navigation was fragment-only, and message ports did not exist (Phase 61)
+## 69. ✅ An array and a string were not asked for their iterator (Phase 63)
 
-**The hole.** The Phase 56 cross-origin table deliberately permits writing a
-child's `location` and `Location.href`, and calling `Location.replace()`, but
-all three met `navigate()`, which returned for every non-fragment target.
-Thus an allowed operation silently did nothing. Separately, pages could use
-`window.postMessage`, but could not construct a private entangled channel at
-all because `MessageChannel` and `MessagePort` were absent.
+**The hole.** `for (x of v)`, `[...v]`, `f(...v)`, `yield* v`, `Array.from(v)`,
+`new Map(v)`, `new Set(v)`, `Object.fromEntries(v)` and `Promise.all(v)` are
+one operation: ask `v` for the function under `Symbol.iterator`, call it,
+and call `next()` on the result until it says `done`. Here all of them end
+in `js_iterate` or `js_iterable_to_vector` (`src/js/JsOps.cpp`), and both
+began with a shortcut: an array's elements were read by index and a string's
+code points were read, without asking. Finding 51 had it under "Still open": the
+array fast path ignores an array's overridden `Symbol.iterator`. The rest of
+this list was found while fixing that.
 
-**The fix.** A non-fragment Location target now asks whether its realm is the
-live child browsing context of an iframe. Only that verified relationship may
-call the existing iframe navigation scheduler, with the resolved target URL.
-The scheduler gives this direct request priority over markup `srcdoc`/`src`,
-does not change the iframe attribute, and relies on the pre-existing loader,
-sandbox and replacement path; `navigate_document()` retains the child
-WindowProxy. No new cross-origin read or reflection capability is granted.
+| A script | Before | Now, and in Node |
+| :--- | :--- | :--- |
+| `var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };` then `[...a]` | `1,2` | `9,8` |
+| the same array `a` given one that yields `['k', 'v']`: `for (x of a)`, `f(...a)`, `Array.from(a)`, `new Map(a).get('k')` | the elements; `undefined` | the pair; `v` |
+| `class Rows extends Array { *[Symbol.iterator]() { /* last to first */ } }` holding `a, b, c`: `[...r]`, `Array.from(r)` | `a,b,c` | `c,b,a` |
+| `Array.prototype[Symbol.iterator]` replaced by a function that counts and calls the original; then `[...[1, 2]]`, `for (x of [3])`, `Math.max(...[4])`: the count | `0` | `3` |
+| `String.prototype[Symbol.iterator] = function* () { yield 'x'; }`: `[...'ab']`, `new Set('ab').size` | `a,b`; `2` | `x`; `1` |
+| `Promise.all(a)` for an array `a` with an iterator that yields `'p'` | resolves with `1,2` | with `p` |
+| `async function* g() { yield 1; }`: `[...g()]` | never returns | `TypeError` |
+| `for (x of { next() { … } })`: an object with `next` and no `Symbol.iterator` | runs the loop | `TypeError` |
+| `[...{ 'Symbol.iterator': function* () { yield 1; } }]`: a property named by the text | `1` | `TypeError` |
+| `Number.prototype[Symbol.iterator] = function* () { yield +this; yield this + 1; }`: `[...5]` | `TypeError` | `5,6` |
+| `for (x of it) break;` where the iterator's `return` is the number 5 | no error | `TypeError` |
+| the same where `return()` gives back a number | no error | `TypeError` |
+| `delete Array.prototype[Symbol.iterator]`: `[...[1, 2]]` | `1,2` | `TypeError` |
 
-`MessageChannel` creates two entangled `MessagePort` EventTargets. A port owns
-a FIFO of pending values; `postMessage()` queues on the peer and delivery runs
-later through the ordinary `MessageEvent` / EventTarget path after `start()`
-or `onmessage`. `close()` drops queued messages and disconnects its peer.
-Collector tracing covers the port object and queued JS values, and task roots
-cover the delivery target. The deliberately bounded implementation is
-same-agent only: values retain identity, the optional transfer argument is
-currently ignored, structured clone is absent, and no failure mode currently
-emits `messageerror`.
+What it broke outside a test: a class that extends `Array` and defines how
+it is iterated (a paged list, a sparse row set, a collection that yields
+wrapped items) was iterated as the bare array by every construct of the
+language; a library that instruments `Array.prototype[Symbol.iterator]` saw
+nothing; and spreading an async generator, which is a mistake that should
+throw, hung the page.
 
-**Verification.** `make test` passes **204/204** engine suites and
-`tests/cross_origin_windows.cpp` passes **110/110** checks, including all three
-Location entry points, direct navigation over `srcdoc`, WindowProxy identity,
-unchanged iframe markup, continued cross-origin read refusal, asynchronous
-FIFO delivery, queued-value GC safety, ordinary EventTarget delivery, delayed
-start and close-before/after-delivery behavior.
+**The fix.** One question, `js_iterator_method(value, method)`, which is the
+language's GetMethod(value, @@iterator), and the shortcut kept behind a
+second one, `js_iterates_as_builtin(value)`, that answers without running
+any script: the array is an ordinary one, its prototype is this realm's
+`Array.prototype`, it has no property of its own under the key, and the
+prototype still holds the function the realm installed (remembered in
+`JsIntrinsics` and kept alive as a root). Anything else is asked; if what it
+hands out is the installed function after all, the elements are still read
+directly; otherwise the protocol runs, as the language writes it: `next`
+read once, `done` before `value`, IteratorClose with its two checks when the
+consumer stops early, the body's error kept when an error stops the loop,
+and no `return()` for an iterator that failed itself. `src/js/JsOps.cpp` and
+its header, and nothing else: every caller already went through the two
+functions. ARCHITECTURE.md, Phase 63, has the design and why the direct read
+is the same as iterating.
+
+### What each instrument found
+
+| Found by | What |
+| :--- | :--- |
+| A file of 40 short scripts, run in Node, in `main`'s binary and here | `main` printed what Node prints for 8 of the 40. Beside the shortcut, four things in the forty lines around it: an object with `next` was its own iterator, a property named by the text `Symbol.iterator` counted, a primitive other than a string was refused unasked, and `return` was not checked. All in the list above |
+| Timing the first version against two copies of `main`'s binary | It asked with a property read on every loop, and `for…of` over three elements took 1.16 of `main`'s time, spread 1.11 to 1.13. The check that runs no script replaced it. ARCHITECTURE.md, Phase 63, section 5, has the table for the final code |
+| test262 over the 25 directories about iteration | Eight more pass, none fewer. That was the wrong run to stop at |
+| test262 over all of `built-ins`, `language` and `annexB` | Four tests that passed on `main` and fail here, in directories the first run had not looked at: three of async delegation (`language/{expressions,statements}/async-generator/yield-star-…`) and `language/statements/class/subclass/default-constructor-spread-override.js`. None can be repaired in the two files of this change: `yield*` and the default constructor are in `JsEval.cpp` and `JsParser.cpp`, which another open pull request held. They are the second and third item of the list below. Final run, on the merged tree: `10 pass in now and not in before; 4 pass in before and not in now`, of 47,967 |
+| Reading every caller of the two functions | `IterationCursor` (array destructuring) has an array mode of its own and never calls them for an array; `Array.from` decides by `is_array()` before it calls; the `Map` and `Set` constructors do not call `set` and `add`. Each is a file another open pull request held: rows, with failing cases |
+| Writing the case for an iterator deleted from `Array.prototype` | `Array.from([1, 2])` then is a `TypeError` here, where Node reads the array as array-like. On `main` it gave the elements, because nothing asked. Worse than before, in `BuiltinsArray.cpp`, a row |
+| Probes with an iterator that never ends | `Array.from(endless, mapperThatThrows)` and `new Set(endless)` with an `add` that throws never return, on `main` and here: the first collects before it maps, the second never calls `add`. The corpus cases use iterators that end, and both are in the rows above |
+| The benchmark, when one line of it did not finish | Iterating a `Map` or a `Set` gets slower every time it is done. `for (e of map)` over three entries, in microseconds a loop for each successive thousand loops: `12.3 24.6 45.7 66.4 90.5 111.4 129.2 154.1`; after `gc()`, `21.5`. A `Set`: `7.7` to `129.1`. `map.forEach` stays at `2.5` and `for…of` over an array at `1.1`. `CollectionData::new_cursor` (`BuiltinsCollections.cpp`) keeps a weak reference to the cursor of every iterator ever made on the collection and, from the 64th on, walks the whole list for each new one to drop the dead; none is dead until a collection, and there is none without `gc()`. Older than this change, not fixed, a row |
+| A unit suite with a frame | An array of another realm has that realm's `Array.prototype`, whose iterator is another function than this realm's. It is asked, so it goes through the protocol: right, and slower than an array of the realm's own. Nothing to fix; section 2 of the phase says why |
+| `tools/ci/check_pr.py`, written for AGENTS.md | Its first version asked the local clone whether `main` was in a commit, and a sandbox's clone is shallow: it said `main` had moved when it had not. It asks GitHub now, and nothing else |
+| The sanitizer build | Nothing in this change: `make asan-core` here, on the tree before the last merge of `main`, ended with no report from either sanitizer (the unit suites, `JS conformance, full corpus: 1062/1092` against 1063 in the release build, the DOM corpus 669/669, web-platform-tests 7998/8009, both fuzzers). The deep pages after it were cut off when the sandbox was suspended: two pages "timed out" after 6,703 seconds of a clock that had kept running. CI's sanitizer job is the run on the merged tree |
+| The annotations of CI's sanitizer job, the day it failed on `main` at `73e23a2` | Not this change, and not chance: a page of web-platform-tests "reported nothing" because the engine stops a page's callbacks after 10 seconds of real time, in silence and with exit status 0. That page's load handlers take 7.3 s in the sanitizer build on an idle machine; with four busy loops beside it they took 18.8 s here and the page ended as it had in CI. The limit can be set now (`--wall-limit`), the engine says so on standard error when it ends a run, and `run_wpt.py` passes its own timeout. ARCHITECTURE.md, Phase 63, section 7, has it; it was found with the step Phase 43 added to that job so that its failures could be read |
+| Merging `main` for the fourth time | Phase 60 had meanwhile repaired one of the 14 cases that were recorded to fail (`String.prototype.trim.call(['x', 'y'])` read the array as `[object Object]`): 13 fail, and the row lost a clause. And #71 had been merged as Phase 56, finding 62, the numbers this change had claimed first and was written to: it is Phase 63, finding 69 |
+
+### What is known to be wrong and is not fixed
+
+Three things are **worse than they were on `main`**, each in a case a page
+is unlikely to meet and a test suite does:
+
+- **`Array.from([1, 2])` after `delete Array.prototype[Symbol.iterator]`** is
+  a `TypeError`; on `main` it gave `[1, 2]` and so does Node. `Array.from`
+  takes whatever `is_array()` for iterable and then calls the function that
+  now asks. In `src/js/BuiltinsArray.cpp`.
+- **`new Derived(1, 2)` for a class without a constructor calls a replaced
+  `Array.prototype[Symbol.iterator]`**, because the parser writes the
+  default constructor as `constructor(...args) { super(...args); }` and a
+  spread now asks. The language's default constructor does not iterate.
+  test262's `default-constructor-spread-override.js` passed and fails. In
+  `src/js/JsParser.cpp` and `src/js/JsEval.cpp`.
+- **`yield*` in an async generator, over an object that has only
+  `Symbol.asyncIterator` and whose `next` answers without a promise**,
+  worked by accident (the object was taken for its own sync iterator) and
+  is a `TypeError`. Three tests of test262 passed that way and fail. Over
+  another async generator `main` never returned, and that is a `TypeError`
+  too; neither is right. In `src/js/JsEval.cpp` (`eval_yield`).
+
+And three that are as they were:
+
+- **Array destructuring** does not ask: `var [x] = a` reads `a`'s elements
+  whatever `a[Symbol.iterator]` is. In `src/js/JsEval.cpp`.
+- **The `Map` and `Set` constructors** do not call `set` and `add`, so a
+  replaced one is not called and cannot stop the iteration. In
+  `src/js/BuiltinsCollections.cpp`.
+- **What an iterator is, in small**: `Array.prototype[Symbol.iterator]` and
+  `Array.prototype.values` are two functions; an array iterator owns its
+  `next`; `arguments` has no iterator of its own; an object whose prototype
+  is an array has no elements; and four smaller things.
+
+All six are rows of the task table in `AGENTS.md`, and 13 cases of
+`iteration.dat` fail for them and say which.
+
+### How verified
+
+On this branch with `main` at `b1745d3` (Phase 60) merged in. "Before" is
+the release binary of that `main`.
+
+- `make test`: `All 206 engine test suites passed successfully!` (204
+  before; the two new ones are
+  `js_iteration_asks_the_value_for_its_iterator` and
+  `js_iteration_of_another_realms_array`), and `Cross-origin Window/Location
+  suite: 80 checks, 0 failure(s).`
+- `make js-conformance`: `JS conformance, full corpus: 1085/1112 (97.6%)
+  [28 files, 0 crashes, 0 timeouts]`; before, 1020/1034. `iteration.dat`
+  alone (`run_js_conformance.py --filter iteration`): 65/78; `main`'s binary
+  28/78 with two timeouts; Node 78/78 (`--reference "node -e"`).
+- The 16 scripts behind the list at the top, in Node, in `main`'s binary and
+  here: `main` prints what Node prints for 3, this branch for 16.
+- test262, `python3 tools/conformance/run_test262.py --binary before=…
+  --binary now=… --timeout 6 built-ins language annexB`: `47967 tests run,
+  830 skipped (modules)`; before `29444 pass (61.4%)`, now `29450 pass
+  (61.4%)`; `10 pass in now and not in before; 4 pass in before and not in
+  now`.
+- `python3 tools/conformance/compare_with_jsdom.py` on a page of 17 lines
+  that hands arrays with their own iterators to `URLSearchParams`, `Blob`,
+  a `MutationObserver`'s `attributeFilter` and `observedAttributes`: `17
+  lines, 17 the same`; `main`'s binary, `17 lines, 9 the same`.
+- Time, 13 operations and 3 controls, least of 5 processes each, twice:
+  this branch is between 0.94 and 1.06 of `main`; a second copy of `main`'s
+  binary is between 0.95 and 1.03 of the first. ARCHITECTURE.md, Phase 63,
+  section 5, has the table.
+- `make dom-conformance`: 669/669. `make wpt`: `9538/9744 subtests pass in
+  190 files; 206 fail as listed, 0 fail and are not listed`.
+- CI's JS floor is 1085 (1020 before) and `JS_ASAN_FLOOR` 1083 (1018
+  before): each is `main`'s plus the 65 cases of `iteration.dat` that pass,
+  which they do under ASan as in the release build. Neither was lowered.
+- CI: run 44021433604 on `f2430f9`, the commit that holds the code, all
+  seven jobs, the sanitizer job with the new floor among them. The commits
+  after it change `*.md` only.

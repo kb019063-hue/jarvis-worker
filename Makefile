@@ -36,7 +36,7 @@ SRCS = src/common/Color.cpp \
        src/render/FontRenderer.cpp \
        src/render/JpegDecoder.cpp \
        src/render/GifDecoder.cpp \
-       src/render/WebPDecoder.cpp \
+       src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -129,8 +129,10 @@ URL_FLOOR ?= 1188
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes. With Phases 37, 43, 44, 45, 55, 59, and 60
 # together, 1019 of 1034 pass under ASan and 1020 in Release (which is what
-# the CI floor requires). Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 1018
+# the CI floor requires). Leave one case of runner headroom. Phase 63 added
+# iteration.dat: 65 of its 78 cases pass, under ASan as in Release, so 1084
+# of 1112 pass under ASan and 1085 in Release.
+JS_ASAN_FLOOR ?= 1083
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669

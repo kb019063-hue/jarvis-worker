@@ -219,6 +219,10 @@ def run_file(binary: str, suite: Path, page: Path, workdir: Path, timeout: float
         "--run-script", str(empty),
         f"--map-origin={ORIGIN}={suite}",
         f"--url={ORIGIN}/{relative}",
+        # The engine stops a page's callbacks after 10 s of real time unless
+        # told otherwise, and what it leaves is a page with no result. This
+        # runner has a limit of its own, which reports a slow page as slow.
+        f"--wall-limit={max(1, int(timeout))}",
     ]
     ct = sidecar_content_type(page)
     if ct:

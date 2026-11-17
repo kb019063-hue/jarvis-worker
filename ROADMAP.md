@@ -52,9 +52,9 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
-| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), and array-hole semantics. (The recursive matcher of finding 26 was replaced by an iterative heap-stack bytecode VM in Phase 37.) | M |
+| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, and array-hole semantics. (Iterative heap-stack RegExp bytecode VM landed in Phase 37; complete RegExp flags `d`/`u`/`v`, ES2025 modifiers `(?ims-ims:...)`, duplicate named capturing groups, `RegExp.escape()`, and `Symbol.{match,matchAll,replace,search,split,species}` landed in Phase 55.) | M |
 | 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
-| 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, property escapes, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. | L |
+| 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. (Unicode 17.0 RegExp property escapes — General_Category, Binary Properties, Script, Script_Extensions, Properties of Strings — and Unicode/legacy RegExp case folding landed in Phase 55.) | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
 
 ## Wave 3 — Real pages (layout & CSS)

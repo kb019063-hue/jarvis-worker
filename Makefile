@@ -59,6 +59,7 @@ SRCS = src/common/Color.cpp \
        src/js/BuiltinsCollections.cpp \
        src/js/BuiltinsJson.cpp \
        src/js/BuiltinsRegExp.cpp \
+       src/js/RegExpUnicodeTables.cpp \
        src/js/BuiltinsDate.cpp \
        src/js/Json.cpp \
        src/js/Promise.cpp \
@@ -126,7 +127,7 @@ URL_FLOOR ?= 1188
 # case that the normal build passes. With Phases 37, 43, 44 and 45 together
 # 973 of 989 pass under ASan and 974 in Release, which is what the CI floor
 # requires. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 972
+JS_ASAN_FLOOR ?= 997
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -138,8 +139,9 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 
 # How many results of the string grid may differ from Node's. Every one of them
 # today is Unicode data the engine does not have (collation, normalization,
-# some case mappings, part of \p{L}); lower this as that data arrives.
-STRING_DIFF_CEILING ?= 95
+# some case mappings); lower this as that data arrives. (Phase 55 removed all
+# 24 \p{L} RegExp mismatches, dropping this ceiling from 95 to 71.)
+STRING_DIFF_CEILING ?= 71
 
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:
 # how many `make deep` runs, and how many the sanitizer build runs. The
@@ -148,7 +150,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -260,6 +262,12 @@ diff-xml: $(TARGET)
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
+## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
+## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,
+## duplicate named capturing groups, and RegExp.escape().
+verify-regexp: $(TARGET)
+	@python3 tools/conformance/verify_regexp.py --binary $(TARGET)
+
 ## Random pages, a few dozen misnested tags each, parsed by Litebird and by
 ## parse5 (an independent HTML parser), trees compared: 1,500 pages of each of
 ## four kinds (plain; with <br/>, type=hidden, CDATA, U+0000 and the like; those
@@ -315,6 +323,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
@@ -419,4 +428,4 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

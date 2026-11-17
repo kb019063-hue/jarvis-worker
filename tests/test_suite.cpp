@@ -32,7 +32,9 @@
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsIdentifierTables.hpp"
+#include "litebird/js/RegExpUnicodeTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -14629,6 +14631,167 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
+TEST(regexp_unicode17_tables_and_parse_time_validation) {
+    using namespace litebird;
+    using namespace litebird::regexp_unicode;
+
+    // 1. Unicode 17.0 property lookup across GC, Binary, Script, Script_Extensions, and Strings.
+    auto lu = lookup_unicode_property("", "Lu", false);
+    assert(lu.kind == PropertyKind::CodePoints && lu.ranges.count > 0);
+    auto gc_lu = lookup_unicode_property("General_Category", "Uppercase_Letter", false);
+    assert(gc_lu.kind == PropertyKind::CodePoints && gc_lu.ranges.data == lu.ranges.data);
+
+    auto ascii = lookup_unicode_property("", "ASCII", false);
+    assert(ascii.kind == PropertyKind::CodePoints && ascii.ranges.count == 1 &&
+           ascii.ranges.data[0].lo == 0 && ascii.ranges.data[0].hi == 0x7F);
+
+    auto garay = lookup_unicode_property("sc", "Garay", false);
+    assert(garay.kind == PropertyKind::CodePoints && garay.ranges.count > 0);
+    auto scx_hira = lookup_unicode_property("Script_Extensions", "Hiragana", false);
+    assert(scx_hira.kind == PropertyKind::CodePoints && scx_hira.ranges.count > 0);
+
+    // Properties of strings require allow_strings=true (v-mode only).
+    assert(lookup_unicode_property("", "RGI_Emoji", false).kind == PropertyKind::Invalid);
+    auto rgi = lookup_unicode_property("", "RGI_Emoji", true);
+    assert(rgi.kind == PropertyKind::Strings && rgi.seq_count > 2000 && rgi.ranges.count > 0);
+
+    // Strict case/alias validation: official aliases like "digit" (Nd) work,
+    // while misspelled or unknown names are rejected.
+    auto nd = lookup_unicode_property("", "Nd", false);
+    auto digit = lookup_unicode_property("", "digit", false);
+    assert(digit.kind == PropertyKind::CodePoints && digit.ranges.data == nd.ranges.data);
+    assert(lookup_unicode_property("", "letter", false).kind == PropertyKind::Invalid);
+    assert(lookup_unicode_property("gc", "UnknownProp", false).kind == PropertyKind::Invalid);
+    assert(lookup_unicode_property("", "ASCII_", false).kind == PropertyKind::Invalid);
+
+    // Unicode 17.0 Simple Case Folding vs legacy Canonicalize.
+    assert(unicode_case_canonical('S') == unicode_case_canonical(0x017F));
+    assert(unicode_case_canonical('K') == unicode_case_canonical(0x212A));
+    assert(unicode_case_canonical(0x10400) == unicode_case_canonical(0x10428));
+    assert(legacy_case_canonical('S') != legacy_case_canonical(0x017F));
+    assert(legacy_case_canonical('a') == legacy_case_canonical('A'));
+
+    // 2. Parse-time js_regexp_validate checks (early SyntaxError before evaluation).
+    std::string err;
+    assert(js_regexp_validate("\\p{L}+", "u", err));
+    assert(js_regexp_validate("[\\p{RGI_Emoji}--[a-z]]", "v", err));
+    assert(js_regexp_validate("(?i:abc)(?:(?<x>a)|(?<x>b))\\k<x>", "d", err));
+    assert(!js_regexp_validate("a", "uv", err));
+    assert(!js_regexp_validate("\\p{NotAProperty}", "u", err));
+    assert(!js_regexp_validate("\\P{RGI_Emoji}", "v", err));
+    assert(!js_regexp_validate("[^\\p{RGI_Emoji}]", "v", err));
+    assert(!js_regexp_validate("[^[\\p{RGI_Emoji}--\\p{RGI_Emoji}]]", "v", err));
+    assert(!js_regexp_validate("[(]", "v", err));
+    assert(!js_regexp_validate("[a&&&b]", "v", err));
+    assert(!js_regexp_validate("(?<x>a)(?<x>b)", "", err));
+    assert(!js_regexp_validate("(?i-i:a)", "", err));
+}
+
+TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval(R"JS(
+        var r = new RegExp("[\\p{Decimal_Number}--[0-9]]+", "v");
+        var v_checks = [
+            r.flags === "v",
+            r.unicodeSets === true,
+            r.unicode === false,
+            r.test("٠١٢٣"),
+            !r.test("123"),
+            /^[\p{Script=Greek}&&\p{Lu}]+$/v.test("ΑΒΓΩ"),
+            !/^[\p{Script=Greek}&&\p{Lu}]+$/v.test("αβγ"),
+            /[\q{a|ab|abc}]/v.exec("abc")[0] === "abc",
+            /[\q{ab}--\q{AB}]/iv.test("ab") === false,
+            /[\q{ab}&&\q{AB}]/iv.test("aB") === true,
+            /^\p{RGI_Emoji}+$/v.test("😀1\uFE0F\u20E3\u{1F1FA}\u{1F1F8}\u{1F468}\u200D\u{1F4BB}"),
+            /(?<=[\q{ab|abc}])X/v.exec("abcX").index === 3,
+            // u+i vs v+i complement semantics
+            /\P{Lowercase_Letter}/iu.test("a") === true,
+            /\P{Lowercase_Letter}/iv.test("a") === false,
+            /\P{Lowercase_Letter}/iv.test("A") === false,
+            /\w/iu.test("\u017f") === true,
+            /\w/iu.test("\u212a") === true,
+            /\W/iu.test("\u017f") === false,
+            /\W/iv.test("s") === false
+        ];
+        var m = /(?<w>[a-z]+)-(?<n>\d+)?/d.exec("hi foo-42!");
+        var d_checks = [
+            m.indices[0][0] === 3 && m.indices[0][1] === 9,
+            m.indices[1][0] === 3 && m.indices[1][1] === 6,
+            m.indices[2][0] === 7 && m.indices[2][1] === 9,
+            m.indices.groups.w === m.indices[1],
+            m.indices.groups.n === m.indices[2]
+        ];
+        var all_ok = v_checks.every(Boolean) && d_checks.every(Boolean);
+    )JS");
+    assert(js.eval("all_ok").is_truthy());
+}
+
+TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval(R"JS(
+        // ES2025 inline modifiers (?ims-ims:...)
+        var mod_ok =
+            /(?i:abc)def/.test("ABCdef") &&
+            !/(?i:abc)def/.test("ABCDEF") &&
+            /(?-i:abc)def/i.test("abcDEF") &&
+            !/(?-i:abc)def/i.test("ABCdef") &&
+            /(?i:a(?-i:b)c)/.test("AbC") &&
+            !/(?i:a(?-i:b)c)/.test("ABC") &&
+            /(?s:.)/.test("\n") &&
+            !/(?-s:.)/s.test("\n") &&
+            /(?m:^b$)/.test("a\nb\nc") &&
+            !/(?-m:^b$)/m.test("a\nb\nc") &&
+            /(?i:\w)/u.test("\u017f") &&
+            !/(?-i:\w)/iu.test("\u017f");
+
+        // ES2025 duplicate named capturing groups across disjunction branches
+        var dateRe = /^(?:(?<y>\d{4})-(?<m>\d{2})|(?<m>\d{2})\/(?<y>\d{4}))$/d;
+        var d1 = dateRe.exec("2026-11");
+        var d2 = dateRe.exec("11/2026");
+        var dup_ok =
+            d1.groups.y === "2026" && d1.groups.m === "11" &&
+            d2.groups.y === "2026" && d2.groups.m === "11" &&
+            Object.keys(d1.groups).join(",") === "y,m" &&
+            d2.indices.groups.y === d2.indices[4] &&
+            /^(?:(?<x>a)|(?<x>b))-\k<x>$/.test("b-b") &&
+            !/^(?:(?<x>a)|(?<x>b))-\k<x>$/.test("a-b") &&
+            "b-1".replace(/(?:(?<x>a)|(?<x>b))-(\d)/, "$<x>:$3") === "b:1";
+
+        // ES2025 RegExp.escape(S)
+        var escTypeErr = false;
+        try { RegExp.escape(42); } catch (e) { escTypeErr = e instanceof TypeError; }
+        var sample = "a0^$\\.*+?()[]{}|/\t\n ,-=<>#&!%:;@~'\"`😀\uD800";
+        var esc_ok =
+            escTypeErr &&
+            RegExp.escape("abc") === "\\x61bc" &&
+            RegExp.escape("^$.*+?()[]{}|/") === "\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\/" &&
+            new RegExp("^" + RegExp.escape(sample) + "$", "u").test(sample) &&
+            new RegExp("^" + RegExp.escape(sample) + "$", "v").test(sample);
+
+        // Well-known symbols & RegExp[Symbol.species]
+        var custom = {
+            flags: "g",
+            [Symbol.match](s) { return "M:" + s; },
+            [Symbol.replace](s, r) { return "R:" + s + ":" + r; },
+            [Symbol.search](s) { return 7; },
+            [Symbol.split](s) { return [s, "ok"]; }
+        };
+        var sym_ok =
+            RegExp[Symbol.species] === RegExp &&
+            "hi".match(custom) === "M:hi" &&
+            "hi".replace(custom, "X") === "R:hi:X" &&
+            "hi".search(custom) === 7 &&
+            "hi".split(custom).join("|") === "hi|ok";
+
+        var phase55_ok = mod_ok && dup_ok && esc_ok && sym_ok;
+    )JS");
+    assert(js.eval("phase55_ok").is_truthy());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -14857,6 +15020,11 @@ int main() {
     RUN_TEST(css_color4_spaces_gamut_and_serialization);
     RUN_TEST(css_color5_mix_relative_and_light_dark);
     RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
+
+    // Phase 55: RegExp Unicode 17.0 properties, v (unicodeSets), d (hasIndices), ES2025 modifiers/dup-groups/escape/symbols.
+    RUN_TEST(regexp_unicode17_tables_and_parse_time_validation);
+    RUN_TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices);
+    RUN_TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

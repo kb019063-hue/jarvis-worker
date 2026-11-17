@@ -6512,3 +6512,39 @@ run under the default of 10 s. None has shown the failure; the line on
 standard error is what will name it if one does. And whether the two
 failures of the sanitizer job on `main` on 16 November were this one is not
 known: they left nothing to read.
+
+---
+
+## Strict-mode writes that a property refuses (the old `strict-write` rows)
+
+The gap this file documented as open ("a write that a property refuses is refused
+in silence", 2 subtests, `strict-write`) is closed. No open change claimed
+`JsEval.cpp`; the note was stale.
+
+`JsExotic::set` answered only "was this dealt with?", so a collection that
+refuses an index write had no way to say "refused", and strict-mode assignments
+could not throw. `JsExotic` now answers with a tri-state
+`SetResult::{NotHandled, Handled, Refused}`: `NotHandled` leaves the ordinary
+rules to the engine, `Refused` is an object that does not take the write
+(a getter-only indexed property of a collection), and strict-mode assignments
+throw a `TypeError` for it, as `[[Set]]`'s false requires. `JsValue::set_property`
+is a `bool` for the same reason — every refusal path (a primitive receiver, a
+non-writable or frozen property, an accessor with no setter, a non-extensible
+cell, a wrapped string's indices) reports `false`, and the evaluator's write
+reference throws in strict mode when it is told `false`. Sloppy mode keeps the
+silent refusal, as the spec does.
+
+The eight exotic `set` implementations in `Dom*Bindings.cpp` were re-tagged to
+the tri-state. Three changes in behaviour beyond the bookkeeping:
+
+- An assignment to a read-only-refused index of `HTMLCollection`,
+  `DOMTokenList`, `NamedNodeMap` (and the getter-only index of a
+  `CSSStyleDeclaration`) throws a `TypeError` in strict mode — the two failing
+  subtests and their siblings now pass.
+- A strict-mode write to a primitive's property, an accessor with no setter
+  (own or inherited) and a non-writable property anywhere else in the engine
+  throws as well, which is what `[[Set]]`'s false means there too.
+- `assign_identifier`'s global fall-through checks the same boolean.
+
+WPT: `document`/`Element-getElementsByTagName.html` strict-mode subtests pass
+and are off the list; the census stays truthful (0 unlisted).

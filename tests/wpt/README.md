@@ -102,20 +102,17 @@ with `--quiet`.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**9,539 of 9,744 subtests pass. 205 are listed:** the 10 below from the DOM
-and encoding suites, and these 195 from the CSS parsing suites.
+**9,550 of 9,744 subtests pass. 194 are listed:** the 8 below from the DOM
+and encoding suites, and these 186 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
 | `grid-resolved-tracks` | 120 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does |
 | `intrinsic-auto-repeat-lanes` | 64 | `repeat(auto-fill, <intrinsic-size>)` — an intrinsic size inside an auto-repetition. The current Grid 3 draft (21 October 2026) makes that a grid-lanes feature only and says the declaration on a non-lanes grid computes to `none`, which is what Litebird does; these `.tentative.html` tests expect the lanes behavior, resolved against a layout, and are expected to move with the spec |
-| `css-values-4` | 8 | `sign()`, `sibling-index()` (and what they need: the context the value is evaluated in) and the Values 4 term order of a serialized `calc()`. None is implemented; the `sign(…)` cases in `flex-computed.html`/`flex-valid.html` cannot be answered without them |
-| `detached-computed-style` | 1 | `grid-template-node-not-connected.html`: after the element is disconnected, the test wants `getComputedStyle().gridTemplate` to be the empty string (it guards a WebKit crash, bug 261421). Litebird answers `none`, the computed value; it does not special-case disconnected elements |
 | `document-fonts` | 2 | `document.fonts` (`FontFaceSet`) is not implemented; two tests call `document.fonts.ready.then(…)` and harness-error before any subtest runs |
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `strict-write` | 2 | Assigning to an index of an `HTMLCollection` that is out of range must throw a `TypeError` in strict mode. The write is refused — the index is not created, and `list[5]` stays `undefined` — but the refusal is not reported to the caller, so nothing throws. A browser throws from `[[Set]]`; here the exotic object's `set` returns "handled" and the strictness of the assignment lives in `JsEval.cpp`, which is claimed by another change (see `ARCHITECTURE.md`, "Known gaps") |
 | `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 

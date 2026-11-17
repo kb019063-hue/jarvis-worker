@@ -14629,6 +14629,245 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
+// ============================================================================
+// Phase 55: Temporal dead zone for derived constructor `this` and let/const/class
+// ============================================================================
+
+TEST(js_derived_this_temporal_dead_zone) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        class Base {
+            constructor(fail, extra) {
+                if (fail) throw new Error('parent-fail');
+                this.base = extra ?? 10;
+            }
+            tag() { return 'Base'; }
+        }
+
+        var log = [];
+        class Derived extends Base {
+            constructor(getThis = () => this) {
+                // Ordinary nested functions have their own `this`, unaffected by the derived TDZ.
+                function inner() { return typeof this; }
+                log.push(inner());
+
+                try { this.x = 1; log.push('wrote'); } catch (e) { log.push(e.name); }
+                try { void this; log.push('read'); } catch (e) { log.push(e.name); }
+                try { typeof this; log.push('typeof'); } catch (e) { log.push(e.name); }
+                try { super.tag(); log.push('super-call'); } catch (e) { log.push(e.name); }
+                try { super['missing']; log.push('super-prop'); } catch (e) { log.push(e.name); }
+                try { getThis(); log.push('arrow'); } catch (e) { log.push(e.name); }
+                try { super(false, this); log.push('super-arg'); } catch (e) { log.push(e.name); }
+
+                // Side effects in computed super[...] key must not run before `this` TDZ check.
+                var keySideEffect = false;
+                try {
+                    super[(keySideEffect = true, 'tag')];
+                } catch (e) {
+                    log.push(e.name + ':' + keySideEffect);
+                }
+
+                // Throwing inside parent keeps `this` uninitialised.
+                try { super(true); } catch (e) { log.push(e.message); }
+                try { getThis(); log.push('still-uninit'); } catch (e) { log.push('still:' + e.name); }
+
+                // Inner derived class has its own `this` binding.
+                class Inner extends Base {
+                    constructor() {
+                        super(false, 7);
+                        this.inner = true;
+                    }
+                }
+                log.push(new Inner().base);
+                try { void this; } catch (e) { log.push('outer:' + e.name); }
+
+                // GC while `this` is uninitialised must preserve the pre-allocated object.
+                if (typeof gc === 'function') gc();
+
+                (() => super(false, 25))();
+                log.push(getThis() === this, super.tag(), this.base);
+            }
+        }
+        var d = new Derived();
+        log.push(d.base);
+
+        // Derived constructor returning `this` before super() throws ReferenceError.
+        class EarlyReturn extends Base {
+            constructor() {
+                try { return this; } catch (e) { log.push('ret:' + e.name); }
+                super(false, 3);
+            }
+        }
+        log.push(new EarlyReturn().base);
+
+        // Derived constructor returning a custom object without calling super() succeeds.
+        class CustomReturn extends Base {
+            constructor() { return { custom: 99 }; }
+        }
+        log.push(new CustomReturn().custom);
+
+        // Parent returning replacement object updates arrow-captured `this`.
+        function AltParent() { return { replaced: true }; }
+        class AltChild extends AltParent {
+            constructor() {
+                var read = () => this;
+                try { read(); log.push('alt-pre'); } catch (e) { log.push('alt:' + e.name); }
+                super();
+                log.push(read() === this, this.replaced);
+            }
+        }
+        new AltChild();
+
+        var summary = log.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "undefined ReferenceError ReferenceError ReferenceError ReferenceError ReferenceError ReferenceError "
+           "ReferenceError ReferenceError:false parent-fail still:ReferenceError 7 outer:ReferenceError true Base 25 "
+           "25 ret:ReferenceError 3 99 alt:ReferenceError true true");
+}
+
+TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        var out = [];
+
+        // Top-level lexical TDZ and `typeof` vs undeclared identifier.
+        out.push('missing:' + typeof neverDeclaredAnywhere);
+        out.push('onGlobalBefore:' + ('topLet' in globalThis) + ':' + typeof globalThis.topLet);
+        try { void topLet; } catch (e) { out.push('read:' + e.name); }
+        try { typeof topLet; } catch (e) { out.push('typeof:' + e.name); }
+        try { topConst = 2; } catch (e) { out.push('constAssign:' + e.name); }
+        let topLet = 42;
+        const topConst = 7;
+        out.push('onGlobalAfter:' + ('topLet' in globalThis) + ':' + typeof globalThis.topLet + ':' + topLet);
+        try { topConst = 8; } catch (e) { out.push('constReassign:' + e.name); }
+
+        // Block `let` shadows outer variable from the top of the block, including hoisted block functions.
+        let outerX = 'outer';
+        {
+            function readInner() { return outerX; }
+            try { readInner(); } catch (e) { out.push('hoist:' + e.name); }
+            try { typeof outerX; } catch (e) { out.push('blkTypeof:' + e.name); }
+            try { outerX = 'early'; } catch (e) { out.push('blkAssign:' + e.name); }
+            let outerX = 'inner';
+            out.push('blkAfter:' + outerX + ':' + readInner());
+        }
+        out.push('outerAfter:' + outerX);
+
+        // `let undefined` in a function scope triggers TDZ before its declaration line.
+        (function () {
+            try { void undefined; } catch (e) { out.push('undefRead:' + e.name); }
+            try { typeof undefined; } catch (e) { out.push('undefTypeof:' + e.name); }
+            let undefined = 'shadowed';
+            out.push('undefVal:' + undefined);
+        })();
+        out.push('globalUndef:' + (undefined === void 0));
+
+        // Class declaration and expression TDZ (extends self, computed keys, forward ref).
+        try { class Self extends Self {} } catch (e) { out.push('selfExt:' + e.name); }
+        try { (class ExprSelf extends ExprSelf {}); } catch (e) { out.push('exprExt:' + e.name); }
+        try { class CompKey { [CompKey]() {} } } catch (e) { out.push('compKey:' + e.name); }
+        try { typeof LateCls; class LateCls {} } catch (e) { out.push('lateCls:' + e.name); }
+        try { class Sub extends Forward {} class Forward {} } catch (e) { out.push('fwdCls:' + e.name); }
+        class Good { static selfRef = Good; method() { return Good; } }
+        out.push('good:' + (Good.selfRef === Good) + ':' + (new Good().method() === Good));
+
+        // Async and generator bodies observe TDZ across suspension points.
+        function* gen() {
+            try { void gv; } catch (e) { out.push('gen1:' + e.name); }
+            yield 1;
+            try { typeof gv; } catch (e) { out.push('gen2:' + e.name); }
+            let gv = 55;
+            out.push('gen3:' + gv);
+        }
+        var it = gen();
+        it.next();
+        it.next();
+
+        var summary = out.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "missing:undefined onGlobalBefore:false:undefined read:ReferenceError typeof:ReferenceError "
+           "constAssign:ReferenceError onGlobalAfter:false:undefined:42 constReassign:TypeError "
+           "hoist:ReferenceError blkTypeof:ReferenceError blkAssign:ReferenceError blkAfter:inner:inner "
+           "outerAfter:outer undefRead:ReferenceError undefTypeof:ReferenceError undefVal:shadowed globalUndef:true "
+           "selfExt:ReferenceError exprExt:ReferenceError compKey:ReferenceError lateCls:ReferenceError "
+           "fwdCls:ReferenceError good:true:true gen1:ReferenceError gen2:ReferenceError gen3:55");
+}
+
+TEST(js_temporal_dead_zone_in_control_flow_and_patterns) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        var out = [];
+
+        // Destructuring declaration defaults see later sibling bindings in TDZ.
+        try { const { a = b, b = 1 } = {}; } catch (e) { out.push('dstr:' + e.name); }
+        {
+            const { a = 5, b = a + 2 } = {};
+            out.push('dstrOk:' + a + ':' + b);
+        }
+
+        // Switch case statements and case tests share one TDZ scope; discriminant uses outer scope.
+        try {
+            switch (1) { case 1: void swVar; case 2: let swVar = 3; }
+        } catch (e) { out.push('swBody:' + e.name); }
+        try {
+            switch (1) { case swCase: break; default: let swCase = 1; }
+        } catch (e) { out.push('swCase:' + e.name); }
+        {
+            let swDisc = 'outer';
+            switch (swDisc) {
+                case 'outer':
+                    let swDisc = 'inner';
+                    out.push('swDisc:' + swDisc);
+                    break;
+            }
+        }
+
+        // for, for-of, and for-in lexical head bindings are in TDZ during init/iterable evaluation.
+        try { for (let i = i; ;) break; } catch (e) { out.push('for:' + e.name); }
+        let iterVar = [1, 2];
+        try { for (let iterVar of iterVar) {} } catch (e) { out.push('forOf:' + e.name); }
+        try { for (const iterVar in { a: iterVar }) {} } catch (e) { out.push('forIn:' + e.name); }
+        try { for (let [p = q, q = 1] of [[]]) {} } catch (e) { out.push('forOfDstr:' + e.name); }
+
+        // Per-iteration closure bindings preserve values while body `let` enters TDZ each turn.
+        var closures = [];
+        for (let i = 0; i < 3; i++) {
+            var seen = '';
+            try { void bodyVar; } catch (e) { seen = e.name; }
+            let bodyVar = i * 10;
+            closures.push(() => i + ':' + bodyVar + ':' + seen);
+        }
+        out.push('loops:' + closures.map(f => f()).join(','));
+
+        // catch destructured parameter and handler block TDZ.
+        try { try { throw {}; } catch ({ ca = cb, cb = 1 }) {} } catch (e) { out.push('catchParam:' + e.name); }
+        try { throw 'err'; } catch (e) {
+            try { void innerC; } catch (err) { out.push('catchBlk:' + err.name); }
+            let innerC = e;
+            out.push('catchOk:' + innerC);
+        }
+
+        // Non-simple default parameter list places later parameters in TDZ.
+        function defParams(a = b, b = 2) { return a + b; }
+        try { defParams(); } catch (e) { out.push('param:' + e.name); }
+        function defSelf(a = a) { return a; }
+        try { defSelf(); } catch (e) { out.push('paramSelf:' + e.name); }
+
+        var summary = out.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "dstr:ReferenceError dstrOk:5:7 swBody:ReferenceError swCase:ReferenceError swDisc:inner "
+           "for:ReferenceError forOf:ReferenceError forIn:ReferenceError forOfDstr:ReferenceError "
+           "loops:0:0:ReferenceError,1:10:ReferenceError,2:20:ReferenceError "
+           "catchParam:ReferenceError catchBlk:ReferenceError catchOk:err "
+           "param:ReferenceError paramSelf:ReferenceError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -14857,6 +15096,11 @@ int main() {
     RUN_TEST(css_color4_spaces_gamut_and_serialization);
     RUN_TEST(css_color5_mix_relative_and_light_dark);
     RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
+
+    // Phase 55: Temporal dead zone for derived constructor `this` and let/const/class bindings.
+    RUN_TEST(js_derived_this_temporal_dead_zone);
+    RUN_TEST(js_lexical_temporal_dead_zone_blocks_and_classes);
+    RUN_TEST(js_temporal_dead_zone_in_control_flow_and_patterns);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

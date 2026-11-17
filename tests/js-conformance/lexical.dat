@@ -248,3 +248,55 @@ undefined s,string undefined true undefined
 var [a = undefined, b = 2] = []; function f(x = undefined, y = 3) { return [x, y].join(); } var { p = undefined, q = 4 } = {}; console.log(a, b, f(), p, q)
 #expect
 undefined 2 ,3 undefined 4
+
+#name let const and class temporal dead zone
+#code
+let out = [];
+let x = "outer";
+{
+  try { void x; } catch (e) { out.push("read:" + e.name); }
+  try { typeof x; } catch (e) { out.push("typeof:" + e.name); }
+  try { x = 1; } catch (e) { out.push("assign:" + e.name); }
+  let x = "inner";
+  out.push("after:" + x);
+}
+out.push("outer:" + x);
+try { c = 2; } catch (e) { out.push("const:" + e.name); }
+const c = 1;
+try { c = 3; } catch (e) { out.push("reassign:" + e.name); }
+try { typeof z; } catch (e) { out.push("top-typeof:" + e.name); }
+let z = 10;
+out.push("undeclared:" + typeof missingVar, "z:" + typeof z);
+try { let s = s; } catch (e) { out.push("self:" + e.name); }
+try { class A extends A {} } catch (e) { out.push("cls-ext:" + e.name); }
+try { class B { [B]() {} } } catch (e) { out.push("cls-key:" + e.name); }
+try { void D; class D {} } catch (e) { out.push("cls-tdz:" + e.name); }
+console.log(out.join(" "));
+#expect
+read:ReferenceError typeof:ReferenceError assign:ReferenceError after:inner outer:outer const:ReferenceError reassign:TypeError top-typeof:ReferenceError undeclared:undefined z:number self:ReferenceError cls-ext:ReferenceError cls-key:ReferenceError cls-tdz:ReferenceError
+
+#name temporal dead zone in switch loops destructuring and hoisted functions
+#code
+let out = [];
+try { const { a = b, b = 1 } = {}; } catch (e) { out.push("dstr:" + e.name); }
+try { switch (1) { case 1: void sx; case 2: let sx = 3; } } catch (e) { out.push("sw-body:" + e.name); }
+try { switch (1) { case sy: break; default: let sy = 1; } } catch (e) { out.push("sw-test:" + e.name); }
+try { for (let i = i; ;) break; } catch (e) { out.push("for:" + e.name); }
+let item = 1;
+try { for (let item of [item]) {} } catch (e) { out.push("forof:" + e.name); }
+try { for (const item in { a: item }) {} } catch (e) { out.push("forin:" + e.name); }
+try { try { throw {}; } catch ({ ca = cb, cb = 1 }) {} } catch (e) { out.push("catch:" + e.name); }
+function def(a = b, b = 2) { return a + b; }
+try { def(); } catch (e) { out.push("param:" + e.name); }
+{
+  let h = "outer";
+  {
+    function readH() { return h; }
+    try { readH(); } catch (e) { out.push("hoist:" + e.name); }
+    let h = "inner";
+    out.push("hoist-ok:" + readH());
+  }
+}
+console.log(out.join(" "));
+#expect
+dstr:ReferenceError sw-body:ReferenceError sw-test:ReferenceError for:ReferenceError forof:ReferenceError forin:ReferenceError catch:ReferenceError param:ReferenceError hoist:ReferenceError hoist-ok:inner

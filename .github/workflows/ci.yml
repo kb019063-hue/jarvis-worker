@@ -138,17 +138,17 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 974 of 989 pass, and the floor is that score (raised by
-        # 14 in finding 50, 4 in finding 51, 1 in finding 42, and 48 in finding
-        # 49, most of them construct.dat). It used to sit one below for
-        # `pairs made a half at a time in a long string` (long-strings.dat),
-        # which copied the whole string at every pair and took 6 of the 10
-        # seconds a case is allowed, so it timed out on a busy machine. Finding
-        # 47 fixed that: the case now takes 0.035 s. Raise the floor as the
-        # engine improves; it exists to catch regressions.
+        # does not vary: 978 of 992 pass, and the floor is that score (raised by
+        # 14 in finding 50, 4 in finding 51, 1 in finding 42, 48 in finding 49,
+        # and 4 in finding 61 across construct.dat and lexical.dat). It used to sit
+        # one below for `pairs made a half at a time in a long string`
+        # (long-strings.dat), which copied the whole string at every pair and
+        # took 6 of the 10 seconds a case is allowed, so it timed out on a busy
+        # machine. Finding 47 fixed that: the case now takes 0.035 s. Raise the
+        # floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 974
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 978
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a

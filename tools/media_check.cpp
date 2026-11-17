@@ -1,5 +1,6 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
+#include "litebird/render/WebPDecoder.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/html/HtmlParser.hpp"
 
@@ -59,7 +60,8 @@ bool write_rgba(const std::string& path, const litebird::ImageData& img) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--render-svg|--fuzz-jpeg|--fuzz-gif|--fuzz-svg> <in> [out]\n";
+        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--render-svg|"
+                     "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-svg> <in> [out]\n";
         return 2;
     }
     const std::string mode = argv[1];
@@ -75,6 +77,8 @@ int main(int argc, char** argv) {
                 (void)litebird::JpegDecoder::decode_detailed(b.data(), b.size());
             } else if (kind == "gif") {
                 (void)litebird::GifDecoder::decode_frames(b.data(), b.size(), 16);
+            } else if (kind == "webp") {
+                (void)litebird::WebPDecoder::decode_detailed(b.data(), b.size());
             } else if (kind == "svg") {
                 std::string markup(reinterpret_cast<const char*>(b.data()), b.size());
                 auto doc = litebird::HtmlParser::parse(markup);
@@ -126,6 +130,38 @@ int main(int argc, char** argv) {
             if (!write_rgba(out_file, *res.frames[i].image)) return 2;
             std::cout << res.frames[i].delay_ms << " " << static_cast<int>(res.frames[i].disposal) << "\n";
         }
+        return 0;
+    }
+
+    if (mode == "--decode-webp") {
+        if (argc < 4) return 2;
+        auto res = litebird::WebPDecoder::decode_detailed(bytes.data(), bytes.size());
+        if (!res.ok()) {
+            std::cerr << "WebP error (" << litebird::WebPDecoder::status_string(res.status) << "): " << res.error << "\n";
+            return 1;
+        }
+        if (!write_ppm(argv[3], *res.image)) {
+            std::cerr << "Failed to write PPM\n";
+            return 2;
+        }
+        // PPM carries no alpha, and a lossless WebP keeps the colour of fully
+        // transparent pixels, so the caller may ask for RGBA as well.
+        if (argc >= 5 && !write_rgba(argv[4], *res.image)) {
+            std::cerr << "Failed to write RGBA\n";
+            return 2;
+        }
+        std::cout << res.image->width << " " << res.image->height << " lossless\n";
+        return 0;
+    }
+
+    if (mode == "--probe-webp") {
+        const auto status = litebird::WebPDecoder::probe(bytes.data(), bytes.size());
+        std::cout << litebird::WebPDecoder::status_string(status) << "\n";
+        return status == litebird::WebPDecoder::Status::Ok ? 0 : 1;
+    }
+
+    if (mode == "--fuzz-webp") {
+        (void)litebird::WebPDecoder::decode_detailed(bytes.data(), bytes.size());
         return 0;
     }
 

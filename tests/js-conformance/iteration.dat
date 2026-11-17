@@ -572,6 +572,64 @@ console.log(out.join(), plain.join(), [...a].join(), [...'ab'].join(), [...[7, 8
 #expect
 3,2,1 4,5,6 3,2,1 a,b 7,8
 
+#name an async generator is not iterable by the sync protocol
+#code
+async function* g() { yield 1; }
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+console.log(t(function () { return [...g()].length; }), t(function () { for (var x of g()) return typeof x; }), t(function () { return new Set(g()).size; }), typeof g()[Symbol.iterator], typeof g()[Symbol.asyncIterator]);
+#expect
+TypeError TypeError TypeError undefined function
+
+#name an object with next and no Symbol.iterator, in yield* and in for await
+#code
+var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+function* g() { yield* bare; }
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+console.log(t(function () { return [...g()].join(); }));
+(async function () { try { for await (var x of bare) {} console.log('no error'); } catch (e) { console.log(e.constructor.name); } })();
+#expect
+TypeError
+TypeError
+
+#name yield* over sync iterables in an async generator
+#code
+async function* outer() { yield* [1, 2]; yield* 'ab'; yield* new Set([7]); }
+(async function () { var out = []; for await (var x of outer()) out.push(x); console.log(out.join()); })().catch(function (e) { console.log('rejected: ' + e); });
+#expect
+1,2,a,b,7
+
+#name for await over an array of promises and values
+#code
+(async function () { var out = []; for await (var x of [Promise.resolve(1), 2, Promise.resolve(3)]) out.push(x); console.log(out.join()); })();
+#expect
+1,2,3
+
+#name apply, Reflect.apply, Reflect.construct, bind and the array methods do not ask for an iterator
+#code
+var original = Array.prototype[Symbol.iterator]; var calls = 0;
+Array.prototype[Symbol.iterator] = function () { calls++; return original.call(this); };
+function f() { return arguments.length; }
+function C() { this.n = arguments.length; }
+var r = [f.apply(null, [1, 2]), Reflect.apply(f, null, [1, 2, 3]), Reflect.construct(C, [1]).n, Math.max.apply(null, [3, 9, 4]), String.fromCharCode.apply(null, [104, 105]), f.call.apply(f, [null, 1, 2])];
+var bound = f.bind(null, 1, 2); r.push(bound(3));
+r.push([1, 2].concat([3]).length, [3, 1, 2].sort().join(''), [1, [2, [3]]].flat(2).length, JSON.stringify([1, 2]), [1, 2].map(function (x) { return x; }).length, new Array(1, 2).length, Array.of(1, 2).length, Object.entries({ a: 1 }).length);
+Array.prototype[Symbol.iterator] = original;
+console.log(r.join(), calls);
+#expect
+2,3,1,9,hi,2,3,3,123,3,[1,2],2,2,2,1 0
+
+#name template literals, tagged templates, rest parameters and join do not ask for an iterator
+#code
+var original = Array.prototype[Symbol.iterator]; var calls = 0;
+Array.prototype[Symbol.iterator] = function () { calls++; return original.call(this); };
+function tag(strings) { return strings.length + ':' + (arguments.length - 1); }
+function rest(a, ...more) { return more.length; }
+var r = [`a${1}b${2}`, tag`x${1}y${2}z`, rest(1, 2, 3), (function () { return arguments.length; })(1, 2), [1, 2, 3].join('-'), String([1, 2]), [1, 2] + '', Object.keys([1, 2]).length];
+Array.prototype[Symbol.iterator] = original;
+console.log(r.join(), calls);
+#expect
+a1b2,3:2,2,2,1-2-3,1,2,1,2,2 0
+
 #name array destructuring asks the array for its iterator
 #code
 var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
@@ -687,3 +745,28 @@ var a = ['x', 'y']; a[Symbol.iterator] = String.prototype[Symbol.iterator];
 console.log([...a].join('+'), String.prototype.trim.call(['x', 'y']), String.prototype[Symbol.iterator].call(['p', 'q']).next().value);
 #expect
 x+,+y x,y p
+
+#name the default constructor of a subclass does not iterate its arguments
+#code
+var original = Array.prototype[Symbol.iterator]; var calls = 0;
+Array.prototype[Symbol.iterator] = function () { calls++; return original.call(this); };
+class Base { constructor(a, b) { this.sum = a + b; this.count = arguments.length; } }
+class Derived extends Base {}
+class Further extends Derived {}
+class Written extends Base { constructor(...args) { super(...args); } }
+var d = new Derived(2, 3), f = new Further(4, 5, 6), before = calls, w = new Written(1, 1);
+Array.prototype[Symbol.iterator] = original;
+console.log(d.sum, d.count, f.sum, f.count, before, calls - before);
+#expect
+5 2 9 3 0 1
+
+#name yield* in an async generator asks for Symbol.asyncIterator
+#code
+async function* inner() { yield 1; yield 2; }
+async function* outer() { yield 0; yield* inner(); yield 3; }
+var own = { [Symbol.asyncIterator]: function () { var i = 0; return { next: function () { return Promise.resolve(i < 3 ? { value: i++, done: false } : { done: true }); } }; } };
+async function* over() { yield* own; }
+async function collect(g) { var out = []; try { for await (var x of g) out.push(x); } catch (e) { out.push(e.constructor.name); } return out.join(); }
+collect(outer()).then(function (a) { return collect(over()).then(function (b) { console.log(a, '|', b); }); });
+#expect
+0,1,2,3 | 0,1,2

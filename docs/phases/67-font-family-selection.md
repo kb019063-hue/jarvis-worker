@@ -69,7 +69,7 @@ it works:
 
 ## How it was verified
 
-`make test` — 212 suites, two of them new, `font_family_selects_a_face` and
+`make test` — 214 suites, two of them new, `font_family_selects_a_face` and
 `font_family_reaches_layout_from_css`.
 
 The oracle is **absolute** rather than a comparison between two faces. Every
@@ -173,3 +173,38 @@ correct. Which regime applies is a fact about the host, and a test that assumes
 one is a test about the machine it was written on. The suite prints what it
 found — the faces, the generic mapping, and the two measurements — so a failure
 on a shared runner says which world it was in.
+
+## What the shared runner found that this host did not
+
+Even that was not enough. Two CI runs failed here and nowhere local, which is
+the signal that a test asserts a fact about the machine it was written on. Two
+such facts remained, and both are now either answered or not asserted.
+
+**"The default face is proportional."** The suite asserted `'i'` advances less
+than `'W'` in the default face. It holds here because the default is DejaVu
+Sans. It is not a fact about the code: "the default" is whichever file the host
+had, and on a host whose primary face is monospace the default *is* monospace,
+where `'i'` and `'W'` advance the same. `default_family_id()` now says which
+family `kDefaultFamily` names — recorded when the primary face registers — and
+the assertion is only made where the default is a different family. The primary
+is registered explicitly now rather than left to discovery, because a host can
+keep its fonts where the search does not look — those directories are guessed
+at precisely because there is no fontconfig to ask — and a primary outside the
+registry left the question with no answer.
+
+**"Serif and sans measure differently."** True of DejaVu, and of most pairs.
+But metric-compatible families exist by design: Liberation Serif and Liberation
+Sans are cut to Times and Arial's widths, so a host with those would measure
+one string identically. Asked of four strings now and not one, and passed if any
+differs — a claim about the code rather than about a typeface.
+
+**The diagnostics were being lost.** stdout is block-buffered when it is not a
+terminal, and `abort()` does not flush it — so every print in a test that fails
+vanishes with it, including on the runner, which is the one place the output is
+needed. That is why two CI failures reported nothing but an exit code. Flushed
+before the assertions that can fail.
+
+Checked against six simulated hosts, by pointing the search at a directory of
+chosen fonts: all six DejaVu faces; serif and mono without sans; serif alone;
+sans alone; none at all, where Ahem is family 0 and still selectable — the case
+the `kDefaultFamily` fix above was for; and a monospace primary. All pass.

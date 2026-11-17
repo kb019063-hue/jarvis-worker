@@ -39,7 +39,7 @@ face is loaded lazily and used to measure and draw.
 ## How it was verified
 
 `make test`, suites `font_family_selects_a_face` and
-`font_family_reaches_layout_from_css`, 212 suites in total passing.
+`font_family_reaches_layout_from_css`, 214 suites in total passing.
 
 The oracle is Ahem, which is in the repository and therefore available on any
 host: every one of its 278 codepoints advances exactly 1em, so four characters

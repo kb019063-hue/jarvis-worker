@@ -56,7 +56,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 208 engine suites + 80 cross-origin Window/Location checks
+make test            # 209 engine suites + 80 cross-origin Window/Location checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -717,7 +717,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 208 engine test suites
+# Run the 209 engine test suites
 make test
 ```
 
@@ -785,14 +785,14 @@ make test
 make test
 ```
 
-Output (208 suites; the first and last lines shown):
+Output (209 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 208 engine test suites passed successfully!
+All 209 engine test suites passed successfully!
 ```
 
 ```bash
@@ -938,7 +938,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 208/208 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 209/209 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

@@ -188,6 +188,10 @@ public:
     /// it ends up asserting a fact about the machine it was written on.
     int generic_family_id(std::string_view generic) const;
 
+    /// The family `kDefaultFamily` stands for: whichever one the primary
+    /// regular face belongs to. `kNoFamily` when there is no primary face.
+    int default_family_id() const { return m_default_family; }
+
     /// Adds a font file to the registry, under the family name it declares, and
     /// returns the id of the family it joined. For tests, which have to say
     /// which font they mean rather than depend on what a host happens to have;
@@ -307,6 +311,16 @@ private:
     std::vector<Family> m_families;
     std::vector<std::string> m_family_names;                    ///< by id, for `family_names()`
     std::unordered_map<std::string, int> m_family_by_key;       ///< "dejavu sans mono" -> id
+
+    /// The family the primary regular face belongs to, which is what
+    /// `kDefaultFamily` actually names. `kNoFamily` when the primary did not
+    /// load or declares no family.
+    ///
+    /// Needed because "the default" is not a claim about a font, it is a claim
+    /// about whichever file the host had: on a host whose only face is
+    /// monospace, the default *is* monospace, and a caller that assumes the
+    /// default is proportional is asserting a fact about the machine.
+    int m_default_family{kNoFamily};
 
     int m_generic_serif{kNoFamily};
     int m_generic_sans{kNoFamily};

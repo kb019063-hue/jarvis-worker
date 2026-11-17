@@ -965,6 +965,13 @@ FontRenderer::FontRenderer() {
     for (const std::string& path : discover_font_files(64)) {
         register_font_file(path);
     }
+    // The primary faces, whether or not discovery walked past them. A host can
+    // keep its fonts where the search does not look -- the paths above are
+    // guessed at precisely because there is no fontconfig to ask -- and a
+    // primary that is not in the registry leaves `default_family_id()` with no
+    // answer, which is the question "is the default monospace" needs asked.
+    register_font_file(m_regular_path);
+    register_font_file(m_bold_path);
 }
 
 // --- the family registry ---------------------------------------------------
@@ -1044,7 +1051,12 @@ int FontRenderer::register_font_file(const std::string& path) {
     // changes what a list resolves to.
     m_resolved.clear();
     const auto it = m_family_by_key.find(m_face_entries[index].key);
-    return it == m_family_by_key.end() ? kNoFamily : it->second;
+    const int id = it == m_family_by_key.end() ? kNoFamily : it->second;
+    // What `kDefaultFamily` names, for a caller that has to say it: "the
+    // default" is whichever face this host had, and on a host whose only face
+    // is monospace the default *is* monospace.
+    if (path == m_regular_path) m_default_family = id;
+    return id;
 }
 
 std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold) const {

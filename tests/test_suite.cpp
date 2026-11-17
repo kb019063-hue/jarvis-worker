@@ -703,9 +703,14 @@ TEST(font_family_selects_a_face) {
                 fr.has_truetype_font() ? "yes" : "no", fr.family_names().size());
     for (std::size_t i = 0; i < fr.family_names().size() && i < 6; ++i)
         std::printf(" [%d]%s", static_cast<int>(i), fr.family_names()[i].c_str());
-    std::printf("\n      [font-family] generic serif=%d sans=%d mono=%d\n",
+    std::printf("\n      [font-family] generic serif=%d sans=%d mono=%d default=%d\n",
                 fr.generic_family_id("serif"), fr.generic_family_id("sans-serif"),
-                fr.generic_family_id("monospace"));
+                fr.generic_family_id("monospace"), fr.default_family_id());
+    // Flushed because the whole point of printing this is to be there when an
+    // assertion below fails: stdout is block-buffered when it is not a
+    // terminal, and abort() does not flush it. Without this the diagnostics
+    // vanish into the same void as the failing run they explain.
+    std::fflush(stdout);
 
     // Every family the registry knows is reachable by its own name -- family 0
     // included. It did not used to be: `kDefaultFamily` was 0, so the first
@@ -777,10 +782,13 @@ TEST(font_family_selects_a_face) {
         const float wide = fr.measure_text("WWWW", 16.0f, 400, "monospace");
         assert(std::fabs(narrow - wide) < 0.5f);
         // ...and the default is only asserted proportional when it is a
-        // different family. On a host whose only face is monospace, the
-        // default is monospace too, and asserting otherwise would be a claim
-        // about the machine rather than about the code.
-        if (mono != FontRenderer::kDefaultFamily && fr.has_truetype_font()) {
+        // different family. "The default" is not a claim about a font, it is a
+        // claim about whichever file this host had: where the only face is
+        // monospace the default *is* monospace, and 'i' and 'W' advance the
+        // same. Asserting otherwise would be a fact about the machine rather
+        // than about the code, and it is exactly what failed on a host whose
+        // primary face was a mono one.
+        if (fr.has_truetype_font() && mono != fr.default_family_id()) {
             assert(std::fabs(fr.measure_text("iiii", 16.0f, 400) -
                              fr.measure_text("WWWW", 16.0f, 400)) > 1.0f);
         }
@@ -790,9 +798,19 @@ TEST(font_family_selects_a_face) {
     if (serif != FontRenderer::kNoFamily && sans != FontRenderer::kNoFamily &&
         serif != sans) {
         // Two generics that resolve to two different faces must not measure
-        // the same.
-        assert(std::fabs(fr.measure_text("WWWW", 16.0f, 400, "serif") -
-                         fr.measure_text("WWWW", 16.0f, 400, "sans-serif")) > 0.5f);
+        // the same. Asked of several strings and not one, because
+        // metric-compatible families exist by design -- Liberation Serif and
+        // Liberation Sans are cut to Times and Arial's widths -- and a single
+        // string is a claim about a typeface rather than about the code.
+        bool differs = false;
+        for (const char* s : {"WWWW", "iiii", "ll1i", "Hello, world"}) {
+            const float a = fr.measure_text(s, 16.0f, 400, "serif");
+            const float b = fr.measure_text(s, 16.0f, 400, "sans-serif");
+            std::printf("      [font-family] %-14s serif=%8.2f sans=%8.2f\n", s, a, b);
+            if (std::fabs(a - b) > 0.5f) differs = true;
+        }
+        std::fflush(stdout);
+        assert(differs);
     }
 
     // Nothing that cannot be named is served: an unresolvable family falls

@@ -1050,7 +1050,9 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
     if (JsObject* global = m_global_object.object_val) {
         if (global->properties.find(name) != global->properties.end()) {
             JsValue target = m_global_object;
-            target.set_property(name, value);
+            if (!target.set_property(name, value) && env->is_strict()) {
+                js_throw_type_error("Cannot set property '" + name + "' of this object");
+            }
             return;
         }
     }
@@ -1123,7 +1125,12 @@ JsValue JsInterpreter::read_reference(const Reference& ref, const EnvPtr& env) {
 void JsInterpreter::write_reference(const Reference& ref, const JsValue& value, const EnvPtr& env) {
     if (ref.is_property) {
         JsValue target = ref.base;
-        target.set_property(ref.name, value);
+        // A write to a property this object does not take (a getter-only
+        // index of a collection, say) is refused; strict mode throws, as
+        // [[Set]]'s false requires.
+        if (!target.set_property(ref.name, value) && env->is_strict()) {
+            js_throw_type_error("Cannot set property '" + ref.name + "' of this object");
+        }
         return;
     }
     assign_identifier(ref.name, value, env);

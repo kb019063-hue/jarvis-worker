@@ -424,7 +424,9 @@ public:
                                   const JsValue** new_target_out = nullptr);
 
     JsValue get_property(const std::string& name) const;
-    void set_property(const std::string& name, JsValue val);
+    /// False when the write was refused; see the definition for what that
+    /// means for strict-mode assignments.
+    bool set_property(const std::string& name, JsValue val);
 
     /// The heap cell that stores this value's own properties: `object_val` for
     /// objects, the lazily created cell for script functions. Null when there

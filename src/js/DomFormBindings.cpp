@@ -105,15 +105,15 @@ struct ControlExotic : JsExotic {
         std::size_t index = 0;
         return parse_index(name, index) && index < items().size();
     }
-    bool set(JsObject*, const std::string& name, const JsValue& value) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
         std::size_t index = 0;
-        if (!parse_index(name, index)) return false;
-        if (!is_select || !realm->alive) return true;
+        if (!parse_index(name, index)) return JsExotic::SetResult::NotHandled;
+        if (!is_select || !realm->alive) return JsExotic::SetResult::Refused;
         // select[i] = option replaces (or appends); select[i] = null removes.
         const NodeVector list = items();
         if (value.is_nullish()) {
             if (index < list.size()) remove_node(*realm, *list[index]);
-            return true;
+            return JsExotic::SetResult::Handled;
         }
         Node* node = node_ptr(value);
         if (!node || !is_html_element(*node, "option")) js_throw_type_error("The value assigned is not an option element.");
@@ -124,7 +124,7 @@ struct ControlExotic : JsExotic {
         } else {
             element->append_child(node->shared_from_this());
         }
-        return true;
+        return JsExotic::SetResult::Handled;
     }
     void keys(JsObject*, std::vector<std::string>& out) override {
         const std::size_t count = items().size();

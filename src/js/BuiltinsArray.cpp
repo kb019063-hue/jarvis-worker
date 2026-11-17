@@ -458,13 +458,22 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_method(ap, "findLast", 1, make_find("findLast", true, Find::Value));
     js_define_method(ap, "findLastIndex", 1, make_find("findLastIndex", true, Find::Index));
 
+    // Generic, like the spec's forEach: the receiver itself is the third
+    // argument of the callback, and `length` and the indices are read with
+    // plain property access, so it works on array-likes (strings, NodeLists,
+    // arguments) and reports the receiver rather than a snapshot.
     js_define_method(ap, "forEach", 1, [](Args args) {
-        JsValue array = receiver("forEach");
+        JsValue me = self();
+        if (me.is_nullish()) {
+            js_throw_type_error("Array.prototype.forEach called on null or undefined");
+        }
         JsValue callback = require_callback(js_arg(args, 0), "forEach");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            JsValue item = elements_of(array)[i];
-            callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
+        double length = js_to_integer(js_to_number(me.get_property("length")));
+        for (size_t i = 0; i < static_cast<size_t>(length < 0 ? 0 : length); ++i) {
+            const std::string key = js_number_to_string(static_cast<double>(i));
+            if (!me.has_property(key)) continue;
+            callback.call_with_this(this_arg, {me.get_property(key), JsValue::make_number(static_cast<double>(i)), me});
         }
         return JsValue::make_undefined();
     });
@@ -563,31 +572,41 @@ void install_array_builtins(JsIntrinsics& realm) {
 
     // ---- Iterators --------------------------------------------------------
     enum class Kind { Keys, Values, Entries };
+    // %Array.prototype.keys/values/entries% are generic: they read `length`
+    // and the indices off the receiver each step, so they work on any
+    // array-like, `this` stays the object the iterator was made from, and a
+    // shrinking array-like shortens the iteration — as the spec has it.
     auto make_array_iterator = [](Kind kind) {
         return [kind](Args) {
-            JsValue array = receiver("values");
+            JsValue me = self();
+            if (me.is_nullish()) {
+                js_throw_type_error(std::string("Array.prototype.") + (kind == Kind::Keys ? "keys" : kind == Kind::Values ? "values" : "entries") + " called on null or undefined");
+            }
             auto index = std::make_shared<size_t>(0);
-            return js_make_iterator([array, index, kind](JsValue& value) {
-                // The array is read live, so it may shrink or grow meanwhile.
-                const auto& elements = elements_of(array);
-                if (*index >= elements.size()) return false;
+            return js_make_iterator([me, index, kind](JsValue& value) {
+                double length = js_to_integer(js_to_number(me.get_property("length")));
+                if (*index >= static_cast<size_t>(length < 0 ? 0 : length)) return false;
                 size_t i = (*index)++;
                 switch (kind) {
                     case Kind::Keys: value = JsValue::make_number(static_cast<double>(i)); break;
-                    case Kind::Values: value = elements[i]; break;
+                    case Kind::Values: value = me.get_property(js_number_to_string(static_cast<double>(i))); break;
                     case Kind::Entries:
-                        value = JsValue::make_array({JsValue::make_number(static_cast<double>(i)), elements[i]});
+                        value = JsValue::make_array({JsValue::make_number(static_cast<double>(i)), me.get_property(js_number_to_string(static_cast<double>(i)))});
                         break;
                 }
                 return true;
-            }, {array});
+            }, {me});
         };
     };
     js_define_method(ap, "keys", 0, make_array_iterator(Kind::Keys));
-    js_define_method(ap, "values", 0, make_array_iterator(Kind::Values));
     js_define_method(ap, "entries", 0, make_array_iterator(Kind::Entries));
-    js_define_method(ap, kIteratorKey, 0, make_array_iterator(Kind::Values));
-    js_define_method(ap, "Symbol.iterator", 0, make_array_iterator(Kind::Values));
+    // %Array.prototype.values% is one and the same function object under all
+    // three keys (`Array.prototype[Symbol.iterator] === Array.prototype.values`),
+    // which is what platform object prototypes alias when Web IDL says so.
+    JsValue values_iterator = js_make_native("values", 0, make_array_iterator(Kind::Values));
+    js_define_hidden(ap, "values", values_iterator);
+    js_define_hidden(ap, kIteratorKey, values_iterator);
+    js_define_hidden(ap, "Symbol.iterator", values_iterator);
 }
 
 } // namespace litebird

@@ -3649,7 +3649,7 @@ custom constructor discards it. This is disclosed, not silenced or presented
 as a conformance gain. Array holes and the general collector audit are also
 outside this change.
 
-(Finding 62, Phase 56: the array fast path now asks. `Promise.all(a)` above
+(Finding 69, Phase 63: the array fast path now asks. `Promise.all(a)` above
 resolves to `[9]`, and a `resolve` that throws closes the iterator the array
 handed out.)
 
@@ -4232,7 +4232,7 @@ with it.
 
 ---
 
-## 62. ✅ An array and a string were not asked for their iterator (Phase 56)
+## 69. ✅ An array and a string were not asked for their iterator (Phase 63)
 
 **The hole.** `for (x of v)`, `[...v]`, `f(...v)`, `yield* v`, `Array.from(v)`,
 `new Map(v)`, `new Set(v)`, `Object.fromEntries(v)` and `Promise.all(v)` are
@@ -4280,7 +4280,7 @@ read once, `done` before `value`, IteratorClose with its two checks when the
 consumer stops early, the body's error kept when an error stops the loop,
 and no `return()` for an iterator that failed itself. `src/js/JsOps.cpp` and
 its header, and nothing else: every caller already went through the two
-functions. ARCHITECTURE.md, Phase 56, has the design and why the direct read
+functions. ARCHITECTURE.md, Phase 63, has the design and why the direct read
 is the same as iterating.
 
 ### What each instrument found
@@ -4288,7 +4288,7 @@ is the same as iterating.
 | Found by | What |
 | :--- | :--- |
 | A file of 40 short scripts, run in Node, in `main`'s binary and here | `main` printed what Node prints for 8 of the 40. Beside the shortcut, four things in the forty lines around it: an object with `next` was its own iterator, a property named by the text `Symbol.iterator` counted, a primitive other than a string was refused unasked, and `return` was not checked. All in the list above |
-| Timing the first version against two copies of `main`'s binary | It asked with a property read on every loop, and `for…of` over three elements took 1.16 of `main`'s time, spread 1.11 to 1.13. The check that runs no script replaced it. ARCHITECTURE.md, Phase 56, section 5, has the table for the final code |
+| Timing the first version against two copies of `main`'s binary | It asked with a property read on every loop, and `for…of` over three elements took 1.16 of `main`'s time, spread 1.11 to 1.13. The check that runs no script replaced it. ARCHITECTURE.md, Phase 63, section 5, has the table for the final code |
 | test262 over the 25 directories about iteration | Eight more pass, none fewer. That was the wrong run to stop at |
 | test262 over all of `built-ins`, `language` and `annexB` | TBD56-audit-test262 |
 | Reading every caller of the two functions | `IterationCursor` (array destructuring) has an array mode of its own and never calls them for an array; `Array.from` decides by `is_array()` before it calls; the `Map` and `Set` constructors do not call `set` and `add`. Each is a file another open pull request held: rows, with failing cases |

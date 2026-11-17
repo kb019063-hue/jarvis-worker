@@ -15068,7 +15068,7 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 56: iteration asks the value for its iterator (finding 62)
+// Phase 63: iteration asks the value for its iterator (finding 69)
 // ---------------------------------------------------------------------------
 
 TEST(js_iteration_asks_the_value_for_its_iterator) {
@@ -15124,7 +15124,7 @@ TEST(js_iteration_asks_the_value_for_its_iterator) {
     assert(js_iterator_method(plain, method) && method.is_function());
     assert(method.identity() == js.intrinsics().array_iterator_method.identity());
 
-    // An array that was given an iterator is asked for it. Until Phase 56
+    // An array that was given an iterator is asked for it. Until Phase 63
     // every one of these read the elements: 1,2.
     JsValue own = js.eval("var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; yield 7; }; own");
     assert(!js_iterates_as_builtin(own));
@@ -15543,7 +15543,7 @@ int main() {
     RUN_TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices);
     RUN_TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols);
 
-    // Phase 56: iteration asks the value for its iterator.
+    // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
 

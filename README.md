@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1063 / 1092 (97.3%)**; of the 29 that fail, ten were recorded in Phases 34 and 43 for what classes still lack and 14 in Phase 56 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1063 / 1092 (97.3%)**; of the 29 that fail, ten were recorded in Phases 34 and 43 for what classes still lack and 14 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7998 / 8009 subtests** across 103 files; the 11 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -100,7 +100,7 @@ Read the number for what it is:
   and none fewer in those directories; Phase 44: 1,440 more pass and none
   fewer in those 21 directories, plus 374/374 = 100.0% in
   `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: 43 more in the whole suite and none fewer; Phase 56:
+  Phase 43: 43 more in the whole suite and none fewer; Phase 63:
   TBD56-readme-test262).
 - **Five of the 29 failures are whole features that do not exist**: BigInt
   (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 24 were
@@ -111,7 +111,7 @@ Read the number for what it is:
   sees nothing of the function (Phase 43, section 8). Fourteen are in
   `iteration.dat`: the places that still read an array without asking it
   for its iterator (array destructuring, `Array.from`), `yield*` in an async
-  generator, and what the built-in iterators themselves get wrong (Phase 56,
+  generator, and what the built-in iterators themselves get wrong (Phase 63,
   section 6). Each of the 24 belongs to a row of the task table in
   `AGENTS.md`.
 - **It measures the language, not the DOM.** The bindings a page script calls
@@ -148,12 +148,12 @@ object a parent's constructor returns, when `this` is bound, and three more
 programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
 engine before Phase 43 passes 13.
 
-78 cases (`iteration.dat`, Phase 56) are about who decides how a value is
+78 cases (`iteration.dat`, Phase 63) are about who decides how a value is
 iterated: an iterator a script put on an array, on a subclass of `Array`, on
 `Array.prototype` or on `String.prototype`, through each construct that
 iterates; the order in which the protocol reads and calls; closing an
 iterator that is left early; and the plain cases, which must not change. 64
-of the 78 pass; the engine before Phase 56 passes TBD56-readme-before.
+of the 78 pass; the engine before Phase 63 passes TBD56-readme-before.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -927,7 +927,7 @@ score is now 925/939 after merging Phase 44's identifiers (911/925 before
 that merge); `make test` passes 170 suites (163 on the original base). A page
 outside the corpus, through `tools/conformance/compare_with_jsdom.py`, prints
 `4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator was still
-ignored by `js_iterate`'s array fast path (until Phase 56, below), and subclassed Promises still
+ignored by `js_iterate`'s array fast path (until Phase 63, below), and subclassed Promises still
 make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
 The full release and sanitizer chain passed on the base tree, again after
 merging main's frames/table work, and again with Phase 44's Unicode identifiers:
@@ -1105,7 +1105,7 @@ are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.
 
-### Iteration asks the value for its iterator (Phase 56)
+### Iteration asks the value for its iterator (Phase 63)
 
 `for…of`, spread, `yield*`, `Array.from`, `new Map`, `new Set`,
 `Object.fromEntries` and the `Promise` combinators read an array's elements
@@ -1141,8 +1141,8 @@ generator, which never asked for `Symbol.asyncIterator`, lost the one shape
 of iterable it handled by accident. Still as it was: array destructuring
 does not ask the array, and the `Map` and `Set` constructors do not call
 `set` and `add`. All of it is in the 14 failing cases of `iteration.dat` and
-in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 56, has
-the design, and `AUDIT.md`, finding 62, says what found what.
+in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 63, has
+the design, and `AUDIT.md`, finding 69, says what found what.
 
 ### The encodings pages are written in (Phase 47)
 

@@ -15,6 +15,7 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Storage.hpp"
 
+#include <deque>
 #include <thread>
 
 namespace litebird {
@@ -333,8 +334,8 @@ struct WindowExotic : JsExotic {
 //
 // What crosses the origin boundary is decided here, per HTML §7.2.1.3.4:
 // `href` has no getter (reading it throws SecurityError) but is writable
-// (the write navigates the child, a fragment move as everywhere in the
-// engine); `replace()` is exposed; everything else throws. All of those
+// (a cross-document target is scheduled through the child iframe loader);
+// `replace()` is exposed; everything else throws. All of those
 // fall through to the child's own bindings when allowed, which is what the
 // ordinary accessors and methods are.
 // Nothing else can be reached: no attribute, no method, no property the
@@ -607,6 +608,162 @@ void setup_location(Iface& I) {
         require_brand("Location");
         return str(document_url(r));
     });
+}
+
+// ---------------------------------------------------------------------------
+// MessageChannel and MessagePort
+// ---------------------------------------------------------------------------
+//
+// A port is an EventTarget with one peer.  The endpoint state deliberately
+// keeps the port object alive while a message task is queued; queued values
+// are otherwise opaque to the collector because the task owns a C++ closure.
+// This is same-agent messaging for now: transfer lists and structured cloning
+// stay with the worker/structured-clone work rather than accidentally sharing
+// objects between agents.
+
+struct MessageChannelState : JsExotic {};
+
+struct MessagePortState : JsExotic {
+    uint64_t realm_id{0};
+    std::weak_ptr<MessagePortState> peer;
+    JsValue object;
+    std::deque<JsValue> pending;
+    bool started{false};
+    bool closed{false};
+    bool delivery_queued{false};
+
+    void trace(Heap& heap) override {
+        heap.mark_value(object);
+        for (const JsValue& value : pending) heap.mark_value(value);
+    }
+};
+
+void queue_message_port_delivery(const std::shared_ptr<MessagePortState>& state) {
+    Realm* owner = state ? find_realm(state->realm_id) : nullptr;
+    if (!state || state->closed || !state->started || state->pending.empty() || state->delivery_queued ||
+        !owner || !owner->alive || !state->object.is_object()) {
+        return;
+    }
+    state->delivery_queued = true;
+    const JsValue target = state->object;
+    EventLoop::default_loop().post_task([state, target]() {
+        state->delivery_queued = false;
+        Realm* realm = find_realm(state->realm_id);
+        if (!realm || !realm->alive || state->closed || !state->started || state->pending.empty() ||
+            !target.is_object()) {
+            return;
+        }
+        JsIntrinsics* previous = &JsIntrinsics::get();
+        if (realm->intrinsics) JsIntrinsics::set_current(realm->intrinsics);
+        struct Restore {
+            JsIntrinsics* previous;
+            ~Restore() { JsIntrinsics::set_current(previous); }
+        } restore{previous};
+        // One event per task gives a listener an observable task boundary: a
+        // message posted by that listener, or a close(), cannot be folded
+        // into the delivery that is already underway.
+        JsValue data = std::move(state->pending.front());
+        state->pending.pop_front();
+        dispatch(*realm, target,
+                 make_event(*realm, "MessageEvent", "message", false, false, {{"data", std::move(data)}}), true);
+        queue_message_port_delivery(state);
+    }, {js_roots({target})});
+}
+
+std::shared_ptr<MessagePortState> message_port_ptr() {
+    const JsValue& self = JsValue::current_this();
+    if (self.type != JsType::Object || !self.object_val) throw_illegal_invocation("MessagePort");
+    auto state = std::dynamic_pointer_cast<MessagePortState>(self.object_val->exotic);
+    if (!state) throw_illegal_invocation("MessagePort");
+    return state;
+}
+
+MessagePortState& message_port_state() {
+    return *message_port_ptr();
+}
+
+JsValue construct_message_channel(Realm& realm, const InterfaceDef&, Args, const JsValue* derived) {
+    JsValue channel = realm.make("MessageChannel", std::make_shared<MessageChannelState>(), derived);
+    auto first = std::make_shared<MessagePortState>();
+    auto second = std::make_shared<MessagePortState>();
+    first->realm_id = realm.id;
+    second->realm_id = realm.id;
+    first->peer = second;
+    second->peer = first;
+    JsValue port1 = realm.make("MessagePort", first);
+    JsValue port2 = realm.make("MessagePort", second);
+    first->object = port1;
+    second->object = port2;
+    set_slot(channel, "port1", port1);
+    set_slot(channel, "port2", port2);
+    return channel;
+}
+
+void setup_message_channel(Iface& I) {
+    I.getter("port1", [](Realm&) {
+        (void)this_state<MessageChannelState>("MessageChannel");
+        const JsValue* port = slot(JsValue::current_this(), "port1");
+        if (!port) throw_illegal_invocation("MessageChannel");
+        return *port;
+    });
+    I.getter("port2", [](Realm&) {
+        (void)this_state<MessageChannelState>("MessageChannel");
+        const JsValue* port = slot(JsValue::current_this(), "port2");
+        if (!port) throw_illegal_invocation("MessageChannel");
+        return *port;
+    });
+}
+
+void setup_message_port(Iface& I) {
+    I.method("postMessage", 1, [](Realm&, Args args) {
+        require_args(args, 1, "MessagePort.postMessage");
+        MessagePortState& source = message_port_state();
+        if (source.closed) return undefined();
+        std::shared_ptr<MessagePortState> peer = source.peer.lock();
+        if (!peer || peer->closed) return undefined();
+        peer->pending.push_back(args[0]);
+        // addEventListener follows MessagePort's explicit-start path:
+        // onmessage assignment starts a port, while listeners need start().
+        queue_message_port_delivery(peer);
+        return undefined();
+    });
+    I.method("start", 0, [](Realm&, Args) {
+        std::shared_ptr<MessagePortState> state = message_port_ptr();
+        if (!state->closed) {
+            state->started = true;
+            queue_message_port_delivery(state);
+        }
+        return undefined();
+    });
+    I.method("close", 0, [](Realm&, Args) {
+        MessagePortState& state = message_port_state();
+        state.closed = true;
+        state.pending.clear();
+        state.peer.reset();
+        return undefined();
+    });
+    I.accessor("onmessage",
+        [](Realm& r) {
+            (void)message_port_state();
+            return get_event_handler(r, JsValue::current_this(), "message");
+        },
+        [](Realm& r, const JsValue& value) {
+            std::shared_ptr<MessagePortState> state = message_port_ptr();
+            if (!state->closed) {
+                state->started = true;
+                queue_message_port_delivery(state);
+            }
+            set_event_handler(r, JsValue::current_this(), "message", value);
+        });
+    I.accessor("onmessageerror",
+        [](Realm& r) {
+            (void)message_port_state();
+            return get_event_handler(r, JsValue::current_this(), "messageerror");
+        },
+        [](Realm& r, const JsValue& value) {
+            (void)message_port_state();
+            set_event_handler(r, JsValue::current_this(), "messageerror", value);
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,14 +1915,25 @@ void set_script_runner(Realm& realm, ScriptRunner runner) {
     realm.part<WindowPart>().run_script = std::move(runner);
 }
 
+namespace {
+// A full document navigation only has a loader for nested browsing contexts.
+// Top-level navigation remains an embedder responsibility.
+bool request_child_frame_navigation(Realm& child, const Url& target);
+}
+
 void navigate(Realm& realm, const Url& target, bool replace) {
     if (!realm.document || !realm.window.is_object()) return;
     const std::string old_url = realm.document->url();
     Url current;
     if (!Url::parse(old_url, nullptr, current)) return;
-    // Only a move within the page is carried out: the same address with a
-    // fragment. Anything else would be loading another page.
-    if (!target.has_fragment || target.href(true) != current.href(true)) return;
+    // A same-document fragment move stays synchronous. For a nested browsing
+    // context, every other Location navigation is handed to the iframe loader
+    // below. This is what lets a cross-origin parent set child.location
+    // without getting permission to inspect the child document.
+    if (!target.has_fragment || target.href(true) != current.href(true)) {
+        (void)request_child_frame_navigation(realm, target);
+        return;
+    }
     const std::string new_url = target.href();
     if (new_url == current.href()) return;
     WindowPart& part = realm.part<WindowPart>();
@@ -1783,7 +1951,8 @@ void navigate(Realm& realm, const Url& target, bool replace) {
 }
 
 // `location.href = x`, assign(x), replace(x): the address is read against
-// the page's own. Only a move within the page is then carried out.
+// the page's own. Same-document fragments update history here; a child frame
+// delegates every other target to its iframe loader.
 void navigate_to(Realm& r, const JsValue& value, bool replace) {
     if (!r.document || !r.window.is_object()) return;
     const std::string reference = to_str(value);
@@ -1989,7 +2158,11 @@ std::shared_ptr<Document> create_blank_frame_document(Realm& parent_realm, const
     return doc;
 }
 
-void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initial_insertion) {
+// `navigation_url` is an already-resolved Location navigation. It deliberately
+// does not write the iframe's `src` attribute: an iframe can be navigated by
+// its WindowProxy without changing the markup that created it.
+void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initial_insertion,
+                                std::string navigation_url = {}) {
     WindowPart& parent_part = parent_realm.part<WindowPart>();
     auto it = parent_part.child_frames.find(&iframe);
     if (it == parent_part.child_frames.end() || !it->second.interpreter) return;
@@ -2004,7 +2177,8 @@ void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initi
     const uint64_t parent_id = parent_realm.id;
     std::weak_ptr<Element> weak_iframe = shared(iframe);
 
-    EventLoop::default_loop().post_task([parent_id, weak_iframe, gen, initial_insertion]() {
+    EventLoop::default_loop().post_task([parent_id, weak_iframe, gen, initial_insertion,
+                                         navigation_url = std::move(navigation_url)]() {
         Realm* pr = find_realm(parent_id);
         if (!pr || !pr->alive || !pr->document) return;
         auto iframe_ptr = weak_iframe.lock();
@@ -2050,51 +2224,32 @@ void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initi
             }
         };
 
-        // 1. `srcdoc` takes precedence over `src` whenever present.
-        if (const std::string* srcdoc = iframe_ptr->attribute("srcdoc")) {
+        // 1. A direct Location navigation wins over the markup's srcdoc/src.
+        // Otherwise `srcdoc` takes precedence over `src` whenever present.
+        const std::string* srcdoc = navigation_url.empty() ? iframe_ptr->attribute("srcdoc") : nullptr;
+        if (srcdoc) {
             const std::string markup = *srcdoc;
             auto new_doc = std::make_shared<Document>();
             new_doc->set_url("about:srcdoc");
             init_iframe_document_context(*pr, *iframe_ptr, *new_doc, sandbox);
             iframe_ptr->set_content_document(new_doc);
+            // `navigate_document()` resets per-document load state. Preserve
+            // the completion hook installed above across that reset so the
+            // iframe and parent load ordering remains the same as other frame
+            // navigation paths.
+            auto saved_cb = std::move(child_realm.part<WindowPart>().on_window_load_complete);
             child_interp->navigate_document(new_doc);
-            // Re-install completion callback after navigate_document cleared load flags.
-            child_interp->dom_realm().part<WindowPart>().on_window_load_complete =
-                std::move(child_realm.part<WindowPart>().on_window_load_complete);
-            // Wait: `child_realm` IS `child_interp->dom_realm()`, so `on_window_load_complete`
-            // is on the same `WindowPart`! Re-assign cleanly below:
-            auto install_cb = [&]() {
-                child_interp->dom_realm().part<WindowPart>().on_window_load_complete = [parent_id, weak_iframe, gen]() {
-                    Realm* pr_inner = find_realm(parent_id);
-                    if (!pr_inner || !pr_inner->alive) return;
-                    auto el = weak_iframe.lock();
-                    if (!el) return;
-                    auto f = pr_inner->part<WindowPart>().child_frames.find(el.get());
-                    if (f == pr_inner->part<WindowPart>().child_frames.end() || f->second.navigation_generation != gen) return;
-                    if (el->is_connected() && document_of(*pr_inner, *el) == pr_inner->document) {
-                        JsIntrinsics* prev = &JsIntrinsics::get();
-                        if (pr_inner->intrinsics) JsIntrinsics::set_current(pr_inner->intrinsics);
-                        struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } guard{prev};
-                        JsScriptScope scope;
-                        fire(*pr_inner, *el, "load");
-                    }
-                    if (!pr_inner->alive) return;
-                    auto f_after = pr_inner->part<WindowPart>().child_frames.find(el.get());
-                    if (f_after != pr_inner->part<WindowPart>().child_frames.end() &&
-                        f_after->second.navigation_generation == gen) {
-                        release_parent_load_delay(*pr_inner, f_after->second);
-                    }
-                };
-            };
-            install_cb();
+            child_interp->dom_realm().part<WindowPart>().on_window_load_complete = std::move(saved_cb);
             child_interp->load_page(markup, sandbox.allow_scripts);
             child_interp->notify_document_loaded();
             return;
         }
 
-        // 2. Determine target URL from `src` (missing or empty `src=""` means `about:blank`).
+        // 2. Determine the target URL. A direct Location navigation is already
+        // absolute; markup uses `src` (missing or empty `src=""` is about:blank).
         const std::string* src_attr = iframe_ptr->attribute("src");
-        const std::string raw_src = src_attr ? strip_ascii_space(*src_attr) : std::string();
+        const std::string raw_src = !navigation_url.empty() ? navigation_url
+            : (src_attr ? strip_ascii_space(*src_attr) : std::string());
         Url target_url;
         bool is_about_blank = raw_src.empty();
         if (!is_about_blank) {
@@ -2237,6 +2392,26 @@ void schedule_iframe_navigation(Realm& parent_realm, Element& iframe, bool initi
         }
         child_interp->notify_document_loaded();
     });
+}
+
+bool request_child_frame_navigation(Realm& child, const Url& target) {
+    WindowPart* child_part = child.find_part<WindowPart>();
+    if (!child_part || child_part->parent_realm_id == 0) return false;
+    Realm* parent = find_realm(child_part->parent_realm_id);
+    auto iframe = child_part->frame_element.lock();
+    if (!parent || !parent->alive || !parent->document || !iframe || !iframe->is_connected() ||
+        document_of(*parent, *iframe) != parent->document) {
+        return false;
+    }
+    WindowPart* parent_part = parent->find_part<WindowPart>();
+    if (!parent_part) return false;
+    auto found = parent_part->child_frames.find(iframe.get());
+    if (found == parent_part->child_frames.end() || !found->second.interpreter ||
+        &found->second.interpreter->dom_realm() != &child) {
+        return false;
+    }
+    schedule_iframe_navigation(*parent, *iframe, false, target.href());
+    return true;
 }
 
 } // namespace
@@ -2461,6 +2636,8 @@ JsValue iframe_content_document(Realm& caller_realm, Element& iframe) {
 void register_window_interfaces() {
     register_interface({"Window", "EventTarget", setup_window, nullptr, 0, nullptr});
     register_interface({"Location", nullptr, setup_location, nullptr, 0, nullptr});
+    register_interface({"MessageChannel", nullptr, setup_message_channel, construct_message_channel, 0, nullptr});
+    register_interface({"MessagePort", "EventTarget", setup_message_port, nullptr, 0, nullptr});
     register_interface({"History", nullptr, setup_history, nullptr, 0, nullptr});
     register_interface({"Navigator", nullptr, setup_navigator, nullptr, 0, nullptr});
     register_interface({"Screen", nullptr, setup_screen, nullptr, 0, nullptr});

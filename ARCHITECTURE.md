@@ -364,6 +364,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 | **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
+| **Phase 61** | **Cross-origin child navigation and same-agent message ports:** permitted non-fragment `child.location`, `child.location.href` and `child.location.replace(url)` reuse the iframe navigation scheduler without changing `src`/`srcdoc` or replacing the WindowProxy; `MessageChannel` now creates entangled EventTarget `MessagePort`s with asynchronous FIFO `message` delivery, `start()`, `close()`, `onmessage` and `onmessageerror`. Values remain same-agent identities; structured clone and transfer are deliberately deferred. | ✅ Completed (204/204 engine suites and 110/110 focused cross-origin/channel checks via `make test`; focused ASan+UBSan run clean) |
 
 ---
 
@@ -2183,8 +2184,8 @@ scoreboard with a floor of 572, the URL data with a floor of 1188), and
   script that writes its rules that way changes nothing; one that appends
   a `<style>` element is fine.
 - **Absent**: `TextEncoder`/`TextDecoder`, `crypto`, `indexedDB`,
-  `BroadcastChannel`, `MessageChannel`, `Request`, `EventSource`,
-  `document.evaluate` (XPath), Web Animations (`el.animate`),
+  `BroadcastChannel`, `Request`, `EventSource`, `document.evaluate` (XPath),
+  Web Animations (`el.animate`),
   `ElementInternals`, constructable stylesheets, the clipboard, the ARIA
   reflections (`el.ariaLabel`), and whatever needs typed arrays
   (`Blob.arrayBuffer()`, `FileReader.readAsArrayBuffer`).
@@ -4014,7 +4015,7 @@ Phase 33 `ResourceLoader::load_for_page` local-file security boundary.
   **200/200** consecutive runs with 0 crashes, vs 4/30–7/60 `SIGSEGV` before).
 - Remaining gaps: ES module worker execution (requires an engine-wide ES module
   loader), structured clone beyond JSON (`ArrayBuffer`/transferables/cyclic
-  objects), `SharedWorker`/`MessagePort`, and heap-allocating `symbol_registry()`
+  objects), `SharedWorker`/cross-agent transferred `MessagePort`, and heap-allocating `symbol_registry()`
   in `src/js/JsOps.cpp` and `s_registry` in `src/js/DomBindings.cpp` as
   defense-in-depth (see `AUDIT.md`, finding 45).
 
@@ -5192,9 +5193,11 @@ raster pipeline.
    `getComputedStyle(el).width` layout metrics, `document.write`, style sheet
    objects (`sheet.cssRules`), SVG DOM (`className.baseVal`, `viewBox`,
    `getBBox()`), CORS preflight `OPTIONS`, and `TextDecoder`/`TextEncoder` (the
-   encodings themselves are read since Phase 47). Absent: `crypto`, `indexedDB`,
-   `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
-   typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
+   encodings themselves are read since Phase 47). Same-agent `MessageChannel` /
+   `MessagePort` arrived in Phase 61, but structured clone, transfer and
+   cross-agent ports remain absent. Other absent APIs: `crypto`, `indexedDB`,
+   XPath, Web Animations, `ElementInternals`, and what needs typed arrays
+   (`ArrayBuffer`). The full lists are in Phase 27, section 12,
    Phase 28, section 10, Phase 36, section 9, and Phase 42.
 10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
    modules, `with`, `Intl`, holes in arrays. Details and the approximate
@@ -5915,29 +5918,29 @@ Every seam that reports keys or descriptors was switched to it:
 now handed a `LocationExotic` at the same place (cached on the child window,
 so one `Location` per window as before). Cross-origin it answers only what
 the standard exposes: `then` reads as `undefined`, `replace()` reaches the
-ordinary method (which navigates the child — a fragment move, as everywhere
-in the engine), `href` may be **written** but **read throws**
+ordinary method, `href` may be **written** but **read throws**
 (`SecurityError`, since the cross-origin `href` entry carries no getter),
-and `has()` answers only `href` / `replace` / `then`. Same-origin callers
-see none of this: every hook returns false and the ordinary accessors run
-unchanged.
+and `has()` answers only `href` / `replace` / `then`. Phase 61 makes each
+permitted write schedule a real nested-frame navigation rather than a
+fragment-only no-op. Same-origin callers see none of the exotic filter: every
+hook returns false and the ordinary accessors run unchanged.
 
 ### 4. Still open, honestly
 
-- `childWin.location = url` and `loc.replace(url)` with a cross-document URL
-  are no-ops — `navigate()` is fragment-only by design (Phase 42); nothing
-  here changes that.
+- Top-level cross-document navigation remains an embedder responsibility; the
+  new loader hook exists only for a realm that is the live child of an iframe.
+  Cross-document session-history replacement is also not modelled: a child
+  navigation creates its new document's single current history entry.
 - `%Symbol.toStringTag%`, `%Symbol.hasInstance%`, `%Symbol.isConcatSpreadable%`
   are not reported by `Reflect.ownKeys`; no symbol key is, anywhere in the
   engine.
 - `'x' in win` for a non-exposed `x` answers `false` instead of throwing
   `SecurityError` — the `in` path cannot throw through this engine's
   boolean `has()`.
-- Other boxes on the `WindowProxy`/`Location` security table —
-  `MessageChannel`/`MessagePort`, out-of-process site isolation, and a
-  cached `[[CrossOriginPropertyDescriptorMap]]` (the spec memoizes the
-  wrapper functions; ours create one per `getOwnPropertyDescriptor` call,
-  identity differs from the child's function) — remain open.
+- `MessageChannel`/`MessagePort` now exist (Phase 61), but transfer lists,
+  structured cloning, cross-agent ports and `messageerror` delivery remain
+  open; out-of-process site isolation and a cached
+  `[[CrossOriginPropertyDescriptorMap]]` also remain open.
 - Named child navigables are reachable by name but do not appear in
   `[[OwnPropertyKeys]]`, per the spec; `Location`'s `ancestorOrigins`,
   `assign()`, `reload()` stay unexposed cross-origin.
@@ -5945,24 +5948,45 @@ unchanged.
   `w.hasOwnProperty('length')` itself throws, because reading the method
   cross-origin is not exposed.
 
-### 5. Verification
+### 5. Phase 61: child navigation and message ports
 
-`tests/cross_origin_windows.cpp` (new, standalone binary built and run by
+`navigate()` preserves its synchronous same-document fragment path. For every
+other target, it asks whether the target realm is still the live child of an
+iframe in its parent realm. If so, `request_child_frame_navigation()` reaches
+that iframe's existing `schedule_iframe_navigation()` pipeline with the
+already-resolved URL. This path wins over markup `srcdoc` and `src`, deliberately
+does **not** modify the iframe attribute, and therefore retains the existing
+sandbox parsing, resource/MIME loading, generation cancellation, load delay
+and parent load-event machinery. `JsInterpreter::navigate_document()` replaces
+the child document while retaining that browsing context's WindowProxy.
+
+`MessageChannel` owns two `MessagePortState` exotic objects. Each state tracks
+its owner realm by id, peer weak pointer, stable JS port object, FIFO pending
+values and start/close/task state. `postMessage(value)` enqueues on the peer;
+`onmessage` assignment or `start()` schedules asynchronous EventLoop delivery
+of `MessageEvent`s through the ordinary EventTarget dispatcher. `close()`
+clears its pending values and breaks its peer relationship. State tracing marks
+the stable port and queued JS values, while the task roots its target, so a
+queued delivery remains collector-visible. This is intentionally a same-agent,
+identity-preserving value channel, not structured clone or transfer; the
+optional transfer argument is currently ignored.
+
+### 6. Verification
+
+`tests/cross_origin_windows.cpp` (standalone binary built and run by
 `make test`) loads a parent at `https://app.example.test/index.html` with a
 cross-origin child at `https://other.example.test/child.html` (served from a
 temporary directory through `ResourceLoader::set_origin_root_for_testing`),
-the child with one named `srcdoc` grandchild. It asserts **80 checks**: the
-two-name `[[OwnPropertyKeys]]` lists, every descriptor shape, the
-`SecurityError` table for read/write/delete/define, the integrity-level and
-prototype refusal, `for…in`/spread/`Object.assign`/JSON containment, and the
-same-origin control (a `srcdoc` iframe, untouched). `tests/test_suite.cpp`
-is untouched (another open PR has it).
+the child with one named `srcdoc` grandchild. It asserts **110 checks**: the
+Phase 56 reflection and security table, `child.location`, `location.href`, and
+`location.replace()` cross-document navigation, direct navigation over both
+`src` and `srcdoc`, WindowProxy identity, unchanged iframe markup and continued
+cross-origin read refusal, plus MessageChannel asynchronous FIFO delivery,
+GC-visible queued values, EventTarget target/receiver behavior, delayed start
+and close-before/after-delivery behavior. `tests/test_suite.cpp` is untouched.
 
-Merged-tree verification (this branch, Release): `make test` — **198/198**
-suites + the 80 cross-origin checks; `js-conformance` **999/1014** (Everyday
-**90/90**); `dom-conformance` **669/669** (Everyday **68/68**);
-`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
-**7998/8009**, 11 fail as listed, 0 unlisted.
+Merged-tree verification after Phase 61 (Release): `make test` — **204/204**
+engine suites plus the **110/110** standalone cross-origin/channel checks.
 
 ---
 

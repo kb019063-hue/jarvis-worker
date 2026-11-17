@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 204 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 204 suites + 110 cross-origin/channel checks, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -1181,24 +1181,41 @@ The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
 a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
 60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
 
-### Cross-origin `Window` and `Location` reflection (Phase 56)
+### Cross-origin `Window` / `Location`, navigation and message ports (Phases 56 & 61)
 
-A script embedded in one origin could already not read a cross-origin frame
-(`SecurityError` on non-safelisted names, since Phase 42), but everything that
-*describes* the frame's window answered the ordinary way: `Object.keys`,
-`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
-described ordinary storage, `Object.defineProperty` wrote into it,
-`Object.freeze` flipped its cell, and `location` handed over the child's
-address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
-the cross-origin table of the HTML Standard instead: the window reports
-exactly its child-frame indices and the exposed names (`window`, `self`,
-`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
-`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
-`href` (writable, not readable cross-origin) and `replace()`, both refuse
-define/delete/integrity changes with `SecurityError`/`TypeError`, and
-`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
-and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
-finding 62.
+A script embedded in one origin cannot read a cross-origin frame (`SecurityError`
+on non-safelisted names), and Phase 56 made its *reflection* surface follow the
+cross-origin table of the HTML Standard: the window reports exactly its
+child-frame indices and exposed names (`window`, `self`, `location`, `close`,
+`closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`, `parent`,
+`postMessage`, then `then`), while `Location` exposes only `href` (writable,
+not readable cross-origin) and `replace()`. Define/delete/integrity changes
+refuse with `SecurityError`/`TypeError`, and `getPrototypeOf` answers `null`.
+Same-origin pages are untouched.
+
+Phase 61 makes the writable entries do useful work: setting `child.location`
+or `child.location.href`, and calling `child.location.replace(url)`, schedules
+a real nested-frame document navigation without changing the iframe's `src`
+markup. The child keeps its `WindowProxy` identity, but receives a new
+Document; the existing iframe loader continues to apply sandbox, MIME,
+origin-root and load-order rules.
+
+`new MessageChannel()` now creates two stable `MessagePort` EventTargets.
+`postMessage()` queues FIFO `message` events, `onmessage` starts a port,
+`start()` releases messages accumulated after `addEventListener`, and `close()`
+drops later messages. This is deliberately **same-agent messaging only**:
+message values are not structured-cloned, and the optional transfer argument is
+currently ignored (transferred ports are not implemented). That work remains
+with Worker structured cloning.
+
+`tests/cross_origin_windows.cpp`, run by `make test`, now has **110 checks**:
+reflection security, three cross-origin navigation entry points, direct
+navigation over both `src` and `srcdoc`, proxy identity, unchanged markup and
+continued cross-origin read refusal, plus asynchronous FIFO channel delivery,
+GC-visible queued values, ordinary EventTarget target/receiver behavior,
+delayed start and close-before/after-delivery behavior. The design and
+remaining limits are in
+`ARCHITECTURE.md`, Phase 61, and `AUDIT.md`, finding 67.
 
 ### String Unicode 17.0 normalization, full/locale case mapping, and CLDR 48 UCA collation (Phase 60)
 

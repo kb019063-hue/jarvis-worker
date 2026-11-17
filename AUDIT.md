@@ -59,7 +59,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
-| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62); `MessageChannel`/`MessagePort` and out-of-process site isolation remain open |
+| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62), while permitted child navigation and same-agent `MessageChannel`/`MessagePort` landed in Phase 61 (finding 67). Structured clone/transferred ports and out-of-process site isolation remain open |
 | 49 | `new.target` was the function that was running: an abstract class refused its own subclasses and `Reflect.construct(F, [], G)` did not name `G` inside `F`. `super()` dropped an object the parent's constructor returned, `this` could be bound twice or never, and a custom element compiled for older browsers could neither be made nor upgraded | **High** | ✅ Fixed (Phase 43); `this` before `super()`, `eval` in a function and private names remain |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 | 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
@@ -67,8 +67,9 @@ The rest are documented with enough detail to act on.
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
-| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
+| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. Phase 61 adds permitted non-fragment child navigation without widening reads. 110 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
 | 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
+| 67 | An allowed cross-origin `childWindow.location = url` / `Location.href = url` / `Location.replace(url)` with a non-fragment URL silently did nothing because `navigate()` only implemented fragments; no script-visible `MessageChannel` or `MessagePort` existed | **Medium (web-platform compatibility)** | ✅ Fixed (Phase 61): a live iframe child delegates permitted cross-document Location writes into its existing navigation scheduler without mutating `src` or replacing its WindowProxy. `MessageChannel` now supplies entangled EventTarget ports with queued FIFO same-agent messages, `start()`, `close()` and `onmessage`; transfer lists, structured cloning, cross-agent transport and meaningful `messageerror` remain open. `make test`: 204/204 engine suites plus 110/110 focused cross-origin/channel checks |
 
 ---
 
@@ -2855,9 +2856,10 @@ at its `24×18` intrinsic size and reports `24×18` from
 - **ES module workers:** `{ type: "module" }` is now explicitly refused with an
   error event instead of silently running classic JS; actual module worker
   execution waits for an ES module loader in the JS engine.
-- **Structured clone & messaging ports:** `postMessage` still serializes via
-  JSON (no `ArrayBuffer`, transferables, cyclic object graphs, `MessagePort`,
-  or `SharedWorker`).
+- **Structured clone & worker messaging ports:** worker `postMessage` still
+  serializes via JSON (no `ArrayBuffer`, transferables, cyclic object graphs,
+  transferred `MessagePort`, or `SharedWorker`). Phase 61 supplies only
+  same-agent `MessageChannel` / `MessagePort` values in a page realm.
 - **Defense-in-depth for process-wide registries:** `symbol_registry()` in
   `src/js/JsOps.cpp` and `s_registry` in `src/js/DomBindings.cpp` are still
   destroyed at static teardown; Phase 40 warms them before registering
@@ -3228,9 +3230,9 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
 
 **What is still open.** Cross-origin `Object.getOwnPropertyDescriptor` /
 `Reflect.ownKeys` filtering on `WindowProxy` was closed in Phase 56 (finding
-62); cross-origin `Location` navigation is limited to a fragment move,
-`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc`
-CSP inheritance, and process-level site isolation remain open.
+62), and Phase 61 adds permitted child `Location` navigation plus same-agent
+`MessageChannel` / `MessagePort`. Structured clone / transferable ports,
+`srcdoc` CSP inheritance, and process-level site isolation remain open.
 
 ---
 
@@ -4278,25 +4280,26 @@ L.pathname; L.origin; L.reload(); // same, plus a callable
   `getPrototypeOf` answers `null`; `instanceof` is `false`; `for…in`
   enumerates only the indices.
 - `location` joined the cross-origin attribute safelist it was missing
-  (`win.location = url` already navigated the child via the set path; reading
-  it threw `SecurityError` in error, and `'location' in win` was `false`).
+  (`win.location = url` reached the permitted set path; Phase 61 makes its
+  non-fragment target load the child document; reading it still throws
+  `SecurityError`, and `'location' in win` was `false`).
 
-**Verification.** `tests/cross_origin_windows.cpp` — **80 checks** over a
+**Verification.** `tests/cross_origin_windows.cpp` now has **110 checks** over a
 parent realm at `https://app.example.test` and a cross-origin child at
 `https://other.example.test` (served from a temporary origin root; the child
-has one named `srcdoc` grandchild), run by `make test`; `tests/test_suite.cpp`
-is untouched here. Full merged-tree verification (Release): `make test`
-**198/198**; `js-conformance` **999/1014**; `dom-conformance` **669/669**;
-`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
-**7998/8009** (11 fail as listed, 0 unlisted).
+has one named `srcdoc` grandchild), run by `make test`. It includes the Phase
+61 direct child Location paths over both `src` and `srcdoc`, continued
+cross-origin read refusal, plus asynchronous/GC-safe MessageChannel,
+EventTarget, start and close cases. `tests/test_suite.cpp` is untouched here.
+Merged-tree Release verification after Phase 61: `make test` **204/204** engine suites
+plus the **110/110** focused checks.
 
-**Still open.** Cross-document navigation (`childWin.location = url` with a
-non-fragment URL — `navigate()` is fragment-only by design); the three symbol
-keys in `Reflect.ownKeys` (no symbol key is reported anywhere in the engine);
-`in` on a non-exposed name answers `false` rather than throwing; a
-`[[CrossOriginPropertyDescriptorMap]]` cache (wrapper identities differ from
-the child's functions); `MessageChannel`/`MessagePort`; process-level site
-isolation.
+**Still open.** The three symbol keys in `Reflect.ownKeys` (no symbol key is
+reported anywhere in the engine); `in` on a non-exposed name answers `false`
+rather than throwing; a `[[CrossOriginPropertyDescriptorMap]]` cache (wrapper
+identities differ from the child's functions); process-level site isolation;
+and MessagePort transfer lists, structured cloning, cross-agent transport and
+meaningful `messageerror` dispatch.
 
 ---
 
@@ -4356,3 +4359,39 @@ These gaps accounted for all **71 remaining diffs** in `make diff-strings` (`50,
 **Still open.**
 - `Intl` namespace / `Intl.Collator` (the 4 remaining failures in Test262 `intl402/String/prototype/localeCompare` test `Intl.Collator` directly), along with `Intl.DateTimeFormat`, `Intl.NumberFormat`, and `Intl.Segmenter`.
 - Language-specific CLDR collation tailorings beyond the CLDR 48 root collation order and `-u-kf`/`-u-kn`/ECMA-402 options (e.g., Swedish `å`/`ä`/`ö` after `z`, German phonebook, Spanish traditional, Japanese kana quaternary order).
+
+---
+
+## 67. ✅ Allowed cross-origin child navigation was fragment-only, and message ports did not exist (Phase 61)
+
+**The hole.** The Phase 56 cross-origin table deliberately permits writing a
+child's `location` and `Location.href`, and calling `Location.replace()`, but
+all three met `navigate()`, which returned for every non-fragment target.
+Thus an allowed operation silently did nothing. Separately, pages could use
+`window.postMessage`, but could not construct a private entangled channel at
+all because `MessageChannel` and `MessagePort` were absent.
+
+**The fix.** A non-fragment Location target now asks whether its realm is the
+live child browsing context of an iframe. Only that verified relationship may
+call the existing iframe navigation scheduler, with the resolved target URL.
+The scheduler gives this direct request priority over markup `srcdoc`/`src`,
+does not change the iframe attribute, and relies on the pre-existing loader,
+sandbox and replacement path; `navigate_document()` retains the child
+WindowProxy. No new cross-origin read or reflection capability is granted.
+
+`MessageChannel` creates two entangled `MessagePort` EventTargets. A port owns
+a FIFO of pending values; `postMessage()` queues on the peer and delivery runs
+later through the ordinary `MessageEvent` / EventTarget path after `start()`
+or `onmessage`. `close()` drops queued messages and disconnects its peer.
+Collector tracing covers the port object and queued JS values, and task roots
+cover the delivery target. The deliberately bounded implementation is
+same-agent only: values retain identity, the optional transfer argument is
+currently ignored, structured clone is absent, and no failure mode currently
+emits `messageerror`.
+
+**Verification.** `make test` passes **204/204** engine suites and
+`tests/cross_origin_windows.cpp` passes **110/110** checks, including all three
+Location entry points, direct navigation over `srcdoc`, WindowProxy identity,
+unchanged iframe markup, continued cross-origin read refusal, asynchronous
+FIFO delivery, queued-value GC safety, ordinary EventTarget delivery, delayed
+start and close-before/after-delivery behavior.

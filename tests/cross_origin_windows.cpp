@@ -1,6 +1,5 @@
-// Cross-origin Window and Location reflection: what the parent realm of one
-// origin can see of the window it embedded cross-origin (HTML §7.2.1,
-// §7.2.3 and §7.2.4).
+// Cross-origin Window/Location security plus child navigation and same-agent
+// MessageChannel/MessagePort behavior (HTML §7.2.1, §7.2.3 and §7.2.4).
 //
 // A page at https://app.example.test embeds https://other.example.test/child.html,
 // served from a temporary directory through ResourceLoader's origin roots, so
@@ -69,6 +68,26 @@ int main() {
         std::ofstream child(child_dir / "child.html");
         child << "<!doctype html><iframe name=\"gamma\" srcdoc=\"<p>leaf</p>\"></iframe>";
     }
+    {
+        std::ofstream navigated(child_dir / "navigated.html");
+        navigated << "<!doctype html><script>parent.postMessage('navigated:' + location.pathname,"
+                     " 'https://app.example.test');</script>";
+    }
+    {
+        std::ofstream replaced(child_dir / "replaced.html");
+        replaced << "<!doctype html><script>parent.postMessage('replaced:' + location.pathname,"
+                    " 'https://app.example.test');</script>";
+    }
+    {
+        std::ofstream replacement(child_dir / "replacement.html");
+        replacement << "<!doctype html><script>parent.postMessage('replacement:' + location.pathname,"
+                       " 'https://app.example.test');</script>";
+    }
+    {
+        std::ofstream srcdoc_navigation(child_dir / "srcdoc-navigation.html");
+        srcdoc_navigation << "<!doctype html><script>parent.postMessage('srcdoc:' + location.pathname,"
+                          " 'https://app.example.test');</script>";
+    }
     ResourceLoader::set_origin_root_for_testing("https://other.example.test", child_dir.string());
 
     auto doc = std::make_shared<Document>();
@@ -82,6 +101,8 @@ int main() {
   window.L = window.w.location;
   window.same = document.getElementById('s').contentWindow;
   window.d = (o, k) => Object.getOwnPropertyDescriptor(o, k);
+  window.navigation_messages = [];
+  window.addEventListener('message', function(e) { navigation_messages.push(e.data); });
 </script>
 )html", true);
     js.notify_document_loaded();
@@ -218,11 +239,108 @@ int main() {
     expect_ok(js, "same-origin child finds 'document' in the chain",
               "'document' in same");
 
+    // -- Cross-origin navigations ------------------------------------------------
+    // The parent cannot read the child Location, so the newly loaded document
+    // proves navigation by posting its own pathname back to the parent.
+    js.eval("w.location = 'https://other.example.test/navigated.html#section';");
+    check("cross-origin Window.location assignment does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "cross-origin Window.location loads the target document",
+              "navigation_messages.join(',')", "navigated:/navigated.html");
+    expect_ok(js, "cross-origin navigation keeps WindowProxy identity",
+              "document.getElementById('x').contentWindow === w");
+    expect_eq(js, "cross-origin navigation leaves iframe src markup untouched",
+              "document.getElementById('x').getAttribute('src')", "https://other.example.test/child.html");
+
+    js.eval("L.href = 'https://other.example.test/replaced.html';");
+    check("cross-origin Location.href assignment does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "cross-origin Location.href loads the target document",
+              "navigation_messages.join(',')", "navigated:/navigated.html,replaced:/replaced.html");
+    js.eval("L.replace('https://other.example.test/replacement.html');");
+    check("cross-origin Location.replace does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "cross-origin Location.replace loads the target document",
+              "navigation_messages.join(',')",
+              "navigated:/navigated.html,replaced:/replaced.html,replacement:/replacement.html");
+    expect_err(js, "cross-origin Window reads stay blocked after navigation", "w.document", "SecurityError");
+    expect_err(js, "cross-origin Location reads stay blocked after navigation", "L.href", "SecurityError");
+    // A Location request must override the markup's srcdoc as well as src.
+    js.eval("same.location = 'https://other.example.test/srcdoc-navigation.html';");
+    check("srcdoc child Window.location assignment does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "child navigation takes precedence over iframe srcdoc",
+              "navigation_messages.join(',')",
+              "navigated:/navigated.html,replaced:/replaced.html,replacement:/replacement.html,srcdoc:/srcdoc-navigation.html");
+    expect_ok(js, "srcdoc child navigation keeps WindowProxy identity",
+              "document.getElementById('s').contentWindow === same");
+    expect_eq(js, "srcdoc child navigation leaves srcdoc markup untouched",
+              "document.getElementById('s').getAttribute('srcdoc')", "<p>same</p>");
+
+    // -- MessageChannel / MessagePort --------------------------------------------
+    expect_eq(js, "MessageChannel constructor is exposed", "typeof MessageChannel", "function");
+    js.eval(R"js(
+        window.port_log = [];
+        window.port_context = [];
+        window.channel = new MessageChannel();
+        channel.port1.onmessage = function(e) {
+          port_log.push(e.data.sequence + ':' + e.origin + ':' + e.ports.length);
+          port_context.push(this === channel.port1 && e.target === this && e.currentTarget === this);
+        };
+        channel.port2.postMessage({sequence: 'first'});
+        channel.port2.postMessage({sequence: 'second'});
+    )js");
+    check("MessageChannel construction and postMessage do not throw", !js.last_eval_failed());
+    expect_eq(js, "MessagePort delivery is asynchronous", "port_log.join(',')", "");
+    js.eval("gc();");
+    check("MessagePort queued values survive collection", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_ok(js, "MessageChannel ports are stable MessagePort instances",
+              "channel.port1 === channel.port1 && channel.port1 instanceof MessagePort");
+    expect_eq(js, "MessagePort delivers queued messages in order",
+              "port_log.join(',')", "first::0,second::0");
+    expect_eq(js, "MessagePort dispatch has normal EventTarget receiver and target",
+              "port_context.join(',')", "true,true");
+
+    js.eval(R"js(
+        window.delayed_log = [];
+        window.delayed_target = false;
+        window.delayed_channel = new MessageChannel();
+        delayed_channel.port1.addEventListener('message', function(e) {
+          delayed_log.push(e.data);
+          delayed_target = e.target === delayed_channel.port1 && e.currentTarget === delayed_channel.port1;
+        });
+        delayed_channel.port2.postMessage('held-until-start');
+    )js");
+    check("MessagePort addEventListener setup does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "MessagePort waits for start after addEventListener", "delayed_log.join(',')", "");
+    js.eval("delayed_channel.port1.start();");
+    check("MessagePort.start does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "MessagePort.start releases queued messages", "delayed_log.join(',')", "held-until-start");
+    expect_ok(js, "MessagePort addEventListener dispatch has its ordinary target",
+              "delayed_target === true");
+    js.eval("delayed_channel.port1.close(); delayed_channel.port2.postMessage('dropped');");
+    check("MessagePort.close does not throw", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "a closed MessagePort drops later messages", "delayed_log.join(',')", "held-until-start");
+    js.eval(R"js(
+        window.closing_log = [];
+        window.closing_channel = new MessageChannel();
+        closing_channel.port1.onmessage = function(e) { closing_log.push(e.data); };
+        closing_channel.port2.postMessage('queued-then-closed');
+        closing_channel.port1.close();
+    )js");
+    check("MessagePort can close before a queued delivery", !js.last_eval_failed());
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    expect_eq(js, "MessagePort.close drops a queued delivery", "closing_log.join(',')", "");
+
     ResourceLoader::clear_origin_roots_for_testing();
     std::error_code ec;
     fs::remove_all(child_dir, ec);
 
-    std::cout << "Cross-origin Window/Location suite: " << g_checks << " checks, "
+    std::cout << "Cross-origin Window/Location and MessageChannel suite: " << g_checks << " checks, "
               << g_failures << " failure(s).\n";
     return g_failures == 0 ? 0 : 1;
 }

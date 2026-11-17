@@ -11853,6 +11853,72 @@ static const uint8_t kWebpLossy[] = {
     0x5F, 0xC9, 0x1F, 0xA0, 0x5E, 0x90, 0x7F, 0xE0, 0x37, 0x5F, 0x16, 0xCB, 0xE0, 0x00,
 };
 
+// kWebpLossy16x16: 244 bytes, a lossy VP8 file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpLossy16x16[] = {
+    0x52, 0x49, 0x46, 0x46, 0xEC, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
+    0xE0, 0x00, 0x00, 0x00, 0x30, 0x03, 0x00, 0x9D, 0x01, 0x2A, 0x10, 0x00, 0x10, 0x00, 0x00, 0x80,
+    0x0E, 0x25, 0xB0, 0x02, 0x74, 0xBA, 0x01, 0xF8, 0x00, 0x80, 0x0D, 0x22, 0x05, 0x24, 0x02, 0x8F,
+    0x23, 0x30, 0x32, 0x87, 0x74, 0x00, 0x00, 0xFE, 0xF7, 0xCF, 0x13, 0x2B, 0x98, 0x69, 0xFC, 0x74,
+    0xCD, 0x70, 0xE1, 0x30, 0x1B, 0xAD, 0x0F, 0xA5, 0x1E, 0x96, 0xDD, 0xDD, 0xD2, 0x8A, 0xA7, 0x41,
+    0xD5, 0x09, 0x76, 0xFC, 0x78, 0x29, 0xBB, 0xF6, 0x8F, 0xEF, 0xF8, 0xEC, 0xDA, 0x69, 0x39, 0x0F,
+    0x13, 0x8B, 0x84, 0xA7, 0xF1, 0x97, 0xF8, 0xA1, 0x27, 0x28, 0x9E, 0xDE, 0x33, 0x5D, 0xFD, 0xD4,
+    0x3F, 0x66, 0x76, 0x8F, 0xD5, 0x74, 0xA8, 0x8A, 0xEE, 0xFC, 0xC1, 0xB0, 0xF7, 0x45, 0x03, 0x47,
+    0xD2, 0x6E, 0x1B, 0xD2, 0xEF, 0x4B, 0xCE, 0x7E, 0x55, 0xD9, 0x2D, 0xBD, 0xB7, 0x11, 0x77, 0x70,
+    0x0E, 0xB4, 0x27, 0xC7, 0x11, 0x74, 0xA9, 0x1D, 0x9B, 0x4B, 0x99, 0xEA, 0x6D, 0x17, 0x2E, 0xB2,
+    0x65, 0xBA, 0xFB, 0xFE, 0xD2, 0xCB, 0xB4, 0x97, 0xBF, 0xFA, 0xF4, 0xBD, 0x26, 0x77, 0x80, 0x32,
+    0x9F, 0xA3, 0xC9, 0x8E, 0x5A, 0xBD, 0x9E, 0xA6, 0x9B, 0x7F, 0x8F, 0x7E, 0xDB, 0x2D, 0xC5, 0xFF,
+    0x93, 0xFF, 0x1F, 0xD5, 0x5D, 0x42, 0xFF, 0xFE, 0x71, 0xB3, 0xFF, 0x89, 0x87, 0xBE, 0x0F, 0x5F,
+    0xF7, 0x6C, 0x1F, 0xEC, 0xFF, 0xA6, 0x9A, 0xE9, 0xD3, 0x37, 0xF7, 0x55, 0x1F, 0xF8, 0x98, 0xFF,
+    0x5E, 0xFA, 0x67, 0x3F, 0x48, 0x0D, 0x1E, 0x7F, 0xFD, 0x8E, 0xB7, 0xFC, 0x76, 0xEA, 0x7D, 0x31,
+    0x40, 0x00, 0x00, 0x00,
+};
+
+static const uint32_t kExpectLossy16x16[] = {
+    0xFFEF20FF, 0xFFDF0EF9, 0xFFEA15FA, 0xFFE70DED, 0xFFF00EEE, 0xFFF00FEA, 0xFFEC16E6, 0xFFEE25EF,
+    0xFFE328F0, 0xFFEC39FC, 0xFFD929E4, 0xFFD92CE1, 0xFFDA33E4, 0xFFDA30E2, 0xFFE531E8, 0xFFD41BD5,
+    0xFFD513F4, 0xFFDB15F5, 0xFFD408E7, 0xFFE00FEC, 0xFFE710E8, 0xFFF01AED, 0xFFFB2CF8, 0xFFFB39FE,
+    0xFFE536F5, 0xFFE644FA, 0xFFCE32DF, 0xFFBC23CB, 0xFFCE33D9, 0xFFD437DE, 0xFFD533DE, 0xFFDF38E7,
+    0xFFC018E5, 0xFFC516E5, 0xFFD61BF0, 0xFFC908DB, 0xFFCC0CD5, 0xFFDC1DE1, 0xFFF838FF, 0xFFF241FF,
+    0xFFCF3AE9, 0xFFD959FA, 0xFFBB48DE, 0xFFB946D8, 0xFFB93ACE, 0xFFBD3ACF, 0xFFC544DA, 0xFFC341DA,
+    0xFFBF2CE6, 0xFFBB24E0, 0xFFC21EE0, 0xFFBE18DB, 0xFFB111CB, 0xFFC525DD, 0xFFE745FF, 0xFFE146FC,
+    0xFFCC48ED, 0xFFC859F1, 0xFFAC4FD9, 0xFFA74DD2, 0xFFAE46CD, 0xFFBB51D9, 0xFFBC59E1, 0xFFA443CD,
+    0xFFCD4BF4, 0xFFC341EA, 0xFFBF3DE4, 0xFFB93CE3, 0xFFA632DB, 0xFFA12DD8, 0xFFC246F2, 0xFFCC4EF8,
+    0xFFCB4EF1, 0xFFC453EB, 0xFFB95BE6, 0xFFA24DD0, 0xFFB861E2, 0xFFC974F5, 0xFF9D52D2, 0xFF9C55D6,
+    0xFFBD58EC, 0xFFCC67FB, 0xFFB04DDE, 0xFFAB4CE0, 0xFFA34CE7, 0xFF9540DE, 0xFFA44DEA, 0xFFA94BEA,
+    0xFFAF45E4, 0xFFB047E1, 0xFFA047D5, 0xFFA458DD, 0xFFA060DE, 0xFFB077F3, 0xFF9E67E5, 0xFF8550CF,
+    0xFFB477F0, 0xFFB676F2, 0xFFB46FF2, 0xFFA963EA, 0xFFA65FEE, 0xFF9350E1, 0xFF945CEF, 0xFF9258ED,
+    0xFF964BE8, 0xFF9543DE, 0xFF9546DA, 0xFFA162EC, 0xFF8863E1, 0xFF9D82FD, 0xFFA17EFE, 0xFF7F57DB,
+    0xFF9C8AEE, 0xFFB09AFF, 0xFFA085F4, 0xFFA784FB, 0xFF9F76F3, 0xFFA37EFE, 0xFF9A88FF, 0xFF8976FA,
+    0xFF7D59E2, 0xFF8759E6, 0xFF9663EF, 0xFF825CE2, 0xFF7E73F0, 0xFF7C78F4, 0xFF8271F2, 0xFF8974F8,
+    0xFF7990E5, 0xFF93A9FF, 0xFF8BA1F9, 0xFF8A98F5, 0xFF9A9EFF, 0xFF9196FF, 0xFF798DF4, 0xFF758BF1,
+    0xFF91A0FF, 0xFF8088F2, 0xFF7272E4, 0xFF6B6CE2, 0xFF5D6BE3, 0xFF6B7CF6, 0xFF777EFC, 0xFF7F81FF,
+    0xFF78B9FF, 0xFF6FB6FC, 0xFF61B0EC, 0xFF65B2EC, 0xFF6CABEC, 0xFF7BB6FB, 0xFF6DB1FA, 0xFF5399E4,
+    0xFF68AAF3, 0xFF81BAFF, 0xFF7AACFF, 0xFF6391F1, 0xFF5E8DF5, 0xFF5B86F5, 0xFF5F80F5, 0xFF6F8CFF,
+    0xFF49B4F9, 0xFF51CAFF, 0xFF3DCFEB, 0xFF44DAE7, 0xFF56DDE6, 0xFF50D0DE, 0xFF52D1F1, 0xFF48C3EE,
+    0xFF4EC3F2, 0xFF68D6FF, 0xFF6CCDFF, 0xFF55B1F4, 0xFF4BA3F0, 0xFF4F9EF7, 0xFF5093F7, 0xFF5A96FF,
+    0xFF26ADEB, 0xFF33C9F3, 0xFF2ADFE9, 0xFF2AE9DD, 0xFF36EBD6, 0xFF43F0E1, 0xFF3FE4EC, 0xFF3DD8EF,
+    0xFF3AD0ED, 0xFF52E3FF, 0xFF52DCFF, 0xFF59DBFF, 0xFF54CDFF, 0xFF4CBEFF, 0xFF43ACFF, 0xFF48AAFF,
+    0xFF2CC3F9, 0xFF33D5FA, 0xFF2BE3E7, 0xFF24EBDA, 0xFF27F1DD, 0xFF3AFEEE, 0xFF3DF1F0, 0xFF32DEE6,
+    0xFF3BE1F2, 0xFF49EDFF, 0xFF29CAEA, 0xFF37D5F9, 0xFF45DEFF, 0xFF42D8FF, 0xFF34C5FF, 0xFF2BBAFF,
+    0xFF17C3E7, 0xFF1CCFE5, 0xFF18DAD4, 0xFF1DEBD6, 0xFF18EED6, 0xFF29FDEA, 0xFF2FF8F2, 0xFF22E0E4,
+    0xFF26DFEB, 0xFF29DEF3, 0xFF30E7FF, 0xFF16CCE9, 0xFF32E4FF, 0xFF3BECFF, 0xFF23D4FF, 0xFF12C5F4,
+    0xFF17DCE4, 0xFF15DEDC, 0xFF00CFB8, 0xFF14EACB, 0xFF14EFCE, 0xFF13F2D9, 0xFF1AFBF3, 0xFF1AF4FA,
+    0xFF0ED8E8, 0xFF22E7FD, 0xFF07D0E5, 0xFF0ED9F2, 0xFF07CBEB, 0xFF27EAFF, 0xFF29F4FF, 0xFF13E0F6,
+    0xFF11E4DF, 0xFF27FBEF, 0xFF17EFD1, 0xFF01DEB8, 0xFF04E3BC, 0xFF05E9CC, 0xFF12FEF5, 0xFF13F8FF,
+    0xFF23F6FF, 0xFF0CD7F0, 0xFF10E3F7, 0xFF0BE0F6, 0xFF16E2FF, 0xFF08D4F4, 0xFF17EDFD, 0xFF1CF8FF
+};
+
+static const uint32_t kExpectLossy8x8[] = {
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+};
+
 static const uint32_t kExpect1x1[] = {
     0xFF123456
 };
@@ -11991,13 +12057,24 @@ TEST(webp_lossless_decodes_every_transform) {
 TEST(webp_unsupported_and_malformed_input_is_refused) {
     using namespace litebird;
 
-    // Lossy VP8 is a different codec: refuse it rather than approximate it.
-    auto lossy = WebPDecoder::decode_detailed(kWebpLossy, sizeof(kWebpLossy));
-    assert(!lossy.ok());
-    assert(lossy.status == WebPDecoder::Status::UnsupportedLossy);
-    assert(lossy.error.find("lossy") != std::string::npos);
-    assert(WebPDecoder::probe(kWebpLossy, sizeof(kWebpLossy)) == WebPDecoder::Status::UnsupportedLossy);
-    assert(WebPDecoder::decode(kWebpLossy, sizeof(kWebpLossy)) == nullptr);
+    // A lossy stream whose payload is cut short must be reported as truncated,
+    // not decoded to a half-finished picture.
+    {
+        const size_t chunk_at = 20;  // the first byte of the `VP8 ` payload
+        for (size_t cut : {chunk_at + 1, chunk_at + 8, chunk_at + 20, sizeof(kWebpLossy) - 1}) {
+            auto res = WebPDecoder::decode_detailed(kWebpLossy, cut);
+            assert(!res.ok());
+            assert(res.status == WebPDecoder::Status::Truncated);
+        }
+        // Setting the frame-type bit of the frame tag asks for a frame that
+        // predicts from a previous one, which a still image does not have.
+        std::vector<uint8_t> not_a_key_frame(kWebpLossy, kWebpLossy + sizeof(kWebpLossy));
+        not_a_key_frame[chunk_at] = static_cast<uint8_t>(not_a_key_frame[chunk_at] | 0x01u);
+        auto res = WebPDecoder::decode_detailed(not_a_key_frame.data(), not_a_key_frame.size());
+        assert(!res.ok());
+        assert(res.status == WebPDecoder::Status::Corrupt);
+        assert(res.error.find("inter-coded") != std::string::npos);
+    }
 
     // Animated WebP: the frames are VP8/VP8L images on a canvas, which is a
     // compositing job this decoder does not do.
@@ -12051,6 +12128,157 @@ TEST(webp_unsupported_and_malformed_input_is_refused) {
     auto empty_stream = WebPDecoder::decode_detailed(header_only, sizeof(header_only));
     assert(!empty_stream.ok());
     assert(empty_stream.status == WebPDecoder::Status::Truncated);
+}
+
+TEST(webp_lossy_vp8_decodes_bit_exactly) {
+    using namespace litebird;
+
+    // A flat 8x8 lossy stream: one macroblock, DC prediction, no residuals worth
+    // coding, so every pixel is the same colour libwebp produces.
+    check_webp_pixels(kWebpLossy, sizeof(kWebpLossy), kExpectLossy8x8, 8, 8, "lossy flat 8x8");
+    auto flat = WebPDecoder::decode_detailed(kWebpLossy, sizeof(kWebpLossy));
+    assert(flat.ok() && flat.lossy);
+    assert(WebPDecoder::probe(kWebpLossy, sizeof(kWebpLossy)) == WebPDecoder::Status::Ok);
+
+    // A 16x16 plasma at quality 92: 4x4 prediction modes, real coefficients, and
+    // a loop filter that has something to smooth. Expected pixels are libwebp's.
+    check_webp_pixels(kWebpLossy16x16, sizeof(kWebpLossy16x16), kExpectLossy16x16, 16, 16, "lossy 16x16");
+    auto textured = WebPDecoder::decode_detailed(kWebpLossy16x16, sizeof(kWebpLossy16x16));
+    assert(textured.ok() && textured.lossy);
+
+    // A lossless image is not marked lossy, and the two must not be confused.
+    auto lossless = WebPDecoder::decode_detailed(kWebp1x1, sizeof(kWebp1x1));
+    assert(lossless.ok() && !lossless.lossy);
+
+    // Two decodes of the same bytes agree, and the generic entry point that
+    // <img> uses reaches the same pixels.
+    auto again = WebPDecoder::decode(kWebpLossy16x16, sizeof(kWebpLossy16x16));
+    assert(again != nullptr && again->pixels == textured.image->pixels);
+    std::vector<uint8_t> bytes(kWebpLossy16x16, kWebpLossy16x16 + sizeof(kWebpLossy16x16));
+    auto via_decoder = ImageDecoder::decode(bytes, "image/webp");
+    assert(via_decoder != nullptr && via_decoder->pixels == textured.image->pixels);
+}
+
+TEST(webp_lossy_alpha_plane_and_container_consistency) {
+    using namespace litebird;
+
+    // Build a `VP8X` + `ALPH` + `VP8 ` file around the flat 8x8 payload so the
+    // alpha plane is the only thing that varies. Chunk sizes and the RIFF size
+    // are computed here rather than copied, which is also what keeps a mismatch
+    // from hiding behind the decoder's truncation check.
+    const auto append_chunk = [](std::vector<uint8_t>& out, const char* fourcc,
+                                 const std::vector<uint8_t>& payload) {
+        out.insert(out.end(), fourcc, fourcc + 4);
+        const uint32_t size = static_cast<uint32_t>(payload.size());
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.push_back(static_cast<uint8_t>((size >> shift) & 0xFFu));
+        }
+        out.insert(out.end(), payload.begin(), payload.end());
+        if ((payload.size() & 1u) != 0) out.push_back(0);
+    };
+    const auto build = [&](int alph_header, const std::vector<uint8_t>& alph_payload) {
+        std::vector<uint8_t> vp8(kWebpLossy + 8 + 12, kWebpLossy + sizeof(kWebpLossy));  // payload only
+        std::vector<uint8_t> vp8x = {0x10, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00};
+        std::vector<uint8_t> alph;
+        alph.push_back(static_cast<uint8_t>(alph_header));
+        alph.insert(alph.end(), alph_payload.begin(), alph_payload.end());
+        std::vector<uint8_t> out = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+        append_chunk(out, "VP8X", vp8x);
+        append_chunk(out, "ALPH", alph);
+        append_chunk(out, "VP8 ", vp8);
+        const uint32_t riff_size = static_cast<uint32_t>(out.size() - 8);
+        for (int shift = 0; shift < 32; shift += 8) {
+            out[4 + shift / 8] = static_cast<uint8_t>((riff_size >> shift) & 0xFFu);
+        }
+        return out;
+    };
+
+    // An unfiltered plane: row y, column x holds `16 * y + x`.
+    std::vector<uint8_t> plane(64);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) plane[static_cast<size_t>(y * 8 + x)] = static_cast<uint8_t>(16 * y + x);
+    }
+    std::vector<uint8_t> file = build(0x00, plane);  // compression 0, filter 0
+    auto res = WebPDecoder::decode_detailed(file.data(), file.size());
+    assert(res.ok() && res.lossy);
+    assert(res.image->width == 8 && res.image->height == 8);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const uint32_t pixel = res.image->get_pixel(x, y);
+            const uint32_t want_alpha = static_cast<uint32_t>(16 * y + x) << 24;
+            assert((pixel & 0xFF000000u) == want_alpha);
+            // The colour channels are the ones the same payload decodes to alone.
+            assert((pixel & 0x00FFFFFFu) == (kExpectLossy8x8[0] & 0x00FFFFFFu));
+        }
+    }
+
+    // The encoder stores `value - predictor` modulo 256, and the three spatial
+    // filters differ only in the predictor they invert. Every one of them falls
+    // back to the horizontal filter on the first row, where the horizontal one's
+    // first pixel predicts from the pixel above it (libwebp's unfilter starts
+    // from `prev[0]`, not from zero).
+    const auto forward_filter = [&](int kind) {
+        std::vector<uint8_t> out(plane.size(), 0);
+        const auto at = [&](int y, int x) { return static_cast<int>(plane[static_cast<size_t>(y * 8 + x)]); };
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                int pred = 0;
+                if (y == 0) {
+                    pred = x == 0 ? 0 : at(0, x - 1);                       // horizontal fallback
+                } else if (kind == 1) {
+                    pred = x == 0 ? at(y - 1, 0) : at(y, x - 1);            // left
+                } else if (kind == 2) {
+                    pred = at(y - 1, x);                                    // above
+                } else {
+                    const int left = x == 0 ? at(y - 1, 0) : at(y, x - 1);  // left + above - above-left
+                    pred = left + at(y - 1, x) - (x == 0 ? at(y - 1, 0) : at(y - 1, x - 1));
+                }
+                out[static_cast<size_t>(y * 8 + x)] = static_cast<uint8_t>((at(y, x) - pred) & 0xFF);
+            }
+        }
+        return out;
+    };
+    const auto check_plane = [&](const std::vector<uint8_t>& bytes, const char* what) {
+        auto filtered_res = WebPDecoder::decode_detailed(bytes.data(), bytes.size());
+        assert(filtered_res.ok());
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                const uint32_t pixel = filtered_res.image->get_pixel(x, y);
+                const uint32_t want_alpha = static_cast<uint32_t>(16 * y + x) << 24;
+                if ((pixel & 0xFF000000u) != want_alpha) {
+                    std::fprintf(stderr, "%s: alpha at %d,%d is %u, expected %d\n", what, x, y,
+                                 (pixel >> 24) & 0xFFu, 16 * y + x);
+                    assert(false);
+                }
+            }
+        }
+    };
+    for (const int filter_kind : {1, 2, 3}) {
+        const uint8_t header = static_cast<uint8_t>(filter_kind << 2);
+        check_plane(build(header, forward_filter(filter_kind)),
+                    filter_kind == 1 ? "horizontal filter" : filter_kind == 2 ? "vertical filter" : "gradient filter");
+    }
+
+    // A plane that is too short for the picture is corrupt, not half-alpha.
+    std::vector<uint8_t> short_plane = build(0x00, std::vector<uint8_t>(63, 0x80));
+    auto short_res = WebPDecoder::decode_detailed(short_plane.data(), short_plane.size());
+    assert(!short_res.ok());
+    assert(short_res.status == WebPDecoder::Status::Corrupt);
+    assert(short_res.error.find("size") != std::string::npos);
+
+    // Level-reduction preprocessing re-quantised the plane when the file was
+    // written and would need the dequantisation table to undo: refuse it.
+    std::vector<uint8_t> preprocessed = build(0x10, plane);  // preprocessing 1
+    auto pre = WebPDecoder::decode_detailed(preprocessed.data(), preprocessed.size());
+    assert(!pre.ok());
+    assert(pre.status == WebPDecoder::Status::UnsupportedAlpha);
+    assert(pre.error.find("level-reduction") != std::string::npos);
+
+    // Reserved header bits are a contradiction, not something to ignore.
+    std::vector<uint8_t> reserved = build(0x40, plane);
+    auto reserved_res = WebPDecoder::decode_detailed(reserved.data(), reserved.size());
+    assert(!reserved_res.ok());
+    assert(reserved_res.status == WebPDecoder::Status::Corrupt);
 }
 
 TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
@@ -15918,6 +16146,9 @@ int main() {
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
     RUN_TEST(webp_lossless_decodes_every_transform);
     RUN_TEST(webp_unsupported_and_malformed_input_is_refused);
+    // Phase 57: lossy WebP, bit-exact against libwebp.
+    RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
+    RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);

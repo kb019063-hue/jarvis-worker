@@ -4162,12 +4162,11 @@ was a 1x1 image whose alpha literal decoded as "corrupt" while the palette entry
 three bits later — `#123456` — came out right, which is what pointed at the
 missing rule rather than at an off-by-one in the container.
 
-**Refusals rather than wrong pictures.** Lossy `VP8` (a keyframe of the VP8
-video codec: macroblock prediction, DCT, loop filter) is reported as
-`UnsupportedLossy`, animated WebP (`ANIM`/`ANMF`) as `UnsupportedAnimation`, a
-short file as `Truncated`, and a dimension or a decoded-pixel budget past the
-limit as `TooLarge`. `WebPDecoder::probe()` returns the same classification
-without decoding.
+**Refusals rather than wrong pictures.** Animated WebP (`ANIM`/`ANMF`) is
+reported as `UnsupportedAnimation`, a short file as `Truncated`, and a dimension
+or a decoded-pixel budget past the limit as `TooLarge`; lossy `VP8` was
+`UnsupportedLossy` until Phase 57 decoded it and took the status out.
+`WebPDecoder::probe()` returns the same classification without decoding.
 
 **Verification.** `make verify-media` gained 30 checks (63 in total): 17
 generated lossless images — palettes of 2, 4, 16 and 256 colours, alpha ramps
@@ -4193,10 +4192,10 @@ dimension bomb, a header-only stream). The rest of the scoreboard is unchanged:
 differ, `make diff-xml` 0 DIFFER and 3000/3000 round trips, `make deep` 1332
 runs 0 failed, `make asan` green.
 
-**Still open.** The lossy `VP8` codec, animated WebP (frame compositing and
-disposal), AVIF (an AV1 still image, a different codec entirely), and an
-`ALPH` chunk, which only accompanies a lossy image and is therefore refused
-with it.
+**Still open.** Animated WebP (frame compositing and disposal) and AVIF (an
+AV1 still image, a different codec entirely). The lossy `VP8` codec and the
+`ALPH` chunk that only accompanies a lossy image were closed by Phase 57:
+[`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md).
 
 ---
 
@@ -4321,7 +4320,7 @@ isolation.
 
 **Verification.**
 
-- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make test`: **201/201** unit suites passed at the time in both Release and ASan+UBSan (`build-asan/test_suite`; 208/208 after the phases merged since), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
 - `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **1017/1017**.
 - `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
 - Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.

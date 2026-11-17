@@ -2,6 +2,7 @@
 
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include <algorithm>
 #include <cctype>
@@ -217,7 +218,8 @@ JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviv
     if (stack_is_exhausted()) js_throw_range_error("JSON is nested too deeply");
     JsValue value = holder.get_property(key);
     if (value.is_object_like() && !value.is_function()) {
-        std::vector<std::string> keys = value.own_keys();
+        std::vector<std::string> keys;
+        if (!litebird::dom::cross_origin_own_keys(value, false, keys)) keys = value.own_keys();
         for (const auto& child : keys) {
             JsValue revived = internalize(value, child, reviver);
             if (revived.is_undefined()) value.delete_property(child);
@@ -352,7 +354,12 @@ public:
                 out += ']';
             }
         } else {
-            std::vector<std::string> keys = m_has_allow_list ? m_allow_list : value.own_keys();
+            std::vector<std::string> keys;
+            if (m_has_allow_list) {
+                keys = m_allow_list;
+            } else if (!litebird::dom::cross_origin_own_keys(value, false, keys)) {
+                keys = value.own_keys();
+            }
             bool any = false;
             out += '{';
             for (const auto& child : keys) {

@@ -1,3 +1,4 @@
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/EventLoop.hpp"
@@ -682,6 +683,12 @@ JsValue js_add(const JsValue& a, const JsValue& b) {
 bool js_instance_of(const JsValue& value, const JsValue& constructor) {
     if (!constructor.is_function()) js_throw_type_error("Right-hand side of 'instanceof' is not callable");
     if (!value.is_object_like()) return false;
+    {
+        // A cross-origin WindowProxy or Location has no prototype (HTML
+        // §7.2.3.1), so it can never be `instanceof` anything.
+        std::vector<std::string> exposed;
+        if (litebird::dom::cross_origin_own_keys(value, true, exposed)) return false;
+    }
     JsValue proto = constructor.get_property("prototype");
     // A `prototype` that is there and is not an object is a TypeError, as the
     // language has it. One that is not there at all still answers false. The

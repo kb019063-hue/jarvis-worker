@@ -56,6 +56,7 @@ SRCS = src/common/Color.cpp \
        src/js/BuiltinsObject.cpp \
        src/js/BuiltinsArray.cpp \
        src/js/BuiltinsString.cpp \
+       src/js/StringUnicodeTables.cpp \
        src/js/BuiltinsNumber.cpp \
        src/js/BuiltinsCollections.cpp \
        src/js/BuiltinsJson.cpp \
@@ -100,6 +101,7 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
+CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
@@ -113,7 +115,7 @@ XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 7998
+WPT_FLOOR ?= 9538
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -125,10 +127,10 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. With Phases 37, 43, 44 and 45 together
-# 973 of 989 pass under ASan and 974 in Release, which is what the CI floor
-# requires. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 997
+# case that the normal build passes. With Phases 37, 43, 44, 45, 55, 59, and 60
+# together, 1019 of 1034 pass under ASan and 1020 in Release (which is what
+# the CI floor requires). Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 1018
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -138,11 +140,11 @@ DOM_ASAN_FLOOR ?= 669
 STRING_STRESS_SRCS = src/js/JsString.cpp tests/js_string_stress_main.cpp
 STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-pointer
 
-# How many results of the string grid may differ from Node's. Every one of them
-# today is Unicode data the engine does not have (collation, normalization,
-# some case mappings); lower this as that data arrives. (Phase 55 removed all
-# 24 \p{L} RegExp mismatches, dropping this ceiling from 95 to 71.)
-STRING_DIFF_CEILING ?= 71
+# How many results of the string grid may differ from Node's. Phase 55 removed
+# the 24 \p{L} RegExp mismatches (95 -> 71); Phase 60 landed Unicode 17.0
+# normalization, full/locale case mapping, and CLDR 48 root collation, bringing
+# all 50,580 results to 0 diffs against Node.js.
+STRING_DIFF_CEILING ?= 0
 
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:
 # how many `make deep` runs, and how many the sanitizer build runs. The
@@ -151,7 +153,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -174,6 +176,10 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
+$(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/cross_origin_windows.cpp -o $@
+
 $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
@@ -182,8 +188,9 @@ $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
+	@./$(CROSS_ORIGIN_TARGET)
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
@@ -240,11 +247,12 @@ url-conformance: $(TARGET)
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
 
-## The web-platform-tests in tests/wpt (dom/nodes and domparsing), the tests
-## browsers are tested with, run with their own testharness.js. Needs nothing
-## but the binary. Fails when fewer than the floor pass, when a subtest fails
-## that tests/wpt/expected-failures.txt does not list, when a listed one
-## passes, and when a file differs from tests/wpt/MANIFEST.txt.
+## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
+## Flexbox parsing suites), the tests browsers are tested with, run with their
+## own testharness.js. Needs nothing but the binary. Fails when fewer than
+## the floor pass, when a subtest fails that tests/wpt/expected-failures.txt
+## does not list, when a listed one passes, and when a file differs from
+## tests/wpt/MANIFEST.txt.
 wpt: $(TARGET)
 	@$(WPT) --min-pass $(WPT_FLOOR)
 
@@ -268,6 +276,12 @@ diff-strings: $(TARGET)
 ## duplicate named capturing groups, and RegExp.escape().
 verify-regexp: $(TARGET)
 	@python3 tools/conformance/verify_regexp.py --binary $(TARGET)
+
+## Exhaustive all-1,114,112 code-point sweep + curated/seeded differential fuzz
+## verification of Unicode 17.0 String normalize(), full/locale case mapping,
+## and CLDR 48 root UCA localeCompare() against Node.js.
+verify-string-unicode: $(TARGET)
+	@python3 tools/conformance/verify_string_unicode.py --binary $(TARGET)
 
 ## Random pages, a few dozen misnested tags each, parsed by Litebird and by
 ## parse5 (an independent HTML parser), trees compared: 1,500 pages of each of
@@ -325,6 +339,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_string_unicode.py --binary build-asan/litebird --fuzz 400 --skip-node --skip-full-sweep
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)

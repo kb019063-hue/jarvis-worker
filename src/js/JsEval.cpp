@@ -9,6 +9,7 @@
 
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Generator.hpp"
 #include "litebird/js/Heap.hpp"
@@ -99,13 +100,18 @@ ScopeStack& active_scopes() {
 }
 
 /// Lists `env` as active for the lifetime of this object. The caller keeps the
-/// scope alive; this only makes it visible to the collector.
+/// scope alive; this only makes it visible to the collector. Passing nullptr
+/// is a no-op so callers can conditionally root lexical loop scopes.
 struct EnvScope {
     ScopeStack& stack;
-    explicit EnvScope(const std::shared_ptr<JsEnvironment>& env) : stack(active_scopes()) {
-        stack.scopes.push_back(env.get());
+    bool pushed{false};
+    explicit EnvScope(const std::shared_ptr<JsEnvironment>& env)
+        : stack(active_scopes()), pushed(env != nullptr) {
+        if (pushed) stack.scopes.push_back(env.get());
     }
-    ~EnvScope() { stack.scopes.pop_back(); }
+    ~EnvScope() {
+        if (pushed) stack.scopes.pop_back();
+    }
     EnvScope(const EnvScope&) = delete;
     EnvScope& operator=(const EnvScope&) = delete;
 };
@@ -211,11 +217,26 @@ private:
     bool m_done{false};
 };
 
+[[noreturn]] void throw_tdz_error(const std::string& name) {
+    if (name == "this") {
+        js_throw_error(JsErrorKind::ReferenceError,
+                       "Must call super constructor in derived class before accessing 'this' or returning from "
+                       "derived constructor");
+    }
+    js_throw_error(JsErrorKind::ReferenceError, "Cannot access '" + name + "' before initialization");
+}
+
+void declare_lexicals(const std::vector<LexicalDecl>& decls, const std::shared_ptr<JsEnvironment>& env) {
+    for (const auto& decl : decls) env->declare_lexical(decl.name, decl.is_const);
+}
+
 std::shared_ptr<JsEnvironment> copy_scope(const std::shared_ptr<JsEnvironment>& source,
                                           const std::shared_ptr<JsEnvironment>& parent) {
     auto copy = std::make_shared<JsEnvironment>(parent);
     for (const auto& binding : source->bindings()) {
-        if (binding.is_const) copy->define_const(binding.name, binding.value);
+        if (!binding.is_initialized) copy->declare_lexical(binding.name, binding.is_const);
+        else if (binding.is_lexical) copy->initialize_lexical(binding.name, binding.value, binding.is_const);
+        else if (binding.is_const) copy->define_const(binding.name, binding.value);
         else copy->define(binding.name, binding.value);
     }
     return copy;
@@ -251,10 +272,12 @@ JsValue JsInterpreter::run_program(const Program& program) {
         ~StrictScope() { env.strict_mode = saved; }
     } strict_scope(*m_global_env, program.is_strict);
 
-    // `var` and function declarations exist before the first statement runs.
+    // `var`, lexical bindings, and function declarations exist before the
+    // first statement runs.
     for (const auto& name : program.var_names) {
         if (!m_global_env->has_own(name)) m_global_env->define(name, JsValue::make_undefined());
     }
+    declare_lexicals(program.lexical_decls, m_global_env);
     hoist_functions(program.functions, m_global_env);
 
     Frame frame;
@@ -322,6 +345,16 @@ void JsInterpreter::bind_parameters(const FunctionNode& node, const EnvPtr& env,
         }
         return;
     }
+    // Pre-declare parameter names uninitialised so earlier defaults cannot
+    // observe later parameters before their initialisers run.
+    for (const auto& param : node.params) {
+        if (!param.target) continue;
+        std::vector<std::string> names;
+        param.target->collect_names(names);
+        for (const auto& name : names) {
+            if (!env->has_own(name)) env->declare_lexical(name, false);
+        }
+    }
     for (size_t i = 0; i < node.params.size(); ++i) {
         const auto& param = node.params[i];
         if (param.rest) {
@@ -376,7 +409,10 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
             // another. Undefined in a plain call.
             env->define("%new.target", !is_construct ? JsValue::make_undefined() : new_target ? *new_target : callee);
         }
-        if (node->is_derived_constructor) env->this_binding = JsEnvironment::ThisBinding::Unbound;
+        if (node->is_derived_constructor) {
+            env->this_binding = JsEnvironment::ThisBinding::Unbound;
+            env->mark_uninitialized("this");
+        }
         if (node->uses_super && callee.is_function()) {
             env->define("%home", callee.get_property("%home"));
         }
@@ -391,7 +427,10 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
         for (const auto& name : node->var_names) {
             if (!env->has_own(name)) env->define(name, JsValue::make_undefined());
         }
-        hoist_functions(node->body->functions, env);
+        if (node->body) {
+            declare_lexicals(node->body->lexical_decls, env);
+            hoist_functions(node->body->functions, env);
+        }
     };
     if (node->is_async && !node->is_generator) {
         JsValue thrown;
@@ -662,10 +701,16 @@ JsValue JsInterpreter::call_legacy_function(const JsValue& fn, const std::vector
 // ---------------------------------------------------------------------------
 
 JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env) {
+    // The class name is in its own TDZ while `extends` and computed property
+    // keys are evaluated, and stays immutable inside the class body.
+    auto class_env = std::make_shared<JsEnvironment>(env);
+    class_env->strict_mode = 1;     // class bodies are always strict code
+    if (!cls->name.empty()) class_env->declare_lexical(cls->name, true);
+
     JsValue parent;
     bool has_parent = false;
     if (cls->super_class) {
-        parent = evaluate(cls->super_class.get(), env);
+        parent = evaluate(cls->super_class.get(), class_env);
         if (parent.type != JsType::Null) {
             // An arrow function, a method, an async or a generator function
             // cannot be constructed, so it cannot be a parent either.
@@ -676,11 +721,6 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
             has_parent = true;
         }
     }
-
-    // The class name is visible inside the class body even if the outer
-    // binding is later reassigned.
-    auto class_env = std::make_shared<JsEnvironment>(env);
-    class_env->strict_mode = 1;     // class bodies are always strict code
 
     JsValue proto = JsValue::make_object();
     if (has_parent) {
@@ -713,14 +753,21 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     if (has_parent) ctor.function_cell()->prototype = parent.as_prototype();
     ctor.define_property("%home", proto, PropertyMap::Hidden);
 
-    if (!cls->name.empty()) class_env->define_const(cls->name, ctor);
+    std::vector<std::string> member_keys;
+    member_keys.reserve(cls->members.size());
+    for (const auto& member : cls->members) {
+        member_keys.push_back(member.computed_key
+                                  ? js_to_property_key(evaluate(member.computed_key.get(), class_env))
+                                  : member.key);
+    }
+
+    if (!cls->name.empty()) class_env->initialize_lexical(cls->name, ctor, true);
 
     std::vector<JsValue> field_keys;
-    for (const auto& member : cls->members) {
+    for (size_t i = 0; i < cls->members.size(); ++i) {
+        const auto& member = cls->members[i];
         JsValue target = member.is_static ? ctor : proto;
-        std::string key = member.computed_key
-            ? js_to_property_key(evaluate(member.computed_key.get(), class_env))
-            : member.key;
+        const std::string& key = member_keys[i];
 
         switch (member.kind) {
             case ClassMember::Kind::Method: {
@@ -823,7 +870,13 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     JsValue ctor = active->value;
     // `this` of the constructor super(...) stands in: the binding this call
     // may give another object, and through an arrow function too.
-    JsValue this_val = lookup_identifier("this", env);
+    JsEnvironment* const constructor_scope = env->derived_constructor_scope();
+    JsValue this_val;
+    if (constructor_scope) {
+        if (auto* self = constructor_scope->find_own("this")) this_val = self->value;
+    } else {
+        this_val = lookup_identifier("this", env);
+    }
     // new.target goes up unchanged: in a parent's constructor it is still the
     // class `new` was applied to. (A copy: the binding can move while the
     // parent's constructor runs.)
@@ -847,7 +900,6 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     // same, as the language has it, and is refused when the parent comes
     // back. It is given an object of its own to work on, so that what the
     // first one made is left as it was.
-    JsEnvironment* const constructor_scope = env->derived_constructor_scope();
     JsValue spare;
     if (constructor_scope && constructor_scope->this_binding != JsEnvironment::ThisBinding::Unbound) {
         spare = JsValue::make_object();
@@ -932,10 +984,13 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         }
         constructor_scope->this_binding = made.is_object_like() ? JsEnvironment::ThisBinding::BoundToAnother
                                                                 : JsEnvironment::ThisBinding::Bound;
+        if (auto* self = constructor_scope->find_own("this")) {
+            if (made.is_object_like()) self->value = made;
+            self->is_initialized = true;
+        }
     }
     if (made.is_object_like()) {
         this_val = made;
-        if (auto* self = env->lookup("this")) self->value = made;
     }
     initialize_fields(ctor, this_val);
     return this_val;        // `super(...)` is an expression, and its value is `this`
@@ -946,7 +1001,10 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
 // ---------------------------------------------------------------------------
 
 JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& env) {
-    if (auto* binding = env->lookup(name)) return binding->value;
+    if (auto* binding = env->lookup(name)) {
+        if (!binding->is_initialized) throw_tdz_error(name);
+        return binding->value;
+    }
 
     // Properties of the global object are global variables too: `window.x = 1`
     // makes `x` resolvable.
@@ -976,6 +1034,8 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
     switch (env->try_assign(name, value)) {
         case JsEnvironment::AssignResult::Ok:
             return;
+        case JsEnvironment::AssignResult::Uninitialized:
+            throw_tdz_error(name);
         case JsEnvironment::AssignResult::Const:
             js_throw_type_error("Assignment to constant variable.");
         case JsEnvironment::AssignResult::ReadOnly:
@@ -1075,12 +1135,10 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
         case Pattern::Kind::Identifier:
             switch (mode) {
                 case BindMode::Let:
-                    env->define(pattern.name, value);
-                    if (env == m_global_env) env->mark_lexical(pattern.name);
+                    env->initialize_lexical(pattern.name, value, false);
                     return;
                 case BindMode::Const:
-                    env->define_const(pattern.name, value);
-                    if (env == m_global_env) env->mark_lexical(pattern.name);
+                    env->initialize_lexical(pattern.name, value, true);
                     return;
                 case BindMode::Var: {
                     // The binding was hoisted to the function scope on entry.
@@ -1144,7 +1202,10 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 if (element.rest) {
                     // Everything not already picked out, own and enumerable.
                     JsValue rest = JsValue::make_object();
-                    for (const auto& key : value.own_keys()) {
+                    std::vector<std::string> rest_keys;
+                    if (!litebird::dom::cross_origin_own_keys(value, false, rest_keys))
+                        rest_keys = value.own_keys();
+                    for (const auto& key : rest_keys) {
                         if (std::find(used.begin(), used.end(), key) != used.end()) continue;
                         rest.set_property(key, value.get_property(key));
                     }
@@ -1186,6 +1247,7 @@ JsInterpreter::Flow JsInterpreter::exec_block(const BlockStmt* block, const EnvP
     if (!block->has_lexical) return exec_list(block->statements, env, frame);
     auto scope = std::make_shared<JsEnvironment>(env);
     EnvScope env_scope(scope);
+    declare_lexicals(block->lexical_decls, scope);
     hoist_functions(block->functions, scope);
     return exec_list(block->statements, scope, frame);
 }
@@ -1268,8 +1330,7 @@ JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Fra
         }
         case NodeKind::ClassDecl: {
             auto* decl = static_cast<const ClassDeclStmt*>(stmt);
-            env->define(decl->cls->name, define_class(decl->cls, env));
-            if (env == m_global_env) env->mark_lexical(decl->cls->name);
+            env->initialize_lexical(decl->cls->name, define_class(decl->cls, env), false);
             return Flow::Normal;
         }
         case NodeKind::FunctionDecl:    // hoisted when the enclosing block was entered
@@ -1357,6 +1418,16 @@ JsInterpreter::Flow JsInterpreter::exec_do_while(const DoWhileStmt* stmt, const 
 JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& env, Frame& frame,
                                             const std::vector<const std::string*>& labels) {
     EnvPtr loop_env = stmt->has_lexical_init ? std::make_shared<JsEnvironment>(env) : env;
+    EnvScope loop_scope(stmt->has_lexical_init ? loop_env : nullptr);
+    if (stmt->has_lexical_init && stmt->init && stmt->init->kind == NodeKind::VarDecl) {
+        auto* var_decl = static_cast<const VarDeclStmt*>(stmt->init.get());
+        const bool is_const = var_decl->kind == JsDeclKind::Const;
+        std::vector<std::string> names;
+        for (const auto& d : var_decl->decls) {
+            if (d.target) d.target->collect_names(names);
+        }
+        for (const auto& name : names) loop_env->declare_lexical(name, is_const);
+    }
     if (stmt->init) exec(stmt->init.get(), loop_env, frame);
 
     // `for (let i ...)` gives every iteration its own `i`, which is what makes
@@ -1365,20 +1436,40 @@ JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& e
     EnvPtr iter_env = per_iteration ? copy_scope(loop_env, env) : loop_env;
 
     while (true) {
-        if (stmt->test && !evaluate(stmt->test.get(), iter_env).is_truthy()) break;
-        Flow flow = exec(stmt->body.get(), iter_env, frame);
-        LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
-        if (action == LoopAction::Exit) break;
-        if (action == LoopAction::Propagate) return flow;
-        if (per_iteration) iter_env = copy_scope(iter_env, env);
-        if (stmt->update) evaluate(stmt->update.get(), iter_env);
+        {
+            EnvScope iter_scope(per_iteration ? iter_env : nullptr);
+            if (stmt->test && !evaluate(stmt->test.get(), iter_env).is_truthy()) break;
+            Flow flow = exec(stmt->body.get(), iter_env, frame);
+            LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
+            if (action == LoopAction::Exit) break;
+            if (action == LoopAction::Propagate) return flow;
+        }
+        if (per_iteration) {
+            EnvPtr next_env = copy_scope(iter_env, env);
+            EnvScope next_scope(next_env);
+            if (stmt->update) evaluate(stmt->update.get(), next_env);
+            iter_env = std::move(next_env);
+        } else if (stmt->update) {
+            evaluate(stmt->update.get(), iter_env);
+        }
     }
     return Flow::Normal;
 }
 
 JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const EnvPtr& env, Frame& frame,
                                                  const std::vector<const std::string*>& labels) {
-    JsValue subject = evaluate(stmt->iterable.get(), env);
+    JsValue subject;
+    if (stmt->declares && stmt->decl_kind != JsDeclKind::Var) {
+        auto head_env = std::make_shared<JsEnvironment>(env);
+        EnvScope head_scope(head_env);
+        const bool is_const = stmt->decl_kind == JsDeclKind::Const;
+        std::vector<std::string> names;
+        if (stmt->target) stmt->target->collect_names(names);
+        for (const auto& name : names) head_env->declare_lexical(name, is_const);
+        subject = evaluate(stmt->iterable.get(), head_env);
+    } else {
+        subject = evaluate(stmt->iterable.get(), env);
+    }
 
     // Binds the loop variable for one iteration and returns the scope the body
     // runs in.
@@ -1392,8 +1483,11 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
             return env;
         }
         auto iter_env = std::make_shared<JsEnvironment>(env);
-        bind_pattern(*stmt->target, value, iter_env,
-                     stmt->decl_kind == JsDeclKind::Const ? BindMode::Const : BindMode::Let);
+        const bool is_const = stmt->decl_kind == JsDeclKind::Const;
+        std::vector<std::string> names;
+        if (stmt->target) stmt->target->collect_names(names);
+        for (const auto& name : names) iter_env->declare_lexical(name, is_const);
+        bind_pattern(*stmt->target, value, iter_env, is_const ? BindMode::Const : BindMode::Let);
         return iter_env;
     };
 
@@ -1401,6 +1495,7 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
     // Returns true to keep iterating.
     auto run_body = [&](const JsValue& value) -> bool {
         EnvPtr iter_env = bind_iteration(value);
+        EnvScope iter_scope(iter_env != env ? iter_env : nullptr);
         Flow flow = exec(stmt->body.get(), iter_env, frame);
         LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
         if (action == LoopAction::Next) return true;
@@ -1413,12 +1508,26 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
         if (subject.is_nullish()) return Flow::Normal;
         std::vector<std::string> keys;
         std::unordered_set<std::string> seen;
-        for (const auto& key : subject.own_keys(true)) {
-            seen.insert(key);
+        std::vector<std::string> cross_keys;
+        const bool cross_origin = litebird::dom::cross_origin_own_keys(subject, true, cross_keys);
+        if (cross_origin) {
+            for (const auto& key : cross_keys) seen.insert(key);
+            for (const auto& key : cross_keys) {
+                // The cross-origin table names are not enumerable; only the
+                // indices are seen for-in.
+                if (!key.empty() && key.find_first_not_of("0123456789") == std::string::npos) keys.push_back(key);
+            }
+        } else {
+            for (const auto& key : subject.own_keys(true)) {
+                seen.insert(key);
+            }
+            for (auto& key : subject.own_keys(false)) keys.push_back(std::move(key));
         }
-        for (auto& key : subject.own_keys(false)) keys.push_back(std::move(key));
         int guard = 0;
-        for (JsObject* proto = subject.type == JsType::String ? nullptr : subject.prototype_object();
+        // A cross-origin WindowProxy or Location has no prototype (HTML
+        // §7.2.3.1), so the chain contributes nothing.
+        for (JsObject* proto = (cross_origin || subject.type == JsType::String) ? nullptr
+                               : subject.prototype_object();
              proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
             JsValue holder = JsValue::make_object(proto);
             std::vector<std::string> all = holder.own_keys(true);
@@ -1465,7 +1574,14 @@ JsInterpreter::Flow JsInterpreter::exec_try(const TryStmt* stmt, const EnvPtr& e
         try {
             if (stmt->param || stmt->handler->has_lexical) {
                 auto scope = std::make_shared<JsEnvironment>(env);
-                if (stmt->param) bind_pattern(*stmt->param, thrown, scope, BindMode::Let);
+                EnvScope env_scope(scope);
+                if (stmt->param) {
+                    std::vector<std::string> param_names;
+                    stmt->param->collect_names(param_names);
+                    for (const auto& name : param_names) scope->declare_lexical(name, false);
+                    bind_pattern(*stmt->param, thrown, scope, BindMode::Let);
+                }
+                declare_lexicals(stmt->handler->lexical_decls, scope);
                 hoist_functions(stmt->handler->functions, scope);
                 flow = exec_list(stmt->handler->statements, scope, frame);
             } else {
@@ -1522,6 +1638,8 @@ JsInterpreter::Flow JsInterpreter::exec_try(const TryStmt* stmt, const EnvPtr& e
 JsInterpreter::Flow JsInterpreter::exec_switch(const SwitchStmt* stmt, const EnvPtr& env, Frame& frame) {
     JsValue discriminant = evaluate(stmt->discriminant.get(), env);
     auto scope = std::make_shared<JsEnvironment>(env);
+    EnvScope env_scope(scope);
+    declare_lexicals(stmt->lexical_decls, scope);
     hoist_functions(stmt->functions, scope);
 
     std::ptrdiff_t selected = -1;
@@ -1905,7 +2023,10 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             // {...source}: own enumerable properties, in order.
             JsValue source = evaluate(prop.value.get(), env);
             if (source.is_nullish()) continue;
-            for (const auto& key : source.own_keys()) {
+            std::vector<std::string> spread_keys;
+            if (!litebird::dom::cross_origin_own_keys(source, false, spread_keys))
+                spread_keys = source.own_keys();
+            for (const auto& key : spread_keys) {
                 object.set_property(key, source.get_property(key));
             }
             continue;
@@ -2209,11 +2330,12 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
 
         case NodeKind::SuperMember: {
             auto* super_member = static_cast<const SuperMemberExpr*>(expr);
+            JsValue receiver = lookup_identifier("this", env);
             std::string key = super_member->computed
                 ? js_to_property_key(evaluate(super_member->computed.get(), env))
                 : super_member->property;
             JsValue base = super_base(env);
-            return get_with_receiver(base.property_cell(), key, lookup_identifier("this", env));
+            return get_with_receiver(base.property_cell(), key, receiver);
         }
 
         case NodeKind::NewTarget: {
@@ -2252,6 +2374,7 @@ JsValue JsInterpreter::execute(const AstNode* node, std::shared_ptr<JsEnvironmen
         Flow flow;
         if (stmt->kind == NodeKind::Block) {
             auto* block = static_cast<const BlockStmt*>(stmt);
+            declare_lexicals(block->lexical_decls, env);
             hoist_functions(block->functions, env);
             flow = exec_list(block->statements, env, frame);
         } else {

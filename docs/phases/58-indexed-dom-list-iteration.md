@@ -26,7 +26,7 @@ third argument, and length snapshot, sparse borrowed array-likes, `Infinity`,
 very large lengths, and getter/callback ordering. The independent out-of-corpus
 `compare_with_jsdom.py` list probe matched jsdom 31.0.0 on **12/12** lines.
 
-**Verification:** `make test` **209/209** suites plus 80 cross-origin checks;
+**Verification:** `make test` **210/210** suites plus 80 cross-origin checks;
 `make wpt` **9550/9744** subtests across 190 files (**194 listed**, **0
 unlisted**), with `WPT_FLOOR` raised from 9538 to **9550**. The old 9538 floor
 was not sufficient to catch losing PR #77's eleven passing subtests. More

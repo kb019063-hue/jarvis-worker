@@ -4505,5 +4505,6 @@ the release binary of that `main`.
 - CI's JS floor is 1085 (1020 before) and `JS_ASAN_FLOOR` 1083 (1018
   before): each is `main`'s plus the 65 cases of `iteration.dat` that pass,
   which they do under ASan as in the release build. Neither was lowered.
-- CI, all seven jobs, on the commit that holds the code: the pull request
-  names the run.
+- CI: run 44021433604 on `f2430f9`, the commit that holds the code, all
+  seven jobs, the sanitizer job with the new floor among them. The commits
+  after it change `*.md` only.

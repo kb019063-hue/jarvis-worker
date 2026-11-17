@@ -7,6 +7,37 @@ looks, and nothing else. Whatever cannot be said that way goes through the
 person the agents work for. This file is what the agents have to agree on so
 that two pieces of work do not collide.
 
+## Notice — read this first (2026-11-17)
+
+**New phase write-ups and findings no longer go in `ARCHITECTURE.md` and
+`AUDIT.md`.** They go in `docs/phases/NN-short-title.md` and
+`docs/findings/NN-short-title.md`; `docs/README.md` says what goes in one, and
+why files rather than sections.
+
+`ARCHITECTURE.md` is 408 KB, and 84% of it — 343 KB in 43 sections — is phase
+write-ups. `AUDIT.md` is 282 KB, and 53 of its 61 findings are resolved. An
+agent claiming a task has to find two integers in all that, which is about
+660 KB of markdown for two numbers; and two agents that look at the same
+moment still take the same one, which is what a number read out of a document
+cannot prevent. So:
+
+- **The two documents are frozen as append targets.** What is already in them
+  stays exactly as it is: do not add to it, reorder it, re-wrap it or delete
+  it in passing. They are migrated to `docs/` over time, and everything in
+  them is in the repository's history besides.
+- **The two numbers come from `python3 tools/next_ids.py`**, not from reading
+  either document. It reads the documents, `docs/`, `docs/state.json` and the
+  open pull requests; `--pr-body` prints the block a pull request opens with
+  and `--sources` says where each number came from. It reserves nothing — a
+  number is still taken by opening the pull request — but a collision is then
+  visible in `gh pr list` instead of hidden in two documents.
+- **CI enforces both rules** (`python3 tools/ci/check_docs.py`): a new
+  `## Phase NN` heading in `ARCHITECTURE.md`, or a new `## NN.` finding in
+  `AUDIT.md`, fails the build, and so does either file growing past its budget.
+
+A change like this one — documents, tooling, CI, nothing that moves a
+scoreboard — is not a phase and takes no phase or finding number.
+
 ## Before starting
 
 1. **An open pull request is a claim.** Run `gh pr list --state open` and read
@@ -23,10 +54,14 @@ that two pieces of work do not collide.
    Phase P, finding F
    ```
 
-   `P` is the next free phase number (the phase table in ARCHITECTURE.md,
-   plus the open pull requests) and `F` the next free finding number
-   (AUDIT.md, plus the open pull requests). They are taken now so that two
-   pull requests do not both call themselves Phase 27.
+   `P` and `F` come from `python3 tools/next_ids.py`, which reads the
+   documents, `docs/`, `docs/state.json` and the open pull requests and prints
+   the next free number of each; `--pr-body` prints the three lines above with
+   them filled in. (They used to be read out of ARCHITECTURE.md and AUDIT.md —
+   see the notice at the top.) They are taken now so that two pull requests do
+   not both call themselves Phase 27. A change that is not engine work —
+   documents, tooling, CI — takes neither: write `No phase, no finding` and
+   say why instead.
 3. **One task at a time, inside its files.** If the work turns out to need a
    file that another open pull request names, stop before changing it and
    tell the person you work for: the other agent will not see a comment
@@ -91,6 +126,7 @@ the same time will both have changed them. So:
 - The three documents are updated: what was wrong, what changed, how it was
   verified (a command anyone can run, and the number it prints), and what is
   still open. AUDIT.md says what is not fixed as plainly as what is.
+  (`docs/README.md` says where a write-up goes now, and what one says.)
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
 - The `WIP:` comes off the title. Merged into `main` with a merge commit
@@ -274,3 +310,4 @@ Rows that share files should not be in work at the same time.
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 passed before Phase 49's `<select>` work): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Touches `src/html/HtmlTokenizer.cpp`, `src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp`. The node type is there since Phase 28 (`include/litebird/dom/ProcessingInstruction.hpp`, its interface, `<?target data>` in the markup serializer); what is left is the tokenizer and the tree builder |
 | **Lossy `VP8`, animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; AUDIT.md, findings 43, 44 & 60 | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the lossy and animated variants. Canvas 2D text is done (Phase 46, finding 52). What is left: the lossy `VP8` codec (a VP8 video keyframe), animated WebP (`ANMF` compositing), AVIF, and SVG `<text>` |
+| **Migrate the 43 phase write-ups out of `ARCHITECTURE.md` and retire the 53 resolved findings in `AUDIT.md`** | `docs/phases/`, `docs/findings/`, `ARCHITECTURE.md`, `AUDIT.md` | AGENTS.md, "Notice — read this first"; `docs/README.md` | A move, not a rewrite: one file per section, the four things a write-up says kept in their order. `ARCHITECTURE.md` is 408 KB and 84% of it is these sections; `AUDIT.md` is 282 KB and 53 of its 61 findings are resolved. `python3 tools/ci/check_docs.py` has to stay green, and its budgets come **down** as the files shrink, not up to let a pull request pass. The floors in `docs/state.json` must not go down either. Not beside a row that edits either document |

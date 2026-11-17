@@ -113,12 +113,11 @@ written one does.
 - `make conformance` 1792 / 1792, `make dom-conformance` 669 / 669,
   `make url-conformance` 1188 / 1188, `make xml-conformance` 1718 / 1718,
   unchanged.
-- `make asan-core` (ASan+UBSan) green: 209 suites (before the merge of Phase
-  64), JS **1123 / 1150** — the one
-  case below Release is `deep-nesting.dat`'s recursion-depth case, which the
-  sanitizer build has always missed — DOM 669 / 669, XML 1718 / 1718, WPT
-  9550 / 9744, both fuzzers 0 findings. `JS_ASAN_FLOOR` in the `Makefile` moved
-  from 1083 to 1121.
+- `make asan-core` (ASan+UBSan), on the merged tree: green — 210 suites, JS
+  **1123 / 1150**, the one case below Release being `deep-nesting.dat`'s
+  recursion-depth case, which the sanitizer build has always missed; DOM
+  669 / 669, XML 1718 / 1718, WPT 9550 / 9744, both fuzzers 0 findings.
+  `JS_ASAN_FLOOR` in the `Makefile` moved from 1083 to 1121.
 
 ## 4. What is still open
 

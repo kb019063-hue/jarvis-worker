@@ -413,7 +413,6 @@ def verify_webp_decoding(binary, convert_bin, tmpdir):
     lossy_path = os.path.join(tmpdir, "lossy.webp")
     subprocess.run([convert_bin, "-size", "8x8", "xc:#3366cc", "-quality", "70", lossy_path],
                    check=True, capture_output=True)
-    expect_refusal("lossy_vp8", lossy_path, "lossy")
 
     anim_path = os.path.join(tmpdir, "animated.webp")
     subprocess.run([convert_bin, "-delay", "10", "-loop", "0",
@@ -440,7 +439,7 @@ def verify_webp_decoding(binary, convert_bin, tmpdir):
     # probe() must classify without decoding.
     for name, path, expected in [
         ("probe_lossless", vp8x_path, "ok"),
-        ("probe_lossy", lossy_path, "lossy VP8 is not supported"),
+        ("probe_lossy", lossy_path, "ok"),
         ("probe_animated", anim_path, "animated WebP is not supported"),
         ("probe_truncated", truncated_path, "truncated WebP file"),
     ]:
@@ -465,6 +464,275 @@ def verify_webp_decoding(binary, convert_bin, tmpdir):
     if a != b:
         raise AssertionError("[WebP determinism] two decodes of the same file differ")
     print("  [PASS] WebP determinism          two decodes byte-identical")
+    passed += 1
+
+    return passed
+
+
+def channel_stats(actual, reference):
+    """Largest per-channel difference and the PSNR it implies (colour channels)."""
+    if len(actual) != len(reference):
+        raise AssertionError(f"buffer sizes differ: {len(actual)} vs {len(reference)}")
+    worst = 0
+    worst_at = 0
+    sse = 0
+    count = 0
+    for i in range(0, len(reference), 4):
+        for c in range(3):
+            d = abs(actual[i + c] - reference[i + c])
+            sse += d * d
+            count += 1
+            if d > worst:
+                worst = d
+                worst_at = i // 4
+    psnr = 99.0 if sse == 0 else 10.0 * math.log10(255.0 * 255.0 * count / sse)
+    return worst, worst_at, psnr
+
+
+def alpha_stats(actual, reference):
+    worst = 0
+    varying = False
+    first = reference[3] if reference else 0
+    for i in range(3, len(reference), 4):
+        d = abs(actual[i] - reference[i])
+        if d > worst:
+            worst = d
+        if reference[i] != first:
+            varying = True
+    return worst, varying
+
+
+def append_riff_chunk(out, fourcc, payload):
+    out += fourcc
+    out += len(payload).to_bytes(4, "little")
+    out += payload
+    if len(payload) & 1:
+        out += b"\0"
+
+
+def verify_lossy_webp(binary, convert_bin, tmpdir):
+    """Lossy `VP8` decoding against libwebp, through ImageMagick as the oracle.
+
+    Lossy decoding has an error budget in principle, but every stream below is
+    compared exactly: a decoder that agrees with libwebp sample for sample is
+    what "bit-exact" means for this codec, and a tolerance would only hide a
+    wrong predictor or a missing filter stage. The loop filter and the alpha
+    plane are exercised by their own cases so a regression in one cannot hide
+    inside the other's numbers.
+    """
+    passed = 0
+
+    def encode(name, size, source, extra):
+        path = os.path.join(tmpdir, f"{name}.webp")
+        cmd = [convert_bin]
+        if size:
+            cmd += ["-size", size]
+        cmd += list(source) + list(extra) + [path]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return path
+
+    def decode_and_compare(name, path, expect_lossy=True):
+        ref_w, ref_h, ref_rgba = decode_webp_with_imagemagick(convert_bin, path)
+        ppm_path = os.path.join(tmpdir, f"{name}.out.ppm")
+        rgba_path = os.path.join(tmpdir, f"{name}.out.rgba")
+        meta = run_media_check(binary, ["--decode-webp", path, ppm_path, rgba_path]).strip()
+        parts = meta.split()
+        if parts[:2] != [str(ref_w), str(ref_h)]:
+            raise AssertionError(f"[VP8 {name}] size mismatch: got {meta!r}, expected {ref_w}x{ref_h}")
+        if expect_lossy and parts[2] != "lossy":
+            raise AssertionError(f"[VP8 {name}] expected a lossy decode, got {meta!r}")
+        with open(rgba_path, "rb") as f:
+            act_rgba = f.read()
+        worst, worst_at, psnr = channel_stats(act_rgba, ref_rgba)
+        alpha_worst, alpha_varies = alpha_stats(act_rgba, ref_rgba)
+        if worst != 0:
+            i = worst_at * 4
+            raise AssertionError(
+                f"[VP8 {name}] colour differs at pixel {worst_at}: got {list(act_rgba[i:i + 3])}, "
+                f"expected {list(ref_rgba[i:i + 3])} (max diff {worst}, PSNR {psnr:.2f} dB)"
+            )
+        return meta, psnr, alpha_worst, alpha_varies, act_rgba, ref_rgba
+
+    # Content, sizes and qualities: 1x1 through several macroblock rows, odd
+    # widths and heights (the chroma planes and the upsampler's edges), smooth
+    # gradients (DC prediction) and plasma (every 4x4 mode).
+    cases = [
+        ("tiny_1x1", "1x1", ["xc:#123456"], ["-quality", "80"]),
+        ("tiny_3x3", "3x3", ["plasma:fuchsia-aqua", "-seed", "3"], ["-quality", "75"]),
+        ("grad_16x16_q75", "16x16", ["gradient:red-blue"], ["-quality", "75"]),
+        ("grad_17x13_q75", "17x13", ["gradient:red-blue"], ["-quality", "75"]),
+        ("plasma_32x32_q50", "32x32", ["plasma:orange-navy", "-seed", "7"], ["-quality", "50"]),
+        ("plasma_33x17_q50", "33x17", ["plasma:fuchsia-aqua", "-seed", "5"], ["-quality", "50"]),
+        ("plasma_100x75_q50", "100x75", ["plasma:orange-navy", "-seed", "11"], ["-quality", "50"]),
+        ("grad_129x97_q95", "129x97", ["gradient:red-blue"], ["-quality", "95"]),
+        ("tall_16x64_q80", "16x64", ["plasma:maroon-teal", "-seed", "4"], ["-quality", "80"]),
+        ("wide_64x16_q80", "64x16", ["plasma:green-blue", "-seed", "2"], ["-quality", "80"]),
+        ("photo_96x64_q30", "96x64", ["plasma:white-black", "-seed", "9", "-blur", "0x1"],
+         ["-quality", "30"]),
+    ]
+    for name, size, source, extra in cases:
+        path = encode(name, size, source, extra)
+        meta, psnr, _, _, _, _ = decode_and_compare(name, path)
+        print(f"  [PASS] VP8  {name:20s} {meta.split()[0]:>4s}x{meta.split()[1]:<4s} "
+              f"{'lossy':7s} exact, PSNR {psnr:5.2f} dB")
+        passed += 1
+
+    # The loop filter. A stream encoded with the filter turned off and one
+    # encoded with it at full strength must both decode exactly, and they must
+    # differ from each other: otherwise these two cases would pass without the
+    # filter ever running.
+    filter_source = ["-size", "64x48", "plasma:lime-purple", "-seed", "6"]
+    no_filter = os.path.join(tmpdir, "filter_off.webp")
+    subprocess.run([convert_bin] + filter_source + ["-quality", "40",
+                                                    "-define", "webp:filter-strength=0", no_filter],
+                   check=True, capture_output=True)
+    strong_filter = os.path.join(tmpdir, "filter_strong.webp")
+    subprocess.run([convert_bin] + filter_source + ["-quality", "40",
+                                                    "-define", "webp:filter-strength=100", strong_filter],
+                   check=True, capture_output=True)
+    simple_filter = os.path.join(tmpdir, "filter_simple.webp")
+    subprocess.run([convert_bin] + filter_source + ["-quality", "40",
+                                                    "-define", "webp:filter-type=1", simple_filter],
+                   check=True, capture_output=True)
+    sharp_filter = os.path.join(tmpdir, "filter_sharp.webp")
+    subprocess.run([convert_bin] + filter_source + ["-quality", "40",
+                                                    "-define", "webp:filter-sharpness=7", sharp_filter],
+                   check=True, capture_output=True)
+    _, psnr_off, _, _, off_rgba, _ = decode_and_compare("filter_off", no_filter)
+    _, psnr_on, _, _, on_rgba, _ = decode_and_compare("filter_strong", strong_filter)
+    decode_and_compare("filter_simple", simple_filter)
+    decode_and_compare("filter_sharp", sharp_filter)
+    if off_rgba == on_rgba:
+        raise AssertionError("[VP8 filter] the filter strength setting made no difference to the "
+                             "decoded pixels; the loop filter is not being exercised")
+    differing = sum(1 for i in range(0, len(off_rgba), 4) if off_rgba[i:i + 4] != on_rgba[i:i + 4])
+    print(f"  [PASS] VP8  loop_filter         off/strong/simple/sharpness=7 exact, "
+          f"{differing} px differ with the filter on")
+    passed += 1
+
+    # Everything else that changes what the bitstream looks like without
+    # changing what the picture is: token partitions, segmentation, sensitivity.
+    for name, extra in [
+        ("partitions_2", ["-define", "webp:partitions=2"]),
+        ("partitions_3", ["-define", "webp:partitions=3"]),
+        ("segments_4", ["-define", "webp:segments=4"]),
+        ("segments_2", ["-define", "webp:segments=2"]),
+        ("sns_100", ["-define", "webp:sns-strength=100"]),
+        ("sns_0", ["-define", "webp:sns-strength=0"]),
+        ("method_6", ["-define", "webp:method=6"]),
+    ]:
+        path = encode(name, "72x56", ["plasma:red-cyan", "-seed", "8"], ["-quality", "60"] + extra)
+        decode_and_compare(name, path)
+        print(f"  [PASS] VP8  {name:20s} exact")
+        passed += 1
+
+    # The alpha plane, separately from the colour planes. The ALPH chunk carries
+    # a header byte (compression method, spatial filter, preprocessing) and the
+    # plane in one of two compressions; both are covered here, along with all
+    # three spatial filters written by hand so the unfiltering is what is tested.
+    # A varying alpha channel: a plasma for the colour and a gradient composited
+    # in as opacity, so a decoder that dropped the plane or shifted it by a row
+    # could not pass.
+    alpha_source = ["-size", "80x60", "plasma:fuchsia-aqua", "-seed", "6",
+                    "(", "-size", "80x60", "gradient:black-white", ")", "-alpha", "off",
+                    "-compose", "copy_opacity", "-composite"]
+    alpha_cases = [
+        ("alpha_lossless_chunk", ["-define", "webp:alpha-compression=1"]),
+        ("alpha_raw_chunk", ["-define", "webp:alpha-compression=0"]),
+    ]
+    raw_path = None
+    for name, extra in alpha_cases:
+        path = os.path.join(tmpdir, f"{name}.webp")
+        subprocess.run([convert_bin] + alpha_source + ["-quality", "70"] + extra + [path],
+                       check=True, capture_output=True)
+        meta, psnr, alpha_worst, alpha_varies, act, ref = decode_and_compare(name, path)
+        if alpha_worst != 0:
+            raise AssertionError(f"[VP8 {name}] alpha channel differs by {alpha_worst}")
+        if not alpha_varies:
+            raise AssertionError(f"[VP8 {name}] the fixture's alpha plane is flat; nothing was tested")
+        print(f"  [PASS] VP8  {name:20s} colour exact, alpha exact and non-flat")
+        passed += 1
+        if name == "alpha_raw_chunk":
+            raw_path = path
+
+    # Rebuild that container with each of the three spatial filters applied by
+    # hand (the encoder's predictors, inverted by the decoder).
+    with open(raw_path, "rb") as f:
+        container = f.read()
+    chunks = []
+    pos = 12
+    while pos + 8 <= len(container):
+        fourcc = container[pos:pos + 4]
+        size = int.from_bytes(container[pos + 4:pos + 8], "little")
+        chunks.append((fourcc, container[pos + 8:pos + 8 + size]))
+        pos += 8 + size + (size & 1)
+    by_name = dict(chunks)
+    width, height = 80, 60
+    plane = by_name[b"ALPH"][1:]
+    if len(plane) != width * height:
+        raise AssertionError(f"[VP8 ALPH] unexpected raw plane size {len(plane)}")
+
+    def forward_filter(mode):
+        deltas = bytearray(len(plane))
+        for y in range(height):
+            for x in range(width):
+                i = y * width + x
+                if mode == 1:
+                    pred = plane[i - 1] if x > 0 else 0
+                elif mode == 2:
+                    pred = plane[i - width] if y > 0 else 0
+                else:
+                    if y == 0:
+                        pred = plane[i - 1] if x > 0 else 0
+                    else:
+                        top = plane[i - width]
+                        left = plane[i - 1] if x > 0 else top
+                        top_left = plane[i - width - 1] if x > 0 else top
+                        pred = (left + top - top_left) & 0xFF
+                deltas[i] = (plane[i] - pred) & 0xFF
+        return bytes(deltas)
+
+    for mode in (1, 2, 3):
+        rebuilt = bytearray(b"RIFF\0\0\0\0WEBP")
+        append_riff_chunk(rebuilt, b"VP8X", by_name[b"VP8X"])
+        append_riff_chunk(rebuilt, b"ALPH", bytes([mode << 2]) + forward_filter(mode))
+        append_riff_chunk(rebuilt, b"VP8 ", by_name[b"VP8 "])
+        rebuilt[4:8] = (len(rebuilt) - 8).to_bytes(4, "little")
+        path = os.path.join(tmpdir, f"alpha_filter{mode}.webp")
+        with open(path, "wb") as f:
+            f.write(rebuilt)
+        _, _, alpha_worst, _, _, _ = decode_and_compare(f"alpha_filter{mode}", path)
+        if alpha_worst != 0:
+            raise AssertionError(f"[VP8 alpha_filter{mode}] alpha channel differs by {alpha_worst}")
+        print(f"  [PASS] VP8  alpha_filter{str(mode):<10s} plane unfiltered exactly")
+        passed += 1
+
+    # A lossy payload that is cut short must be reported, not drawn.
+    lossy_cut = os.path.join(tmpdir, "lossy_cut.webp")
+    with open(lossy_cut, "wb") as f:
+        f.write(container[:len(container) - 40])
+    res = subprocess.run([binary, "--decode-webp", lossy_cut, os.path.join(tmpdir, "cut.ppm")],
+                         capture_output=True)
+    if res.returncode == 0:
+        raise AssertionError("[VP8 truncated] decoded a payload that was cut short")
+    if "truncat" not in res.stderr.decode("utf-8", errors="replace").lower():
+        raise AssertionError(f"[VP8 truncated] unhelpful message: {res.stderr!r}")
+    print("  [PASS] VP8  truncated_payload     refused")
+    passed += 1
+
+    # Two decodes of the same bytes agree.
+    first = os.path.join(tmpdir, "lossy_repeat1.rgba")
+    second = os.path.join(tmpdir, "lossy_repeat2.rgba")
+    for target in (first, second):
+        run_media_check(binary, ["--decode-webp", strong_filter, os.path.join(tmpdir, "repeat.ppm"),
+                                 target])
+    with open(first, "rb") as f:
+        a = f.read()
+    with open(second, "rb") as f:
+        b = f.read()
+    if a != b:
+        raise AssertionError("[VP8 determinism] two decodes of the same file differ")
+    print("  [PASS] VP8  determinism          two decodes byte-identical")
     passed += 1
 
     return passed
@@ -636,6 +904,7 @@ def main():
             total_passed += verify_jpegs_with_oracle(args.binary, convert_bin, tmpdir)
             total_passed += verify_gifs_with_oracle(args.binary, convert_bin, tmpdir)
             total_passed += verify_webp_decoding(args.binary, convert_bin, tmpdir)
+            total_passed += verify_lossy_webp(args.binary, convert_bin, tmpdir)
         else:
             print("WARNING: ImageMagick 'convert' not found; skipping libjpeg/GIF/WebP differential oracle.")
 

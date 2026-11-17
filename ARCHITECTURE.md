@@ -370,6 +370,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 54** | **Lossless WebP: the container and the `VP8L` bitstream.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 54 Architecture") |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
 | **Phase 56** | **Cross-origin `Window` and `Location` reflection.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 56 Architecture") |
+| **Phase 57** | **Lossy WebP — the `VP8` key frame, the `VP8X` container's `ALPH` plane, and the loop filter:** `Vp8Decoder` (`include/litebird/render/Vp8Decoder.hpp`, `src/render/Vp8Decoder.cpp`, tables in `Vp8Tables.cpp`) decodes a VP8 intra frame — the frame tag and `9d 01 2a` start code, the boolean arithmetic coder with its literal and signed-literal forms, one to eight token partitions, segmentation, the `[4][8][3][11]` coefficient probabilities and quantiser deltas, macroblock mode rows (16x16 luma, 8x8 chroma, and sixteen 4x4 modes through the `[10][10][9]` context), residuals with the eob / zero-run / ±1 triple, the inverse Walsh–Hadamard transform for Y2 and the 4x4 IDCT, the 16x16/8x8/4x4 intra predictors over a 16-sample border, the loop filter as a whole-frame pass in the bitstream's four-edge order, and fancy 9/3/3/1 chroma upsampling with libwebp's fixed-point BT.601 matrix — and `WebPDecoder` gains the lossy branch: a `VP8 ` chunk in a simple or `VP8X` file, an `ALPH` plane in either compression method and all three spatial filters (level-reduction refused as `UnsupportedAlpha`, reserved bits `Corrupt`), with `Status::UnsupportedLossy` retired. The write-up is in [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md). | ✅ Completed (finding 63; 208/208 unit suites — `webp_lossy_vp8_decodes_bit_exactly`, `webp_lossy_alpha_plane_and_container_consistency`; `make verify-media` 63 → 88 checks, the 26 new ones all lossy and every one bit-exact against libwebp 1.2.4, plus the loop filter, partitions, segmentation and the alpha filters; `make fuzz-media` 2,400 cases with 14 new seeds, 0 findings; `make asan` green, `asan-deep` 882 runs 0 failed) |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 | **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
 | **Phase 63** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (206/206 unit suites; JS corpus 1085/1112, `iteration.dat` 65/78 against 28 before; test262 10 more and 4 fewer of 47,967, the four being rows of the task table; 0.94 to 1.06 of `main`'s time over two runs) |
@@ -3737,11 +3738,12 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
 ### 3. Standalone Lossless WebP Decoder (`WebPDecoder.hpp`, `src/render/WebPDecoder.cpp`)
 
 - **Container:** `RIFF`/`WEBP` with a padding-aware chunk walk, a simple file
-  holding one `VP8L` chunk, or an extended `VP8X` file whose canvas is checked
-  against the image; a `VP8 ` (lossy) chunk, `ANIM`/`ANMF` (animation), a RIFF
-  size past the buffer, and a container with no image chunk each get their own
-  `Status` (`UnsupportedLossy`, `UnsupportedAnimation`, `Truncated`,
-  `Corrupt`) instead of a null image.
+  holding one `VP8L` chunk, one `VP8 ` (lossy) chunk, or an extended `VP8X`
+  file whose canvas is checked against the image and whose optional `ALPH`
+  chunk carries the alpha plane; `ANIM`/`ANMF` (animation), a RIFF size past
+  the buffer, and a container with no image chunk each get their own `Status`
+  (`UnsupportedAnimation`, `UnsupportedAlpha`, `Truncated`, `Corrupt`) instead
+  of a null image.
 - **Bitstream:** LSB-first bit reader with an explicit end-of-stream latch;
   canonical prefix codes (simple codes, and code-length codes with repeat
   symbols) with a **single-symbol code that consumes zero bits**, the rule that
@@ -3796,14 +3798,14 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
 
 `make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
 PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
-(exact `max_diff = 0` on every frame), 17 lossless WebP images against libwebp
-bit-exactly (plus a `VP8X` container, five refusals and four `probe()`
-classifications, added in Phase 54), and 5 SVG feature suites. `make fuzz-media`
+(exact `max_diff = 0` on every frame), 27 lossless and 26 lossy WebP checks
+against libwebp bit-exactly (plus a `VP8X` container, refusals and `probe()`
+classifications, added in Phase 54 and Phase 57), and 5 SVG feature suites. `make fuzz-media`
 mutates JPEG, GIF, WebP, and SVG inputs (2,400 cases in Release, 6,000 under
 ASan+UBSan+LSan). `JpegDecoder` and `GifDecoder`, like `WebPDecoder`, are wired
-into `ImageDecoder.cpp`; lossy `VP8`, animated WebP, AVIF, SVG
+into `ImageDecoder.cpp`; animated WebP, AVIF, SVG
 `<text>`/CSS stylesheets/filters, and Canvas 2D shadows/patterns remain open
-(see `AUDIT.md`, findings 43 and 60).
+(see `AUDIT.md`, findings 43, 60 and 63).
 
 ---
 
@@ -5703,8 +5705,9 @@ image CDNs — drew an empty box. `AUDIT.md`, finding 60.
    simple file (one `VP8L`) or an extended one (`VP8X` canvas, then the image),
    and clamps a RIFF size larger than the buffer instead of trusting it. An
    extended file whose animation flag is set, or which carries `ANIM`/`ANMF`,
-   stops here as `UnsupportedAnimation`; a `VP8 ` chunk as `UnsupportedLossy`;
-   an empty chunk list as `Corrupt`.
+   stops here as `UnsupportedAnimation`; an empty chunk list as `Corrupt`. A
+   `VP8 ` chunk stops here too until Phase 57, which decodes it, and an `ALPH`
+   chunk with it.
 2. **`BitReader`** — least-significant-bit-first, a five-byte window, and an
    explicit end-of-stream latch so that reads past the end are reported as
    truncated instead of returning fabricated zero bits.
@@ -5758,7 +5761,11 @@ implementation gets wrong long before it gets the Huffman layer wrong.
 Lossy `VP8` (macroblock prediction, DCT, loop filter — a video codec, not a
 variation), animated WebP (`ANMF` compositing and disposal), the `ALPH` chunk
 that only accompanies a lossy image, and AVIF (an AV1 still image). SVG
-`<text>` remains open too. The AGENTS.md row now names exactly these.
+`<text>` remains open too. The AGENTS.md row now names exactly these. *Phase 57
+closed the first and third of them — `VP8` key frames and the `ALPH` plane — in
+`src/render/Vp8Decoder.cpp`; the write-up moved to
+[`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
+when new write-ups stopped going into this document.*
 
 ---
 
@@ -6057,7 +6064,8 @@ execution reached their declaration statement. As a result:
 
 ### 4. Verification & remaining boundaries
 
-- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan
+- `make test`: **201/201** unit suites passed at the time (208/208 after the
+  phases merged since), in both Release and ASan+UBSan
   (`build-asan/test_suite`), including three new Phase 59 suites
   (`js_derived_this_temporal_dead_zone`,
   `js_lexical_temporal_dead_zone_blocks_and_classes`,

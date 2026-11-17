@@ -44,8 +44,12 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # Ceilings in bytes. Lowered as sections move to docs/, never raised to let a
 # pull request pass — the same rule as a scoreboard floor in CI.
 BUDGETS: dict[str, int] = {
-    "ARCHITECTURE.md": 512_000,   # 408 KB today
-    "AUDIT.md": 350_000,          # 282 KB today
+    # Set after the migration moved 46 phase write-ups out of ARCHITECTURE.md
+    # (435 KB -> 71 KB) and 56 resolved findings out of AUDIT.md (296 KB ->
+    # 37 KB). The headroom now is for the documents describing *more*, not for
+    # a log growing again; a write-up goes in docs/ instead.
+    "ARCHITECTURE.md": 120_000,   # 71 KB today
+    "AUDIT.md": 80_000,           # 37 KB today
 }
 
 # A heading that, added, means a write-up went into the wrong place.

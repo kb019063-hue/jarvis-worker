@@ -7,33 +7,42 @@ looks, and nothing else. Whatever cannot be said that way goes through the
 person the agents work for. This file is what the agents have to agree on so
 that two pieces of work do not collide.
 
-## Notice — read this first (2026-11-17)
+## Notice — read this first (2026-11-17, rewritten the same day)
 
 **New phase write-ups and findings no longer go in `ARCHITECTURE.md` and
 `AUDIT.md`.** They go in `docs/phases/NN-short-title.md` and
 `docs/findings/NN-short-title.md`; `docs/README.md` says what goes in one, and
 why files rather than sections.
 
-`ARCHITECTURE.md` is 408 KB, and 84% of it — 343 KB in 43 sections — is phase
-write-ups. `AUDIT.md` is 282 KB, and 53 of its 61 findings are resolved. An
-agent claiming a task has to find two integers in all that, which is about
-660 KB of markdown for two numbers; and two agents that look at the same
-moment still take the same one, which is what a number read out of a document
-cannot prevent. So:
+**The move has happened.** `ARCHITECTURE.md` was 435 KB and is now 71 KB: 46
+phase write-ups left it for `docs/phases/`. `AUDIT.md` was 296 KB and is now
+38 KB: 56 resolved findings left it for `docs/findings/`. Nothing was rewritten
+on the way — each file is its section, in the same order, and every heading the
+two documents had is still in the repository. An agent claiming a task used to
+read 731 KB of markdown to find two integers, and two agents that looked at
+the same moment still took the same one, which is what a number read out of a
+document cannot prevent. So:
 
-- **The two documents are frozen as append targets.** What is already in them
-  stays exactly as it is: do not add to it, reorder it, re-wrap it or delete
-  it in passing. They are migrated to `docs/` over time, and everything in
-  them is in the repository's history besides.
+- **The two documents are frozen as append targets.** What is still in them
+  stays exactly as it is: do not add to it, reorder it, re-wrap it or delete it
+  in passing. Everything in them is in the repository's history besides.
 - **The two numbers come from `python3 tools/next_ids.py`**, not from reading
   either document. It reads the documents, `docs/`, `docs/state.json` and the
-  open pull requests; `--pr-body` prints the block a pull request opens with
-  and `--sources` says where each number came from. It reserves nothing — a
+  open pull requests; `--pr-body` prints the block a pull request opens with,
+  `--sources` says where each number came from, and `--taken` lists every
+  number taken rather than only the next free one. It reserves nothing — a
   number is still taken by opening the pull request — but a collision is then
   visible in `gh pr list` instead of hidden in two documents.
+- **It is the only allocator.** `tools/ci/check_pr.py` asks it
+  (`--taken --ref main --no-prs`) instead of parsing the two documents itself,
+  which is what it did until the write-ups left them — after which it went on
+  answering "nothing is taken", and would have handed out numbers that were
+  somebody else's. One allocator cannot disagree with itself.
 - **CI enforces both rules** (`python3 tools/ci/check_docs.py`): a new
   `## Phase NN` heading in `ARCHITECTURE.md`, or a new `## NN.` finding in
   `AUDIT.md`, fails the build, and so does either file growing past its budget.
+  The budgets came **down** with the files, to 120 KB and 80 KB: a floor in CI
+  is not lowered to let a pull request pass.
 
 A change like this one — documents, tooling, CI, nothing that moves a
 scoreboard — is not a phase and takes no phase or finding number.
@@ -310,4 +319,3 @@ Rows that share files should not be in work at the same time.
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 passed before Phase 49's `<select>` work): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Touches `src/html/HtmlTokenizer.cpp`, `src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp`. The node type is there since Phase 28 (`include/litebird/dom/ProcessingInstruction.hpp`, its interface, `<?target data>` in the markup serializer); what is left is the tokenizer and the tree builder |
 | **Animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md); AUDIT.md, findings 43, 44 & 60; [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md) | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), **lossy WebP** (a VP8 key frame: the boolean decoder, the 16x16/8x8/4x4 intra predictors, the 4x4 IDCT and the Walsh–Hadamard transform, the loop filter, plus the `VP8X` container and an `ALPH` plane in either compression method and all three spatial filters), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the animated variant only. Canvas 2D text is done (Phase 46, finding 52). What is left: animated WebP (`ANMF` compositing and disposal), AVIF, and SVG `<text>` |
-| **Migrate the 43 phase write-ups out of `ARCHITECTURE.md` and retire the 53 resolved findings in `AUDIT.md`** | `docs/phases/`, `docs/findings/`, `ARCHITECTURE.md`, `AUDIT.md` | AGENTS.md, "Notice — read this first"; `docs/README.md` | A move, not a rewrite: one file per section, the four things a write-up says kept in their order. `ARCHITECTURE.md` is 408 KB and 84% of it is these sections; `AUDIT.md` is 282 KB and 53 of its 61 findings are resolved. `python3 tools/ci/check_docs.py` has to stay green, and its budgets come **down** as the files shrink, not up to let a pull request pass. The floors in `docs/state.json` must not go down either. Not beside a row that edits either document |

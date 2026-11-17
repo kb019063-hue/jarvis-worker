@@ -1487,7 +1487,22 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
             consume(JsTokenType::CloseBracket, "Expected ']' after index expression.");
             expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
         } else if (check(JsTokenType::OpenParen)) {
-            expr = std::make_unique<CallExpr>(std::move(expr), parse_arguments());
+            // A call of the identifier `eval` may run code that names
+            // `arguments`, `new.target` or `super`, and the string it is
+            // given is only known when it runs. The function it is written in
+            // therefore has to hoist those bindings even though its own body
+            // does not mention them.
+            const bool calls_eval = expr->kind == NodeKind::Identifier &&
+                                    static_cast<IdentifierExpr*>(expr.get())->name == "eval";
+            auto call = std::make_unique<CallExpr>(std::move(expr), parse_arguments());
+            if (calls_eval) {
+                if (auto* fn = nearest_non_arrow_function()) {
+                    fn->uses_arguments = true;
+                    fn->uses_new_target = true;
+                    fn->uses_super = true;
+                }
+            }
+            expr = std::move(call);
         } else if (check(JsTokenType::NoSubstitutionTemplate) || check(JsTokenType::TemplateHead)) {
             expr = parse_template(std::move(expr));
         } else {

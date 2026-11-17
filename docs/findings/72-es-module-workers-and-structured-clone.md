@@ -44,7 +44,7 @@ so queued asynchronous work does not root a sender agent's value.
 
 ```bash
 make -j2 test
-# All 211 engine test suites passed successfully!
+# All 212 engine test suites passed successfully!
 # Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 
 make -j2 security-worker

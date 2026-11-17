@@ -82,7 +82,7 @@ On the Phase 66 tree:
 
 ```bash
 make -j2 test
-# All 211 engine test suites passed successfully!
+# All 212 engine test suites passed successfully!
 # Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 
 make -j2 security-worker
@@ -103,7 +103,7 @@ module top-level and the absent `importScripts`, and verifies that `export *`
 fails before the worker body can post. The standalone worker-policy check runs
 the same static graph through an HTTP server and retains MIME, error listener,
 classic `importScripts`, and 60-process startup/exit checks. A focused
-ASan+UBSan build also ran `build-asan/test_suite` (211 suites),
+ASan+UBSan build also ran `build-asan/test_suite` (212 suites),
 `build-asan/cross_origin_test` (114 checks), and the policy runner with 20
 startup/exit iterations without a sanitizer diagnostic.
 

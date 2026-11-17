@@ -248,6 +248,11 @@ std::shared_ptr<JsEnvironment> copy_scope(const std::shared_ptr<JsEnvironment>& 
 // Programs
 // ---------------------------------------------------------------------------
 
+std::vector<JsInterpreter::EvalFrame>& JsInterpreter::eval_call_stack() {
+    thread_local std::vector<EvalFrame> stack;
+    return stack;
+}
+
 JsValue JsInterpreter::run(std::string_view source) {
     // Functions keep a reference to the text they were parsed from.
     auto text = std::make_shared<const std::string>(source);
@@ -259,32 +264,93 @@ JsValue JsInterpreter::run(std::string_view source) {
 }
 
 JsValue JsInterpreter::run_program(const Program& program) {
+    return run_program(program, nullptr, false);
+}
+
+JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope,
+                                   bool direct_eval) {
     CallDepthGuard depth_guard(*this);
     JsIntrinsics::set_current(m_realm.get());
-    EnvScope env_scope(m_global_env);
+    EnvPtr target = scope ? scope : m_global_env;
+    EnvScope env_scope(target);
 
-    // The global scope is shared by every script; its strictness is that of
-    // the script running right now.
+    // A script's strictness is its own, and for as long as it runs it is the
+    // global scope's too (the global scope is shared by every script). A
+    // direct eval inherits the strictness of the code that called it, unless
+    // its own text opens with "use strict" -- which is known only once it has
+    // been parsed, so the flag here is left alone: the caller's environment
+    // already has the right value, and run_program keeps it.
     struct StrictScope {
         JsEnvironment& env;
         int8_t saved;
-        StrictScope(JsEnvironment& e, bool strict) : env(e), saved(e.strict_mode) { env.strict_mode = strict ? 1 : 0; }
-        ~StrictScope() { env.strict_mode = saved; }
-    } strict_scope(*m_global_env, program.is_strict);
+        bool active;
+        StrictScope(JsEnvironment& e, bool strict, bool is_active) : env(e), saved(e.strict_mode), active(is_active) {
+            if (active) env.strict_mode = strict ? 1 : 0;
+        }
+        ~StrictScope() {
+            if (active) env.strict_mode = saved;
+        }
+    } strict_scope(*target, program.is_strict, !direct_eval);
 
-    // `var`, lexical bindings, and function declarations exist before the
-    // first statement runs.
-    for (const auto& name : program.var_names) {
-        if (!m_global_env->has_own(name)) m_global_env->define(name, JsValue::make_undefined());
+    // A direct eval's `let`, `const` and `class` are its own: they must not be
+    // visible to the caller's code after it returns, nor to a later eval in
+    // the same function. A layer over the caller's environment gives them that
+    // lifetime, and gives the eval everything the caller has beneath it -- a
+    // name in the layer shadows the caller's, so `eval('x')` still reads the
+    // caller's `x` when the eval declares no `x` of its own. The `var`s go
+    // elsewhere (below): into the caller's environment when the code is
+    // sloppy, which is what leaves them behind afterwards, and into the layer
+    // when it is strict, where they are the eval's alone.
+    EnvPtr body = target;
+    std::shared_ptr<JsEnvironment> layer;
+    const bool var_scope_own = direct_eval && (program.is_strict || target->is_strict()); // its own text, or its caller's
+    if (direct_eval) {
+        layer = std::make_shared<JsEnvironment>(target);
+        // The eval's text is as strict as it says, and otherwise as its
+        // caller's -- the caller's environment already answers that: a
+        // function's environment carries its own strictness, and so does a
+        // strict script's global one.
+        layer->strict_mode = program.is_strict ? 1 : -1;
+        body = layer;
     }
-    declare_lexicals(program.lexical_decls, m_global_env);
-    hoist_functions(program.functions, m_global_env);
+    EnvScope layer_scope(layer);
+
+    // Everything declared exists before the first statement runs. A `var` of
+    // sloppy eval text is declared in the caller's environment, which is what
+    // leaves it behind afterwards.
+    EnvPtr var_target = var_scope_own ? body : target;
+    for (const auto& name : program.var_names) {
+        if (!var_target->has_own(name)) var_target->define(name, JsValue::make_undefined());
+    }
+    declare_lexicals(program.lexical_decls, body);
+    // A function declaration in sloppy eval text is var-scoped like a `var` is
+    // (ECMA-262 B.3.3.1), so it goes to the caller's environment; in strict
+    // text it is lexical to the eval, like a `let`.
+    hoist_functions(program.functions, var_scope_own ? body : target);
 
     Frame frame;
     frame.track_completion = true;
-    Flow flow = exec_list(program.statements, m_global_env, frame);
+    Flow flow = exec_list(program.statements, body, frame);
     if (flow == Flow::Return) return std::move(frame.return_value);
     return std::move(frame.completion);
+}
+
+JsValue JsInterpreter::eval_source(const std::string& source) {
+    // A call from outside any call expression -- a host calling `eval`'s
+    // function value, say -- has no call site to answer for it, and is as
+    // indirect as `(0, eval)` is.
+    const EvalFrame frame = eval_call_stack().empty() ? EvalFrame{} : eval_call_stack().back();
+    if (!frame.direct || !frame.environment) return run(source);
+
+    auto text = std::make_shared<const std::string>(source);
+    JsLexer lexer(*text);
+    auto tokens = lexer.tokenize_all();
+    JsParser parser(std::move(tokens), text);
+    auto program = parser.parse_program();
+    // The scope has to outlive this call: the bindings its `var`s make belong
+    // to the function whose code called it, and are read after it returns.
+    JsEnvironment* running = const_cast<JsEnvironment*>(frame.environment);
+    return run_program(*program, running->shared_from_this(), /*direct_eval=*/true);
 }
 
 void JsInterpreter::hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env) {
@@ -2007,6 +2073,33 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     std::vector<JsValue> args = eval_arguments(expr->args, env);
     if (!fn.is_function()) {
         js_throw_type_error((callee_name ? *callee_name : std::string("expression")) + " is not a function");
+    }
+    // Whether `eval` is the direct one is decided here, not inside it: the
+    // standard asks whether the callee reference is the identifier `eval`,
+    // bound to the function the realm installed, and that is exactly a callee
+    // written as a plain identifier named `eval`. `(0, eval)(x)`,
+    // `window.eval(x)` and `var e = eval; e(x)` arrive by another kind of
+    // expression -- or, for the alias, by a callee that is an identifier of
+    // another name -- and are indirect: global code. A function of its own
+    // that a script calls `eval` is compared by identity, so shadowing the
+    // name does not make its calls direct, and reassigning the global one
+    // does not either.
+    const bool is_eval = callee->kind == NodeKind::Identifier &&
+                         static_cast<const IdentifierExpr*>(callee)->name == "eval";
+    const bool direct = is_eval && m_eval_function.is_function() && strict_equals(m_eval_function, fn);
+    // A frame is pushed only where one can matter: for the direct call itself,
+    // and -- inside an eval's extent, where the stack is not empty -- for every
+    // other call too, so that an indirect eval farther in can mask the direct
+    // one it runs inside. Outside any eval the stack stays empty and a call
+    // expression costs nothing.
+    std::vector<EvalFrame>& stack = eval_call_stack();
+    if (direct || !stack.empty()) {
+        stack.push_back(EvalFrame{env.get(), direct});
+        struct Pop {
+            std::vector<EvalFrame>& stack;
+            ~Pop() { stack.pop_back(); }
+        } pop{stack};
+        return fn.call_with_this(this_val, args);
     }
     return fn.call_with_this(this_val, args);
 }

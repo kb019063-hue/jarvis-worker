@@ -38,6 +38,24 @@ void print_banner() {
     std::cout << "=========================================================\033[0m\n";
 }
 
+/// Runs the loop of a one-shot host until it is idle, or until `budget` of
+/// loop time or `wall_limit_seconds` of real time are spent, and says so on
+/// standard error when it was the real-time limit that ended it with
+/// callbacks still due. What the page printed is then not all it would have
+/// printed, the exit status does not show it, and until this line existed
+/// nothing did: a web-platform-test whose load handlers took 11 seconds in a
+/// sanitizer build on a busy machine ended with no result and no message.
+void run_page_loop(litebird::EventLoop& loop, std::chrono::milliseconds budget, int wall_limit_seconds) {
+    const auto wall_limit = std::chrono::seconds(wall_limit_seconds);
+    const auto began = std::chrono::steady_clock::now();
+    loop.run_until_idle(budget, 100000, wall_limit);
+    if (std::chrono::steady_clock::now() - began < wall_limit || !loop.has_pending_tasks()) return;
+    const auto wait = loop.time_until_next();
+    if (!wait || wait->count() > 0) return;      // what is left is a timer that is not due yet
+    std::cerr << "litebird: the event loop was stopped after " << wall_limit_seconds
+              << " s of real time with callbacks still due (--wall-limit=SECONDS allows more)\n";
+}
+
 void print_help(const char* prog) {
     print_banner();
     std::cout << "Usage: " << prog << " [options] <html-file>\n\n";
@@ -61,6 +79,9 @@ void print_help(const char* prog) {
     std::cout << "  --run-script <file>    Load the page, run <file> in it as a deferred script,\n";
     std::cout << "                         let the page finish loading and its timers run, and\n";
     std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
+    std::cout << "  --wall-limit=SECONDS   Real time the page's callbacks may take once it has\n";
+    std::cout << "                         loaded (default 10). A test runner with a timeout of\n";
+    std::cout << "                         its own passes that, so that it is the one limit\n";
     std::cout << "  --url=URL              The address the page is said to come from\n";
     std::cout << "  --map-origin=ORIG=DIR  Serve requests to HTTP(S) origin ORIG from local DIR\n";
     std::cout << "  --xml-canonical <file> Read <file> as XML and print its canonical form (the\n";
@@ -132,6 +153,8 @@ int main(int argc, char* argv[]) {
     // How much timer time a page gets to settle before it is rendered: one
     // animation frame by default.
     int virtual_time_budget_ms = 16;
+    // How much real time the page's callbacks get once it has loaded.
+    int wall_limit_seconds = 10;
     std::string fragment_context;
     std::string input_file;
     std::string run_script_file;
@@ -156,6 +179,8 @@ int main(int argc, char* argv[]) {
             scripting = false;
         } else if (arg.rfind("--virtual-time-budget=", 0) == 0) {
             virtual_time_budget_ms = std::max(0, std::atoi(arg.substr(std::string("--virtual-time-budget=").size()).c_str()));
+        } else if (arg.rfind("--wall-limit=", 0) == 0) {
+            wall_limit_seconds = std::max(1, std::atoi(arg.substr(std::string("--wall-limit=").size()).c_str()));
         } else if (arg == "--xml-canonical") {
             xml_dump = "canonical";
         } else if (arg == "--xml-events") {
@@ -289,7 +314,7 @@ int main(int argc, char* argv[]) {
             auto& loop = litebird::EventLoop::default_loop();
             loop.set_time_skipping(true);
             interp.eval(js_code);
-            loop.run_until_idle(std::chrono::seconds(60));
+            run_page_loop(loop, std::chrono::seconds(60), wall_limit_seconds);
             // A script that ended with an uncaught exception or a syntax error
             // is a failure; say so through the exit status.
             if (litebird::js_uncaught_error_count() > 0) return 1;
@@ -440,7 +465,7 @@ int main(int argc, char* argv[]) {
         if (!read_file(run_script_file, script)) return 1;
         js_engine.eval_ast(script);
         js_engine.notify_document_loaded();
-        page_loop.run_until_idle(std::chrono::seconds(60));
+        run_page_loop(page_loop, std::chrono::seconds(60), wall_limit_seconds);
         return litebird::js_uncaught_error_count() > 0 ? 1 : 0;
     }
 
@@ -449,7 +474,7 @@ int main(int argc, char* argv[]) {
     // animation frame have run by the time a browser first paints, so they
     // run here too. Timers further out than the budget stay pending.
     js_engine.notify_document_loaded();
-    page_loop.run_until_idle(std::chrono::milliseconds(virtual_time_budget_ms));
+    run_page_loop(page_loop, std::chrono::milliseconds(virtual_time_budget_ms), wall_limit_seconds);
 
     // 3. CSS Parsing & Style Resolution: all <style>, <link rel="stylesheet">,
     // and @import sheets in document tree order.

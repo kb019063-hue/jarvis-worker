@@ -117,14 +117,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 **Claims**
 
 - **The same number twice.** #68 and #69 were opened 72 seconds apart and both
-  are Phase 55, finding 61: neither could have seen the other. That is what
-  step 4 above is for. Three more took a number that an open pull request
+  were Phase 55, finding 61: neither could have seen the other. That is what
+  step 4 above is for. Four more took a number that an open pull request
   already had: #63 took 52 and 58 half an hour after #62 had them, #66 took
-  53 and 59 two hours after #64, and #71 took 54 (which #67 held) and then 55.
-  Count the open pull requests, not `main` alone. And count the `## Phase N`
-  headings of ARCHITECTURE.md, not its phase table alone: seven phases (36,
-  42, 45, 47, 51, 52, 54) had a section and no row until Phase 63 added the
-  rows.
+  53 and 59 two hours after #64, #71 took 54 (which #67 held), then 55, then
+  56, and #68 took 59 and 65 twenty-two minutes after #74 had them. Count the
+  open pull requests, not `main` alone. And count the `## Phase N` headings
+  of ARCHITECTURE.md, not its phase table alone: eight phases (36, 42, 45,
+  47, 51, 52, 54, 56) had a section and no row until Phase 63 added the rows.
+- **Whoever merges first keeps the number, whoever claimed it first.** #70
+  claimed Phase 56 and finding 62 at 01:11 on 17 November. #71 put 56 in its
+  title at 02:40, was told in a comment at 02:43, and was merged with 56 and
+  62 at 03:02. Once a number is on `main` there is nothing left to settle:
+  #70 became Phase 63, finding 69, two hours of documents later. So run
+  `check_pr.py merge N` before you merge (it refuses a number that an
+  earlier open pull request holds), and write so that a renumbering is one
+  `sed`: always the words `Phase N` and `finding F`, which stand in six
+  files (`ARCHITECTURE.md`, `AUDIT.md`, `README.md`, `AGENTS.md`,
+  `tests/test_suite.cpp`, `tests/js-conformance/README.md`). Renumber on
+  your branch *before* you merge `main`, while every `Phase N` in the tree
+  is still yours.
 - **A claim nobody can read.** #65 and #71 have no `Task:`, `Files:` and
   `Phase P, finding F` lines. So nothing said that #71 changes
   `src/js/JsEval.cpp`, which #68 names, and `src/js/JsOps.cpp`, which #70

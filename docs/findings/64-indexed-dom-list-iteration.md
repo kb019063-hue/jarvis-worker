@@ -1,24 +1,25 @@
-## 64. ✅ Indexed DOM list methods did not share Array identities or live semantics (Phase 58)
+## 64. ✅ Array-Like Iteration Lost `ToLength` and `forEach` Getter Order (Phase 58)
 
-**The hole.** `tests/wpt/dom/nodes/Node-childNodes.html` compared all five
-iteration methods with `Array.prototype` by identity. The Web IDL binding
-created separate functions. Borrowing the existing Array versions was not a
-fix: non-array receivers were copied at method entry, so changes to a live
-list after calling `values()` would not be visible to `next()`. Also the
-Array `values` and `Symbol.iterator` properties held distinct functions.
+**The hole.** PR #77 fixed the `Node.childNodes` WPT function-identity failure
+and gave indexed lists the actual generic Array iterator methods. It directly
+cast `js_to_integer(length)` to `size_t`, however: infinity and oversized
+lengths can leave an iterator finished instead of producing index zero, and
+out-of-range floating-to-integer conversion is undefined in C++. `forEach`
+checked the callback before evaluating the receiver's `length` getter,
+where ECMA-262 evaluates length first. No test outside the WPT corpus pinned
+liveness as the original list changes between `next()` calls. PR #77 also
+passed **9550/9744** WPT subtests but left the minimum floor at **9538**.
 
-**The fix.** NodeList and DOMTokenList install their own realm's *same*
-Array prototype function values. Array iterators reread length and index on
-each step and keep the receiver reachable by GC; `forEach` reads the initial
-length once but rereads each property, skips absent indices and supplies the
-original receiver to the callback. Other Array methods and non-iterable
-HTMLCollection / NamedNodeMap methods are deliberately unchanged.
+**The fix.** A shared `iteration_length()` clamps to 2^53 − 1 before casting;
+`forEach` evaluates it before checking the callback. A new unit suite covers
+identity, DOM list mutation, ordinary sparse/large array-likes, and getter
+order. The WPT floor rises to 9550, without adding any expected failure.
 
-**Verification.** `make test` **209/209** including the new mutation,
-identity, and array-like regression suite; out-of-corpus
-`compare_with_jsdom.py` iterator/list probe **12/12** lines match jsdom
-31.0.0; `make wpt` **9539/9744** across 190 files, **205 listed**, **0
-unlisted** (before: 9538/9744, 206 listed).
+**Verification.** `make test` **209/209** plus 80 cross-origin checks; `make
+wpt` **9550/9744**, 194 listed, 0 unlisted (unchanged WPT score, stronger
+floor). Out-of-corpus `compare_with_jsdom.py`: **12/12** lines match jsdom
+31.0.0. The `Infinity`/getter regression is in `tests/test_suite.cpp`.
 
-**Still open.** `strict-write` (2 WPT cases) needs the exotic `[[Set]]`
-refusal path; other Array methods' `receiver()` still snapshots non-arrays.
+**Still open.** Other Array methods use `receiver()`'s snapshot of non-array
+objects; this change does not claim to make all Array methods generic. The
+remaining 194 WPT failures are classified in `tests/wpt/README.md`.

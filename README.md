@@ -31,7 +31,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **1085 / 1112 (97.6%)**; of the 27 that fail, nine were recorded in Phases 34 and 43 for what classes and `eval` still lack, and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9539 / 9744 subtests** across 190 files; the 205 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing, 9538 before Phase 58 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9550 / 9744 subtests** across 190 files; the 194 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 9538 before PR #77 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
@@ -807,21 +807,19 @@ make url-conformance                                                    # URL pa
 ```
 
 
-### Live indexed-list iteration (Phase 58)
+### Live indexed-list iteration follow-up (Phase 58)
 
-`NodeList` and `DOMTokenList` used to have separate lookalike iterator
-functions; `Node.childNodes` WPT compares their **identities** with the Array
-prototype's, and borrowed Array methods copied array-like objects, missing
-mutations between iterator steps. The two interfaces now install their realm's
-actual Array `keys`/`values`/`entries`/`forEach` functions and `@@iterator`;
-`Array.prototype.values === Array.prototype[Symbol.iterator]`. Iterators read
-live length and indexed values, while `forEach` fixes length at entry and
-passes the original list to the callback. `make test` runs 209/209 suites,
-including live list and ordinary array-like probes; `make wpt` passes
-9539/9744 across 190 files (205 listed, 0 unlisted). The two `strict-write`
-HTMLCollection failures still require an exotic write-refusal path. Details:
-`docs/phases/58-indexed-dom-list-iteration.md` and
-`docs/findings/64-indexed-dom-list-iteration.md`.
+PR #77 made NodeList and DOMTokenList methods share the realm's Array iterator
+functions and fixed the `Node.childNodes` WPT identity check. This follow-up
+pins live mutations and borrowed array-like iteration in a unit suite, clamps
+`length` to the ECMAScript `ToLength` maximum before converting it to a C++
+index (so `Infinity` does not produce a finished iterator), and reads
+`forEach`'s length before checking the callback. `make test` runs 209/209
+suites; `make wpt` passes **9550/9744** across 190 files (194 listed,
+0 unlisted). The WPT floor now enforces the eleven gains PR #77 left without
+a raised floor. See `docs/phases/58-indexed-dom-list-iteration.md` and
+`docs/findings/64-indexed-dom-list-iteration.md`. Other Array methods still
+snapshot non-array receivers.
 
 ### CSS whitespace runs (Phase 31)
 

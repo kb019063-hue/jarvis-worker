@@ -1292,6 +1292,19 @@ TEST(indexed_dom_lists_use_live_generic_array_iteration) {
         Array.prototype.entries.call({0: 7, length: 1}).next().value[1] === 7 &&
         Array.prototype.keys.call({length: 2}).next().value === 0;
     )").is_truthy());
+
+    // ToLength clamps non-finite/oversized lengths before C++ integer
+    // conversion; forEach evaluates the receiver's length before IsCallable.
+    assert(js.eval(R"(
+        var infinite = Array.prototype.keys.call({length: Infinity}).next();
+        var huge = Array.prototype.entries.call({0: 'ok', length: 1e100}).next();
+        var calls = [];
+        try {
+            Array.prototype.forEach.call({get length() { calls.push('length'); return 0; }}, null);
+        } catch (error) { calls.push(error.name); }
+        infinite.value === 0 && !infinite.done && huge.value[1] === 'ok' &&
+        calls.join() === 'length,TypeError';
+    )").is_truthy());
 }
 
 TEST(incremental_layout_and_invalidation) {

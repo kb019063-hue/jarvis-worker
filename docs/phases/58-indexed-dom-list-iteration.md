@@ -1,29 +1,33 @@
-## Phase 58 Architecture: Indexed DOM Lists Share the Array Iteration Functions
+## Phase 58 Architecture: Array-Like Iteration Boundaries and Live DOM Lists
 
-The `Node.childNodes` WPT already exercised iteration, but its final assertions
-compared **function identity** with `Array.prototype`. The DOM installed
-separate lookalike methods, and the array implementation copied non-array
-receivers on entry, so assigning the built-ins directly would have broken
-liveness. `Array.prototype.values` and `@@iterator` were also two functions.
+PR #77 made Web IDL indexed collections share the Array prototype's iterator
+functions by identity. Its generic `keys`/`values`/`entries` read the original
+receiver's `length` and indexed properties on each `next()`, and `forEach`
+passes that receiver to the callback. That change retired `nodelist-iterator`
+and ten other listed WPT failures, but the WPT floor remained at 9538.
 
-`BuiltinsArray.cpp` now exposes the same `values` function at both keys and
-implements `keys`/`values`/`entries` by keeping their original receiver as a
-GC root. Each `next()` reads its current length and indexed property anew.
-`forEach` takes the initial length once, skips missing indices, reads each
-present index at callback time, and passes the original collection as its
-third callback argument. `DomCollectionBindings.cpp` installs those exact
-realm-local functions on Web IDL indexed-value iterables (`NodeList` and
-`DOMTokenList`), leaving HTMLCollection and NamedNodeMap's separate
-iterator-only definitions untouched. The new regression suite exercises
-identity, mutations between `next()` calls, `DOMTokenList` updates,
-`forEach`'s this/third argument and length boundary, and borrowed methods on
-ordinary array-like objects including holes. An independent out-of-corpus
-`compare_with_jsdom.py` probe (identity, live NodeList/token iteration, and
-`forEach` boundaries) matched jsdom 31.0.0 on **12/12** output lines.
+**What remained wrong.** `BuiltinsArray.cpp` converted an arbitrary array-like
+`length` directly from `double` to `size_t`. `Infinity` and numbers above the
+integer range have undefined C++ conversion, rather than ECMAScript's
+`ToLength` clamp at 2^53 − 1. An iterator over `{length: Infinity}` could
+finish before producing index zero. `forEach` tested whether its callback was
+callable before getting `length`, reversing the spec's observable order when
+that property is a getter.
 
-**Verification:** `make test` **209/209**; `make wpt` **9539/9744** across
-190 files (205 listed failures, 0 unlisted), up from **9538/9744** (206
-listed). Remaining indexed-collection WPT failures are `strict-write` (2),
-which needs the exotic property-write refusal path, not iteration. Other
-array methods still use `receiver()`'s snapshot of non-arrays; this phase
-does not claim to make every Array method generic.
+**How it works now.** The shared `iteration_length()` converts a length with
+`ToIntegerOrInfinity`, maps negatives and `NaN` to zero, and clamps positive
+values (including infinity) to `9007199254740991` before conversion to
+`size_t`. Array iterator `next()` still calls it on every step to see live
+length changes; `forEach` calls it once, before `IsCallable`, so appended
+indices are not visited but existing values are looked up when reached. No
+other Array method is changed. The new unit suite checks NodeList / DOMTokenList
+function identities, list shrink/grow while iterating, `forEach`'s `this`,
+third argument, and length snapshot, sparse borrowed array-likes, `Infinity`,
+very large lengths, and getter/callback ordering. The independent out-of-corpus
+`compare_with_jsdom.py` list probe matched jsdom 31.0.0 on **12/12** lines.
+
+**Verification:** `make test` **209/209** suites plus 80 cross-origin checks;
+`make wpt` **9550/9744** subtests across 190 files (**194 listed**, **0
+unlisted**), with `WPT_FLOOR` raised from 9538 to **9550**. The old 9538 floor
+was not sufficient to catch losing PR #77's eleven passing subtests. More
+specific verification and what is still open are in finding 64.

@@ -31,13 +31,13 @@ suite and two other parsers, and brought in the tests browsers share (see
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **1003 / 1017 (98.6%)**; nine of the 14 that fail were recorded in Phases 34 and 43 for what classes and `eval` still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7998 / 8009 subtests** across 103 files; the 11 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (DOM, encoding, CSS parsing) | **9539 / 9744 subtests** across 190 files; the 205 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 9538 before Phase 58 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 201 suites, all passing | `make test` |
+| Engine unit tests | 202 suites, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
@@ -54,7 +54,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 201 engine suites
+make test            # 202 engine suites
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
@@ -699,7 +699,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 201 engine test suites
+# Run the 202 engine test suites
 make test
 ```
 
@@ -788,6 +788,21 @@ python3 tools/conformance/run_dom_conformance.py --reference            # the co
 make url-conformance                                                    # URL parsing and setters
 ```
 
+
+### Live indexed-list iteration (Phase 58)
+
+`NodeList` and `DOMTokenList` used to have separate lookalike iterator
+functions; `Node.childNodes` WPT compares their **identities** with the Array
+prototype's, and borrowed Array methods copied array-like objects, missing
+mutations between iterator steps. The two interfaces now install their realm's
+actual Array `keys`/`values`/`entries`/`forEach` functions and `@@iterator`;
+`Array.prototype.values === Array.prototype[Symbol.iterator]`. Iterators read
+live length and indexed values, while `forEach` fixes length at entry and
+passes the original list to the callback. `make test` runs 202/202 suites,
+including live list and ordinary array-like probes; `make wpt` passes
+9539/9744 across 190 files (205 listed, 0 unlisted). The two `strict-write`
+HTMLCollection failures still require an exotic write-refusal path. Details:
+`ARCHITECTURE.md`, Phase 58; `AUDIT.md`, finding 64.
 
 ### CSS whitespace runs (Phase 31)
 
@@ -889,7 +904,7 @@ parser/evaluator across scripts, functions, async/generator bodies, blocks,
 try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
 # ReferenceError
 # ReferenceError
-make test            # 201 / 201 unit suites
+make test            # 202 / 202 unit suites
 make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
 make test262         # 12,359 / 15,686 (+43, 0 regressions)
 ```

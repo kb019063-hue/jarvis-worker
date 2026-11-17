@@ -362,6 +362,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 58** | **Live, generic indexed-list iteration:** `NodeList` and `DOMTokenList` reuse their realm's `Array.prototype` `keys`, `values`, `entries`, `forEach`, and `@@iterator` functions by identity. Array iterators read length and index from the original receiver on each `next()`; `forEach` snapshots length but reads values at callback time. `Array.prototype.values` and `@@iterator` are one function. HTMLCollection / NamedNodeMap keep their existing iterator-only surface. | ✅ Completed (202/202 suites; `make wpt` 9539/9744, 205 listed, 0 unlisted) |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 
 ---
@@ -6066,3 +6067,33 @@ execution reached their declaration statement. As a result:
   - Direct `eval` inside a function (separate `AGENTS.md` row) and `var`
     inside a block shadowing an outer block `let`/`const` early SyntaxError
     remain open.
+
+## Phase 58 Architecture: Indexed DOM Lists Share the Array Iteration Functions
+
+The `Node.childNodes` WPT already exercised iteration, but its final assertions
+compared **function identity** with `Array.prototype`. The DOM installed
+separate lookalike methods, and the array implementation copied non-array
+receivers on entry, so assigning the built-ins directly would have broken
+liveness. `Array.prototype.values` and `@@iterator` were also two functions.
+
+`BuiltinsArray.cpp` now exposes the same `values` function at both keys and
+implements `keys`/`values`/`entries` by keeping their original receiver as a
+GC root. Each `next()` reads its current length and indexed property anew.
+`forEach` takes the initial length once, skips missing indices, reads each
+present index at callback time, and passes the original collection as its
+third callback argument. `DomCollectionBindings.cpp` installs those exact
+realm-local functions on Web IDL indexed-value iterables (`NodeList` and
+`DOMTokenList`), leaving HTMLCollection and NamedNodeMap's separate
+iterator-only definitions untouched. The new regression suite exercises
+identity, mutations between `next()` calls, `DOMTokenList` updates,
+`forEach`'s this/third argument and length boundary, and borrowed methods on
+ordinary array-like objects including holes. An independent out-of-corpus
+`compare_with_jsdom.py` probe (identity, live NodeList/token iteration, and
+`forEach` boundaries) matched jsdom 31.0.0 on **12/12** output lines.
+
+**Verification:** `make test` **202/202**; `make wpt` **9539/9744** across
+190 files (205 listed failures, 0 unlisted), up from **9538/9744** (206
+listed). Remaining indexed-collection WPT failures are `strict-write` (2),
+which needs the exotic property-write refusal path, not iteration. Other
+array methods still use `receiver()`'s snapshot of non-arrays; this phase
+does not claim to make every Array method generic.

@@ -44,6 +44,24 @@ std::deque<JsValue>& elements_of(const JsValue& array) {
     return array.object_val->array_elements;
 }
 
+// Unlike receiver(), iteration must not copy an array-like: a live NodeList
+// can grow or shrink between calls to next(), and forEach passes the original
+// receiver to the callback. ToLength also handles fractional/negative lengths.
+size_t iteration_length(const JsValue& target) {
+    if (target.is_array()) return elements_of(target).size();
+    const double length = js_to_integer(js_to_number(target.get_property("length")));
+    if (length <= 0) return 0;
+    return static_cast<size_t>(std::min(length, 9007199254740991.0));
+}
+
+JsValue iteration_receiver(const char* method) {
+    JsValue target = self();
+    if (target.is_nullish()) {
+        js_throw_type_error(std::string("Array.prototype.") + method + " called on null or undefined");
+    }
+    return target;
+}
+
 /// Resolves a relative index argument (negative counts from the end) into
 /// [0, length].
 size_t relative_index(const JsValue& arg, size_t length, size_t fallback) {
@@ -459,12 +477,17 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_method(ap, "findLastIndex", 1, make_find("findLastIndex", true, Find::Index));
 
     js_define_method(ap, "forEach", 1, [](Args args) {
-        JsValue array = receiver("forEach");
+        JsValue target = iteration_receiver("forEach");
+        // forEach snapshots the length, but reads each value only when its
+        // index is reached. Unlike an iterator, it never visits appended items.
+        const size_t length = iteration_length(target);
         JsValue callback = require_callback(js_arg(args, 0), "forEach");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            JsValue item = elements_of(array)[i];
-            callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
+        for (size_t i = 0; i < length; ++i) {
+            const std::string key = std::to_string(i);
+            if (!target.is_array() && !target.has_property(key)) continue;
+            JsValue item = target.get_property(key);
+            callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), target});
         }
         return JsValue::make_undefined();
     });
@@ -565,29 +588,33 @@ void install_array_builtins(JsIntrinsics& realm) {
     enum class Kind { Keys, Values, Entries };
     auto make_array_iterator = [](Kind kind) {
         return [kind](Args) {
-            JsValue array = receiver("values");
+            JsValue target = iteration_receiver(kind == Kind::Keys ? "keys" :
+                                                kind == Kind::Entries ? "entries" : "values");
             auto index = std::make_shared<size_t>(0);
-            return js_make_iterator([array, index, kind](JsValue& value) {
-                // The array is read live, so it may shrink or grow meanwhile.
-                const auto& elements = elements_of(array);
-                if (*index >= elements.size()) return false;
+            return js_make_iterator([target, index, kind](JsValue& value) {
+                // Re-read length and the indexed property on every next().
+                // This is generic over arrays and live DOM indexed collections.
+                if (*index >= iteration_length(target)) return false;
                 size_t i = (*index)++;
+                JsValue item;
+                if (kind != Kind::Keys) item = target.get_property(std::to_string(i));
                 switch (kind) {
                     case Kind::Keys: value = JsValue::make_number(static_cast<double>(i)); break;
-                    case Kind::Values: value = elements[i]; break;
+                    case Kind::Values: value = item; break;
                     case Kind::Entries:
-                        value = JsValue::make_array({JsValue::make_number(static_cast<double>(i)), elements[i]});
+                        value = JsValue::make_array({JsValue::make_number(static_cast<double>(i)), item});
                         break;
                 }
                 return true;
-            }, {array});
+            }, {target});
         };
     };
     js_define_method(ap, "keys", 0, make_array_iterator(Kind::Keys));
-    js_define_method(ap, "values", 0, make_array_iterator(Kind::Values));
+    JsValue values = js_make_native("values", 0, make_array_iterator(Kind::Values));
+    js_define_hidden(ap, "values", values);
+    js_define_hidden(ap, kIteratorKey, values);
+    js_define_hidden(ap, "Symbol.iterator", values);
     js_define_method(ap, "entries", 0, make_array_iterator(Kind::Entries));
-    js_define_method(ap, kIteratorKey, 0, make_array_iterator(Kind::Values));
-    js_define_method(ap, "Symbol.iterator", 0, make_array_iterator(Kind::Values));
 }
 
 } // namespace litebird

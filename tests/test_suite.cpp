@@ -1230,6 +1230,69 @@ TEST(javascript_prototype_chain_and_arrays) {
     assert(is_arr.to_string() == "true false");
 }
 
+// Phase 58: indexed-value iterables borrow the actual Array methods, while
+// ordinary array-likes and live DOM lists are read from their original object.
+TEST(indexed_dom_lists_use_live_generic_array_iteration) {
+    using namespace litebird;
+    JsInterpreter js(std::make_shared<Document>());
+    assert(js.eval(R"(
+        var names = ['keys', 'values', 'entries', 'forEach'];
+        var same = function(proto) {
+            return names.every(function(name) { return proto[name] === Array.prototype[name]; }) &&
+                   proto[Symbol.iterator] === Array.prototype[Symbol.iterator];
+        };
+        var host = document.createElement('div');
+        var a = document.createElement('a'), b = document.createElement('b');
+        host.appendChild(a); host.appendChild(b);
+        var list = host.childNodes;
+        var id = same(NodeList.prototype) && same(DOMTokenList.prototype) &&
+                 Array.prototype.values === Array.prototype[Symbol.iterator] &&
+                 list.values === Array.prototype.values;
+        var values = list.values(), keys = list.keys(), entries = list.entries();
+        var first = values.next().value === a && keys.next().value === 0 &&
+                    entries.next().value[1] === a;
+        var c = document.createElement('c');
+        host.appendChild(c); host.removeChild(a);
+        var changed = values.next().value === c && values.next().done &&
+                      keys.next().value === 1 && keys.next().done &&
+                      entries.next().value[1] === c && entries.next().done;
+        var words = document.createElement('p').classList;
+        words.add('one');
+        var tokens = words.values();
+        var tokenLive = tokens.next().value === 'one';
+        words.add('two');
+        tokenLive = tokenLive && tokens.next().value === 'two' && tokens.next().done;
+        var seen = [];
+        var that = {};
+        list.forEach(function(node, index, owner) {
+            seen.push(node === (index === 0 ? b : c) && owner === list && this === that);
+            if (index === 0) host.appendChild(document.createElement('d'));
+        }, that);
+        id && first && changed && tokenLive && seen.join() === 'true,true';
+    )").is_truthy());
+
+    assert(js.eval(R"(
+        var target = {0: 'a', 1: 'b', length: 2};
+        var iterator = Array.prototype.values.call(target);
+        var first = iterator.next().value === 'a';
+        target[1] = 'changed'; target[2] = 'added'; target.length = 3;
+        var live = iterator.next().value === 'changed' &&
+                   iterator.next().value === 'added' && iterator.next().done;
+        var seen = [];
+        Array.prototype.forEach.call(target, function(value, index, owner) {
+            seen.push(value + index + (owner === target));
+            if (index === 0) { target[1] = 'updated'; target[3] = 'ignored'; target.length = 4; }
+        });
+        var hole = {0: 'x', 2: 'z', length: 3};
+        var skipped = [];
+        Array.prototype.forEach.call(hole, function(value) { skipped.push(value); });
+        first && live && seen.join() === 'a0true,updated1true,added2true' &&
+        skipped.join() === 'x,z' &&
+        Array.prototype.entries.call({0: 7, length: 1}).next().value[1] === 7 &&
+        Array.prototype.keys.call({length: 2}).next().value === 0;
+    )").is_truthy());
+}
+
 TEST(incremental_layout_and_invalidation) {
     using namespace litebird;
 
@@ -15335,6 +15398,7 @@ int main() {
     RUN_TEST(css_positioning_and_stacking_contexts);
     RUN_TEST(box_sizing_and_constraints);
     RUN_TEST(javascript_prototype_chain_and_arrays);
+    RUN_TEST(indexed_dom_lists_use_live_generic_array_iteration);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
     RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);

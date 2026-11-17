@@ -24,6 +24,18 @@ namespace {
 using IndexFn = bool (*)(Realm&, const JsValue& self, std::size_t index, JsValue& out);
 
 void define_list_iteration(Iface& I, IndexFn at, bool with_pairs) {
+    if (with_pairs) {
+        // Web IDL's indexed-value iterables (NodeList and DOMTokenList) use
+        // the Array prototype functions themselves, not lookalike wrappers.
+        // Those functions read length and indexed properties on the original
+        // receiver, so a DOM list remains live while its iterator advances.
+        JsValue array = js_object_value(I.realm.intrinsics->array_proto);
+        for (const char* name : {"values", "keys", "entries", "forEach"}) {
+            define_method_value(I.proto, name, array.get_property(name));
+        }
+        define_method_value(I.proto, kIteratorKey, array.get_property(kIteratorKey), PropertyMap::Hidden);
+        return;
+    }
     auto values = make_function(I.realm, "values", 0, [at](Realm& r, Args) -> JsValue {
         const JsValue self = JsValue::current_this();
         JsValue probe;

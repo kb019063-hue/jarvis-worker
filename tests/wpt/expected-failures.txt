@@ -7,7 +7,6 @@
 # and when one that is here passes.
 dom/nodes/Document-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	strict-write
 dom/nodes/Element-getElementsByTagName.html	Shouldn't be able to set unsigned properties on a HTMLCollection (strict mode)	strict-write
-dom/nodes/Node-childNodes.html	Iterator behavior of Node.childNodes	nodelist-iterator
 domparsing/XMLSerializer-serializeToString.html	Check if an attribute with namespace and no prefix is serialized with the nearest-declared prefix even if the prefix is assigned to another namespace.	serializer-another-tree
 domparsing/XMLSerializer-serializeToString.html	Check if the prefix of an attribute is NOT preserved in a case where neither its prefix nor its namespace URI is not already used.	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization takes into account of the same prefix declared in an ancestor element	serializer-standard-moved

@@ -68,6 +68,7 @@ The rest are documented with enough detail to act on.
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
 | 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
+| 64 | Indexed-value DOM lists supplied their own `keys`/`values`/`entries`/`forEach`/`@@iterator` functions instead of the Array prototype functions, and Array iteration copied non-array receivers (losing live list mutations); `Array.prototype.values !== Array.prototype[Symbol.iterator]` | **Medium (spec conformance)** | ✅ Fixed (Phase 58): shared realm-local function identities, live receiver/length/index reads for iterators, fixed-length `forEach` with live values; WPT 9538→9539/9744, 206→205 listed, 0 unlisted |
 | 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
 
 ---
@@ -4323,3 +4324,30 @@ isolation.
 **Still open.**
 - Separate `<script>` tags evaluate `run_program` per script, so referencing a `let` declared in a later `<script>` throws `"x is not defined"` (`ReferenceError`) rather than `"Cannot access 'x' before initialization"`, and redeclaring the same lexical name across two `<script>` tags overwrites `m_global_env` instead of raising a `SyntaxError`.
 - Direct `eval` scope (tracked separately in `AGENTS.md`) and parse-time early `SyntaxError` for `{ let x; { var x; } }` remain open.
+
+---
+
+## 64. ✅ Indexed DOM list methods did not share Array identities or live semantics (Phase 58)
+
+**The hole.** `tests/wpt/dom/nodes/Node-childNodes.html` compared all five
+iteration methods with `Array.prototype` by identity. The Web IDL binding
+created separate functions. Borrowing the existing Array versions was not a
+fix: non-array receivers were copied at method entry, so changes to a live
+list after calling `values()` would not be visible to `next()`. Also the
+Array `values` and `Symbol.iterator` properties held distinct functions.
+
+**The fix.** NodeList and DOMTokenList install their own realm's *same*
+Array prototype function values. Array iterators reread length and index on
+each step and keep the receiver reachable by GC; `forEach` reads the initial
+length once but rereads each property, skips absent indices and supplies the
+original receiver to the callback. Other Array methods and non-iterable
+HTMLCollection / NamedNodeMap methods are deliberately unchanged.
+
+**Verification.** `make test` **202/202** including the new mutation,
+identity, and array-like regression suite; out-of-corpus
+`compare_with_jsdom.py` iterator/list probe **12/12** lines match jsdom
+31.0.0; `make wpt` **9539/9744** across 190 files, **205 listed**, **0
+unlisted** (before: 9538/9744, 206 listed).
+
+**Still open.** `strict-write` (2 WPT cases) needs the exotic `[[Set]]`
+refusal path; other Array methods' `receiver()` still snapshots non-arrays.

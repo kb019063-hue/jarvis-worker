@@ -32,7 +32,8 @@ The runner sets `TZ=UTC` for both engines so date cases are stable.
 | `deep-nesting.dat` | Input nested or chained far deeper than the native stack: 200,000 nested parentheses, blocks or functions, a million-node linked list, a 100,000-link promise chain. Too deep must be a `RangeError` the script can catch, never the end of the process. Engines differ on where "too deep" begins, so these cases accept either a result or a `RangeError` and print which invariant held |
 | `long-strings.dat` | Strings of 100,000 characters and more: read one character at a time, built with `+=`, eaten from the front by a tokenizer, searched by a regular expression. Each script does work proportional to its input, so it takes milliseconds unless reading, appending or slicing a string costs its whole length, in which case it takes minutes and the 10 s limit ends it. The rest of the file is what sharing text must not change: every earlier value of a string that was appended to, the two halves of a surrogate pair meeting, order by code unit, `RangeError` for a string too long to exist |
 | `gc-safety.dat` | Scripts that run a collection in the middle of everything: inside callbacks, half-built expressions, loops, suspended generators and async functions. The result must not change |
-| `prototypes.dat` | A function in a prototype chain: the parent of a class (`Object.getPrototypeOf(Derived) === Base`, static members through any number of parents, `super()` after the parent was replaced), the prototype of an object (`Object.create(fn)`), `Function.prototype` itself, the error types, `Reflect.construct` with a third argument, what `Object.defineProperty` allows on a property that cannot be configured, and three whole programs as Babel and TypeScript compile classes for older browsers. Eleven cases collect in the middle and check that a class reachable only as a prototype keeps what it closed over. Nine cases fail and were recorded to: what classes still lack (ARCHITECTURE.md, Phase 34, section 9) |
+| `prototypes.dat` | A function in a prototype chain: the parent of a class (`Object.getPrototypeOf(Derived) === Base`, static members through any number of parents, `super()` after the parent was replaced), the prototype of an object (`Object.create(fn)`), `Function.prototype` itself, the error types, `Reflect.construct` with a third argument, what `Object.defineProperty` allows on a property that cannot be configured, and three whole programs as Babel and TypeScript compile classes for older browsers. Eleven cases collect in the middle and check that a class reachable only as a prototype keeps what it closed over. Eight cases fail and were recorded to: what classes still lack (ARCHITECTURE.md, Phase 34, section 9). A ninth did until Phase 43 |
+| `construct.dat` | What a constructor makes. `new.target` is the function `new` was applied to: in a parent's constructor, through a default constructor, in an arrow function, under `Reflect.construct(F, args, G)`, through a bound function, in a subclass of a built-in. An object a parent's constructor returns is `this` in the child, with the child's fields on it, and is what `new` gives. When `this` is bound: a second `super()`, none at all, a returned primitive, a class that extends null. `Reflect.construct` of a built-in with another function as `new.target`, what it refuses and what it reads in which order. Three whole programs as Babel and TypeScript compile classes. Two cases fail and were recorded to: `this` used before `super()`, and `new.target` and `super()` inside `eval` (ARCHITECTURE.md, Phase 43, section 8) |
 
 ## Beside the corpus: a grid compared with Node
 
@@ -60,20 +61,23 @@ directories of it (downloaded the first time, at a pinned commit, into
 `build/test262`; nothing of it is in the repository).
 
 ```bash
-make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 10,835 pass
+make test262                       # 21 directories on functions, classes and objects: 15,686 tests, 12,316 pass
 python3 tools/conformance/run_test262.py --binary before=/tmp/litebird-main --binary now=build/litebird
 python3 tools/conformance/run_test262.py --show 20 language/expressions/super
 ```
 
-It is not a scoreboard and has no floor: two thirds of those directories
-pass (of the 4,851 tests that do not, 1,259 write an identifier with a
-Unicode escape, which the lexer does not read, and 1,027 are scripts that
-should be refused before they run). Of the whole suite, 26,012 of 47,967
-pass (`run_test262.py --timeout 4 built-ins language annexB`, a quarter of
-an hour for two builds). What it is for is the second form: build
-`main` somewhere (`git worktree add /tmp/main origin/main`, `make` there),
-give the runner both binaries, and it lists every test that passes in the
-first and not in the second and exits 1 if there is one. A change to how
+It is not a scoreboard and has no floor: 78.5% of those directories pass
+(Phase 44 / finding 50 added Unicode 17.0 identifier validation and `\uXXXX` /
+`\u{...}` identifier escape handling, moving the 21 default directories from
+10,835 to 12,275 of 15,686 with 0 regressions, and moving `language/identifiers`,
+`keywords`, `future-reserved-words` and `reserved-words` to 374/374 = 100.0%;
+Phase 43 / finding 49, `new.target` and what `super(...)` binds, moved them to
+12,316, again with none lost). Of the whole suite, 27,872 of 47,967 pass
+(`run_test262.py --timeout 6 built-ins language annexB`, eight minutes for two
+builds on two cores). What it is for
+is the second form: build `main` somewhere (`git worktree add /tmp/main origin/main`,
+`make` there), give the runner both binaries, and it lists every test that passes
+in the first and not in the second and exits 1 if there is one. A change to how
 functions, classes or properties work should be run through it before it is
 called done: Phase 34 passed every case it had written for itself and still
 failed two tests that `main` passed. Both became corpus cases.

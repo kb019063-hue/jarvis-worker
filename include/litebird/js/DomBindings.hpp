@@ -666,17 +666,31 @@ JsValue make_dataset(Realm& realm, Element& element);
 JsValue make_attribute_map(Realm& realm, Element& element);
 /// The Attr object for an attribute of `element`, the same one every time
 /// while the attribute exists.
-JsValue attr_object(Realm& realm, Element& element, const std::string& name);
+/// The script object of one attribute. One object per attribute and realm:
+/// `el.attributes[0] === el.attributes[0]` and `el.getAttributeNode("a")` is
+/// the same object every time, which is what an attribute's identity is.
+JsValue attr_object(Realm& realm, Element& element, const Attribute& attribute);
 /// Called when an attribute has been removed: its Attr object, if a script
 /// holds one, keeps the last value and no longer belongs to the element.
-void detach_attr_object(Realm& realm, Element& element, const std::string& name, const std::string& last_value);
-/// document.createAttribute(name): an Attr that belongs to no element yet.
-JsValue create_attribute(Realm& realm, const std::string& name, const std::string& namespace_uri = std::string());
+/// The attribute has left the element: its object stays (a script may hold
+/// it), with no owner and with the value it had.
+void detach_attr_object(Realm& realm, Element& element, const std::string& namespace_uri,
+                        const std::string& local_name, const std::string& last_value);
+/// document.createAttribute(name): an Attr that belongs to no element yet,
+/// and to `document` until one takes it.
+JsValue create_attribute(Realm& realm, const std::shared_ptr<Document>& document, const std::string& name,
+                         const std::string& namespace_uri = std::string());
 /// element.setAttributeNode(attr): returns the Attr it replaced, or null.
 JsValue set_attribute_node(Realm& realm, Element& element, const JsValue& attr);
 JsValue remove_attribute_node(Realm& realm, Element& element, const JsValue& attr);
 /// Whether `value` is an Attr object.
 bool is_attr_object(const JsValue& value);
+
+/// `document.importNode(attr)` and `document.adoptNode(attr)`: an attribute is
+/// not on the tree, so it is copied into the document (import) or moved to it
+/// (adopt), and adopting the element it is on carries it along.
+JsValue clone_attr_into(Realm& realm, const JsValue& attr, const std::shared_ptr<Document>& document);
+JsValue adopt_attr_into(const JsValue& attr, const std::shared_ptr<Document>& document);
 
 // --- DomEventBindings.cpp -------------------------------------------------------
 void register_event_interfaces();
@@ -871,8 +885,7 @@ void register_observer_interfaces();
 /// What Node.cpp tells the bindings (see DomHooks).
 void note_children_changed(Node& parent, const NodeVector& added, const NodeVector& removed,
                            const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next);
-void note_attribute_changed(Element& element, const std::string& name, const std::string* old_value,
-                            const std::string* new_value);
+void note_attribute_changed(Element& element, const AttributeChange& change);
 void note_character_data_changed(Node& node, const std::string& old_value);
 void note_connected(Element& element, bool connected);
 /// While one of these exists, changes to the children of `parent` queue no

@@ -44,13 +44,16 @@ const std::unordered_set<std::string>& known_properties() {
         "animation-duration", "animation-fill-mode", "animation-iteration-count", "animation-name",
         "animation-play-state", "animation-timing-function", "appearance", "aspect-ratio", "backdrop-filter",
         "backface-visibility", "background", "background-attachment", "background-blend-mode", "background-clip",
-        "background-color", "background-image", "background-origin", "background-position", "background-repeat",
+        "background-color", "background-image", "background-origin", "background-position", "background-position-x",
+        "background-position-y", "background-repeat", "background-repeat-x", "background-repeat-y",
         "background-size", "block-size", "border", "border-bottom", "border-bottom-color",
         "border-bottom-left-radius", "border-bottom-right-radius", "border-bottom-style", "border-bottom-width",
-        "border-collapse", "border-color", "border-image", "border-left", "border-left-color", "border-left-style",
-        "border-left-width", "border-radius", "border-right", "border-right-color", "border-right-style",
-        "border-right-width", "border-spacing", "border-style", "border-top", "border-top-color",
-        "border-top-left-radius", "border-top-right-radius", "border-top-style", "border-top-width", "border-width",
+        "border-collapse", "border-color", "border-image", "border-image-outset", "border-image-repeat",
+        "border-image-slice", "border-image-source", "border-image-width", "border-left", "border-left-color",
+        "border-left-style", "border-left-width", "border-radius", "border-right", "border-right-color",
+        "border-right-style", "border-right-width", "border-spacing", "border-style", "border-top",
+        "border-top-color", "border-top-left-radius", "border-top-right-radius", "border-top-style",
+        "border-top-width", "border-width",
         "bottom", "box-shadow", "box-sizing", "break-after", "break-before", "break-inside", "caption-side",
         "caret-color", "clear", "clip", "clip-path", "color", "color-scheme", "column-count", "column-fill",
         "column-gap", "column-rule", "column-rule-color", "column-rule-style", "column-rule-width", "column-span",
@@ -88,9 +91,34 @@ const std::unordered_set<std::string>& known_properties() {
         "-webkit-appearance", "-webkit-box-shadow", "-webkit-line-clamp", "-webkit-box-orient",
         "-webkit-overflow-scrolling", "-webkit-tap-highlight-color", "-webkit-text-fill-color",
         "-webkit-text-size-adjust", "-webkit-transform", "-webkit-transition", "-webkit-user-select",
-        "-moz-appearance", "-moz-user-select", "-ms-transform",
+        "-moz-appearance", "-moz-user-select",
     };
     return s_names;
+}
+
+std::string canonical_css_property(const std::string& lower) {
+    static const std::unordered_map<std::string, std::string> s_aliases = {
+        {"-webkit-transform", "transform"},
+        {"-webkit-transition", "transition"},
+        {"-webkit-transition-delay", "transition-delay"},
+        {"-webkit-transition-duration", "transition-duration"},
+        {"-webkit-transition-property", "transition-property"},
+        {"-webkit-transition-timing-function", "transition-timing-function"},
+        {"-webkit-animation", "animation"},
+        {"-webkit-animation-delay", "animation-delay"},
+        {"-webkit-animation-direction", "animation-direction"},
+        {"-webkit-animation-duration", "animation-duration"},
+        {"-webkit-animation-fill-mode", "animation-fill-mode"},
+        {"-webkit-animation-iteration-count", "animation-iteration-count"},
+        {"-webkit-animation-name", "animation-name"},
+        {"-webkit-animation-play-state", "animation-play-state"},
+        {"-webkit-animation-timing-function", "animation-timing-function"},
+        {"-webkit-box-shadow", "box-shadow"},
+        {"-webkit-border-radius", "border-radius"},
+        {"-webkit-appearance", "appearance"},
+    };
+    auto it = s_aliases.find(lower);
+    return it == s_aliases.end() ? lower : it->second;
 }
 
 bool is_custom_property(const std::string& name) {
@@ -120,7 +148,7 @@ const std::unordered_map<std::string, std::string>& webkit_aliases() {
 
 std::string canonicalize_property_name(const std::string& name) {
     const auto found = webkit_aliases().find(name);
-    return found == webkit_aliases().end() ? name : found->second;
+    return canonical_css_property(found == webkit_aliases().end() ? name : found->second);
 }
 
 bool is_css_property(const std::string& name) {
@@ -150,6 +178,7 @@ std::string css_name_for(const std::string& property) {
         }
         if (property.find('-') != std::string::npos) return std::string();
     }
+    dashed = canonicalize_property_name(dashed);
     return known_properties().count(dashed) ? dashed : std::string();
 }
 
@@ -260,59 +289,7 @@ bool may_be_negative(const std::string& property) {
     return s_never.count(property) == 0;
 }
 
-int hex_digit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-std::string rgb_text(double r, double g, double b, double alpha) {
-    auto channel = [](double value) {
-        return format_number(std::round(std::min(255.0, std::max(0.0, value))));
-    };
-    if (alpha >= 1) return "rgb(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ")";
-    const double rounded = std::round(std::max(0.0, alpha) * 1000) / 1000;
-    return "rgba(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ", " + format_number(rounded) + ")";
-}
-
-// Splits the arguments of a function on commas, whitespace and "/".
-std::vector<std::string> function_arguments(const std::string& inside) {
-    std::vector<std::string> out;
-    std::string current;
-    for (char c : inside) {
-        if (c == ',' || c == '/' || is_ascii_space(c)) {
-            if (!current.empty()) out.push_back(current);
-            current.clear();
-        } else {
-            current += c;
-        }
-    }
-    if (!current.empty()) out.push_back(current);
-    return out;
-}
-
-bool parse_channel(const std::string& text, double scale, double& out) {
-    std::size_t at = 0;
-    double number = 0;
-    if (!parse_css_number(text, at, number)) return false;
-    const std::string unit = text.substr(at);
-    if (unit == "%") out = number / 100 * scale;
-    else if (unit.empty()) out = number;
-    else return false;
-    return true;
-}
-
-double hue_to_channel(double p, double q, double t) {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1.0 / 6) return p + (q - p) * 6 * t;
-    if (t < 1.0 / 2) return q;
-    if (t < 2.0 / 3) return p + (q - p) * (2.0 / 3 - t) * 6;
-    return p;
-}
-
-// A colour, written the way a browser gives it back.
+// A colour, written the way a browser gives it back (CSS Color 4 / 5).
 bool normalize_color(const std::string& text, std::string& out) {
     const std::string lower = ascii_lower(text);
     unsigned named = 0;
@@ -326,65 +303,25 @@ bool normalize_color(const std::string& text, std::string& out) {
         out = text;
         return true;
     }
-    if (!lower.empty() && lower[0] == '#') {
-        const std::string digits = lower.substr(1);
-        for (char c : digits) {
-            if (hex_digit(c) < 0) return false;
-        }
-        double channels[4] = {0, 0, 0, 255};
-        if (digits.size() == 3 || digits.size() == 4) {
-            for (std::size_t i = 0; i < digits.size(); ++i) channels[i] = hex_digit(digits[i]) * 17;
-        } else if (digits.size() == 6 || digits.size() == 8) {
-            for (std::size_t i = 0; i < digits.size() / 2; ++i) {
-                channels[i] = hex_digit(digits[2 * i]) * 16 + hex_digit(digits[2 * i + 1]);
-            }
-        } else {
-            return false;
-        }
-        // Eight bits of alpha are written with two decimals when two are
-        // enough to get the same eight bits back, and with three otherwise:
-        // #11223380 is 0.5, not 0.502.
-        double alpha = 1;
-        if (channels[3] < 255) {
-            const double hundredths = std::round(channels[3] * 100 / 255.0);
-            alpha = std::round(hundredths * 255 / 100.0) == channels[3] ? hundredths / 100
-                                                                         : std::round(channels[3] * 1000 / 255.0) / 1000;
-        }
-        out = rgb_text(channels[0], channels[1], channels[2], alpha);
+    // Deferred light-dark(): validate both branches strictly and preserve
+    // the specified expression so getComputedStyle resolves against color-scheme.
+    if (is_function_value(lower, "light-dark")) {
+        if (!CssColor::is_valid_syntax(text)) return false;
+        out = text;
         return true;
     }
-    const bool is_rgb = is_function_value(lower, "rgb") || is_function_value(lower, "rgba");
-    const bool is_hsl = is_function_value(lower, "hsl") || is_function_value(lower, "hsla");
-    if (!is_rgb && !is_hsl) return false;
-    const auto open = lower.find('(');
-    const auto arguments = function_arguments(lower.substr(open + 1, lower.size() - open - 2));
-    if (arguments.size() != 3 && arguments.size() != 4) return false;
-    double alpha = 1;
-    if (arguments.size() == 4 && !parse_channel(arguments[3], 1, alpha)) return false;
-    if (is_rgb) {
-        double r = 0, g = 0, b = 0;
-        if (!parse_channel(arguments[0], 255, r) || !parse_channel(arguments[1], 255, g) || !parse_channel(arguments[2], 255, b)) {
-            return false;
-        }
-        out = rgb_text(r, g, b, alpha);
+    CssColor parsed;
+    if (CssColor::parse(text, parsed) && !parsed.is_currentcolor) {
+        out = parsed.serialize_computed();
         return true;
     }
-    std::size_t at = 0;
-    double hue = 0, saturation = 0, lightness = 0;
-    if (!parse_css_number(arguments[0], at, hue)) return false;
-    if (!parse_channel(arguments[1], 1, saturation) || !parse_channel(arguments[2], 1, lightness)) return false;
-    if (arguments[1].back() != '%' || arguments[2].back() != '%') return false;
-    hue = std::fmod(std::fmod(hue, 360) + 360, 360) / 360;
-    double r = lightness, g = lightness, b = lightness;
-    if (saturation != 0) {
-        const double q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-        const double p = 2 * lightness - q;
-        r = hue_to_channel(p, q, hue + 1.0 / 3);
-        g = hue_to_channel(p, q, hue);
-        b = hue_to_channel(p, q, hue - 1.0 / 3);
+    // Valid color-mix() or relative color referencing currentcolor: preserve
+    // the specified expression for computed-value resolution against `color`.
+    if (CssColor::is_valid_syntax(text)) {
+        out = text;
+        return true;
     }
-    out = rgb_text(r * 255, g * 255, b * 255, alpha);
-    return true;
+    return false;
 }
 
 bool one_of(const std::string& value, std::initializer_list<const char*> options) {
@@ -428,7 +365,8 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
             rules[name] = {ValueKind::LengthOrNone, {"none", "min-content", "max-content", "fit-content"}};
         }
         for (const char* name : {"padding-top", "padding-right", "padding-bottom", "padding-left", "text-indent",
-                                 "outline-offset"}) {
+                                 "outline-offset", "border-top-left-radius", "border-top-right-radius",
+                                 "border-bottom-right-radius", "border-bottom-left-radius"}) {
             rules[name] = {ValueKind::Length, {}};
         }
         for (const char* name : {"letter-spacing", "word-spacing", "column-gap", "row-gap"}) {
@@ -446,6 +384,9 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
         for (const char* name : {"border-top-style", "border-right-style", "border-bottom-style", "border-left-style"}) {
             rules[name] = {ValueKind::BorderStyle, {}};
         }
+        rules["outline-style"] = {ValueKind::Keyword,
+                                  {"none", "hidden", "dotted", "dashed", "solid", "double", "groove", "ridge", "inset",
+                                   "outset", "auto"}};
         rules["display"] = {ValueKind::Keyword,
                             {"block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid", "none",
                              "contents", "table", "inline-table", "table-row", "table-cell", "table-row-group",
@@ -459,6 +400,9 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
         for (const char* name : {"overflow-x", "overflow-y"}) {
             rules[name] = {ValueKind::Keyword, {"visible", "hidden", "scroll", "auto", "clip"}};
         }
+        rules["flex-direction"] = {ValueKind::Keyword, {"row", "row-reverse", "column", "column-reverse"}};
+        rules["flex-wrap"] = {ValueKind::Keyword, {"nowrap", "wrap", "wrap-reverse"}};
+        rules["list-style-position"] = {ValueKind::Keyword, {"inside", "outside"}};
         rules["text-align"] = {ValueKind::Keyword,
                                {"left", "right", "center", "justify", "start", "end", "match-parent", "-webkit-center"}};
         rules["font-style"] = {ValueKind::Keyword, {"normal", "italic", "oblique"}};
@@ -508,9 +452,140 @@ bool is_grid_property(const std::string& property) {
     return kNames.count(property) != 0;
 }
 
+std::string canonicalize_css_value(const std::string& property, const std::string& raw) {
+    const std::string trimmed = trim(raw);
+    if (trimmed.empty() || is_custom_property(property)) return trimmed;
+    const bool preserve_case = property == "font-family" || property == "animation-name" ||
+                               property == "list-style-type" || property == "grid-area" ||
+                               property == "grid-row" || property == "grid-column" ||
+                               property == "font" || property == "list-style";
+
+    auto is_ident_start = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_';
+    };
+    auto is_ident_char = [&](char c) {
+        return is_ident_start(c) || (c >= '0' && c <= '9');
+    };
+    auto append_space = [](std::string& dst) {
+        if (!dst.empty() && dst.back() != ' ' && dst.back() != '(') dst += ' ';
+    };
+
+    std::string out;
+    int paren_depth = 0;
+    for (std::size_t i = 0; i < trimmed.size();) {
+        const char c = trimmed[i];
+        if (c == '"' || c == '\'') {
+            const char q = c;
+            out += q;
+            ++i;
+            while (i < trimmed.size()) {
+                const char sc = trimmed[i++];
+                out += sc;
+                if (sc == '\\' && i < trimmed.size()) out += trimmed[i++];
+                else if (sc == q) break;
+            }
+            continue;
+        }
+        if (is_ascii_space(c)) {
+            while (i < trimmed.size() && is_ascii_space(trimmed[i])) ++i;
+            if (i < trimmed.size() && trimmed[i] != ',' && trimmed[i] != ')') append_space(out);
+            continue;
+        }
+        if (c == ',') {
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            out += ',';
+            ++i;
+            while (i < trimmed.size() && is_ascii_space(trimmed[i])) ++i;
+            if (i < trimmed.size() && trimmed[i] != ')') out += ' ';
+            continue;
+        }
+        if (c == '(') {
+            if (property == "transform" && !out.empty()) {
+                for (const char* tf : {"translatex", "translatey", "translatez", "scalex", "scaley", "scalez",
+                                       "rotatex", "rotatey", "rotatez", "skewx", "skewy"}) {
+                    const std::size_t n = std::char_traits<char>::length(tf);
+                    if (out.size() >= n && out.compare(out.size() - n, n, tf) == 0 &&
+                        (out.size() == n || !is_ident_char(out[out.size() - n - 1]))) {
+                        out.back() = static_cast<char>(out.back() - 'a' + 'A');
+                        break;
+                    }
+                }
+            }
+            ++paren_depth;
+            out += '(';
+            ++i;
+            while (i < trimmed.size() && is_ascii_space(trimmed[i])) ++i;
+            continue;
+        }
+        if (c == ')') {
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            if (paren_depth > 0) --paren_depth;
+            out += ')';
+            ++i;
+            continue;
+        }
+        // Check for url(...) case-insensitively at an identifier boundary
+        if (i + 3 < trimmed.size() && (trimmed[i] | 0x20) == 'u' && (trimmed[i + 1] | 0x20) == 'r' &&
+            (trimmed[i + 2] | 0x20) == 'l' && trimmed[i + 3] == '(' &&
+            (i == 0 || !is_ident_char(trimmed[i - 1]))) {
+            std::size_t j = i + 4;
+            char q = 0;
+            int depth = 1;
+            std::string inner;
+            while (j < trimmed.size() && depth > 0) {
+                const char uc = trimmed[j++];
+                if (q) {
+                    inner += uc;
+                    if (uc == '\\' && j < trimmed.size()) inner += trimmed[j++];
+                    else if (uc == q) q = 0;
+                } else if (uc == '"' || uc == '\'') {
+                    q = uc;
+                    inner += uc;
+                } else if (uc == '(') {
+                    ++depth;
+                    inner += uc;
+                } else if (uc == ')') {
+                    --depth;
+                    if (depth > 0) inner += uc;
+                } else {
+                    inner += uc;
+                }
+            }
+            std::string target = trim(inner);
+            if (target.size() >= 2 && ((target.front() == '"' && target.back() == '"') ||
+                                       (target.front() == '\'' && target.back() == '\''))) {
+                const char oldq = target.front();
+                std::string unq = target.substr(1, target.size() - 2);
+                if (oldq == '\'') {
+                    std::string esc;
+                    for (char ch : unq) {
+                        if (ch == '"') esc += "\\\"";
+                        else esc += ch;
+                    }
+                    target = std::move(esc);
+                } else {
+                    target = std::move(unq);
+                }
+            }
+            out += "url(\"";
+            out += target;
+            out += "\")";
+            i = j;
+            continue;
+        }
+        if (paren_depth > 0 || !preserve_case) {
+            out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+        } else {
+            out += c;
+        }
+        ++i;
+    }
+    return trim(out);
+}
+
 // Checks `text` against what `property` accepts and gives it back the way
 // it is stored. False when the declaration must be dropped.
-bool normalize_value(const std::string& property, const std::string& text, std::string& out) {
+bool normalize_value(const std::string& property, const std::string& text, std::string& out, bool inline_mode = false) {
     const std::string value = trim(text);
     if (value.empty()) return false;
     if (is_custom_property(property)) {
@@ -531,7 +606,11 @@ bool normalize_value(const std::string& property, const std::string& text, std::
     }
     auto found = property_rules().find(property);
     if (found == property_rules().end()) {
-        out = value;
+        if (!inline_mode || lower.find("var(") != std::string::npos) {
+            out = value;
+        } else {
+            out = canonicalize_css_value(property, value);
+        }
         return true;
     }
     const PropertyRule& rule = found->second;
@@ -547,7 +626,9 @@ bool normalize_value(const std::string& property, const std::string& text, std::
     }
     switch (rule.kind) {
         case ValueKind::Any:
-            out = value;
+            out = (inline_mode && lower.find("var(") == std::string::npos)
+                      ? canonicalize_css_value(property, value)
+                      : value;
             return true;
         case ValueKind::Length:
         case ValueKind::LengthOrAuto:
@@ -639,6 +720,39 @@ std::vector<std::string> split_components(const std::string& value) {
     return out;
 }
 
+bool normalize_css_time(const std::string& text, bool non_negative, std::string& out) {
+    const std::string lower = ascii_lower(trim(text));
+    std::size_t at = 0;
+    double number = 0;
+    if (!parse_css_number(lower, at, number)) return false;
+    if (non_negative && number < 0) return false;
+    const std::string unit = lower.substr(at);
+    if (unit != "s" && unit != "ms") return false;
+    out = format_number(number) + unit;
+    return true;
+}
+
+bool has_unquoted_comma(const std::string& text) {
+    int depth = 0;
+    char quote = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < text.size()) ++i;
+            else if (c == quote) quote = 0;
+        } else if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            if (depth > 0) --depth;
+        } else if (c == ',' && depth == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Shorthands
 // ---------------------------------------------------------------------------
@@ -717,6 +831,411 @@ bool covers(const Shorthand& shorthand, const std::string& longhand) {
     return std::find(shorthand.longhands.begin(), shorthand.longhands.end(), longhand) != shorthand.longhands.end();
 }
 
+struct InlineShorthandDef {
+    std::string name;
+    std::vector<std::string> longhands;
+};
+
+const std::vector<InlineShorthandDef>& inline_shorthands() {
+    static const std::vector<InlineShorthandDef> s_table = {
+        // Widest first for serialization collapsing
+        {"border",
+         {"border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+          "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
+          "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+          "border-image-source", "border-image-slice", "border-image-width", "border-image-outset",
+          "border-image-repeat"}},
+        {"border-width", {"border-top-width", "border-right-width", "border-bottom-width", "border-left-width"}},
+        {"border-style", {"border-top-style", "border-right-style", "border-bottom-style", "border-left-style"}},
+        {"border-color", {"border-top-color", "border-right-color", "border-bottom-color", "border-left-color"}},
+        {"border-image",
+         {"border-image-source", "border-image-slice", "border-image-width", "border-image-outset",
+          "border-image-repeat"}},
+        {"border-top", {"border-top-width", "border-top-style", "border-top-color"}},
+        {"border-right", {"border-right-width", "border-right-style", "border-right-color"}},
+        {"border-bottom", {"border-bottom-width", "border-bottom-style", "border-bottom-color"}},
+        {"border-left", {"border-left-width", "border-left-style", "border-left-color"}},
+        {"margin", {"margin-top", "margin-right", "margin-bottom", "margin-left"}},
+        {"padding", {"padding-top", "padding-right", "padding-bottom", "padding-left"}},
+        {"inset", {"top", "right", "bottom", "left"}},
+        {"border-radius",
+         {"border-top-left-radius", "border-top-right-radius", "border-bottom-right-radius",
+          "border-bottom-left-radius"}},
+        {"overflow", {"overflow-x", "overflow-y"}},
+        {"gap", {"row-gap", "column-gap"}},
+        {"flex", {"flex-grow", "flex-shrink", "flex-basis"}},
+        {"flex-flow", {"flex-direction", "flex-wrap"}},
+        {"font", {"font-style", "font-variant", "font-weight", "font-size", "line-height", "font-family"}},
+        {"list-style", {"list-style-position", "list-style-image", "list-style-type"}},
+        {"text-decoration", {"text-decoration-line", "text-decoration-style", "text-decoration-color"}},
+        {"outline", {"outline-width", "outline-style", "outline-color"}},
+        {"transition",
+         {"transition-property", "transition-duration", "transition-timing-function", "transition-delay"}},
+        {"background",
+         {"background-image", "background-position", "background-size", "background-repeat",
+          "background-attachment", "background-origin", "background-clip", "background-color"}},
+    };
+    return s_table;
+}
+
+const InlineShorthandDef* find_inline_shorthand(const std::string& name) {
+    for (const auto& def : inline_shorthands()) {
+        if (def.name == name) return &def;
+    }
+    return nullptr;
+}
+
+bool inline_covers(const InlineShorthandDef& def, const std::string& prop) {
+    return std::find(def.longhands.begin(), def.longhands.end(), prop) != def.longhands.end();
+}
+
+bool expand_inline_shorthand(const InlineShorthandDef& def, const std::string& text,
+                             std::vector<std::pair<std::string, std::string>>& out) {
+    out.clear();
+    const std::string value = trim(text);
+    if (value.empty()) return false;
+    const std::string lower = ascii_lower(value);
+    const std::vector<std::string> parts = split_components(value);
+    if (parts.empty()) return false;
+
+    if (parts.size() == 1 && is_global_keyword(lower)) {
+        for (const auto& lh : def.longhands) out.emplace_back(lh, lower);
+        return true;
+    }
+
+    const std::string& name = def.name;
+    if (name == "margin" || name == "padding" || name == "border-width" || name == "border-style" ||
+        name == "border-color" || name == "inset" || name == "border-radius") {
+        if (parts.size() > 4) return false;
+        if (name == "border-radius" && lower.find('/') != std::string::npos) return false;
+        std::vector<std::string> sides;
+        for (const auto& part : parts) {
+            std::string normalized;
+            if (!normalize_value(def.longhands[0], part, normalized, true)) return false;
+            sides.push_back(normalized);
+        }
+        const std::string& top = sides[0];
+        const std::string& right = sides.size() > 1 ? sides[1] : top;
+        const std::string& bottom = sides.size() > 2 ? sides[2] : top;
+        const std::string& left = sides.size() > 3 ? sides[3] : right;
+        out.emplace_back(def.longhands[0], top);
+        out.emplace_back(def.longhands[1], right);
+        out.emplace_back(def.longhands[2], bottom);
+        out.emplace_back(def.longhands[3], left);
+        return true;
+    }
+
+    if (name == "overflow" || name == "gap") {
+        if (parts.size() > 2) return false;
+        std::string a, b;
+        if (!normalize_value(def.longhands[0], parts[0], a, true)) return false;
+        if (!normalize_value(def.longhands[1], parts.back(), b, true)) return false;
+        out.emplace_back(def.longhands[0], a);
+        out.emplace_back(def.longhands[1], b);
+        return true;
+    }
+
+    if (name == "border" || name == "border-top" || name == "border-right" || name == "border-bottom" ||
+        name == "border-left") {
+        if (parts.size() > 3) return false;
+        std::string width, style, color;
+        for (const auto& part : parts) {
+            std::string normalized;
+            const std::string pl = ascii_lower(part);
+            if (style.empty() && is_border_style(pl)) style = pl;
+            else if (width.empty() && normalize_border_width(part, normalized)) width = normalized;
+            else if (color.empty() && normalize_color(part, normalized)) color = normalized;
+            else return false;
+        }
+        if (width.empty()) width = "medium";
+        if (style.empty()) style = "none";
+        if (color.empty()) color = "currentcolor";
+        if (name == "border") {
+            for (const std::string* p : {&width, &style, &color}) {
+                for (int s = 0; s < 4; ++s) out.emplace_back(def.longhands[out.size()], *p);
+            }
+            out.emplace_back("border-image-source", "none");
+            out.emplace_back("border-image-slice", "100%");
+            out.emplace_back("border-image-width", "1");
+            out.emplace_back("border-image-outset", "0");
+            out.emplace_back("border-image-repeat", "stretch");
+        } else {
+            out.emplace_back(def.longhands[0], width);
+            out.emplace_back(def.longhands[1], style);
+            out.emplace_back(def.longhands[2], color);
+        }
+        return true;
+    }
+
+    if (name == "border-image") {
+        if (lower == "none") {
+            out.emplace_back("border-image-source", "none");
+            out.emplace_back("border-image-slice", "100%");
+            out.emplace_back("border-image-width", "1");
+            out.emplace_back("border-image-outset", "0");
+            out.emplace_back("border-image-repeat", "stretch");
+            return true;
+        }
+        return false;
+    }
+
+    if (name == "flex-flow") {
+        Parts decomposed;
+        if (!decompose(name, trim(text), decomposed)) return false;
+        out = std::move(decomposed);
+        return true;
+    }
+
+    if (name == "flex") {
+        Parts decomposed;
+        if (!decompose(name, trim(text), decomposed)) return false;
+        out = std::move(decomposed);
+        return true;
+    }
+
+    if (name == "outline") {
+        if (parts.size() > 3) return false;
+        std::string width, style, color;
+        for (const auto& part : parts) {
+            std::string normalized;
+            const std::string pl = ascii_lower(part);
+            if (style.empty() && (is_border_style(pl) || pl == "auto")) style = pl;
+            else if (width.empty() && normalize_border_width(part, normalized)) width = normalized;
+            else if (color.empty() && (pl == "invert" || normalize_color(part, normalized))) {
+                color = (pl == "invert") ? "invert" : normalized;
+            } else {
+                return false;
+            }
+        }
+        out.emplace_back("outline-width", width.empty() ? "medium" : width);
+        out.emplace_back("outline-style", style.empty() ? "none" : style);
+        out.emplace_back("outline-color", color.empty() ? "currentcolor" : color);
+        return true;
+    }
+
+    if (name == "text-decoration") {
+        std::string line, style = "solid", color = "currentcolor";
+        bool seen_style = false, seen_color = false;
+        for (const auto& part : parts) {
+            const std::string pl = ascii_lower(part);
+            std::string normalized;
+            if (pl == "none" || pl == "underline" || pl == "overline" || pl == "line-through" || pl == "blink") {
+                if (pl == "none" && !line.empty()) return false;
+                if (line == "none") return false;
+                if (!line.empty()) line += ' ';
+                line += pl;
+            } else if (!seen_style && (pl == "solid" || pl == "double" || pl == "dotted" || pl == "dashed" || pl == "wavy")) {
+                style = pl;
+                seen_style = true;
+            } else if (!seen_color && normalize_color(part, normalized)) {
+                color = normalized;
+                seen_color = true;
+            } else {
+                return false;
+            }
+        }
+        out.emplace_back("text-decoration-line", line.empty() ? "none" : line);
+        out.emplace_back("text-decoration-style", style);
+        out.emplace_back("text-decoration-color", color);
+        return true;
+    }
+
+    if (name == "list-style") {
+        std::string pos, img, type;
+        bool none = false;
+        for (const auto& part : parts) {
+            const std::string pl = ascii_lower(part);
+            if (pos.empty() && (pl == "inside" || pl == "outside")) {
+                pos = pl;
+            } else if (pl == "none") {
+                none = true;
+            } else if (img.empty() && (pl.rfind("url(", 0) == 0 || pl.find("gradient(") != std::string::npos)) {
+                img = canonicalize_css_value("list-style-image", part);
+            } else if (type.empty()) {
+                type = (part[0] == '"' || part[0] == '\'') ? part : pl;
+            } else {
+                return false;
+            }
+        }
+        out.emplace_back("list-style-position", pos.empty() ? "outside" : pos);
+        out.emplace_back("list-style-image", img.empty() ? "none" : img);
+        out.emplace_back("list-style-type", type.empty() ? (none ? "none" : "disc") : type);
+        return true;
+    }
+
+    if (name == "font") {
+        std::string style = "normal", variant = "normal", weight = "normal";
+        std::size_t at = 0;
+        for (; at < parts.size(); ++at) {
+            const std::string pl = ascii_lower(parts[at]);
+            if (pl == "normal") continue;
+            if (pl == "italic" || pl == "oblique") style = pl;
+            else if (pl == "small-caps") variant = pl;
+            else if (pl == "bold" || pl == "bolder" || pl == "lighter") weight = pl;
+            else {
+                std::size_t nat = 0;
+                double wnum = 0;
+                if (parse_css_number(pl, nat, wnum) && nat == pl.size() && wnum >= 1 && wnum <= 1000) {
+                    weight = format_number(wnum);
+                } else {
+                    break;
+                }
+            }
+        }
+        if (at >= parts.size()) return false;
+        std::string raw_size = parts[at++];
+        std::string raw_line = "normal";
+        const auto slash = raw_size.find('/');
+        if (slash != std::string::npos) {
+            raw_line = raw_size.substr(slash + 1);
+            raw_size = raw_size.substr(0, slash);
+        } else if (at < parts.size() && parts[at][0] == '/') {
+            raw_line = parts[at++].substr(1);
+        } else {
+            raw_line.clear();
+        }
+        if (slash != std::string::npos || !raw_line.empty() || (at > 0 && parts[at - 1] == "/")) {
+            if (raw_line.empty()) {
+                if (at >= parts.size()) return false;
+                raw_line = parts[at++];
+            }
+        } else {
+            raw_line = "normal";
+        }
+        if (raw_size.empty() || at >= parts.size()) return false;
+        std::string norm_size, norm_line;
+        if (!normalize_value("font-size", raw_size, norm_size, true)) return false;
+        if (!normalize_value("line-height", raw_line, norm_line, true)) return false;
+        std::string family;
+        for (; at < parts.size(); ++at) {
+            if (!family.empty()) family += ' ';
+            family += parts[at];
+        }
+        family = canonicalize_css_value("font-family", family);
+        out.emplace_back("font-style", style);
+        out.emplace_back("font-variant", variant);
+        out.emplace_back("font-weight", weight);
+        out.emplace_back("font-size", norm_size);
+        out.emplace_back("line-height", norm_line);
+        out.emplace_back("font-family", family);
+        return true;
+    }
+
+    if (name == "transition") {
+        if (has_unquoted_comma(value)) return false;
+        std::string prop = "all", dur = "0s", tim = "ease", del = "0s";
+        bool seen_dur = false, seen_del = false, seen_tim = false, seen_prop = false;
+        for (const auto& part : parts) {
+            const std::string pl = ascii_lower(part);
+            std::string tnorm;
+            if (normalize_css_time(pl, !seen_dur, tnorm)) {
+                if (!seen_dur) { dur = tnorm; seen_dur = true; }
+                else if (!seen_del) { del = tnorm; seen_del = true; }
+                else return false;
+            } else if (!seen_tim && (pl == "ease" || pl == "linear" || pl == "ease-in" || pl == "ease-out" ||
+                                     pl == "ease-in-out" || pl == "step-start" || pl == "step-end" ||
+                                     pl.rfind("cubic-bezier(", 0) == 0 || pl.rfind("steps(", 0) == 0)) {
+                tim = canonicalize_css_value("transition-timing-function", part);
+                seen_tim = true;
+            } else if (!seen_prop) {
+                prop = pl;
+                seen_prop = true;
+            } else {
+                return false;
+            }
+        }
+        out.emplace_back("transition-property", prop);
+        out.emplace_back("transition-duration", dur);
+        out.emplace_back("transition-timing-function", tim);
+        out.emplace_back("transition-delay", del);
+        return true;
+    }
+
+    if (name == "background") {
+        if (has_unquoted_comma(value)) return false;
+        std::string img = "none", pos = "0% 0%", size = "auto", rep = "repeat", att = "scroll";
+        std::string orig = "padding-box", clip = "border-box", color = "transparent";
+        std::vector<std::string> pos_tokens, size_tokens;
+        bool after_slash = false, seen_img = false, seen_rep = false, seen_att = false, seen_color = false;
+        int seen_boxes = 0;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            std::string part = parts[i];
+            if (part == "/") {
+                if (pos_tokens.empty() || after_slash) return false;
+                after_slash = true;
+                continue;
+            }
+            if (!after_slash) {
+                const auto sl = part.find('/');
+                if (sl != std::string::npos && part.find("url(") == std::string::npos) {
+                    const std::string left = part.substr(0, sl);
+                    const std::string right = part.substr(sl + 1);
+                    if (!left.empty()) pos_tokens.push_back(ascii_lower(left));
+                    after_slash = true;
+                    if (!right.empty()) size_tokens.push_back(ascii_lower(right));
+                    continue;
+                }
+            }
+            const std::string pl = ascii_lower(part);
+            std::string norm;
+            if (after_slash) {
+                if (pl == "cover" || pl == "contain" || pl == "auto") {
+                    size_tokens.push_back(pl);
+                } else if (normalize_length(part, norm)) {
+                    size_tokens.push_back(norm);
+                } else {
+                    after_slash = false;
+                    --i;
+                }
+                continue;
+            }
+            if (!seen_img && (pl == "none" || pl.rfind("url(", 0) == 0 || pl.find("gradient(") != std::string::npos)) {
+                img = (pl == "none") ? "none" : canonicalize_css_value("background-image", part);
+                seen_img = true;
+            } else if (!seen_rep && (pl == "repeat" || pl == "repeat-x" || pl == "repeat-y" ||
+                                     pl == "no-repeat" || pl == "space" || pl == "round")) {
+                rep = pl;
+                seen_rep = true;
+            } else if (!seen_att && (pl == "scroll" || pl == "fixed" || pl == "local")) {
+                att = pl;
+                seen_att = true;
+            } else if (seen_boxes < 2 && (pl == "border-box" || pl == "padding-box" || pl == "content-box" || pl == "text")) {
+                if (seen_boxes == 0) { orig = (pl == "text") ? "padding-box" : pl; clip = pl; }
+                else { clip = pl; }
+                ++seen_boxes;
+            } else if (!seen_color && normalize_color(part, norm)) {
+                color = norm;
+                seen_color = true;
+            } else if (pl == "left" || pl == "center" || pl == "right" || pl == "top" || pl == "bottom") {
+                pos_tokens.push_back(pl);
+            } else if (normalize_length(part, norm)) {
+                pos_tokens.push_back(norm);
+            } else {
+                return false;
+            }
+        }
+        if (!pos_tokens.empty()) {
+            if (pos_tokens.size() == 1) pos_tokens.push_back("center");
+            pos = pos_tokens[0] + " " + pos_tokens[1];
+        }
+        if (!size_tokens.empty()) {
+            size = size_tokens[0];
+            if (size_tokens.size() > 1) size += " " + size_tokens[1];
+        }
+        out.emplace_back("background-image", img);
+        out.emplace_back("background-position", pos);
+        out.emplace_back("background-size", size);
+        out.emplace_back("background-repeat", rep);
+        out.emplace_back("background-attachment", att);
+        out.emplace_back("background-origin", orig);
+        out.emplace_back("background-clip", clip);
+        out.emplace_back("background-color", color);
+        return true;
+    }
+
+    return false;
+}
+
 struct Entry {
     std::string name;
     std::string value;
@@ -756,8 +1275,172 @@ public:
         return nullptr;
     }
 
+    static std::string serialize_inline(const InlineShorthandDef& def, const Block& block) {
+        std::vector<std::string> values;
+        values.reserve(def.longhands.size());
+        bool first_imp = false;
+        for (std::size_t i = 0; i < def.longhands.size(); ++i) {
+            const Entry* e = block.find(def.longhands[i]);
+            if (!e) return std::string();
+            if (i == 0) first_imp = e->important;
+            else if (e->important != first_imp) return std::string();
+            values.push_back(e->value);
+        }
+        // A shorthand whose longhands all carry the same CSS-wide keyword is
+        // written as that keyword (like put_together does).
+        if (std::all_of(values.begin(), values.end(),
+                        [&](const std::string& part) { return part == values.front(); }) &&
+            is_global_keyword(ascii_lower(values.front()))) {
+            return values.front();
+        }
+        const std::string& name = def.name;
+        if (name == "margin" || name == "padding" || name == "border-width" || name == "border-style" ||
+            name == "border-color" || name == "inset" || name == "border-radius") {
+            return four_sides(values[0], values[1], values[2], values[3]);
+        }
+        if (name == "overflow" || name == "gap") {
+            return values[0] == values[1] ? values[0] : values[0] + " " + values[1];
+        }
+        if (name == "border-image") {
+            if (values[0] == "none" && values[1] == "100%" && values[2] == "1" && values[3] == "0" &&
+                values[4] == "stretch") {
+                return "none";
+            }
+            return std::string();
+        }
+        if (name == "border") {
+            for (int part = 0; part < 3; ++part) {
+                for (int side = 1; side < 4; ++side) {
+                    if (values[part * 4 + side] != values[part * 4]) return std::string();
+                }
+            }
+            if (values[12] != "none" || values[13] != "100%" || values[14] != "1" || values[15] != "0" ||
+                values[16] != "stretch") {
+                return std::string();
+            }
+            const std::string& w = values[0];
+            const std::string& s = values[4];
+            const std::string& c = values[8];
+            if (w == "medium" && s == "none" && c == "currentcolor") return "none";
+            return join_parts({w == "medium" ? std::string() : w,
+                               s == "none" ? std::string() : s,
+                               c == "currentcolor" ? std::string() : c});
+        }
+        if (name == "border-top" || name == "border-right" || name == "border-bottom" || name == "border-left" ||
+            name == "outline") {
+            const std::string& w = values[0];
+            const std::string& s = values[1];
+            const std::string& c = values[2];
+            if (w == "medium" && s == "none" && c == "currentcolor") return "none";
+            return join_parts({w == "medium" ? std::string() : w,
+                               s == "none" ? std::string() : s,
+                               c == "currentcolor" ? std::string() : c});
+        }
+        if (name == "flex") {
+            return values[0] + " " + values[1] + " " + values[2];
+        }
+        if (name == "flex-flow") {
+            // The shortest serialization that round-trips: nowrap is the
+            // initial wrap, row the initial direction.
+            if (values[1] == "nowrap") return values[0];
+            if (values[0] == "row") return values[1];
+            return values[0] + " " + values[1];
+        }
+        if (name == "font") {
+            std::string out;
+            if (values[0] != "normal") out += values[0] + " ";
+            if (values[1] != "normal") out += values[1] + " ";
+            if (values[2] != "normal") out += values[2] + " ";
+            out += values[3];
+            if (values[4] != "normal") out += " / " + values[4];
+            return out + " " + values[5];
+        }
+        if (name == "list-style") {
+            if (values[0] == "outside" && values[1] == "none" && values[2] == "disc") return "disc";
+            std::vector<std::string> parts;
+            if (values[0] != "outside") parts.push_back(values[0]);
+            if (values[1] != "none") parts.push_back(values[1]);
+            if (values[2] != "disc" || parts.empty()) parts.push_back(values[2]);
+            std::string out;
+            for (const auto& p : parts) {
+                if (!out.empty()) out += ' ';
+                out += p;
+            }
+            return out;
+        }
+        if (name == "text-decoration") {
+            if (values[0] == "none" && values[1] == "solid" && values[2] == "currentcolor") return "none";
+            return join_parts({values[0] == "none" ? std::string() : values[0],
+                               values[1] == "solid" ? std::string() : values[1],
+                               values[2] == "currentcolor" ? std::string() : values[2]});
+        }
+        if (name == "transition") {
+            if (values[0] == "none" && values[1] == "0s" && values[2] == "ease" && values[3] == "0s") return "none";
+            if (values[0] == "all" && values[1] == "0s" && values[2] == "ease" && values[3] == "0s") return "all";
+            std::vector<std::string> parts;
+            if (values[0] != "all") parts.push_back(values[0]);
+            if (values[1] != "0s" || values[3] != "0s") parts.push_back(values[1]);
+            if (values[2] != "ease") parts.push_back(values[2]);
+            if (values[3] != "0s") parts.push_back(values[3]);
+            std::string out;
+            for (const auto& p : parts) {
+                if (!out.empty()) out += ' ';
+                out += p;
+            }
+            return out;
+        }
+        if (name == "background") {
+            std::vector<std::string> parts;
+            if (values[0] != "none") parts.push_back(values[0]);
+            if (values[1] != "0% 0%" || values[2] != "auto") {
+                std::string pos = values[1];
+                if (values[2] != "auto") pos += " / " + values[2];
+                parts.push_back(pos);
+            }
+            if (values[3] != "repeat") parts.push_back(values[3]);
+            if (values[4] != "scroll") parts.push_back(values[4]);
+            if (values[5] != "padding-box" || values[6] != "border-box") {
+                parts.push_back(values[5]);
+                if (values[6] != values[5]) parts.push_back(values[6]);
+            }
+            if (values[7] != "transparent") parts.push_back(values[7]);
+            if (parts.empty()) return "none";
+            std::string out;
+            for (const auto& p : parts) {
+                if (!out.empty()) out += ' ';
+                out += p;
+            }
+            return out;
+        }
+        return std::string();
+    }
+
     // The value of a property, a shorthand's put together from its parts.
-    std::string get(const std::string& name) const {
+    std::string get(const std::string& name, bool inline_mode = false) const {
+        if (inline_mode) {
+            if (const InlineShorthandDef* def = find_inline_shorthand(name)) {
+                if (const Entry* pending = find(name)) return pending->value;
+                return serialize_inline(*def, *this);
+            }
+            if (!parts_of(name) && !find_shorthand(name)) {
+                const Entry* entry = find(name);
+                return entry ? entry->value : std::string();
+            }
+            // Otherwise: assemble from the longhands like the non-inline
+            // case does (the shorthand machinery wrote them).
+        }
+        // A declaration whose var() the grammar could not look through is
+        // kept whole under the shorthand's name: no longhands exist, and the
+        // declaration reads back as written.
+        if (const Shorthand* shorthand = find_shorthand(name)) {
+            if (const Entry* marker = find(name)) {
+                bool any_longhand = false;
+                for (const auto& longhand : shorthand->longhands) {
+                    if (find(longhand)) { any_longhand = true; break; }
+                }
+                if (!any_longhand) return marker->value;
+            }
+        }
         if (const std::vector<std::string>* parts = parts_of(name)) {
             std::vector<std::string> values;
             values.reserve(parts->size());
@@ -832,11 +1515,9 @@ public:
                 return composed;
             }
             case ShorthandKind::Grid: {
-                // The grid shorthand only serializes when it was declared on
-                // this element and the longhands still stand for the value
-                // it can roundtrip.
-                const Entry* marker = find(name);
-                if (!marker) return std::string();
+                // Serializes whenever the longhands stand for a value the
+                // shorthand can round-trip; representability is what licenses
+                // it, not whether the shorthand was declared.
                 const std::string& rows = values[0];
                 const std::string& cols = values[1];
                 const std::string& areas = values[2];
@@ -900,14 +1581,27 @@ public:
                 }
                 return join_parts({values[0], values[4], values[8]});
             }
+            case ShorthandKind::FlexFlow:
+            case ShorthandKind::Flex:
+                // Not reachable: the parts_of() branch above returns first.
+                break;
             case ShorthandKind::Background:
                 break;
         }
         return std::string();
     }
 
-    bool is_important(const std::string& name) const {
-        if (const Shorthand* shorthand = find_shorthand(name)) {
+    bool is_important(const std::string& name, bool inline_mode = false) const {
+        if (inline_mode) {
+            if (const InlineShorthandDef* def = find_inline_shorthand(name)) {
+                if (const Entry* entry = find(name)) return entry->important;
+                for (const auto& longhand : def->longhands) {
+                    const Entry* entry = find(longhand);
+                    if (!entry || !entry->important) return false;
+                }
+                return true;
+            }
+        } else if (const Shorthand* shorthand = find_shorthand(name)) {
             if (const Entry* entry = find(name)) return entry->important;
             for (const auto& longhand : shorthand->longhands) {
                 const Entry* entry = find(longhand);
@@ -921,7 +1615,30 @@ public:
 
     // Stores a declaration. False when the value is not one the property
     // accepts, in which case nothing changes.
-    bool set(const std::string& name, const std::string& text, bool important) {
+    bool set(const std::string& name, const std::string& text, bool important, bool inline_mode = false) {
+        if (inline_mode) {
+            if (const InlineShorthandDef* def = find_inline_shorthand(name)) {
+                const std::string trimmed = trim(text);
+                if (trimmed.empty()) return false;
+                if (ascii_lower(trimmed).find("var(") != std::string::npos) {
+                    entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
+                        return inline_covers(*def, e.name);
+                    }), entries.end());
+                    store(name, trimmed, important, false);
+                    return true;
+                }
+                std::vector<std::pair<std::string, std::string>> expanded;
+                if (!expand_inline_shorthand(*def, trimmed, expanded)) return false;
+                entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
+                    if (e.name == name) return true;
+                    const InlineShorthandDef* other = find_inline_shorthand(e.name);
+                    return other != nullptr && std::any_of(other->longhands.begin(), other->longhands.end(),
+                                                           [&](const std::string& lh) { return inline_covers(*def, lh); });
+                }), entries.end());
+                for (const auto& [lh, val] : expanded) store(lh, val, important, false);
+                return true;
+            }
+        }
         if (const Shorthand* shorthand = find_shorthand(name)) {
             std::vector<std::string> values;
             std::string raw;
@@ -959,6 +1676,17 @@ public:
                 for (std::size_t i = 0; i < shorthand->longhands.size(); ++i) {
                     store(shorthand->longhands[i], values[i], important, true);
                 }
+                // The listed entry stands for the longhands: give it the
+                // assembled (canonical) text, falling back to the
+                // canonicalizer on the declaration as written, so reads of
+                // the shorthand and the attribute text agree.
+                std::string assembled = get(name, inline_mode);
+                if (assembled.empty()) {
+                    std::string canonical;
+                    if (grid_property_canonical(name, trim(text), canonical)) assembled = canonical;
+                }
+                if (assembled.empty()) assembled = trim(text);
+                if (Entry* marker = find(name)) marker->value = assembled;
             }
             return true;
         }
@@ -978,7 +1706,7 @@ public:
             return true;
         }
         std::string value;
-        if (!normalize_value(name, text, value)) return false;
+        if (!normalize_value(name, text, value, inline_mode)) return false;
         bool covered = false;
         for (const auto& shorthand : shorthands()) {
             if (covers(shorthand, name) && find(shorthand.name)) {
@@ -986,13 +1714,74 @@ public:
                 if (shorthand.kind == ShorthandKind::Background) find(shorthand.name)->value = value;
             }
         }
+        if (inline_mode) {
+            // A longhand written on its own no longer stands for the inline
+            // shorthand that covered it.
+            entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
+                const InlineShorthandDef* def = find_inline_shorthand(e.name);
+                return def != nullptr && inline_covers(*def, name);
+            }), entries.end());
+        }
         store(name, value, important, covered);
         return true;
     }
 
+    // A listed shorthand whose longhands are no longer all there cannot be
+    // written as one value any more: it is unfolded into the longhands that
+    // remain, which become listed themselves. A marker with no longhands at
+    // all is kept: it stands for a declaration the grammar kept whole (a var()).
+    void unfold_dead_shorthands() {
+        const std::vector<Shorthand> table = shorthands();
+        for (std::size_t i = 0; i < entries.size();) {
+            const std::string listed_name = entries[i].name;
+            const Shorthand* shorthand = nullptr;
+            for (const auto& candidate : table) {
+                if (candidate.name == listed_name) { shorthand = &candidate; break; }
+            }
+            if (!shorthand) { ++i; continue; }
+            std::size_t present = 0;
+            for (const auto& longhand : shorthand->longhands) {
+                if (find(longhand)) ++present;
+            }
+            if (present == shorthand->longhands.size() || present == 0) { ++i; continue; }
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                         [&](const Entry& e) { return e.name == listed_name; }),
+                          entries.end());
+        }
+        for (auto& other : entries) {
+            for (const auto& candidate : table) {
+                if (covers(candidate, other.name)) {
+                    const Entry* marker = find(candidate.name);
+                    if (!marker) {
+                        // The listed shorthand is gone; the parts it covered are listed themselves.
+                        for (auto& candidate2 : entries) {
+                            if (covers(candidate, candidate2.name)) candidate2.implicit = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Removes a property; returns the value it had.
-    std::string remove(const std::string& name) {
-        const std::string old = get(name);
+    std::string remove(const std::string& name, bool inline_mode = false) {
+        const std::string old = remove_impl(name, inline_mode);
+        unfold_dead_shorthands();
+        return old;
+    }
+
+    std::string remove_impl(const std::string& name, bool inline_mode = false) {
+        const std::string old = get(name, inline_mode);
+        if (inline_mode) {
+            if (const InlineShorthandDef* def = find_inline_shorthand(name)) {
+                entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
+                    return e.name == name || inline_covers(*def, e.name);
+                }), entries.end());
+                return old;
+            }
+            // Otherwise: the shared longhand bookkeeping below (removing one
+            // part of a listed shorthand un-marks the rest).
+        }
         if (const std::vector<std::string>* parts = parts_of(name)) {
             entries.erase(std::remove_if(entries.begin(), entries.end(),
                                          [&](const Entry& entry) {
@@ -1034,12 +1823,67 @@ public:
         return old;
     }
 
-    std::string text() const {
+    std::string text(bool inline_mode = false) const {
         std::string out;
         auto write = [&](const std::string& name, const std::string& value, bool important) {
             if (!out.empty()) out += ' ';
             out += name + ": " + value + (important ? " !important;" : ";");
         };
+        if (inline_mode) {
+            std::unordered_set<std::string> emitted;
+            // CSSOM serialization prints the shortest form the declaration
+            // can be expressed in: the six grid longhands are one `grid`
+            // whenever they are all present and the value round-trips. (The
+            // `grid` marker exists while the shorthand stands; this is for
+            // the unfolded form left when a part of it was removed and set
+            // again.)
+            if (!find("grid")) {
+                static const char* const kGridLonghands[] = {"grid-template-rows", "grid-template-columns",
+                                                             "grid-template-areas", "grid-auto-rows",
+                                                             "grid-auto-columns", "grid-auto-flow"};
+                bool all_present = true;
+                bool important = false;
+                for (const char* longhand : kGridLonghands) {
+                    const Entry* part = find(longhand);
+                    if (!part) { all_present = false; break; }
+                    important = important || part->important;
+                }
+                if (all_present) {
+                    const std::string assembled = get("grid", /*inline_mode=*/true);
+                    if (!assembled.empty()) {
+                        write("grid", assembled, important);
+                        for (const char* longhand : kGridLonghands) emitted.insert(longhand);
+                        emitted.insert("grid-template"); // the nested marker stands for the same tracks
+                    }
+                }
+            }
+            for (const auto& entry : entries) {
+                if (entry.implicit || emitted.count(entry.name)) continue;
+                bool collapsed = false;
+                for (const auto& def : inline_shorthands()) {
+                    if (!inline_covers(def, entry.name)) continue;
+                    bool already = false;
+                    for (const auto& lh : def.longhands) {
+                        if (emitted.count(lh)) { already = true; break; }
+                    }
+                    if (already) continue;
+                    const std::string serialized = serialize_inline(def, *this);
+                    if (serialized.empty()) continue;
+                    write(def.name, serialized, entry.important);
+                    for (const auto& lh : def.longhands) emitted.insert(lh);
+                    collapsed = true;
+                    break;
+                }
+                if (!collapsed) {
+                    const Shorthand* shorthand = find_shorthand(entry.name);
+                    std::string value = shorthand ? get(entry.name) : entry.value;
+                    if (value.empty()) value = entry.value;
+                    write(entry.name, value, entry.important);
+                    emitted.insert(entry.name);
+                }
+            }
+            return out;
+        }
         for (const auto& entry : entries) {
             if (entry.implicit) continue;
             const Shorthand* shorthand = find_shorthand(entry.name);
@@ -1335,10 +2179,10 @@ std::vector<RawDeclaration> parse_declarations(const std::string& text) {
     return out;
 }
 
-void apply_declarations(Block& block, const std::string& text) {
+void apply_declarations(Block& block, const std::string& text, bool inline_mode = false) {
     for (const auto& declaration : parse_declarations(text)) {
         if (!is_css_property(declaration.name)) continue;
-        block.set(declaration.name, declaration.value, declaration.important);
+        block.set(declaration.name, declaration.value, declaration.important, inline_mode);
     }
 }
 
@@ -2415,8 +3259,34 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
             return name == "color" ? std::string("rgb(0, 0, 0)") : computed_value(realm, from, block, "color", depth + 1);
         }
         if (lower == "transparent") return "rgba(0, 0, 0, 0)";
-        unsigned rgb = 0;
-        if (Color::named_color_value(lower, rgb)) return rgb_text((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 1);
+        ColorResolveContext ctx;
+        if (lower.find("light-dark(") != std::string::npos) {
+            const std::string scheme = ascii_lower(computed_value(realm, from, block, "color-scheme", depth + 1));
+            ctx.dark_scheme = (scheme == "dark" || scheme == "only dark");
+        }
+        CssColor cc;
+        if (lower.find("currentcolor") != std::string::npos) {
+            std::string cc_str = "rgb(0, 0, 0)";
+            if (name == "color") {
+                std::shared_ptr<Node> keep;
+                if (const Element* parent_el = parent_element_of(from, keep)) {
+                    Block parent_block;
+                    compute_block(realm, *parent_el, parent_block, tree_root_of(from));
+                    cc_str = computed_value(realm, *parent_el, parent_block, "color", depth + 1);
+                }
+            } else {
+                cc_str = computed_value(realm, from, block, "color", depth + 1);
+            }
+            if (CssColor::parse(cc_str, cc)) ctx.current_color = &cc;
+        }
+        CssColor parsed;
+        if (CssColor::parse(value, parsed, ctx)) {
+            if (parsed.is_currentcolor) {
+                return name == "color" ? std::string("rgb(0, 0, 0)")
+                                       : computed_value(realm, from, block, "color", depth + 1);
+            }
+            return parsed.serialize_computed();
+        }
         return value;
     }
     if (name == "font-size") return px_text(font_size_px(realm, from));
@@ -2661,13 +3531,13 @@ struct StyleState : JsExotic {
         }
         if (has_source && *attribute == source) return;
         block.clear();
-        apply_declarations(block, *attribute);
+        apply_declarations(block, *attribute, true);
         source = *attribute;
         has_source = true;
     }
 
     void store() {
-        source = block.text();
+        source = block.text(!computed);
         has_source = true;
         element->set_attribute("style", source);
     }
@@ -2680,7 +3550,7 @@ struct StyleState : JsExotic {
 
     std::string value_of(const std::string& name) {
         load();
-        if (!computed || !realm->alive) return block.get(name);
+        if (!computed || !realm->alive) return block.get(name, true);
         return computed_value(*realm, *element, block, name, 0);
     }
 
@@ -2688,16 +3558,14 @@ struct StyleState : JsExotic {
         refuse_write();
         load();
         if (trim(text).empty()) {
-            if (block.find(name) || find_shorthand(name)) {
-                const std::string before = block.text();
-                block.remove(name);
-                if (block.text() != before) store();
-            }
+            const std::string before = block.text(true);
+            block.remove(name, true);
+            if (block.text(true) != before) store();
             return;
         }
-        const std::string before = block.text();
-        if (!block.set(name, text, important)) return;
-        if (!has_source || block.text() != before) store();
+        const std::string before = block.text(true);
+        if (!block.set(name, text, important, true)) return;
+        if (!has_source || block.text(true) != before) store();
     }
 
     bool get(JsObject*, const std::string& name, JsValue& out) override {
@@ -2752,13 +3620,13 @@ void setup_style_declaration(Iface& I) {
         [](Realm&) {
             StyleState& state = this_style();
             state.load();
-            return str(state.block.text());
+            return str(state.block.text(!state.computed));
         },
         [](Realm&, const JsValue& value) {
             StyleState& state = this_style();
             state.refuse_write();
             state.block.clear();
-            apply_declarations(state.block, to_str_null_empty(value));
+            apply_declarations(state.block, to_str_null_empty(value), !state.computed);
             state.store();
         });
     I.getter("length", [](Realm&) {
@@ -2788,7 +3656,7 @@ void setup_style_declaration(Iface& I) {
         require_args(args, 1, "CSSStyleDeclaration.getPropertyPriority");
         StyleState& state = this_style();
         state.load();
-        return str(state.block.is_important(property_argument(args[0])) ? "important" : "");
+        return str(state.block.is_important(property_argument(args[0]), !state.computed) ? "important" : "");
     });
     I.method("setProperty", 2, [](Realm&, Args args) {
         require_args(args, 2, "CSSStyleDeclaration.setProperty");
@@ -2807,9 +3675,9 @@ void setup_style_declaration(Iface& I) {
         state.refuse_write();
         state.load();
         const std::string name = property_argument(args[0]);
-        const std::string before = state.block.text();
-        const std::string old = state.block.remove(name);
-        if (state.block.text() != before) state.store();
+        const std::string before = state.block.text(!state.computed);
+        const std::string old = state.block.remove(name, !state.computed);
+        if (state.block.text(!state.computed) != before) state.store();
         return str(old);
     });
 }
@@ -2836,7 +3704,7 @@ void set_inline_css_text(Realm& realm, Element& element, const std::string& text
     JsValue style = inline_style(realm, element);
     StyleState& state = *state_of<StyleState>(style);
     state.block.clear();
-    apply_declarations(state.block, text);
+    apply_declarations(state.block, text, true);
     state.store();
 }
 

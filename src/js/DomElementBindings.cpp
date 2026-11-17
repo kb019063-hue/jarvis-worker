@@ -50,15 +50,10 @@ std::string attribute_name(const Element& element, const std::string& name) {
     return is_html_in_html_document(element) ? ascii_lower(name) : name;
 }
 
-// The value of the attribute with this namespace and local name; `stored`
-// receives the name it is kept under.
-const std::string* find_attribute_ns(const Element& element, const JsValue& ns, const std::string& local,
-                                     std::string& stored) {
+// The attribute with this namespace and local name; null when there is none.
+const Attribute* find_attribute_ns(const Element& element, const JsValue& ns, const std::string& local) {
     const std::string uri = ns.is_nullish() ? std::string() : to_str(ns);
-    const std::string* name = element.find_attribute_ns(uri, local);
-    if (!name) return nullptr;
-    stored = *name;
-    return element.attribute(stored);
+    return element.find_attribute_ns(uri, local);
 }
 
 std::string namespace_uri(const Element& element) {
@@ -243,7 +238,7 @@ void setup_element(Iface& I) {
     E.method("hasAttributes", 0, [](Realm&, Element& el, Args) { return boolean(!el.attributes().empty()); });
     E.method("getAttributeNames", 0, [](Realm&, Element& el, Args) {
         std::vector<JsValue> names;
-        for (const auto& [name, value] : el.attributes()) names.push_back(str(name));
+        for (const auto& attribute : el.attributes()) names.push_back(str(attribute.name));
         return JsValue::make_array(names);
     });
     E.method("getAttribute", 1, [](Realm&, Element& el, Args args) {
@@ -252,8 +247,8 @@ void setup_element(Iface& I) {
     });
     E.method("getAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.getAttributeNS");
-        std::string stored;
-        return nullable_str(find_attribute_ns(el, args[0], to_str(args[1]), stored));
+        const Attribute* attribute = find_attribute_ns(el, args[0], to_str(args[1]));
+        return attribute ? str(attribute->value) : null();
     });
     E.method("setAttribute", 2, [](Realm& r, Element& el, Args args) {
         require_args(args, 2, "Element.setAttribute");
@@ -263,17 +258,11 @@ void setup_element(Iface& I) {
     E.method("setAttributeNS", 3, [](Realm& r, Element& el, Args args) {
         require_args(args, 3, "Element.setAttributeNS");
         // "Set an attribute value": an attribute is found by its namespace
-        // and local name, and keeps the prefix it has.
+        // and local name, and keeps the prefix it has; the value changes in
+        // place, and the list keeps its order.
         const std::string name = to_str(args[1]);
         const QualifiedName parts = validate_and_extract(r, args[0], name, true);
-        const std::string& uri = parts.namespace_uri;
-        const std::string& local = parts.local;
-        if (const std::string* stored = el.find_attribute_ns(uri, local)) {
-            const std::string existing = *stored;
-            el.set_attribute(existing, to_str(args[2]));
-        } else {
-            el.set_attribute_ns(uri, name, to_str(args[2]));
-        }
+        el.set_attribute_ns(parts.namespace_uri, name, to_str(args[2]));
         return undefined();
     });
     E.method("removeAttribute", 1, [](Realm&, Element& el, Args args) {
@@ -283,8 +272,9 @@ void setup_element(Iface& I) {
     });
     E.method("removeAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.removeAttributeNS");
-        std::string stored;
-        if (find_attribute_ns(el, args[0], to_str(args[1]), stored)) el.remove_attribute(stored);
+        const std::string local = to_str(args[1]);
+        const std::string uri = args[0].is_nullish() ? std::string() : to_str(args[0]);
+        el.remove_attribute_ns(uri, local);
         return undefined();
     });
     E.method("toggleAttribute", 1, [](Realm& r, Element& el, Args args) {
@@ -309,18 +299,17 @@ void setup_element(Iface& I) {
     });
     E.method("hasAttributeNS", 2, [](Realm&, Element& el, Args args) {
         require_args(args, 2, "Element.hasAttributeNS");
-        std::string stored;
-        return boolean(find_attribute_ns(el, args[0], to_str(args[1]), stored) != nullptr);
+        return boolean(find_attribute_ns(el, args[0], to_str(args[1])) != nullptr);
     });
     E.method("getAttributeNode", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.getAttributeNode");
-        const std::string name = attribute_name(el, to_str(args[0]));
-        return el.has_attribute(name) ? attr_object(r, el, name) : null();
+        const Attribute* attribute = el.find_attribute(attribute_name(el, to_str(args[0])));
+        return attribute ? attr_object(r, el, *attribute) : null();
     });
     E.method("getAttributeNodeNS", 2, [](Realm& r, Element& el, Args args) {
         require_args(args, 2, "Element.getAttributeNodeNS");
-        std::string stored;
-        return find_attribute_ns(el, args[0], to_str(args[1]), stored) ? attr_object(r, el, stored) : null();
+        const Attribute* attribute = find_attribute_ns(el, args[0], to_str(args[1]));
+        return attribute ? attr_object(r, el, *attribute) : null();
     });
     E.method("setAttributeNode", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "Element.setAttributeNode");

@@ -196,7 +196,7 @@ void setup_document(Iface& I) {
         return str(as_document(self).quirks_mode() == QuirksMode::Quirks ? "BackCompat" : "CSS1Compat");
     });
     for (const char* name : {"characterSet", "charset", "inputEncoding"}) {
-        I.node_getter(doc, name, [](Realm&, Node&) { return str("UTF-8"); });
+        I.node_getter(doc, name, [](Realm&, Node& self) { return str(as_document(self).character_set()); });
     }
     I.node_getter(doc, "contentType", [](Realm&, Node& self) { return str(as_document(self).content_type()); });
     I.node_getter(doc, "doctype", [](Realm& r, Node& self) { return wrap(r, as_document(self).doctype_node()); });
@@ -524,13 +524,13 @@ void setup_document(Iface& I) {
         require_args(args, 1, "Document.createAttribute");
         const std::string name = to_str(args[0]);
         validate_attribute_name(r, name);
-        return create_attribute(r, as_document(self).is_html_document() ? ascii_lower(name) : name);
+        return create_attribute(r, shared_document(self), as_document(self).is_html_document() ? ascii_lower(name) : name);
     });
-    I.node_method(doc, "createAttributeNS", 2, [](Realm& r, Node&, Args args) {
+    I.node_method(doc, "createAttributeNS", 2, [](Realm& r, Node& self, Args args) {
         require_args(args, 2, "Document.createAttributeNS");
         const std::string name = to_str(args[1]);
         const QualifiedName parts = validate_and_extract(r, args[0], name, true);
-        return create_attribute(r, name, parts.namespace_uri);
+        return create_attribute(r, shared_document(self), name, parts.namespace_uri);
     });
     I.node_method(doc, "createEvent", 1, [](Realm& r, Node&, Args args) {
         require_args(args, 1, "Document.createEvent");
@@ -542,6 +542,8 @@ void setup_document(Iface& I) {
     });
     I.node_method(doc, "importNode", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.importNode");
+        // An Attr is not a Node here, so it does not go through the tree copy.
+        if (is_attr_object(js_arg(args, 0))) return clone_attr_into(r, js_arg(args, 0), shared_document(self));
         Node& node = node_argument(args, 0, "Document.importNode");
         if (node.is_document()) throw_dom(r, "NotSupportedError", "The node provided is a document, which may not be imported.");
         if (dynamic_cast<ShadowRoot*>(&node)) throw_dom(r, "NotSupportedError", "The node provided is a shadow root, which may not be imported.");
@@ -549,6 +551,7 @@ void setup_document(Iface& I) {
     });
     I.node_method(doc, "adoptNode", 1, [](Realm& r, Node& self, Args args) {
         require_args(args, 1, "Document.adoptNode");
+        if (is_attr_object(js_arg(args, 0))) return adopt_attr_into(js_arg(args, 0), shared_document(self));
         Node& node = node_argument(args, 0, "Document.adoptNode");
         if (node.is_document()) throw_dom(r, "NotSupportedError", "The node provided is of type '#document', which may not be adopted.");
         if (dynamic_cast<ShadowRoot*>(&node)) throw_dom(r, "HierarchyRequestError", "The node provided is a shadow root, which may not be adopted.");

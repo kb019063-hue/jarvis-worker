@@ -1,8 +1,11 @@
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/RasterBudget.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <new>
 #include <vector>
@@ -14,6 +17,246 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr int kMaxImageDataPixels = 16 * 1024 * 1024; // 16M pixels cap for JS ImageData
+constexpr int kMaxTextBufferWidth = 16384;            // px cap for one rasterised text run
+constexpr int kMaxTextBufferHeight = 512;
+
+// Strict-ish UTF-8 walker: invalid bytes become U+FFFD and consume at least
+// one byte, so any input terminates.
+uint32_t canvas_utf8_next(std::string_view s, std::size_t& pos) {
+    if (pos >= s.size()) return 0;
+    const auto byte_at = [&s](std::size_t i) { return static_cast<uint8_t>(s[i]); };
+    const uint8_t lead = byte_at(pos);
+    if (lead < 0x80) {
+        pos += 1;
+        return lead;
+    }
+    uint32_t cp = 0;
+    int extra = 0;
+    if ((lead & 0xE0) == 0xC0) {
+        cp = lead & 0x1F;
+        extra = 1;
+    } else if ((lead & 0xF0) == 0xE0) {
+        cp = lead & 0x0F;
+        extra = 2;
+    } else if ((lead & 0xF8) == 0xF0) {
+        cp = lead & 0x07;
+        extra = 3;
+    } else {
+        pos += 1;
+        return 0xFFFD;
+    }
+    for (int i = 1; i <= extra; ++i) {
+        if (pos + static_cast<std::size_t>(i) >= s.size()) {
+            pos = s.size();
+            return 0xFFFD;
+        }
+        const uint8_t cc = byte_at(pos + static_cast<std::size_t>(i));
+        if ((cc & 0xC0) != 0x80) {
+            pos += 1;
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | static_cast<uint32_t>(cc & 0x3F);
+    }
+    pos += static_cast<std::size_t>(extra) + 1;
+    return cp;
+}
+
+struct ParsedCanvasFont {
+    float size_px{10.0f};
+    int weight{400};
+    std::string style{"normal"};
+    std::string family{"sans-serif"};
+};
+
+inline bool canvas_is_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
+inline std::string canvas_trim(const std::string& s) {
+    std::size_t b = 0, e = s.size();
+    while (b < e && canvas_is_space(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && canvas_is_space(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+inline std::string canvas_lower(std::string s) {
+    for (auto& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    }
+    return s;
+}
+
+// Consumes the next whitespace-separated word from the front of `work`.
+bool canvas_next_word(std::string& work, std::string& word) {
+    std::size_t i = 0;
+    while (i < work.size() && canvas_is_space(static_cast<unsigned char>(work[i]))) ++i;
+    if (i == work.size()) return false;
+    std::size_t j = i;
+    while (j < work.size() && !canvas_is_space(static_cast<unsigned char>(work[j]))) ++j;
+    word = work.substr(i, j - i);
+    work.erase(0, j);
+    return true;
+}
+
+inline bool canvas_digits(const std::string& s, std::size_t b, std::size_t e) {
+    if (b >= e) return false;
+    for (std::size_t i = b; i < e; ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    }
+    return true;
+}
+
+// Parses a CSS font shorthand for the canvas `font` attribute. Returns false
+// when the input is invalid; per spec the assignment must then be ignored.
+// The family is validated (it must be present and non-empty) but not used for
+// rasterisation: the engine has a single system regular/bold font.
+bool parse_canvas_font(const std::string& input, ParsedCanvasFont& out) {
+    std::string work = canvas_trim(input);
+    if (work.empty()) return false;
+    std::string word;
+
+    // style
+    if (canvas_next_word(work, word)) {
+        const std::string w = canvas_lower(word);
+        if (w == "normal" || w == "italic" || w == "oblique") {
+            out.style = w;
+        } else {
+            work = canvas_trim(word + " " + work);
+        }
+    }
+    // font-variant
+    if (canvas_next_word(work, word)) {
+        const std::string w = canvas_lower(word);
+        if (w == "normal" || w == "small-caps") {
+            // Small caps is accepted and ignored.
+        } else {
+            work = canvas_trim(word + " " + work);
+        }
+    }
+    // weight
+    {
+        int weight = -1;
+        if (canvas_next_word(work, word)) {
+            const std::string w = canvas_lower(word);
+            if (w == "normal") weight = 400;
+            else if (w == "bold") weight = 700;
+            else if (w == "bolder") weight = 700; // no parent weight context here
+            else if (w == "lighter") weight = 300;
+            else if (canvas_digits(w, 0, w.size())) {
+                const long v = std::strtol(w.c_str(), nullptr, 10);
+                if (v >= 1 && v <= 1000) weight = static_cast<int>(v);
+            }
+        }
+        if (weight > 0) {
+            out.weight = weight;
+        } else if (!word.empty()) {
+            work = canvas_trim(word + " " + work);
+            out.weight = 400;
+        }
+    }
+    // stretch
+    if (canvas_next_word(work, word)) {
+        static const char* const kStretch[] = {"ultra-condensed", "extra-condensed", "condensed",
+                                               "semi-condensed",  "normal",          "semi-expanded",
+                                               "expanded",        "extra-expanded",  "ultra-expanded"};
+        const std::string w = canvas_lower(word);
+        bool stretch = false;
+        for (const char* s : kStretch) {
+            if (w == s) {
+                stretch = true;
+                break;
+            }
+        }
+        if (!stretch) work = canvas_trim(word + " " + work);
+    }
+    // size (required), with optional /line-height
+    if (!canvas_next_word(work, word)) return false;
+    {
+        std::string size_tok = word;
+        std::string line_height;
+        const std::size_t slash = size_tok.find('/');
+        if (slash != std::string::npos) {
+            line_height = size_tok.substr(slash + 1);
+            size_tok = size_tok.substr(0, slash);
+        } else if (!work.empty() && work.front() == '/') {
+            // "/ line-height" may arrive as the next word
+            std::string slash_tok;
+            const std::string rest = canvas_trim(work);
+            if (canvas_next_word(work, slash_tok) && !slash_tok.empty() && slash_tok.front() == '/') {
+                std::string after = canvas_trim(slash_tok.substr(1));
+                if (after.empty()) {
+                    std::string lh_tok;
+                    if (canvas_next_word(work, lh_tok)) line_height = lh_tok;
+                } else {
+                    line_height = after;
+                }
+            } else {
+                return false;
+            }
+        }
+        // line-height is parsed for validity and ignored for rendering.
+        if (!line_height.empty()) {
+            std::size_t i = 0;
+            bool lh_dot = false, lh_any_digit = false;
+            while (i < line_height.size()) {
+                const unsigned char c = static_cast<unsigned char>(line_height[i]);
+                if (std::isdigit(c)) {
+                    lh_any_digit = true;
+                    ++i;
+                    continue;
+                }
+                if (c == '.' && !lh_dot) {
+                    lh_dot = true;
+                    ++i;
+                    continue;
+                }
+                break;
+            }
+            const std::string lh_unit = canvas_lower(line_height.substr(i));
+            const bool lh_unit_ok = lh_unit.empty() || lh_unit == "px" || lh_unit == "%" || lh_unit == "em" ||
+                                    lh_unit == "rem" || lh_unit == "pt";
+            if (!lh_any_digit || !lh_unit_ok) return false;
+        }
+        // number part of the size
+        std::size_t i = 0;
+        while (i < size_tok.size() && std::isdigit(static_cast<unsigned char>(size_tok[i]))) ++i;
+        bool dot = false;
+        if (i < size_tok.size() && size_tok[i] == '.') {
+            dot = true;
+            ++i;
+            while (i < size_tok.size() && std::isdigit(static_cast<unsigned char>(size_tok[i]))) ++i;
+        } else if (size_tok.rfind(".", 0) == 0) {
+            // ".5px": leading dot form
+            ++i;
+            while (i < size_tok.size() && std::isdigit(static_cast<unsigned char>(size_tok[i]))) ++i;
+            dot = true;
+        }
+        if (i == 0) return false; // no digits at all
+        bool any_digit = false;
+        for (char c : size_tok.substr(0, i)) {
+            if (std::isdigit(static_cast<unsigned char>(c))) any_digit = true;
+        }
+        if (!any_digit) return false;
+        const float value = std::strtof(size_tok.substr(0, i).c_str(), nullptr);
+        if (!std::isfinite(value)) return false;
+        const std::string unit = canvas_lower(size_tok.substr(i));
+        float scale = -1.0f;
+        if (unit == "px") scale = 1.0f;
+        else if (unit == "pt") scale = 96.0f / 72.0f;
+        else if (unit == "em" || unit == "rem") scale = 16.0f;
+        else if (unit == "%") scale = 16.0f / 100.0f;
+        else if (unit.empty() && value == 0.0f) scale = 1.0f; // "0" without unit is valid
+        if (scale < 0.0f) return false;
+        const float size_px = value * scale;
+        if (!std::isfinite(size_px) || size_px < 0.0f) return false;
+        out.size_px = std::min(size_px, 1600.0f);
+    }
+    // family: everything that is left, must be non-empty
+    const std::string family = canvas_trim(work);
+    if (family.empty()) return false;
+    out.family = family;
+    return true;
+}
 
 inline float apply_spread(float t, GradientSpread spread) {
     if (spread == GradientSpread::Pad) {
@@ -149,6 +392,9 @@ void CanvasRenderingContext2D::save() {
     st.miter_limit = miter_limit;
     st.line_dash = line_dash;
     st.line_dash_offset = line_dash_offset;
+    st.font = font;
+    st.text_align = text_align;
+    st.text_baseline = text_baseline;
     st.fill_gradient = fill_gradient;
     st.stroke_gradient = stroke_gradient;
     st.ctm = m_ctm;
@@ -170,6 +416,9 @@ void CanvasRenderingContext2D::restore() {
     miter_limit = st.miter_limit;
     line_dash = std::move(st.line_dash);
     line_dash_offset = st.line_dash_offset;
+    font = std::move(st.font);
+    text_align = std::move(st.text_align);
+    text_baseline = std::move(st.text_baseline);
     fill_gradient = std::move(st.fill_gradient);
     stroke_gradient = std::move(st.stroke_gradient);
     m_ctm = st.ctm;
@@ -226,6 +475,263 @@ void CanvasRenderingContext2D::set_line_dash(const std::vector<float>& segments)
         line_dash.reserve(orig * 2);
         for (size_t i = 0; i < orig; ++i) line_dash.push_back(line_dash[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const std::string& text,
+                                                                           float max_width) const {
+    TextLayout layout;
+    ParsedCanvasFont parsed;
+    if (!parse_canvas_font(font, parsed)) {
+        // Direct member assignment can bypass the validating setter; fall back
+        // to the default font rather than failing to draw.
+        parsed = ParsedCanvasFont{};
+    }
+    const float size_px = std::max(0.0f, parsed.size_px);
+    const auto metrics = FontRenderer::instance().em_ascent_descent(size_px, parsed.weight);
+    layout.ascent = metrics.first;
+    layout.descent = metrics.second;
+
+    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight);
+    const float condensable = (max_width > 0.0f && layout.advance > max_width && layout.advance > 0.0f)
+                                  ? std::clamp(max_width / layout.advance, 0.02f, 1.0f)
+                                  : 1.0f;
+    layout.condense = condensable;
+
+    layout.baseline_px = static_cast<int>(std::ceil(layout.ascent)) + 1;
+    layout.height = layout.baseline_px + static_cast<int>(std::ceil(layout.descent)) + 1;
+    layout.height = std::clamp(layout.height, 1, kMaxTextBufferHeight);
+    const int pad = static_cast<int>(layout.pad_x);
+    // Clamp before narrowing: a hostile string can advance past INT_MAX pixels.
+    const int natural_w = (layout.advance >= static_cast<float>(kMaxTextBufferWidth - pad - 2))
+                              ? kMaxTextBufferWidth
+                              : static_cast<int>(std::ceil(layout.advance)) + pad + 2;
+    layout.width = std::clamp(natural_w, 1, kMaxTextBufferWidth);
+    layout.coverage.assign(static_cast<std::size_t>(layout.width) * static_cast<std::size_t>(layout.height), 0);
+    if (size_px <= 0.0f || text.empty()) return layout;
+
+    const int px_size = std::clamp(static_cast<int>(std::lround(size_px)), 4, 160);
+    const bool bold = parsed.weight >= 600;
+    float pen = layout.pad_x;
+    float ink_l = std::numeric_limits<float>::infinity();
+    float ink_r = -std::numeric_limits<float>::infinity();
+    float ink_a = 0.0f;
+    float ink_d = 0.0f;
+
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const uint32_t cp = canvas_utf8_next(text, pos);
+        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold);
+        const float pen_rel = pen - layout.pad_x;
+        if (g.width > 0 && g.height > 0) {
+            const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;
+            const int gy0 = layout.baseline_px - g.bearing_y;
+            ink_l = std::min(ink_l, pen_rel + static_cast<float>(g.bearing_x));
+            ink_r = std::max(ink_r, pen_rel + static_cast<float>(g.bearing_x) + static_cast<float>(g.width));
+            ink_a = std::max(ink_a, static_cast<float>(g.bearing_y));
+            ink_d = std::max(ink_d, static_cast<float>(g.height - g.bearing_y));
+            for (int r = 0; r < g.height; ++r) {
+                const int dy = gy0 + r;
+                if (dy < 0 || dy >= layout.height) continue;
+                const uint8_t* src_row = g.coverage.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(g.width);
+                uint8_t* dst_row = layout.coverage.data() + static_cast<std::size_t>(dy) * static_cast<std::size_t>(layout.width);
+                for (int col = 0; col < g.width; ++col) {
+                    const int dx = gx0 + col;
+                    if (dx < 0 || dx >= layout.width) continue;
+                    const uint8_t cov = src_row[col];
+                    if (cov == 0) continue;
+                    const int sum = static_cast<int>(dst_row[dx]) + static_cast<int>(cov);
+                    dst_row[dx] = static_cast<uint8_t>(std::min(255, sum));
+                }
+            }
+        }
+        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight);
+        if (pen > static_cast<float>(kMaxTextBufferWidth)) break; // truncated by the buffer cap
+    }
+    if (std::isfinite(ink_l)) {
+        layout.ink_left = ink_l;
+        layout.ink_right = ink_r;
+        layout.ink_ascent = ink_a;
+        layout.ink_descent = ink_d;
+    }
+    return layout;
+}
+
+void CanvasRenderingContext2D::blit_text(const TextLayout& layout, float pen_user_x, float baseline_user_y,
+                                         bool stroke) {
+    if (layout.width <= 0 || layout.height <= 0) return;
+    const float c = layout.condense;
+    const float origin_x = pen_user_x - layout.pad_x * c;
+    const float origin_y = baseline_user_y - static_cast<float>(layout.baseline_px);
+
+    const std::vector<uint8_t>* src = &layout.coverage;
+    std::vector<uint8_t> outline;
+    if (stroke) {
+        // Approximate strokeText: a band centred on the binary glyph boundary
+        // (dilate(mask, d) minus erode(mask, d)) with half the line width, d >= 1.
+        // lineWidth <= 1 keeps the pure inner boundary ring. This is an
+        // outline-band approximation, not a stroked vector path.
+        const int w = layout.width;
+        const int h = layout.height;
+        std::vector<uint8_t> mask(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+        for (std::size_t i = 0; i < mask.size(); ++i) mask[i] = layout.coverage[i] >= 128 ? 1 : 0;
+        int d = static_cast<int>(std::lround(static_cast<double>(line_width) * 0.5));
+        d = std::clamp(d, 0, 16);
+        auto maxfilter = [w, h](const std::vector<uint8_t>& in, int passes) {
+            std::vector<uint8_t> out = in;
+            for (int p = 0; p < passes; ++p) {
+                std::vector<uint8_t> next(out.size(), 0);
+                for (int y = 0; y < h; ++y) {
+                    const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+                    for (int x = 0; x < w; ++x) {
+                        uint8_t v = out[row + static_cast<std::size_t>(x)];
+                        if (x > 0) v = std::max(v, out[row + static_cast<std::size_t>(x) - 1]);
+                        if (x + 1 < w) v = std::max(v, out[row + static_cast<std::size_t>(x) + 1]);
+                        if (y > 0) v = std::max(v, out[row - static_cast<std::size_t>(w) + static_cast<std::size_t>(x)]);
+                        if (y + 1 < h) v = std::max(v, out[row + static_cast<std::size_t>(w) + static_cast<std::size_t>(x)]);
+                        next[row + static_cast<std::size_t>(x)] = v;
+                    }
+                }
+                out.swap(next);
+            }
+            return out;
+        };
+        auto minfilter = [w, h](const std::vector<uint8_t>& in, int passes) {
+            std::vector<uint8_t> out = in;
+            for (int p = 0; p < passes; ++p) {
+                std::vector<uint8_t> next(out.size(), 0);
+                for (int y = 0; y < h; ++y) {
+                    const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+                    for (int x = 0; x < w; ++x) {
+                        uint8_t v = out[row + static_cast<std::size_t>(x)];
+                        if (x > 0) v = std::min(v, out[row + static_cast<std::size_t>(x) - 1]);
+                        else v = 0;
+                        if (x + 1 < w) v = std::min(v, out[row + static_cast<std::size_t>(x) + 1]);
+                        else v = 0;
+                        if (y > 0) v = std::min(v, out[row - static_cast<std::size_t>(w) + static_cast<std::size_t>(x)]);
+                        else v = 0;
+                        if (y + 1 < h) v = std::min(v, out[row + static_cast<std::size_t>(w) + static_cast<std::size_t>(x)]);
+                        else v = 0;
+                        next[row + static_cast<std::size_t>(x)] = v;
+                    }
+                }
+                out.swap(next);
+            }
+            return out;
+        };
+        std::vector<uint8_t> outer, inner;
+        if (d == 0) {
+            outer = mask;
+            inner = minfilter(mask, 1);
+        } else {
+            outer = maxfilter(mask, d);
+            inner = minfilter(mask, d);
+        }
+        outline.assign(mask.size(), 0);
+        for (std::size_t i = 0; i < mask.size(); ++i) outline[i] = (outer[i] && !inner[i]) ? 255 : 0;
+        src = &outline;
+    }
+
+    if (std::abs(m_ctm.determinant()) < 1e-7f) return;
+    const Rect bbox = m_ctm.map_rect(Rect(origin_x, origin_y, static_cast<float>(layout.width) * c,
+                                          static_cast<float>(layout.height)));
+    const TransformMatrix2D inv = m_ctm.inverse();
+    const int x0 = std::max(0, static_cast<int>(std::floor(bbox.left())) - 1);
+    const int y0 = std::max(0, static_cast<int>(std::floor(bbox.top())) - 1);
+    const int x1 = std::min(m_width, static_cast<int>(std::ceil(bbox.right())) + 1);
+    const int y1 = std::min(m_height, static_cast<int>(std::ceil(bbox.bottom())) + 1);
+
+    const Color solid = stroke ? stroke_style : fill_style;
+    const std::shared_ptr<CanvasGradient>& gradient = stroke ? stroke_gradient : fill_gradient;
+
+    for (int py = y0; py < y1; ++py) {
+        for (int px = x0; px < x1; ++px) {
+            const Point up = inv.map_point(static_cast<float>(px) + 0.5f, static_cast<float>(py) + 0.5f);
+            const int row = static_cast<int>(std::floor(up.y - origin_y));
+            if (row < 0 || row >= layout.height) continue;
+            // Horizontal source span covered by this device pixel (handles
+            // horizontal condensing and arbitrary CTM x-components).
+            const Point left_p = inv.map_point(static_cast<float>(px), static_cast<float>(py) + 0.5f);
+            const Point right_p = inv.map_point(static_cast<float>(px) + 1.0f, static_cast<float>(py) + 0.5f);
+            float ua = (left_p.x - origin_x) / c;
+            float ub = (right_p.x - origin_x) / c;
+            if (ua > ub) std::swap(ua, ub);
+            int i0 = static_cast<int>(std::floor(ua));
+            int i1 = static_cast<int>(std::ceil(ub)) - 1;
+            if (i1 < i0) {
+                const int single = static_cast<int>(std::floor((ua + ub) * 0.5f));
+                i0 = i1 = single;
+            }
+            i0 = std::clamp(i0, 0, layout.width - 1);
+            i1 = std::clamp(i1, 0, layout.width - 1);
+            uint8_t cov = 0;
+            const uint8_t* src_row = src->data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(layout.width);
+            for (int i = i0; i <= i1; ++i) cov = std::max(cov, src_row[i]);
+            if (cov == 0) continue;
+            Color color = solid;
+            if (gradient) color = gradient->sample_at(up.x, up.y);
+            set_pixel_safe(px, py, color, cov);
+        }
+    }
+}
+
+void CanvasRenderingContext2D::draw_text_run(const std::string& text, float x, float y, float max_width,
+                                             bool stroke) {
+    if (!is_finite_f(x) || !is_finite_f(y)) return;
+    if (max_width == 0.0f) return; // requested a zero-width run: nothing is drawn
+    TextLayout layout = layout_text(text, max_width);
+    if (layout.advance <= 0.0f) return; // nothing to draw (or empty string)
+
+    float pen_user_x = x;
+    if (text_align == "center") {
+        pen_user_x = x - layout.advance * 0.5f;
+    } else if (text_align == "right" || text_align == "end") {
+        pen_user_x = x - layout.advance;
+    } // "left", "start" (and anything else) draw from x
+
+    float baseline_user_y;
+    if (text_baseline == "top") {
+        baseline_user_y = y + layout.ascent;
+    } else if (text_baseline == "hanging") {
+        // Hanging baseline approximated at 0.8em above the alphabetic baseline.
+        baseline_user_y = y + 0.8f * layout.ascent;
+    } else if (text_baseline == "middle") {
+        baseline_user_y = y + (layout.ascent - layout.descent) * 0.5f;
+    } else if (text_baseline == "bottom" || text_baseline == "ideographic") {
+        // Ideographic baseline approximated at the bottom of the em box.
+        baseline_user_y = y - layout.descent;
+    } else {
+        baseline_user_y = y; // "alphabetic"
+    }
+    blit_text(layout, pen_user_x, baseline_user_y, stroke);
+}
+
+void CanvasRenderingContext2D::fill_text(const std::string& text, float x, float y, float max_width) {
+    draw_text_run(text, x, y, max_width, /*stroke=*/false);
+}
+
+void CanvasRenderingContext2D::stroke_text(const std::string& text, float x, float y, float max_width) {
+    draw_text_run(text, x, y, max_width, /*stroke=*/true);
+}
+
+CanvasRenderingContext2D::TextMetrics CanvasRenderingContext2D::measure_text(const std::string& text) const {
+    TextMetrics metrics;
+    const TextLayout layout = layout_text(text, -1.0f);
+    metrics.width = layout.advance;
+    metrics.actual_bounding_box_left = layout.ink_left;
+    metrics.actual_bounding_box_right = layout.ink_right;
+    metrics.actual_bounding_box_ascent = layout.ink_ascent;
+    metrics.actual_bounding_box_descent = layout.ink_descent;
+    metrics.font_bounding_box_ascent = layout.ascent;
+    metrics.font_bounding_box_descent = layout.descent;
+    metrics.em_height_ascent = layout.ascent;
+    metrics.em_height_descent = layout.descent;
+    metrics.hanging_baseline = 0.8f * layout.ascent;
+    metrics.ideographic_baseline = layout.descent;
+    return metrics;
 }
 
 void CanvasRenderingContext2D::set_pixel_safe(int x, int y, Color c, uint8_t coverage) {
@@ -1803,6 +2309,99 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         }),
         kAccFlags
     );
+
+    ctx.define_accessor(
+        "font",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->font);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (!args.empty()) {
+                const std::string v = args[0].to_string();
+                ParsedCanvasFont parsed;
+                // Per spec, an invalid font string is ignored (previous value kept).
+                if (parse_canvas_font(v, parsed)) get_ctx()->font = canvas_trim(v);
+            }
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    ctx.define_accessor(
+        "textAlign",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->text_align);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (!args.empty()) {
+                const std::string v = args[0].to_string();
+                if (v == "start" || v == "end" || v == "left" || v == "right" || v == "center") {
+                    get_ctx()->text_align = v;
+                }
+            }
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    ctx.define_accessor(
+        "textBaseline",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->text_baseline);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (!args.empty()) {
+                const std::string v = args[0].to_string();
+                if (v == "top" || v == "hanging" || v == "middle" || v == "alphabetic" || v == "ideographic" ||
+                    v == "bottom") {
+                    get_ctx()->text_baseline = v;
+                }
+            }
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    auto text_max_width = [](const std::vector<JsValue>& args) {
+        if (args.size() < 4 || args[3].is_nullish() || args[3].is_undefined()) return -1.0f;
+        const double v = args[3].to_number();
+        return std::isfinite(v) && v >= 0.0 ? static_cast<float>(v) : -1.0f;
+    };
+
+    ctx.set_property("fillText", JsValue::make_native_function([get_ctx, text_max_width](const std::vector<JsValue>& args) {
+        if (args.size() >= 3) {
+            get_ctx()->fill_text(args[0].to_string(), static_cast<float>(args[1].to_number()),
+                                 static_cast<float>(args[2].to_number()), text_max_width(args));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("strokeText", JsValue::make_native_function([get_ctx, text_max_width](const std::vector<JsValue>& args) {
+        if (args.size() >= 3) {
+            get_ctx()->stroke_text(args[0].to_string(), static_cast<float>(args[1].to_number()),
+                                   static_cast<float>(args[2].to_number()), text_max_width(args));
+        }
+        return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("measureText", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        const std::string text = args.empty() ? std::string() : args[0].to_string();
+        const auto m = get_ctx()->measure_text(text);
+        JsValue out = JsValue::make_object();
+        out.set_property("width", JsValue::make_number(m.width));
+        out.set_property("actualBoundingBoxLeft", JsValue::make_number(m.actual_bounding_box_left));
+        out.set_property("actualBoundingBoxRight", JsValue::make_number(m.actual_bounding_box_right));
+        out.set_property("actualBoundingBoxAscent", JsValue::make_number(m.actual_bounding_box_ascent));
+        out.set_property("actualBoundingBoxDescent", JsValue::make_number(m.actual_bounding_box_descent));
+        out.set_property("fontBoundingBoxAscent", JsValue::make_number(m.font_bounding_box_ascent));
+        out.set_property("fontBoundingBoxDescent", JsValue::make_number(m.font_bounding_box_descent));
+        out.set_property("emHeightAscent", JsValue::make_number(m.em_height_ascent));
+        out.set_property("emHeightDescent", JsValue::make_number(m.em_height_descent));
+        out.set_property("hangingBaseline", JsValue::make_number(m.hanging_baseline));
+        out.set_property("alphabeticBaseline", JsValue::make_number(0.0));
+        out.set_property("ideographicBaseline", JsValue::make_number(m.ideographic_baseline));
+        return out;
+    }));
 
     // Existing properties handled via JsValue.cpp fast-path kept initialized
     ctx.set_property("fillStyle", JsValue::make_string(fill_style.to_hex()));

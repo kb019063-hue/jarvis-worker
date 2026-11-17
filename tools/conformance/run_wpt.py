@@ -32,13 +32,18 @@ Usage:
                          (default: <suite>/expected-failures.txt)
     --filter TEXT        only the test files whose path contains TEXT
     --show N             print the first N failures that are not expected
+                         (default: 10)
     --list-failures      print every failing subtest in the form of the
                          expectations file, to copy from
     --jobs N             processes at a time (default: the CPU count)
-    --timeout SECONDS    for one test file (default: 60)
+    --timeout SECONDS    for one test file (default: 60). The harness in the
+                         page has a limit of its own, 10 seconds, which is
+                         meant for a build of ordinary speed: it is multiplied
+                         by SECONDS / 60, so a run that allows a slow build
+                         ten times as long allows the harness that too
     --min-pass N         fail unless at least N subtests pass
     --json FILE          write the results there
-    --quiet              the summary only
+    --quiet              the summary only, and what --show prints
 
 Exit status: 0 when every failure is a listed one, no listed subtest passes
 and the floor is met; 1 otherwise; 2 for a wrong invocation.
@@ -63,11 +68,24 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_BINARY = REPO / "build" / "litebird"
 DEFAULT_SUITE = REPO / "tests" / "wpt"
 ORIGIN = "https://web-platform.test"
+DEFAULT_TIMEOUT = 60.0      # seconds for one test file, in a build of ordinary speed
 
 # Printed by the page for each subtest and once for the harness. The fields
 # are separated by tabs; the harness's own status names are kept.
+#
+# The harness gives a page 10 seconds (60 with <meta name=timeout content=long>)
+# and then reports TIMEOUT for the file, whatever its subtests did. The timer
+# starts when testharness.js is read, and a page that needs longer than that to
+# reach its load event loses to it even when every subtest has passed by then:
+# the harness finishes from a zero-delay timer set in the load event, and the
+# 10-second timer is due first. A sanitizer build on a busy machine is that
+# slow. So the limit is scaled the way wptrunner scales it for slow builds,
+# with the harness's own `timeout_multiplier`; @MULTIPLIER@ is filled in from
+# --timeout, and is 1 for an ordinary run, which then calls nothing.
 REPORTER = r"""
 (function () {
+  var multiplier = @MULTIPLIER@;
+  if (multiplier > 1) setup({timeout_multiplier: multiplier});
   var names = ['PASS', 'FAIL', 'TIMEOUT', 'NOTRUN', 'PRECONDITION_FAILED'];
   var harness = ['OK', 'ERROR', 'TIMEOUT', 'PRECONDITION_FAILED'];
   function one_line(text) {
@@ -84,7 +102,7 @@ REPORTER = r"""
 """
 
 SCRIPT_SRC = re.compile(
-    r"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*?)(?:>\s*</script\s*>|/\s*>)""",
+    rb"""<script\b([^>]*?)\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)([^>]*?)(?:>\s*</script\s*>|/\s*>)""",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -143,49 +161,69 @@ def is_test_file(path: Path, suite: Path) -> bool:
     return path.suffix in (".html", ".xhtml")
 
 
-def inline_scripts(page: Path, suite: Path) -> tuple[str, bool]:
+def harness_timeout_multiplier(timeout: float) -> int:
+    """What the harness's own time limit is multiplied by, for --timeout SECONDS."""
+    return max(1, int(round(timeout / DEFAULT_TIMEOUT)))
+
+
+def inline_scripts(page: Path, suite: Path, multiplier: int = 1) -> tuple[bytes, bool]:
     """The page with each external script put inline; and whether it uses the harness."""
-    text = page.read_text(encoding="utf-8")
+    raw = page.read_bytes()
     uses_harness = False
     is_xml = page.suffix == ".xhtml"
 
-    def wrap_script_body(attrs_before: str, attrs_after: str, body: str) -> str:
+    def wrap_script_body(attrs_before: bytes, attrs_after: bytes, body: bytes) -> bytes:
         if is_xml:
-            return "<script" + attrs_before + attrs_after + "><![CDATA[" + body.replace("]]>", "]]]]><![CDATA[>") + "]]></script>"
-        body = re.sub(r"</(script)", r"<\\/\1", body, flags=re.IGNORECASE)
-        return "<script" + attrs_before + attrs_after + ">" + body + "</script>"
+            return b"<script" + attrs_before + attrs_after + b"><![CDATA[" + body.replace(b"]]>", b"]]]]><![CDATA[>") + b"]]></script>"
+        body = re.sub(rb"</(script)", rb"<\\/\1", body, flags=re.IGNORECASE)
+        return b"<script" + attrs_before + attrs_after + b">" + body + b"</script>"
 
-    def replace(match: re.Match) -> str:
+    def replace(match: re.Match) -> bytes:
         nonlocal uses_harness
-        source = match.group(2).strip("\"'")
+        source = match.group(2).decode("ascii", "ignore").strip("\"'")
         if source.endswith("/resources/testharnessreport.js"):
-            return wrap_script_body("", "", REPORTER)
+            return wrap_script_body(b"", b"", REPORTER.replace("@MULTIPLIER@", str(multiplier)).encode("utf-8"))
         if source.endswith("/resources/testharness.js"):
             uses_harness = True
         target = suite / source.lstrip("/") if source.startswith("/") else page.parent / source
         if not target.is_file():
             # Left as it is: the engine will not load it, and the test says so.
             return match.group(0)
-        body = target.read_text(encoding="utf-8")
+        body = target.read_bytes()
         return wrap_script_body(match.group(1), match.group(3), body)
 
-    return SCRIPT_SRC.sub(replace, text), uses_harness
+    return SCRIPT_SRC.sub(replace, raw), uses_harness
+
+
+def sidecar_content_type(page: Path) -> str | None:
+    sidecar = page.parent / (page.name + ".headers")
+    if not sidecar.is_file():
+        return None
+    for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            if k.strip().lower() == "content-type":
+                return v.strip()
+    return None
 
 
 def run_file(binary: str, suite: Path, page: Path, workdir: Path, timeout: float) -> FileResult:
     relative = page.relative_to(suite).as_posix()
     result = FileResult(relative)
-    text, uses_harness = inline_scripts(page, suite)
+    raw, uses_harness = inline_scripts(page, suite, harness_timeout_multiplier(timeout))
     staged = workdir / (relative.replace("/", "__"))
-    staged.write_text(text, encoding="utf-8")
+    staged.write_bytes(raw)
     empty = workdir / "empty.js"
     command = [
         binary,
         "--run-script", str(empty),
         f"--map-origin={ORIGIN}={suite}",
         f"--url={ORIGIN}/{relative}",
-        str(staged),
     ]
+    ct = sidecar_content_type(page)
+    if ct:
+        command.append(f"--content-type={ct}")
+    command.append(str(staged))
     env = dict(os.environ, TZ="UTC")
     try:
         completed = subprocess.run(command, capture_output=True, timeout=timeout, env=env)
@@ -266,7 +304,7 @@ def main() -> int:
     parser.add_argument("--show", type=int, default=0)
     parser.add_argument("--list-failures", action="store_true")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--min-pass", type=int, default=0)
     parser.add_argument("--json")
     parser.add_argument("--quiet", action="store_true")
@@ -346,9 +384,12 @@ def main() -> int:
                         print(f"#   {subtest.status}: {subtest.message[:300]}")
         print()
 
-    if args.show and unexpected:
-        print(f"First {min(args.show, len(unexpected))} failures that are not in {expectations_path.name}:")
-        for path, subtest in unexpected[: args.show]:
+    # A run that fails says what failed, also when it was asked to be quiet:
+    # the summary alone ("1 fail and are not listed") cannot be acted on.
+    show = args.show or 10
+    if show and unexpected:
+        print(f"First {min(show, len(unexpected))} failures that are not in {expectations_path.name}:")
+        for path, subtest in unexpected[:show]:
             print(f"  {path}: {subtest.name}")
             print(f"    {subtest.status}: {subtest.message[:400]}")
         print()

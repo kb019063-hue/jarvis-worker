@@ -212,6 +212,23 @@ public:
         return false;
     }
 
+    /// In the scope of a derived class's constructor: has `super(...)`
+    /// returned? That is the moment `this` is bound, and it happens once: to
+    /// the object the constructor was entered with, or to another that the
+    /// parent's constructor gave back. Every other scope is NotDerived.
+    enum class ThisBinding : uint8_t { NotDerived, Unbound, Bound, BoundToAnother };
+    ThisBinding this_binding{ThisBinding::NotDerived};
+
+    /// The scope of the derived constructor that code in this scope belongs
+    /// to, through the blocks and arrow functions in between; null outside
+    /// one. `super(...)` binds `this` there.
+    JsEnvironment* derived_constructor_scope() {
+        for (JsEnvironment* env = this; env; env = env->m_parent.get()) {
+            if (env->this_binding != ThisBinding::NotDerived) return env;
+        }
+        return nullptr;
+    }
+
 private:
     static constexpr size_t kIndexThreshold = 16;
 
@@ -350,7 +367,8 @@ public:
     /// (inline CDATA/text and external `src`, honoring `defer`).
     bool load_xml_page(std::string_view xml_bytes, const std::string& content_type,
                        bool scripting = true,
-                       const std::function<void(const std::string& source)>& before = nullptr);
+                       const std::function<void(const std::string& source)>& before = nullptr,
+                       std::string_view transport_charset = {});
 
     /// Dispatches a `resize` event on `window`.
     void notify_window_resized();
@@ -410,9 +428,12 @@ private:
     JsValue run_program(const Program& program);
     JsValue make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                           const std::string& name_hint = std::string());
+    /// `new_target` is what `new.target` is inside when that is not the
+    /// callee: the function `new` was applied to, further down a chain of
+    /// `super(...)` calls or named by Reflect.construct. Null otherwise.
     JsValue invoke_function(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& closure,
                             const JsValue& callee, const JsValue& this_val, bool is_construct,
-                            const std::vector<JsValue>& args);
+                            const std::vector<JsValue>& args, const JsValue* new_target);
     JsValue run_function_body(const FunctionNode& node, const EnvPtr& env);
     JsValue run_async_body(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);
     JsValue make_generator(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& env);

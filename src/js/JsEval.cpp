@@ -302,13 +302,15 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     fd.native_fn = [this, alive = m_alive, shared_node, closure](const std::vector<JsValue>& args) {
         JsValue this_val;
         JsValue callee;
+        // Whoever called construct() holds this for as long as the call runs.
+        const JsValue* new_target = nullptr;
         bool is_construct = false;
-        JsValue::take_call_context(this_val, is_construct, &callee);
+        JsValue::take_call_context(this_val, is_construct, &callee, &new_target);
         // The interpreter that created this function is gone: a timer or a
         // listener outlived it. There is nothing left to run the body with.
         if (!alive->load()) return JsValue::make_undefined();
         return invoke_function(shared_node, closure ? closure->shared_from_this() : nullptr, callee, this_val,
-                               is_construct, args);
+                               is_construct, args, new_target);
     };
     return fn;
 }
@@ -342,7 +344,7 @@ void JsInterpreter::bind_parameters(const FunctionNode& node, const EnvPtr& env,
 
 JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>& node, const EnvPtr& closure,
                                        const JsValue& callee, const JsValue& this_val, bool is_construct,
-                                       const std::vector<JsValue>& args) {
+                                       const std::vector<JsValue>& args, const JsValue* new_target) {
     CallDepthGuard depth_guard(*this);
     JsIntrinsics::set_current(m_realm.get());
 
@@ -369,8 +371,12 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
         }
         if (node->is_class_constructor || node->uses_new_target) {
             env->define("%fn", callee);
-            env->define("%new.target", is_construct ? callee : JsValue::make_undefined());
+            // The function `new` was applied to: this one, unless this call is
+            // a `super(...)` further down, or a Reflect.construct that names
+            // another. Undefined in a plain call.
+            env->define("%new.target", !is_construct ? JsValue::make_undefined() : new_target ? *new_target : callee);
         }
+        if (node->is_derived_constructor) env->this_binding = JsEnvironment::ThisBinding::Unbound;
         if (node->uses_super && callee.is_function()) {
             env->define("%home", callee.get_property("%home"));
         }
@@ -401,7 +407,28 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     if (node->is_class_constructor && !node->is_derived_constructor) {
         initialize_fields(callee, this_val);
     }
-    return run_function_body(*node, env);
+    JsValue result = run_function_body(*node, env);
+    // What a derived constructor made is its `this` as `super(...)` left it,
+    // which need not be the object it was entered with: a parent's
+    // constructor can return another (eval_super_call), and then that one
+    // comes back from here. Whoever called construct() uses an object that
+    // comes back in preference to its own. The constructor may return an
+    // object of its choice instead, or nothing; and if it returns nothing,
+    // `super(...)` has to have run.
+    if (is_construct && node->is_derived_constructor && !result.is_object_like()) {
+        if (!result.is_undefined()) {
+            js_throw_type_error("Derived constructors may only return object or undefined");
+        }
+        if (env->this_binding == JsEnvironment::ThisBinding::Unbound) {
+            js_throw_error(JsErrorKind::ReferenceError,
+                           "Must call super constructor in derived class before accessing 'this' or returning from "
+                           "derived constructor");
+        }
+        if (env->this_binding == JsEnvironment::ThisBinding::BoundToAnother) {
+            if (const auto* self = env->find_own("this"); self && self->value.is_object_like()) return self->value;
+        }
+    }
+    return result;
 }
 
 JsValue JsInterpreter::run_function_body(const FunctionNode& node, const EnvPtr& env) {
@@ -794,7 +821,15 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
         js_throw_error(JsErrorKind::SyntaxError, "'super' keyword unexpected here");
     }
     JsValue ctor = active->value;
+    // `this` of the constructor super(...) stands in: the binding this call
+    // may give another object, and through an arrow function too.
     JsValue this_val = lookup_identifier("this", env);
+    // new.target goes up unchanged: in a parent's constructor it is still the
+    // class `new` was applied to. (A copy: the binding can move while the
+    // parent's constructor runs.)
+    JsValue new_target_value;
+    if (auto* binding = env->lookup("%new.target")) new_target_value = binding->value;
+    const JsValue* new_target = new_target_value.is_function() ? &new_target_value : nullptr;
     // The parent is the constructor's prototype at this moment, as the
     // language has it: `Object.setPrototypeOf(Derived, Other)` changes what
     // `super(...)` calls. A class that extends null has Function.prototype
@@ -807,18 +842,36 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
     }
 
     std::vector<JsValue> args = eval_arguments(expr->args, env);
-    if (parent_fd && parent_fd->node) {
-        // A script parent initialises the same `this` object.
-        parent.construct(args, &this_val);
+
+    // `this` is bound once. A second `super(...)` runs the parent all the
+    // same, as the language has it, and is refused when the parent comes
+    // back. It is given an object of its own to work on, so that what the
+    // first one made is left as it was.
+    JsEnvironment* const constructor_scope = env->derived_constructor_scope();
+    JsValue spare;
+    if (constructor_scope && constructor_scope->this_binding != JsEnvironment::ThisBinding::Unbound) {
+        spare = JsValue::make_object();
+        const JsValue proto = new_target ? new_target->get_property("prototype") : JsValue::make_undefined();
+        if (proto.is_object_like()) {
+            if (JsObject* target = proto.as_prototype()) spare.object_val->prototype = target;
+        }
+    }
+    const JsValue& receiver = spare.is_object() ? spare : this_val;
+
+    JsValue made;       // an object the parent gave back in place of the one it was given
+    if ((parent_fd && parent_fd->node) || parent.forwards_construct()) {
+        // A script parent initialises the object it is given, unless its
+        // constructor returns another: then that one is `this` from here on,
+        // as it is, with the prototype it has. A bound function constructs
+        // its target on an object of its own, which comes back the same way.
+        made = parent.construct(args, &receiver, new_target);
+        if (!made.is_object_like() || made.identity() == receiver.identity()) made = JsValue::make_undefined();
     } else {
         // A built-in parent (Error, Array, Map, ...) builds its own object;
         // take over its state so `this` becomes that kind of object. A host
         // constructor (Event, HTMLElement) is handed `this` and makes it the
         // object it constructs, and then there is nothing to take over.
-        JsValue built = parent.construct_as_super(args, this_val);
-        if (built.object_val && this_val.object_val && built.object_val != this_val.object_val) {
-            JsObject* from = built.object_val;
-            JsObject* to = this_val.object_val;
+        const auto take_over = [](JsObject* from, JsObject* to) {
             for (const auto& entry : from->properties) {
                 auto& slot = to->properties.entry(entry.first);
                 slot.second = entry.second;
@@ -834,10 +887,58 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             to->has_accessors = to->has_accessors || from->has_accessors;
             to->has_legacy_getters = to->has_legacy_getters || from->has_legacy_getters;
             if (from->dom_node) to->dom_node = from->dom_node;
+        };
+        JsValue in_place;
+        JsValue built = parent.construct_as_super(args, receiver, new_target, &in_place);
+        if (in_place.is_object()) {
+            // The interface was not offered the object super(...) came with,
+            // because an element is being upgraded to new.target (JsValue.cpp,
+            // "Constructions in place"). Either this constructor was reached
+            // with Reflect.construct, on an object of its own, and the
+            // interface took the element: the element is what this
+            // construction makes. Or the interface is not the element's and
+            // was offered another object. Whichever that is, it is `this`
+            // from here; an interface that builds its own object whatever it
+            // is offered (Text) has its state taken over into it, as below.
+            made = in_place;
+            if (built.object_val && built.object_val != in_place.object_val) {
+                take_over(built.object_val, in_place.object_val);
+            }
+        } else if (built.object_val && receiver.object_val && built.object_val != receiver.object_val) {
+            if (receiver.object_val->dom_node) {
+                // `this` is an element that is being upgraded, and the parent
+                // is no interface of the DOM at all: a class that extends Map
+                // was given to customElements.define. The element is not made
+                // a map. What the parent built is `this`, with the prototype
+                // new.target has, as Reflect.construct(Map, [], NewTarget)
+                // makes it, and the upgrade fails because that is not the
+                // element.
+                const JsValue proto = new_target ? new_target->get_property("prototype") : JsValue::make_undefined();
+                if (proto.is_object_like()) {
+                    if (JsObject* target = proto.as_prototype()) js_set_prototype(built.object_val, target);
+                }
+                made = built;
+            } else {
+                take_over(built.object_val, receiver.object_val);
+            }
         }
     }
+    // The parent has run; now `this` is bound. (The flag is read again: the
+    // parent's constructor may have bound `this` itself, through an arrow
+    // function it was passed.)
+    if (constructor_scope) {
+        if (constructor_scope->this_binding != JsEnvironment::ThisBinding::Unbound) {
+            js_throw_error(JsErrorKind::ReferenceError, "Super constructor may only be called once");
+        }
+        constructor_scope->this_binding = made.is_object_like() ? JsEnvironment::ThisBinding::BoundToAnother
+                                                                : JsEnvironment::ThisBinding::Bound;
+    }
+    if (made.is_object_like()) {
+        this_val = made;
+        if (auto* self = env->lookup("this")) self->value = made;
+    }
     initialize_fields(ctor, this_val);
-    return JsValue::make_undefined();
+    return this_val;        // `super(...)` is an expression, and its value is `this`
 }
 
 // ---------------------------------------------------------------------------

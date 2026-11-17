@@ -8,6 +8,7 @@
 #include "litebird/xml/XmlTools.hpp"
 #include "litebird/xml/XmlDom.hpp"
 #include "litebird/net/DataUrl.hpp"
+#include "litebird/net/TextEncoding.hpp"
 #include <fstream>
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/html/HtmlTokenizer.hpp"
@@ -31,6 +32,7 @@
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsIdentifierTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -1389,6 +1391,70 @@ TEST(js_async_promises_and_json) {
     EventLoop::default_loop().run_microtasks();
     auto result_code = interp.eval("_code");
     assert(result_code.to_number() == 200.0);
+}
+
+TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var combinator_trace = [];
+        var saved_resolve = Promise.resolve;
+        function check(method) {
+            var steps = 0;
+            var iterable = {
+                next: function() {
+                    combinator_trace.push('next');
+                    if (steps++ === 0) return {value: 7, done: false};
+                    throw Error('advanced beyond the first value');
+                },
+                return: function() { combinator_trace.push('close'); return {done: true}; }
+            };
+            iterable[Symbol.iterator] = function() { return this; };
+            Promise.resolve = function(value) {
+                combinator_trace.push('resolve:' + value);
+                throw Error('stop');
+            };
+            Promise[method](iterable).catch(function(e) {
+                combinator_trace.push(method + ':' + e.message);
+            });
+        }
+        check('all'); check('allSettled'); check('any'); check('race');
+        Promise.resolve = saved_resolve;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("combinator_trace.join('|')").to_string() ==
+           "next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|next|resolve:7|close|"
+           "all:stop|allSettled:stop|any:stop|race:stop");
+
+    // Getting resolve is a single operation, before asking for the iterator.
+    js.eval_ast(R"JS(
+        var order = [];
+        Object.defineProperty(Promise, 'resolve', {configurable:true, get:function() {
+            order.push('get');
+            return function(value) { order.push('resolve:' + value); return saved_resolve.call(Promise, value); };
+        }});
+        var items = {i:0, next:function() {
+            order.push('next');
+            return this.i++ < 2 ? {value:this.i, done:false} : {done:true};
+        }};
+        items[Symbol.iterator] = function() { order.push('iterator'); return this; };
+        Promise.all(items);
+        Object.defineProperty(Promise, 'resolve', {value:saved_resolve, writable:true, configurable:true});
+    )JS");
+    assert(js.eval("order.join('|')").to_string() == "get|iterator|next|resolve:1|next|resolve:2|next");
+
+    // The returned promise's own then getter can throw. This happens *during*
+    // iteration, so IteratorClose must call return before rejecting.
+    js.eval_ast(R"JS(
+        var then_trace = [], item = Promise.resolve(1);
+        Object.defineProperty(item, 'then', {get:function() { then_trace.push('then'); throw Error('getter'); }});
+        var forever = {next:function() { then_trace.push('next'); return {value:item, done:false}; },
+                       return:function() { then_trace.push('close'); return {done:true}; }};
+        forever[Symbol.iterator] = function() { return this; };
+        Promise.any(forever).catch(function(e) { then_trace.push(e.message); });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
 }
 
 TEST(css_flex_wrapping_and_grid_layout) {
@@ -4783,7 +4849,7 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                         const auto found = list.find(name);
                         assert((found == list.end()) == (in_model == model.end()));
                         if (found != list.end()) {
-                            assert(found->second == in_model->second);
+                            assert(found->value == in_model->second);
                             assert(found - list.begin() == in_model - model.begin());
                             if (random() % 4 == 0) {
                                 list.erase(found);
@@ -4803,61 +4869,69 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
             }
             std::size_t at = 0;
             for (const auto& item : list) {
-                assert(item == model[at]);
-                assert(list[at] == model[at]);
+                assert(item.name == model[at].first && item.value == model[at].second);
+                assert(list[at].name == model[at].first && list[at].value == model[at].second);
                 ++at;
             }
             assert(at == model.size());
         }
     }
 
-    // 2. The side table of namespaces, against a plain vector.
+    // 2. Attributes are kept by (namespace, local name), so one qualified
+    //    name may be used once in each namespace, and the list keeps the
+    //    order the attributes arrived in. Against a plain vector.
     {
         std::mt19937 random(7);
-        for (int round = 0; round < 100; ++round) {
-            AttributeNamespaces table;
-            struct Row { std::string qualified, uri; };
+        for (int round = 0; round < 40; ++round) {
+            auto element = std::make_shared<Element>("e");
+            struct Row {
+                std::string ns, local, name, value;
+            };
             std::vector<Row> model;
-            const int names = round < 50 ? 10 + round : 300;
-            for (int step = 0; step < 2000; ++step) {
-                const int n = static_cast<int>(random() % names);
+            const int count = round < 20 ? 6 + round : 120;
+            const int steps = round < 20 ? 200 : 2000;
+            for (int step = 0; step < steps; ++step) {
+                const int n = static_cast<int>(random() % count);
                 const std::string local = "a" + std::to_string(n);
-                const std::string qualified = (n % 3 == 0 ? "" : "p" + std::to_string(n % 3) + ":") + local;
-                const auto in_model = std::find_if(model.begin(), model.end(), [&](const Row& row) { return row.qualified == qualified; });
-                switch (random() % 5) {
+                const std::string ns = n % 3 == 0 ? std::string() : "urn:" + std::to_string(n % 4);
+                // A prefix needs a namespace: in no namespace the whole name
+                // is the local name.
+                const std::string name = (ns.empty() || n % 2 == 0 ? "" : "p" + std::to_string(n % 4) + ":") + local;
+                auto found = std::find_if(model.begin(), model.end(),
+                                          [&](const Row& row) { return row.ns == ns && row.local == local; });
+                switch (random() % 4) {
                     case 0: case 1: {
-                        // One namespace per name most of the time; now and then another.
-                        const std::string uri = "urn:" + std::to_string(random() % 8 == 0 ? (n + 1) % 4 : n % 4);
-                        table.set(qualified, uri);
-                        if (in_model == model.end()) model.push_back({qualified, uri});
-                        else in_model->uri = uri;
+                        const std::string value = std::to_string(step);
+                        element->set_attribute_ns(ns, name, value);
+                        if (found == model.end()) model.push_back({ns, local, name, value});
+                        else found->value = value;
                         break;
                     }
                     case 2: {
-                        table.erase(qualified);
-                        if (in_model != model.end()) model.erase(in_model);
-                        break;
-                    }
-                    case 3: {
-                        const std::string* found = table.find(qualified);
-                        assert((found == nullptr) == (in_model == model.end()));
-                        if (found) assert(*found == in_model->uri);
+                        element->remove_attribute_ns(ns, local);
+                        if (found != model.end()) model.erase(found);
                         break;
                     }
                     default: {
-                        // A name has one local part here, so namespace and
-                        // local name find at most one entry.
-                        for (int k = 0; k < 4; ++k) {
-                            const std::string uri = "urn:" + std::to_string(k);
-                            const std::string* found = table.find_expanded(uri, local);
-                            const bool expected = in_model != model.end() && in_model->uri == uri;
-                            assert((found != nullptr) == expected);
-                            if (found) assert(*found == qualified);
+                        const Attribute* attribute = element->find_attribute_ns(ns, local);
+                        assert((attribute != nullptr) == (found != model.end()));
+                        if (attribute) {
+                            assert(attribute->value == found->value);
+                            assert(attribute->namespace_uri() == ns);
+                            assert(attribute->local_name() == local);
                         }
                         break;
                     }
                 }
-                assert(table.size() == model.size());
+                assert(element->attributes().size() == model.size());
+                std::size_t at = 0;
+                for (const Attribute& attribute : element->attributes()) {
+                    assert(attribute.namespace_uri() == model[at].ns);
+                    assert(attribute.local_name() == model[at].local);
+                    assert(attribute.value == model[at].value);
+                    ++at;
+                }
+                assert(at == model.size());
             }
         }
     }
@@ -4884,6 +4958,123 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
                    " n.hasAttributeNS('urn:n' + (10000 % 7), 'a10000'), n.getAttribute('p3:a17'), n.attributes[9999].localName].join(' ')").to_string() ==
            "10000 17  true false 17 a9999");
     assert(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < 60.0);
+}
+
+TEST(attributes_are_kept_by_namespace_and_local_name) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
+    js.notify_document_loaded();
+    auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
+
+    // 1. One qualified name, two namespaces: both attributes exist, in the
+    //    order they were added, and the name-addressed methods answer about
+    //    the first of them. (The DOM Standard, "set an attribute".)
+    assert(S("var e = document.createElement('div');"
+             "e.setAttributeNS('urn:a', 'x', 'first');"
+             "e.setAttribute('x', 'second');"
+             "e.setAttributeNS('urn:b', 'x', 'third');"
+             "[e.attributes.length, e.getAttribute('x'), e.hasAttribute('x'),"
+             " e.getAttributeNames().join(','),"
+             " e.getAttributeNS('urn:a', 'x'), e.getAttributeNS(null, 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|second|true|x,x|second||third");
+    //    setAttribute changes that first one in place, in its own namespace:
+    //    it does not add, and it does not move the attribute.
+    assert(S("e.setAttribute('x', 'changed');"
+             "[e.attributes.length, e.getAttributeNS('urn:a', 'x'), e.getAttributeNS('urn:b', 'x')].join('|')") ==
+           "2|changed|third");
+    //    removeAttribute takes the first; toggleAttribute removes the first.
+    assert(S("e.removeAttribute('x'); [e.attributes.length, e.getAttribute('x'), String(e.getAttributeNS('urn:a', 'x')),"
+             " e.getAttributeNames().join(',')].join('|')") ==
+           "1|third|null|x");
+    assert(S("e.toggleAttribute('x'); [e.attributes.length, e.hasAttribute('x'), String(e.getAttributeNS('urn:b', 'x'))].join('|')") ==
+           "0|false|null");
+
+    // 2. Each attribute knows its own namespace, prefix and local name, and
+    //    the list keeps the order even when two names are the same string.
+    assert(S("var n = document.createElementNS('urn:d', 'e');"
+             "n.setAttributeNS('urn:a', 'p:id', '1');"
+             "n.setAttributeNS('', 'id', '2');"
+             "[n.attributes.length, String(n.attributes[0].namespaceURI), String(n.attributes[0].prefix), n.attributes[0].localName,"
+             " String(n.attributes[1].namespaceURI), String(n.attributes[1].prefix), n.attributes[1].localName,"
+             " n.attributes[0].ownerElement === n, n.attributes[0].ownerDocument === document].join('|')") ==
+           "2|urn:a|p|id|null|null|id|true|true");
+
+    // 3. A NamedNodeMap is keyed by qualified name: one own property per
+    //    name, after the indices, not enumerable, and it answers with the
+    //    first attribute of that name.
+    assert(S("var m = document.createElement('div'); m.setAttribute('a', '1'); m.setAttribute('b', '2');"
+             "var map = m.attributes;"
+             "[Object.getOwnPropertyNames(map).join(','), map.hasOwnProperty('a'), map.hasOwnProperty('0'),"
+             " Object.getOwnPropertyDescriptor(map, 'a').enumerable, Object.getOwnPropertyDescriptor(map, '0').enumerable,"
+             " map.a.value, map[1].value, map.length].join('|')") ==
+           "0,1,a,b|true|true|false|true|1|2|2");
+
+    // 4. An Attr is one object per (element, namespace, local name): two
+    //    attributes with one qualified name are two objects, and a removed
+    //    attribute keeps its value and loses its element.
+    assert(S("var d = document.createElement('div');"
+             "d.setAttributeNS('urn:a', 'x', 'one'); d.setAttributeNS('urn:b', 'x', 'two');"
+             "var a1 = d.getAttributeNodeNS('urn:a', 'x'), a2 = d.getAttributeNodeNS('urn:b', 'x');"
+             "[a1 === a2, a1 !== d.getAttributeNodeNS('urn:a', 'x'), d.getAttributeNode('x') === a1,"
+             " String(d.getAttributeNode('x').namespaceURI)].join('|')") ==
+           "false|false|true|urn:a");
+    assert(S("d.removeAttributeNS('urn:a', 'x');"
+             "[a1.value, String(a1.ownerElement), a1.isConnected, d.getAttributeNode('x') === a2].join('|')") ==
+           "one|null|false|true");
+
+    // 5. setAttributeNode returns what it replaced; setAttributeNodeNS keeps
+    //    the replaced attribute's place and takes the new name, so the old
+    //    qualified name is gone and lookups follow the new order.
+    assert(S("var r = document.createElement('div');"
+             "r.setAttribute('keep', 'k'); r.setAttributeNS('urn:t', 'p:id', 'namespaced');"
+             "var made = document.createAttributeNS('urn:t', 'id'); made.value = 'replacement';"
+             "var replaced = r.setAttributeNodeNS(made);"
+             "[replaced.name, replaced.value, String(r.getAttribute('p:id')), r.getAttribute('id'),"
+             " r.getAttributeNS('urn:t', 'id'), r.getAttributeNames().join(',')].join('|')") ==
+           "p:id|namespaced|null|replacement|replacement|keep,id");
+
+    // 6. An HTMLCollection's named properties are own properties too, and
+    //    they do not enumerate.
+    assert(S("var h = document.getElementById('host');"
+             "h.innerHTML = '<i id=\"only\"></i>';"
+             "var list = h.getElementsByTagName('i');"
+             "[Object.getOwnPropertyNames(list).join(','), list.hasOwnProperty('only'), 'only' in list,"
+             " Object.getOwnPropertyDescriptor(list, 'only').enumerable, list.only.id].join('|')") ==
+           "0,only|true|true|false|only");
+
+    // 7. A custom element's attributeChangedCallback and a MutationObserver
+    //    record both see the namespace, which a qualified name alone cannot
+    //    tell apart.
+    assert(S("var seen = [];"
+             "class C extends HTMLElement { static get observedAttributes() { return ['x', 'p:x']; }"
+             "  attributeChangedCallback(name, oldValue, newValue, ns) { seen.push([name, oldValue, newValue, ns].join('~')); } }"
+             "customElements.define('x-c', C);"
+             "var c = document.createElement('x-c'); document.body.appendChild(c);"
+             "c.setAttributeNS('urn:a', 'x', '1'); c.setAttributeNS('urn:b', 'x', '2'); c.removeAttribute('x');"
+             "seen.join('|')") == "x~~1~urn:a|x~~2~urn:b|x~1~~urn:a");
+    assert(S("var records = [];"
+             "var t = document.createElement('div'); document.body.appendChild(t);"
+             "var o = new MutationObserver(function (list) { list.forEach(function (r) {"
+             "  records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); }); });"
+             "o.observe(t, { attributes: true, attributeOldValue: true });"
+             "t.setAttributeNS('urn:a', 'p:x', 'one'); t.setAttributeNS('urn:a', 'p:x', 'two'); t.removeAttributeNS('urn:a', 'x');"
+             "o.takeRecords().forEach(function (r) { records.push([r.attributeName, r.attributeNamespace, r.oldValue].join('~')); });"
+             "records.join('|')") ==
+           "p:x~urn:a~|p:x~urn:a~one|p:x~urn:a~two");
+
+    // 8. importNode copies a detached attribute into the document; adoptNode
+    //    moves one, and returns the same object.
+    assert(S("var other = document.implementation.createDocument('urn:d', 'r', null);"
+             "var attr = other.createAttributeNS('urn:a', 'p:x'); attr.value = 'v';"
+             "var copy = document.importNode(attr);"
+             "[copy !== attr, copy.name, copy.namespaceURI, copy.prefix, copy.localName, copy.value,"
+             " copy.ownerElement, copy.ownerDocument === document, String(attr.ownerDocument === other)].join('|')") ==
+           "true|p:x|urn:a|p|x|v||true|true");
+    assert(S("var a2 = other.createAttribute('plain');"
+             "document.adoptNode(a2) === a2 && a2.ownerDocument === document") == "true");
 }
 
 TEST(xml_http_request_answers_data_urls_and_nothing_else) {
@@ -4969,10 +5160,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         assert(encoding_name_for_label("utf-16be") == "UTF-16BE");
         assert(encoding_name_for_label("ascii") == "windows-1252" && encoding_name_for_label("ISO-8859-1") == "windows-1252" &&
                encoding_name_for_label("cp819") == "windows-1252");
-        // Any other name is no name: one the standard has and this build
-        // cannot read, like one nobody has.
+        // Any non-WHATWG label is empty; Shift_JIS and EUC-JP are now supported.
+        assert(encoding_name_for_label("shift_jis") == "Shift_JIS");
         assert(encoding_name_for_label("").empty() && encoding_name_for_label("bogus").empty() &&
-               encoding_name_for_label("shift_jis").empty() && encoding_name_for_label("utf-32").empty() &&
+               encoding_name_for_label("ebcdic-cp-us").empty() && encoding_name_for_label("utf-32").empty() &&
                encoding_name_for_label("\"utf-8\"").empty());
     }
 
@@ -4998,7 +5189,8 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         // With nothing from outside: a mark, then the declaration, then UTF-8.
         assert(encoding_of("<a/>") == "UTF-8" && encoding_of(latin1) == "windows-1252");
         assert(encoding_of("\xEF\xBB\xBF<a/>") == "UTF-8" && encoding_of("\xFF\xFE" + le) == "UTF-16LE" && encoding_of("\xFE\xFF" + be) == "UTF-16BE");
-        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "unsupported");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>") == "EUC-JP");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?><a/>") == "unsupported");
         //   A declaration that the bytes contradict is an error of form.
         assert(encoding_of("<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>") == "error");
         assert(encoding_of("\xEF\xBB\xBF" + latin1) == "error");
@@ -5009,11 +5201,11 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
         assert(encoding_of(le, "UTF-16LE") == "UTF-16LE" && encoding_of(be, "UTF-16BE") == "UTF-16BE");
         assert(decoded(le, "UTF-16LE") == "<a/>" && decoded(be, "UTF-16BE") == "<a/>" && decoded(le, "utf-16") == "<a/>");
         assert(encoding_of(latin1, "UTF-8") == "UTF-8" && encoding_of("<a/>", "windows-1252") == "windows-1252");
-        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EUC-JP\"?><a/>", "UTF-8") == "UTF-8");
+        assert(encoding_of("<?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?><a/>", "UTF-8") == "UTF-8");
         assert(encoding_of("\xEF\xBB\xBF<a/>", "windows-1252") == "UTF-8" && encoding_of("\xFF\xFE" + le, "UTF-8") == "UTF-16LE");
         assert(encoding_of("\xEF\xBB\xBF" + latin1, "UTF-8") == "UTF-8");
         //   A name this build does not know is no word from the transport.
-        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "shift_jis") == "UTF-8");
+        assert(encoding_of(latin1, "bogus") == "windows-1252" && encoding_of("<a/>", "ebcdic-cp-us") == "UTF-8");
         // Bytes that are no text in the encoding: no document (4.3.3).
         assert(decoded(std::string("<\0a\0>\0\x3D\xD8<\0/\0a\0>\0", 16), "UTF-16LE") == "error");
         assert(decoded(std::string("<\0a\0/\0>", 7), "UTF-16LE") == "error");
@@ -5095,8 +5287,8 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("get('data:text/xml;charset=utf-8,%3C?xml version=\"1.0\" encoding=\"ISO-8859-1\"?%3E%3Ca%3E%C3%A9%3C/a%3E').responseXML.documentElement.textContent.charCodeAt(0)") == "233");
     //    UTF-16 with a byte order mark.
     assert(S("var x = get('data:text/xml,%FF%FE%3C%00a%00/%00%3E%00'); x.responseXML.documentElement.nodeName + ' ' + x.responseText") == "a <a/>");
-    //    An encoding this build cannot read: no document, and the text as UTF-8.
-    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EUC-JP\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 43");
+    //    An encoding outside WHATWG (e.g. EBCDIC-CP-US): no document, and the text as UTF-8.
+    assert(S("var x = get('data:text/xml,%3C?xml version=\"1.0\" encoding=\"EBCDIC-CP-US\"?%3E%3Ca/%3E'); String(x.responseXML) + ' ' + x.responseText.length") == "null 49");
     //    Bytes that are no text in the document's encoding: XML calls that
     //    fatal (4.3.3), so there is no document; jsdom puts U+FFFD in their
     //    place and gives one. responseText has the U+FFFD in both.
@@ -6899,11 +7091,11 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(b.string_val.shares_text_with(a.string_val) && c.string_val.shares_text_with(a.string_val));
         assert(a.string_val.use_count() == 103);
         assert(strict_equals(a, c));
-        // The handle is a pointer and five 32-bit fields: where the text is,
-        // how long it is in bytes and in code units, and the high half it may
-        // owe at its end (finding 47). It was four fields, 24 bytes, before the
-        // owed half; the fifth costs one word of padding.
-        assert(sizeof(JsString) == 32);
+        // The handle is a pointer and three 32-bit fields: where the text is,
+        // its offset and length in UTF-16 code units, and its cached UTF-8
+        // byte count (24 bytes; Phase 53 removed the owed-half fifth word by
+        // storing non-ASCII strings directly as UTF-16).
+        assert(sizeof(JsString) == 24);
     }
 
     // --- Length and indexing ---------------------------------------------------------
@@ -6914,23 +7106,29 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(mixed.length() == 9 && mixed.size() == 12 && !mixed.is_ascii());
         assert(mixed.unit_at(1) == 0xE9 && mixed.unit_at(6) == 0xD83D && mixed.unit_at(7) == 0xDE00 && mixed.unit_at(8) == '!');
 
-        // Text that is not ASCII is converted to UTF-16 once, at the first
-        // index, and the conversion is kept with the text: a copy of the
-        // handle finds it there.
+        // Text that is not ASCII is widened to UTF-16 once when constructed;
+        // indexing it later widens nothing more, and its UTF-8 view is cached
+        // once on first `.view()` so copies share it.
         std::string body;
         for (int i = 0; i < 10000; ++i) body += "ab\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80";       // "abé中😀": 6 code units, 11 bytes
+        const auto built_before = JsString::stats();
         JsString text(body);
+        const auto built_after = JsString::stats();
         assert(text.length() == 60000 && text.size() == 110000);
-        const auto before = JsString::stats();
+        assert(built_after.units_widened - built_before.units_widened == 60000);
         uint64_t sum = 0;
         for (size_t i = 0; i < text.length(); ++i) sum += text.unit_at(i);
         const auto once = JsString::stats();
         assert(sum == 10000ull * ('a' + 'b' + 0xE9 + 0x4E2D + 0xD83D + 0xDE00));
-        assert(once.units_widened - before.units_widened == 60000);
+        assert(once.units_widened == built_after.units_widened && once.bytes_copied == built_after.bytes_copied);
         JsString copy = text;
         for (size_t i = 0; i < copy.length(); ++i) sum += copy.unit_at(i);
+        assert(text.view() == body);
+        const auto viewed_once = JsString::stats();
+        assert(viewed_once.bytes_copied - once.bytes_copied == body.size());
+        assert(copy.view() == body);
         const auto twice = JsString::stats();
-        assert(twice.units_widened == once.units_widened && twice.bytes_copied == before.bytes_copied);
+        assert(twice.units_widened == built_after.units_widened && twice.bytes_copied == viewed_once.bytes_copied);
 
         JsString empty;
         assert(empty.length() == 0 && empty.view().empty() && empty.use_count() == 0 && empty == JsString(""));
@@ -7007,11 +7205,14 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(rest.shares_text_with(wide_text) && rest.length() == 7197);
         assert(rest.unit_at(0) == 0xE9 && rest.unit_at(2) == 0xD83D && rest.unit_at(3) == 0xDE00);
         assert(rest.substring(0, 1) == std::string_view("\xC3\xA9"));
-        // A piece that starts between the two halves of a pair holds a lone
-        // half, which is not in the block as such: it is built, not shared.
+        // A piece that starts between the two halves of a pair still shares the
+        // UTF-16 block (`from_low_half` indexes straight at offset 6) and builds
+        // its own UTF-8 view only if `.view()` is asked for.
         JsString from_low_half = wide_text.substring(6, 8000);
-        assert(!from_low_half.shares_text_with(wide_text));
+        assert(from_low_half.shares_text_with(wide_text));
         assert(from_low_half.length() == 7994 && from_low_half.unit_at(0) == 0xDE00 && from_low_half.unit_at(1) == ' ');
+        assert(from_low_half.view().substr(0, 4) == "\xED\xB8\x80 ");
+        assert(from_low_half.to_well_formed().view().substr(0, 4) == "\xEF\xBF\xBD ");
         // Appending to a piece that ends where its block ends still works in place.
         JsString grown = JsString::concat(JsString::concat(JsString("0123456789abcdef"), JsString("0123456789abcdef")),
                                           JsString("0123456789abcdef"));
@@ -7081,9 +7282,9 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
         assert(!js.last_eval_failed());
         assert(js.global_env()->get("total").to_number() == 1326300000);
         assert(js.global_env()->get("marks").to_number() == 20000);
-        // The UTF-16 form is built once, at the first index: 60,000 units,
-        // not 60,000 units for each of the 180,000 reads.
-        assert(after.units_widened - counted.units_widened == 60000);
+        // The UTF-16 form is already in the block, so 180,000 reads widen none
+        // of `s` (at most the 1-unit `'\u4e2d'` script literal on parse).
+        assert(after.units_widened - counted.units_widened <= 1);
         // `s[i]` makes a string of one code unit: a few bytes each time.
         assert(after.bytes_copied - counted.bytes_copied < 400000);
     }
@@ -7226,61 +7427,59 @@ TEST(js_strings_are_shared_and_read_in_constant_time) {
 TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
     using namespace litebird;
 
-    // AUDIT.md, finding 47. `a + b` where a ends in a high half and b starts
-    // with the low one is a single four-byte character that starts three bytes
-    // before the end of a. Written bytes never change, so that join used to
-    // copy the whole of a. A join now owes the half instead of writing it, and
-    // the character is written where the block's text ends when the low half
-    // arrives. These checks pin what script can see of that: nothing.
+    // AUDIT.md, findings 47 and 59. Non-ASCII strings now live directly in
+    // UTF-16 blocks: joining a high half writes its 2-byte UTF-16 code unit,
+    // reading it builds a UTF-8 view lazily without settling UTF-8 into the
+    // string's backing units, and arriving with the low half appends 2 bytes in
+    // place even after the half was read.
     const JsString high = JsString::from_unit(0xD83D);
     const JsString low = JsString::from_unit(0xDE00);
     const std::string_view high_bytes("\xED\xA0\xBD", 3);
     const std::string_view pair_bytes("\xF0\x9F\x98\x80", 4);
 
-    // --- Owed: nothing is written, and the text reads as it always did ---------------
+    // --- High half appended to UTF-16 base: 2 bytes written; UTF-8 view cached once -
     {
-        const JsString abc("abc");
+        const JsString base = JsString::from_utf16(u"ab\x00e9");
         const auto before = JsString::stats();
-        const JsString owed = JsString::concat(abc, high);
+        const JsString with_high = JsString::concat(base, high);
         const auto after = JsString::stats();
-        // No block, no byte: the half is a field of the handle.
-        assert(after.blocks == before.blocks && after.bytes_copied == before.bytes_copied);
-        assert(owed.shares_text_with(abc));
-        assert(owed.length() == 4 && owed.size() == 6 && !owed.is_ascii() && !owed.is_well_formed());
-        assert(owed.unit_at(0) == 'a' && owed.unit_at(3) == 0xD83D);
-        // Reading it settles it: three bytes, once. Reading it again copies nothing.
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(with_high.shares_text_with(base));
+        assert(with_high.length() == 4 && with_high.size() == 7 && !with_high.is_ascii() && !with_high.is_well_formed());
+        assert(with_high.unit_at(0) == 'a' && with_high.unit_at(2) == 0xE9 && with_high.unit_at(3) == 0xD83D);
+        // Reading UTF-8 creates a separate Utf8Slice once; reading it again copies nothing.
         const auto read_before = JsString::stats();
-        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        assert(with_high.view() == std::string("ab\xC3\xA9") + std::string(high_bytes));
         const auto read_once = JsString::stats();
-        assert(read_once.bytes_copied - read_before.bytes_copied == 3);
-        assert(owed.view() == std::string("abc") + std::string(high_bytes));
+        assert(read_once.bytes_copied - read_before.bytes_copied == 7);
+        assert(with_high.view() == std::string("ab\xC3\xA9") + std::string(high_bytes));
         assert(JsString::stats().bytes_copied == read_once.bytes_copied);
-        assert(owed.str() == owed.view());
-        assert(JsString::stats().bytes_copied - read_once.bytes_copied == 6);      // str() hands out its own copy
-        assert(owed == JsString("abc\xED\xA0\xBD"));            // equal to the same text, written out
-        assert(abc == std::string_view("abc"));                 // and what it was joined to is untouched
-        assert(owed.substring(0, 2) == std::string_view("ab"));
-        assert(owed.substring(3, 4).length() == 1 && owed.substring(3, 4).unit_at(0) == 0xD83D);
-        assert(owed.to_well_formed() == JsString("abc\xEF\xBF\xBD"));
+        assert(with_high.str() == with_high.view());
+        assert(JsString::stats().bytes_copied - read_once.bytes_copied == 7);   // str() hands out its own copy
+        assert(with_high == JsString("ab\xC3\xA9\xED\xA0\xBD"));
+        assert(base == std::string_view("ab\xC3\xA9"));
+        assert(with_high.substring(0, 2) == std::string_view("ab"));
+        assert(with_high.substring(3, 4).length() == 1 && with_high.substring(3, 4).unit_at(0) == 0xD83D);
+        assert(with_high.to_well_formed() == JsString("ab\xC3\xA9\xEF\xBF\xBD"));
     }
 
-    // --- The low half arrives: one character, written after the text, nothing copied --
+    // --- The low half arrives: 2 UTF-16 bytes written in place, nothing copied --------
     {
         const JsString abc("abc");
-        const JsString owed = JsString::concat(abc, high);
+        const JsString with_high = JsString::concat(abc, high);               // promotes ASCII "abc" once to UTF-16
         const auto before = JsString::stats();
-        const JsString joined = JsString::concat(owed, low);
+        const JsString joined = JsString::concat(with_high, low);
         const auto after = JsString::stats();
+        assert(after.blocks == before.blocks);
+        assert(after.bytes_copied - before.bytes_copied == 2);                // 2 bytes for `low`, and nothing else
+        assert(joined.shares_text_with(with_high));                           // same UTF-16 block: nothing copied
         assert(joined.view() == std::string("abc") + std::string(pair_bytes));
         assert(joined.length() == 5 && joined.size() == 7 && joined.is_well_formed());
         assert(joined == JsString("abc\xF0\x9F\x98\x80"));
-        assert(joined.shares_text_with(abc));                    // the same block: nothing was copied
-        assert(after.blocks == before.blocks);
-        assert(after.bytes_copied - before.bytes_copied == 4);   // the character, and nothing else
         assert(abc == std::string_view("abc"));
     }
 
-    // --- A handle kept before the pair was completed still ends in a half ------------
+    // --- A handle kept or read before the pair was completed still reads the half ----
     {
         const JsString abc("abc");
         const JsString owed = JsString::concat(abc, high);
@@ -7289,36 +7488,39 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(kept.length() == 4 && kept.view() == std::string("abc") + std::string(high_bytes));
         assert(kept.unit_at(3) == 0xD83D && !kept.is_well_formed());
         assert(joined.length() == 5 && joined.view() == std::string("abc") + std::string(pair_bytes));
-        // Reading the kept half first writes it into the block; completing the
-        // pair then has to copy, because those bytes are now spoken for.
-        JsString other("xyz");
+        // Phase 53, finding 59: reading `read_first` before `low` arrives STILL
+        // lets `completed` append `low` in place and share the block.
+        JsString other = JsString::from_utf16(u"xy\x00e9");
         JsString read_first = JsString::concat(other, high);
-        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+        assert(read_first.view() == std::string("xy\xC3\xA9") + std::string(high_bytes));
+        const auto before = JsString::stats();
         const JsString completed = JsString::concat(read_first, low);
-        assert(completed.view() == std::string("xyz") + std::string(pair_bytes));
-        assert(read_first.view() == std::string("xyz") + std::string(high_bytes));
+        const auto after = JsString::stats();
+        assert(completed.shares_text_with(read_first));
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(completed.view() == std::string("xy\xC3\xA9") + std::string(pair_bytes));
+        assert(read_first.view() == std::string("xy\xC3\xA9") + std::string(high_bytes));
     }
 
-    // --- Settling when the room after the text has been taken ------------------------
+    // --- Taking the room after the text forces a copy, once -------------------------
     {
-        JsString base("room enough for a few appends");
-        const JsString owed = JsString::concat(base, high);
-        const JsString sibling = JsString::concat(base, JsString("!"));      // takes the room
-        assert(sibling.view().back() == '!');
+        JsString base = JsString::from_utf16(u"room enough for a few \x00e9");
+        const JsString sibling = JsString::concat(base, JsString("!"));       // takes the room
+        const JsString owed = JsString::concat(base, high);                   // copies once into its own block
+        assert(sibling.view().back() == '!' && !owed.shares_text_with(base));
         const auto before = JsString::stats();
-        const std::string_view text = owed.view();                            // has to copy, once
-        assert(text == std::string("room enough for a few appends") + std::string(high_bytes));
-        assert(JsString::stats().bytes_copied - before.bytes_copied == owed.size());
+        const std::string_view text = owed.view();
+        assert(text == std::string("room enough for a few \xC3\xA9") + std::string(high_bytes));
+        assert(JsString::stats().bytes_copied - before.bytes_copied == text.size());
         const auto again = JsString::stats();
-        assert(owed.view() == text && JsString::stats().blocks == again.blocks);   // the copy is kept
-        // The copy outlives the handles that took the room, and `base` itself.
+        assert(owed.view() == text && JsString::stats().blocks == again.blocks);
         const std::string expected(text);
         {
             JsString only_owed = owed;
             base = JsString();
             assert(only_owed.view() == expected);
         }
-        assert(owed.view() == expected && owed.length() == 30);
+        assert(owed.view() == expected && owed.length() == 24);
     }
 
     // --- Every way round: two halves, a half and text, raw text on either side --------
@@ -7333,7 +7535,6 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(JsString::concat(low_then_high, low).view() ==
                std::string("abc") + std::string("\xED\xB8\x80", 3) + std::string(pair_bytes));
 
-        // The half is owed by the result however the text arrives.
         assert(JsString::concat(abc, high_bytes).view() == std::string("abc") + std::string(high_bytes));
         assert(JsString::concat(JsString::concat(abc, high_bytes), low).view() == std::string("abc") + std::string(pair_bytes));
         assert(JsString::concat(std::string_view("abc"), JsString::concat(abc, high)).view() == std::string("abcabc") + std::string(high_bytes));
@@ -7341,13 +7542,107 @@ TEST(js_string_owes_a_trailing_high_half_until_it_is_read) {
         assert(JsString::concat(JsString(), high).length() == 1);
         assert(JsString::concat(high, low).view() == pair_bytes);
         assert(JsString::concat(abc, JsString()).shares_text_with(abc));
-        // Text appended after the half: the half stands alone and is written.
         const JsString then_text = JsString::concat(JsString::concat(abc, high), JsString("z"));
         assert(then_text.view() == std::string("abc") + std::string(high_bytes) + "z" && then_text.length() == 5);
-        // A join of more than one unit owes only the last half.
         const JsString tail = JsString::concat(abc, std::string_view("q\xED\xA0\xBD", 4));
         assert(tail.length() == 5 && tail.unit_at(3) == 'q' && tail.unit_at(4) == 0xD83D);
         assert(JsString::concat(tail, low).view() == std::string("abcq") + std::string(pair_bytes));
+    }
+}
+
+TEST(js_string_completes_a_surrogate_pair_after_reading_without_copying) {
+    using namespace litebird;
+
+    // AUDIT.md, finding 59 (Phase 53). Reading a string that ends in a high
+    // surrogate (`indexOf`, `charCodeAt`, `===`, `wide()`) does not mutate its
+    // UTF-16 buffer, so completing the pair afterward stays O(N) total copies.
+    {
+        JsInterpreter js;
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "var s = '', n = 0;"
+            "for (var i = 0; i < 20000; i++) { s += '\\uD83D'; n += s.indexOf('zz'); s += '\\uDE00'; }"
+            "var len = s.length, cp0 = s.codePointAt(0), cpLast = s.codePointAt(s.length - 2);");
+        const auto after = JsString::stats();
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("n").to_number() == -20000);
+        assert(js.global_env()->get("len").to_number() == 40000);
+        assert(js.global_env()->get("cp0").to_number() == 0x1F600);
+        assert(js.global_env()->get("cpLast").to_number() == 0x1F600);
+        assert(after.bytes_copied - before.bytes_copied < 1000000);
+        assert(after.blocks - before.blocks < 64);
+    }
+
+    // The same when the high half comes from `substring` of a surrogate pair.
+    {
+        JsInterpreter js;
+        js.eval_ast("var h = '\\uD83D\\uDE00'.substring(0, 1), s = '', n = 0;");
+        const auto before = JsString::stats();
+        js.eval_ast(
+            "for (var i = 0; i < 20000; i++) { s += h; n += s.charCodeAt(s.length - 1); s += '\\uDE00'; }");
+        const auto after = JsString::stats();
+        js.eval_ast("var pairs = 0; for (var ch of s) if (ch.length === 2) pairs++;");
+        assert(!js.last_eval_failed());
+        assert(js.global_env()->get("n").to_number() == 20000.0 * 0xD83D);
+        assert(js.global_env()->get("pairs").to_number() == 20000);
+        assert(after.bytes_copied - before.bytes_copied < 1000000);
+        assert(after.blocks - before.blocks < 64);
+    }
+
+    // C++ `substring` ending in a high half, completed with the low half:
+    // (a) when the original string is kept, the original is untouched and the
+    // completed string is valid; (b) when the original is dropped so `refs == 1`,
+    // `concat` rewinds the buffer tail in place, even if `.view()` was read
+    // on the high-half slice before completion, while respecting any cache
+    // extending past the slice end.
+    const JsString low = JsString::from_unit(0xDE00);
+    {
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        JsString kept = full;
+        JsString piece = full.substring(0, full.length() - 1);
+        assert(piece.shares_text_with(full));
+        assert(piece.view().size() == 5003);
+        JsString completed = JsString::concat(piece, low);
+        assert(!completed.shares_text_with(full));
+        assert(full.unit_at(5001) == 0xDE00);
+        assert(completed.length() == 5002 && completed.view() == full.view());
+        assert(piece.view().size() == 5003 && kept.length() == 5002);
+    }
+    {
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        JsString piece = full.substring(0, full.length() - 1);
+        full = JsString();
+        assert(piece.use_count() == 1);
+        assert(piece.view().size() == 5003);                                  // Utf8Slice covers up to a_end, not past it
+        const auto before = JsString::stats();
+        JsString completed = JsString::concat(piece, low);
+        const auto after = JsString::stats();
+        assert(after.blocks == before.blocks && after.bytes_copied - before.bytes_copied == 2);
+        assert(completed.shares_text_with(piece));
+        assert(completed.length() == 5002 && completed.view().size() == 5004 && completed.is_well_formed());
+    }
+    {
+        // When `full.view()` cached UTF-8 past `piece`'s end before `full` was
+        // dropped, `cache_covers_past` prevents rewinding over cached data.
+        std::u16string u(5000, u'a');
+        u.push_back(0xD83D);
+        u.push_back(0xDE00);
+        JsString full = JsString::from_utf16(u);
+        assert(full.view().size() == 5004);
+        JsString piece = full.substring(0, full.length() - 1);
+        full = JsString();
+        JsString sub_tail = piece.substring(4998, 5001);
+        assert(piece.use_count() == 1);
+        JsString other = JsString::concat(piece, JsString::from_unit(0xE9));
+        assert(!other.shares_text_with(piece));
+        assert(other.length() == 5002 && other.unit_at(5001) == 0xE9);
+        assert(sub_tail.view() == std::string("aa\xED\xA0\xBD"));
     }
 }
 
@@ -8983,6 +9278,47 @@ TEST(many_sized_floats_pack_without_escaping_the_box) {
     assert(wide->dimensions.content.x == wide_box->dimensions.content.x);
 }
 
+TEST(indexed_float_bands_preserve_mixed_clear_and_negative_margins) {
+    using namespace litebird;
+    auto check = [](const std::string& html,
+                    const std::vector<std::tuple<const char*, float, float>>& expected) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto box = find_box_by_id(root, "box");
+        assert(box);
+        for (const auto& [id, x, y] : expected) {
+            auto child = find_box_by_id(root, id);
+            assert(child);
+            assert(child->dimensions.content.x - box->dimensions.content.x == x);
+            assert(child->dimensions.content.y - box->dimensions.content.y == y);
+        }
+    };
+    // Different band bottoms on opposite sides; a negative margin lets the
+    // third float fit at y=0. The later wide right float must land at the
+    // exact 50px edge, and both kinds of clearance advance the cursor.
+    check(R"(<body style="margin:0"><div id="box" style="width:300px;overflow:hidden">
+        <div id="left" style="float:left;width:130px;height:50px"></div>
+        <div id="right" style="float:right;width:90px;height:80px"></div>
+        <div id="middle" style="float:left;width:90px;height:10px;margin-left:-20px"></div>
+        <div id="later" style="float:right;width:180px;height:15px"></div>
+        <div id="clearleft" style="clear:left;height:5px"></div>
+        <div id="tail" style="float:left;width:210px;height:10px;margin-left:-15px"></div>
+        <div id="clearright" style="clear:right;height:7px"></div>
+    </div></body>)", {{"left", 0, 0}, {"right", 210, 0}, {"middle", 110, 0},
+                    {"later", 30, 50}, {"clearleft", 0, 50}, {"tail", -15, 65},
+                    {"clearright", 0, 80}});
+    // The first margin box has *negative* left intrusion. Its next sibling
+    // starts at that negative edge; an empty partition must not clamp it to 0.
+    check(R"(<body style="margin:0"><div id="box" style="width:100px">
+        <div id="negative" style="float:left;width:10px;height:20px;margin-left:-25px"></div>
+        <div id="next" style="float:left;width:30px;height:10px"></div>
+        <div id="opposite" style="float:right;width:70px;height:30px"></div>
+        <div id="follow" style="float:left;width:45px;height:10px"></div>
+    </div></body>)", {{"negative", -25, 0}, {"next", -15, 0},
+                    {"opposite", 30, 0}, {"follow", 0, 30}});
+}
+
 TEST(floats_of_no_height_cost_nothing_and_still_count) {
     using namespace litebird;
 
@@ -9640,6 +9976,184 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
     assert(response.body == "net");
     assert(response.url == "http://127.0.0.1:" + std::to_string(port) + "/sub/secret.txt");
     assert(request_line.rfind("GET /sub/secret.txt ", 0) == 0);
+}
+
+TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
+        var mDeep = deepNonCap.exec("zzabczz");
+        var veryDeepResult = "";
+        try {
+            var r5k = new RegExp("(?:".repeat(5000) + "abc" + ")".repeat(5000));
+            veryDeepResult = r5k.exec("zzabczz")[0];
+        } catch (e) {
+            veryDeepResult = e.name === "SyntaxError" ? "abc" : e.name;
+        }
+        var s = "ab".repeat(60000);
+        var mLong = /^(?:a|b)+$/.test(s);
+        var mCap = /(?:a|b)*c/.exec(s + "c");
+        var mNamed = /^(?<part>[a-z]+)-\k<part>$/.exec("hello-hello");
+        var mLookbehind = /(?<=(x+)y)\1z/.exec("xxxyxxxz");
+        var out = [
+            mDeep ? mDeep[0] : "",
+            veryDeepResult,
+            String(mLong),
+            String(mCap ? mCap[0].length : -1),
+            mNamed ? mNamed.groups.part : "",
+            mLookbehind ? mLookbehind[0] + ":" + mLookbehind[1] : ""
+        ].join("|");
+    )JS");
+    assert(js.eval("out").to_string() == "abc|abc|true|120001|hello|xxxz:xxx");
+}
+
+TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(R"HTML(<!DOCTYPE html><html><head><style>
+        :root { font-size: 20px; --pad: 12px 24px; }
+        @layer base, theme;
+        @layer base {
+            .card > p.lead { color: rgb(255, 0, 0); background-color: rgb(10, 20, 30) !important; }
+        }
+        @layer theme {
+            .card > p { color: rgb(0, 128, 0); background-color: rgb(200, 200, 200) !important; }
+        }
+        .sibling + .target { margin-top: clamp(10px, 5vw, 30px); padding: var(--pad); }
+        .sibling ~ .later { width: 50dvh; border-radius: 50%; font-size: 150%; line-height: 1.5; }
+        ul > li:nth-child(2n + 1) { font-weight: bold; }
+        @media (400px <= width <= 1000px) and (height >= 500px) {
+            :is(#mq, #mq2) { display: flex; }
+        }
+        @supports (display: grid) and (not (bogus-prop: 1)) {
+            :where(#sup) { display: grid; }
+        }
+    </style></head><body>
+        <div class="card"><p class="lead">lead</p></div>
+        <div class="sibling">s</div><div class="target">t</div><div class="later">l</div>
+        <ul><li>1</li><li>2</li><li>3</li></ul>
+        <div id="mq"></div><div id="sup"></div>
+    </body></html>)HTML");
+
+    StyleResolver resolver;
+    resolver.set_viewport(800.0f, 600.0f);
+    for (const auto& el : doc->get_elements_by_tag_name("style")) {
+        resolver.add_stylesheet(CssParser::parse(el->text_content()));
+    }
+
+    auto root = doc->document_element();
+    auto root_style = resolver.resolve_style(root, nullptr);
+    assert(root_style.font_size == 20.0f);
+
+    auto body = doc->body();
+    auto body_style = resolver.resolve_style(body, &root_style);
+
+    auto card = doc->query_selector(".card");
+    auto card_style = resolver.resolve_style(card, &body_style);
+    auto lead = doc->query_selector(".lead");
+    auto lead_style = resolver.resolve_style(lead, &card_style);
+    // Cascade layers: later layer (theme) beats earlier layer (base) even with lower specificity,
+    // while for !important earlier layer (base) beats later layer (theme).
+    assert(lead_style.color.r == 0 && lead_style.color.g == 128 && lead_style.color.b == 0);
+    assert(lead_style.background_color.r == 10 && lead_style.background_color.g == 20 && lead_style.background_color.b == 30);
+
+    auto target = doc->query_selector(".target");
+    auto target_style = resolver.resolve_style(target, &body_style);
+    // 5vw of 800 = 40px clamped to 30px; var(--pad) expanded before shorthand padding.
+    assert(target_style.margin.top == 30.0f);
+    assert(target_style.padding.top == 12.0f && target_style.padding.right == 24.0f);
+
+    auto later = doc->query_selector(".later");
+    auto later_style = resolver.resolve_style(later, &body_style);
+    assert(later_style.width == 300.0f); // 50dvh of 600px
+    assert(later_style.border_radius_percent == 50.0f);
+    assert(later_style.font_size == 24.0f); // 150% of inherited 16px body font-size
+    assert(later_style.effective_line_height() == 36.0f); // 1.5 * 24px
+
+    auto lis = doc->get_elements_by_tag_name("li");
+    assert(lis.size() == 3);
+    assert(resolver.resolve_style(lis[0], &body_style).font_weight == 700);
+    assert(resolver.resolve_style(lis[1], &body_style).font_weight == 400);
+    assert(resolver.resolve_style(lis[2], &body_style).font_weight == 700);
+
+    assert(resolver.resolve_style(doc->get_element_by_id("mq"), &body_style).display == Display::Flex);
+    assert(resolver.resolve_style(doc->get_element_by_id("sup"), &body_style).display == Display::Grid);
+}
+
+TEST(inline_style_cssom_shorthands_and_aliases) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var el = document.createElement('div');
+        el.style.fontFamily = '"Helvetica Neue", Arial';
+        el.style.flex = '2 1 10px';
+        el.style.overflow = 'hidden auto';
+        el.style.inset = '1px 2px 3px 4px';
+        el.style.gap = '4px 8px';
+        el.style.borderRadius = '6px';
+        el.style.webkitTransform = 'translateX(10px)';
+        el.style.webkitTransition = 'opacity 200ms ease';
+        el.style.setProperty('--accent', 'rgb(1, 2, 3)');
+        var summary = [
+            el.style.fontFamily,
+            el.style.flexGrow, el.style.flexShrink, el.style.flexBasis,
+            el.style.overflowX, el.style.overflowY,
+            el.style.top, el.style.right, el.style.bottom, el.style.left,
+            el.style.rowGap, el.style.columnGap,
+            el.style.borderTopLeftRadius,
+            el.style.transform,
+            el.style.transitionDuration,
+            el.style.getPropertyValue('--accent')
+        ].join('|');
+    )JS");
+    assert(js.eval("summary").to_string() ==
+           "\"Helvetica Neue\", Arial|2|1|10px|hidden|auto|1px|2px|3px|4px|4px|8px|6px|translateX(10px)|200ms|rgb(1, 2, 3)");
+}
+
+TEST(html5_date_time_inputs_validation_and_stepping) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
+        var negMonth = inp('month');
+        negMonth.valueAsNumber = -1;
+        var invalidLeap = inp('date', '2025-02-29').value;
+        var validLeap = inp('date', '2024-02-29').value;
+        var badMonth = inp('month', '2026-13').value;
+        var badWeek = inp('week', '2025-W53').value;
+        var okWeek = inp('week', '2026-W53').value;
+        var dtSpace = inp('datetime-local', '2026-03-04 05:06').value;
+        var d = inp('date', '2026-03-04'); d.stepUp(2); d.min = '2026-03-10';
+        var t = inp('time', '12:30'); t.step = '0.5'; t.stepUp();
+        var w = inp('week', '2025-W52'); w.stepUp();
+        var errs = [];
+        try { inp('text').valueAsDate = 'bad'; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('datetime-local').valueAsDate = new Date(); } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = Infinity; } catch (e) { errs.push(e.name); }
+        try { inp('text').valueAsNumber = 5; } catch (e) { errs.push(e.name); }
+        var result = [
+            negMonth.value, invalidLeap, validLeap, badMonth, badWeek, okWeek, dtSpace,
+            d.value, String(d.validity.rangeUnderflow), t.value, w.value, errs.join(',')
+        ].join('|');
+    )JS");
+    assert(js.eval("result").to_string() ==
+           "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
 }
 
 // =============================================================================
@@ -10568,18 +11082,18 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         while (!model.empty()) {
             const bool front = ((removed_front + removed_back) % 3) != 2;
             const auto at = front ? model.begin() : model.end() - 1;
-            const std::string name = at->first;
+            const std::string name = at->name;
             if ((removed_front + removed_back) % 2 == 0) {
                 auto found = list.find(name);
                 assert(found != list.end());
                 const bool was_front = at == model.begin();
                 const bool was_back = at == model.end() - 1;
                 const std::string next_name = was_front
-                    ? (model.size() > 1 ? std::next(at)->first : std::string())
+                    ? (model.size() > 1 ? std::next(at)->name : std::string())
                     : std::string();
                 auto next = list.erase(found);
                 if (was_front && !next_name.empty()) {
-                    assert(next != list.end() && next->first == next_name);
+                    assert(next != list.end() && next->name == next_name);
                 } else if (was_back) {
                     assert(next == list.end());
                 }
@@ -10590,7 +11104,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             }
             // The model erase uses the name because the list's erase may
             // compact its storage and invalidate the endpoint we read above.
-            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.first == name; });
+            const auto model_at = std::find_if(model.begin(), model.end(), [&](const auto& item) { return item.name == name; });
             assert(model_at != model.end());
             model.erase(model_at);
             assert(list.size() == model.size());
@@ -10598,14 +11112,15 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
             assert(list.count(name) == 0);
             assert(list.erase(name) == 0);
             for (std::size_t i = 0; i < model.size(); ++i) {
-                assert(list[i] == model[i]);
-                auto found = list.find(model[i].first);
+                assert(list[i].name == model[i].name && list[i].value == model[i].value);
+                auto found = list.find(model[i].name);
                 assert(found != list.end() && found - list.begin() == static_cast<std::ptrdiff_t>(i));
-                assert(found->second == model[i].second);
+                assert(found->value == model[i].value);
             }
             std::size_t walked = 0;
             for (const auto& item : list) {
-                assert(item == model[walked++]);
+                const Attribute& expected = model[walked++];
+                assert(item.name == expected.name && item.value == expected.value);
             }
             assert(walked == model.size());
             if (!model.empty()) {
@@ -10613,9 +11128,9 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
                 // appended while the ends are being drained; its number must
                 // be greater than every surviving one. Most steps shrink the
                 // model, so this loop terminates.
-                const std::string kept = model.back().first;
+                const std::string kept = model.back().name;
                 list[kept] = "updated";
-                model.back().second = "updated";
+                model.back().value = "updated";
                 assert(list.count(kept) == 1);
                 if ((removed_front + removed_back) % 7 == 0) {
                     const std::string returned = front ? ("front" + std::to_string(removed_front)) : ("back" + std::to_string(removed_back));
@@ -10627,7 +11142,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
         }
         assert(list.empty());
         list["after-clear"] = "ok";
-        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].first == "after-clear" && std::as_const(list)[std::size_t{0}].second == "ok");
+        assert(list.size() == 1 && std::as_const(list)[std::size_t{0}].name == "after-clear" && std::as_const(list)[std::size_t{0}].value == "ok");
     }
 
     // Copy and assignment preserve the visible order/values and remain
@@ -10655,7 +11170,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     move_assigned.clear();
     assert(move_assigned.empty() && move_assigned.find("k0") == move_assigned.end());
     move_assigned["fresh"] = "1";
-    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].first == "fresh");
+    assert(move_assigned.size() == 1 && std::as_const(move_assigned)[std::size_t{0}].name == "fresh");
 
     // The index can be built after a dead prefix already exists: stay below
     // the scan threshold while erasing the front, grow past it, then search.
@@ -10663,7 +11178,7 @@ TEST(attribute_list_end_removals_keep_order_and_index) {
     for (int i = 0; i < 31; ++i) late["l" + std::to_string(i)] = std::to_string(i);
     for (int i = 0; i < 10; ++i) late.erase(late.begin());
     for (int i = 31; i < 51; ++i) late["l" + std::to_string(i)] = std::to_string(i);
-    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].first == "l10");
+    assert(late.size() == 41 && std::as_const(late)[std::size_t{0}].name == "l10");
     assert(late.count("l50") == 1); // builds the index with a nonzero start
     for (int i = 10; i < 51; ++i) {
         assert(late.erase("l" + std::to_string(i)) == 1);
@@ -10688,7 +11203,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     for (int i = 0; i < 50000; ++i) {
         assert(direct.erase("a" + std::to_string(i)) == 1);
         assert(direct.size() == static_cast<std::size_t>(50000 - i - 1));
-        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].first == "a" + std::to_string(i + 1));
+        if (i + 1 < 50000) assert(std::as_const(direct)[std::size_t{0}].name == "a" + std::to_string(i + 1));
     }
     const double direct_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     assert(direct.empty());
@@ -10699,6 +11214,7 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     JsInterpreter js(doc);
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
+
     start = std::chrono::steady_clock::now();
     assert(js.eval(
         "var e = document.createElement('div');"
@@ -11231,6 +11747,243 @@ static void test_canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings() {
     assert(pxA >= 120.0 && pxA <= 135.0);
 }
 
+static int canvas_lit_pixels(const litebird::CanvasRenderingContext2D& ctx) {
+    int count = 0;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) ++count;
+        }
+    }
+    return count;
+}
+
+static void canvas_ink_extent(const litebird::CanvasRenderingContext2D& ctx, int& min_x, int& max_x, int& min_y,
+                              int& max_y) {
+    min_x = ctx.width();
+    max_x = -1;
+    min_y = ctx.height();
+    max_y = -1;
+    for (int y = 0; y < ctx.height(); ++y) {
+        for (int x = 0; x < ctx.width(); ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+}
+
+TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
+    using namespace litebird;
+
+    // 1. The default state and the C++ members.
+    {
+        CanvasRenderingContext2D ctx(80, 40);
+        assert(ctx.font == "10px sans-serif");
+        assert(ctx.text_align == "start");
+        assert(ctx.text_baseline == "alphabetic");
+    }
+
+    // 2. measure_text: empty measures zero, width grows with glyph count,
+    //    and the metric boxes are populated.
+    {
+        CanvasRenderingContext2D ctx(400, 40);
+        const float empty_w = ctx.measure_text("").width;
+        const float narrow = ctx.measure_text("i").width;
+        const float wide = ctx.measure_text("WWWWWWWW").width;
+        assert(empty_w == 0.0f);
+        assert(narrow > 0.0f);
+        assert(wide > narrow);
+        const auto m = ctx.measure_text("Hello");
+        assert(m.width > 0.0f);
+        assert(m.actual_bounding_box_right > 0.0f);
+        assert(m.actual_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_ascent > 0.0f);
+        assert(m.font_bounding_box_descent > 0.0f);
+        assert(m.em_height_ascent == m.font_bounding_box_ascent);
+    }
+
+    // 3. fill_text paints with the current fill style.
+    {
+        CanvasRenderingContext2D ctx(120, 50);
+        ctx.font = "20px sans-serif";
+        ctx.fill_style = Color(255, 0, 0);
+        assert(canvas_lit_pixels(ctx) == 0);
+        ctx.fill_text("Hi", 5.0f, 40.0f);
+        assert(canvas_lit_pixels(ctx) > 10);
+    }
+
+    // 4. textAlign start vs center: the same pen x-position shifts the ink.
+    {
+        CanvasRenderingContext2D a(140, 40), b(140, 40);
+        a.font = "16px sans-serif";
+        b.font = "16px sans-serif";
+        a.text_align = "start";
+        b.text_align = "center";
+        a.fill_text("X", 70.0f, 30.0f);
+        b.fill_text("X", 70.0f, 30.0f);
+        int amin, amax, ay0, ay1, bmin, bmax, by0, by1;
+        canvas_ink_extent(a, amin, amax, ay0, ay1);
+        canvas_ink_extent(b, bmin, bmax, by0, by1);
+        assert(amax > amin && bmax > bmin);
+        assert(bmin < amin); // centered ink starts left of left-aligned ink
+        assert(bmax <= amax); // and ends no further right
+    }
+
+    // 5. textBaseline changes the vertical placement for the same y.
+    {
+        CanvasRenderingContext2D top_ctx(120, 60), alpha_ctx(120, 60), bottom_ctx(120, 60);
+        top_ctx.font = "16px sans-serif";
+        alpha_ctx.font = "16px sans-serif";
+        bottom_ctx.font = "16px sans-serif";
+        top_ctx.text_baseline = "top";
+        alpha_ctx.text_baseline = "alphabetic";
+        bottom_ctx.text_baseline = "bottom";
+        top_ctx.fill_text("Xg", 5.0f, 30.0f);
+        alpha_ctx.fill_text("Xg", 5.0f, 30.0f);
+        bottom_ctx.fill_text("Xg", 5.0f, 30.0f);
+        int t0, t1, t2, t3, a0, a1, a2, a3, b0, b1, b2, b3;
+        canvas_ink_extent(top_ctx, t0, t1, t2, t3);
+        canvas_ink_extent(alpha_ctx, a0, a1, a2, a3);
+        canvas_ink_extent(bottom_ctx, b0, b1, b2, b3);
+        assert(t2 > a2); // "top" ink starts lower than baseline-aligned ink
+        assert(b3 <= 31); // "bottom" ink ends at the em box bottom (the y passed), allowing ink overshoot
+    }
+
+    // 6. maxWidth condenses the run horizontally.
+    {
+        CanvasRenderingContext2D natural(320, 40), condensed(320, 40);
+        natural.font = "16px sans-serif";
+        condensed.font = "16px sans-serif";
+        natural.fill_text("WWWWWWWWWW", 0.0f, 30.0f);
+        condensed.fill_text("WWWWWWWWWW", 0.0f, 30.0f, 30.0f);
+        int n0, n1, n2, n3, c0, c1, c2, c3;
+        canvas_ink_extent(natural, n0, n1, n2, n3);
+        canvas_ink_extent(condensed, c0, c1, c2, c3);
+        assert(n1 > 0 && c1 > 0);
+        assert(c1 < n1);    // condensed ink is narrower
+        assert(c1 <= 36);   // and stays (almost) inside the requested width
+    }
+
+    // 7. strokeText paints an outline; a wider lineWidth paints more of it.
+    {
+        CanvasRenderingContext2D thin(200, 40), thick(200, 40);
+        thin.font = "24px sans-serif";
+        thick.font = "24px sans-serif";
+        thin.line_width = 1.0f;
+        thick.line_width = 6.0f;
+        thin.stroke_text("MMMM", 2.0f, 30.0f);
+        thick.stroke_text("MMMM", 2.0f, 30.0f);
+        const int thin_px = canvas_lit_pixels(thin);
+        const int thick_px = canvas_lit_pixels(thick);
+        assert(thin_px > 0);
+        assert(thick_px > thin_px);
+    }
+
+    // 8. A gradient fillStyle paints along the text, not flat.
+    {
+        CanvasRenderingContext2D g(400, 40);
+        g.font = "20px sans-serif";
+        auto grad = g.create_linear_gradient(0.0f, 0.0f, 400.0f, 0.0f);
+        grad->add_color_stop(0.0f, Color(255, 0, 0));
+        grad->add_color_stop(1.0f, Color(0, 0, 255));
+        g.fill_gradient = grad;
+        g.fill_text("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", 0.0f, 30.0f);
+        int min_x, max_x, min_y, max_y;
+        canvas_ink_extent(g, min_x, max_x, min_y, max_y);
+        assert(max_x > min_x + 50);
+        // Find a strongly covered pixel in the left third and in the right third.
+        auto strong_pixel = [&](int x0, int x1, int& r, int& b) {
+            for (int x = x0; x < x1; ++x) {
+                for (int y = 0; y < g.height(); ++y) {
+                    const uint32_t px = g.image_data()->get_pixel(x, y);
+                    if ((px >> 24) == 255) {
+                        const Color c = Color::from_argb(px);
+                        r = c.r;
+                        b = c.b;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        int lr = 0, lb = 0, rr = 0, rb = 0;
+        assert(strong_pixel(min_x, min_x + 60, lr, lb));
+        assert(strong_pixel(max_x - 60, max_x + 1, rr, rb));
+        assert(lr > lb); // left ink is reddish
+        assert(rb > rr); // right ink is bluish
+    }
+
+    // 9. save()/restore() round-trip the text state.
+    {
+        CanvasRenderingContext2D c(40, 20);
+        c.font = "bold 18px sans-serif";
+        c.text_align = "end";
+        c.text_baseline = "top";
+        c.save();
+        c.font = "9px sans-serif";
+        c.text_align = "center";
+        c.text_baseline = "bottom";
+        assert(c.font == "9px sans-serif");
+        c.restore();
+        assert(c.font == "bold 18px sans-serif");
+        assert(c.text_align == "end");
+        assert(c.text_baseline == "top");
+    }
+
+    // 10. End-to-end through the JS bindings: setters validate, text renders.
+    auto doc = HtmlParser::parse("<body><canvas id='c' width='120' height='60'></canvas></body>");
+    JsInterpreter interp(doc);
+    interp.eval(R"(
+        var ctx = document.getElementById('c').getContext('2d');
+        ctx.font = 'bold 20px sans-serif';
+        var fontAfterSet = ctx.font;
+        ctx.font = 'totally not a font';
+        var fontAfterInvalid = ctx.font;
+        ctx.textAlign = 'right';
+        ctx.textAlign = 'bogus-align';
+        var alignAfterInvalid = ctx.textAlign;
+        ctx.textBaseline = 'middle';
+        ctx.textBaseline = 'bogus-baseline';
+        var baselineAfterInvalid = ctx.textBaseline;
+        ctx.fillStyle = '#00ff00';
+        ctx.fillText('Hello', 5, 40);
+        ctx.fillText('Hello', 5, 40, 4);
+        ctx.strokeText('Hello', 70, 40);
+        ctx.fillText();
+        var m = ctx.measureText('Hello');
+        var w = m.width;
+        var wide = ctx.measureText('WWWWWWWW').width;
+        var narrow = ctx.measureText('i').width;
+        var boxRight = m.actualBoundingBoxRight;
+        var boxLeft = m.actualBoundingBoxLeft;
+        var boxAsc = m.actualBoundingBoxAscent;
+        var fontAsc = m.fontBoundingBoxAscent;
+        var alphaBase = m.alphabeticBaseline;
+        var emptyW = ctx.measureText('').width;
+    )");
+    assert(interp.eval("fontAfterSet").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("fontAfterInvalid").to_string() == "bold 20px sans-serif");
+    assert(interp.eval("alignAfterInvalid").to_string() == "right");
+    assert(interp.eval("baselineAfterInvalid").to_string() == "middle");
+    assert(interp.eval("w").to_number() > 0.0);
+    assert(interp.eval("wide").to_number() > interp.eval("narrow").to_number());
+    assert(interp.eval("boxRight").to_number() > 0.0);
+    assert(interp.eval("boxLeft").to_number() <= interp.eval("boxRight").to_number());
+    assert(interp.eval("boxAsc").to_number() >= 0.0);
+    assert(interp.eval("fontAsc").to_number() > 0.0);
+    assert(interp.eval("alphaBase").to_number() == 0.0);
+    assert(interp.eval("emptyW").to_number() == 0.0);
+
+    auto canvas_el = doc->get_element_by_id("c");
+    assert(canvas_el != nullptr);
+    auto ctx_ptr = canvas_el->canvas_context();
+    assert(ctx_ptr != nullptr);
+    assert(canvas_lit_pixels(*ctx_ptr) > 5); // both fill and stroke drew green pixels
+}
+
 static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     using namespace litebird;
     // 1. Paths with W3C elliptical arc + compact flags, <defs>, gradient href inheritance,
@@ -11713,6 +12466,188 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     EventLoop::default_loop().tick();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 44: Unicode identifier tables, \u escapes in identifiers/private names,
+// escaped keyword/contextual-keyword rules, and Unicode line terminators.
+// ---------------------------------------------------------------------------
+
+TEST(js_unicode_identifier_tables_and_lexer_escapes) {
+    using namespace litebird;
+    // 1. Unicode 17.0 ID_Start / ID_Continue checks (ECMA-262 §12.7.1).
+    assert(is_js_id_start('a') && is_js_id_start('Z') && is_js_id_start('_') && is_js_id_start('$'));
+    assert(!is_js_id_start('0') && is_js_id_continue('0'));
+    assert(is_js_id_start(0x088Fu));       // Unicode 17.0 ID_Start
+    assert(is_js_id_start(0x1D49Cu));      // Astral mathematical script A
+    assert(!is_js_id_start(0x200Cu) && is_js_id_continue(0x200Cu)); // ZWNJ
+    assert(!is_js_id_start(0x200Du) && is_js_id_continue(0x200Du)); // ZWJ
+    assert(!is_js_id_start(0x2E2Fu) && !is_js_id_continue(0x2E2Fu)); // VERTICAL TILDE
+    assert(!is_js_id_start(0xD800u) && !is_js_id_continue(0xD800u)); // Surrogate
+    assert(!is_js_id_start(0x0023u) && !is_js_id_continue(0x0023u)); // '#'
+
+    // 2. Lexer token classification & source spans.
+    {
+        JsLexer lex(R"(\u0061\u{0000000062} \u0069f l\u0065t #\u{1D49C} #\u0069f)");
+        auto toks = lex.tokenize_all();
+        assert(toks.size() == 6); // 5 tokens + Eof
+        assert(toks[0].type == JsTokenType::Identifier && toks[0].text == "ab" && toks[0].has_escape);
+        assert(toks[1].type == JsTokenType::EscapedKeyword && toks[1].text == "if" &&
+               toks[1].is_keyword && toks[1].has_escape);
+        assert(toks[2].type == JsTokenType::Identifier && toks[2].text == "let" &&
+               !toks[2].is_keyword && toks[2].has_escape);
+        assert(toks[3].type == JsTokenType::PrivateName && toks[3].text == "#\xF0\x9D\x92\x9C" &&
+               !toks[3].is_keyword && toks[3].has_escape);
+        assert(toks[4].type == JsTokenType::PrivateName && toks[4].text == "#if" &&
+               !toks[4].is_keyword && toks[4].has_escape);
+    }
+
+    // 3. Invalid identifier escapes and non-ID Unicode chars must throw JsSyntaxError.
+    const char* bad_tokens[] = {
+        R"(\u0030)", R"(\u200C)", R"(\u200D)", R"(\u2E2F)", "\xE2\xB8\xAF",
+        R"(\uD835\uDC9C)", R"(\uD800)", R"(\u{110000})", R"(\u{})", R"(\u00)",
+        R"(\x61)", R"(a\u2E2F)", R"(a\u0020)", R"(1\u0061)",
+        R"(#\u0030)", R"(#\u200C)", R"(#\u2E2F)", R"(\u0023foo)"
+    };
+    for (const char* src : bad_tokens) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            (void)lex.tokenize_all();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_escaped_keywords_and_contextual_rules) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Valid IdentifierName positions (properties, member access, division after escaped keyword,
+    //    methods, getters, destructuring property keys, private fields/methods).
+    JsValue res = js.eval(R"js(
+        var o = { \u0069f: 12, cl\u0061ss() { return 3; }, get v\u0061r() { return 4; } };
+        var { \u0069f: x } = o;
+        class C {
+            #\u{1D49C} = 5;
+            #\u0069f = 6;
+            st\u0061tic() { return 7; }
+            g\u0065t() { return 8; }
+            \u0061sync() { return 9; }
+            c\u006Fnstructor(v) { this.v = v; }
+            sum() { return this.#\u{1D49C} + this.#if + this.static() + this.get() + this.async() + this.v; }
+        }
+        var p = { __pr\u006Fto__: { k: 10 } };
+        (o.\u0069f / 2) + o.cl\u0061ss() + o.v\u0061r + x + new C(1).sum() + p.k
+    )js");
+    assert(res.type == JsType::Number && res.to_number() == 6 + 3 + 4 + 12 + (5 + 6 + 7 + 8 + 9 + 1) + 10);
+
+    // 2. Escaped reserved words and contextual keywords must be rejected in syntax/binding/shorthand slots.
+    const char* bad_scripts[] = {
+        R"(v\u0061r x = 1;)",
+        R"(l\u0065t x = 1;)",
+        R"(c\u006Fnst x = 1;)",
+        R"(\u0069f (true) {})",
+        R"(var \u0069f = 1;)",
+        R"(({ \u0069f }))",
+        R"(var { \u0069f } = { if: 1 };)",
+        R"(\u0069f: 1;)",
+        R"(class C { st\u0061tic m() {} })",
+        R"(class C { g\u0065t x() {} })",
+        R"(class C { s\u0065t x(v) {} })",
+        R"(class C { \u0061sync m() {} })",
+        R"(({ g\u0065t x() {} }))",
+        R"(({ \u0061sync m() {} }))",
+        R"(\u0061sync function f() {})",
+        R"(\u0061sync x => x)",
+        R"(\u0061sync (x) => x)",
+        R"(for (var a \u006Ff [1]) {})",
+        R"(function f() { return new.t\u0061rget; })",
+        R"(let l\u0065t = 1;)",
+        R"(const l\u0065t = 1;)"
+    };
+    for (const char* src : bad_scripts) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
+TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
+    using namespace litebird;
+    JsInterpreter js;
+
+    // 1. Sloppy-mode contextual identifiers, class await, FunctionExpression own [Yield, Await],
+    //    escaped labels, Function.prototype.toString preservation, and Unicode whitespace/line terminators.
+    JsValue ok = js.eval(R"js(
+        var l\u0065t = 1, yi\u0065ld = 2, aw\u0061it = 3;
+        var clsName;
+        { class aw\u0061it {} clsName = aw\u0061it.name; }
+        var fnRes = 0;
+        class C {
+            static {
+                fnRes = (function await(await) { return await; })(42);
+            }
+        }
+        var genOk = false;
+        var g = { *m() { genOk = typeof (function yield() {}) === 'function'; } };
+        g.m().next();
+        var lbl = 0;
+        \u0061bc: { lbl = 1; break a\u0062c; lbl = 2; }
+        function f\u006Fo() { return 1; }
+        l\u0065t === 1 && yi\u0065ld === 2 && aw\u0061it === 3 &&
+        clsName === 'await' && fnRes === 42 && genOk && lbl === 1 &&
+        f\u006Fo.name === 'foo' && f\u006Fo.toString() === 'function f\\u006Fo() { return 1; }'
+    )js");
+    assert(ok.type == JsType::Boolean && ok.is_truthy());
+
+    // 2. Unicode whitespace (U+3000, U+2000), U+2028/U+2029 hashbang/ASI/string line continuation.
+    JsValue ws = js.eval("#!bang\xE2\x80\xA8var x = 1\xE3\x80\x80+\xE2\x80\x80" "2\xE2\x80\xA9" "x + (\"a\\\xE2\x80\xA8" "b\" === \"ab\" ? 10 : 0)");
+    assert(ws.type == JsType::Number && ws.to_number() == 13);
+
+    // 3. Strict-mode future reserved words, async/generator/static-block early errors, regex LS/PS.
+    const char* bad_ctx[] = {
+        R"("use strict"; var l\u0065t = 1;)",
+        R"("use strict"; var st\u0061tic = 1;)",
+        R"("use strict"; var im\u0070lements = 1;)",
+        R"("use strict"; ({ l\u0065t } = { let: 1 });)",
+        R"(class l\u0065t {})",
+        R"(class st\u0061tic {})",
+        R"(class yi\u0065ld {})",
+        R"(async function f() { var aw\u0061it = 1; })",
+        R"(async function f() { aw\u0061it: ; })",
+        R"(function* g() { var yi\u0065ld = 1; })",
+        R"(function* g() { yi\u0065ld: ; })",
+        R"(var f = async function aw\u0061it() {};)",
+        R"(var f = function* yi\u0065ld() {};)",
+        R"(class S { static { argument\u0073; } })",
+        R"(class S { static { (class { [argument\u0073]() {} }); } })",
+        R"(class S { x = argument\u0073; })",
+        R"(class S { static { var aw\u0061it = 1; } })",
+        R"(class S { static { ((x = await) => 0); } })",
+        R"(function* g() { ((x = yield) => 0); })",
+        "/a\xE2\x80\xA8/",
+        "/a\xE2\x80\xA9/"
+    };
+    for (const char* src : bad_ctx) {
+        bool threw = false;
+        try {
+            JsLexer lex(src);
+            JsParser parser(lex.tokenize_all());
+            (void)parser.parse_program();
+        } catch (const JsSyntaxError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+}
+
 // =========================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
@@ -11981,6 +12916,1719 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
     assert(heap.stats().alive_cells == permanent_cells);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 43: new.target, and what a constructor makes (finding 49)
+// ---------------------------------------------------------------------------
+
+TEST(js_new_target_is_the_function_new_was_applied_to) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // Until Phase 43 `new.target` was the function that was running: a
+    // parent's constructor saw itself, never the class `new` was applied to.
+    js.eval_ast(R"(
+        var seen = [];
+        class Shape {
+            constructor() {
+                if (new.target === Shape) throw new TypeError('Shape is abstract');
+                seen.push('Shape:' + new.target.name);
+            }
+        }
+        class Circle extends Shape { constructor() { super(); seen.push('Circle:' + new.target.name); } }
+        class Dot extends Circle {}
+        function attempt(fn) { try { return String(fn()); } catch (e) { return e.name + ': ' + e.message; } }
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+    )");
+    assert(text("new Dot(); new Circle(); seen.join(' ')") ==
+           "Shape:Dot Circle:Dot Shape:Circle Circle:Circle");
+    assert(text("attempt(function () { new Shape(); return 'made'; })") ==
+           "TypeError: Shape is abstract");
+
+    // Reflect.construct names it, for a function and for a class, and the
+    // object has the prototype of the function that was named.
+    js.eval_ast(R"(
+        function F() { this.target = new.target; this.arrow = () => new.target; }
+        function G() {}
+        G.prototype.tag = 'G';
+        class K { constructor() { this.k = new.target.name; } }
+        class L extends K { constructor() { super(); this.l = new.target.name; } }
+        class Other {}
+        var o = Reflect.construct(F, [], G), p = Reflect.construct(L, [], Other);
+    )");
+    assert(text("[o.target === G, o.arrow() === G, o.tag, o instanceof G, o instanceof F].join()") ==
+           "true,true,G,true,false");
+    assert(text("[p.k, p.l, p instanceof Other, p instanceof L].join()") ==
+           "Other,Other,true,false");
+    assert(text("[new F().target === F, Reflect.construct(F, []).target === F, Reflect.construct(F, [], F).target === "
+                "F].join()") ==
+           "true,true,true");
+
+    // Undefined wherever the function was not entered with `new`.
+    assert(text("function probe() { return new.target === undefined; } [probe(), probe.call({}), probe.apply(null, "
+                "[]), Reflect.apply(probe, null, []), [0].map(function () { return new.target === undefined; })[0], "
+                "({ m() { return new.target === undefined; } }).m()].join()") ==
+           "true,true,true,true,true,true");
+
+    // A function inside a constructor has one of its own, and the
+    // constructor's is not changed by what it constructs on the way.
+    assert(text("function Outer() { function inner() { return new.target; } this.called = inner() === undefined; "
+                "this.made = new inner() instanceof inner; new K(); Reflect.construct(F, [], G); this.mine = "
+                "new.target === Outer; } var out = new Outer(); [out.called, out.made, out.mine].join()") ==
+           "true,false,true");
+
+    // In a parameter default, and in a constructor that makes more of itself.
+    assert(text("function D(a = new.target) { this.a = a; } [new D().a === D, Reflect.construct(D, [], G).a === "
+                "G].join()") ==
+           "true,true");
+    assert(text("var trail = []; class N { constructor(d) { trail.push(d + new.target.name); if (d < 2) new (d ? M : "
+                "N)(d + 1); trail.push(d + new.target.name); } } class M extends N {} new N(0); trail.join(' ')") ==
+           "0N 1N 2M 2M 1N 0N");
+
+    // A bound function constructs its target: new.target is the target, or
+    // what Reflect.construct names. What the target returns comes back as it is
+    // (until Phase 43 it was given the prototype of new.target).
+    js.eval_ast(R"(
+        var B = F.bind({ ignored: true });
+        var shared = { tag: 'shared' };
+        function Returns() { return shared; }
+    )");
+    assert(text("[new B().target === F, 'ignored' in new B(), Reflect.construct(B, [], G).target === G, "
+                "Reflect.construct(B, [], G) instanceof G].join()") ==
+           "true,false,true,true");
+    assert(text("var r = Reflect.construct(Returns.bind(null), [], G); [r === shared, Object.getPrototypeOf(r) === "
+                "Object.prototype].join()") ==
+           "true,true");
+
+    // A class that extends a bound function: `this` is the object the target
+    // was given, not a copy of it.
+    assert(text("var given; function T(x) { given = this; this.x = x; this.nt = new.target.name; } var BT = "
+                "T.bind(null, 7); BT.prototype = T.prototype; class DT extends BT { constructor() { super(); this.own "
+                "= 1; } } var dt = new DT(); [given === dt, dt.x, dt.own, dt.nt, dt instanceof DT].join()") ==
+           "true,7,1,DT,true");
+
+    // A built-in with another function as new.target: its own kind of object,
+    // with the other prototype. Without an object for a prototype it keeps its own.
+    assert(text("function S() {} S.prototype = Object.create(Array.prototype); var a = Reflect.construct(Array, [3], "
+                "S); [a instanceof S, Array.isArray(a), a.length].join()") ==
+           "true,true,3");
+    assert(text("var e = Reflect.construct(Error, ['boom'], G), m = Reflect.construct(Map, [], G); "
+                "Map.prototype.set.call(m, 1, 2); [e instanceof G, e.message, Object.prototype.toString.call(e), m "
+                "instanceof G, Map.prototype.get.call(m, 1)].join()") ==
+           "true,boom,[object Error],true,2");
+    assert(text("function NoProto() {} NoProto.prototype = null; [Object.getPrototypeOf(Reflect.construct(Array, [], "
+                "NoProto)) === Array.prototype, Object.getPrototypeOf(Reflect.construct(F, [], NoProto)) === "
+                "Object.prototype].join()") ==
+           "true,true");
+    assert(text("var fn = Reflect.construct(Function, ['a', 'return a * 2'], G); [typeof fn, fn(4), "
+                "Object.getPrototypeOf(fn) === G.prototype, fn.tag].join()") ==
+           "function,8,true,G");
+
+    // The prototype is read from new.target once. A script function is given
+    // its object before it runs; a built-in looks at its arguments first, so a
+    // Promise without an executor complains about that and reads nothing.
+    js.eval_ast(R"(
+        var reads = 0;
+        function counting() {
+            var nt = function () {}.bind(null);
+            Object.defineProperty(nt, 'prototype', { get: function () { reads++; return G.prototype; } });
+            return nt;
+        }
+        function Inside() { this.readsInside = reads; }
+    )");
+    assert(text("var i1 = Reflect.construct(Inside, [], counting()); [reads, i1.readsInside, i1.tag].join()") ==
+           "1,1,G");
+    assert(text("var a2 = Reflect.construct(Array, [2], counting()); [reads, a2.tag, a2.length].join()") ==
+           "2,G,2");
+    assert(text("var before = reads; [nameOf(function () { Reflect.construct(Promise, [], counting()); }), reads - "
+                "before].join()") ==
+           "TypeError,0");
+    assert(text("before = reads; var p2 = Reflect.construct(Promise, [function () {}], counting()); [reads - before, "
+                "p2.tag, p2 instanceof Promise].join()") ==
+           "1,G,false");
+    assert(text("var badReads = 0, bad = function () {}.bind(null); Object.defineProperty(bad, 'prototype', { get: "
+                "function () { badReads++; return 5; } }); var a3 = Reflect.construct(Array, [], bad), o3 = "
+                "Reflect.construct(Inside, [], bad); [badReads, Object.getPrototypeOf(a3) === Array.prototype, "
+                "Object.getPrototypeOf(o3) === Object.prototype].join()") ==
+           "2,true,true");
+
+    // What Reflect.construct refuses. Both functions have to be constructors,
+    // and that is found out before the list of arguments is looked at.
+    assert(text("[nameOf(function () { Reflect.construct(F, [], () => 1); }), nameOf(function () { "
+                "Reflect.construct(F, [], undefined); }), nameOf(function () { Reflect.construct(F, [], {}); }), "
+                "nameOf(function () { Reflect.construct(() => 1, []); }), nameOf(function () { Reflect.construct(F); "
+                "}), nameOf(function () { Reflect.construct(F, 5); }), nameOf(function () { Reflect.construct(() => "
+                "1, { get length() { throw new RangeError('read'); } }); }), nameOf(function () { "
+                "Reflect.construct(F, { get length() { throw new RangeError('read'); } }); }), nameOf(function () { "
+                "Reflect.construct(F, [], class {}); }), nameOf(function () { Reflect.construct(F, [], Array); "
+                "})].join()") ==
+           "TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,RangeError,no error,no error");
+
+    // The same through the engine's own calls. construct() takes new.target,
+    // and a native function is told the one that is not itself.
+    {
+        JsValue F = js.eval("F"), G = js.eval("G");
+        JsValue keep = js.eval("(function (name, value) { globalThis[name] = value; })");
+        auto remember = [&](const char* name, const JsValue& value) {
+            keep.call_with_this(JsValue::make_undefined(), {JsValue::make_string(name), value});
+        };
+        JsValue instance = JsValue::make_object();
+        F.construct({}, &instance, &G);
+        remember("viaConstruct", instance);
+        assert(text("viaConstruct.target === G && viaConstruct.arrow() === G") == "true");
+        JsValue plain = JsValue::make_object();
+        F.construct({}, &plain);
+        remember("viaPlain", plain);
+        assert(text("viaPlain.target === F") == "true");
+
+        bool was_construct = false, was_named = false;
+        JsValue named;
+        JsValue native = JsValue::make_native_function([&](const std::vector<JsValue>&) {
+            was_construct = JsValue::current_is_construct();
+            const JsValue* target = JsValue::current_new_target();
+            was_named = target != nullptr;
+            named = target ? *target : JsValue::make_undefined();
+            return JsValue::make_object();
+        });
+        JsValue built = js_construct(native, {}, &G);
+        assert(was_construct && was_named && named.identity() == G.identity());
+        remember("builtByNative", built);
+        assert(text("builtByNative.tag") == "G");       // its own object, given G.prototype afterwards
+        js_construct(native, {});
+        assert(was_construct && !was_named);            // new.target is the native itself: nothing to tell
+        native.call_with_this(JsValue::make_undefined(), {});
+        assert(!was_construct && !was_named);
+
+        // A native that asks for the object it is to construct on, as the
+        // constructor of a DOM interface does, is given one that has the
+        // prototype of new.target, made when it asks. Without a new.target,
+        // or with one that has no object for a prototype, there is none.
+        bool offered = false;
+        JsValue asking = JsValue::make_native_function([&](const std::vector<JsValue>&) {
+            const JsValue* derived = JsValue::current_derived_this();
+            offered = derived != nullptr;
+            if (!derived) return JsValue::make_object();
+            JsValue self = *derived;
+            self.set_property("byNative", JsValue::make_boolean(true));
+            return self;
+        });
+        JsValue on_offer = js_construct(asking, {}, &G);
+        assert(offered);
+        remember("onOffer", on_offer);
+        assert(text("[onOffer.tag, onOffer.byNative, Object.getPrototypeOf(onOffer) === G.prototype].join()") ==
+               "G,true,true");
+        js_construct(asking, {});
+        assert(!offered);
+        JsValue no_proto = js.eval("NoProto");
+        js_construct(asking, {}, &no_proto);
+        assert(!offered);
+    }
+}
+
+TEST(js_super_binds_this_to_what_the_parent_made) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // `super(...)` binds `this` to what the parent made. Until Phase 43 that
+    // was always the object `new` had made beforehand, so an object the parent's
+    // constructor returned was lost: the child went on with the other one.
+    js.eval_ast(R"(
+        function attempt(fn) { try { return String(fn()); } catch (e) { return e.name; } }
+        var registry = [];
+        function Parent() { var o = { from: 'parent' }; registry.push(o); return o; }
+        class Child extends Parent {
+            field = 7;
+            #secret = 42;
+            constructor() { var s = super(); this.same = s === this; this.own = 2; }
+            static secretOf(o) { return o.#secret; }
+        }
+        var c = new Child();
+    )");
+    assert(text("[c === registry[0], c.from, c.field, c.own, c.same, c instanceof Child, Child.secretOf(c)].join()") ==
+           "true,parent,7,2,true,false,42");
+
+    // Through two levels of classes, and the value of `super(...)` is `this`
+    // whatever the parent is.
+    assert(text("var made = { tag: 'made' }; class A1 { constructor() { this.lost = true; return made; } } class B1 "
+                "extends A1 { constructor() { super(); this.b = 1; } } class C1 extends B1 { constructor() { super(); "
+                "this.c = 2; } } var c1 = new C1(); [c1 === made, c1.b, c1.c, 'lost' in c1, c1 instanceof C1].join()") ==
+           "true,1,2,false,false");
+    assert(text("class P0 { constructor() { this.a = 1; } } class S0 extends P0 { constructor() { var s = super(); "
+                "this.same = s === this; } } class M0 extends Map { constructor() { var s = super(); this.same = s "
+                "=== this; } } class E0 extends Error { constructor() { var s = super('m'); this.same = s === this; } "
+                "} [new S0().same, new M0().same, new E0().same, new M0() instanceof Map, new E0().message].join()") ==
+           "true,true,true,true,m");
+
+    // A function or an array can be what comes back; a primitive is ignored.
+    assert(text("function callable() { return 'called'; } class RF { constructor() { return callable; } } class SF "
+                "extends RF { extra = 1; } var sf = new SF(); [sf === callable, sf(), sf.extra].join()") ==
+           "true,called,1");
+    assert(text("class RA { constructor() { return [1, 2]; } } class SA extends RA { constructor() { super(); "
+                "this.push(3); } } var sa = new SA(); [Array.isArray(sa), sa.length, sa instanceof SA].join()") ==
+           "true,3,false");
+    assert(text("function RP() { this.p = 1; return 5; } class SP extends RP { constructor() { super(); this.c = 2; } "
+                "} var sp = new SP(); [sp.p, sp.c, sp instanceof SP, sp instanceof RP].join()") ==
+           "1,2,true,true");
+
+    // The parent that hands out one object: each `new` of the child runs the
+    // child's constructor on it again.
+    assert(text("var one = null, runs = 0; class Registry { constructor() { if (one) return one; one = this; "
+                "this.items = []; } } class AppRegistry extends Registry { constructor(n) { super(); runs++; "
+                "this.items.push(n); } } var r1 = new AppRegistry('a'), r2 = new AppRegistry('b'); [r1 === r2, "
+                "r1.items.join('+'), runs, r1 instanceof AppRegistry].join()") ==
+           "true,a+b,2,true");
+
+    // `this` is bound once. A second `super(...)` runs the parent again and
+    // then throws; a constructor that returns without one having finished throws;
+    // and a derived constructor may return an object or nothing.
+    assert(text("var ran = 0; class Twice0 { constructor() { ran++; } } class Twice extends Twice0 { constructor() { "
+                "super(); try { super(); this.second = 'no error'; } catch (e) { this.second = e.name; } } } var tw = "
+                "new Twice(); [ran, tw.second, tw instanceof Twice].join()") ==
+           "2,ReferenceError,true");
+    assert(text("class Base {} function returning(value) { class X extends Base { constructor() { super(); return "
+                "value; } } try { var x = new X(); return x instanceof X ? 'instance' : typeof x; } catch (e) { "
+                "return e.name; } } [returning(undefined), returning(null), returning(1), returning('s'), "
+                "returning(false), returning({}), returning(function () {})].join()") ==
+           "instance,TypeError,TypeError,TypeError,TypeError,object,function");
+    assert(text("class Never extends Base { constructor() {} } class Explicit extends Base { constructor() { return { "
+                "other: true }; } } class Above extends Never { constructor() { super(); } } [attempt(function () { "
+                "new Never(); return 'made'; }), attempt(function () { return new Explicit().other; }), "
+                "attempt(function () { Reflect.construct(Never, []); return 'made'; }), attempt(function () { new "
+                "Above(); return 'made'; })].join()") ==
+           "ReferenceError,true,ReferenceError,ReferenceError");
+    assert(text("class Fails { constructor() { throw new RangeError('no'); } } class Swallows extends Fails { "
+                "constructor() { try { super(); } catch (e) {} } } class Recovers extends Fails { constructor() { try "
+                "{ super(); } catch (e) { return { recovered: e.name }; } } } [attempt(function () { new Swallows(); "
+                "return 'made'; }), new Recovers().recovered].join()") ==
+           "ReferenceError,RangeError");
+    assert(text("var tries = 0; class Flaky { constructor() { if (++tries < 2) throw new Error('first'); this.ok = "
+                "true; } } class Retries extends Flaky { constructor() { try { super(); } catch (e) { super(); } "
+                "this.after = tries; } } var rt = new Retries(); [rt.ok, rt.after, rt instanceof Retries].join()") ==
+           "true,2,true");
+
+    // Through an arrow function it is the constructor's `this` that is bound,
+    // also after the constructor has returned something else.
+    assert(text("var later; class AP { constructor(v) { this.a = v; } } class AB extends AP { constructor() { var "
+                "init = (v) => super(v); var made = init(5); this.same = made === this; } } class AC extends AP { "
+                "constructor() { later = () => super(9); return { early: true }; } } var ab = new AB(), ac = new "
+                "AC(), lateMade = later(); [ab.a, ab.same, ac.early, lateMade.a, lateMade instanceof AC, "
+                "attempt(function () { later(); return 'twice'; })].join()") ==
+           "5,true,true,9,true,ReferenceError");
+
+    // A class that extends null has no parent to call.
+    assert(text("[attempt(function () { class Z extends null {} new Z(); return 'made'; }), attempt(function () { "
+                "class Z extends null { constructor() {} } new Z(); return 'made'; }), attempt(function () { class Z "
+                "extends null { constructor() { return Object.create(new.target.prototype); } hi() { return 'hi'; } } "
+                "return new Z().hi(); })].join()") ==
+           "TypeError,ReferenceError,hi");
+
+    // What compilers emit. Babel: `Reflect.construct(Super, arguments,
+    // NewTarget)` and the result returned; TypeScript: `_super.call(this) || this`.
+    js.eval_ast(R"(
+        function _inherits(subClass, superClass) {
+            subClass.prototype = Object.create(superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } });
+            Object.setPrototypeOf(subClass, superClass);
+        }
+        function _createSuper(Derived) {
+            return function () {
+                var Super = Object.getPrototypeOf(Derived), NewTarget = Object.getPrototypeOf(this).constructor;
+                return Reflect.construct(Super, arguments, NewTarget);
+            };
+        }
+        var Animal = function Animal(name) { this.name = name; this.madeAs = new.target.name; };
+        var Dog = (function (_Animal) {
+            _inherits(Dog, _Animal);
+            var _super = _createSuper(Dog);
+            function Dog(name) { var _this = _super.call(this, name); _this.tricks = 0; return _this; }
+            return Dog;
+        })(Animal);
+        var Puppy = (function (_Dog) {
+            _inherits(Puppy, _Dog);
+            var _super = _createSuper(Puppy);
+            function Puppy() { var _this = _super.apply(this, arguments); _this.age = 0; return _this; }
+            return Puppy;
+        })(Dog);
+        var puppy = new Puppy('Rex');
+        var Cached = (function (_super) {
+            Object.setPrototypeOf(Cached, _super);
+            function Cached() { var _this = _super.call(this) || this; _this.fromStore = _this === Cached.store; return _this; }
+            Cached.store = { stored: true };
+            return Cached;
+        })(function () { return Cached.store; });
+    )");
+    assert(text("[puppy.name, puppy.madeAs, puppy.age, puppy.tricks, puppy instanceof Puppy, puppy instanceof Dog, "
+                "puppy instanceof Animal, new Dog('x').madeAs].join()") ==
+           "Rex,Puppy,0,0,true,true,true,Dog");
+    assert(text("var cached = new Cached(); [cached.fromStore, cached.stored].join()") ==
+           "true,true");
+}
+
+TEST(js_new_target_and_returned_objects_are_collected) {
+    using namespace litebird;
+
+    // new.target is held by the scope of the constructor it was bound in and
+    // by nothing else. When the objects go, so does everything a construction
+    // made on the way: the object `new` made and a parent replaced, the one
+    // a built-in was offered and did not use.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function Parent() { this.handler = () => new.target; }
+            function Target() {}
+            class Child extends Parent { constructor() { super(); this.self = () => this; this.nt = new.target; } }
+            class Returns extends (function () { return { made: 1 }; }) { field = [1, 2, 3]; }
+            class Listy extends Array { constructor() { super(); this.nt = new.target; } }
+            function round() {
+                for (var i = 0; i < 300; i++) {
+                    new Child(); Reflect.construct(Parent, [], Target); Reflect.construct(Child, [], Target);
+                    new Returns(); new Listy(); Reflect.construct(Array, [2], Target); Reflect.construct(Error, ['m'], Target);
+                }
+            }
+            var keep = new Child();
+            round();
+        )");
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        const size_t settled = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("round(); round();");
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells <= settled + 8);
+        // What was kept still answers, after the collections.
+        assert(js.eval("keep.handler() === Child && keep.nt === Child && keep.self() === keep").to_string() == "true");
+    }
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+}
+
+TEST(js_compiled_custom_elements_are_constructed) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // A custom element as code written for ES5 makes it: the constructor is a
+    // function, and the element comes from `Reflect.construct(HTMLElement, [],
+    // new.target)`. Until Phase 43 that was "Illegal constructor": HTMLElement
+    // was run without the object it builds on, which only `super()` handed it.
+    js.eval_ast(R"(
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+        function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+        Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+        Object.setPrototypeOf(Old, HTMLElement);
+        customElements.define('x-old', Old);
+        var a = document.createElement('x-old'), b = new Old();
+    )");
+    assert(text("[a instanceof Old, a instanceof HTMLElement, a.made, a.localName, a.constructor === Old, "
+                "b.localName, b.made, a !== b, b.ownerDocument === document].join()") ==
+           "true,true,true,x-old,true,x-old,true,true,true");
+
+    // A class on top of it: `super()` returns the element, which is `this`
+    // from there on, and the class's fields go on it.
+    js.eval_ast(R"(
+        class Modern extends Old {
+            label = 'field';
+            constructor() { var s = super(); this.same = s === this; this.kind = new.target.name; }
+        }
+        customElements.define('x-modern', Modern);
+        var m = document.createElement('x-modern');
+    )");
+    assert(text("[m instanceof Modern, m instanceof Old, m.made, m.same, m.kind, m.label, m.localName, new "
+                "Modern().kind].join()") ==
+           "true,true,true,true,Modern,field,x-modern,Modern");
+
+    // What Babel emits: the interface wrapped in a function that constructs
+    // it with the class as new.target, and the class constructing the wrapper.
+    js.eval_ast(R"(
+        function _wrapNativeSuper(Class) {
+            function Wrapper() { return Reflect.construct(Class, arguments, Object.getPrototypeOf(this).constructor); }
+            Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, writable: true, configurable: true } });
+            return Object.setPrototypeOf(Wrapper, Class);
+        }
+        var Greeter = (function (_HTMLElement) {
+            function Greeter() {
+                var _this = Reflect.construct(Object.getPrototypeOf(Greeter), arguments, Object.getPrototypeOf(this).constructor);
+                _this.greeting = 'hello';
+                return _this;
+            }
+            Greeter.prototype = Object.create(_HTMLElement.prototype, { constructor: { value: Greeter, writable: true, configurable: true } });
+            Object.setPrototypeOf(Greeter, _HTMLElement);
+            Greeter.prototype.connectedCallback = function () { this.textContent = this.greeting + ' ' + this.getAttribute('name'); };
+            return Greeter;
+        })(_wrapNativeSuper(HTMLElement));
+        customElements.define('x-greeter', Greeter);
+        var g = document.createElement('x-greeter');
+        g.setAttribute('name', 'you');
+        document.getElementById('host').appendChild(g);
+    )");
+    assert(text("[g instanceof Greeter, g instanceof HTMLElement, g.greeting, g.textContent, new Greeter().localName, "
+                "g.constructor === Greeter].join()") ==
+           "true,true,hello,hello you,x-greeter,true");
+
+    // new.target in the parent class of a custom element is the class that
+    // was defined, for createElement and for `new`.
+    assert(text("var seen = []; class Widget extends HTMLElement { constructor() { super(); "
+                "seen.push(new.target.name); } } class Button extends Widget {} customElements.define('x-button', "
+                "Button); document.createElement('x-button'); new Button(); seen.join()") ==
+           "Button,Button");
+
+    // The other interfaces: an event and an event target with a new.target.
+    js.eval_ast(R"(
+        class Sub extends Event {}
+        var e = Reflect.construct(Event, ['ping', { bubbles: true }], Sub);
+        function Bus() {}
+        Bus.prototype = Object.create(EventTarget.prototype);
+        var bus = Reflect.construct(EventTarget, [], Bus), heard = [];
+        bus.addEventListener('ping', function (ev) { heard.push(ev instanceof Sub, ev.target === bus); });
+        bus.dispatchEvent(e);
+        class AppEvent extends Event { constructor(type) { super(type); this.kind = new.target.name; } }
+        class Saved extends AppEvent {}
+    )");
+    assert(text("[e instanceof Sub, e instanceof Event, e.type, e.bubbles, Object.getPrototypeOf(e) === "
+                "Sub.prototype, bus instanceof Bus, bus instanceof EventTarget, heard.join()].join()") ==
+           "true,true,ping,true,true,true,true,true,true");
+    assert(text("[new Saved('s').kind, Reflect.construct(AppEvent, ['y'], Saved).kind, new AppEvent('x').kind, "
+                "Reflect.construct(AppEvent, ['y'], Saved) instanceof Saved].join()") ==
+           "Saved,Saved,AppEvent,true");
+
+    // What is refused stays refused: a class nothing was defined for, the
+    // wrong interface, no new.target at all, a call.
+    assert(text("function Plain() {} Plain.prototype = Object.create(HTMLElement.prototype); [nameOf(function () { "
+                "Reflect.construct(HTMLElement, [], Plain); }), nameOf(function () { "
+                "Reflect.construct(HTMLDivElement, [], Old); }), nameOf(function () { Reflect.construct(HTMLElement, "
+                "[]); }), nameOf(function () { Reflect.construct(HTMLElement, [], Object); }), nameOf(function () { "
+                "HTMLElement.call(document.createElement('div')); }), nameOf(function () { Reflect.construct(Old, [], "
+                "Old); })].join()") ==
+           "TypeError,TypeError,TypeError,TypeError,TypeError,no error");
+
+    // The prototype comes from new.target, read once, when the interface
+    // makes its object; with nothing usable there the interface's own is
+    // used. Both are Web IDL's answers and not jsdom's, which reads the
+    // property twice and, finding no object, makes something that is not an
+    // event (tests/dom-conformance/README.md).
+    assert(text("var reads = 0, nt = function () {}.bind(null); Object.defineProperty(nt, 'prototype', { get: "
+                "function () { reads++; return Sub.prototype; } }); var once = Reflect.construct(Event, ['z'], nt); "
+                "[reads, once instanceof Sub, once.type].join()") ==
+           "1,true,z");
+    assert(text("function NoProto() {} NoProto.prototype = null; var np = Reflect.construct(Event, ['x'], NoProto); "
+                "[Object.getPrototypeOf(np) === Event.prototype, np.type, np instanceof Event].join()") ==
+           "true,x,true");
+    assert(text("var badReads = 0, bad = function () {}.bind(null); Object.defineProperty(bad, 'prototype', { get: "
+                "function () { badReads++; return 5; } }); var ev = Reflect.construct(Event, ['q'], bad); "
+                "[badReads, ev instanceof Event, ev.type, Object.getPrototypeOf(ev) === Event.prototype].join()") ==
+           "1,true,q,true");
+}
+
+TEST(js_compiled_custom_elements_are_upgraded) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><x-old id='parsed' start='3'>text</x-old><x-modern id='m'></x-modern>"
+        "<x-greeter id='g' name='page'></x-greeter><button is='fancy-b' id='fancy'>b</button>"
+        "<x-twice id='twice'></x-twice><x-nested id='outer'></x-nested><x-throws id='throws'></x-throws>"
+        "<div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // An element of the page, there before its class is defined. The upgrade
+    // runs the constructor on the element's own object; a constructor written
+    // for ES5 does not pass `this` on but asks HTMLElement for its element
+    // with new.target, and is given that object (JsValue.cpp, "Constructions
+    // in place"). Until Phase 43 it was given nothing: "Illegal constructor".
+    // What it is told afterwards comes in the order of the standard: the
+    // attributes it observes, then that it is connected.
+    js.eval_ast(R"(
+        function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
+        function inherit(C, Parent) {
+            C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+            return Object.setPrototypeOf(C, Parent);
+        }
+        var $ = function (id) { return document.getElementById(id); }, host = $('host'), log = [];
+        var Old = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.made = true;
+            log.push('constructed ' + self.id + ' ' + self.getAttribute('start') + ' ' + self.childNodes.length + ' ' + self.isConnected);
+            return self;
+        }, HTMLElement);
+        Old.prototype.connectedCallback = function () { log.push('connected ' + this.id); };
+        Old.prototype.attributeChangedCallback = function (name, before, after) { log.push(name + ':' + before + '>' + after); };
+        Old.observedAttributes = ['start'];
+        var e = $('parsed'), before = [e instanceof Old, e.made, e.matches(':defined')].join();
+        customElements.define('x-old', Old);
+    )");
+    assert(text("before") ==
+           "false,,false");
+    assert(text("[e instanceof Old, e.made, e.constructor === Old, e.matches(':defined'), e === "
+                "$('parsed'), e.textContent].join()") ==
+           "true,true,true,true,true,text");
+    assert(text("log.join('|')") ==
+           "constructed parsed 3 1 true|start:null>3|connected parsed");
+
+    // Elements the fragment parser makes, and a clone: each is upgraded by
+    // the same constructor, the clone while it is in no document.
+    js.eval_ast(R"(
+        log.length = 0;
+        host.innerHTML = '<x-old id="one"></x-old><p><x-old id="two" start="5"></x-old></p>';
+        var one = $('one'), two = $('two'), copy = one.cloneNode(true);
+    )");
+    assert(text("[one instanceof Old, one.made, two.made, copy instanceof Old, copy.made, copy !== one, "
+                "copy.isConnected].join()") ==
+           "true,true,true,true,true,true,false");
+    assert(text("log.join('|')") ==
+           "constructed one null 0 true|connected one|constructed two 5 0 true|start:null>5|connected "
+           "two|constructed one null 0 false");
+
+    // Elements made before the definition: the one in the document is
+    // upgraded by define(), the one in a loose tree by upgrade().
+    js.eval_ast(R"(
+        var Late = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.late = true; return self; }, HTMLElement);
+        var tree = document.createElement('section');
+        tree.appendChild(document.createElement('x-late'));
+        host.appendChild(document.createElement('x-late'));
+        customElements.define('x-late', Late);
+        var loose = [tree.firstChild instanceof Late, tree.firstChild.late].join();
+        customElements.upgrade(tree);
+    )");
+    assert(text("[host.lastChild instanceof Late, host.lastChild.late, loose, tree.firstChild instanceof "
+                "Late, tree.firstChild.late].join()") ==
+           "true,true,false,,true,true");
+
+    // A class on top of the function: its `super()` reaches the function
+    // with the element as `this` and the class as new.target, the function
+    // gets the element back from HTMLElement, and the class's field goes on
+    // it.
+    js.eval_ast(R"(
+        class Modern extends Old {
+            field = 7;
+            constructor() { var s = super(); this.same = s === this; this.top = new.target === Modern; }
+        }
+        customElements.define('x-modern', Modern);
+        var m = $('m');
+    )");
+    assert(text("[m instanceof Modern, m instanceof Old, m.made, m.field, m.same, m.top, m === "
+                "$('m')].join()") ==
+           "true,true,true,7,true,true,true");
+
+    // What Babel emits, two classes deep: every level constructs the next
+    // with `Reflect.construct(Super, arguments, NewTarget)`, and only
+    // new.target says which element this is about.
+    js.eval_ast(R"(
+        function _wrapNativeSuper(Class) {
+            function Wrapper() { return Reflect.construct(Class, arguments, Object.getPrototypeOf(this).constructor); }
+            Wrapper.prototype = Object.create(Class.prototype, { constructor: { value: Wrapper, writable: true, configurable: true } });
+            return Object.setPrototypeOf(Wrapper, Class);
+        }
+        function _createSuper(Derived) {
+            return function () { return Reflect.construct(Object.getPrototypeOf(Derived), arguments, Object.getPrototypeOf(this).constructor); };
+        }
+        var Greeter = (function (_HTMLElement) {
+            inherit(Greeter, _HTMLElement);
+            var _super = _createSuper(Greeter);
+            function Greeter() { var _this = _super.call(this); _this.greeting = 'hello'; return _this; }
+            Greeter.prototype.connectedCallback = function () { this.textContent = this.greeting + ' ' + this.getAttribute('name'); };
+            return Greeter;
+        })(_wrapNativeSuper(HTMLElement));
+        var Loud = (function (_Greeter) {
+            inherit(Loud, _Greeter);
+            var _super = _createSuper(Loud);
+            function Loud() { var _this = _super.call(this); _this.loud = true; return _this; }
+            return Loud;
+        })(Greeter);
+        customElements.define('x-greeter', Greeter);
+        customElements.define('x-loud', Loud);
+        var g = $('g');
+        host.innerHTML = '<x-loud name="inner"></x-loud>';
+    )");
+    assert(text("[g instanceof Greeter, g.greeting, g.textContent, g.constructor === Greeter].join()") ==
+           "true,hello,hello page,true");
+    assert(text("[host.firstChild instanceof Loud, host.firstChild instanceof Greeter, "
+                "host.firstChild.loud, host.firstChild.greeting, host.firstChild.textContent, "
+                "host.firstChild.cloneNode(false).loud].join()") ==
+           "true,true,true,hello,hello inner,true");
+
+    // A customized built-in: the interface is HTMLButtonElement.
+    js.eval_ast(R"(
+        var Fancy = inherit(function () { var self = Reflect.construct(HTMLButtonElement, [], new.target); self.fancy = true; return self; }, HTMLButtonElement);
+        customElements.define('fancy-b', Fancy, { extends: 'button' });
+        var fancy = $('fancy');
+    )");
+    assert(text("[fancy instanceof Fancy, fancy instanceof HTMLButtonElement, fancy.fancy, "
+                "fancy.localName, document.createElement('button', { is: 'fancy-b' }).fancy, "
+                "document.createElement('button').fancy].join()") ==
+           "true,true,true,button,true,");
+
+    // The element is handed out once. A constructor that asks again during
+    // an upgrade is refused (the standard's "already constructed" marker);
+    // under `new` nothing is being upgraded and each request makes an
+    // element.
+    js.eval_ast(R"(
+        var seen = [];
+        var Twice = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target), other;
+            try { other = Reflect.construct(HTMLElement, [], new.target); seen.push('another ' + (other !== self) + ' ' + other.localName); }
+            catch (err) { seen.push(err.name); }
+            return self;
+        }, HTMLElement);
+        customElements.define('x-twice', Twice);
+        var twice = $('twice'), again = new Twice();
+    )");
+    assert(text("[twice instanceof Twice, again instanceof Twice, again !== twice, seen.join('|')].join()") ==
+           "true,true,true,TypeError|another true x-twice");
+
+    // An instance of the same class made inside the constructor, before the
+    // constructor asked for its own element, takes the element that is being
+    // upgraded; the constructor's own request is then the second one. (The
+    // constructor returns the inner instance, so the upgrade succeeds.)
+    js.eval_ast(R"(
+        var depth = 0, steps = [];
+        var Nested = inherit(function () {
+            var inner = null, self;
+            if (depth++ === 0) inner = new Nested();
+            try { self = Reflect.construct(HTMLElement, [], new.target); }
+            catch (err) { steps.push('own ' + err.name); return inner; }
+            steps.push('made ' + (self.id || 'no id'));
+            return self;
+        }, HTMLElement);
+        customElements.define('x-nested', Nested);
+        var outer = $('outer');
+    )");
+    assert(text("[steps.join('|'), outer instanceof Nested, outer.matches(':defined')].join()") ==
+           "made outer|own TypeError,true,true");
+
+    // A constructor that throws after it got its element: the upgrade fails,
+    // and nothing of it is left behind. The next constructions get elements
+    // of their own, also for the class whose upgrade failed.
+    js.eval_ast(R"(
+        var Throws = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.half = true; throw new RangeError('no'); }, HTMLElement);
+        customElements.define('x-throws', Throws);
+        var failed = $('throws'), fresh = Reflect.construct(HTMLElement, [], Old);
+    )");
+    assert(text("[failed.matches(':defined'), nameOf(function () { new Throws(); }), nameOf(function () { "
+                "document.createElement('x-old'); }), fresh instanceof Old, fresh !== e, fresh.localName, "
+                "fresh.isConnected, nameOf(function () { new Twice(); })].join()") ==
+           "false,RangeError,no error,true,true,x-old,false,no error");
+
+    // A class from a library and a subclass of it compiled for ES5. The
+    // compiled constructor constructs the class with Reflect.construct, on a
+    // new object, and the class reaches HTMLElement with super(): the
+    // interface is given the element that is being upgraded all the same,
+    // and that element is `this` in the class, with the class's field on it.
+    js.eval_ast(R"(
+        class Base extends HTMLElement {
+            ready = 'yes';
+            constructor() { super(); this.base = new.target.name; }
+        }
+        var MyEl = (function (_Base) {
+            inherit(MyEl, _Base);
+            var _super = _createSuper(MyEl);
+            function MyEl() { var _this = _super.call(this); _this.mine = true; return _this; }
+            return MyEl;
+        })(Base);
+        customElements.define('my-el', MyEl);
+        host.innerHTML = '<my-el id="mixed"></my-el>';
+        var mixed = $('mixed'), mixedCopy = mixed.cloneNode(false);
+    )");
+    assert(text("[mixed instanceof MyEl, mixed instanceof Base, mixed.mine, mixed.base, mixed.ready, mixed === "
+                "host.firstChild, mixedCopy.mine, mixedCopy.ready, new MyEl().base, "
+                "document.createElement('my-el').mine].join()") ==
+           "true,true,true,MyEl,yes,true,true,yes,MyEl,true");
+
+    // The element is given out once, to a class too. A second instance made
+    // after super() has taken it is refused; one made before takes it, and
+    // then the constructor's own super() is the one refused and the upgrade
+    // fails. Outside an upgrade nothing is being constructed in place.
+    js.eval_ast(R"(
+        var tries = [], firstTime = true;
+        class Again extends HTMLElement {
+            constructor() { super(); if (firstTime) { firstTime = false; tries.push(nameOf(function () { new Again(); })); } }
+        }
+        customElements.define('x-again', Again);
+        host.innerHTML = '<x-again id="again"></x-again>';
+        var again = $('again'), order = [], firstBefore = true;
+        class Before extends HTMLElement {
+            constructor() {
+                if (firstBefore) { firstBefore = false; order.push('inner is ' + (new Before().id || 'new')); }
+                super();
+                order.push('own');
+            }
+        }
+        customElements.define('x-before', Before);
+        host.innerHTML = '<x-before id="before"></x-before>';
+    )");
+    assert(text("[tries.join(), again instanceof Again, again.matches(':defined'), nameOf(function () { new Again(); "
+                "}), order.join('|'), $('before').matches(':defined')].join()") ==
+           "TypeError,true,true,no error,own|inner is before,false");
+
+    // Only the interface the element belongs to is given it. An event made
+    // with the class as new.target while the element is upgraded is another
+    // object, and a customized built-in that asks HTMLElement where its
+    // interface is HTMLButtonElement gets nothing.
+    js.eval_ast(R"(
+        var notes = [];
+        class Ev extends HTMLElement {
+            constructor() {
+                var made = Reflect.construct(Event, ['ping'], new.target);
+                notes.push(made === $('ev'), Object.getPrototypeOf(made) === Ev.prototype);
+                super();
+                notes.push(this === $('ev'));
+            }
+        }
+        customElements.define('x-ev', Ev);
+        var Wrong = inherit(function () { return Reflect.construct(HTMLElement, [], new.target); }, HTMLButtonElement);
+        customElements.define('wrong-b', Wrong, { extends: 'button' });
+        host.innerHTML = '<x-ev id="ev"></x-ev><button is="wrong-b" id="wrong"></button>';
+    )");
+    assert(text("[notes.join(), $('ev') instanceof Ev, $('ev').matches(':defined'), $('wrong').localName, typeof "
+                "$('wrong').click, nameOf(function () { new Wrong(); })].join()") ==
+           "false,true,true,true,true,button,function,TypeError");
+
+    // The same for a class, whose super() comes with the element: an
+    // interface that is not the element's builds on an object of its own.
+    // HTMLElement then finds a definition for a button and refuses; Event
+    // makes an event, the constructor runs to its end on that, and the
+    // upgrade fails because what it made is not the element. Until Phase 43
+    // the element's own object was made the event.
+    js.eval_ast(R"(
+        var ranWrong = 0, event = null;
+        class WrongClass extends HTMLElement { constructor() { super(); ranWrong++; } }
+        customElements.define('wrong-c', WrongClass, { extends: 'button' });
+        class NotAnElement extends Event { constructor() { super('x'); event = this; } }
+        customElements.define('x-not', NotAnElement);
+        host.innerHTML = '<button is="wrong-c" id="wrongc"></button><x-not id="not"></x-not>';
+        var not = host.lastChild;
+    )");
+    assert(text("[ranWrong, host.firstChild.localName, event === not, event instanceof NotAnElement, event.type, "
+                "host.querySelectorAll('x-not:defined').length, host.querySelectorAll('x-not').length, "
+                "Element.prototype.getAttribute.call(not, 'id')].join()") ==
+           "0,button,false,true,x,0,1,not");
+
+    // A parent that is no interface of the DOM at all, or an interface that
+    // builds its own object whatever it is offered (Text). Until Phase 43
+    // the element's object took over what the parent built: it was made a
+    // map, an error, an array, the wrapper of a text node. Now what the
+    // parent built is `this` in the constructor, a real one of its kind,
+    // and the element is left as it was, its upgrade failed.
+    js.eval_ast(R"(
+        var kinds = {};
+        class AsMap extends Map { constructor() { super([[1, 2]]); kinds.map = this; } }
+        class AsError extends Error { constructor() { super('boom'); kinds.error = this; } }
+        class AsArray extends Array { constructor() { super(); this.push(1); kinds.array = this; } }
+        class AsText extends Text { field = 'kept'; constructor() { super('text'); kinds.text = this; } }
+        customElements.define('x-as-map', AsMap);
+        customElements.define('x-as-error', AsError);
+        customElements.define('x-as-array', AsArray);
+        customElements.define('x-as-text', AsText);
+        host.innerHTML = '<x-as-map k="v"></x-as-map><x-as-error k="v"></x-as-error><x-as-array k="v"></x-as-array><x-as-text k="v"></x-as-text>';
+        var els = Array.prototype.slice.call(host.childNodes);
+        function attr(el) { return Element.prototype.getAttribute.call(el, 'k'); }
+    )");
+    assert(text("[kinds.map !== els[0], kinds.map instanceof AsMap, kinds.map.size, kinds.map.get(1), kinds.error !== "
+                "els[1], kinds.error instanceof AsError, kinds.error.message, kinds.array !== els[2], "
+                "Array.isArray(kinds.array), kinds.array.length].join()") ==
+           "true,true,1,2,true,true,boom,true,true,1");
+    assert(text("[kinds.text !== els[3], kinds.text instanceof AsText, kinds.text.data, kinds.text.nodeType, "
+                "kinds.text.parentNode === null, kinds.text.field, els[3].field].join()") ==
+           "true,true,text,3,true,kept,");
+    assert(text("[els.map(attr).join(''), Array.isArray(els[2]), host.querySelectorAll(':defined').length, "
+                "host.childNodes.length, host.innerHTML.indexOf('<x-as-text k=\"v\"></x-as-text>') > 0, new "
+                "AsMap().size, new AsText().data].join()") ==
+           "vvvv,false,0,4,true,1,text");
+
+    // The body of a generator, and of an async function that awaits, runs on
+    // a thread of its own. What it constructs while an element is upgraded
+    // is part of that upgrade all the same: the list of constructions in
+    // place belongs to the agent, not to the thread. (With a list for each
+    // thread the first three of these were refused: "The custom element
+    // constructor returned a different object".) A generator that was
+    // started during an upgrade and is resumed after it finds nothing under
+    // construction and makes an element of its own.
+    js.eval_ast(R"(
+        var resumed = 0, keep = null;
+        var Gen = inherit(function () {
+            var nt = new.target;
+            var it = (function* () { var el = Reflect.construct(HTMLElement, [], nt); yield el; resumed++; })();
+            var self = it.next().value;
+            self.made = 'gen';
+            it.next();
+            return self;
+        }, HTMLElement);
+        var Async = inherit(function () {
+            var nt = new.target, self;
+            (async function () { self = Reflect.construct(HTMLElement, [], nt); await null; })();
+            self.made = 'async';
+            return self;
+        }, HTMLElement);
+        var early = (function* () { var nt = yield 0; yield Reflect.construct(HTMLElement, [], nt); })();
+        early.next();
+        var Mid = inherit(function () { var self = early.next(new.target).value; self.made = 'mid'; return self; }, HTMLElement);
+        var LateGen = inherit(function () {
+            var nt = new.target;
+            keep = (function* () { yield 1; yield Reflect.construct(HTMLElement, [], nt); })();
+            keep.next();
+            return Reflect.construct(HTMLElement, [], nt);
+        }, HTMLElement);
+        customElements.define('x-gen', Gen);
+        customElements.define('x-async', Async);
+        customElements.define('x-mid', Mid);
+        customElements.define('x-late-gen', LateGen);
+        host.innerHTML = '<x-gen id="gen"></x-gen><x-async id="async"></x-async><x-mid id="mid"></x-mid><x-late-gen id="lategen"></x-late-gen>';
+        var afterwards = keep.next().value;
+    )");
+    assert(text("[$('gen').made, $('gen') instanceof Gen, $('async').made, $('async') instanceof Async, $('mid').made, "
+                "$('mid') instanceof Mid, host.querySelectorAll(':defined').length, resumed].join()") ==
+           "gen,true,async,true,mid,true,4,1");
+    assert(text("[$('lategen') instanceof LateGen, afterwards instanceof LateGen, afterwards !== $('lategen'), "
+                "afterwards.localName, afterwards.isConnected, new Gen().made, new Async().made].join()") ==
+           "true,true,true,x-late-gen,false,gen,async");
+
+    // A frame has interfaces and a registry of its own (Phase 42), and the
+    // interface that is given an element is the one of the element's realm.
+    // A compiled constructor on the frame's HTMLElement upgrades an element
+    // of the frame; the same name can be defined in the page with another
+    // constructor; and one that asks the page's HTMLElement for an element
+    // of the frame gets none, because the standard looks the definition up
+    // in the registry of the interface that is called. An upgrade in the
+    // frame can make an element of the page on the way.
+    js.eval_ast(R"(
+        var frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        var fw = frame.contentWindow, fdoc = frame.contentDocument;
+        var FOld = inherit(function () { var self = Reflect.construct(fw.HTMLElement, [], new.target); self.made = 'frame'; return self; }, fw.HTMLElement);
+        fw.customElements.define('x-fold', FOld);
+        fdoc.body.innerHTML = '<x-fold></x-fold>';
+        var inFrame = fdoc.body.firstChild;
+        var POld = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'page'; return self; }, HTMLElement);
+        customElements.define('x-fold', POld);
+        host.innerHTML = '<x-fold></x-fold>';
+        var inPage = host.firstChild;
+        var Cross = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'cross'; return self; }, HTMLElement);
+        fw.customElements.define('x-cross', Cross);
+        var across = [];
+        var Both = inherit(function () {
+            var other = new POld(), self = Reflect.construct(fw.HTMLElement, [], new.target);
+            across.push(other !== self, other.made, other.ownerDocument === document);
+            self.made = 'both';
+            return self;
+        }, fw.HTMLElement);
+        fw.customElements.define('x-both', Both);
+        fdoc.body.innerHTML = '<x-cross></x-cross><x-both></x-both>';
+    )");
+    assert(text("[fw.HTMLElement !== HTMLElement, inFrame.made, inFrame instanceof FOld, inFrame.matches(':defined'), new "
+                "FOld().ownerDocument === fdoc, fdoc.createElement('x-fold').made, inPage.made, inPage instanceof POld, "
+                "inPage instanceof FOld].join()") ==
+           "true,frame,true,true,true,frame,page,true,false");
+    assert(text("[fdoc.body.firstChild.made, fdoc.body.firstChild.matches(':defined'), fdoc.body.lastChild.made, "
+                "fdoc.body.lastChild instanceof Both, across.join()].join()") ==
+           ",false,both,true,true,page,true");
+}
+
+TEST(js_a_page_with_compiled_custom_elements_is_collected) {
+    using namespace litebird;
+
+    // The object an interface was offered, and the element it became, go
+    // with the page like everything else of its realm.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    for (int round = 0; round < 3; ++round) {
+        {
+            auto doc = HtmlParser::parse(
+                "<!DOCTYPE html><body><x-old id='first'></x-old><x-modern id='second'></x-modern>"
+                "<x-throws></x-throws><my-el id='third'></my-el><x-twice></x-twice><div id='host'></div></body>");
+            JsInterpreter js(doc);
+            js.eval_ast(R"(
+                function Old() { var self = Reflect.construct(HTMLElement, [], new.target); self.made = true; return self; }
+                Old.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Old, writable: true, configurable: true } });
+                Object.setPrototypeOf(Old, HTMLElement);
+                customElements.define('x-old', Old);
+                class Modern extends Old { constructor() { super(); this.kind = new.target.name; this.self = () => this; } }
+                customElements.define('x-modern', Modern);
+                // An upgrade that ends in an exception, with its element handed out.
+                function Throws() { var self = Reflect.construct(HTMLElement, [], new.target); self.keeps = [self]; throw new Error('no'); }
+                Throws.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Throws, writable: true, configurable: true } });
+                Object.setPrototypeOf(Throws, HTMLElement);
+                customElements.define('x-throws', Throws);
+                // A class constructed on an object of its own, which is dropped
+                // for the element; and a constructor refused for asking twice.
+                class Base extends HTMLElement { ready = 'yes'; constructor() { super(); this.self = () => this; } }
+                function MyEl() { var made = Reflect.construct(Base, [], new.target); made.mine = true; return made; }
+                MyEl.prototype = Object.create(Base.prototype, { constructor: { value: MyEl, writable: true, configurable: true } });
+                Object.setPrototypeOf(MyEl, Base);
+                customElements.define('my-el', MyEl);
+                function Twice() { var self = Reflect.construct(HTMLElement, [], new.target); self.again = Reflect.construct(HTMLElement, [], new.target); return self; }
+                Twice.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Twice, writable: true, configurable: true } });
+                Object.setPrototypeOf(Twice, HTMLElement);
+                customElements.define('x-twice', Twice);
+                var host = document.getElementById('host'), kinds = [];
+                for (var i = 0; i < 50; i++) {
+                    var el = i % 2 ? document.createElement('x-modern') : new Old();
+                    kinds.push(el.kind || 'old');
+                    if (i % 5 === 0) host.appendChild(el);
+                }
+                class Sub extends Event {}
+                var e = Reflect.construct(Event, ['x'], Sub);
+            )");
+            assert(js.eval("[host.children.length, kinds[0], kinds[1], e instanceof Sub].join()").to_string() ==
+                   "10,old,Modern,true");
+            // The two elements of the page were upgraded where they stood.
+            assert(js.eval("var first = document.getElementById('first'), second = document.getElementById('second'); "
+                           "[first.made, second.made, second.kind, second.self() === second].join()").to_string() ==
+                   "true,true,Modern,true");
+            Heap::default_heap().collect_garbage();
+            assert(js.eval("host.lastChild instanceof Old && host.children[1].self() === host.children[1]").to_string() ==
+                   "true");
+            assert(js.eval("[first.made, second.self() === second, document.querySelector('x-throws').keeps.length].join()")
+                       .to_string() == "true,true,1");
+            assert(js.eval("var third = document.getElementById('third'); [third.mine, third.ready, third.self() === third, "
+                           "document.querySelector('x-twice').again, new Twice().again.localName].join()")
+                       .to_string() == "true,yes,true,,x-twice");
+        }
+        Heap::default_heap().collect_garbage();
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == permanent_cells);
+    }
+}
+
+// ============================================================================
+// Phase 50: CSS Color 4/5 color spaces, gamut mapping, color-mix(), relative colors
+// ============================================================================
+
+static void test_css_color4_spaces_gamut_and_serialization() {
+    using namespace litebird;
+    auto parse_ok = [](std::string_view expr, CssColor& out) {
+        return CssColor::parse(expr, out);
+    };
+
+    // 1. Legacy & modern rgb/rgba/hsl/hsla/hwb including angle units and `none`
+    CssColor c;
+    assert(parse_ok("rgb(255 50% 0 / 50%)", c));
+    assert(c.serialize_computed() == "rgba(255, 128, 0, 0.5)");
+    assert(parse_ok("rgb(128 none none)", c));
+    assert(c.serialize_computed() == "color(srgb 0.501961 none none)");
+    assert(parse_ok("hsl(0.5turn 100% 50%)", c));
+    assert(c.serialize_computed() == "rgb(0, 255, 255)");
+    assert(parse_ok("hsl(200grad 100% 50%)", c));
+    assert(c.serialize_computed() == "rgb(0, 255, 255)");
+    assert(parse_ok("hsl(120 none 50%)", c));
+    assert(c.serialize_computed() == "hsl(120 none 50%)");
+    assert(parse_ok("hwb(120 30% 50%)", c));
+    assert(c.serialize_computed() == "rgb(77, 128, 77)");
+    assert(parse_ok("hwb(0 70% 60%)", c));
+    assert(c.serialize_computed() == "rgb(137, 137, 137)");
+    assert(parse_ok("hwb(120 none 50%)", c));
+    assert(c.serialize_computed() == "hwb(120 none 50%)");
+    assert(parse_ok("rgb(/* R */ 0, /* G */ 51, /* B */ 255)", c));
+    assert(c.serialize_computed() == "rgb(0, 51, 255)");
+
+    // 2. lab/lch/oklab/oklch & all 9 predefined color() spaces
+    assert(parse_ok("lab(50% 100% -100%)", c));
+    assert(c.serialize_computed() == "lab(50 125 -125)");
+    assert(parse_ok("lch(50% 50% 0.5turn)", c));
+    assert(c.serialize_computed() == "lch(50 75 180)");
+    assert(parse_ok("oklab(50% 50% -50% / 50%)", c));
+    assert(c.serialize_computed() == "oklab(0.5 0.2 -0.2 / 0.5)");
+    assert(parse_ok("oklch(60% 50% 120deg / 80%)", c));
+    assert(c.serialize_computed() == "oklch(0.6 0.2 120 / 0.8)");
+    assert(parse_ok("color(xyz 0.2 0.4 0.6)", c));
+    assert(c.serialize_computed() == "color(xyz-d65 0.2 0.4 0.6)");
+    assert(parse_ok("color(display-p3-linear 0.25 0.5 0.75)", c));
+    assert(c.serialize_computed() == "color(display-p3-linear 0.25 0.5 0.75)");
+
+    // 3. Cross-space exact round-trips (sRGB -> OKLab -> Lab -> Display P3 -> ProPhoto -> Rec2020 -> sRGB)
+    assert(parse_ok("rebeccapurple", c));
+    CssColor rt = c.convert_to(ColorSpace::Oklab)
+                   .convert_to(ColorSpace::Oklch)
+                   .convert_to(ColorSpace::Lab)
+                   .convert_to(ColorSpace::Lch)
+                   .convert_to(ColorSpace::DisplayP3)
+                   .convert_to(ColorSpace::A98Rgb)
+                   .convert_to(ColorSpace::ProphotoRgb)
+                   .convert_to(ColorSpace::Rec2020)
+                   .convert_to(ColorSpace::XyzD50)
+                   .convert_to(ColorSpace::XyzD65)
+                   .convert_to(ColorSpace::Srgb);
+    assert(std::fabs(rt.c[0] - 0.4) < 1e-5);
+    assert(std::fabs(rt.c[1] - 0.2) < 1e-5);
+    assert(std::fabs(rt.c[2] - 0.6) < 1e-5);
+
+    // 4. CSS Color 4 §13.2 OKLCH binary-search chroma reduction gamut mapping
+    assert(parse_ok("color(display-p3 1 0 0)", c));
+    const Color p3_red = c.to_srgb8();
+    assert(p3_red.r >= 245 && p3_red.g <= 30 && p3_red.b <= 20 && p3_red.a == 255);
+    assert(parse_ok("oklch(0.7 0.35 145)", c));
+    const Color wide_green = c.to_srgb8();
+    // Chroma reduction preserves perceptual lightness/green hue (unlike clipping which skews channels)
+    assert(wide_green.g > wide_green.r && wide_green.g > wide_green.b && wide_green.a == 255);
+
+    // 5. Strict syntax rejection & hostile recursion guard
+    const char* bad[] = {
+        "", "notacolor", "#12345", "rgb(255, 50%, 0)", "rgb(255, none, 0)",
+        "hsl(120, 50, 50)", "hwb(120, 10%, 20%)", "lab(50, 20, 30)",
+        "oklch(0.5 0.1 50%)", "color(unknown 1 0 0)", "rgb(255px 0 0)",
+        "color-mix(in srgb shorter hue, red, blue)", "color-mix(in srgb, red -10%, blue)",
+        "rgb(from red r, g, b)", "light-dark(white, notacolor)", "rgb(calc(10+20) 0 0)"
+    };
+    for (const char* expr : bad) {
+        assert(!CssColor::parse(expr, c));
+    }
+    std::string deep;
+    for (int i = 0; i < 45; ++i) deep += "color-mix(in srgb, ";
+    deep += "red, blue";
+    for (int i = 0; i < 45; ++i) deep += ")";
+    assert(!CssColor::parse(deep, c));
+}
+
+static void test_css_color5_mix_relative_and_light_dark() {
+    using namespace litebird;
+    CssColor c;
+
+    // 1. color-mix(): spaces, percentage normalization, premultiplied alpha, hue interpolation, multi-arg
+    assert(CssColor::parse("color-mix(in srgb, red 25%, blue)", c));
+    assert(c.serialize_computed() == "color(srgb 0.25 0 0.75)");
+    assert(CssColor::parse("color-mix(in srgb, red 20%, blue 20%)", c));
+    assert(c.serialize_computed() == "color(srgb 0.5 0 0.5 / 0.4)");
+    assert(CssColor::parse("color-mix(in hsl longer hue, red, white)", c));
+    assert(c.serialize_computed() == "color(srgb 0.625 0.875 0.875)");
+    assert(CssColor::parse("color-mix(in hsl longer hue, red, transparent)", c));
+    assert(c.serialize_computed() == "color(srgb 0 1 1 / 0.5)");
+    assert(CssColor::parse("color-mix(in oklch shorter hue, oklch(0.6 0.2 350), oklch(0.8 0.1 10))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.15 0)");
+    assert(CssColor::parse("color-mix(in oklch longer hue, oklch(0.6 0.2 350), oklch(0.8 0.1 10))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.15 180)");
+    assert(CssColor::parse("color-mix(in srgb, red, green, blue)", c));
+    assert(c.serialize_computed() == "color(srgb 0.333333 0.16732 0.333333)");
+    assert(CssColor::parse("color-mix(in oklch, teal calc(-10%), olive 0%)", c));
+    assert(c.space == ColorSpace::Oklch && std::fabs(c.alpha) < 1e-6);
+
+    // 2. Relative color syntax + CSS Values 4 math functions
+    assert(CssColor::parse("rgb(from rebeccapurple r g b)", c));
+    assert(c.serialize_computed() == "color(srgb 0.4 0.2 0.6)");
+    assert(CssColor::parse("rgb(from rgb(from rebeccapurple r g b / calc(alpha + 0.5)) r g b / calc(alpha - 0.5))", c));
+    assert(c.serialize_computed() == "color(srgb 0.4 0.2 0.6 / 0.5)");
+    assert(CssColor::parse("hsl(from rebeccapurple h s none)", c));
+    assert(c.serialize_computed() == "hsl(270 50% none)");
+    assert(CssColor::parse("oklch(from oklch(0.6 0.2 30) calc(l + 0.1) calc(c / 2) calc(h + 180))", c));
+    assert(c.serialize_computed() == "oklch(0.7 0.1 210)");
+    assert(CssColor::parse("lab(clamp(0, abs(-50), 100) pow(2, 4) hypot(15, 20))", c));
+    assert(c.serialize_computed() == "lab(50 16 25)");
+    assert(CssColor::parse("color(from color(display-p3 0.2 0.4 0.6 / 0.5) display-p3 calc(r + 0.1) g b / calc(alpha * 2))", c));
+    assert(c.serialize_computed() == "color(display-p3 0.3 0.4 0.6)");
+
+    // 3. light-dark() and currentcolor context resolution
+    const CssColor red_cc = CssColor::from_srgb8(Color::red());
+    ColorResolveContext light_ctx{&red_cc, false};
+    ColorResolveContext dark_ctx{&red_cc, true};
+    assert(CssColor::parse("light-dark(white, black)", c, light_ctx));
+    assert(c.serialize_computed() == "rgb(255, 255, 255)");
+    assert(CssColor::parse("light-dark(white, black)", c, dark_ctx));
+    assert(c.serialize_computed() == "rgb(0, 0, 0)");
+    assert(CssColor::parse("color-mix(in srgb, currentcolor 50%, white)", c, light_ctx));
+    assert(c.serialize_computed() == "color(srgb 1 0.5 0.5)");
+    assert(CssColor::parse("oklch(from currentcolor calc(l + 0.1) c h)", c, light_ctx));
+    assert(c.space == ColorSpace::Oklch && std::fabs(c.c[0] - 0.727955) < 1e-4);
+}
+
+static void test_css_color45_style_resolver_dom_and_svg_integration() {
+    using namespace litebird;
+
+    // 1. StyleResolver: shorthands, box-shadow, drop-shadow, currentcolor-in-mix, light-dark + color-scheme, invalid rejection
+    auto doc = HtmlParser::parse(R"html(<!DOCTYPE html><html><head><style>
+        #a {
+            color: red;
+            background: color-mix(in srgb, currentcolor 50%, white);
+            border: 2px solid oklch(0.627955 0.257683 29.233885);
+            box-shadow: 3px 4px 5px color-mix(in srgb, blue 50%, transparent);
+            filter: drop-shadow(2px 6px 4px rgb(10 20 30 / 50%));
+        }
+        #a { color: not-a-real-color; }
+        #dark { color-scheme: dark; color: light-dark(black, white); }
+        #dark_child { background-color: light-dark(rgb(10, 20, 30), rgb(200, 210, 220)); }
+    </style></head><body><div id="a"></div><div id="dark"><span id="dark_child"></span></div></body></html>)html");
+
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc);
+    auto el_a = doc->get_element_by_id("a");
+    auto st_a = resolver.resolve_style(el_a);
+    assert(st_a.color == Color(255, 0, 0, 255)); // invalid second rule rejected
+    assert(st_a.background_color == Color(255, 128, 128, 255));
+    assert(st_a.border_width.top == 2.0f && st_a.border_color == Color(255, 0, 0, 255));
+    assert(st_a.box_shadow.has_shadow && st_a.box_shadow.x_offset == 3.0f && st_a.box_shadow.y_offset == 4.0f);
+    assert(st_a.box_shadow.color.b == 255 && st_a.box_shadow.color.a == 128);
+    assert(st_a.filters.size() == 1 && st_a.filters[0].type == FilterType::DropShadow);
+    assert(st_a.filters[0].dx == 2.0f && st_a.filters[0].dy == 6.0f && st_a.filters[0].blur_radius == 4.0f);
+    assert(st_a.filters[0].color == Color(10, 20, 30, 128));
+
+    auto el_dark = doc->get_element_by_id("dark");
+    auto st_dark = resolver.resolve_style(el_dark);
+    assert(st_dark.dark_color_scheme && st_dark.color == Color(255, 255, 255, 255));
+    auto el_dark_child = doc->get_element_by_id("dark_child");
+    auto st_dark_child = resolver.resolve_style(el_dark_child, &st_dark);
+    assert(st_dark_child.dark_color_scheme && st_dark_child.background_color == Color(200, 210, 220, 255));
+
+    // 2. DOM CSSOM (el.style + getComputedStyle) end-to-end via JS
+    JsInterpreter js(doc);
+    assert(js.eval(R"js(
+        const d = document.createElement('div');
+        document.body.appendChild(d);
+        d.style.color = 'oklch(0.6 0.2 120)';
+        const s1 = d.style.color;
+        d.style.color = 'not-a-color';
+        const s1_kept = d.style.color;
+        d.style.backgroundColor = 'color-mix(in srgb, red 25%, blue)';
+        const s2 = d.style.backgroundColor;
+        d.style.borderColor = 'rgb(from rebeccapurple r g b)';
+        const s3 = d.style.borderColor;
+
+        const box = document.createElement('div');
+        box.style.color = 'red';
+        box.style.backgroundColor = 'color-mix(in srgb, currentcolor 50%, white)';
+        document.body.appendChild(box);
+        const cs_mix = getComputedStyle(box).backgroundColor;
+
+        const dm = document.createElement('div');
+        dm.style.colorScheme = 'dark';
+        dm.style.color = 'light-dark(black, oklch(0.9 0.05 240))';
+        document.body.appendChild(dm);
+        const cs_ld = getComputedStyle(dm).color;
+
+        [s1, s1_kept, s2, s3, cs_mix, cs_ld].join('|');
+    )js").to_string() ==
+        "oklch(0.6 0.2 120)|oklch(0.6 0.2 120)|color(srgb 0.25 0 0.75)|color(srgb 0.4 0.2 0.6)|color(srgb 1 0.5 0.5)|oklch(0.9 0.05 240)");
+
+    // 3. SVG renderer with CSS Color 4/5 fills & currentColor inside color-mix()
+    auto svg_doc = HtmlParser::parse(
+        R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" style="color: red">
+            <rect x="0" y="0" width="10" height="10" fill="oklch(0.627955 0.257683 29.233885)"/>
+            <rect x="10" y="0" width="10" height="10" fill="color-mix(in srgb, currentColor 50%, white)"/>
+        </svg>)svg");
+    auto svg_el = svg_doc->query_selector("svg");
+    assert(svg_el);
+    auto svg_img = SvgRenderer::render(svg_el, 20.0f, 10.0f);
+    assert(svg_img && svg_img->width == 20 && svg_img->height == 10);
+    assert(Color::from_argb(svg_img->get_pixel(5, 5)) == Color(255, 0, 0, 255));
+    assert(Color::from_argb(svg_img->get_pixel(15, 5)) == Color(255, 128, 128, 255));
+}
+
+// ============================================================================
+// Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
+// ============================================================================
+
+TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders) {
+    using namespace litebird;
+    // 1. All 40 canonical names and 228 labels resolve cleanly; non-WHATWG labels fail.
+    for (std::size_t i = 0; i < 40; ++i) {
+        auto id = static_cast<EncodingId>(i);
+        std::string_view canon = canonical_encoding_name(id);
+        assert(!canon.empty());
+    }
+    for (std::size_t i = 0; i < 228; ++i) {
+        EncodingId resolved = EncodingId::Utf8;
+        std::string padded = std::string(" \t\r\n\f") + encoding_tables::kLabels[i].label + " \t";
+        assert(get_encoding_from_label(padded, resolved));
+        assert(resolved == encoding_tables::kLabels[i].id);
+    }
+    EncodingId dummy = EncodingId::Utf8;
+    assert(!get_encoding_from_label("", dummy));
+    assert(!get_encoding_from_label("utf-32", dummy));
+    assert(!get_encoding_from_label("utf-32be", dummy));
+    assert(!get_encoding_from_label("utf-7", dummy));
+    assert(encoding_name_for_label("  LATIN1 ") == "windows-1252");
+    assert(encoding_name_for_label("Shift-JIS") == "Shift_JIS");
+    assert(encoding_name_for_label("csEUCKR") == "EUC-KR");
+    assert(encoding_name_for_label("zh_cn") == "");
+
+    // 2. BOM sniffing strips at most one BOM.
+    EncodingId actual = EncodingId::Windows1252;
+    assert(whatwg_decode(std::string("\xEF\xBB\xBF\xEF\xBB\xBF", 6), EncodingId::Windows1252, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf8);
+    assert(whatwg_decode(std::string("\xFE\xFF\xFE\xFF", 4), EncodingId::Utf8, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf16BE);
+    assert(whatwg_decode(std::string("\xFF\xFE\xFF\xFE", 4), EncodingId::Utf8, &actual) == "\xEF\xBB\xBF");
+    assert(actual == EncodingId::Utf16LE);
+
+    // 3. Single-byte encodings + unmapped byte holes in replacement vs fatal modes.
+    std::string out;
+    assert(decode_with_encoding("\xF0\xD2\xC9\xD7\xC5\xD4", EncodingId::Koi8R, out, true));
+    assert(out == "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82"); // "Привет"
+    // ISO-8859-6 byte 0xA1 is unmapped (null in index-iso-8859-6).
+    assert(!decode_with_encoding("\xA1", EncodingId::Iso8859_6, out, true));
+    assert(decode_with_encoding("A\xA1Z", EncodingId::Iso8859_6, out, false));
+    assert(out == "A\xEF\xBF\xBDZ");
+
+    // 4. gb18030 & GBK: 0x80 -> Euro, 2-byte BMP, 4-byte SMP, pointer 7457 -> U+E7C7, ASCII pushback.
+    assert(decode_with_encoding("\x80", EncodingId::Gbk, out, true) && out == "\xE2\x82\xAC");
+    assert(decode_with_encoding("\x90\x30\x81\x30", EncodingId::Gb18030, out, true) && out == "\xF0\x90\x80\x80"); // U+10000
+    assert(decode_with_encoding("\x81\x35\xF4\x37", EncodingId::Gb18030, out, true) && out == "\xEE\x9F\x87"); // pointer 7457 -> U+E7C7
+    // Invalid 4th byte restores second ('0'), third (0x81), and fourth byte:
+    // 0x81 '@' (0x40, pointer 0) re-parses as 2-byte U+4E02 (\xE4\xB8\x82), whereas 0x81 '!' (0x21) errors and restores '!'.
+    assert(decode_with_encoding("\x81\x30\x81@", EncodingId::Gb18030, out, false) && out == "\xEF\xBF\xBD" "0\xE4\xB8\x82");
+    assert(decode_with_encoding("\x81\x30\x81!", EncodingId::Gb18030, out, false) && out == "\xEF\xBF\xBD" "0\xEF\xBF\xBD!");
+
+    // 5. Big5: two-code-point HKSCS entries (1133, 1135, 1164, 1166) and ASCII pushback.
+    assert(decode_with_encoding("\x88\x62", EncodingId::Big5, out, true) && out == "\xC3\x8A\xCC\x84"); // ptr 1133 -> U+00CA U+0304
+    assert(decode_with_encoding("\x88\x64", EncodingId::Big5, out, true) && out == "\xC3\x8A\xCC\x8C"); // ptr 1135 -> U+00CA U+030C
+    assert(decode_with_encoding("\x88\xA3", EncodingId::Big5, out, true) && out == "\xC3\xAA\xCC\x84"); // ptr 1164 -> U+00EA U+0304
+    assert(decode_with_encoding("\x88\xA5", EncodingId::Big5, out, true) && out == "\xC3\xAA\xCC\x8C"); // ptr 1166 -> U+00EA U+030C
+    assert(decode_with_encoding("\x81!", EncodingId::Big5, out, false) && out == "\xEF\xBF\xBD!");
+
+    // 6. EUC-JP (JIS X 0208, 0x8E katakana, 0x8F JIS X 0212), Shift_JIS (EUDC), ISO-2022-JP, EUC-KR.
+    assert(decode_with_encoding("\xA4\xA2\x8E\xB1", EncodingId::EucJp, out, true) && out == "\xE3\x81\x82\xEF\xBD\xB1"); // あｱ
+    assert(decode_with_encoding("\xF0\x40", EncodingId::ShiftJis, out, true) && out == "\xEE\x80\x80"); // EUDC U+E000
+    assert(decode_with_encoding("\x1B(J\\\x7E\x1B(B", EncodingId::Iso2022Jp, out, true) && out == "\xC2\xA5\xE2\x80\xBE"); // ¥‾
+    // ISO-2022-JP back-to-back state switches with no output emit U+FFFD; incomplete ESC $ at EOF restores '$'.
+    assert(decode_with_encoding("\x1B(J\x1B(B", EncodingId::Iso2022Jp, out, false) && out == "\xEF\xBF\xBD");
+    assert(decode_with_encoding("\x1B$", EncodingId::Iso2022Jp, out, false) && out == "\xEF\xBF\xBD$");
+    assert(decode_with_encoding("\xB0\xA1", EncodingId::EucKr, out, true) && out == "\xEA\xB0\x80"); // 가
+
+    // 7. replacement and x-user-defined.
+    assert(decode_with_encoding("", EncodingId::Replacement, out, true) && out.empty());
+    assert(!decode_with_encoding("abc", EncodingId::Replacement, out, true));
+    assert(decode_with_encoding("abc", EncodingId::Replacement, out, false) && out == "\xEF\xBF\xBD");
+    assert(decode_with_encoding("A\x80\xFF", EncodingId::XUserDefined, out, true) && out == "A\xEF\x9E\x80\xEF\x9F\xBF");
+}
+
+TEST(html_meta_charset_prescan_and_xml_encname_multibyte_decoding) {
+    using namespace litebird;
+    // 1. HTML §13.2.3.2 prescan rules: comments, quoted `>`, pragma, UTF-16 -> UTF-8, x-user-defined -> windows-1252, 1024-byte cap.
+    assert(HtmlParser::prescan_meta_charset("<!-- <meta charset='koi8-r'> --><meta charset='windows-1251'>") == "windows-1251");
+    assert(HtmlParser::prescan_meta_charset("<!---> <meta charset=shift_jis>") == "Shift_JIS");
+    assert(HtmlParser::prescan_meta_charset("<head data-x=\"><meta charset='koi8-r'>\"><meta charset=\"euc-jp\">") == "EUC-JP");
+    assert(HtmlParser::prescan_meta_charset("<meta http-equiv='Content-Type' content='text/html; charset = \"big5\"'>") == "Big5");
+    assert(HtmlParser::prescan_meta_charset("<meta content='text/html; charset=koi8-u'>") == ""); // missing http-equiv
+    assert(HtmlParser::prescan_meta_charset("<meta charset='utf-16le'>") == "UTF-8");
+    assert(HtmlParser::prescan_meta_charset("<meta charset='x-user-defined'>") == "windows-1252");
+    assert(HtmlParser::prescan_meta_charset("<meta charset='csiso2022kr'>") == "replacement");
+    std::string beyond_1024(1030, ' ');
+    beyond_1024 += "<meta charset='koi8-r'>";
+    assert(HtmlParser::prescan_meta_charset(beyond_1024).empty());
+
+    // 2. HTML §13.2.3.1 precedence: BOM > transport > <meta> > fallback.
+    std::string resolved;
+    std::string body_bom = std::string("\xEF\xBB\xBF<meta charset='koi8-r'>\xC3\xA9", 28);
+    assert(HtmlParser::decode_bytes(body_bom, "windows-1251", "ISO-8859-2", &resolved) == "<meta charset='koi8-r'>\xC3\xA9");
+    assert(resolved == "UTF-8");
+
+    std::string body_meta = "<meta charset='koi8-r'>\xF0";
+    assert(HtmlParser::decode_bytes(body_meta, "windows-1252", "UTF-8", &resolved) == "<meta charset='koi8-r'>\xC3\xB0");
+    assert(resolved == "windows-1252");
+    assert(HtmlParser::decode_bytes(body_meta, "", "UTF-8", &resolved) == "<meta charset='koi8-r'>\xD0\x9F");
+    assert(resolved == "KOI8-R");
+
+    // 3. XML 1.0 [81] EncName validation + CJK XML fatal decoding.
+    std::string utf8, enc;
+    xml::XmlError err;
+    for (const char* bad_decl : {
+             "<?xml version='1.0' encoding=' utf-8'?><r/>",
+             "<?xml version='1.0' encoding='_UTF-8'?><r/>",
+             "<?xml version='1.0' encoding='8-UTF'?><r/>",
+             "<?xml version='1.0' encoding='utf:8'?><r/>",
+             "<?xml version='1.0' encoding=''?><r/>",
+         }) {
+        err = xml::XmlError{};
+        assert(!xml::decode_xml(bad_decl, utf8, enc, err));
+        assert(!err.unsupported_encoding);
+    }
+
+    // Valid Shift_JIS, EUC-JP, and ISO-2022-JP XML decode to identical canonical XML `<doc>あ</doc>`.
+    const std::string sjis_xml = "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><doc>\x82\xA0</doc>";
+    const std::string eucjp_xml = "<?xml version=\"1.0\" encoding=\"euc-jp\"?><doc>\xA4\xA2</doc>";
+    const std::string iso2022_xml = "<?xml version=\"1.0\" encoding=\"ISO-2022-JP\"?><doc>\x1B$B$\"\x1B(B</doc>";
+    std::string c1, c2, c3;
+    assert(xml::decode_xml(sjis_xml, utf8, enc, err) && enc == "Shift_JIS" && xml::xml_canonical_form(utf8, c1, err));
+    assert(xml::decode_xml(eucjp_xml, utf8, enc, err) && enc == "EUC-JP" && xml::xml_canonical_form(utf8, c2, err));
+    assert(xml::decode_xml(iso2022_xml, utf8, enc, err) && enc == "ISO-2022-JP" && xml::xml_canonical_form(utf8, c3, err));
+    assert(c1 == "<doc>\xE3\x81\x82</doc>" && c1 == c2 && c2 == c3);
+
+    // Truncated Shift_JIS lead byte in XML fails in fatal mode.
+    err = xml::XmlError{};
+    assert(!xml::decode_xml("<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><doc>\x82</doc>", utf8, enc, err));
+}
+
+TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase47_encoding_test";
+    fs::remove_all(tmp_dir);
+    fs::create_directories(tmp_dir);
+
+    auto write_bin = [&](const fs::path& p, std::string_view bytes) {
+        std::ofstream ofs(p, std::ios::binary);
+        ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+
+    // Unlabelled child HTML containing raw KOI8-R byte 0xF0 ('П' in KOI8-R, 'ð' in windows-1252).
+    write_bin(tmp_dir / "child_unlabelled.html", "<!DOCTYPE html><p id='t'>\xF0</p>");
+    // External Shift_JIS script (`window.sjisWord = "あ";` encoded in Shift_JIS).
+    write_bin(tmp_dir / "ext_sjis.js", "window.sjisWord = \"\x82\xA0\";\n");
+    // External CSS stylesheet with `@charset "koi8-r";` setting `--word` or valid selector/rule + Shift_JIS XHR doc.
+    write_bin(tmp_dir / "sheet_at_charset.css", "@charset \"koi8-r\";\n#styled { width: 137px; }\n");
+    write_bin(tmp_dir / "xhr_meta.html", "<!DOCTYPE html><meta charset=\"koi8-r\"><span id=\"w\">\xF0</span>");
+    write_bin(tmp_dir / "xhr_sjis.xml", "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><item>\x82\xA0</item>");
+
+    ResourceLoader::set_origin_root_for_testing("https://enc.example.test", tmp_dir.string());
+
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://enc.example.test/index.html");
+        doc->set_character_set("KOI8-R");
+        doc->set_viewport_size(400.0f, 300.0f);
+
+        JsInterpreter js(doc);
+        const std::string page_html = R"html(<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="sheet_at_charset.css">
+  <script src="ext_sjis.js" charset="shift_jis"></script>
+</head>
+<body>
+  <div id="styled" style="height:20px"></div>
+  <iframe id="same" src="child_unlabelled.html"></iframe>
+  <iframe id="sdoc" srcdoc="<!DOCTYPE html><meta charset='windows-1252'><p>ok</p>"></iframe>
+  <iframe id="dataf" src="data:text/html,<meta charset='windows-1252'><p>%F0</p>"></iframe>
+  <script>
+    const htmlParsed = new DOMParser().parseFromString("<meta charset='iso-8859-2'><p>x</p>", "text/html");
+    const xmlParsed = new DOMParser().parseFromString("<?xml version='1.0' encoding='Shift_JIS'?><x/>", "text/xml");
+    window.domParserCs = htmlParsed.characterSet + "," + xmlParsed.characterSet;
+
+    const xhrHtml = new XMLHttpRequest();
+    xhrHtml.open("GET", "xhr_meta.html", false);
+    xhrHtml.send();
+    window.xhrHtmlText = xhrHtml.responseText.includes("\u041F");
+
+    const xhrXml = new XMLHttpRequest();
+    xhrXml.open("GET", "xhr_sjis.xml", false);
+    xhrXml.send();
+    window.xhrXmlInfo = xhrXml.responseXML.characterSet + ":" + xhrXml.responseXML.documentElement.textContent;
+  </script>
+</body>
+</html>)html";
+
+        js.load_page(page_html, true);
+        js.notify_document_loaded();
+        EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+        assert(js.eval("document.characterSet === 'KOI8-R' && document.charset === 'KOI8-R' && document.inputEncoding === 'KOI8-R'").is_truthy());
+        assert(js.eval("window.sjisWord").to_string() == "\xE3\x81\x82");
+        assert(js.eval("window.domParserCs").to_string() == "UTF-8,UTF-8");
+        assert(js.eval("window.xhrHtmlText").is_truthy());
+        assert(js.eval("window.xhrXmlInfo").to_string() == "Shift_JIS:\xE3\x81\x82");
+
+        // Same-origin unlabelled iframe inherits parent KOI8-R -> 0xF0 decodes to U+041F ('П').
+        assert(js.eval("document.getElementById('same').contentDocument.characterSet").to_string() == "KOI8-R");
+        assert(js.eval("document.getElementById('same').contentDocument.getElementById('t').textContent.codePointAt(0)").to_number() == 0x041F);
+        // srcdoc iframe always stays UTF-8 despite internal <meta charset>.
+        assert(js.eval("document.getElementById('sdoc').contentDocument.characterSet").to_string() == "UTF-8");
+        assert(js.eval("document.getElementById('styled').offsetWidth").to_number() == 137);
+    }
+
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(tmp_dir);
+}
+
+TEST(customizable_select_scope_and_formatting_rules) {
+    using namespace litebird;
+
+    // 1. <select> is a default scope boundary: outer </font> cannot run
+    //    adoption agency across <select>.
+    const std::string font_select = tree_of("<font><select><option>a</option></font></select>");
+    assert(font_select ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <font>\n"
+        "|       <select>\n"
+        "|         <option>\n"
+        "|           \"a\"\n");
+
+    // 2. Outer </p> inside <select> cannot close <p> outside <select>.
+    const std::string p_select = tree_of("<!doctype html><p><select><div></p></select>x");
+    assert(contains(p_select,
+        "|     <p>\n"
+        "|       <select>\n"
+        "|         <div>\n"
+        "|           <p>\n"
+        "|       \"x\"\n"));
+
+    // 3. A nested <select> finds the enclosing <select> in scope across <b><option>
+    //    (and <button>), closes it, and reconstructs active formatting outside.
+    const std::string nested = tree_of("<select><b><option><select><option></b></select>X");
+    assert(nested ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <b>\n"
+        "|         <option>\n"
+        "|     <b>\n"
+        "|       <option>\n"
+        "|     \"X\"\n");
+
+    // 4. Reconstruct active formatting elements inside "in select" for
+    //    <option>, <optgroup>, <hr>, and character tokens.
+    assert(tree_of("<select><div><i></div><option>option") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <div>\n"
+        "|         <i>\n"
+        "|       <i>\n"
+        "|         <option>\n"
+        "|           \"option\"\n");
+
+    const std::string char_reconstruct = tree_of("<!doctype html><select><div><i></div>abc");
+    assert(contains(char_reconstruct,
+        "|       <i>\n"
+        "|         \"abc\"\n"));
+
+    const std::string optgroup_reconstruct = tree_of("<!doctype html><select><div><i></div><optgroup><option>x");
+    assert(contains(optgroup_reconstruct,
+        "|       <i>\n"
+        "|         <optgroup>\n"
+        "|           <option>\n"
+        "|             \"x\"\n"));
+
+    const std::string hr_reconstruct = tree_of("<!doctype html><select><div><i></div><hr>");
+    assert(contains(hr_reconstruct,
+        "|       <i>\n"
+        "|         <hr>\n"));
+
+    // 5. <keygen> and <textarea> remain inside <select> (document & fragment),
+    //    while <input> still closes <select> in documents and is ignored in fragments.
+    assert(tree_of("<select><keygen>") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <keygen>\n");
+
+    assert(fragment_tree_of("<keygen><option>", "select") ==
+        "| <keygen>\n"
+        "| <option>\n");
+
+    assert(fragment_tree_of("<textarea><option>", "select") ==
+        "| <textarea>\n"
+        "|   \"<option>\"\n");
+
+    assert(tree_of("<!doctype html><select><input>X") ==
+        "| <!DOCTYPE html>\n"
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|     <input>\n"
+        "|     \"X\"\n");
+
+    assert(fragment_tree_of("<input><option>", "select") ==
+        "| <option>\n");
+}
+
+TEST(cloning_for_selectedcontent_keeps_attribute_namespaces) {
+    using namespace litebird;
+
+    // `<selectedcontent>` clones the selected option's children (Phase 49,
+    // `clone_node_tree`). An attribute carries its own namespace since Phase
+    // 51 — there is no side table to copy — so a clone that copied only names
+    // and values would lose the namespaces of `xml:lang` and `xlink:href`.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><select><button><selectedcontent></selectedcontent></button>"
+                 "<option selected>x<svg xml:lang=\"en\"><use xlink:href=\"#i\"/></svg></option></select>");
+    js.notify_document_loaded();
+    assert(js.eval(
+        "var sc = document.querySelector('selectedcontent');"
+        "var svg = sc.querySelector('svg'), use = sc.querySelector('use');"
+        "[sc.childNodes.length, svg.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang'),"
+        " svg.getAttribute('xml:lang'), svg.namespaceURI, use.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),"
+        " use.getAttribute('xlink:href'), use.namespaceURI, use.ownerDocument === document].join('|')").to_string() ==
+        "2|en|en|http://www.w3.org/2000/svg|#i|#i|http://www.w3.org/2000/svg|true");
+
+    // The clone is a copy, not a move: the option keeps its own subtree, and
+    // the two do not share attributes.
+    assert(js.eval(
+        "var option = document.querySelector('option');"
+        "var original = option.querySelector('svg');"
+        "original.setAttributeNS('urn:x', 'p:a', '1');"
+        "[original !== sc.querySelector('svg'), sc.querySelector('svg').hasAttributeNS('urn:x', 'a'),"
+        " sc.querySelector('svg').getAttributeNames().join(',')].join('|')").to_string() ==
+        "true|false|xml:lang");
+}
+
+TEST(select_selectedcontent_cloning_and_edge_cases) {
+    using namespace litebird;
+
+    // 1. Unclosed trailing <option> clones into <selectedcontent> at EOF,
+    //    including adoption-agency-rearranged children.
+    assert(tree_of("<select><button><selectedcontent></button><option>X") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>x<i>i<b>ib</i>b") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"x\"\n"
+        "|           <i>\n"
+        "|             \"i\"\n"
+        "|             <b>\n"
+        "|               \"ib\"\n"
+        "|           <b>\n"
+        "|             \"b\"\n"
+        "|       <option>\n"
+        "|         \"x\"\n"
+        "|         <i>\n"
+        "|           \"i\"\n"
+        "|           <b>\n"
+        "|             \"ib\"\n"
+        "|         <b>\n"
+        "|           \"b\"\n");
+
+    // 2. First enabled <option> vs explicit `selected` attribute.
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"X\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         \"Y\"\n");
+
+    assert(tree_of("<select><button><selectedcontent></button><option>X<option selected>Y") ==
+        "| <html>\n"
+        "|   <head>\n"
+        "|   <body>\n"
+        "|     <select>\n"
+        "|       <button>\n"
+        "|         <selectedcontent>\n"
+        "|           \"Y\"\n"
+        "|       <option>\n"
+        "|         \"X\"\n"
+        "|       <option>\n"
+        "|         selected=\"\"\n"
+        "|         \"Y\"\n");
+
+    const std::string first_explicit =
+        tree_of("<!doctype html><select><button><selectedcontent></button><option selected>X<option>Y");
+    assert(contains(first_explicit, "<selectedcontent>\n|           \"X\"\n"));
+
+    // 3. Disabled <option> / <optgroup disabled>, <datalist>, and <template> isolation.
+    const std::string disabled_opt = tree_of(
+        "<!doctype html><select><button><selectedcontent></button><option disabled>X<option>Y");
+    assert(contains(disabled_opt, "<selectedcontent>\n|           \"Y\"\n"));
+
+    const std::string disabled_grp = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<optgroup disabled><option>A</option></optgroup><option>B</option></select>");
+    assert(contains(disabled_grp, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_datalist = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<datalist><option>D</option></datalist><option>B</option></select>");
+    assert(contains(with_datalist, "<selectedcontent>\n|           \"B\"\n"));
+
+    const std::string with_template = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<template><option>T</option></template><option>B</option></select>");
+    assert(contains(with_template, "<selectedcontent>\n|           \"B\"\n"));
+
+    // 4. multiple / size>1 / no options preserve fallback content.
+    const std::string fallback_multi = tree_of(
+        "<!doctype html><select multiple><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_multi, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    const std::string fallback_size2 = tree_of(
+        "<!doctype html><select size='2'><button><selectedcontent>fallback</selectedcontent></button>"
+        "<option>X</option></select>");
+    assert(contains(fallback_size2, "<selectedcontent>\n|           \"fallback\"\n"));
+
+    // 5. <selectedcontent> appearing after <option>, plus sibling and <template>/DOM-nested <select> isolation.
+    const std::string after_option = tree_of(
+        "<!doctype html><select><option>X</option><button><selectedcontent></selectedcontent></button></select>");
+    assert(contains(after_option, "<selectedcontent>\n|           \"X\"\n"));
+
+    auto sibling_doc = HtmlParser::parse(
+        "<!doctype html>"
+        "<select id='s1'><button><selectedcontent id='sc1'></button><option>First</option></select>"
+        "<select id='s2'><button><selectedcontent id='sc2'></button><option>Second</option></select>"
+        "<select id='s3'><button><selectedcontent id='sc3'></button>"
+        "<template><select><button><selectedcontent id='sct'></button><option>Tpl</option></select></template>"
+        "<option>Outer</option></select>");
+    auto sc1 = sibling_doc->get_element_by_id("sc1");
+    auto sc2 = sibling_doc->get_element_by_id("sc2");
+    auto sc3 = sibling_doc->get_element_by_id("sc3");
+    assert(sc1 && sc2 && sc3);
+    assert(sc1->text_content() == "First");
+    assert(sc2->text_content() == "Second");
+    assert(sc3->text_content() == "Outer");
+
+    // 6. <option> containing <template> clones its template contents cleanly,
+    //    and <script> mutation / DOM-nested <select> during parse re-evaluates accurately.
+    const std::string with_tpl_child = tree_of(
+        "<!doctype html><select><button><selectedcontent></button>"
+        "<option><template><span>T</span></template>Label</option></select>");
+    assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
+
+    {
+        auto doc = std::make_shared<Document>();
+        JsInterpreter js(doc);
+        js.load_page(
+            "<!doctype html><select><button><selectedcontent id='sc'></button>"
+            "<option id='o1'>First</option>"
+            "<div id='slot'></div>"
+            "<script>"
+            "document.getElementById('o1').setAttribute('selected', '');"
+            "var inner = document.createElement('select');"
+            "var btn = document.createElement('button');"
+            "var sc2 = document.createElement('selectedcontent');"
+            "sc2.id = 'sc2'; btn.appendChild(sc2); inner.appendChild(btn);"
+            "var opt = document.createElement('option'); opt.textContent = 'Inner'; inner.appendChild(opt);"
+            "document.getElementById('slot').appendChild(inner);"
+            "</script>"
+            "<option>Second</option></select>",
+            true);
+        assert(doc->get_element_by_id("sc")->text_content() == "First");
+        assert(doc->get_element_by_id("sc2")->text_content().empty());
+    }
+
+    // 7. Stress: 5,000 options + deeply nested markup inside <option> stay fast
+    //    and respect kMaxTreeDepth without overflowing the native stack.
+    std::string deep_select = "<!doctype html><select><button><selectedcontent id='sc'></button><option id='deep'>";
+    for (int i = 0; i < 600; ++i) deep_select += "<div>";
+    deep_select += "DeepPick";
+    for (int i = 0; i < 600; ++i) deep_select += "</div>";
+    deep_select += "</option>";
+    for (int i = 0; i < 5000; ++i) deep_select += "<option>Other</option>";
+    deep_select += "</select>";
+    auto deep_doc = HtmlParser::parse(deep_select);
+    auto deep_sc = deep_doc->get_element_by_id("sc");
+    assert(deep_sc && deep_sc->text_content() == "DeepPick");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -12008,6 +14656,7 @@ int main() {
     RUN_TEST(javascript_prototype_chain_and_arrays);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
+    RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
@@ -12052,6 +14701,7 @@ int main() {
     RUN_TEST(xml_dom_follows_the_standard_where_jsdom_does_not);
     RUN_TEST(selectors_know_namespaces);
     RUN_TEST(attribute_lists_keep_their_order_and_stay_fast);
+    RUN_TEST(attributes_are_kept_by_namespace_and_local_name);
     RUN_TEST(xml_http_request_answers_data_urls_and_nothing_else);
     RUN_TEST(computed_style_answers_for_every_property);
     RUN_TEST(ranges_follow_the_tree);
@@ -12099,9 +14749,11 @@ int main() {
     RUN_TEST(replacing_children_detaches_the_old_ones);
     RUN_TEST(inline_children_know_their_lines_in_a_paragraph_of_any_length);
     RUN_TEST(many_sized_floats_pack_without_escaping_the_box);
+    RUN_TEST(indexed_float_bands_preserve_mixed_clear_and_negative_margins);
     RUN_TEST(floats_of_no_height_cost_nothing_and_still_count);
     RUN_TEST(js_strings_are_shared_and_read_in_constant_time);
     RUN_TEST(js_string_owes_a_trailing_high_half_until_it_is_read);
+    RUN_TEST(js_string_completes_a_surrogate_pair_after_reading_without_copying);
     RUN_TEST(js_string_built_half_a_pair_at_a_time_costs_what_it_writes);
     RUN_TEST(js_string_matches_a_utf16_model_under_random_edits);
     RUN_TEST(js_property_maps_and_arrays_keep_their_order_through_front_edits);
@@ -12154,9 +14806,16 @@ int main() {
     RUN_TEST(truetype_font_rasterizer_and_utf8_proportional_metrics);
     RUN_TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e);
 
+    // Phase 37: RegExp VM, modern CSS cascade/units/MQ L4, inline-style CSSOM, HTML5 date/time inputs.
+    RUN_TEST(regexp_vm_handles_deep_nesting_and_long_inputs);
+    RUN_TEST(css_cascade_layers_supports_combinators_and_mq_l4);
+    RUN_TEST(inline_style_cssom_shorthands_and_aliases);
+    RUN_TEST(html5_date_time_inputs_validation_and_stepping);
+
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
+    RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
 
@@ -12170,6 +14829,34 @@ int main() {
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
     RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
+
+    // Phase 43: new.target, and what a constructor makes.
+    RUN_TEST(js_new_target_is_the_function_new_was_applied_to);
+    RUN_TEST(js_super_binds_this_to_what_the_parent_made);
+    RUN_TEST(js_new_target_and_returned_objects_are_collected);
+    RUN_TEST(js_compiled_custom_elements_are_constructed);
+    RUN_TEST(js_compiled_custom_elements_are_upgraded);
+    RUN_TEST(js_a_page_with_compiled_custom_elements_is_collected);
+
+    // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.
+    RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);
+    RUN_TEST(js_escaped_keywords_and_contextual_rules);
+    RUN_TEST(js_strict_async_generator_identifier_context_and_line_terminators);
+
+    // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK.
+    RUN_TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders);
+    RUN_TEST(html_meta_charset_prescan_and_xml_encname_multibyte_decoding);
+    RUN_TEST(document_characterset_xhr_iframe_inheritance_and_subresource_charset);
+
+    // Phase 49: customizable <select> content and <selectedcontent> cloning.
+    RUN_TEST(customizable_select_scope_and_formatting_rules);
+    RUN_TEST(select_selectedcontent_cloning_and_edge_cases);
+    RUN_TEST(cloning_for_selectedcontent_keeps_attribute_namespaces);
+
+    // Phase 50: CSS Color 4/5 color spaces, OKLCH gamut mapping, color-mix(), relative colors, light-dark().
+    RUN_TEST(css_color4_spaces_gamut_and_serialization);
+    RUN_TEST(css_color5_mix_relative_and_light_dark);
+    RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

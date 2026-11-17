@@ -473,11 +473,19 @@ public:
     }
 };
 
+struct LexicalDecl {
+    std::string name;
+    bool is_const{false};
+};
+
 class BlockStmt : public Stmt {
 public:
     std::vector<std::unique_ptr<Stmt>> statements;
     /// Function declarations directly inside this block, hoisted on entry.
     std::vector<const FunctionDeclStmt*> functions;
+    /// Lexical declarations (`let`, `const`, `class`) directly inside this
+    /// block, instantiated uninitialised in the scope's TDZ on entry.
+    std::vector<LexicalDecl> lexical_decls;
     /// True when the block declares let/const/class/function bindings and so
     /// needs an environment of its own.
     bool has_lexical{false};
@@ -609,6 +617,7 @@ public:
     std::unique_ptr<Expr> discriminant;
     std::vector<SwitchCase> cases;
     std::vector<const FunctionDeclStmt*> functions;
+    std::vector<LexicalDecl> lexical_decls;
     SwitchStmt(std::unique_ptr<Expr> expr, std::vector<SwitchCase> c)
         : Stmt(NodeKind::Switch), discriminant(std::move(expr)), cases(std::move(c)) {}
 };

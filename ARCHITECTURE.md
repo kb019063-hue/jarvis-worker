@@ -362,6 +362,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 
 ---
 
@@ -4682,13 +4683,14 @@ Found on the way, the same on `main`, and in the task table now, as rows of
 their own or added to the row they belong to. The first two have a failing
 case each in `construct.dat`.
 
-- **`this` can be used before `super(...)` has run.** In a derived
-  constructor `this.x = 1; super();` writes to the object `new` made, where
-  the language has a `ReferenceError`; an arrow function that reads `this`
-  and `super.m` behave the same. The engine has no binding that exists and
-  cannot be read yet: `let` and `const` have none either (`typeof z` before
-  `let z` is `undefined` here and a `ReferenceError` in Node, and a `let` in
-  a block does not hide an outer variable above its own line).
+- **`this` can be used before `super(...)` has run.** *(Fixed in Phase 59 /
+  finding 65; kept here for context from Phase 43.)* In a derived constructor
+  `this.x = 1; super();` writes to the object `new` made, where the language has
+  a `ReferenceError`; an arrow function that reads `this` and `super.m` behave
+  the same. The engine has no binding that exists and cannot be read yet: `let`
+  and `const` have none either (`typeof z` before `let z` is `undefined` here
+  and a `ReferenceError` in Node, and a `let` in a block does not hide an outer
+  variable above its own line).
 - **`eval` inside a function is global code.** It sees no local variable, no
   parameter, no `this`, no `new.target` and no `super`: `function f() { var
   local = 5; return eval('local + 1'); }` is a `ReferenceError`, and
@@ -5810,3 +5812,257 @@ full modern ECMAScript conformance across six pillars:
      `BuiltinsString.cpp` to delegate `String.prototype.{match, matchAll,
      replace, replaceAll, search, split}` through `GetMethod` on object
      arguments.
+
+## Phase 56 Architecture: Cross-Origin `Window` and `Location` Reflection
+
+### 1. What Phase 42 left open
+
+Phase 42 made a cross-origin `WindowProxy` refuse to read, write or invoke what
+it may not: `WindowExotic::get`/`set` throw `SecurityError` before consulting
+the child's own properties, the scope or the prototype chain, and the indexed
+child navigables and named children stay reachable (finding 48). Everything
+that *describes* the object was still the ordinary path, though:
+
+- `Object.getOwnPropertyNames(win)` listed the child's ordinary own properties
+  (its interface members are on the prototype, so it listed scripts' globals
+  and whatever had been remembered), not the spec's cross-origin list;
+  `Reflect.ownKeys` and `Object.keys` were the same.
+- `Object.getOwnPropertyDescriptor(win, 'length')` etc. describe what is
+  stored, not what a cross-origin caller may see.
+- `childWin.location` was a plain Iface-branded object: a parent could read
+  `loc.href`, `loc.pathname`, `loc.origin` — leaking the child's address —
+  and `loc.reload()` was callable. No origin check existed anywhere in its
+  member list.
+- `Object.defineProperty(win, ...)` and `Reflect.defineProperty` wrote straight
+  into the child's own property map.
+- `Object.getOwnPropertyNames(win).indexOf('gamma')` hinted at ids of the
+  child; `for…in`, spread, rest and `JSON.stringify` keys were all derived
+  from the ordinary own-keys walk.
+- `Object.getPrototypeOf(win)` returned the child realm's `Window.prototype`
+  (browsers answer `null`), so `for…in` enumerated the interface's
+  members and `win instanceof Object` walked into the child.
+
+### 2. One predicate, every reflection seam
+
+The whole phase hinges on a single new helper, declared in
+`include/litebird/js/DomBindings.hpp` and defined in `src/js/DomWindowBindings.cpp`:
+
+```cpp
+bool dom::cross_origin_own_keys(const JsValue& object, bool include_non_enumerable,
+                                std::vector<std::string>& out);
+```
+
+It returns `false` when `object` is not a `Window`/`Location` proxy whose
+`realm` is not same-effective-origin with the caller (`same_effective_origin`,
+unchanged), and `true` otherwise, filling `out` with HTML §7.2.3.10's
+`[[OwnPropertyKeys]]` result, ascending:
+
+1. the indices of the document-tree child navigables (`0`…`length-1`); then,
+   only when `include_non_enumerable` is asked (the engine maps that flag to
+   `own_keys(true)`, what `Reflect.ownKeys`, `getOwnPropertyNames` and
+   `for…in`'s seen-set use);
+2. the cross-origin table names in spec order — `window`, `self`, `location`,
+   `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`,
+   `parent`, `postMessage` for a window, or `href`, `replace` for a location;
+3. `then`.
+
+(The spec's three symbol keys — `%Symbol.toStringTag%`, `%Symbol.hasInstance%`,
+`%Symbol.isConcatSpreadable%` — are part of `CrossOriginOwnPropertyKeys`, but
+no symbol key is reported anywhere in this engine, so none is reported here
+either.) The named-property set of the child navigables deliberately does not
+appear: it drives named access, not `[[OwnPropertyKeys]]`.
+
+Every seam that reports keys or descriptors was switched to it:
+
+- `BuiltinsObject.cpp`: a local `reflected_own_keys` wraps all reflection
+  calls (`Object.keys`/`values`/`entries`/`assign`, `getOwnPropertyNames`,
+  `getOwnPropertyDescriptors`, `Reflect.ownKeys`), and `descriptor_for`
+  answers for a cross-origin object before anything else.
+- `descriptor_for` shapes the descriptors: indices are data descriptors
+  (`writable: false, enumerable: true, configurable: true`) holding the child
+  proxy; `then` is `{ value: undefined, enumerable: false, configurable: true }`;
+  an attribute entry of the table is an **accessor descriptor** whose `get` is
+  a native reading-sequence wrapper (HTML §7.2.1.3.4's crossOriginGet) and
+  whose `set` exists only where the spec has one (`location`, and the Location
+  `href` entry, whose descriptor has *no getter* cross-origin); a method
+  entry (`close`, `closed`…) — a data descriptor whose value is the child's
+  own function, configurable and non-enumerable. The engine has no
+  caller-realm anonymous built-in to put there; that substitution is the one
+  place the shape is not byte-identical to the spec.
+- `define_from_descriptor` refuses a cross-origin object with
+  `SecurityError` before reading the descriptor (HTML §7.2.3.6 / §7.2.4.6:
+  `[[DefineOwnProperty]]` always throws; `Reflect.defineProperty` does not
+  return `false`).
+- `Object.getPrototypeOf` / `Reflect.getPrototypeOf` answer `null`;
+  `Object.setPrototypeOf` / `Reflect.setPrototypeOf` refuse with `TypeError` /
+  `false`; `Object.freeze` / `Object.seal` / `Object.preventExtensions` throw
+  `TypeError` (`[[PreventExtensions]]` is `false`).
+- `js_instance_of` answers `false` for a cross-origin object (no prototype to
+  walk). `for…in` sees only the indices (the prototype walk is skipped), and
+  spread, `Object.assign`, object rest destructuring and `JSON.stringify`
+  gather only the indices.
+- `WindowExotic::has` reports only the indices, the table names, `then` and
+  the named child navigables; `WindowExotic::remove` and
+  `LocationExotic::remove` throw `SecurityError` (HTML §7.2.3.9 / §7.2.4.9).
+- The `location` attribute is in the cross-origin safelist now (it always
+  needed Get+Set and was missing from `is_cross_origin_safelisted`; the
+  `set` path already special-cased it).
+
+### 3. `Location` became an exotic
+
+`Location` is created as a branded ordinary object in `setup_window`; it is
+now handed a `LocationExotic` at the same place (cached on the child window,
+so one `Location` per window as before). Cross-origin it answers only what
+the standard exposes: `then` reads as `undefined`, `replace()` reaches the
+ordinary method (which navigates the child — a fragment move, as everywhere
+in the engine), `href` may be **written** but **read throws**
+(`SecurityError`, since the cross-origin `href` entry carries no getter),
+and `has()` answers only `href` / `replace` / `then`. Same-origin callers
+see none of this: every hook returns false and the ordinary accessors run
+unchanged.
+
+### 4. Still open, honestly
+
+- `childWin.location = url` and `loc.replace(url)` with a cross-document URL
+  are no-ops — `navigate()` is fragment-only by design (Phase 42); nothing
+  here changes that.
+- `%Symbol.toStringTag%`, `%Symbol.hasInstance%`, `%Symbol.isConcatSpreadable%`
+  are not reported by `Reflect.ownKeys`; no symbol key is, anywhere in the
+  engine.
+- `'x' in win` for a non-exposed `x` answers `false` instead of throwing
+  `SecurityError` — the `in` path cannot throw through this engine's
+  boolean `has()`.
+- Other boxes on the `WindowProxy`/`Location` security table —
+  `MessageChannel`/`MessagePort`, out-of-process site isolation, and a
+  cached `[[CrossOriginPropertyDescriptorMap]]` (the spec memoizes the
+  wrapper functions; ours create one per `getOwnPropertyDescriptor` call,
+  identity differs from the child's function) — remain open.
+- Named child navigables are reachable by name but do not appear in
+  `[[OwnPropertyKeys]]`, per the spec; `Location`'s `ancestorOrigins`,
+  `assign()`, `reload()` stay unexposed cross-origin.
+- `Object.prototype.hasOwnProperty.call(win, 'length')` answers correctly;
+  `w.hasOwnProperty('length')` itself throws, because reading the method
+  cross-origin is not exposed.
+
+### 5. Verification
+
+`tests/cross_origin_windows.cpp` (new, standalone binary built and run by
+`make test`) loads a parent at `https://app.example.test/index.html` with a
+cross-origin child at `https://other.example.test/child.html` (served from a
+temporary directory through `ResourceLoader::set_origin_root_for_testing`),
+the child with one named `srcdoc` grandchild. It asserts **80 checks**: the
+two-name `[[OwnPropertyKeys]]` lists, every descriptor shape, the
+`SecurityError` table for read/write/delete/define, the integrity-level and
+prototype refusal, `for…in`/spread/`Object.assign`/JSON containment, and the
+same-origin control (a `srcdoc` iframe, untouched). `tests/test_suite.cpp`
+is untouched (another open PR has it).
+
+Merged-tree verification (this branch, Release): `make test` — **198/198**
+suites + the 80 cross-origin checks; `js-conformance` **999/1014** (Everyday
+**90/90**); `dom-conformance` **669/669** (Everyday **68/68**);
+`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
+**7998/8009**, 11 fail as listed, 0 unlisted.
+
+---
+
+## Phase 59 Architecture: Temporal Dead Zone for Derived `this` and Lexical Bindings (Finding 65)
+
+### 1. Why TDZ checks were missing
+
+Prior to Phase 59, `JsEnvironment::Binding` tracked only `is_const`,
+`is_readonly`, and `is_lexical` (`include/litebird/js/JsInterpreter.hpp`).
+Entering a block, function, or script only hoisted `var` and `function`
+declarations; `let`, `const`, and `class` declarations added bindings only when
+execution reached their declaration statement. As a result:
+
+- Reading or `typeof`-inspecting a variable before its `let`/`const`/`class`
+  declaration either escaped to an outer binding or global object, or returned
+  `"undefined"` for undeclared identifiers.
+- Assigning to a lexical name before its declaration fell through to outer
+  scopes or created an implicit global in sloppy mode.
+- Derived constructors (`invoke_function`) defined `"this"` as initialized on
+  entry while separately setting `env->this_binding = ThisBinding::Unbound`, so
+  `this.x = 1`, `() => this`, `super.m`, `super[key]`, and `return this` before
+  `super(...)` read or mutated the pre-allocated object instead of throwing a
+  `ReferenceError`.
+
+### 2. Uninitialized binding state in `JsEnvironment`
+
+- `JsEnvironment::Binding` gains `bool is_initialized{true}` (occupying existing
+  trailing struct padding with no size growth), and `AssignResult` gains
+  `Uninitialized`.
+- `declare_lexical(name, is_const)` creates or resets an own binding to
+  `undefined` with `is_lexical = true` and `is_initialized = false`.
+- `initialize_lexical(name, value, is_const)` stores `value` and sets
+  `is_initialized = true`.
+- `mark_uninitialized(name)` sets `is_initialized = false` on an existing own
+  binding (used for derived constructor `"this"` on entry).
+- `try_assign(name, value)` checks `!b->is_initialized` **before** `b->is_const`
+  so assigning to a `const` (or `let`) in its TDZ throws `ReferenceError` while
+  re-assigning an initialized `const` still throws `TypeError`.
+
+### 3. Parser & evaluator TDZ scopes
+
+- **Parser (`include/litebird/js/JsParser.hpp`, `src/js/JsParser.cpp`):**
+  `BlockStmt` (also used for `Program` and function bodies) and `SwitchStmt`
+  collect `std::vector<LexicalDecl> lexical_decls` for every `let`, `const`,
+  and `class` declaration directly inside them.
+- **Evaluator (`src/js/JsEval.cpp`):**
+  - `lookup_identifier` throws `ReferenceError` when `!binding->is_initialized`
+    (special-casing `"this"` to match derived-constructor error wording);
+    `assign_identifier` throws via `AssignResult::Uninitialized`; `eval_unary`
+    for `typeof` evaluates identifiers through `lookup_identifier` when `env->lookup(name)` finds a binding so `typeof z` in TDZ throws `ReferenceError`
+    while `typeof neverDeclared` stays `"undefined"`.
+  - Pre-declaration (`declare_lexicals`) runs on entry to `run_program`,
+    `invoke_function` (for both body lexicals and non-simple parameter targets
+    in `bind_parameters`, with derived `"this"` marked uninitialized on entry and
+    re-initialized in `eval_super_call` once the parent returns), `exec_block`,
+    `execute` (`BlockStmt`), `exec_switch` (discriminant evaluated outside `scope`;
+    `case` tests and bodies inside), `exec_for` (lexical `init` declarations),
+    `exec_for_each` (`head_env` for iterable evaluation + per-iteration
+    `iter_env`), and `exec_try` (destructured `catch` parameter names before
+    binding, then handler block lexicals).
+  - `copy_scope` preserves `is_initialized` and `is_lexical` flags across
+    per-iteration `for (let ...)` scopes, and `exec_for` / `exec_for_each` keep
+    newly allocated lexical loop environments rooted in `EnvScope`.
+  - `define_class` installs an uninitialized `const` self-binding inside
+    `class_env` while evaluating `super_expr` and computed property keys, then
+    initializes `cls->name` before running static field initializers and
+    `static {}` blocks; `ClassDecl` initializes the outer mutable lexical binding
+    via `initialize_lexical(..., /*is_const=*/false)`.
+  - `SuperMember` evaluation (member read, `eval_call`, and `resolve_reference`
+    for writes) calls `lookup_identifier("this", env)` before evaluating a
+    computed property key so `super[sideEffect()]` before `super()` throws
+    without running `sideEffect()`.
+
+### 4. Verification & remaining boundaries
+
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan
+  (`build-asan/test_suite`), including three new Phase 59 suites
+  (`js_derived_this_temporal_dead_zone`,
+  `js_lexical_temporal_dead_zone_blocks_and_classes`,
+  `js_temporal_dead_zone_in_control_flow_and_patterns`).
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan;
+  `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**),
+  verified **1017/1017** under Node.js (`--reference "node -e"`). Only `eval`
+  inside a function remains open in `construct.dat`.
+- `make test262` (against pre-change `main` binary): **12,359 / 15,686**
+  default 21 dirs (**+43 pass**, **0 regressions**); **8,195 / 10,622** across
+  13 TDZ/scope dirs (`let`, `const`, `class`, `super`, `this`, `switch`, `for`,
+  `for-of`, `for-in`, `block-scope`, `typeof`, `try`; **+49 pass**, **0
+  regressions**, **0** failures remaining in `language/block-scope/` and **0**
+  TDZ failures in `language/statements/{let,const}/`).
+- Release & ASan+UBSan regression checks: `dom-conformance` **669/669**,
+  `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt`
+  **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`
+  and `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) &
+  `fuzz_pipeline` (400) **0** findings, targeted + 150 random `asan-deep` runs
+  **0** failures.
+- **Still open / boundaries:**
+  - Across separate `<script>` elements, an earlier script referencing a `let`
+    declared in a later `<script>` sees `"x is not defined"` (still
+    `ReferenceError`), and redeclaring the same lexical name in a second
+    `<script>` overwrites `m_global_env` rather than throwing a `SyntaxError`.
+  - Direct `eval` inside a function (separate `AGENTS.md` row) and `var`
+    inside a block shadowing an outer block `let`/`const` early SyntaxError
+    remain open.

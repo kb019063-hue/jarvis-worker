@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **999 / 1014 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1003 / 1017 (98.6%)**; nine of the 14 that fail were recorded in Phases 34 and 43 for what classes and `eval` still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7998 / 8009 subtests** across 103 files; the 11 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 198 suites, all passing | `make test` |
+| Engine unit tests | 201 suites, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
@@ -54,7 +54,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 198 engine suites
+make test            # 201 engine suites
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
@@ -74,13 +74,13 @@ make bench-surrogates # six surrogate-pair scripts (including reads and substrin
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
-make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
+make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 71 differ
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 989 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,017 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -94,20 +94,22 @@ Read the number for what it is:
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
   27,872 pass (58.1%; 26,012 / 54.2% before Phase 44); of the 15,686
-  on functions, classes and objects, 12,316 pass (78.5%; 10,835 / 69.1%
-  before Phase 44). `make test262` runs the latter. It is used for what a
-  change moved between two builds, not as a score (Phase 34: 108 more pass
-  and none fewer in those directories; Phase 44: 1,440 more pass and none
-  fewer in those 21 directories, plus 374/374 = 100.0% in
-  `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: 43 more in the whole suite and none fewer).
-- **Five of the 15 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
+  on functions, classes and objects, 12,359 pass (78.8%; 12,316 / 78.5%
+  before Phase 59, 10,835 / 69.1% before Phase 44). `make test262` runs the
+  latter. It is used for what a change moved between two builds, not as a
+  score (Phase 34: 108 more pass and none fewer in those directories; Phase
+  44: 1,440 more pass and none fewer in those 21 directories, plus 374/374 =
+  100.0% in `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
+  Phase 43: 43 more in the whole suite and none fewer; Phase 59: 43 more in
+  those 21 directories and 49 more across 13 TDZ/scope directories, none
+  fewer).
+- **Five of the 14 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Two are in `construct.dat`:
-  `this` used before `super()` has run, and `eval` inside a function, which
-  sees nothing of the function (Phase 43, section 8).
+  things; ARCHITECTURE.md, Phase 34, section 9). One is in `construct.dat`:
+  `eval` inside a function, which sees nothing of the function (Phase 43,
+  section 8; `this` before `super()` was fixed in Phase 59).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -120,9 +122,9 @@ Four other checks sit behind the number. A differential run evaluates 67,545
 generated expressions in Litebird and in Node and compares the results: 99
 (0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`.
 `make diff-strings` does the same for strings (36 subjects through every
-string method and 51 regular expressions): 95 of 50,580 results differ, all
+string method and 51 regular expressions): 71 of 50,580 results differ, all
 of them Unicode data the engine does not have (collation, normalization, some
-case mappings, part of `\p{L}`).
+case mappings; Phase 55 eliminated all 24 `\p{L}` RegExp diffs).
 63 of the corpus cases (`deep-nesting.dat`) hand the engine input nested
 200,000 deep, which used to end the process and must now end in an error the
 script can catch. And 34 (`long-strings.dat`) loop over, build or take apart
@@ -136,11 +138,11 @@ prototype chain: the parent of a class, the prototype of an object,
 TypeScript compile classes for older browsers, which stopped at their first
 class before. 68 of the 76 pass; the engine before Phase 34 passes 7.
 
-49 cases (`construct.dat`, Phase 43) are about what a constructor makes:
-`new.target` in a parent's constructor and under `Reflect.construct`, an
-object a parent's constructor returns, when `this` is bound, and three more
-programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
-engine before Phase 43 passes 13.
+50 cases (`construct.dat`, Phase 43 / Phase 59) are about what a constructor
+makes: `new.target` in a parent's constructor and under `Reflect.construct`, an
+object a parent's constructor returns, when `this` is bound (including TDZ
+checks before `super()`), and three more programs as Babel and TypeScript
+compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -697,7 +699,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 198 engine test suites
+# Run the 201 engine test suites
 make test
 ```
 
@@ -864,6 +866,35 @@ wider, which costs about 5% across the string benchmarks that were already
 there. Reading a half-owed string before completing the
 pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
+
+
+### Temporal dead zone for derived `this` and lexical bindings (Phase 59)
+
+Derived constructor `this` and `let`/`const`/`class` bindings previously lacked
+an uninitialized state: reading or writing `this` before `super()` touched the
+pre-allocated object instead of throwing a `ReferenceError`, `typeof z` before
+`let z` returned `"undefined"`, a block `let` failed to shadow outer bindings
+above its declaration line, and `c = 2` before `const c` created an implicit
+global.
+
+Phase 59 (finding 65) adds `JsEnvironment::Binding::is_initialized` and
+`AssignResult::Uninitialized`, marks derived constructor `this` uninitialized on
+entry until `super(...)` completes, and pre-declares lexical bindings in the
+parser/evaluator across scripts, functions, async/generator bodies, blocks,
+`switch` statements, `for`/`for-of`/`for-in` heads, `try/catch`, class
+`extends`/computed keys, and non-simple parameter defaults.
+
+```bash
+./build/litebird --run-js 'class Base {} class Derived extends Base { constructor() { try { this.x = 1; } catch (e) { console.log(e.name); } super(); } } new Derived();
+try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
+# ReferenceError
+# ReferenceError
+make test            # 201 / 201 unit suites
+make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
+make test262         # 12,359 / 15,686 (+43, 0 regressions)
+```
+
+Details are in `ARCHITECTURE.md`, Phase 59, and `AUDIT.md`, finding 65.
 
 
 ### UTF-16 storage for non-ASCII strings (Phase 53)
@@ -1146,3 +1177,22 @@ make fuzz-media     # 2,400 mutation cases across four formats
 The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
 a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
 60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
+
+### Cross-origin `Window` and `Location` reflection (Phase 56)
+
+A script embedded in one origin could already not read a cross-origin frame
+(`SecurityError` on non-safelisted names, since Phase 42), but everything that
+*describes* the frame's window answered the ordinary way: `Object.keys`,
+`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
+described ordinary storage, `Object.defineProperty` wrote into it,
+`Object.freeze` flipped its cell, and `location` handed over the child's
+address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
+the cross-origin table of the HTML Standard instead: the window reports
+exactly its child-frame indices and the exposed names (`window`, `self`,
+`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
+`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
+`href` (writable, not readable cross-origin) and `replace()`, both refuse
+define/delete/integrity changes with `SecurityError`/`TypeError`, and
+`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
+and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
+finding 62.

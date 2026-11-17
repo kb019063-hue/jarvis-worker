@@ -100,6 +100,7 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
+CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
@@ -113,7 +114,7 @@ XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 7998
+WPT_FLOOR ?= 9538
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -125,10 +126,10 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. With Phases 37, 43, 44 and 45 together
-# 973 of 989 pass under ASan and 974 in Release, which is what the CI floor
-# requires. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 997
+# case that the normal build passes. With Phases 37, 43, 44, 45, 55, and 59
+# together, 1002 of 1017 pass under ASan and 1003 in Release (which is what
+# the CI floor requires). Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 1001
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -174,6 +175,10 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
+$(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/cross_origin_windows.cpp -o $@
+
 $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
@@ -182,8 +187,9 @@ $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
+	@./$(CROSS_ORIGIN_TARGET)
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
@@ -240,11 +246,12 @@ url-conformance: $(TARGET)
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
 
-## The web-platform-tests in tests/wpt (dom/nodes and domparsing), the tests
-## browsers are tested with, run with their own testharness.js. Needs nothing
-## but the binary. Fails when fewer than the floor pass, when a subtest fails
-## that tests/wpt/expected-failures.txt does not list, when a listed one
-## passes, and when a file differs from tests/wpt/MANIFEST.txt.
+## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
+## Flexbox parsing suites), the tests browsers are tested with, run with their
+## own testharness.js. Needs nothing but the binary. Fails when fewer than
+## the floor pass, when a subtest fails that tests/wpt/expected-failures.txt
+## does not list, when a listed one passes, and when a file differs from
+## tests/wpt/MANIFEST.txt.
 wpt: $(TARGET)
 	@$(WPT) --min-pass $(WPT_FLOOR)
 

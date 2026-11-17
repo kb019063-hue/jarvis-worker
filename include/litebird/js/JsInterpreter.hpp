@@ -37,9 +37,13 @@ public:
         /// a binding is visible to every script and is not a property of the
         /// global object: `let x = 1; window.x` is undefined.
         bool is_lexical{false};
+        /// False while a lexical binding (`let`, `const`, `class`, or a
+        /// non-simple parameter) or a derived constructor's `this` is in its
+        /// Temporal Dead Zone before initialisation.
+        bool is_initialized{true};
     };
 
-    enum class AssignResult { Ok, NotFound, Const, ReadOnly };
+    enum class AssignResult { Ok, NotFound, Const, ReadOnly, Uninitialized };
 
     /// True once any scope other than a global one has declared a binding
     /// named `undefined`. Until then every use of that name means the global,
@@ -92,14 +96,50 @@ public:
             existing->value = std::move(value);
             existing->is_const = false;
             existing->is_lexical = false;
+            existing->is_initialized = true;
             return;
         }
-        add(name, std::move(value), false);
+        add(name, std::move(value), false, false, true);
     }
 
     /// See Binding::is_lexical.
     void mark_lexical(const std::string& name) {
         if (Binding* binding = find_own(name)) binding->is_lexical = true;
+    }
+
+    /// Creates an uninitialised lexical binding in this scope's TDZ.
+    void declare_lexical(const std::string& name, bool is_const) {
+        Binding* existing = find_own(name);
+        if (existing) {
+            if (existing->is_readonly) return;
+            existing->value = JsValue::make_undefined();
+            existing->is_const = is_const;
+            existing->is_lexical = true;
+            existing->is_initialized = false;
+            return;
+        }
+        add(name, JsValue::make_undefined(), is_const, true, false);
+    }
+
+    /// Initialises a lexical binding (declared earlier via declare_lexical, or
+    /// created on demand in this scope).
+    void initialize_lexical(const std::string& name, JsValue value, bool is_const) {
+        Binding* existing = find_own(name);
+        if (existing) {
+            if (existing->is_readonly) return;
+            existing->value = std::move(value);
+            existing->is_const = is_const;
+            existing->is_lexical = true;
+            existing->is_initialized = true;
+            return;
+        }
+        add(name, std::move(value), is_const, true, true);
+    }
+
+    /// Marks an existing own binding (such as a derived constructor's `this`)
+    /// uninitialised until `super(...)` binds it.
+    void mark_uninitialized(const std::string& name) {
+        if (Binding* binding = find_own(name)) binding->is_initialized = false;
     }
 
     void define_const(const std::string& name, JsValue value) {
@@ -108,9 +148,10 @@ public:
             if (existing->is_readonly) return;
             existing->value = std::move(value);
             existing->is_const = true;
+            existing->is_initialized = true;
             return;
         }
-        add(name, std::move(value), true);
+        add(name, std::move(value), true, false, true);
     }
 
     /// Declares a non-writable global such as `undefined`.
@@ -146,6 +187,7 @@ public:
     AssignResult try_assign(const std::string& name, const JsValue& value) {
         Binding* b = lookup(name);
         if (!b) return AssignResult::NotFound;
+        if (!b->is_initialized) return AssignResult::Uninitialized;
         if (b->is_const) return AssignResult::Const;
         if (b->is_readonly) return AssignResult::ReadOnly;
         b->value = value;
@@ -232,11 +274,11 @@ public:
 private:
     static constexpr size_t kIndexThreshold = 16;
 
-    void add(const std::string& name, JsValue value, bool is_const) {
+    void add(const std::string& name, JsValue value, bool is_const, bool is_lexical, bool is_initialized) {
         if (m_parent && name.size() == 9 && name == "undefined") {
             s_undefined_shadowed.store(true, std::memory_order_relaxed);
         }
-        m_bindings.push_back(Binding{name, std::move(value), is_const, false, false});
+        m_bindings.push_back(Binding{name, std::move(value), is_const, false, is_lexical, is_initialized});
         if (m_bindings.size() == kIndexThreshold + 1) {
             for (size_t i = 0; i < m_bindings.size(); ++i) m_index[m_bindings[i].name] = static_cast<uint32_t>(i);
         } else if (m_bindings.size() > kIndexThreshold + 1) {

@@ -39,15 +39,30 @@ enum class ObjectClass : uint8_t {
 /// Every hook gets the cell it is attached to. The default is to add nothing.
 class JsExotic {
 public:
+    /// What a write to an object with a host-defined property did. The
+    /// distinction matters to strict-mode assignments: `[[Set]]` answers with
+    /// false when a property cannot be written, and the assignment throws a
+    /// TypeError, while code that does not throw only wants to know the write
+    /// was dealt with.
+    enum class SetResult {
+        /// Not the host's property: the ordinary rules of the engine apply.
+        NotHandled,
+        /// Dealt with (stored somewhere else, or thrown from).
+        Handled,
+        /// Refused: this object does not accept the write (a getter-only
+        /// indexed property of a collection, say). A strict-mode assignment
+        /// throws a TypeError, as [[Set]]'s false requires.
+        Refused,
+    };
+
     virtual ~JsExotic() = default;
     /// Asked before the object's own properties. True when the object computes
     /// a property called `name`; `out` is its value.
     virtual bool get(JsObject* self, const std::string& name, JsValue& out) { (void)self; (void)name; (void)out; return false; }
     /// Asked last, when neither the object nor its prototypes have `name`.
     virtual bool get_last(JsObject* self, const std::string& name, JsValue& out) { (void)self; (void)name; (void)out; return false; }
-    /// Offered every write first. True when the write was dealt with (stored
-    /// somewhere else, or refused).
-    virtual bool set(JsObject* self, const std::string& name, const JsValue& value) { (void)self; (void)name; (void)value; return false; }
+    /// Offered every write first (see SetResult).
+    virtual SetResult set(JsObject* self, const std::string& name, const JsValue& value) { (void)self; (void)name; (void)value; return SetResult::NotHandled; }
     /// True when `name` is a computed property: `name in obj`, hasOwnProperty.
     virtual bool has(JsObject* self, const std::string& name) { (void)self; (void)name; return false; }
     /// `delete obj[name]`. True when dealt with; `result` is what delete yields.

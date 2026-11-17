@@ -1209,7 +1209,9 @@ JsValue JsValue::get_property(const std::string& name) const {
     return JsValue::make_undefined();
 }
 
-void JsValue::set_property(const std::string& name, JsValue val) {
+// Returns false when the write was refused — nothing was stored, and a
+// strict-mode assignment must throw a TypeError, as [[Set]]'s false requires.
+bool JsValue::set_property(const std::string& name, JsValue val) {
     if (canvas_context()) {
         if (name == "fillStyle") {
             if (val.canvas_gradient_value()) {
@@ -1233,43 +1235,49 @@ void JsValue::set_property(const std::string& name, JsValue val) {
     }
 
     if (type == JsType::String || type == JsType::Number || type == JsType::Boolean || type == JsType::Symbol) {
-        return;     // assigning to a primitive's property has no effect
+        return false;     // assigning to a primitive's property is refused
     }
 
     // `fn.__proto__ = x` needs the function to have a cell, whatever kind of
     // function it is: a native one would otherwise store a property by that name.
     const bool sets_prototype = name == "__proto__";
     if (JsObject* obj = (sets_prototype && is_function()) ? function_cell() : property_cell(true)) {
-        if (obj->exotic && obj->exotic->set(obj, name, val)) return;
-        if (obj->assign_hook && (*obj->assign_hook)(name, val)) return;
+        if (obj->exotic) {
+            switch (obj->exotic->set(obj, name, val)) {
+                case JsExotic::SetResult::Handled: return true;
+                case JsExotic::SetResult::Refused: return false;
+                case JsExotic::SetResult::NotHandled: break;
+            }
+        }
+        if (obj->assign_hook && (*obj->assign_hook)(name, val)) return true;
         if (sets_prototype) {
             // Anything but an object or null is ignored, as the setter on
             // Object.prototype does. A change that is refused throws.
-            if (!val.is_object_like() && val.type != JsType::Null) return;
+            if (!val.is_object_like() && val.type != JsType::Null) return false;
             JsObject* target = val.type == JsType::Null ? nullptr : val.as_prototype();
             if (!js_set_prototype(obj, target)) {
                 js_throw_error(JsErrorKind::TypeError,
                                obj->extensible ? "Cyclic __proto__ value" : "Object is not extensible");
             }
-            return;
+            return true;
         }
-        if (is_wrapped_string_index(obj, name)) return;      // the characters are read-only
+        if (is_wrapped_string_index(obj, name)) return false;      // the characters are read-only
 
         if (obj->is_array) {
             if (name == "length") {
-                if (obj->frozen) return;
+                if (obj->frozen) return false;
                 double requested = js_to_number(val);
                 if (!(requested >= 0) || requested != std::floor(requested) || requested > 4294967295.0) {
                     js_throw_range_error("Invalid array length");
                 }
                 obj->array_elements.resize(static_cast<size_t>(requested), JsValue::make_undefined());
-                return;
+                return true;
             }
             size_t index = 0;
             if (parse_array_index(name, index)) {
-                if (obj->frozen) return;
+                if (obj->frozen) return false;
                 if (index >= obj->array_elements.size()) {
-                    if (!obj->extensible) return;
+                    if (!obj->extensible) return false;
                     // A stray huge index would otherwise allocate gigabytes.
                     if (index > obj->array_elements.size() + (1u << 24)) {
                         js_throw_range_error("Array index too far past the end of the array");
@@ -1277,19 +1285,19 @@ void JsValue::set_property(const std::string& name, JsValue val) {
                     obj->array_elements.resize(index + 1, JsValue::make_undefined());
                 }
                 obj->array_elements[index] = std::move(val);
-                return;
+                return true;
             }
         }
 
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) {
-                if (it->setter && it->setter->is_function()) it->setter->call_with_this(*this, {val});
-                return;
+                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+                return false;
             }
-            if (obj->frozen || !(it->flags & PropertyMap::Writable)) return;
+            if (obj->frozen || !(it->flags & PropertyMap::Writable)) return false;
             it->second = std::move(val);
-            return;
+            return true;
         }
 
         // `F.prototype = {...}` before anything has read F.prototype. The
@@ -1298,11 +1306,11 @@ void JsValue::set_property(const std::string& name, JsValue val) {
         // assignment must not make an enumerable, deletable one: a loop that
         // copies the static members of F would copy `prototype` with them.
         if (name == "prototype" && function_has_implicit_property(*this, name)) {
-            if (obj->frozen) return;
+            if (obj->frozen) return false;
             auto& slot = obj->properties.entry(name);
             slot.second = std::move(val);
             slot.flags = PropertyMap::Writable;
-            return;
+            return true;
         }
 
         // A setter inherited from a prototype (a class `set x(v)`) runs instead
@@ -1313,16 +1321,16 @@ void JsValue::set_property(const std::string& name, JsValue val) {
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
-                if (pit->setter && pit->setter->is_function()) pit->setter->call_with_this(*this, {val});
-                return;
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
+                return false;
             }
             break;
         }
 
-        if (!obj->extensible || obj->frozen) return;
+        if (!obj->extensible || obj->frozen) return false;
         if (is_legacy_getter_key(name)) obj->has_legacy_getters = true;
         obj->properties[name] = std::move(val);
-        return;
+        return true;
     }
 
     PropertyMap* map = loose_properties(true);
@@ -1333,14 +1341,15 @@ void JsValue::set_property(const std::string& name, JsValue val) {
     auto it = map->find(name);
     if (it != map->end()) {
         if (it->flags & PropertyMap::Accessor) {
-            if (it->setter && it->setter->is_function()) it->setter->call_with_this(*this, {val});
-            return;
+            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+            return false;
         }
-        if (!(it->flags & PropertyMap::Writable)) return;
+        if (!(it->flags & PropertyMap::Writable)) return false;
         it->second = std::move(val);
-        return;
+        return true;
     }
     (*map)[name] = std::move(val);
+    return true;
 }
 
 JsValue JsValue::make_array(const std::vector<JsValue>& elements) {

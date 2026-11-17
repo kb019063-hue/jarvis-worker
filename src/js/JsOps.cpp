@@ -925,7 +925,13 @@ bool js_symbol_from_key(const std::string& key, JsValue& out) {
 
 namespace {
 
-const std::string kIteratorName = kIteratorKey;
+/// The property key of `Symbol.iterator`, as the std::string that property
+/// lookups take. Made on first use, not when the program is loaded, so that
+/// it is there whatever asks first.
+const std::string& iterator_name() {
+    static const std::string name = kIteratorKey;
+    return name;
+}
 
 /// An array's elements, in order. Read by index each time round, because
 /// `visit` runs script and the array may grow or shrink under it; the array
@@ -1008,15 +1014,11 @@ void iterate_with(const JsValue& iterable, const JsValue& method, const std::fun
     }
 }
 
-} // namespace
-
-namespace {
-
 /// Whether `proto` still holds, as a plain data property, the method the
 /// realm installed under @@iterator.
 bool holds_installed_method(const JsObject* proto, const JsValue& installed) {
     if (proto->exotic || proto->has_legacy_getters || !installed.is_function()) return false;
-    auto it = proto->properties.find(kIteratorName);
+    auto it = proto->properties.find(iterator_name());
     return it != proto->properties.end() && !(it->flags & PropertyMap::Accessor) &&
            it->second.is_function() && it->second.identity() == installed.identity();
 }
@@ -1038,7 +1040,7 @@ bool method_is_installed(const JsValue& value, const JsValue& method) {
 } // namespace
 
 bool js_iterator_method(const JsValue& value, JsValue& method) {
-    method = value.is_nullish() ? JsValue::make_undefined() : value.get_property(kIteratorName);
+    method = value.is_nullish() ? JsValue::make_undefined() : value.get_property(iterator_name());
     if (method.is_nullish()) return false;
     if (!method.is_function()) throw_not_iterable(value);
     return true;
@@ -1063,7 +1065,7 @@ bool js_iterates_as_builtin(const JsValue& value) {
     // array of another realm, one whose prototype was set).
     const JsObject* cell = value.object_val.get();
     if (cell->exotic || cell->has_legacy_getters || cell->prototype != realm.array_proto) return false;
-    if (!cell->properties.empty() && cell->properties.find(kIteratorName) != cell->properties.end()) return false;
+    if (!cell->properties.empty() && cell->properties.find(iterator_name()) != cell->properties.end()) return false;
     return holds_installed_method(realm.array_proto, realm.array_iterator_method);
 }
 

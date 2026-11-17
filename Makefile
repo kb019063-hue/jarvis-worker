@@ -56,6 +56,7 @@ SRCS = src/common/Color.cpp \
        src/js/BuiltinsObject.cpp \
        src/js/BuiltinsArray.cpp \
        src/js/BuiltinsString.cpp \
+       src/js/StringUnicodeTables.cpp \
        src/js/BuiltinsNumber.cpp \
        src/js/BuiltinsCollections.cpp \
        src/js/BuiltinsJson.cpp \
@@ -126,10 +127,12 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. With Phases 37, 43, 44, 45, 55, and 59
-# together, 1002 of 1017 pass under ASan and 1003 in Release (which is what
-# the CI floor requires). Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 1001
+# case that the normal build passes. With Phases 37, 43, 44, 45, 55, 59, and 60
+# together, 1019 of 1034 pass under ASan and 1020 in Release (which is what
+# the CI floor requires). Leave one case of runner headroom. Phase 63 added
+# iteration.dat: 65 of its 78 cases pass, under ASan as in Release, so 1084
+# of 1112 pass under ASan and 1085 in Release.
+JS_ASAN_FLOOR ?= 1083
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -139,11 +142,11 @@ DOM_ASAN_FLOOR ?= 669
 STRING_STRESS_SRCS = src/js/JsString.cpp tests/js_string_stress_main.cpp
 STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-pointer
 
-# How many results of the string grid may differ from Node's. Every one of them
-# today is Unicode data the engine does not have (collation, normalization,
-# some case mappings); lower this as that data arrives. (Phase 55 removed all
-# 24 \p{L} RegExp mismatches, dropping this ceiling from 95 to 71.)
-STRING_DIFF_CEILING ?= 71
+# How many results of the string grid may differ from Node's. Phase 55 removed
+# the 24 \p{L} RegExp mismatches (95 -> 71); Phase 60 landed Unicode 17.0
+# normalization, full/locale case mapping, and CLDR 48 root collation, bringing
+# all 50,580 results to 0 diffs against Node.js.
+STRING_DIFF_CEILING ?= 0
 
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:
 # how many `make deep` runs, and how many the sanitizer build runs. The
@@ -152,7 +155,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -276,6 +279,12 @@ diff-strings: $(TARGET)
 verify-regexp: $(TARGET)
 	@python3 tools/conformance/verify_regexp.py --binary $(TARGET)
 
+## Exhaustive all-1,114,112 code-point sweep + curated/seeded differential fuzz
+## verification of Unicode 17.0 String normalize(), full/locale case mapping,
+## and CLDR 48 root UCA localeCompare() against Node.js.
+verify-string-unicode: $(TARGET)
+	@python3 tools/conformance/verify_string_unicode.py --binary $(TARGET)
+
 ## Random pages, a few dozen misnested tags each, parsed by Litebird and by
 ## parse5 (an independent HTML parser), trees compared: 1,500 pages of each of
 ## four kinds (plain; with <br/>, type=hidden, CDATA, U+0000 and the like; those
@@ -332,6 +341,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_string_unicode.py --binary build-asan/litebird --fuzz 400 --skip-node --skip-full-sweep
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)

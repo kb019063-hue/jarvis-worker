@@ -415,8 +415,8 @@ bench-surrogates: $(TARGET)
 security-fetch: $(TARGET)
 	@python3 tools/security/check_fetch_origin.py
 
-## Worker script MIME/module policy, EventTarget error/message dispatch,
-## importScripts boundary checks, and 60x concurrent startup/exit stress runs.
+## Worker script MIME/static-module policy, EventTarget error/message dispatch,
+## classic importScripts boundary checks, and 60x concurrent startup/exit stress runs.
 security-worker: $(TARGET)
 	@python3 tools/security/verify_worker_policy.py --binary $(TARGET) --stress-runs 60
 

@@ -12611,7 +12611,8 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
 }
 
 // ============================================================================
-// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
+// module execution and structured-clone delivery below.
 // ============================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
@@ -12864,20 +12865,24 @@ TEST(worker_options_module_policy_and_global_scope) {
     assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
     assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
 
-    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
-    //    it queues an error event to both onerror and addEventListener('error').
+    // 2. A module worker is a strict module wrapper, not a classic fallback.
+    //    It runs a data: entry module, keeps its configured name, and does not
+    //    expose classic importScripts(). The static import graph itself is
+    //    covered by the Phase 66 clone/module test below.
     js.eval(
-        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
-        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
-        "wm.onmessage = function() { modRan = true; };"
-        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "var modInfo = null, modOnErr = '', modEvErr = '';"
+        "var wm = new Worker('data:text/javascript,postMessage({ name:self.name, globalName:name, topThis:this === undefined, importScriptsType:typeof importScripts })', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function(e) { modInfo = e.data; };"
+        "wm.onerror = function(e) { modOnErr = e.message; };"
         "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
     );
-    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
-    assert(!js.eval("modRan").is_truthy());
-    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
-    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
-    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    assert(wait_for(js, "modInfo !== null"));
+    assert(js.eval("modInfo.name").to_string() == "mod1");
+    assert(js.eval("modInfo.globalName").to_string() == "mod1");
+    assert(js.eval("modInfo.topThis").is_truthy());
+    assert(js.eval("modInfo.importScriptsType").to_string() == "undefined");
+    assert(js.eval("modOnErr").to_string().empty());
+    assert(js.eval("modEvErr").to_string().empty());
     js.eval("wm.terminate();");
 
     // 3. Classic options (name, self.location, null/undefined options) and importScripts().
@@ -13038,6 +13043,171 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     );
     WorkerObject::shutdown_all_workers();
     EventLoop::default_loop().tick();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 66: structured-clone delivery across Worker, Window and MessagePort.
+// ---------------------------------------------------------------------------
+
+TEST(structured_clone_message_delivery_and_refusal) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://clone.example.test/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    js.eval(R"js(
+        var workerReply, workerCloneReport, pageCloneError = '', transferCloneError = '';
+        var worker = new Worker('data:text/javascript,self.onmessage = function(e) { e.data.shared.leaf = 22; postMessage(e.data); };');
+        worker.onmessage = function(e) { workerReply = e.data; };
+        var shared = { leaf: 7 };
+        var workerSent = { shared: shared, alias: shared, missing: undefined,
+                           nan: 0 / 0, inf: 1 / 0, neg: -0, items: [1, undefined] };
+        workerSent.self = workerSent;
+        worker.postMessage(workerSent);
+        shared.leaf = 99;
+        try { worker.postMessage(function() {}); } catch (e) { pageCloneError = e.name + ':' + e.code; }
+        try { worker.postMessage({x: 1}, [{}]); } catch (e) { transferCloneError = e.name + ':' + e.code; }
+
+        var errorWorker = new Worker('data:text/javascript,try { postMessage(function() {}); } catch (e) { postMessage({name: e.name, code: e.code}); }');
+        errorWorker.onmessage = function(e) { workerCloneReport = e.data; };
+
+        var channelReply, channelSent = { child: { n: 2 } };
+        channelSent.self = channelSent;
+        var channel = new MessageChannel();
+        channel.port2.onmessage = function(e) { channelReply = e.data; };
+        channel.port1.postMessage(channelSent, []);
+        channelSent.child.n = 9;
+
+        var windowReply, windowSent = { kind: 'window-copy', child: { n: 3 } };
+        windowSent.self = windowSent;
+        window.addEventListener('message', function(e) {
+          if (e.data && e.data.kind === 'window-copy') windowReply = e.data;
+        });
+        window.postMessage(windowSent, '*');
+        windowSent.child.n = 11;
+    )js");
+
+    assert(wait_for(js, "workerReply !== undefined && workerCloneReport !== undefined && channelReply !== undefined && windowReply !== undefined"));
+
+    // Page -> worker -> page: nested data is copied at send time, special
+    // numeric values survive, and graph aliases/cycles remain aliases/cycles
+    // inside the receiving agent rather than pointing back at sender objects.
+    assert(js.eval(
+        "workerReply !== workerSent && workerReply.self === workerReply && "
+        "workerReply.shared === workerReply.alias && workerReply.shared !== shared && "
+        "workerReply.shared.leaf === 22 && shared.leaf === 99 && "
+        "('missing' in workerReply) && workerReply.missing === undefined && "
+        "workerReply.nan !== workerReply.nan && workerReply.inf === 1 / 0 && "
+        "workerReply.neg === 0 && 1 / workerReply.neg < 0 && workerReply.items[1] === undefined"
+    ).is_truthy());
+
+    // The same packet model applies to same-agent ports and windows: their
+    // asynchronous deliveries are copies too, not retained source identities.
+    assert(js.eval("channelReply !== channelSent && channelReply.self === channelReply && channelReply.child.n === 2 && channelSent.child.n === 9").is_truthy());
+    assert(js.eval("windowReply !== windowSent && windowReply.self === windowReply && windowReply.child.n === 3 && windowSent.child.n === 11").is_truthy());
+
+    // Functions and non-empty transfer lists are refused synchronously at the
+    // sender; the worker reports the same DOMException when it is the sender.
+    assert(js.eval("pageCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("transferCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("workerCloneReport.name + ':' + workerCloneReport.code").to_string() == "DataCloneError:25");
+
+    js.eval("worker.terminate(); errorWorker.terminate(); channel.port1.close(); channel.port2.close();");
+}
+
+TEST(module_worker_static_graph_loading_and_refusal) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const fs::path root = fs::temp_directory_path() /
+                          ("litebird_module_worker_" + std::to_string(static_cast<long>(::getpid())));
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        std::ofstream math(root / "math.js");
+        math << "export const base = 40;\n"
+                "export const label = 'module';\n"
+                "export function add(a, b) { return a + b; }\n";
+    }
+    {
+        std::ofstream tools(root / "tools.js");
+        tools << "import { base, add as plus } from './math.js';\n"
+                 "export const answer = plus(base, 2);\n"
+                 "export default function decorate(value) { return 'answer:' + value; }\n";
+    }
+    {
+        std::ofstream reexport(root / "reexport.js");
+        reexport << "export { answer as finalAnswer } from './tools.js';\n";
+    }
+    {
+        std::ofstream entry(root / "entry.js");
+        entry << "import decorate from './tools.js';\n"
+                 "import { finalAnswer } from './reexport.js';\n"
+                 "import * as math from './math.js';\n"
+                 "postMessage({ text: decorate(finalAnswer), label: math.label, sum: math.add(1, 2), "
+                 "topThis: this === undefined, classicImport: typeof importScripts });\n";
+    }
+    {
+        std::ofstream unsupported(root / "unsupported.js");
+        unsupported << "export * from './math.js';\npostMessage('MUST_NOT_RUN');\n";
+    }
+
+    ResourceLoader::set_origin_root_for_testing("https://module.example.test", root.string());
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://module.example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+
+    js.eval(R"js(
+        var moduleReply = null, moduleError = '', unsupportedReply = '', unsupportedError = '';
+        var moduleWorker = new Worker('/entry.js', { type: 'module', name: 'graph-worker' });
+        moduleWorker.onmessage = function(e) { moduleReply = e.data; };
+        moduleWorker.onerror = function(e) { moduleError = e.message; };
+        var unsupportedWorker = new Worker('/unsupported.js', { type: 'module' });
+        unsupportedWorker.onmessage = function(e) { unsupportedReply = e.data; };
+        unsupportedWorker.onerror = function(e) { unsupportedError = e.message; };
+    )js");
+
+    assert(wait_for(js, "moduleReply !== null && unsupportedError !== ''"));
+    assert(js.eval("moduleError").to_string().empty());
+    assert(js.eval("moduleReply.text").to_string() == "answer:42");
+    assert(js.eval("moduleReply.label").to_string() == "module");
+    assert(js.eval("moduleReply.sum").to_number() == 3.0);
+    assert(js.eval("moduleReply.topThis").is_truthy());
+    assert(js.eval("moduleReply.classicImport").to_string() == "undefined");
+    assert(js.eval("unsupportedReply").to_string().empty());
+    assert(js.eval("unsupportedError").to_string().find("export *") != std::string::npos);
+
+    js.eval("moduleWorker.terminate(); unsupportedWorker.terminate();");
+    WorkerObject::shutdown_all_workers();
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -16319,6 +16489,10 @@ int main() {
     RUN_TEST(worker_options_module_policy_and_global_scope);
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
+
+    // Phase 66: module-worker graph loading and structured-clone message packets.
+    RUN_TEST(structured_clone_message_delivery_and_refusal);
+    RUN_TEST(module_worker_static_graph_loading_and_refusal);
 
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);

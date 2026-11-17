@@ -28,8 +28,12 @@ struct Registry {
 };
 
 Registry& registry() {
-    static Registry s_registry;
-    return s_registry;
+    // A worker can make DOM interfaces while process teardown is joining other
+    // workers. Keep this process-wide registry alive for the process lifetime,
+    // as Heap::default_heap() does, instead of depending on static-destruction
+    // order for its maps.
+    static auto* s_registry = new Registry();
+    return *s_registry;
 }
 
 void setup_dom_exception(Iface& I);

@@ -37,11 +37,11 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 210 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 212 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
-| Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
+| Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 5 SVG suites; 2,400 mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -56,7 +56,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 210 engine suites + 80 cross-origin Window/Location checks
+make test            # 212 engine suites + 114 cross-origin Window/Location/channel checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -76,7 +76,7 @@ make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expec
 make bench-surrogates # six surrogate-pair scripts (including reads and substring slices between halves): results face Node, each under 1 s
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
-make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
+make security-worker # Worker MIME/static-module policy, EventTarget dispatch, classic importScripts boundary, and 60x startup/exit stability
 make diff-strings    # 50,580 string results compared with Node's; fails if any differ (ceiling: 0)
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
@@ -658,11 +658,13 @@ twice.
 - **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
   `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
   `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
-  interpreter and event loop; messages are copied as JSON),
-  `canvas.getContext("2d")`, and the DOM: section 1, "The DOM a script
-  sees".
-- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`,
-  modules (`import`/`export`), `with`, holes in arrays, `Intl`. See "Known
+  interpreter and event loop; `Worker`, `Window`, and same-agent
+  `MessagePort` messages use a neutral structured-clone packet for primitives,
+  ordinary objects, and arrays), `canvas.getContext("2d")`, and the DOM:
+  section 1, "The DOM a script sees".
+- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`, a
+  general ES-module language runtime (only module workers have the documented
+  static import/export subset), `with`, holes in arrays, `Intl`. See "Known
   gaps" in `ARCHITECTURE.md` for the limits of what is there.
 - **Bytecode VM:** an earlier experiment, kept for `--dump-bytecode`. It
   covers a small subset of the language and scripts do not run on it.
@@ -718,7 +720,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 210 engine test suites
+# Run the 212 engine test suites
 make test
 ```
 
@@ -786,14 +788,14 @@ make test
 make test
 ```
 
-Output (210 suites; the first and last lines shown):
+Output (212 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 210 engine test suites passed successfully!
+All 212 engine test suites passed successfully!
 ```
 
 ```bash
@@ -939,7 +941,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 210/210 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 212/212 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1295,24 +1297,53 @@ says what was found and
 [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
 how it is built.
 
-### Cross-origin `Window` and `Location` reflection (Phase 56)
+### Cross-origin `Window` / `Location`, navigation, module workers and message ports (Phases 56, 61 & 66)
 
-A script embedded in one origin could already not read a cross-origin frame
-(`SecurityError` on non-safelisted names, since Phase 42), but everything that
-*describes* the frame's window answered the ordinary way: `Object.keys`,
-`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
-described ordinary storage, `Object.defineProperty` wrote into it,
-`Object.freeze` flipped its cell, and `location` handed over the child's
-address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
-the cross-origin table of the HTML Standard instead: the window reports
-exactly its child-frame indices and the exposed names (`window`, `self`,
-`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
-`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
-`href` (writable, not readable cross-origin) and `replace()`, both refuse
-define/delete/integrity changes with `SecurityError`/`TypeError`, and
-`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
-and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
-finding 62.
+A script embedded in one origin cannot read a cross-origin frame (`SecurityError`
+on non-safelisted names), and Phase 56 made its *reflection* surface follow the
+cross-origin table of the HTML Standard: the window reports exactly its
+child-frame indices and exposed names (`window`, `self`, `location`, `close`,
+`closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`, `parent`,
+`postMessage`, then `then`), while `Location` exposes only `href` (writable,
+not readable cross-origin) and `replace()`. Define/delete/integrity changes
+refuse with `SecurityError`/`TypeError`, and `getPrototypeOf` answers `null`.
+Same-origin pages are untouched.
+
+Phase 61 makes the writable entries do useful work: setting `child.location`
+or `child.location.href`, and calling `child.location.replace(url)`, schedules
+a real nested-frame document navigation without changing the iframe's `src`
+markup. The child keeps its `WindowProxy` identity, but receives a new
+Document; the existing iframe loader continues to apply sandbox, MIME,
+origin-root and load-order rules.
+
+Phase 66 also lets `{ type: "module" }` workers load a MIME-checked,
+CORS-aware static module graph. The supported subset has side-effect,
+default/named/namespace imports; simple declaration/default/named exports; and
+named re-exports. Modules execute in dependency order inside strict,
+module-local wrappers; classic `importScripts()` is not exposed there.
+
+`new MessageChannel()` creates two stable `MessagePort` EventTargets.
+`postMessage()` queues FIFO `message` events, `onmessage` starts a port,
+`start()` releases messages accumulated after `addEventListener`, and `close()`
+drops later messages. Worker, Window, and same-agent port delivery now writes a
+neutral structured-clone graph before scheduling: `undefined`, `NaN`,
+infinities, `-0`, strings, ordinary objects, arrays, aliases, and cycles retain
+their supported value semantics without retaining a sender-realm `JsValue`.
+Functions, symbols, DOM/host/exotic values, and non-empty transfer lists throw
+`DataCloneError`; an empty transfer list is a no-op. Ports themselves are still
+not transferable or cross-agent.
+
+`tests/cross_origin_windows.cpp`, run by `make test`, now has **114 checks**:
+reflection security, three cross-origin navigation entry points, direct
+navigation over both `src` and `srcdoc`, proxy identity, unchanged markup and
+continued cross-origin read refusal, plus asynchronous FIFO channel delivery,
+GC-safe cloned graphs, ordinary EventTarget target/receiver behavior, delayed
+start and close-before/after-delivery behavior. The design and remaining limits
+are in
+[`docs/phases/61-child-location-navigation-and-message-channel.md`](docs/phases/61-child-location-navigation-and-message-channel.md),
+[`docs/phases/66-es-module-workers-and-structured-clone.md`](docs/phases/66-es-module-workers-and-structured-clone.md),
+[`docs/findings/67-child-location-navigation-and-message-ports.md`](docs/findings/67-child-location-navigation-and-message-ports.md),
+and [`docs/findings/72-es-module-workers-and-structured-clone.md`](docs/findings/72-es-module-workers-and-structured-clone.md).
 
 ### String Unicode 17.0 normalization, full/locale case mapping, and CLDR 48 UCA collation (Phase 60)
 

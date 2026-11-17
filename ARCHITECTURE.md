@@ -370,8 +370,6 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 54** | **Lossless WebP: the container and the `VP8L` bitstream.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 54 Architecture") |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
 | **Phase 56** | **Cross-origin `Window` and `Location` reflection.** The row was not added when the phase merged; Phase 63 added it so that the table can be counted. The section below is the description. | ✅ Completed (see the section "Phase 56 Architecture") |
-
-| **Phase 58** | **Live, generic indexed-list iteration:** `NodeList` and `DOMTokenList` reuse their realm's `Array.prototype` `keys`, `values`, `entries`, `forEach`, and `@@iterator` functions by identity. Array iterators read length and index from the original receiver on each `next()`; `forEach` snapshots length but reads values at callback time. `Array.prototype.values` and `@@iterator` are one function. HTMLCollection / NamedNodeMap keep their existing iterator-only surface. | ✅ Completed (207/207 suites; `make wpt` 9539/9744, 205 listed, 0 unlisted) |
 | **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 | **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
 | **Phase 63** | **Iteration asks the value for its iterator:** `for…of`, spread, `yield*`, `Array.from`, the `Map`, `Set`, `WeakMap` and `WeakSet` constructors, `Object.fromEntries`, the `Promise` combinators and the DOM's sequence arguments read an array's elements and a string's code points without asking for `Symbol.iterator`. `js_iterate` and `js_iterable_to_vector` ask now (GetMethod, one read), and keep the direct read where a check that runs no script (`js_iterates_as_builtin`) finds the function the realm installed. The loop is the language's: `next` read once, `done` before `value`, IteratorClose with its checks. An object with `next` and no `Symbol.iterator` is no longer iterable. | ✅ Completed (206/206 unit suites; JS corpus 1085/1112, `iteration.dat` 65/78 against 28 before; test262 10 more and 4 fewer of 47,967, the four being rows of the task table; 0.94 to 1.06 of `main`'s time over two runs) |
@@ -6506,35 +6504,3 @@ run under the default of 10 s. None has shown the failure; the line on
 standard error is what will name it if one does. And whether the two
 failures of the sanitizer job on `main` on 16 November were this one is not
 known: they left nothing to read.
-
----
-
-## Phase 58 Architecture: Indexed DOM Lists Share the Array Iteration Functions
-
-The `Node.childNodes` WPT already exercised iteration, but its final assertions
-compared **function identity** with `Array.prototype`. The DOM installed
-separate lookalike methods, and the array implementation copied non-array
-receivers on entry, so assigning the built-ins directly would have broken
-liveness. `Array.prototype.values` and `@@iterator` were also two functions.
-
-`BuiltinsArray.cpp` now exposes the same `values` function at both keys and
-implements `keys`/`values`/`entries` by keeping their original receiver as a
-GC root. Each `next()` reads its current length and indexed property anew.
-`forEach` takes the initial length once, skips missing indices, reads each
-present index at callback time, and passes the original collection as its
-third callback argument. `DomCollectionBindings.cpp` installs those exact
-realm-local functions on Web IDL indexed-value iterables (`NodeList` and
-`DOMTokenList`), leaving HTMLCollection and NamedNodeMap's separate
-iterator-only definitions untouched. The new regression suite exercises
-identity, mutations between `next()` calls, `DOMTokenList` updates,
-`forEach`'s this/third argument and length boundary, and borrowed methods on
-ordinary array-like objects including holes. An independent out-of-corpus
-`compare_with_jsdom.py` probe (identity, live NodeList/token iteration, and
-`forEach` boundaries) matched jsdom 31.0.0 on **12/12** output lines.
-
-**Verification:** `make test` **207/207**; `make wpt` **9539/9744** across
-190 files (205 listed failures, 0 unlisted), up from **9538/9744** (206
-listed). Remaining indexed-collection WPT failures are `strict-write` (2),
-which needs the exotic property-write refusal path, not iteration. Other
-array methods still use `receiver()`'s snapshot of non-arrays; this phase
-does not claim to make every Array method generic.

@@ -820,7 +820,8 @@ passes the original list to the callback. `make test` runs 207/207 suites,
 including live list and ordinary array-like probes; `make wpt` passes
 9539/9744 across 190 files (205 listed, 0 unlisted). The two `strict-write`
 HTMLCollection failures still require an exotic write-refusal path. Details:
-`ARCHITECTURE.md`, Phase 58; `AUDIT.md`, finding 64.
+`docs/phases/58-indexed-dom-list-iteration.md` and
+`docs/findings/64-indexed-dom-list-iteration.md`.
 
 ### CSS whitespace runs (Phase 31)
 

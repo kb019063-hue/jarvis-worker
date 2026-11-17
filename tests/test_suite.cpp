@@ -14904,6 +14904,246 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 56: iteration asks the value for its iterator (finding 62)
+// ---------------------------------------------------------------------------
+
+TEST(js_iteration_asks_the_value_for_its_iterator) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    // js_iterate() and its neighbours ask the current realm which functions
+    // it installed. Inside eval() that is the interpreter's realm; the direct
+    // calls below have to say so themselves.
+    JsIntrinsics* previous_realm = &JsIntrinsics::get();
+    JsIntrinsics::set_current(&js.intrinsics());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous_realm};
+
+    auto numbers = [](const std::vector<JsValue>& values) {
+        std::string out;
+        for (const JsValue& value : values) out += (out.empty() ? "" : ",") + value.to_string();
+        return out;
+    };
+    auto visited = [&](const JsValue& iterable, size_t stop_after = 1000) {
+        std::vector<JsValue> seen;
+        js_iterate(iterable, [&](const JsValue& item) {
+            seen.push_back(item);
+            return seen.size() < stop_after;
+        });
+        return numbers(seen);
+    };
+    auto throws_type_error = [&](const std::function<void()>& body) {
+        try {
+            body();
+        } catch (const JsThrow& thrown) {
+            return thrown.value.get_property("name").to_string() == "TypeError";
+        }
+        return false;
+    };
+
+    // The plain case: an array and a string are read directly, and finding
+    // that out runs nothing.
+    JsValue plain = js.eval("var plain = [1, 2, 3]; plain");
+    assert(js_iterates_as_builtin(plain));
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    assert(js_iterates_as_builtin(js.eval("[]")));
+    assert(!js_iterates_as_builtin(js.eval("({ length: 1, 0: 'a' })")));
+    assert(!js_iterates_as_builtin(js.eval("new Map()")));
+    assert(!js_iterates_as_builtin(js.eval("new String('wrapped')")));
+    assert(!js_iterates_as_builtin(JsValue::make_number(5)));
+    assert(!js_iterates_as_builtin(JsValue::make_undefined()));
+    assert(numbers(js_iterable_to_vector(plain)) == "1,2,3");
+    assert(visited(plain) == "1,2,3");
+    assert(visited(plain, 2) == "1,2");
+    assert(visited(JsValue::make_string("a\xF0\x9F\x98\x80z")) == "a,\xF0\x9F\x98\x80,z");
+    JsValue method;
+    assert(js_iterator_method(plain, method) && method.is_function());
+    assert(method.identity() == js.intrinsics().array_iterator_method.identity());
+
+    // An array that was given an iterator is asked for it. Until Phase 56
+    // every one of these read the elements: 1,2.
+    JsValue own = js.eval("var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; yield 7; }; own");
+    assert(!js_iterates_as_builtin(own));
+    assert(numbers(js_iterable_to_vector(own)) == "9,8,7");
+    assert(visited(own) == "9,8,7");
+    assert(text("var seen = []; for (var x of own) seen.push(x); seen.join()") == "9,8,7");
+    assert(text("[...own].join() + '|' + Math.max(...own) + '|' + Array.from(own).join() + '|' + new Set(own).size") ==
+           "9,8,7|9|9,8,7|3");
+    assert(text("function* gen() { yield* own; } [...gen()].join()") == "9,8,7");
+    assert(text("var entries = [['a', 1]]; entries[Symbol.iterator] = function* () { yield ['z', 26]; };"
+                "JSON.stringify(Object.fromEntries(entries)) + [...new Map(entries).keys()].join()") == "{\"z\":26}z");
+    // The array that asked is `this`, and another array's iterator may be what it hands out.
+    assert(text("var a = [1]; var self; a[Symbol.iterator] = function () { self = this; return [5, 6][Symbol.iterator](); };"
+                "[...a].join() + ':' + (self === a)") == "5,6:true");
+    // Other arrays are not affected by it.
+    assert(js_iterates_as_builtin(plain));
+
+    // The same method put back, a getter that hands it out, a subclass
+    // without one: the long way round to the elements. The getter is read
+    // once for each iteration and never by the question that runs no script.
+    JsValue same = js.eval("var same = [4, 5]; same[Symbol.iterator] = Array.prototype[Symbol.iterator]; same");
+    assert(!js_iterates_as_builtin(same));
+    assert(visited(same) == "4,5");
+    JsValue lazy = js.eval("var reads = 0; var lazy = [6, 7];"
+                           "Object.defineProperty(lazy, Symbol.iterator, { get: function () { reads++; return Array.prototype[Symbol.iterator]; } }); lazy");
+    assert(!js_iterates_as_builtin(lazy));
+    assert(text("reads") == "0");
+    assert(visited(lazy) == "6,7");
+    assert(numbers(js_iterable_to_vector(lazy)) == "6,7");
+    assert(text("reads") == "2");
+    assert(text("class Plain extends Array {} var sub = new Plain(); sub.push(1, 2, 3); [...sub].join()") == "1,2,3");
+    assert(text("Object.getPrototypeOf(sub) === Plain.prototype") == "true");
+    assert(!js_iterates_as_builtin(js.eval("sub")));
+    assert(text("class Odd extends Array { *[Symbol.iterator]() { yield 'x'; yield this.length; } }"
+                "var odd = new Odd(3); [...odd].join() + '|' + Array.from(odd).join()") == "x,3|x,3");
+
+    // On the prototype: every array has it, and the plain case comes back
+    // when it does.
+    js.eval("var original = Array.prototype[Symbol.iterator];"
+            "Array.prototype[Symbol.iterator] = function* () { yield 'p'; yield this.length; };");
+    assert(!js_iterates_as_builtin(plain));
+    assert(visited(plain) == "p,3");
+    assert(numbers(js_iterable_to_vector(plain)) == "p,3");
+    assert(text("[...[1, 2]].join() + '|' + new Set([4, 4, 4]).size") == "p,2|2");
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain));
+    assert(text("[...[1, 2]].join()") == "1,2");
+
+    // Without one an array is not iterable, and a value that is not a
+    // function there is a TypeError as well.
+    js.eval("delete Array.prototype[Symbol.iterator];");
+    assert(!js_iterates_as_builtin(plain));
+    assert(!js_iterator_method(plain, method) && method.is_undefined());
+    assert(throws_type_error([&] { visited(plain); }));
+    assert(throws_type_error([&] { js_iterable_to_vector(plain); }));
+    assert(text("try { [...[1]]; 'no error' } catch (e) { e.name + ': ' + e.message }") ==
+           "TypeError: [object Array] is not iterable");
+    js.eval("Array.prototype[Symbol.iterator] = 5;");
+    assert(throws_type_error([&] { js_iterator_method(plain, method); }));
+    assert(throws_type_error([&] { visited(plain); }));
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain) && visited(plain) == "1,2,3");
+
+    // Strings, and the primitives that have no iterator until a script
+    // gives their prototype one.
+    js.eval("var stringOriginal = String.prototype[Symbol.iterator];"
+            "String.prototype[Symbol.iterator] = function* () { yield 'z'; yield this.length; };");
+    assert(!js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(visited(JsValue::make_string("ab")) == "z,2");
+    assert(text("[...'ab'].join() + '|' + Array.from('abc').join() + '|' + new Set('aab').size") == "z,2|z,3|2");
+    js.eval("String.prototype[Symbol.iterator] = stringOriginal;");
+    assert(js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(text("[...'ab'].join()") == "a,b");
+    assert(!js_iterator_method(JsValue::make_number(3), method));
+    assert(throws_type_error([&] { visited(JsValue::make_number(3)); }));
+    assert(!js_iterator_method(JsValue::make_undefined(), method));
+    assert(!js_iterator_method(JsValue::make_null(), method));
+    js.eval("Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };");
+    assert(js_iterator_method(JsValue::make_number(3), method));
+    assert(visited(JsValue::make_number(3)) == "0,1,2");
+    assert(text("[...3].join() + '|' + new Set(4).size") == "0,1,2|4");
+    js.eval("delete Number.prototype[Symbol.iterator];");
+
+    // What is not an iterator: an object that only has next(), and a property
+    // whose name is the text 'Symbol.iterator'. Both were iterated before.
+    assert(throws_type_error([&] { visited(js.eval("({ next: function () { return { done: true }; } })")); }));
+    assert(throws_type_error([&] { visited(js.eval("({ 'Symbol.iterator': function* () { yield 1; } })")); }));
+    assert(text("async function* ag() { yield 1; } try { [...ag()]; 'no error' } catch (e) { e.name }") == "TypeError");
+
+    // A loop that stops early closes the iterator, once; return() has to be
+    // callable and to give back an object. A loop that an error ends closes
+    // it too, and the error is the one that is seen.
+    js.eval(R"(
+        var closed = 0;
+        function endless(ret) {
+            var o = {};
+            o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; };
+            return o;
+        }
+        var counting = endless(function () { closed++; return {}; });
+    )");
+    assert(visited(js.eval("counting"), 2) == "1,1");
+    assert(text("closed") == "1");
+    assert(throws_type_error([&] { visited(js.eval("endless(function () { return 5; })"), 1); }));
+    assert(throws_type_error([&] { visited(js.eval("endless(7)"), 1); }));
+    assert(visited(js.eval("endless(undefined)"), 1) == "1");
+    assert(visited(js.eval("endless(null)"), 1) == "1");
+    bool body_error_seen = false;
+    try {
+        js_iterate(js.eval("endless(function () { closed++; throw new Error('from return'); })"), [](const JsValue&) -> bool {
+            js_throw_error(JsErrorKind::RangeError, "from the body");
+        });
+    } catch (const JsThrow& thrown) {
+        body_error_seen = thrown.value.get_property("message").to_string() == "from the body";
+    }
+    assert(body_error_seen);
+    assert(text("closed") == "2");
+    // An iterator that fails itself is not closed.
+    assert(text("var o = {}; o[Symbol.iterator] = function () { return { next: function () { throw new Error('next'); },"
+                "return: function () { closed += 100; return {}; } }; };"
+                "try { for (var x of o) {} } catch (e) { e.message + closed }") == "next2");
+
+    // An array that changes under the loop is read as the array iterator
+    // reads it: by index, against the length it has now.
+    assert(text("var grow = [1, 2, 3]; var got = []; for (var x of grow) { got.push(x); if (x === 1) grow.push(4); } got.join()") ==
+           "1,2,3,4");
+    assert(text("var shrink = [1, 2, 3, 4]; got = []; for (var x of shrink) { got.push(x); shrink.shift(); } got.join()") == "1,3");
+    // Given an iterator in the middle of a loop, the loop that is running is
+    // not changed and the next one is.
+    assert(text("var late = [1, 2]; got = []; for (var x of late) { got.push(x); late[Symbol.iterator] = function* () { yield 'late'; }; }"
+                "got.concat([...late]).join()") == "1,2,late");
+
+    // The functions the realm compares with outlive a collection, replaced
+    // on the prototype or not.
+    js.eval("Array.prototype[Symbol.iterator] = function* () { yield 'gone'; };");
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js.intrinsics().array_iterator_method.is_function());
+    assert(js_iterates_as_builtin(plain));
+    assert(text("gc(); [...plain, ...'ab'].join()") == "1,2,3,a,b");
+}
+
+TEST(js_iteration_of_another_realms_array) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://iteration.example.test/root.html");
+    JsInterpreter js(doc);
+    js.load_page(R"html(<!doctype html><html><body>
+      <iframe id="child" srcdoc="<script>var theirs = [1, 2, 3]; var custom = [1, 2]; custom[Symbol.iterator] = function* () { yield 'c'; };</script>"></iframe>
+    </body></html>)html", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // An array made in the frame has the frame's Array.prototype. Read from
+    // this realm it is not the plain case (its iterator is not the function
+    // this realm installed), so it is asked, and the answer is its elements.
+    assert(text("var cw = document.getElementById('child').contentWindow; cw.theirs instanceof cw.Array && !(cw.theirs instanceof Array)") == "true");
+    assert(text("[...cw.theirs].join() + '|' + Array.from(cw.theirs).join() + '|' + new Set(cw.theirs).size") == "1,2,3|1,2,3|3");
+    assert(text("var got = []; for (var x of cw.theirs) got.push(x); got.join()") == "1,2,3");
+    assert(text("[...cw.custom].join()") == "c");
+    {
+        JsIntrinsics* previous = &JsIntrinsics::get();
+        JsIntrinsics::set_current(&js.intrinsics());
+        struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous};
+        assert(js_iterates_as_builtin(js.eval("[1]")));
+        assert(!js_iterates_as_builtin(js.eval("cw.theirs")));
+    }
+
+    // Each realm has an iterator of its own to replace: the frame's arrays
+    // follow the frame's prototype, and this realm's arrays do not.
+    js.eval("cw.Array.prototype[Symbol.iterator] = function* () { yield 'frame'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|7,8");
+    js.eval("var mine = Array.prototype[Symbol.iterator]; Array.prototype[Symbol.iterator] = function* () { yield 'top'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|top");
+    js.eval("Array.prototype[Symbol.iterator] = mine;");
+    assert(text("[...[7, 8]].join()") == "7,8");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -15134,6 +15374,10 @@ int main() {
     RUN_TEST(css_color4_spaces_gamut_and_serialization);
     RUN_TEST(css_color5_mix_relative_and_light_dark);
     RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
+
+    // Phase 56: iteration asks the value for its iterator.
+    RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
+    RUN_TEST(js_iteration_of_another_realms_array);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -106,9 +106,11 @@ struct ListState : JsExotic {
         JsValue ignored;
         return named && realm->alive && !name.empty() && name[0] != '%' && name[0] != '@' && lookup_name(name, ignored);
     }
-    bool set(JsObject*, const std::string& name, const JsValue&) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue&) override {
         std::size_t index = 0;
-        return parse_index(name, index);        // the items cannot be assigned
+        // The items cannot be assigned: this object has no indexed setter,
+        // so the write is refused (a strict-mode assignment throws).
+        return parse_index(name, index) ? JsExotic::SetResult::Refused : JsExotic::SetResult::NotHandled;
     }
     void keys(JsObject*, std::vector<std::string>& out) override {
         const std::size_t count = items().size();
@@ -275,9 +277,10 @@ struct TokenListState : JsExotic {
         std::size_t index = 0;
         return parse_index(name, index) && index < tokens().size();
     }
-    bool set(JsObject*, const std::string& name, const JsValue&) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue&) override {
         std::size_t index = 0;
-        return parse_index(name, index);
+        // No indexed setter: the write is refused (a strict-mode assignment throws).
+        return parse_index(name, index) ? JsExotic::SetResult::Refused : JsExotic::SetResult::NotHandled;
     }
     void keys(JsObject*, std::vector<std::string>& out) override {
         const std::size_t count = tokens().size();
@@ -480,18 +483,18 @@ struct DatasetState : JsExotic {
         JsValue ignored;
         return get(self, name, ignored);
     }
-    bool set(JsObject*, const std::string& name, const JsValue& value) override {
-        if (is_internal_name(name)) return false;
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
+        if (is_internal_name(name)) return JsExotic::SetResult::NotHandled;
         std::string attribute;
         bool invalid = false;
         if (!dataset_attribute_name(name, attribute, invalid)) {
             if (invalid && realm->alive) throw_dom(*realm, "SyntaxError", "'" + name + "' is not a valid property name.");
-            return true;
+            return JsExotic::SetResult::Handled;
         }
         const std::string text = to_str(value);
         if (realm->alive) validate_attribute_name(*realm, attribute);
         element->set_attribute(attribute, text);
-        return true;
+        return JsExotic::SetResult::Handled;
     }
     bool remove(JsObject*, const std::string& name, bool& result) override {
         if (is_internal_name(name)) return false;
@@ -690,9 +693,10 @@ struct AttributeMapState : JsExotic {
         if (parse_index(name, index)) return index < element->attributes().size();
         return !is_internal_name(name) && element->has_attribute(name);
     }
-    bool set(JsObject*, const std::string& name, const JsValue&) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue&) override {
         std::size_t index = 0;
-        return parse_index(name, index);
+        // No indexed setter: the write is refused (a strict-mode assignment throws).
+        return parse_index(name, index) ? JsExotic::SetResult::Refused : JsExotic::SetResult::NotHandled;
     }
     void keys(JsObject*, std::vector<std::string>& out) override {
         const std::size_t count = element->attributes().size();

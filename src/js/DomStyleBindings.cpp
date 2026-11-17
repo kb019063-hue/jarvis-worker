@@ -3630,13 +3630,13 @@ struct StyleState : JsExotic {
         }
         return !css_name_for(name).empty();
     }
-    bool set(JsObject*, const std::string& name, const JsValue& value) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
         std::size_t index = 0;
-        if (parse_index(name, index)) return true;
+        if (parse_index(name, index)) return JsExotic::SetResult::Refused;
         const std::string property = css_name_for(name);
-        if (property.empty()) return false;
+        if (property.empty()) return JsExotic::SetResult::NotHandled;
         set_value(property, to_str_null_empty(value), false);
-        return true;
+        return JsExotic::SetResult::Handled;
     }
     void keys(JsObject*, std::vector<std::string>& out) override {
         load();

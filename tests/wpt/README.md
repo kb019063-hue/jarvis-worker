@@ -102,7 +102,7 @@ with `--quiet`.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**9,548 of 9,744 subtests pass. 196 are listed:** the 10 below from the DOM
+**9,550 of 9,744 subtests pass. 194 are listed:** the 8 below from the DOM
 and encoding suites, and these 186 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
@@ -113,7 +113,6 @@ and encoding suites, and these 186 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `strict-write` | 2 | Assigning to an index of an `HTMLCollection` that is out of range must throw a `TypeError` in strict mode. The write is refused — the index is not created, and `list[5]` stays `undefined` — but the refusal is not reported to the caller, so nothing throws. A browser throws from `[[Set]]`; here the exotic object's `set` returns "handled" and the strictness of the assignment lives in `JsEval.cpp`, which is claimed by another change (see `ARCHITECTURE.md`, "Known gaps") |
 | `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 

@@ -206,21 +206,21 @@ struct WindowExotic : JsExotic {
         out = binding->value;
         return true;
     }
-    bool set(JsObject*, const std::string& name, const JsValue& value) override {
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
         if (realm && realm->alive) {
             Realm& caller = current_realm();
             if (!same_effective_origin(caller, *realm)) {
-                if (name == "location") return false;
+                if (name == "location") return JsExotic::SetResult::NotHandled;
                 throw_dom(caller, "SecurityError",
                           "Blocked a frame from setting property '" + name + "' on a cross-origin Window.");
             }
         }
         auto scope = realm ? realm->global_scope.lock() : nullptr;
-        if (!scope) return false;
+        if (!scope) return JsExotic::SetResult::NotHandled;
         auto* binding = scope->find_own(name);
-        if (!binding || binding->is_lexical) return false;
+        if (!binding || binding->is_lexical) return JsExotic::SetResult::NotHandled;
         if (!binding->is_const && !binding->is_readonly) binding->value = value;
-        return true;
+        return JsExotic::SetResult::Handled;
     }
     // Asked when nothing else has the name: an interface, a named child frame, or an element.
     bool get_last(JsObject* self, const std::string& name, JsValue& out) override {
@@ -593,14 +593,14 @@ struct StorageExotic : JsExotic {
     bool has(JsObject*, const std::string& name) override {
         return !is_internal(name) && storage->has_item(name);
     }
-    bool set(JsObject* self, const std::string& name, const JsValue& value) override {
-        if (is_internal(name)) return false;
+    JsExotic::SetResult set(JsObject* self, const std::string& name, const JsValue& value) override {
+        if (is_internal(name)) return JsExotic::SetResult::NotHandled;
         int guard = 0;
         for (JsObject* proto = self->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
-            if (proto->properties.find(name) != proto->properties.end()) return false;
+            if (proto->properties.find(name) != proto->properties.end()) return JsExotic::SetResult::NotHandled;
         }
         storage->set_item(name, to_str(value));
-        return true;
+        return JsExotic::SetResult::Handled;
     }
     bool remove(JsObject*, const std::string& name, bool& result) override {
         if (is_internal(name) || !storage->has_item(name)) return false;

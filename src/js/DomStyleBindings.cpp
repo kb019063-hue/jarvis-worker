@@ -57,7 +57,7 @@ const std::unordered_set<std::string>& known_properties() {
         "bottom", "box-shadow", "box-sizing", "break-after", "break-before", "break-inside", "caption-side",
         "caret-color", "clear", "clip", "clip-path", "color", "color-scheme", "column-count", "column-fill",
         "column-gap", "column-rule", "column-rule-color", "column-rule-style", "column-rule-width", "column-span",
-        "column-width", "columns", "contain", "content", "counter-increment", "counter-reset", "cursor", "direction",
+        "column-width", "columns", "contain", "container-type", "content", "counter-increment", "counter-reset", "cursor", "direction",
         "display", "empty-cells", "fill", "fill-opacity", "filter", "flex", "flex-basis", "flex-direction",
         "flex-flow", "flex-grow", "flex-shrink", "flex-wrap", "float", "font", "font-family", "font-feature-settings",
         "font-kerning", "font-size", "font-size-adjust", "font-stretch", "font-style", "font-variant",
@@ -665,13 +665,13 @@ bool normalize_value(const std::string& property, const std::string& text, std::
                 return true;
             }
             // A calc() is a number: a static one folds into "calc(<n>)", the
-            // rest is kept as written.
+            // rest is kept written the way a calculation serializes.
             if (!litebird::grid_calc_family(lower).empty()) {
-                double stat = 0;
-                if (litebird::grid_static_number(lower, stat)) {
-                    out = "calc(" + litebird::grid_number_text(stat) + ")";
+                litebird::CalcTriple triple;
+                if (litebird::calc_eval_text(lower, litebird::CalcContext{}, triple) && !triple.dimension) {
+                    out = "calc(" + litebird::calc_num_text(triple.number) + ")";
                 } else {
-                    out = lower;
+                    out = litebird::canonicalize_calc(lower);
                 }
                 return true;
             }
@@ -2532,60 +2532,30 @@ bool starts_like_a_number(const std::string& text) {
 // The longhands a shorthand declaration stands for. False when the value is
 // not understood (a var(), a system font): the declaration is then kept
 // under its own name and its longhands are not known (see covered_by).
-// Walks a calc() text looking for a unit token (a number immediately
-// followed by a unit) or a percentage. False for number-typed expressions.
-bool calc_has_unit(const std::string& text) {
-    const std::size_t n = text.size();
-    for (std::size_t i = 0; i < n;) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        if (!std::isdigit(c) && c != '.') {
-            ++i;
-            continue;
-        }
-        std::size_t j = i;
-        while (j < n && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
-        if (j < n && text[j] == '.') {
-            ++j;
-            while (j < n && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
-        }
-        if (j < n && (text[j] == 'e' || text[j] == 'E')) {
-            std::size_t e = j + 1;
-            if (e < n && (text[e] == '+' || text[e] == '-')) ++e;
-            std::size_t digits = 0;
-            while (e < n && std::isdigit(static_cast<unsigned char>(text[e]))) {
-                ++e;
-                ++digits;
-            }
-            if (digits != 0) j = e;
-        }
-        const std::size_t unit_start = j;
-        while (j < n && (std::isalpha(static_cast<unsigned char>(text[j])) || text[j] == '%')) ++j;
-        if (j > unit_start) {
-            const std::string unit = ascii_lower(text.substr(unit_start, j - unit_start));
-            if (unit == "%" || litebird::grid_length_unit(unit)) return true;
-        }
-        i = j > i ? j : i + 1;
-    }
-    return false;
-}
-
 // A number word for flex-grow or flex-shrink: a plain number, or a calc()
-// (a static calc() folds into "calc(<number>)"; anything else is kept as
-// written, unless it carries units, in which case it is a length and not a
-// number).
+// whose type is a number (a static one folds into "calc(<number>)"; the rest
+// is kept, rewritten the way it serializes). A calc that is really a length
+// or a percentage — even when only its operands carry units, like
+// sign(20cqw - 10px) — is not a number and is refused.
 bool flex_number(const std::string& part, std::string& word) {
     if (is_plain_number(part)) {
         word = part;
         return true;
     }
     if (litebird::grid_calc_family(part).empty()) return false;
-    double stat = 0;
-    if (litebird::grid_static_number(part, stat)) {
-        word = "calc(" + litebird::grid_number_text(stat) + ")";
+    litebird::CalcNode ast;
+    if (!litebird::calc_parse(part, ast)) {
+        // Something the grammar does not know: keep it as it was written.
+        word = part;
         return true;
     }
-    if (calc_has_unit(part)) return false;
-    word = litebird::grid_normalize_function(part);
+    if (litebird::calc_classify(ast) != 0) return false; // a <length-percentage> calc is not a number
+    litebird::CalcTriple triple;
+    if (litebird::calc_eval(ast, litebird::CalcContext{}, triple) && !triple.dimension) {
+        word = "calc(" + litebird::calc_num_text(triple.number) + ")";
+        return true;
+    }
+    word = litebird::canonicalize_calc(part);
     return true;
 }
 
@@ -2667,10 +2637,15 @@ bool decompose(const std::string& name, const std::string& value, Parts& out) {
                         continue;
                     }
                     if (!litebird::grid_calc_family(part).empty()) {
-                        double stat = 0;
-                        if (litebird::grid_static_number(part, stat)) return false; // a number, not a <length-percentage>
-                        if (!calc_has_unit(part)) return false; // number-typed, not a <length-percentage>
-                        basis = litebird::grid_normalize_function(part);
+                        litebird::CalcNode ast;
+                        if (!litebird::calc_parse(part, ast)) {
+                            // Something the grammar does not know: keep it as
+                            // it was written.
+                            basis = part;
+                            continue;
+                        }
+                        if (litebird::calc_classify(ast) == 0) return false; // a number, not a <length-percentage>
+                        basis = litebird::canonicalize_calc(part);
                         continue;
                     }
                     basis = part; // auto, content, a length, a percentage, a non-static calc(...)
@@ -3227,6 +3202,47 @@ Found declared_in(const Block& block, const std::string& name, std::string& valu
     return Found::No;
 }
 
+// What a calc() may not know by itself: the font size, the query container's
+// inline size (the nearest ancestor with a container-type of inline-size or
+// size, when its width is definite) and where the element sits among its
+// siblings (for sibling-index()/sibling-count()).
+litebird::CalcContext make_calc_context(Realm& realm, const Element& subject, double em, double rem) {
+    litebird::CalcContext ctx;
+    ctx.em = em;
+    ctx.rem = rem;
+    if (const std::shared_ptr<Node> parent = subject.parent()) {
+        double index = 0, count = 0;
+        bool found = false;
+        for (const auto& child : parent->children()) {
+            if (!child->is_element()) continue;
+            ++count;
+            if (!found) ++index;
+            if (child.get() == &subject) found = true;
+        }
+        if (found) {
+            ctx.sibling_index = index;
+            ctx.sibling_count = count;
+        }
+    }
+    const Node* top = tree_root_of(subject);
+    std::shared_ptr<Node> keep;
+    for (const Element* at = parent_element_of(subject, keep); at; at = parent_element_of(*at, keep)) {
+        Block block;
+        compute_block(realm, *at, block, top);
+        std::string container_type;
+        if (declared_in(block, "container-type", container_type) != Found::Yes) continue;
+        const std::string lower = ascii_lower(container_type);
+        if (lower != "inline-size" && lower != "size") continue; // not a query container for the inline axis
+        std::string width;
+        double px = 0;
+        if (declared_in(block, "width", width) == Found::Yes && length_px(realm, *at, ascii_lower(width), px)) {
+            ctx.query_inline_px = px;
+        }
+        return ctx; // the nearest query container decides, even when its size is not definite
+    }
+    return ctx;
+}
+
 std::string computed_value(Realm& realm, const Element& element, const Block& block, const std::string& name,
                            int depth);
 
@@ -3236,6 +3252,17 @@ std::string computed_value(Realm& realm, const Element& element, const Block& bl
 // absolute length.
 std::string resolved(Realm& realm, const Element& subject, const Element& from, const Block& block,
                      const std::string& name, const std::string& value, int depth) {
+    // What a calculation may need from the tree, built at most once per
+    // resolved value and only when one needs it.
+    litebird::CalcContext calc_ctx;
+    bool calc_ctx_built = false;
+    const auto ensure_calc_ctx = [&]() -> const litebird::CalcContext& {
+        if (!calc_ctx_built) {
+            calc_ctx = make_calc_context(realm, subject, font_size_px(realm, from), root_font_size(realm, from));
+            calc_ctx_built = true;
+        }
+        return calc_ctx;
+    };
     if (is_custom_property(name)) return value;
     const std::string lower = ascii_lower(value);
     // A flex grow or shrink factor computes to a plain number. A negative
@@ -3248,8 +3275,10 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
             return format_number(std::max(0.0, number));
         }
         if (!litebird::grid_calc_family(lower).empty()) {
-            double stat = 0;
-            if (litebird::grid_static_number(lower, stat)) return format_number(std::max(0.0, stat));
+            litebird::CalcTriple triple;
+            if (litebird::calc_eval_text(lower, ensure_calc_ctx(), triple) && !triple.dimension) {
+                return format_number(std::max(0.0, triple.number));
+            }
             return value;
         }
         return value;
@@ -3296,7 +3325,7 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
     if (name == "grid-column-start" || name == "grid-column-end" || name == "grid-row-start" ||
         name == "grid-row-end") {
         std::string line;
-        if (litebird::grid_line_computed(value, line)) return line;
+        if (litebird::grid_line_computed(value, line, &ensure_calc_ctx())) return line;
         return value;
     }
 
@@ -3332,7 +3361,8 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
             return true;
         };
         std::string resolved_list;
-        if (litebird::grid_resolved_track_list(value, em, rem, basis, is_grid, simplify_calc, resolved_list)) {
+        if (litebird::grid_resolved_track_list(value, em, rem, basis, is_grid, simplify_calc, resolved_list,
+                                               &ensure_calc_ctx())) {
             return resolved_list;
         }
         return value;
@@ -3342,25 +3372,26 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
     // nothing more to do without layout, and it is written the short way.
     std::string text = lower;
     if (is_function_value(lower, "calc")) {
-        const bool font_relative = lower.find("em") != std::string::npos;
-        const double em = font_relative ? font_size_px(realm, from) : 16;
-        const double rem = lower.find("rem") != std::string::npos ? root_font_size(realm, from) : 16;
-        CalcValue sum;
-        if (!eval_calc(lower, em, rem, sum)) return value;
+        // A calc() of a length is a computed length; resolve it against what
+        // the tree knows (fonts, the query container). A number-typed calc
+        // stays as written — the plain-number paths handle those.
+        litebird::CalcTriple triple;
+        if (!litebird::calc_eval_text(lower, ensure_calc_ctx(), triple)) return value;
+        if (!triple.dimension) return value;
         // A calc with a percentage in it keeps its calc at computed-value
         // time (percentages resolve against a basis that is not here); a
         // zero one is written as it came in.
         const bool has_percent = lower.find('%') != std::string::npos;
-        if (has_percent && sum.percent == 0) return value;
-        if (sum.percent != 0) {
-            const std::string percent = format_number(sum.percent) + "%";
-            if (sum.px == 0) return percent;
-            std::string length = px_text(std::fabs(sum.px));
-            return "calc(" + percent + (sum.px < 0 ? " - " : " + ") + length + ")";
+        if (has_percent && triple.percent == 0) return value;
+        if (triple.percent != 0) {
+            const std::string percent = format_number(triple.percent) + "%";
+            if (triple.px == 0) return percent;
+            std::string length = px_text(std::fabs(triple.px));
+            return "calc(" + percent + (triple.px < 0 ? " - " : " + ") + length + ")";
         }
         // A negative length is clamped to zero where the property does not
         // accept negative lengths, for example a flex-basis.
-        text = (name == "flex-basis" && sum.px < 0) ? "0px" : px_text(sum.px);
+        text = (name == "flex-basis" && triple.px < 0) ? "0px" : px_text(triple.px);
     }
 
     std::size_t at = 0;
@@ -3517,6 +3548,14 @@ struct StyleState : JsExotic {
 
     void load() {
         if (computed) {
+            // An element that is not connected has no computed style: every
+            // property, the priority, the length and the cssText read as
+            // empty, the way a browser answers it (HTML, window.getComputedStyle).
+            if (realm->alive && !element->is_connected()) {
+                block.clear();
+                version = Node::tree_version();
+                return;
+            }
             if (version == Node::tree_version() && realm->alive) return;
             if (realm->alive) compute_block(*realm, *element, block);
             version = Node::tree_version();
@@ -3550,6 +3589,7 @@ struct StyleState : JsExotic {
 
     std::string value_of(const std::string& name) {
         load();
+        if (computed && realm->alive && !element->is_connected()) return std::string();
         if (!computed || !realm->alive) return block.get(name, true);
         return computed_value(*realm, *element, block, name, 0);
     }

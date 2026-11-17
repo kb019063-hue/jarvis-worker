@@ -362,6 +362,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
+| **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
+| **Phase 60** | **Unicode 17.0 `String.prototype.normalize()`, full & locale case mapping (`tr`/`az`, `lt`, `el`), and CLDR 48 / UCA 17.0 `localeCompare()`:** generates compact static Unicode 17.0 / ICU 78.2 / CLDR 48 tables (`StringUnicodeTables.{hpp,cpp}` via `tools/generate_string_unicode_tables.py`, 293 KB `.o`: CCC, canonical/compatibility decompositions, composition pairs, QuickCheck/Cased/Case_Ignorable/Soft_Dotted/Variable properties, simple + `SpecialCasing` mappings, and CLDR 48 root collation CEs + contractions); implements UAX #15 `NFC`/`NFD`/`NFKC`/`NFKD` with Hangul Jamo and QuickCheck fast paths, full Unicode 17.0 case mapping (`Final_Sigma`, multi-code-point expansions, `tr`/`az`, `lt` `More_Above`/`After_I`, ICU 78.2 `el` `GreekUpper::toUpper` state machine), CLDR 48 UCA 17.0 root collation (S2.1 contiguous + discontiguous contractions, all 7 implicit weight groups, `sensitivity`, `caseFirst`, `numeric`, `ignorePunctuation`, `-u-kf`/`-u-kn`), ECMA-402 BCP-47/options validation, and fixes `this_string()` dangling-reference UB and ES String prototype metadata in `BuiltinsString.cpp`. | ✅ Completed (204/204 unit suites + 80 cross-origin checks; `make diff-strings` **50,580/50,580 (0 diffs)**, down from 71; `make verify-string-unicode` 12,255,232 CP×op + 1,112 strings + 1,038 pairs + 400,680 UCD `NormalizationTest` + 206,297 CLDR `CollationTest` = **0 diffs**; JS corpus 1,020/1,034 (17/17 `string_unicode.dat`); test262 9 String Unicode/locale suites 105→152/156 (97.4%), full `built-ins/String` 1,199/1,223 (98.0%); ASan+UBSan clean) |
 
 ---
 
@@ -4682,13 +4684,14 @@ Found on the way, the same on `main`, and in the task table now, as rows of
 their own or added to the row they belong to. The first two have a failing
 case each in `construct.dat`.
 
-- **`this` can be used before `super(...)` has run.** In a derived
-  constructor `this.x = 1; super();` writes to the object `new` made, where
-  the language has a `ReferenceError`; an arrow function that reads `this`
-  and `super.m` behave the same. The engine has no binding that exists and
-  cannot be read yet: `let` and `const` have none either (`typeof z` before
-  `let z` is `undefined` here and a `ReferenceError` in Node, and a `let` in
-  a block does not hide an outer variable above its own line).
+- **`this` can be used before `super(...)` has run.** *(Fixed in Phase 59 /
+  finding 65; kept here for context from Phase 43.)* In a derived constructor
+  `this.x = 1; super();` writes to the object `new` made, where the language has
+  a `ReferenceError`; an arrow function that reads `this` and `super.m` behave
+  the same. The engine has no binding that exists and cannot be read yet: `let`
+  and `const` have none either (`typeof z` before `let z` is `undefined` here
+  and a `ReferenceError` in Node, and a `let` in a block does not hide an outer
+  variable above its own line).
 - **`eval` inside a function is global code.** It sees no local variable, no
   parameter, no `this`, no `new.target` and no `super`: `function f() { var
   local = 5; return eval('local + 1'); }` is a `ReferenceError`, and
@@ -5811,6 +5814,335 @@ full modern ECMAScript conformance across six pillars:
      replace, replaceAll, search, split}` through `GetMethod` on object
      arguments.
 
+## Phase 56 Architecture: Cross-Origin `Window` and `Location` Reflection
+
+### 1. What Phase 42 left open
+
+Phase 42 made a cross-origin `WindowProxy` refuse to read, write or invoke what
+it may not: `WindowExotic::get`/`set` throw `SecurityError` before consulting
+the child's own properties, the scope or the prototype chain, and the indexed
+child navigables and named children stay reachable (finding 48). Everything
+that *describes* the object was still the ordinary path, though:
+
+- `Object.getOwnPropertyNames(win)` listed the child's ordinary own properties
+  (its interface members are on the prototype, so it listed scripts' globals
+  and whatever had been remembered), not the spec's cross-origin list;
+  `Reflect.ownKeys` and `Object.keys` were the same.
+- `Object.getOwnPropertyDescriptor(win, 'length')` etc. describe what is
+  stored, not what a cross-origin caller may see.
+- `childWin.location` was a plain Iface-branded object: a parent could read
+  `loc.href`, `loc.pathname`, `loc.origin` — leaking the child's address —
+  and `loc.reload()` was callable. No origin check existed anywhere in its
+  member list.
+- `Object.defineProperty(win, ...)` and `Reflect.defineProperty` wrote straight
+  into the child's own property map.
+- `Object.getOwnPropertyNames(win).indexOf('gamma')` hinted at ids of the
+  child; `for…in`, spread, rest and `JSON.stringify` keys were all derived
+  from the ordinary own-keys walk.
+- `Object.getPrototypeOf(win)` returned the child realm's `Window.prototype`
+  (browsers answer `null`), so `for…in` enumerated the interface's
+  members and `win instanceof Object` walked into the child.
+
+### 2. One predicate, every reflection seam
+
+The whole phase hinges on a single new helper, declared in
+`include/litebird/js/DomBindings.hpp` and defined in `src/js/DomWindowBindings.cpp`:
+
+```cpp
+bool dom::cross_origin_own_keys(const JsValue& object, bool include_non_enumerable,
+                                std::vector<std::string>& out);
+```
+
+It returns `false` when `object` is not a `Window`/`Location` proxy whose
+`realm` is not same-effective-origin with the caller (`same_effective_origin`,
+unchanged), and `true` otherwise, filling `out` with HTML §7.2.3.10's
+`[[OwnPropertyKeys]]` result, ascending:
+
+1. the indices of the document-tree child navigables (`0`…`length-1`); then,
+   only when `include_non_enumerable` is asked (the engine maps that flag to
+   `own_keys(true)`, what `Reflect.ownKeys`, `getOwnPropertyNames` and
+   `for…in`'s seen-set use);
+2. the cross-origin table names in spec order — `window`, `self`, `location`,
+   `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`,
+   `parent`, `postMessage` for a window, or `href`, `replace` for a location;
+3. `then`.
+
+(The spec's three symbol keys — `%Symbol.toStringTag%`, `%Symbol.hasInstance%`,
+`%Symbol.isConcatSpreadable%` — are part of `CrossOriginOwnPropertyKeys`, but
+no symbol key is reported anywhere in this engine, so none is reported here
+either.) The named-property set of the child navigables deliberately does not
+appear: it drives named access, not `[[OwnPropertyKeys]]`.
+
+Every seam that reports keys or descriptors was switched to it:
+
+- `BuiltinsObject.cpp`: a local `reflected_own_keys` wraps all reflection
+  calls (`Object.keys`/`values`/`entries`/`assign`, `getOwnPropertyNames`,
+  `getOwnPropertyDescriptors`, `Reflect.ownKeys`), and `descriptor_for`
+  answers for a cross-origin object before anything else.
+- `descriptor_for` shapes the descriptors: indices are data descriptors
+  (`writable: false, enumerable: true, configurable: true`) holding the child
+  proxy; `then` is `{ value: undefined, enumerable: false, configurable: true }`;
+  an attribute entry of the table is an **accessor descriptor** whose `get` is
+  a native reading-sequence wrapper (HTML §7.2.1.3.4's crossOriginGet) and
+  whose `set` exists only where the spec has one (`location`, and the Location
+  `href` entry, whose descriptor has *no getter* cross-origin); a method
+  entry (`close`, `closed`…) — a data descriptor whose value is the child's
+  own function, configurable and non-enumerable. The engine has no
+  caller-realm anonymous built-in to put there; that substitution is the one
+  place the shape is not byte-identical to the spec.
+- `define_from_descriptor` refuses a cross-origin object with
+  `SecurityError` before reading the descriptor (HTML §7.2.3.6 / §7.2.4.6:
+  `[[DefineOwnProperty]]` always throws; `Reflect.defineProperty` does not
+  return `false`).
+- `Object.getPrototypeOf` / `Reflect.getPrototypeOf` answer `null`;
+  `Object.setPrototypeOf` / `Reflect.setPrototypeOf` refuse with `TypeError` /
+  `false`; `Object.freeze` / `Object.seal` / `Object.preventExtensions` throw
+  `TypeError` (`[[PreventExtensions]]` is `false`).
+- `js_instance_of` answers `false` for a cross-origin object (no prototype to
+  walk). `for…in` sees only the indices (the prototype walk is skipped), and
+  spread, `Object.assign`, object rest destructuring and `JSON.stringify`
+  gather only the indices.
+- `WindowExotic::has` reports only the indices, the table names, `then` and
+  the named child navigables; `WindowExotic::remove` and
+  `LocationExotic::remove` throw `SecurityError` (HTML §7.2.3.9 / §7.2.4.9).
+- The `location` attribute is in the cross-origin safelist now (it always
+  needed Get+Set and was missing from `is_cross_origin_safelisted`; the
+  `set` path already special-cased it).
+
+### 3. `Location` became an exotic
+
+`Location` is created as a branded ordinary object in `setup_window`; it is
+now handed a `LocationExotic` at the same place (cached on the child window,
+so one `Location` per window as before). Cross-origin it answers only what
+the standard exposes: `then` reads as `undefined`, `replace()` reaches the
+ordinary method (which navigates the child — a fragment move, as everywhere
+in the engine), `href` may be **written** but **read throws**
+(`SecurityError`, since the cross-origin `href` entry carries no getter),
+and `has()` answers only `href` / `replace` / `then`. Same-origin callers
+see none of this: every hook returns false and the ordinary accessors run
+unchanged.
+
+### 4. Still open, honestly
+
+- `childWin.location = url` and `loc.replace(url)` with a cross-document URL
+  are no-ops — `navigate()` is fragment-only by design (Phase 42); nothing
+  here changes that.
+- `%Symbol.toStringTag%`, `%Symbol.hasInstance%`, `%Symbol.isConcatSpreadable%`
+  are not reported by `Reflect.ownKeys`; no symbol key is, anywhere in the
+  engine.
+- `'x' in win` for a non-exposed `x` answers `false` instead of throwing
+  `SecurityError` — the `in` path cannot throw through this engine's
+  boolean `has()`.
+- Other boxes on the `WindowProxy`/`Location` security table —
+  `MessageChannel`/`MessagePort`, out-of-process site isolation, and a
+  cached `[[CrossOriginPropertyDescriptorMap]]` (the spec memoizes the
+  wrapper functions; ours create one per `getOwnPropertyDescriptor` call,
+  identity differs from the child's function) — remain open.
+- Named child navigables are reachable by name but do not appear in
+  `[[OwnPropertyKeys]]`, per the spec; `Location`'s `ancestorOrigins`,
+  `assign()`, `reload()` stay unexposed cross-origin.
+- `Object.prototype.hasOwnProperty.call(win, 'length')` answers correctly;
+  `w.hasOwnProperty('length')` itself throws, because reading the method
+  cross-origin is not exposed.
+
+### 5. Verification
+
+`tests/cross_origin_windows.cpp` (new, standalone binary built and run by
+`make test`) loads a parent at `https://app.example.test/index.html` with a
+cross-origin child at `https://other.example.test/child.html` (served from a
+temporary directory through `ResourceLoader::set_origin_root_for_testing`),
+the child with one named `srcdoc` grandchild. It asserts **80 checks**: the
+two-name `[[OwnPropertyKeys]]` lists, every descriptor shape, the
+`SecurityError` table for read/write/delete/define, the integrity-level and
+prototype refusal, `for…in`/spread/`Object.assign`/JSON containment, and the
+same-origin control (a `srcdoc` iframe, untouched). `tests/test_suite.cpp`
+is untouched (another open PR has it).
+
+Merged-tree verification (this branch, Release): `make test` — **198/198**
+suites + the 80 cross-origin checks; `js-conformance` **999/1014** (Everyday
+**90/90**); `dom-conformance` **669/669** (Everyday **68/68**);
+`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
+**7998/8009**, 11 fail as listed, 0 unlisted.
+
+---
+
+## Phase 59 Architecture: Temporal Dead Zone for Derived `this` and Lexical Bindings (Finding 65)
+
+### 1. Why TDZ checks were missing
+
+Prior to Phase 59, `JsEnvironment::Binding` tracked only `is_const`,
+`is_readonly`, and `is_lexical` (`include/litebird/js/JsInterpreter.hpp`).
+Entering a block, function, or script only hoisted `var` and `function`
+declarations; `let`, `const`, and `class` declarations added bindings only when
+execution reached their declaration statement. As a result:
+
+- Reading or `typeof`-inspecting a variable before its `let`/`const`/`class`
+  declaration either escaped to an outer binding or global object, or returned
+  `"undefined"` for undeclared identifiers.
+- Assigning to a lexical name before its declaration fell through to outer
+  scopes or created an implicit global in sloppy mode.
+- Derived constructors (`invoke_function`) defined `"this"` as initialized on
+  entry while separately setting `env->this_binding = ThisBinding::Unbound`, so
+  `this.x = 1`, `() => this`, `super.m`, `super[key]`, and `return this` before
+  `super(...)` read or mutated the pre-allocated object instead of throwing a
+  `ReferenceError`.
+
+### 2. Uninitialized binding state in `JsEnvironment`
+
+- `JsEnvironment::Binding` gains `bool is_initialized{true}` (occupying existing
+  trailing struct padding with no size growth), and `AssignResult` gains
+  `Uninitialized`.
+- `declare_lexical(name, is_const)` creates or resets an own binding to
+  `undefined` with `is_lexical = true` and `is_initialized = false`.
+- `initialize_lexical(name, value, is_const)` stores `value` and sets
+  `is_initialized = true`.
+- `mark_uninitialized(name)` sets `is_initialized = false` on an existing own
+  binding (used for derived constructor `"this"` on entry).
+- `try_assign(name, value)` checks `!b->is_initialized` **before** `b->is_const`
+  so assigning to a `const` (or `let`) in its TDZ throws `ReferenceError` while
+  re-assigning an initialized `const` still throws `TypeError`.
+
+### 3. Parser & evaluator TDZ scopes
+
+- **Parser (`include/litebird/js/JsParser.hpp`, `src/js/JsParser.cpp`):**
+  `BlockStmt` (also used for `Program` and function bodies) and `SwitchStmt`
+  collect `std::vector<LexicalDecl> lexical_decls` for every `let`, `const`,
+  and `class` declaration directly inside them.
+- **Evaluator (`src/js/JsEval.cpp`):**
+  - `lookup_identifier` throws `ReferenceError` when `!binding->is_initialized`
+    (special-casing `"this"` to match derived-constructor error wording);
+    `assign_identifier` throws via `AssignResult::Uninitialized`; `eval_unary`
+    for `typeof` evaluates identifiers through `lookup_identifier` when `env->lookup(name)` finds a binding so `typeof z` in TDZ throws `ReferenceError`
+    while `typeof neverDeclared` stays `"undefined"`.
+  - Pre-declaration (`declare_lexicals`) runs on entry to `run_program`,
+    `invoke_function` (for both body lexicals and non-simple parameter targets
+    in `bind_parameters`, with derived `"this"` marked uninitialized on entry and
+    re-initialized in `eval_super_call` once the parent returns), `exec_block`,
+    `execute` (`BlockStmt`), `exec_switch` (discriminant evaluated outside `scope`;
+    `case` tests and bodies inside), `exec_for` (lexical `init` declarations),
+    `exec_for_each` (`head_env` for iterable evaluation + per-iteration
+    `iter_env`), and `exec_try` (destructured `catch` parameter names before
+    binding, then handler block lexicals).
+  - `copy_scope` preserves `is_initialized` and `is_lexical` flags across
+    per-iteration `for (let ...)` scopes, and `exec_for` / `exec_for_each` keep
+    newly allocated lexical loop environments rooted in `EnvScope`.
+  - `define_class` installs an uninitialized `const` self-binding inside
+    `class_env` while evaluating `super_expr` and computed property keys, then
+    initializes `cls->name` before running static field initializers and
+    `static {}` blocks; `ClassDecl` initializes the outer mutable lexical binding
+    via `initialize_lexical(..., /*is_const=*/false)`.
+  - `SuperMember` evaluation (member read, `eval_call`, and `resolve_reference`
+    for writes) calls `lookup_identifier("this", env)` before evaluating a
+    computed property key so `super[sideEffect()]` before `super()` throws
+    without running `sideEffect()`.
+
+### 4. Verification & remaining boundaries
+
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan
+  (`build-asan/test_suite`), including three new Phase 59 suites
+  (`js_derived_this_temporal_dead_zone`,
+  `js_lexical_temporal_dead_zone_blocks_and_classes`,
+  `js_temporal_dead_zone_in_control_flow_and_patterns`).
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan;
+  `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**),
+  verified **1017/1017** under Node.js (`--reference "node -e"`). Only `eval`
+  inside a function remains open in `construct.dat`.
+- `make test262` (against pre-change `main` binary): **12,359 / 15,686**
+  default 21 dirs (**+43 pass**, **0 regressions**); **8,195 / 10,622** across
+  13 TDZ/scope dirs (`let`, `const`, `class`, `super`, `this`, `switch`, `for`,
+  `for-of`, `for-in`, `block-scope`, `typeof`, `try`; **+49 pass**, **0
+  regressions**, **0** failures remaining in `language/block-scope/` and **0**
+  TDZ failures in `language/statements/{let,const}/`).
+- Release & ASan+UBSan regression checks: `dom-conformance` **669/669**,
+  `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt`
+  **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`
+  and `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) &
+  `fuzz_pipeline` (400) **0** findings, targeted + 150 random `asan-deep` runs
+  **0** failures.
+- **Still open / boundaries:**
+  - Across separate `<script>` elements, an earlier script referencing a `let`
+    declared in a later `<script>` sees `"x is not defined"` (still
+    `ReferenceError`), and redeclaring the same lexical name in a second
+    `<script>` overwrites `m_global_env` rather than throwing a `SyntaxError`.
+  - Direct `eval` inside a function (separate `AGENTS.md` row) and `var`
+    inside a block shadowing an outer block `let`/`const` early SyntaxError
+    remain open.
+
+---
+
+## Phase 60 Architecture: Unicode 17.0 String Normalization, Full & Locale Case Mapping, and CLDR 48 UCA Collation (Finding 66)
+
+### 1. What was wrong before Phase 60
+
+Before Phase 60, Litebird's `String.prototype` Unicode methods (`src/js/BuiltinsString.cpp`) were placeholders or ASCII-only:
+
+- `toLowerCase()` and `toUpperCase()` transformed only ASCII `'A'..'Z'` / `'a'..'z'`, leaving every non-ASCII code point (Greek, Cyrillic, Latin extended, supplementary Deseret/Adlam/Warang Citi/Garay/Beria Erfe), multi-code-point `SpecialCasing` expansion (`ß → SS`, `ﬁ → FI`, `İ → i\u0307`, `ΐ`), and contextual rule (`Final_Sigma`) untouched.
+- `toLocaleLowerCase()` and `toLocaleUpperCase()` ignored their locale argument completely and delegated straight to the ASCII functions, with no BCP-47 locale validation and no `tr`/`az`, `lt`, or `el` rules.
+- `normalize()` validated the form string (`NFC`/`NFD`/`NFKC`/`NFKD`) and then returned the input verbatim without decomposing, canonically reordering, or composing.
+- `localeCompare()` compared raw UTF-16 code units (`<`/`>`), returning arbitrary code-point order (`'Z' < 'a'`, `'ä' > 'z'`, ignoring canonical equivalence and UCA multi-level weights) and ignoring its `locales` and `options` arguments.
+- `this_string()` returned a `JsString` constructed from `ctx.current_this()` by `const JsValue&` reference — a dangling reference if `RequireObjectCoercible` / `ToString` triggered `valueOf()` / `toString()` re-entrancy that grew the call-context stack.
+- Several `String.prototype` built-ins lacked `not_constructor = true`, `padStart`/`padEnd` reported `.length === 2` instead of `1`, `[Symbol.iterator]` lacked standard `.name`/`.length`, and boxed `new String(...)` receivers were not unboxed via `this_string_value` before `ToString`.
+
+Together, these accounted for all **71 remaining discrepancies** in `make diff-strings` (`50,509 / 50,580`) and left Test262's nine String Unicode/locale directories at **105 / 156 (67.3%)**.
+
+### 2. Static Unicode 17.0 / ICU 78.2 / CLDR 48 data tables
+
+Following the zero-runtime-dependency table pattern of `IdnaTables.{hpp,cpp}` and `RegExpUnicodeTables.{hpp,cpp}`, `tools/generate_string_unicode_tables.py` downloads official Unicode 17.0 UCD files (`UnicodeData.txt`, `SpecialCasing.txt`, `DerivedNormalizationProps.txt`, `DerivedCoreProperties.txt`, `NormalizationTest.txt`) and CLDR 48 (`allkeys_CLDR.txt`, `CollationTest_CLDR_NON_IGNORABLE_SHORT.txt`), verifies all 1,114,112 code points across 6 operations against Node.js's ICU 78.2 during generation, and emits `src/js/StringUnicodeTables.cpp` (895 KB source, **293 KB** `.o`, 0 warnings) against `include/litebird/js/StringUnicodeTables.hpp`:
+
+- **Normalization**: `kCccRuns` (403 runs), `kCanonDecomp` (2,081 entries), `kCompatDecomp` (3,849 entries), shared `kDecompPool` (6,763 UTF-16 code units), `kComposePairs` (961 canonical composition pairs, excluding `Full_Composition_Exclusion`), and packed property runs (`kNfcQcRuns`, `kNfkcQcRuns`, `kNfdQcNoRuns`, `kNfkdQcNoRuns`, `kCasedRuns`, `kCaseIgnorableRuns`, `kSoftDottedRuns`).
+- **Case mapping**: delta-compressed run-length tables `kSimpleLowerRuns` (185 runs) and `kSimpleUpperRuns` (198 runs), plus full `SpecialCasing` tables `kSpecialLower` (1 unconditional entry: `U+0130`) and `kSpecialUpper` (102 multi-code-point entries) indexed into a shared UTF-16 pool.
+- **Collation (CLDR 48 / UCA 17.0 root)**: `kCollationRuns` (6,300 delta-compressed single-CE runs, flagging variable elements for `ignorePunctuation`), `kCollationMulti` (3,985 multi-CE expansion entries), `kCollationContractions` (974 sorted 2–3 code-point contraction entries with ASCII starter check for `L·`/`l·`), and `kCollationCePool` (10,689 packed 64-bit CEs storing primary/secondary/tertiary weights and variable bit).
+
+### 3. Runtime architecture (`litebird::unicode` in `src/js/BuiltinsString.cpp`)
+
+1. **UAX #15 Normalization (`normalize_utf16`)**:
+   - Fast-path QuickCheck scans the UTF-16 input and returns immediately when all code points are `YES` and in non-decreasing CCC order (including pure ASCII).
+   - Algorithmic Hangul Jamo decomposition (`SBase=0xAC00`, `LBase=0x1100`, `VBase=0x1161`, `TBase=0x11A7`) and composition (`L+V → LV`, `LV+T → LVT`) without storing 11,172 table rows.
+   - Recursive canonical (`NFD`/`NFC`) and compatibility (`NFKD`/`NFKC`) decomposition with unpaired surrogates preserved verbatim.
+   - Canonical Ordering Algorithm (stable insertion sort over non-zero CCC runs).
+   - Canonical Composition Algorithm (`NFC`/`NFKC`) tracking the last starter and blocking recombinations whenever an intervening combining mark has `last_ccc >= ccc`.
+
+2. **Full & Locale-Sensitive Case Mapping (`to_lower_utf16`, `to_upper_utf16`)**:
+   - **Root Unicode 17.0**: applies `SpecialCasing` unconditional expansions (`ß → SS`, `İ → i\u0307`, ligatures, iota-subscript forms), `Final_Sigma` context (`Cased` before, skipping `Case_Ignorable`, and not followed by `Cased`), and simple run-length mappings across all 17 Unicode planes (decoding surrogate pairs cleanly and preserving lone surrogates).
+   - **Turkish / Azeri (`tr`, `az`)**: `toLocaleLowerCase` maps `U+0130` (`İ`) → `i`, `I` + combining dot above (`U+0307`, skipping intervening `ccc != 0 && ccc != 230` marks) → `i` (consuming the dot), and bare `I` → `ı` (`U+0131`); `toLocaleUpperCase` maps `i` → `İ` (`U+0130`).
+   - **Lithuanian (`lt`)**: `toLocaleLowerCase` inserts `U+0307` after `I`/`J`/`Į` when `More_Above` (`ccc == 230`) follows, and maps `Ì`/`Í`/`Ĩ` to `i\u0307` + accent; `toLocaleUpperCase` strips `U+0307` when preceded by a `Soft_Dotted` base (`After_I` / `Soft_Dotted` skipping non-`230` marks).
+   - **Greek (`el`)**: `toLocaleUpperCase` implements the exact ICU 78.2 `GreekUpper::toUpper` state machine (`AFTER_CASED`, `AFTER_VOWEL_WITH_PRECOMPOSED_ACCENT`, `AFTER_VOWEL_WITH_COMBINING_ACCENT`), consuming following Greek combining marks after *all* Greek letters (vowels and consonants), inserting dialytika on accented diphthong second vowels (`άι → ΑΪ`, `όυ → ΟΫ`, without adding dialytika after already-dialytika vowels like `ΰυ`), preserving the disjunctive tonos on standalone `ή`, and folding `ypogegrammeni` (`U+0345`) to `Ι`.
+
+3. **CLDR 48 / UCA 17.0 Collation (`locale_compare_utf16`)**:
+   - NFD-normalizes both operands (with an ASCII fast path that bypasses normalization unless `0x00B7` follows `L`/`l` for Catalan `L·`/`l·`).
+   - Walks code points using UCA S2.1 longest-match contiguous and discontiguous contraction matching (blocking across marks with `last_ccc >= ccc` or `ccc == 0`), collecting packed `(primary, secondary, tertiary, variable)` CEs.
+   - Unmapped code points emit the 7 UCA 17.0 / CLDR 48 implicit two-CE groups: `FB00` (Tangut), `FB01` (Tangut Components), `FB02` (Nushu), `FB03` (Khitan Small Script), `FB40+(cp>>15)` (Core Han + 12 CJK compatibility ideographs), `FB80+(cp>>15)` (Han Extensions A–J), and `FBC0+(cp>>15)` (unassigned / surrogates).
+   - Supports ECMA-402 collation options and Unicode `-u-` subtags (`-u-kn`, `-u-kn-true`/`false`, `-u-kf-upper`/`lower`/`false`):
+     - `ignorePunctuation`: skips variable CEs (and any immediately following secondary-only combining marks).
+     - `numeric`: compares maximal runs of ASCII digits (`0x21E6..0x21EF`) by leading-zero-stripped length then digit value, keeping raw CE tie-breaking at lower levels.
+     - `caseFirst` (`upper` / `lower`): applies case-level weighting on uppercase tertiary weights (`0x08..0x12`) ahead of tertiary comparison.
+     - `sensitivity` (`base` / `accent` / `case` / `variant`): selects primary, primary+secondary, primary+case, or primary+secondary+tertiary passes.
+
+4. **ECMA-402 Validation & VM Hardening**:
+   - `CanonicalizeLocaleList` validates every BCP-47 language tag (rejecting malformed subtags, duplicate singletons/variants, invalid grandfathered/private-use shapes, non-string/non-object entries) and extracts canonical primary language plus `-u-kf`/`-u-kn` extensions, throwing `RangeError` / `TypeError` per ECMA-402.
+   - Options object parsing validates `usage`, `localeMatcher`, `sensitivity`, `caseFirst`, and reads `numeric` / `ignorePunctuation` via `JsValue::is_truthy()`.
+   - `this_string()` copies `ctx.current_this()` by value before invoking `ToString`, eliminating re-entrancy dangling references; `this_string_value()` unboxes `String` wrappers; `String.prototype` methods are marked `not_constructor = true`, `padStart`/`padEnd` have `.length === 1`, and `[Symbol.iterator]` exposes proper metadata.
+
+### 4. Verification (merged tree)
+
+- `make diff-strings`: **50,580 / 50,580** equal to Node.js v22.22.3 (ICU 78.2 / Unicode 17.0), **0 differ** (`STRING_DIFF_CEILING ?= 0`, lowered from `71`).
+- `make verify-string-unicode` (`tools/conformance/verify_string_unicode.py`):
+  - Exhaustive all-code-point sweep: **1,114,112 CPs × 11 operations (12,255,232 checks)** vs Node.js = **0 diffs**.
+  - Curated + seeded fuzz: **1,112 strings × 11 operations** + **1,038 collation pairs** vs Node.js = **0 diffs**.
+  - ECMA-262 / ECMA-402 validation: **25 / 25** passed.
+  - With `--ucd-dir /tmp/ucd_cldr`: **400,680** official UCD `NormalizationTest.txt` assertions (5 invariants × 4 forms × 20,034 lines) = **0 fails**, and **206,297** official CLDR 48 `CollationTest_CLDR_NON_IGNORABLE_SHORT.txt` adjacent ordering pairs = **0 fails** (10.93s total).
+- Test262 (`tools/conformance/run_test262.py`, Unicode 17.0):
+  - Nine String Unicode/locale suites (`built-ins/String/prototype/{normalize,toLowerCase,toUpperCase,toLocaleLowerCase,toLocaleUpperCase,localeCompare}` + `intl402/String/prototype/{toLocaleLowerCase,toLocaleUpperCase,localeCompare}`): **105 → 152 / 156 (97.4%, +47)**.
+  - Full `built-ins/String`: **1,199 / 1,223 (98.0%)** (24 remaining failures are BigInt / `$262` / `with` / prototype-meta outside String Unicode).
+- `make js-conformance`: **1,020 / 1,034 (98.6%)** (`string_unicode.dat` **17 / 17**, verified 1,034/1,034 against `node -e`; CI floor raised `1003 → 1020`, `JS_ASAN_FLOOR` raised `1001 → 1018`).
+- `make test`: **204 / 204** engine unit suites (3 new Phase 60 suites) + **80 / 80** cross-origin checks.
+- Regression & sanitizer checks on the merged tree: `make conformance` **1,792 / 1,792**, `make dom-conformance` **669 / 669**, `make url-conformance` **1,188 / 1,188**, `make wpt` **9,538 / 9,744** (0 unlisted), `make verify-regexp` **588 / 588 + 112 / 112**, `make fuzz` / `make bench` / `make bench-surrogates` all green; **ASan + UBSan** (`build-asan/test_suite` 204/204, `build-asan/cross_origin_test` 80/80, `verify_string_unicode.py --fuzz 400 --skip-node --skip-full-sweep`, `diff_strings.py --max-differ 0` 50,580/50,580, `run_js_conformance.py --min-pass 1018` with 0 crashes): **0 sanitizer findings**.
+
+### 5. Still open
+
+- **No `Intl` namespace / `Intl.Collator` object**: the 4 remaining failures in `intl402/String/prototype/localeCompare` construct or spy on `Intl.Collator` directly. `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Segmenter`, and `Intl.Collator` remain Wave 2 Row 10 work.
+- **Locale-specific CLDR collation tailorings**: `localeCompare()` implements the full CLDR 48 root collation order (DUCET + CLDR root contractions + `-u-kf`/`-u-kn` + all ECMA-402 options), which matches `en`/`und` and default ICU root collation, but language-specific tailorings (e.g. Swedish `å`/`ä`/`ö` after `z`, German phonebook `ä ≈ ae`, Spanish traditional `ch`, Japanese Hiragana/Katakana quaternary weights) are not yet tabulated.
+- **`usage: "search"`**: accepted by options validation and mapped to root collation; locale-specific search tailorings depend on CLDR tailoring tables.
 ## Strict-mode writes that a property refuses (the old `strict-write` rows)
 
 The gap this file documented as open ("a write that a property refuses is refused

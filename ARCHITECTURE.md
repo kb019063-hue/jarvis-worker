@@ -3159,9 +3159,10 @@ make -j$(nproc) && make test
 - **Frames (`<iframe>` / `<frame>`)**: `iframe.contentDocument` /
   `contentWindow` and nested browsing contexts do not exist yet (495 listed WPT
   subtests).
-- **Additional image & font formats**: PNG, JPEG, GIF, SVG, BMP, and PPM are
-  decoded through `ImageDecoder`; WebP, AVIF, `@font-face` remote font loading,
-  WOFF/WOFF2, and complex script shaping (HarfBuzz/bidi) remain open.
+- **Additional image & font formats**: PNG, JPEG, GIF, WebP (lossless, Phase
+  54), SVG, BMP, and PPM are decoded through `ImageDecoder`; lossy `VP8`,
+  animated WebP, AVIF, `@font-face` remote font loading, WOFF/WOFF2, and
+  complex script shaping (HarfBuzz/bidi) remain open.
 - **Networking & CSSOM corners**: CORS preflight `OPTIONS` requests,
   credentialed cross-origin cookies, HTTP/2, `ArrayBuffer`/binary XHR bodies,
   and CSSOM `sheet.cssRules` remain open.
@@ -3721,7 +3722,32 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   sub-rectangle compositing onto a persistent canvas buffer.
 - **Bounds:** Enforces `kMaxDecodedPixels` and `kMaxFrames` (default 256).
 
-### 3. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
+### 3. Standalone Lossless WebP Decoder (`WebPDecoder.hpp`, `src/render/WebPDecoder.cpp`)
+
+- **Container:** `RIFF`/`WEBP` with a padding-aware chunk walk, a simple file
+  holding one `VP8L` chunk, or an extended `VP8X` file whose canvas is checked
+  against the image; a `VP8 ` (lossy) chunk, `ANIM`/`ANMF` (animation), a RIFF
+  size past the buffer, and a container with no image chunk each get their own
+  `Status` (`UnsupportedLossy`, `UnsupportedAnimation`, `Truncated`,
+  `Corrupt`) instead of a null image.
+- **Bitstream:** LSB-first bit reader with an explicit end-of-stream latch;
+  canonical prefix codes (simple codes, and code-length codes with repeat
+  symbols) with a **single-symbol code that consumes zero bits**, the rule that
+  silently breaks every stream when it is missed; meta prefix codes (an entropy
+  image selects one of up to 256 prefix groups per 16-pixel tile), the
+  32-entry colour cache, and LZ77 with the 120 near-neighbour distance codes
+  mapped onto scan-line distances.
+- **Transforms:** predictor (14 modes, with the rightmost column's top-right
+  pixel taken from the row being rebuilt), cross-colour (3.5-fixed-point
+  per-channel delta), subtract-green, and colour-indexing (delta-coded palettes
+  of up to 256 entries, with 8/4/2 indices packed per byte and a zero tail).
+  Each is described by a sub-image decoded with the same reader, and inverted in
+  reverse order after the pixel loop — which is also why decoding is recursive
+  and the pixel budget is charged once, up front.
+- **Bounds:** `kMaxDecodedPixels` (64M px) and `kMaxDimension` (16384) are
+  checked from the 14-bit header before any allocation.
+
+### 4. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
 
 - **Transform & state stack:** Full 2D affine Current Transformation Matrix
   (`TransformMatrix2D`) with `save()`/`restore()`, `translate()`, `rotate()`,
@@ -3739,7 +3765,7 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   `JsValue::define_accessor` (`globalAlpha`, `lineCap`, `lineJoin`,
   `miterLimit`, `lineDashOffset`).
 
-### 4. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
+### 5. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
 
 - **DOM & CSS integration:** Iterative ID indexing (safe on 200,000-deep DOMs),
   `<defs>` exclusion, presentation attributes + inline `style` parsing,
@@ -3754,15 +3780,18 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   `spreadMethod`; `<use>` (with recursion/cycle guard) + `<symbol>`;
   `<clipPath>`; rounded `<rect rx ry>`; nested `<svg>`.
 
-### 5. Verification & what remains open
+### 6. Verification & what remains open
 
 `make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
 PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
-(exact `max_diff = 0` on every frame), and 5 SVG feature suites. `make fuzz-media`
-mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
-ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
-is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
-and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
+(exact `max_diff = 0` on every frame), 17 lossless WebP images against libwebp
+bit-exactly (plus a `VP8X` container, five refusals and four `probe()`
+classifications, added in Phase 54), and 5 SVG feature suites. `make fuzz-media`
+mutates JPEG, GIF, WebP, and SVG inputs (2,400 cases in Release, 6,000 under
+ASan+UBSan+LSan). `JpegDecoder` and `GifDecoder`, like `WebPDecoder`, are wired
+into `ImageDecoder.cpp`; lossy `VP8`, animated WebP, AVIF, SVG
+`<text>`/CSS stylesheets/filters, and Canvas 2D shadows/patterns remain open
+(see `AUDIT.md`, findings 43 and 60).
 
 ---
 
@@ -5633,3 +5662,79 @@ only when **all three** invariants hold:
   Repeated `.view()` calls while a string still ends in an unpaired high half
   allocate a bounded `Utf8Slice` per call rather than pinning `\xED\xA0\xBD` in
   `Utf8Cache`; standard JS string operations never call `.view()`.
+
+---
+
+## Phase 54 Architecture: Lossless WebP — the Container and the `VP8L` Bitstream
+
+### 1. The hole
+
+`ImageDecoder` dispatched on magic bytes: PNG, JPEG, GIF, BMP, PPM, then an SVG
+sniff. WebP has none of those signatures, so the function returned `nullptr` and
+every page serving `.webp` — the default for most modern `<picture>` sources and
+image CDNs — drew an empty box. `AUDIT.md`, finding 60.
+
+### 2. Layers, top to bottom
+
+`src/render/WebPDecoder.cpp` is four layers, each one testable on its own:
+
+1. **`read_chunks`** — walks `RIFF`/`WEBP` chunks with RIFF padding, accepts a
+   simple file (one `VP8L`) or an extended one (`VP8X` canvas, then the image),
+   and clamps a RIFF size larger than the buffer instead of trusting it. An
+   extended file whose animation flag is set, or which carries `ANIM`/`ANMF`,
+   stops here as `UnsupportedAnimation`; a `VP8 ` chunk as `UnsupportedLossy`;
+   an empty chunk list as `Corrupt`.
+2. **`BitReader`** — least-significant-bit-first, a five-byte window, and an
+   explicit end-of-stream latch so that reads past the end are reported as
+   truncated instead of returning fabricated zero bits.
+3. **`HuffmanTree`** — canonical codes built from code lengths, with the
+   over-subscription check. `single_symbol_` is the important state: a
+   one-symbol prefix code has code length 0 in libwebp (`bits = 0`), so it
+   consumes **no bits at all**. Reading the spec's `code_lengths[symbol0] = 1`
+   literally shifts the rest of the stream by one bit per use.
+4. **`Vp8lDecoder`** — image header (`0x2f`, 14-bit width-1/height-1, alpha
+   hint, 3-bit version), the transform list, the per-level prefix groups with a
+   1-bit colour-cache flag and 4-bit cache size, meta prefix codes, the pixel
+   loop, and the four inverse transforms.
+
+### 3. The five alphabets and the pixel loop
+
+Every level decodes with the same five prefix groups: green (`256 + 24 + cache
+size` symbols: literals, then the length/distance prefixes packed in the high
+byte), red, blue, alpha (256 each), and distance (40 symbols). A pixel is a
+`green` symbol: `>= 256` means a length/distance copy — the length is
+`prefix < 4 ? prefix + 1 : ((2 + (prefix & 1)) << ((prefix - 2) >> 1)) + bits + 1`
+and the distance comes from the 40-symbol code, with the first 120 values mapped
+back to 2-D offsets by `kCodeToPlane` and larger ones by `code - 120`.
+
+### 4. The four transforms
+
+The transforms are self-similar: the predictor, cross-colour, subtract-green and
+colour-indexing descriptions are each a *sub-image*, decoded by recursing into
+the same decoder. They are inverted in reverse order once the entropy-decoded
+image exists. Predictor mode 0 of the first column reads the pixel to the left
+(wrapping to the row above), the rightmost column's top-right pixel is the first
+pixel of the row being rebuilt, and the borders use the `0xff000000` /
+left / top defaults that `lossless.c` uses — three rules that a from-scratch
+implementation gets wrong long before it gets the Huffman layer wrong.
+
+### 5. Verification
+
+- `make verify-media` → **63/63**, of which 30 are WebP: 17 lossless images
+  decoded bit-exactly in RGBA and in the PPM channels against libwebp through
+  ImageMagick, a `VP8X` container, five refusals, four `probe()`
+  classifications, determinism.
+- `make fuzz-media` → **2,400 cases** (600 WebP) over hostile seeds: a 16384 x
+  16384 header, a lossy chunk, animation flags, RIFF sizes past the buffer.
+- `make test` → **195 suites** (`193 → 195`): every pixel of five embedded
+  fixtures, the `data:` URI path, and the `<img>` box taking the decoded
+  intrinsic size; plus the refusal matrix.
+- `make asan` green; `make conformance`/`dom`/`js`/`url`/`xml`/`wpt`, `diff-trees`,
+  `diff-xml` and `deep` are untouched by the change and re-run below.
+
+### 6. What is still open
+
+Lossy `VP8` (macroblock prediction, DCT, loop filter — a video codec, not a
+variation), animated WebP (`ANMF` compositing and disposal), the `ALPH` chunk
+that only accompanies a lossy image, and AVIF (an AV1 still image). SVG
+`<text>` remains open too. The AGENTS.md row now names exactly these.

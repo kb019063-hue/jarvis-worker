@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1016 / 1031 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1020 / 1034 (98.6%)**; nine of the 14 that fail were recorded in Phases 34 and 43 for what classes and `eval` still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 201 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 204 suites + 80 cross-origin checks, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -55,7 +55,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 201 engine suites + 80 cross-origin Window/Location checks
+make test            # 204 engine suites + 80 cross-origin Window/Location checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -82,7 +82,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 1,031 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,034 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -96,20 +96,22 @@ Read the number for what it is:
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
   27,872 pass (58.1%; 26,012 / 54.2% before Phase 44); of the 15,686
-  on functions, classes and objects, 12,316 pass (78.5%; 10,835 / 69.1%
-  before Phase 44). `make test262` runs the latter. It is used for what a
-  change moved between two builds, not as a score (Phase 34: 108 more pass
-  and none fewer in those directories; Phase 44: 1,440 more pass and none
-  fewer in those 21 directories, plus 374/374 = 100.0% in
-  `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: 43 more in the whole suite and none fewer).
-- **Five of the 15 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
+  on functions, classes and objects, 12,359 pass (78.8%; 12,316 / 78.5%
+  before Phase 59, 10,835 / 69.1% before Phase 44). `make test262` runs the
+  latter. It is used for what a change moved between two builds, not as a
+  score (Phase 34: 108 more pass and none fewer in those directories; Phase
+  44: 1,440 more pass and none fewer in those 21 directories, plus 374/374 =
+  100.0% in `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
+  Phase 43: 43 more in the whole suite and none fewer; Phase 59: 43 more in
+  those 21 directories and 49 more across 13 TDZ/scope directories, none
+  fewer).
+- **Five of the 14 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Two are in `construct.dat`:
-  `this` used before `super()` has run, and `eval` inside a function, which
-  sees nothing of the function (Phase 43, section 8).
+  things; ARCHITECTURE.md, Phase 34, section 9). One is in `construct.dat`:
+  `eval` inside a function, which sees nothing of the function (Phase 43,
+  section 8; `this` before `super()` was fixed in Phase 59).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -139,11 +141,11 @@ prototype chain: the parent of a class, the prototype of an object,
 TypeScript compile classes for older browsers, which stopped at their first
 class before. 68 of the 76 pass; the engine before Phase 34 passes 7.
 
-49 cases (`construct.dat`, Phase 43) are about what a constructor makes:
-`new.target` in a parent's constructor and under `Reflect.construct`, an
-object a parent's constructor returns, when `this` is bound, and three more
-programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
-engine before Phase 43 passes 13.
+50 cases (`construct.dat`, Phase 43 / Phase 59) are about what a constructor
+makes: `new.target` in a parent's constructor and under `Reflect.construct`, an
+object a parent's constructor returns, when `this` is bound (including TDZ
+checks before `super()`), and three more programs as Babel and TypeScript
+compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -700,7 +702,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 198 engine test suites
+# Run the 201 engine test suites
 make test
 ```
 
@@ -867,6 +869,35 @@ wider, which costs about 5% across the string benchmarks that were already
 there. Reading a half-owed string before completing the
 pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
+
+
+### Temporal dead zone for derived `this` and lexical bindings (Phase 59)
+
+Derived constructor `this` and `let`/`const`/`class` bindings previously lacked
+an uninitialized state: reading or writing `this` before `super()` touched the
+pre-allocated object instead of throwing a `ReferenceError`, `typeof z` before
+`let z` returned `"undefined"`, a block `let` failed to shadow outer bindings
+above its declaration line, and `c = 2` before `const c` created an implicit
+global.
+
+Phase 59 (finding 65) adds `JsEnvironment::Binding::is_initialized` and
+`AssignResult::Uninitialized`, marks derived constructor `this` uninitialized on
+entry until `super(...)` completes, and pre-declares lexical bindings in the
+parser/evaluator across scripts, functions, async/generator bodies, blocks,
+`switch` statements, `for`/`for-of`/`for-in` heads, `try/catch`, class
+`extends`/computed keys, and non-simple parameter defaults.
+
+```bash
+./build/litebird --run-js 'class Base {} class Derived extends Base { constructor() { try { this.x = 1; } catch (e) { console.log(e.name); } super(); } } new Derived();
+try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
+# ReferenceError
+# ReferenceError
+make test            # 201 / 201 unit suites
+make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
+make test262         # 12,359 / 15,686 (+43, 0 regressions)
+```
+
+Details are in `ARCHITECTURE.md`, Phase 59, and `AUDIT.md`, finding 65.
 
 
 ### UTF-16 storage for non-ASCII strings (Phase 53)

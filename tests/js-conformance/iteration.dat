@@ -1,0 +1,689 @@
+#name for...of asks an array for its own iterator
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+var out = []; for (var x of a) out.push(x);
+console.log(out.join());
+#expect
+9,8
+
+#name spread in an array literal asks the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+console.log([...a].join(), [0, ...a, 0].join());
+#expect
+9,8 0,9,8,0
+
+#name spread in a call and in new asks the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+function f() { return Array.prototype.slice.call(arguments).join(); }
+function C() { this.args = Array.prototype.slice.call(arguments).join(); }
+console.log(f(...a), f(0, ...a), new C(...a).args, Math.max(...a));
+#expect
+9,8 0,9,8 9,8 9
+
+#name Array.from asks the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+console.log(Array.from(a).join(), Array.from(a, function (v, i) { return v * 10 + i; }).join());
+#expect
+9,8 90,81
+
+#name Set and Map ask the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+var p = [[1, 2]]; p[Symbol.iterator] = function* () { yield ['k', 'v']; };
+console.log([...new Set(a)].join(), [...new Map(p)].join(), new Map(p).get('k'));
+#expect
+9,8 k,v v
+
+#name WeakSet and WeakMap ask the array
+#code
+var k1 = {}, k2 = {};
+var a = [k1]; a[Symbol.iterator] = function* () { yield k2; };
+var p = [[k1, 1]]; p[Symbol.iterator] = function* () { yield [k2, 2]; };
+var ws = new WeakSet(a), wm = new WeakMap(p);
+console.log(ws.has(k1), ws.has(k2), wm.has(k1), wm.get(k2));
+#expect
+false true false 2
+
+#name Promise.all, allSettled, race and any ask the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+Promise.all(a).then(function (v) { console.log('all', v.join()); });
+Promise.allSettled(a).then(function (v) { console.log('allSettled', v.map(function (r) { return r.value; }).join()); });
+Promise.race(a).then(function (v) { console.log('race', v); });
+Promise.any(a).then(function (v) { console.log('any', v); });
+#expect
+all 9,8
+allSettled 9,8
+race 9
+any 9
+
+#name Object.fromEntries asks the array
+#code
+var p = [['a', 1]]; p[Symbol.iterator] = function* () { yield ['z', 26]; };
+console.log(JSON.stringify(Object.fromEntries(p)));
+#expect
+{"z":26}
+
+#name yield* asks the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+function* g() { yield* a; }
+console.log([...g()].join(), Array.from(g()).join());
+#expect
+9,8 9,8
+
+#name for await asks the array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+(async function () { var out = []; for await (var x of a) out.push(x); console.log(out.join()); })();
+#expect
+9,8
+
+#name the iterator method gets the array as this, and no arguments
+#code
+var a = [1, 2]; var seen;
+a[Symbol.iterator] = function () { seen = [this === a, arguments.length]; return [7][Symbol.iterator](); };
+console.log([...a].join(), seen.join());
+#expect
+7 true,0
+
+#name an iterator method that is a plain function returning a hand-written iterator
+#code
+var a = [1, 2];
+a[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < 3 ? { value: i++, done: false } : { value: undefined, done: true }; } }; };
+var out = []; for (var x of a) out.push(x);
+console.log(out.join(), [...a].join(), Array.from(a).join(), new Set(a).size);
+#expect
+0,1,2 0,1,2 0,1,2 3
+
+#name Promise.all over an array that hands out another array's iterator
+#code
+var a = [1]; a[Symbol.iterator] = function () { return [9][Symbol.iterator](); };
+Promise.all(a).then(function (v) { console.log(JSON.stringify(v)); });
+#expect
+[9]
+
+#name an iterator replaced on Array.prototype is the one every array has
+#code
+var original = Array.prototype[Symbol.iterator];
+Array.prototype[Symbol.iterator] = function* () { yield 'p'; yield this.length; };
+var s = [...[1, 2, 3]]; var out = []; for (var x of [5]) out.push(x);
+var fromd = Array.from([1, 2]); var set = new Set([4, 4, 4]);
+Array.prototype[Symbol.iterator] = original;
+console.log(s.join(), out.join(), fromd.join(), [...set].join(), [...[1, 2]].join());
+#expect
+p,3 p,1 p,2 p,3 1,2
+
+#name an iterator deleted from Array.prototype: an array is not iterable
+#code
+var original = Array.prototype[Symbol.iterator];
+delete Array.prototype[Symbol.iterator];
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [];
+r.push(t(function () { return [...[1, 2]]; }));
+r.push(t(function () { var o = []; for (var x of [1]) o.push(x); return o; }));
+r.push(t(function () { return new Set([1]).size; }));
+r.push(t(function () { return new Map([[1, 2]]).size; }));
+r.push(t(function () { function f() { return arguments.length; } return f(...[1, 2]); }));
+Array.prototype[Symbol.iterator] = original;
+console.log(r.join(' | '), [...[1, 2]].join());
+#expect
+TypeError | TypeError | TypeError | TypeError | TypeError 1,2
+
+#name an iterator on Array.prototype that is not a function: TypeError
+#code
+var original = Array.prototype[Symbol.iterator];
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [];
+[5, 'str', {}, null, undefined, true].forEach(function (v) {
+  Array.prototype[Symbol.iterator] = v;
+  r.push(t(function () { return [...[1, 2]]; }));
+});
+Array.prototype[Symbol.iterator] = original;
+console.log(r.join(' | '));
+#expect
+TypeError | TypeError | TypeError | TypeError | TypeError | TypeError
+
+#name a getter for the iterator on an array is read once for each iteration
+#code
+var a = [1, 2]; var reads = 0;
+Object.defineProperty(a, Symbol.iterator, { get: function () { reads++; return Array.prototype[Symbol.iterator]; } });
+var s = [...a]; var r1 = reads; for (var x of a) {} var r2 = reads; Array.from(a); var r3 = reads; new Set(a); var r4 = reads;
+console.log(s.join(), r1, r2, r3, r4);
+#expect
+1,2 1 2 3 4
+
+#name a getter for the iterator on Array.prototype gets the array as receiver
+#code
+var original = Array.prototype[Symbol.iterator]; var log = [];
+var a = [1, 2];
+Object.defineProperty(Array.prototype, Symbol.iterator, { configurable: true, get: function () { log.push(this === a); return original; } });
+var s = [...a];
+Object.defineProperty(Array.prototype, Symbol.iterator, { configurable: true, writable: true, enumerable: false, value: original });
+console.log(s.join(), log.join());
+#expect
+1,2 true
+
+#name a subclass of Array with an iterator of its own
+#code
+class L extends Array { *[Symbol.iterator]() { yield 'x'; yield this.length; } }
+var l = new L(3);
+var out = []; for (var x of l) out.push(x);
+console.log([...l].join(), out.join(), Array.from(l).join(), new Set(l).size);
+#expect
+x,3 x,3 x,3 2
+
+#name a subclass of Array without one iterates its elements
+#code
+class L extends Array {}
+var l = L.from([1, 2, 3]); l.push(4);
+var out = []; for (var x of l) out.push(x);
+console.log([...l].join(), out.join(), new Set(l).size);
+#expect
+1,2,3,4 1,2,3,4 4
+
+#name a subclass reaches Array's iterator through super
+#code
+class L extends Array { [Symbol.iterator]() { var it = super[Symbol.iterator](); return { next: function () { var s = it.next(); if (!s.done) s.value = s.value * 2; return s; } }; } }
+var l = new L(); l.push(1, 2, 3);
+console.log([...l].join());
+#expect
+2,4,6
+
+#name the built-in iterator assigned back, and keys, entries and a bound one in its place
+#code
+var a = [1, 2]; a[Symbol.iterator] = Array.prototype[Symbol.iterator];
+var b = [3, 4]; b[Symbol.iterator] = Array.prototype.values;
+var c = [5, 6]; c[Symbol.iterator] = Array.prototype.keys;
+var d = [7, 8]; d[Symbol.iterator] = Array.prototype.entries;
+var e = [9]; e[Symbol.iterator] = [][Symbol.iterator].bind([0, 0]);
+console.log([...a].join(), [...b].join(), [...c].join(), JSON.stringify([...d]), [...e].join());
+#expect
+1,2 3,4 0,1 [[0,7],[1,8]] 0,0
+
+#name an iterator given to the array while it is being iterated
+#code
+var a = [1, 2, 3]; var out = [];
+for (var x of a) { out.push(x); a[Symbol.iterator] = function* () { yield 'late'; }; }
+out.push([...a].join());
+console.log(out.join());
+#expect
+1,2,3,late
+
+#name an iterator replaced on String.prototype is the one every string has
+#code
+var original = String.prototype[Symbol.iterator];
+String.prototype[Symbol.iterator] = function* () { yield 'z'; yield this.length; };
+var s = [...'ab']; var out = []; for (var x of 'q') out.push(x);
+var fromd = Array.from('abc'); var set = new Set('aab'); var [d1, d2] = 'xy';
+String.prototype[Symbol.iterator] = original;
+console.log(s.join(), out.join(), fromd.join(), [...set].join(), d1, d2, [...'ab'].join());
+#expect
+z,2 z,1 z,3 z,3 z 2 a,b
+
+#name an iterator deleted from String.prototype: a string is not iterable
+#code
+var original = String.prototype[Symbol.iterator];
+delete String.prototype[Symbol.iterator];
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [];
+r.push(t(function () { return [...'ab']; }));
+r.push(t(function () { var o = []; for (var x of 'ab') o.push(x); return o; }));
+r.push(t(function () { return new Set('ab').size; }));
+r.push(t(function () { var [a] = 'ab'; return a; }));
+String.prototype[Symbol.iterator] = original;
+console.log(r.join(' | '), [...'ab'].join());
+#expect
+TypeError | TypeError | TypeError | TypeError a,b
+
+#name the string iterator method is given a string, not an object
+#code
+var original = String.prototype[Symbol.iterator]; var seen;
+String.prototype[Symbol.iterator] = function () { 'use strict'; seen = typeof this; return original.call(this); };
+var s = [...'ab'];
+String.prototype[Symbol.iterator] = original;
+console.log(s.join(), seen);
+#expect
+a,b string
+
+#name strings iterate by code point
+#code
+var s = 'a\u{1F600}b\uD800c';
+console.log([...s].length, Array.from(s).map(function (c) { return c.length; }).join(), [...new String('xy')].join(), [...''].length);
+#expect
+5 1,2,1,1,1 x,y 0
+
+#name a number is iterable when Number.prototype has an iterator
+#code
+Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };
+var out = []; for (var x of 3) out.push(x);
+function count() { return arguments.length; }
+console.log([...3].join(), out.join(), new Set(4).size, count(...5));
+#expect
+0,1,2 0,1,2 4 5
+
+#name a boolean is iterable when Boolean.prototype has an iterator
+#code
+Boolean.prototype[Symbol.iterator] = function* () { yield String(this); };
+console.log([...true].join(), [...false].join());
+#expect
+true false
+
+#name what is not iterable is a TypeError
+#code
+function t(f) { try { f(); return 'no error'; } catch (e) { return e.constructor.name; } }
+var r = [];
+[5, true, null, undefined, {}, function () {}, Symbol('s'), { length: 2, 0: 'a', 1: 'b' }].forEach(function (v) {
+  r.push(t(function () { return [...v]; }) + '/' + t(function () { for (var x of v) {} }) + '/' + t(function () { return new Set(v); }) + '/' + t(function () { var [a] = v; }));
+});
+console.log(r.join(' '));
+#expect
+TypeError/TypeError/TypeError/TypeError TypeError/TypeError/TypeError/TypeError TypeError/TypeError/no error/TypeError TypeError/TypeError/no error/TypeError TypeError/TypeError/TypeError/TypeError TypeError/TypeError/TypeError/TypeError TypeError/TypeError/TypeError/TypeError TypeError/TypeError/TypeError/TypeError
+
+#name an object with next and no Symbol.iterator is not iterable
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+console.log(t(function () { return [...bare]; }), t(function () { var o = []; for (var x of bare) o.push(x); return o; }), t(function () { return new Set(bare).size; }), t(function () { return Array.from(bare).length; }));
+#expect
+TypeError TypeError TypeError 0
+
+#name a property named 'Symbol.iterator' does not make an object iterable
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var o = { 'Symbol.iterator': function* () { yield 1; } };
+console.log(t(function () { return [...o]; }), t(function () { for (var x of o) return x; }), t(function () { return new Set(o).size; }));
+#expect
+TypeError TypeError TypeError
+
+#name the iterator method must return an object
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [];
+[5, 'str', null, undefined].forEach(function (v) {
+  var o = {}; o[Symbol.iterator] = function () { return v; };
+  r.push(t(function () { return [...o]; }));
+});
+var o2 = {}; o2[Symbol.iterator] = function () { return {}; };
+r.push(t(function () { return [...o2]; }));
+var o3 = {}; o3[Symbol.iterator] = function () { return { next: 5 }; };
+r.push(t(function () { return [...o3]; }));
+console.log(r.join(' | '));
+#expect
+TypeError | TypeError | TypeError | TypeError | TypeError | TypeError
+
+#name a Symbol.iterator that is null, undefined or not a function
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [];
+[null, undefined, 0, '', {}].forEach(function (v) { var o = {}; o[Symbol.iterator] = v; r.push(t(function () { return [...o]; })); });
+console.log(r.join(' | '));
+#expect
+TypeError | TypeError | TypeError | TypeError | TypeError
+
+#name break closes the iterator once, with the iterator as this and no arguments
+#code
+var log = [];
+var it = { i: 0, next: function () { return { value: this.i++, done: false }; }, return: function () { log.push('return ' + (this === it) + ' ' + arguments.length); return {}; } };
+var o = {}; o[Symbol.iterator] = function () { return it; };
+for (var x of o) { if (x === 2) break; }
+console.log(log.join(), it.i);
+#expect
+return true 0 3
+
+#name an error in the loop body closes the iterator, and is the error that is seen
+#code
+var log = [];
+function make(ret) { var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; }; return o; }
+function t(f) { try { f(); return 'no error'; } catch (e) { return e instanceof Error ? e.constructor.name + ':' + e.message : String(e); } }
+console.log(t(function () { for (var x of make(function () { log.push('r1'); return {}; })) throw new RangeError('body'); }));
+console.log(t(function () { for (var x of make(function () { log.push('r2'); throw new Error('from return'); })) throw new RangeError('body'); }));
+console.log(t(function () { for (var x of make(function () { log.push('r3'); return 5; })) throw new RangeError('body'); }));
+console.log(t(function () { for (var x of make(7)) throw new RangeError('body'); }));
+console.log(log.join());
+#expect
+RangeError:body
+RangeError:body
+RangeError:body
+RangeError:body
+r1,r2,r3
+
+#name break: what return gives back must be an object, and what it throws is thrown
+#code
+function make(ret) { var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; }; return o; }
+function t(f) { try { f(); return 'no error'; } catch (e) { return e instanceof Error ? e.constructor.name : String(e); } }
+var r = [];
+[function () { return {}; }, function () { return 5; }, function () { return undefined; }, function () { return null; }, function () { return function () {}; }, function () { throw 'thrown'; }, undefined, null, 5, 'str', {}].forEach(function (ret) {
+  r.push(t(function () { for (var x of make(ret)) break; }));
+});
+console.log(r.join(' | '));
+#expect
+no error | TypeError | TypeError | TypeError | no error | thrown | no error | no error | TypeError | TypeError | TypeError
+
+#name an iterator that fails is not closed
+#code
+var log = [];
+function make(next) { var o = {}; o[Symbol.iterator] = function () { return { next: next, return: function () { log.push('closed'); return {}; } }; }; return o; }
+function t(f) { try { f(); return 'no error'; } catch (e) { return e instanceof Error ? e.constructor.name : String(e); } }
+var r = [];
+r.push(t(function () { for (var x of make(function () { throw 'next threw'; })) {} }));
+r.push(t(function () { for (var x of make(function () { return 5; })) {} }));
+r.push(t(function () { for (var x of make(function () { return { get done() { throw 'done threw'; } }; })) {} }));
+r.push(t(function () { for (var x of make(function () { return { done: false, get value() { throw 'value threw'; } }; })) {} }));
+r.push(t(function () { for (var x of make(5)) {} }));
+r.push(t(function () { for (var x of make(undefined)) {} }));
+console.log(r.join(' | '), log.length);
+#expect
+next threw | TypeError | done threw | value threw | TypeError | TypeError 0
+
+#name next is read once, and done before value
+#code
+var log = [];
+var iterator = { get next() { log.push('get next'); return function () { log.push('call next'); return { get done() { log.push('get done'); return log.length > 12; }, get value() { log.push('get value'); return 1; } }; }; } };
+var o = { get [Symbol.iterator]() { log.push('get iterator'); return function () { log.push('call iterator'); return iterator; }; } };
+var n = 0; for (var x of o) n++;
+console.log(n, log.join());
+#expect
+3 get iterator,call iterator,get next,call next,get done,get value,call next,get done,get value,call next,get done,get value,call next,get done
+
+#name spread, Array.from, Set and a call do not close an iterator they finish
+#code
+var log = [];
+function make(n) { var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < n ? { value: i++, done: false } : { value: undefined, done: true }; }, return: function () { log.push('closed'); return {}; } }; }; return o; }
+var a = [...make(3)], b = Array.from(make(2)), c = new Set(make(2)), d = Math.max(...make(4));
+console.log(a.join(), b.join(), c.size, d, log.length);
+#expect
+0,1,2 0,1 2 3 0
+
+#name a bad entry closes the iterator of Map, WeakMap and Object.fromEntries
+#code
+var log = [];
+function make(name) { var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 5, done: false }; }, return: function () { log.push(name + ' closed'); return {}; } }; }; return o; }
+function t(f) { try { f(); return 'no error'; } catch (e) { return e.constructor.name; } }
+console.log(t(function () { new Map(make('Map')); }), t(function () { new WeakMap(make('WeakMap')); }), t(function () { Object.fromEntries(make('fromEntries')); }), t(function () { new WeakSet(make('WeakSet')); }), log.join());
+#expect
+TypeError TypeError TypeError TypeError Map closed,WeakMap closed,fromEntries closed,WeakSet closed
+
+#name return closes the iterator, continue does not
+#code
+var log = [];
+function make() { var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < 3 ? { value: i++, done: false } : { done: true }; }, return: function () { log.push('closed'); return {}; } }; }; return o; }
+function f() { for (var x of make()) { if (x === 1) return 'returned ' + x; } }
+function g() { var n = 0; for (var x of make()) { if (x === 1) continue; n++; } return n; }
+function h() { outer: for (var a of make()) { for (var b of make()) { if (b === 1) continue outer; if (a === 2) break outer; } } return 'done'; }
+console.log(f(), log.length, g(), log.length, h(), log.length);
+#expect
+returned 1 1 2 1 done 5
+
+#name break closes a generator: its finally runs
+#code
+var log = [];
+function* gen() { try { yield 1; yield 2; yield 3; } finally { log.push('finally'); } }
+for (var x of gen()) { if (x === 2) break; }
+var [first] = gen();
+var it = gen(); it.next(); var s = [...it];
+console.log(log.join(), first, s.join());
+#expect
+finally,finally,finally 1 2,3
+
+#name destructuring closes an iterator it does not finish
+#code
+var log = [];
+function make(n) { var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < n ? { value: i++, done: false } : { value: undefined, done: true }; }, return: function () { log.push('closed'); return {}; } }; }; return o; }
+var [a, b] = make(5); var [c, ...d] = make(3); var [e, f, g] = make(2); var [] = make(1);
+console.log(a, b, c, d.join(), e, f, g, log.join());
+#expect
+0 1 0 1,2 0 1 undefined closed,closed
+
+#name Promise.all closes the iterator when resolve throws
+#code
+var log = [];
+var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: function () { log.push('closed'); return {}; } }; };
+function C(executor) { return new Promise(executor); }
+C.resolve = function () { throw new Error('resolve threw'); };
+Promise.all.call(C, o).then(null, function (e) { console.log(e.message, log.join()); });
+#expect
+resolve threw closed
+
+#name Promise.all over an array with an iterator of its own closes that one
+#code
+var log = [];
+var a = [1, 2]; a[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: function () { log.push('closed'); return {}; } }; };
+function C(executor) { return new Promise(executor); }
+C.resolve = function () { throw new Error('resolve threw'); };
+Promise.all.call(C, a).then(null, function (e) { console.log(e.message, log.join()); });
+#expect
+resolve threw closed
+
+#name keys, values and entries of an array
+#code
+var a = ['a', 'b'];
+console.log([...a.keys()].join(), [...a.values()].join(), JSON.stringify([...a.entries()]), a[Symbol.iterator]().next().value);
+#expect
+0,1 a,b [[0,"a"],[1,"b"]] a
+
+#name an array that grows and shrinks while it is iterated
+#code
+var a = [1, 2, 3]; var out = [];
+for (var x of a) { out.push(x); if (x === 1) a.push(4); if (x === 2) a.length = 3; }
+var b = [1, 2, 3, 4]; var out2 = [];
+for (var y of b) { out2.push(y); b.shift(); }
+var c = [1, 2, 3]; var out3 = [...c, c.push(4), ...c];
+console.log(out.join(), out2.join(), out3.join());
+#expect
+1,2,3 1,3 1,2,3,4,1,2,3,4
+
+#name holes are undefined to an iterator
+#code
+var a = [1, , 3]; var out = [];
+for (var x of a) out.push(String(x));
+console.log(out.join(), [...a].length, Array.from([, ,]).length, new Set([, 1, ,]).size);
+#expect
+1,undefined,3 3 2 2
+
+#name nested and re-entrant iteration over one array
+#code
+var a = [1, 2, 3]; var out = [];
+for (var x of a) for (var y of a) if (x === y) out.push(x * y);
+var b = [1, 2]; var out2 = [];
+for (var p of b) { out2.push([...b].join('')); if (b.length < 4) b.push(b.length + 1); }
+console.log(out.join(), out2.join());
+#expect
+1,4,9 12,123,1234,1234
+
+#name spread of 100,000 elements and of 100,000 characters
+#code
+var a = []; for (var i = 0; i < 100000; i++) a.push(i);
+var b = [...a, ...a]; var s = 'ab'.repeat(50000); var c = [...s];
+function count() { return arguments.length; }
+console.log(b.length, b[150000], c.length, c[99999], count(...a.slice(0, 50000)), new Set(a).size, Array.from(a).length);
+#expect
+200000 50000 100000 b 50000 100000 100000
+
+#name the arguments object is iterable, and can be given an iterator
+#code
+function f() { var out = []; for (var x of arguments) out.push(x); return out.join() + '|' + [...arguments].join() + '|' + Array.from(arguments).join() + '|' + new Set(arguments).size; }
+function g() { arguments[Symbol.iterator] = function* () { yield 'mine'; }; return [...arguments].join(); }
+function h() { return typeof arguments[Symbol.iterator] + ' ' + (arguments[Symbol.iterator] === Array.prototype[Symbol.iterator]); }
+console.log(f(1, 2, 2), g(1, 2), h());
+#expect
+1,2,2|1,2,2|1,2,2|2 mine function true
+
+#name a Map and a Set with an iterator of their own
+#code
+var m = new Map([[1, 'a']]); m[Symbol.iterator] = function* () { yield ['x', 'y']; };
+var s = new Set([1]); s[Symbol.iterator] = function* () { yield 'z'; };
+var out = []; for (var e of m) out.push(e.join('=')); for (var v of s) out.push(v);
+console.log(out.join(), [...new Map(m)].join(), [...new Set(s)].join(), Array.from(m).join(), [...m.keys()].join());
+#expect
+x=y,z x,y z x,y 1
+
+#name an iterator replaced on Map.prototype and Set.prototype
+#code
+var om = Map.prototype[Symbol.iterator], os = Set.prototype[Symbol.iterator];
+Map.prototype[Symbol.iterator] = function* () { yield ['pm', 1]; }; Set.prototype[Symbol.iterator] = function* () { yield 'ps'; };
+var r = [[...new Map([[1, 2]])].join(), [...new Set([1])].join(), new Map(new Map([[1, 2]])).has('pm'), new Set(new Set([5])).has('ps')];
+Map.prototype[Symbol.iterator] = om; Set.prototype[Symbol.iterator] = os;
+console.log(r.join(), [...new Map([[1, 2]])].join(), [...new Set([5])].join());
+#expect
+pm,1,ps,true,true 1,2 5
+
+#name generators and array iterators are iterable, once
+#code
+function* g() { yield 1; yield 2; }
+var it = g(); var a = [...it], b = [...it];
+var ai = [1, 2, 3][Symbol.iterator](); ai.next(); var c = [...ai];
+console.log(a.join(), b.length, c.join(), it[Symbol.iterator]() === it, ai[Symbol.iterator]() === ai);
+#expect
+1,2 0 2,3 true true
+
+#name the array iterator borrowed by an array-like and by a String object
+#code
+var like = { length: 2, 0: 'a', 1: 'b' }; like[Symbol.iterator] = Array.prototype[Symbol.iterator];
+var str = new String('xy'); str[Symbol.iterator] = Array.prototype[Symbol.iterator];
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+console.log(t(function () { return [...like].join(); }), t(function () { return [...str].join(); }), t(function () { return Array.prototype[Symbol.iterator].call('pq').next().value; }));
+#expect
+a,b x,y p
+
+#name yield* over an array with an iterator of its own, a string and a plain array
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 'A'; };
+var os = String.prototype[Symbol.iterator];
+function* g() { yield* a; yield* 'xy'; yield* [3, 4]; }
+var first = [...g()].join();
+String.prototype[Symbol.iterator] = function* () { yield 'S'; };
+var second = [...g()].join();
+String.prototype[Symbol.iterator] = os;
+console.log(first, second);
+#expect
+A,x,y,3,4 A,S,3,4
+
+#name iteration after a collection ran in the middle of it
+#code
+var a = [1, 2, 3]; a[Symbol.iterator] = function* () { for (var i = this.length - 1; i >= 0; i--) { if (typeof gc === 'function') gc(); yield this[i]; } };
+var out = []; for (var x of a) { if (typeof gc === 'function') gc(); out.push(x); }
+if (typeof gc === 'function') gc();
+var plain = []; for (var y of [4, 5, 6]) { if (typeof gc === 'function') gc(); plain.push(y); }
+console.log(out.join(), plain.join(), [...a].join(), [...'ab'].join(), [...[7, 8]].join());
+#expect
+3,2,1 4,5,6 3,2,1 a,b 7,8
+
+#name array destructuring asks the array for its iterator
+#code
+var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+var [x, y] = a; var [h, ...rest] = a;
+function f([p, q]) { return p + ':' + q; }
+console.log(x, y, h, rest.join(), f(a));
+#expect
+9 8 9 8 9:8
+
+#name array destructuring: no iterator on Array.prototype, or an object that only has next
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+var r = [t(function () { var [a] = bare; return a; })];
+var original = Array.prototype[Symbol.iterator];
+delete Array.prototype[Symbol.iterator];
+r.push(t(function () { var [a] = [1]; return a; }));
+Array.prototype[Symbol.iterator] = original;
+console.log(r.join(' | '));
+#expect
+TypeError | TypeError
+
+#name Array.from reads what has no iterator as array-like
+#code
+var oa = Array.prototype[Symbol.iterator], os = String.prototype[Symbol.iterator];
+delete Array.prototype[Symbol.iterator]; delete String.prototype[Symbol.iterator];
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var r = [t(function () { return Array.from([1, 2]); }), t(function () { return Array.from('ab'); }), t(function () { return Array.from('a\u{1F600}').length; })];
+Array.prototype[Symbol.iterator] = oa; String.prototype[Symbol.iterator] = os;
+console.log(r.join(' | '));
+#expect
+1,2 | a,b | 3
+
+#name Array.from asks a number that was made iterable
+#code
+Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };
+console.log(Array.from(3).join(), Array.from(2, function (v) { return v + 10; }).join());
+#expect
+0,1,2 10,11
+
+#name Array.from maps each value as it arrives, and closes the iterator when the mapper throws
+#code
+var log = [];
+var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { log.push('next'); return i < 5 ? { value: i++, done: false } : { value: undefined, done: true }; }, return: function () { log.push('closed'); return {}; } }; };
+try { Array.from(o, function (v) { log.push('map ' + v); if (v === 1) throw new Error('mapper'); return v; }); } catch (e) { log.push(e.message); }
+console.log(log.join());
+#expect
+next,map 0,next,map 1,closed,mapper
+
+#name the Set and Map constructors call add and set, and close the iterator when those throw
+#code
+var log = [];
+function make(name) { var o = {}; o[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < 3 ? { value: [i, i++], done: false } : { value: undefined, done: true }; }, return: function () { log.push(name + ' closed'); return {}; } }; }; return o; }
+var add = Set.prototype.add, set = Map.prototype.set, calls = 0;
+Set.prototype.add = function (v) { calls++; return add.call(this, v); };
+Map.prototype.set = function (k, v) { calls++; return set.call(this, k, v); };
+var s = new Set(make('Set')), m = new Map(make('Map'));
+Set.prototype.add = function () { throw new Error('add threw'); }; Map.prototype.set = function () { throw new Error('set threw'); };
+function t(f) { try { f(); return 'no error'; } catch (e) { return e.message; } }
+var r = [t(function () { new Set(make('Set')); }), t(function () { new Map(make('Map')); })];
+Set.prototype.add = add; Map.prototype.set = set;
+console.log(s.size, m.size, calls, r.join(), log.join());
+#expect
+3 3 6 add threw,set threw Set closed,Map closed
+
+#name Array.prototype[Symbol.iterator] is Array.prototype.values, and the others likewise
+#code
+console.log(Array.prototype[Symbol.iterator] === Array.prototype.values, Array.prototype[Symbol.iterator].name,
+  Map.prototype[Symbol.iterator] === Map.prototype.entries, Set.prototype[Symbol.iterator] === Set.prototype.values, Set.prototype.keys === Set.prototype.values,
+  String.prototype[Symbol.iterator].name);
+#expect
+true values true true true [Symbol.iterator]
+
+#name array iterators take next from one prototype
+#code
+var it = [][Symbol.iterator](); var proto = Object.getPrototypeOf(it);
+var shape = [Object.prototype.hasOwnProperty.call(it, 'next'), typeof proto.next, proto === Object.getPrototypeOf([].keys()), proto === Object.getPrototypeOf(new Map().keys()), Object.prototype.toString.call(it)];
+var original = proto.next, calls = 0;
+proto.next = function () { calls++; return original.call(this); };
+var s = [...[1, 2, 3]]; for (var x of [1]) {}
+proto.next = original;
+console.log(shape.join(), s.join(), calls);
+#expect
+false,function,true,false,[object Array Iterator] 1,2,3 6
+
+#name no property is named 'Symbol.iterator' or '@@iterator'
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var o = { '@@iterator': function* () { yield 2; } };
+console.log('Symbol.iterator' in [], typeof []['Symbol.iterator'], typeof ''['Symbol.iterator'], typeof new Map()['Symbol.iterator'],
+  Object.getOwnPropertyNames(Array.prototype).indexOf('Symbol.iterator'), '@@iterator' in [], typeof []['@@iterator'], t(function () { return [...o]; }));
+#expect
+false undefined undefined undefined -1 false undefined TypeError
+
+#name an object whose prototype is an array
+#code
+var o = Object.create([1, 2, 3]);
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+console.log(t(function () { return [...o].join(); }), o.length, o[1], Array.isArray(o));
+#expect
+1,2,3 3 2 false
+
+#name arguments has a Symbol.iterator of its own
+#code
+function h() { return [typeof arguments[Symbol.iterator], arguments[Symbol.iterator] === Array.prototype[Symbol.iterator], Object.prototype.hasOwnProperty.call(arguments, Symbol.iterator), Object.getOwnPropertySymbols(arguments).length].join(); }
+console.log(h(1, 2));
+#expect
+function,true,true,1
+
+#name a String.prototype method called on an array, the string iterator among them
+#code
+var a = ['x', 'y']; a[Symbol.iterator] = String.prototype[Symbol.iterator];
+console.log([...a].join('+'), String.prototype.trim.call(['x', 'y']), String.prototype[Symbol.iterator].call(['p', 'q']).next().value);
+#expect
+x+,+y x,y p

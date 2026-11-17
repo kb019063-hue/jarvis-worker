@@ -36,6 +36,7 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsIdentifierTables.hpp"
 #include "litebird/js/RegExpUnicodeTables.hpp"
+#include "litebird/js/StringUnicodeTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -15072,6 +15073,185 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
 }
 
 // ============================================================================
+// Phase 60: Unicode 17.0 String normalize(), case mapping & CLDR 48 collation
+// ============================================================================
+
+TEST(string_unicode17_normalization_tables_and_api) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    // Direct Unicode 17.0 property & table sanity checks
+    assert(canonical_combining_class('a') == 0);
+    assert(canonical_combining_class(0x0301) == 230); // COMBINING ACUTE ACCENT
+    assert(canonical_combining_class(0x0323) == 220); // COMBINING DOT BELOW
+    assert(canonical_combining_class(0x1D185) == 230); // MUSICAL SYMBOL COMBINING DOIT
+    assert(is_cased('A') && is_cased('a') && is_cased(0x03A3) && is_cased(0x10400));
+    assert(!is_cased('0') && !is_cased(' '));
+    assert(is_case_ignorable(0x180E) && is_case_ignorable('\'') && is_case_ignorable(0x0301));
+    assert(is_soft_dotted('i') && is_soft_dotted('j') && is_soft_dotted(0x012F) && is_soft_dotted(0x1D456));
+    assert(!is_soft_dotted('I'));
+
+    // Direct UTF-16 normalization API: NFC, NFD, NFKC, NFKD, Hangul, exclusions, lone surrogates
+    std::u16string out;
+    // ASCII fast path returns false (unchanged)
+    std::u16string ascii = u"hello world";
+    assert(!normalize_utf16(ascii.data(), ascii.size(), NormForm::NFC, out));
+
+    // Canonical composition + ordering
+    std::u16string decomposed = u"e\u0301\u0323";
+    assert(normalize_utf16(decomposed.data(), decomposed.size(), NormForm::NFD, out));
+    assert(out == u"e\u0323\u0301");
+    assert(normalize_utf16(decomposed.data(), decomposed.size(), NormForm::NFC, out));
+    assert(out == u"\u1EB9\u0301");
+
+    // Hangul LVT round-trip
+    std::u16string hangul = u"\uAC01";
+    assert(normalize_utf16(hangul.data(), hangul.size(), NormForm::NFD, out));
+    assert(out == u"\u1100\u1161\u11A8");
+    std::u16string jamo = out;
+    assert(normalize_utf16(jamo.data(), jamo.size(), NormForm::NFC, out));
+    assert(out == u"\uAC01");
+
+    // Compatibility vs canonical
+    std::u16string lig = u"\uFB01\u00BD";
+    assert(!normalize_utf16(lig.data(), lig.size(), NormForm::NFC, out));
+    assert(normalize_utf16(lig.data(), lig.size(), NormForm::NFKC, out));
+    assert(out == u"fi1\u20442");
+
+    // Full_Composition_Exclusion (U+0958 -> U+0915 U+093C, stays decomposed in NFC)
+    std::u16string excl = u"\u0958";
+    assert(normalize_utf16(excl.data(), excl.size(), NormForm::NFC, out));
+    assert(out == u"\u0915\u093C");
+
+    // Lone surrogates preserved
+    std::u16string surr = {0xD800, u'e', 0x0301, 0xDC00};
+    assert(normalize_utf16(surr.data(), surr.size(), NormForm::NFC, out));
+    std::u16string surr_exp = {0xD800, 0x00E9, 0xDC00};
+    assert(out == surr_exp);
+
+    // JS-level String.prototype.normalize
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var norm_ok =
+            "e\u0301".normalize() === "\u00E9" &&
+            "\u00E9".normalize("NFD") === "e\u0301" &&
+            "\u212B".normalize("NFC") === "\u00C5" &&
+            "\u1E9B\u0323".normalize("NFD") === "\u017F\u0323\u0307" &&
+            "\uFB03".normalize("NFKC") === "ffi" &&
+            "\uAC00".normalize("NFD") === "\u1100\u1161";
+        var norm_err = false;
+        try { "a".normalize("BAD"); } catch (e) { norm_err = e instanceof RangeError; }
+    )JS");
+    assert(js.eval("norm_ok && norm_err").is_truthy());
+}
+
+TEST(string_unicode17_full_and_locale_case_mapping) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    // Direct UTF-16 case API checks
+    std::u16string sharp_s = u"\u00DF";
+    assert(to_upper_utf16(sharp_s.data(), sharp_s.size()) == u"SS");
+    std::u16string sigma = u"\u039F\u0394\u03A5\u03A3\u03A3\u0395\u03A5\u03A3";
+    assert(to_lower_utf16(sigma.data(), sigma.size()) == u"\u03BF\u03B4\u03C5\u03C3\u03C3\u03B5\u03C5\u03C2");
+
+    // Turkish/Azeri
+    std::u16string tr_in = u"I\u0307I\u0130";
+    assert(to_lower_utf16(tr_in.data(), tr_in.size(), CaseLocale::Turkish) == u"i\u0131i");
+    std::u16string tr_i = u"i";
+    assert(to_upper_utf16(tr_i.data(), tr_i.size(), CaseLocale::Turkish) == u"\u0130");
+
+    // Lithuanian
+    std::u16string lt_in = u"I\u0300\u00CC";
+    assert(to_lower_utf16(lt_in.data(), lt_in.size(), CaseLocale::Lithuanian) == u"i\u0307\u0300i\u0307\u0300");
+    std::u16string lt_up = u"i\u0323\u0307";
+    assert(to_upper_utf16(lt_up.data(), lt_up.size(), CaseLocale::Lithuanian) == u"I\u0323");
+
+    // Greek (el) diphthongs, disjunctive eta, consonant diacritic stripping
+    std::u16string el_diph = u"\u03AC\u03B9 \u03AE \u03B1\u03AE \u03A3\u0301";
+    assert(to_upper_utf16(el_diph.data(), el_diph.size(), CaseLocale::Greek) == u"\u0391\u03AA \u0389 \u0391\u0397 \u03A3");
+
+    // JS-level end-to-end including Final_Sigma U+180E, astral scripts, and multi-locale BCP-47 validation
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var case_ok =
+            "A\u180E\u03A3".toLowerCase() === "a\u180E\u03C2" &&
+            "A\u180E\u03A3B".toLowerCase() === "a\u180E\u03C3b" &&
+            "\u{10400}".toLowerCase() === "\u{10428}" &&
+            "\u{10428}".toUpperCase() === "\u{10400}" &&
+            "i".toLocaleUpperCase("tr-TR") === "\u0130" &&
+            "\u0130".toLocaleLowerCase("az-Latn-AZ") === "i" &&
+            "I\u0300".toLocaleLowerCase("lt-LT") === "i\u0307\u0300" &&
+            "\u039C\u03AC\u03B9\u03BF\u03C2".toLocaleUpperCase("el-GR") === "\u039C\u0391\u03AA\u039F\u03A3";
+        var all_locales_validated = false;
+        try { "".toLocaleLowerCase(["en-US", "not a valid locale"]); }
+        catch (e) { all_locales_validated = e instanceof RangeError; }
+        var b = new Boolean(true);
+        b.toUpperCase = String.prototype.toUpperCase;
+        var this_ok = b.toUpperCase() === "TRUE";
+    )JS");
+    assert(js.eval("case_ok && all_locales_validated && this_ok").is_truthy());
+}
+
+TEST(string_cldr48_uca_collation_and_ecma402_validation) {
+    using namespace litebird;
+    using namespace litebird::unicode;
+
+    auto cmp = [](std::u16string_view a, std::u16string_view b, CollationOptions opts = {}) {
+        return locale_compare_utf16(a.data(), a.size(), b.data(), b.size(), opts);
+    };
+
+    // Canonical equivalence, case, accents, contractions, UCA 17.0 implicit weights
+    assert(cmp(u"a", u"b") < 0);
+    assert(cmp(u"a", u"A") < 0);
+    assert(cmp(u"A", u"b") < 0);
+    assert(cmp(u"\u00E9", u"e\u0301") == 0);
+    assert(cmp(u"\u013F", u"L\u00B7") == 0);
+    assert(cmp(u"\uAC00", u"\u1100\u1161") == 0);
+    assert(cmp(u"\u4E00", u"\u3400") < 0);
+
+    // Sensitivity, ignorePunctuation, numeric, caseFirst
+    CollationOptions base_opt;
+    base_opt.sensitivity = CollationSensitivity::Base;
+    assert(cmp(u"a", u"\u00E1", base_opt) == 0);
+    assert(cmp(u"a", u"A", base_opt) == 0);
+
+    CollationOptions case_opt;
+    case_opt.sensitivity = CollationSensitivity::Case;
+    assert(cmp(u"a", u"\u00E1", case_opt) == 0);
+    assert(cmp(u"a", u"A", case_opt) < 0);
+
+    CollationOptions ip_opt;
+    ip_opt.ignore_punctuation = true;
+    assert(cmp(u"a-b!", u"ab?", ip_opt) == 0);
+
+    CollationOptions num_opt;
+    num_opt.numeric = true;
+    assert(cmp(u"file2", u"file10", num_opt) < 0);
+    assert(cmp(u"file02", u"file2", num_opt) == 0);
+
+    CollationOptions upper_opt;
+    upper_opt.case_first = 1;
+    assert(cmp(u"a", u"A", upper_opt) > 0);
+
+    // JS-level end-to-end validation & non-constructor checks
+    JsInterpreter js;
+    js.eval_ast(R"JS(
+        var coll_ok =
+            "o\u0308".localeCompare("\u00F6") === 0 &&
+            "file2".localeCompare("file10", "und", { numeric: true }) < 0 &&
+            "a-b".localeCompare("ab", "und", { ignorePunctuation: true }) === 0 &&
+            "a".localeCompare("A", "en-u-kf-upper") > 0;
+        var err_ok = true;
+        try { new String.prototype.normalize(); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { new String.prototype.localeCompare(); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { "a".localeCompare("b", null); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof TypeError); }
+        try { "a".localeCompare("b", "und", { sensitivity: "bogus" }); err_ok = false; } catch (e) { err_ok = err_ok && (e instanceof RangeError); }
+    )JS");
+    assert(js.eval("coll_ok && err_ok").is_truthy());
+}
+
+// ============================================================================
 // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
 // ============================================================================
 
@@ -15550,6 +15730,11 @@ int main() {
     RUN_TEST(js_derived_this_temporal_dead_zone);
     RUN_TEST(js_lexical_temporal_dead_zone_blocks_and_classes);
     RUN_TEST(js_temporal_dead_zone_in_control_flow_and_patterns);
+
+    // Phase 60: Unicode 17.0 String normalize(), full/locale case mapping, and CLDR 48 UCA localeCompare().
+    RUN_TEST(string_unicode17_normalization_tables_and_api);
+    RUN_TEST(string_unicode17_full_and_locale_case_mapping);
+    RUN_TEST(string_cldr48_uca_collation_and_ecma402_validation);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

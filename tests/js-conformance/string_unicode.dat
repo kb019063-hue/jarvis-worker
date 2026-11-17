@@ -1,0 +1,248 @@
+#name String.prototype.normalize NFC/NFD/NFKC/NFKD basic and default form
+#code
+console.log(
+  "e\u0301".normalize() === "\u00E9",
+  "e\u0301".normalize(undefined) === "\u00E9",
+  "\u00E9".normalize("NFD") === "e\u0301",
+  "\uFB01".normalize("NFC") === "\uFB01",
+  "\uFB01".normalize("NFKC") === "fi",
+  "\u00BD".normalize("NFKD") === "1\u20442",
+  "\u33A1".normalize("NFKC") === "m2"
+)
+#expect
+true true true true true true true
+
+#name String.prototype.normalize canonical ordering and composition exclusions
+#code
+console.log(
+  "e\u0301\u0323".normalize("NFD") === "e\u0323\u0301",
+  "e\u0323\u0301".normalize("NFC") === "\u1EB9\u0301",
+  "\u1E9B\u0323".normalize("NFD") === "\u017F\u0323\u0307",
+  "\u212B".normalize("NFC") === "\u00C5",
+  "\u0958".normalize("NFC") === "\u0915\u093C",
+  "\uFB1D".normalize("NFC") === "\u05D9\u05B4",
+  "\u0344".normalize("NFC") === "\u0308\u0301"
+)
+#expect
+true true true true true true true
+
+#name String.prototype.normalize Hangul syllable decomposition and composition
+#code
+console.log(
+  "\uAC00".normalize("NFD") === "\u1100\u1161",
+  "\u1100\u1161".normalize("NFC") === "\uAC00",
+  "\uAC01".normalize("NFD") === "\u1100\u1161\u11A8",
+  "\u1100\u1161\u11A8".normalize("NFC") === "\uAC01",
+  "\uD7A3".normalize("NFD") === "\u1112\u1175\u11C2",
+  "\u1112\u1175\u11C2".normalize("NFC") === "\uD7A3"
+)
+#expect
+true true true true true true
+
+#name String.prototype.normalize preserves lone surrogates and astral characters
+#code
+console.log(
+  "\uD800".normalize("NFC") === "\uD800",
+  "\uDC00".normalize("NFD") === "\uDC00",
+  "\uD800e\u0301\uDC00".normalize("NFC") === "\uD800\u00E9\uDC00",
+  "\uD834\uDD5E".normalize("NFD") === "\uD834\uDD57\uD834\uDD65",
+  "\uD834\uDD57\uD834\uDD65".normalize("NFC") === "\uD834\uDD57\uD834\uDD65"
+)
+#expect
+true true true true true
+
+#name String.prototype.normalize form validation and error handling
+#code
+function kind(fn) { try { fn(); return "ok"; } catch (e) { return e.name; } }
+console.log(
+  kind(() => "a".normalize("INVALID")),
+  kind(() => "a".normalize(null)),
+  kind(() => "a".normalize("nfc")),
+  kind(() => "a".normalize(Symbol())),
+  kind(() => String.prototype.normalize.call(null)),
+  kind(() => String.prototype.normalize.call(undefined)),
+  "e\u0301".normalize({ toString() { return "NFC"; } }) === "\u00E9"
+)
+#expect
+RangeError RangeError RangeError TypeError TypeError TypeError true
+
+#name Full Unicode SpecialCasing 1-to-N mappings
+#code
+console.log(
+  "\u00DF".toUpperCase(),
+  "\u1E9E".toLowerCase() === "\u00DF",
+  "\u0130".toLowerCase() === "i\u0307",
+  "\uFB00\uFB01\uFB02\uFB03\uFB04".toUpperCase(),
+  "\u0587".toUpperCase() === "\u0535\u0552",
+  "\u1F80".toUpperCase() === "\u1F08\u0399",
+  "\u0390".toUpperCase() === "\u0399\u0308\u0301"
+)
+#expect
+SS true true FFFIFLFFIFFL true true true
+
+#name Contextual Greek Final_Sigma including Case_Ignorable U+180E
+#code
+console.log(
+  "\u039F\u0394\u03A5\u03A3\u03A3\u0395\u03A5\u03A3".toLowerCase() === "\u03BF\u03B4\u03C5\u03C3\u03C3\u03B5\u03C5\u03C2",
+  "A\u03A3".toLowerCase() === "a\u03C2",
+  "A\u03A3B".toLowerCase() === "a\u03C3b",
+  "\u03A3".toLowerCase() === "\u03C3",
+  "A\u180E\u03A3".toLowerCase() === "a\u180E\u03C2",
+  "A\u180E\u03A3B".toLowerCase() === "a\u180E\u03C3b",
+  "A\u03A3\u180E".toLowerCase() === "a\u03C2\u180E"
+)
+#expect
+true true true true true true true
+
+#name Supplementary plane (astral) Unicode case mapping
+#code
+console.log(
+  "\u{10400}".toLowerCase() === "\u{10428}",
+  "\u{10428}".toUpperCase() === "\u{10400}",
+  "\u{104B0}".toLowerCase() === "\u{104D8}",
+  "\u{118A0}".toLowerCase() === "\u{118C0}",
+  "\u{1E900}".toLowerCase() === "\u{1E922}",
+  "\u{1E922}".toUpperCase() === "\u{1E900}"
+)
+#expect
+true true true true true true
+
+#name Turkish and Azeri locale-sensitive case mapping
+#code
+console.log(
+  "I".toLocaleLowerCase("tr") === "\u0131",
+  "\u0130".toLocaleLowerCase("tr") === "i",
+  "I\u0307".toLocaleLowerCase("tr") === "i",
+  "I\u0323\u0307".toLocaleLowerCase("tr") === "i\u0323",
+  "I\u0300\u0307".toLocaleLowerCase("tr") === "\u0131\u0300\u0307",
+  "i".toLocaleUpperCase("tr") === "\u0130",
+  "i".toLocaleUpperCase("az") === "\u0130",
+  "\u0130".toLocaleLowerCase("az") === "i"
+)
+#expect
+true true true true true true true true
+
+#name Lithuanian locale-sensitive case mapping
+#code
+console.log(
+  "\u00CC".toLocaleLowerCase("lt") === "i\u0307\u0300",
+  "\u00CD".toLocaleLowerCase("lt") === "i\u0307\u0301",
+  "\u0128".toLocaleLowerCase("lt") === "i\u0307\u0303",
+  "I\u0300".toLocaleLowerCase("lt") === "i\u0307\u0300",
+  "J\u0325\u0300".toLocaleLowerCase("lt") === "j\u0307\u0325\u0300",
+  "IA\u0300".toLocaleLowerCase("lt") === "ia\u0300",
+  "i\u0307".toLocaleUpperCase("lt") === "I",
+  "j\u0323\u0307".toLocaleUpperCase("lt") === "J\u0323",
+  "I\u0307".toLocaleUpperCase("lt") === "I\u0307"
+)
+#expect
+true true true true true true true true true
+
+#name Greek locale-sensitive uppercasing (accents, diphthongs, disjunctive eta)
+#code
+console.log(
+  "\u0391\u03B8\u03AE\u03BD\u03B1".toLocaleUpperCase("el") === "\u0391\u0398\u0397\u039D\u0391",
+  "\u03AC\u03B9".toLocaleUpperCase("el") === "\u0391\u03AA",
+  "\u03AC\u03C5".toLocaleUpperCase("el") === "\u0391\u03AB",
+  "\u03B1\u0390".toLocaleUpperCase("el") === "\u0391\u03AA",
+  "\u03AE".toLocaleUpperCase("el") === "\u0389",
+  "\u03B1 \u03AE \u03B2".toLocaleUpperCase("el") === "\u0391 \u0389 \u0392",
+  "\u03B1\u03AE".toLocaleUpperCase("el") === "\u0391\u0397",
+  "\u1F84".toLocaleUpperCase("el") === "\u0391\u0399"
+)
+#expect
+true true true true true true true true
+
+#name localeCompare canonical equivalence and primary/secondary/tertiary UCA order
+#code
+function s(x) { return x < 0 ? -1 : x > 0 ? 1 : 0; }
+console.log(
+  s("a".localeCompare("b")),
+  s("a".localeCompare("A")),
+  s("A".localeCompare("b")),
+  s("\u00E9".localeCompare("e\u0301")),
+  s("\u00F6".localeCompare("o\u0308")),
+  s("\u00C5".localeCompare("A\u030A")),
+  s("\u1E9B\u0323".localeCompare("\u017F\u0323\u0307")),
+  s("a".localeCompare("\u00E1")),
+  s("\u00E1".localeCompare("b"))
+)
+#expect
+-1 -1 -1 0 0 0 0 -1 -1
+
+#name localeCompare contractions, Hangul Jamo, CJK/Tangut/Nushu/Khitan implicit weights, surrogates
+#code
+function s(x) { return x < 0 ? -1 : x > 0 ? 1 : 0; }
+console.log(
+  s("\u013F".localeCompare("L\u00B7")),
+  s("\u0439".localeCompare("\u0438\u0306")),
+  s("\uAC00".localeCompare("\u1100\u1161")),
+  s("\u4E00".localeCompare("\u3400")),
+  s("\u{17000}".localeCompare("\u{18800}")),
+  s("\u{18800}".localeCompare("\u{1B170}")),
+  s("\u{1B170}".localeCompare("\u{18B00}")),
+  s("\u{18B00}".localeCompare("\u4E00")),
+  s("\uD800".localeCompare("\uDC00")),
+  s("\uD800".localeCompare("\uFFFD"))
+)
+#expect
+0 0 0 -1 -1 -1 -1 -1 -1 -1
+
+#name localeCompare sensitivity options (base, accent, case, variant)
+#code
+function s(x) { return x < 0 ? -1 : x > 0 ? 1 : 0; }
+console.log(
+  s("a".localeCompare("\u00E1", "und", { sensitivity: "base" })),
+  s("a".localeCompare("A", "und", { sensitivity: "base" })),
+  s("a".localeCompare("\u00E1", "und", { sensitivity: "accent" })),
+  s("a".localeCompare("A", "und", { sensitivity: "accent" })),
+  s("a".localeCompare("\u00E1", "und", { sensitivity: "case" })),
+  s("a".localeCompare("A", "und", { sensitivity: "case" })),
+  s("a".localeCompare("A", "und", { sensitivity: "variant" }))
+)
+#expect
+0 0 -1 0 0 -1 -1
+
+#name localeCompare ignorePunctuation, numeric, caseFirst, and Unicode -u- extensions
+#code
+function s(x) { return x < 0 ? -1 : x > 0 ? 1 : 0; }
+console.log(
+  s("a-b".localeCompare("ab", "und", { ignorePunctuation: true })),
+  s("a b!".localeCompare("ab?", "und", { ignorePunctuation: true })),
+  s("file2".localeCompare("file10", "und", { numeric: true })),
+  s("file02".localeCompare("file2", "und", { numeric: true })),
+  s("file2".localeCompare("file10", "en-u-kn-true")),
+  s("a".localeCompare("A", "und", { caseFirst: "upper" })),
+  s("a".localeCompare("A", "en-u-kf-upper")),
+  s("a".localeCompare("A", "und", { caseFirst: "lower" }))
+)
+#expect
+0 0 -1 0 -1 1 1 -1
+
+#name String prototype methods coerce non-string this safely (no dangling this)
+#code
+var b = new Boolean(true);
+b.toLowerCase = String.prototype.toLowerCase;
+b.toUpperCase = String.prototype.toUpperCase;
+var r = new RegExp("AbC");
+r.toLowerCase = String.prototype.toLowerCase;
+r.toUpperCase = String.prototype.toUpperCase;
+console.log(b.toLowerCase(), b.toUpperCase(), r.toLowerCase(), r.toUpperCase())
+#expect
+true TRUE /abc/ /ABC/
+
+#name String prototype methods are not constructors and validate locales/options
+#code
+function kind(fn) { try { fn(); return "ok"; } catch (e) { return e.name; } }
+console.log(
+  kind(() => new String.prototype.normalize()),
+  kind(() => new String.prototype.toLowerCase()),
+  kind(() => new String.prototype.toUpperCase()),
+  kind(() => new String.prototype.localeCompare()),
+  kind(() => "a".toLocaleLowerCase(null)),
+  kind(() => "a".toLocaleLowerCase("not_valid")),
+  kind(() => "a".localeCompare("b", undefined, null)),
+  kind(() => "a".localeCompare("b", "und", { sensitivity: "invalid" }))
+)
+#expect
+TypeError TypeError TypeError TypeError TypeError RangeError TypeError RangeError

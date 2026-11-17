@@ -362,7 +362,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
 | **Phase 55** | **Complete RegExp flags (`d`/`u`/`v`), Unicode 17.0 property escapes & case folding, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, and `Symbol.*` dispatch:** generates compact deduplicated Unicode 17.0 tables (`RegExpUnicodeTables.{hpp,cpp}` via `tools/generate_regexp_unicode_tables.py`: 22,207 shared ranges covering 80 General_Category, 98 Binary, 344 Script, 344 Script_Extensions aliases, all 7 Properties of Strings with 2,760 multi-CP sequences, 1,482 Unicode case classes, and 1,144 legacy case classes); upgrades `BuiltinsRegExp.cpp` with O(log R) normalized `CharClass`, `ClassSet` + `RegExpOp::MatchStringSet` (indexed by edge CP in longest-first order) for ES2024 `v`-mode `--`/`&&`/nested `[...]`/`\q{...}` and static `MayContainStrings`, distinct `iu` vs `iv` case-closure/complement ordering, ES2022 `d` (`hasIndices`) `match.indices`/`indices.groups`, ES2025 `(?ims-ims:...)` 3-bit scoped modifiers, alternative-scoped duplicate named capturing groups with Unicode `RegExpIdentifierName`, `RegExp.escape()`, parse-time regex literal validation (`js_regexp_validate` in `JsParser.cpp`), and full `Symbol.{match,matchAll,replace,search,split,species}` dispatch in `BuiltinsRegExp.cpp` and `BuiltinsString.cpp`. | ✅ Completed (198/198 unit suites; test262 `built-ins/RegExp` 739→1,849/1,879 (98.4%, +1,110), `language/literals/regexp` 68→237/240 (98.8%, 0 fail), `String.prototype/{match,matchAll,replace,replaceAll,search,split}` 333/339 (98.2%); JS corpus 999/1,014; `make verify-regexp` 588/588 diff + 112/112 ES2025; `make diff-strings` 50,509/50,580 (71 diff, down from 95); ASan+UBSan clean) |
-| **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
+| **Phase 57** | **Lossy WebP — the `VP8` key frame, the `VP8X` container's `ALPH` plane, and the loop filter:** `Vp8Decoder` (`include/litebird/render/Vp8Decoder.hpp`, `src/render/Vp8Decoder.cpp`, tables in `Vp8Tables.cpp`) decodes a VP8 intra frame — the frame tag and `9d 01 2a` start code, the boolean arithmetic coder with its literal and signed-literal forms, one to eight token partitions, segmentation, the `[4][8][3][11]` coefficient probabilities and quantiser deltas, macroblock mode rows (16x16 luma, 8x8 chroma, and sixteen 4x4 modes through the `[10][10][9]` context), residuals with the eob / zero-run / ±1 triple, the inverse Walsh–Hadamard transform for Y2 and the 4x4 IDCT, the 16x16/8x8/4x4 intra predictors over a 16-sample border, the loop filter as a whole-frame pass in the bitstream's four-edge order, and fancy 9/3/3/1 chroma upsampling with libwebp's fixed-point BT.601 matrix — and `WebPDecoder` gains the lossy branch: a `VP8 ` chunk in a simple or `VP8X` file, an `ALPH` plane in either compression method and all three spatial filters (level-reduction refused as `UnsupportedAlpha`, reserved bits `Corrupt`), with `Status::UnsupportedLossy` retired. | ✅ Completed (finding 63; 203/203 unit suites — `webp_lossy_vp8_decodes_bit_exactly`, `webp_lossy_alpha_plane_and_container_consistency`; `make verify-media` 63 → 88 checks, the 26 new ones all lossy and every one bit-exact against libwebp 1.2.4, plus the loop filter, partitions, segmentation and the alpha filters; `make fuzz-media` 2,400 cases with 14 new seeds, 0 findings; `make asan` green, `asan-deep` 882 runs 0 failed) |
+| **Phase 59** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (201/201 unit suites at the time, 203/203 after Phase 57; `make js-conformance` 1003/1017 Release / 1002/1017 ASan, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 
 ---
 
@@ -3727,11 +3728,12 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
 ### 3. Standalone Lossless WebP Decoder (`WebPDecoder.hpp`, `src/render/WebPDecoder.cpp`)
 
 - **Container:** `RIFF`/`WEBP` with a padding-aware chunk walk, a simple file
-  holding one `VP8L` chunk, or an extended `VP8X` file whose canvas is checked
-  against the image; a `VP8 ` (lossy) chunk, `ANIM`/`ANMF` (animation), a RIFF
-  size past the buffer, and a container with no image chunk each get their own
-  `Status` (`UnsupportedLossy`, `UnsupportedAnimation`, `Truncated`,
-  `Corrupt`) instead of a null image.
+  holding one `VP8L` chunk, one `VP8 ` (lossy) chunk, or an extended `VP8X`
+  file whose canvas is checked against the image and whose optional `ALPH`
+  chunk carries the alpha plane; `ANIM`/`ANMF` (animation), a RIFF size past
+  the buffer, and a container with no image chunk each get their own `Status`
+  (`UnsupportedAnimation`, `UnsupportedAlpha`, `Truncated`, `Corrupt`) instead
+  of a null image.
 - **Bitstream:** LSB-first bit reader with an explicit end-of-stream latch;
   canonical prefix codes (simple codes, and code-length codes with repeat
   symbols) with a **single-symbol code that consumes zero bits**, the rule that
@@ -3786,14 +3788,14 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
 
 `make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
 PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
-(exact `max_diff = 0` on every frame), 17 lossless WebP images against libwebp
-bit-exactly (plus a `VP8X` container, five refusals and four `probe()`
-classifications, added in Phase 54), and 5 SVG feature suites. `make fuzz-media`
+(exact `max_diff = 0` on every frame), 27 lossless and 26 lossy WebP checks
+against libwebp bit-exactly (plus a `VP8X` container, refusals and `probe()`
+classifications, added in Phase 54 and Phase 57), and 5 SVG feature suites. `make fuzz-media`
 mutates JPEG, GIF, WebP, and SVG inputs (2,400 cases in Release, 6,000 under
 ASan+UBSan+LSan). `JpegDecoder` and `GifDecoder`, like `WebPDecoder`, are wired
-into `ImageDecoder.cpp`; lossy `VP8`, animated WebP, AVIF, SVG
+into `ImageDecoder.cpp`; animated WebP, AVIF, SVG
 `<text>`/CSS stylesheets/filters, and Canvas 2D shadows/patterns remain open
-(see `AUDIT.md`, findings 43 and 60).
+(see `AUDIT.md`, findings 43, 60 and 63).
 
 ---
 
@@ -5685,8 +5687,9 @@ image CDNs — drew an empty box. `AUDIT.md`, finding 60.
    simple file (one `VP8L`) or an extended one (`VP8X` canvas, then the image),
    and clamps a RIFF size larger than the buffer instead of trusting it. An
    extended file whose animation flag is set, or which carries `ANIM`/`ANMF`,
-   stops here as `UnsupportedAnimation`; a `VP8 ` chunk as `UnsupportedLossy`;
-   an empty chunk list as `Corrupt`.
+   stops here as `UnsupportedAnimation`; an empty chunk list as `Corrupt`. A
+   `VP8 ` chunk stops here too until Phase 57, which decodes it, and an `ALPH`
+   chunk with it.
 2. **`BitReader`** — least-significant-bit-first, a five-byte window, and an
    explicit end-of-stream latch so that reads past the end are reported as
    truncated instead of returning fabricated zero bits.
@@ -5740,7 +5743,10 @@ implementation gets wrong long before it gets the Huffman layer wrong.
 Lossy `VP8` (macroblock prediction, DCT, loop filter — a video codec, not a
 variation), animated WebP (`ANMF` compositing and disposal), the `ALPH` chunk
 that only accompanies a lossy image, and AVIF (an AV1 still image). SVG
-`<text>` remains open too. The AGENTS.md row now names exactly these.
+`<text>` remains open too. The AGENTS.md row now names exactly these. *Phase 57
+closed the first and third of them — `VP8` key frames and the `ALPH` plane — in
+`src/render/Vp8Decoder.cpp`; see the Phase 57 section at the end of this
+document.*
 
 ---
 
@@ -6037,7 +6043,8 @@ execution reached their declaration statement. As a result:
 
 ### 4. Verification & remaining boundaries
 
-- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan
+- `make test`: **201/201** unit suites passed at the time (203/203 after
+  Phase 57's two suites), in both Release and ASan+UBSan
   (`build-asan/test_suite`), including three new Phase 59 suites
   (`js_derived_this_temporal_dead_zone`,
   `js_lexical_temporal_dead_zone_blocks_and_classes`,
@@ -6066,3 +6073,150 @@ execution reached their declaration statement. As a result:
   - Direct `eval` inside a function (separate `AGENTS.md` row) and `var`
     inside a block shadowing an outer block `let`/`const` early SyntaxError
     remain open.
+
+---
+
+## Phase 57 Architecture: Lossy WebP — the `VP8` Key Frame, the `ALPH` Plane, and the Loop Filter
+
+### 1. The hole
+
+Phase 54 read the container and the lossless (`VP8L`) bitstream, and refused
+every `VP8 ` chunk as `UnsupportedLossy` — a status this phase retired along
+with the refusal. That is the wrong half of the format to have: libwebp's
+default output at quality 75 is lossy, and the files libwebp only writes on
+request are the lossless ones, so `<img src="x.webp">` drew nothing for what
+most encoders — `convert`, `cwebp`, every CDN — actually produce. The lossy
+half is not a variation of `VP8L`: it is a VP8 *video* key frame, the intra
+frame of a codec, which never refers to a picture before it and is therefore
+self-contained. `AUDIT.md`, finding 63.
+
+### 2. Layers, top to bottom
+
+`include/litebird/render/Vp8Decoder.hpp` and `src/render/Vp8Decoder.cpp` decode
+one key frame into the three planes libwebp reconstructs, with the constant
+tables in `src/render/Vp8Tables.cpp`; `to_argb` turns the planes into the
+`0xAARRGGBB` pixels `ImageData` expects. The layers, each one testable alone:
+
+1. **Frame header.** The three-byte frame tag (key-frame bit, profile, the
+   show-frame bit, the length of the first partition), the `9d 01 2a` start
+   code, and 14-bit width and height. An inter-coded frame stops here as
+   `NotKeyFrame` — it needs the picture before it, which a still image does not
+   have — a profile above 3 as `UnsupportedProfile`, a zero dimension as
+   `Corrupt`, and a frame past `kMaxDecodedPixels` or `kMaxDimension` as
+   `TooLarge`, before anything is allocated.
+2. **The boolean decoder.** VP8's arithmetic coder: `get_bool(p)` narrows a
+   `range`/`value` pair against an 8-bit probability and renormalises a byte at
+   a time; `get_literal(n)` and `get_signed_literal(n)` are built on it. The
+   first partition carries the macroblock modes; the residual tokens live in
+   one to eight partitions whose three-byte sizes are read from the start of
+   the token area.
+3. **Header probabilities.** Segmentation (four segments, a per-segment
+   quantiser and filter-strength delta, an optional segment map with its own
+   coded tree), the filter type/level/sharpness, the loop-filter deltas, the
+   base quantiser with its five per-plane deltas, and the coefficient
+   probabilities — `[4][8][3][11]` defaults, each with its own "is updated"
+   bit.
+4. **Per-macroblock headers.** Segment id, the skip-coefficients flag, the
+   16x16 luma and 8x8 chroma prediction modes (four each, through their own
+   tree), and, for a macroblock not predicted as 16x16, sixteen 4x4 modes
+   chosen from ten through the `[10][10][9]` context table. The modes of a
+   whole macroblock row are read before its residuals, because a 4x4
+   macroblock's context is its left and above neighbours' modes.
+5. **Residuals.** `get_coeffs` reads a block's tokens with the VP8 context
+   (the above and left nonzero-coefficient counts), the coefficient bands
+   (`kCoeffBands`), the eob / zero-run / "is ±1" probability triple, and the
+   category tables for the larger values. Y2 — the 4x4 block of DC
+   coefficients of a 16x16 macroblock — is coded first and either goes through
+   the inverse Walsh–Hadamard transform or, when it carries a single
+   coefficient, is spread as `(dc + 3) >> 3`; the sixteen luma blocks and eight
+   chroma blocks then get the 4x4 IDCT with libwebp's fixed-point constants
+   (`20091`/`35468` and a `+4` before the shift).
+6. **Intra prediction.** 16x16 DC/V/H/TM, 8x8 chroma DC/V/H/TM with the 117
+   clamp, and the ten 4x4 modes, all reading the 16-sample border the frame
+   carries on every side, with a missing top or left edge handled the way
+   `vp8/common/reconintra.h` does it — top-right replication by 4, 8 and 12
+   samples included.
+7. **The loop filter.** A per-macroblock level (`level >> sharpness` folded in,
+   the inner edge limit `2 * level + ilevel`, and `+4` on macroblock edges, HEV
+   limits at 40 and 15), applied in the order the bitstream prescribes:
+   horizontal macroblock edges, horizontal inner edges, vertical macroblock
+   edges, vertical inner edges, luma then chroma. It is a pass over the whole
+   frame after every macroblock has been reconstructed — not work inside the
+   macroblock loop — because a filtered edge is a source for its neighbours,
+   which is the one structural mistake that still decodes to a picture and is
+   wrong by a few levels per pixel.
+8. **`to_argb`.** The "fancy" bilinear chroma upsampling (9/3/3/1 weights,
+   `YUV_FIX2 = 6`) and the fixed-point BT.601 studio-swing matrix, then the
+   optional alpha plane.
+
+### 3. The container around it: `VP8X`, `ALPH`, and the alpha plane
+
+A lossy image is either a simple file (one `VP8 ` chunk) or an extended one: a
+`VP8X` canvas whose flag byte says what follows, an optional `ALPH` chunk, and
+the `VP8 ` chunk. `ALPH` is one header byte — bits 0–1 choose raw (0) or a
+signature-less `VP8L` stream (1), bits 2–3 the spatial filter, bits 4–5 the
+preprocessing, bits 6–7 reserved — and then the plane, one byte a pixel per row,
+filtered. The spatial filters are undone against the plane already rebuilt:
+none, left, above, and `left + above - above-left` modulo 256, with every one of
+them falling back to the horizontal filter on the first row — and the horizontal
+filter itself starting from `prev[0]` rather than from zero, which is libwebp's
+`HorizontalUnfilter` and not the textbook "predict from the left" reading.
+Level-reduction preprocessing is refused as `UnsupportedAlpha`: undoing it needs
+the quantisation table the encoder used, which the file does not carry.
+Reserved bits set are `Corrupt`, and a plane that is not `width * height` bytes
+is refused rather than half-applied.
+
+### 4. The oracle, and what it cost
+
+Nothing here can be "close enough": VP8's transforms, filters and the YUV matrix
+are specified to the last fixed-point constant, so libwebp's output is the only
+correct answer and the work is not finished until the pixels are equal. The
+oracle was libwebp 1.2.4 itself: `dwebp -yuv` for the planes (60 sweep files,
+`max |Δ| = 0` on every one, with `-nofilter` on both sides to separate the
+reconstruction from the filter) and `convert f.webp -depth 8 rgba:-` for the
+pixels. Every mismatch that the sweeps found was one of four: a probability
+pointer read from the wrong context (a multi-megabyte "coefficient stream ended
+mid-row"), a 4x4 predictor that used the wrong edge sample on an odd-sized
+frame, a row-pair walk in `to_argb` that ran past the last row, and the
+`ALPH` first-row rule above. What the sweeps could not see — the loop filter,
+the token partitions, the segmentation, and the alpha plane, none of which a
+flat gradient exercises — is what the conformance checks below build by hand.
+
+### 5. Verification
+
+- `make verify-media` → **88/88**, of which **26** are lossy WebP checks:
+  11 generated streams (1x1, 3x3, 16x16, 17x13, 32x32, 33x17, 100x75, 129x97,
+  16x64, 64x16, and 96x64 at quality 30) decoded **exactly** against ImageMagick
+  — `max_diff = 0`, which the helper reports as 99.00 dB — the loop filter
+  (off, strength 0/100, simple, sharpness 7; 3,072 pixels differ, so the check
+  proves the filter runs and is not the identity), `partitions 2/3`,
+  `segments 2/4`, `sns 0/100`, `method 6`, the alpha plane from both compression
+  methods and all three filters (rebuilt forward by hand, then required equal and
+  non-flat), a truncated payload refused, and determinism.
+- `make fuzz-media` → **2,400 cases** (600 WebP) over the lossless seeds, seven
+  new lossy encodes (partitions 2, filter-type 1, strength 100, alpha methods
+  0 and 1) and seven hand-built `VP8X`+`ALPH`+`VP8 ` containers with hostile
+  header bytes: 0 findings. A one-off run at 5,000 iterations a format
+  (20,000 cases) was clean too.
+- `make test` → **203 suites** (`201 → 203`):
+  `webp_lossy_vp8_decodes_bit_exactly` (a flat 8x8 and a 16x16 plasma embedded
+  as bytes, every pixel compared against libwebp's, `lossy` set, lossless not
+  set, determinism, and `ImageDecoder::decode(bytes, "image/webp")` agreeing) and
+  `webp_lossy_alpha_plane_and_container_consistency` (a `VP8X`+`ALPH`+`VP8 `
+  file built chunk by chunk in the test, so its RIFF size is computed rather
+  than copied; the raw plane `16 * y + x` read back through all four filters;
+  a short plane, level-reduction preprocessing and reserved bits refused). The
+  refusal matrix in `webp_unsupported_and_malformed_input_is_refused` now covers
+  truncation at four points, an inter-coded frame (message contains
+  "inter-coded", not "key frame"), and the container cases.
+- `make asan`, and the rest of the scoreboard, below.
+
+### 6. What is still open
+
+Animated WebP (`ANIM`/`ANMF` compositing and disposal) and AVIF are still
+refused with a status, and SVG `<text>` is still unrendered; the AGENTS.md row
+now names exactly those three. Inside the codec: only key frames are decoded
+(which is all a still image has), profiles 0–3 only (no encoder emits more), and
+`ALPH` level-reduction is refused rather than approximated. `VP8X` canvas
+scaling — a canvas larger than the image, which the format allows — is not
+applied; the image is decoded at its own size.

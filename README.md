@@ -37,11 +37,11 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 201 suites, all passing | `make test` |
+| Engine unit tests | 203 suites, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
-| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 17 lossless WebP images bit-exact vs libwebp (plus refusals), 5 SVG suites; 2,400+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
+| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 5 SVG suites; 2,400 mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -54,7 +54,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 201 engine suites
+make test            # 203 engine suites
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
@@ -582,10 +582,10 @@ Litebird implements the complete modern browser rendering pipeline:
   - Geometric & path primitives: `fillRect`, `clearRect`, `strokeRect`, `rect`, `roundRect`, `arc`, `ellipse`, `arcTo`, `quadraticCurveTo`, `bezierCurveTo`, `isPointInPath`.
   - Text (Phase 46): `fillText`, `strokeText`, `measureText` with `font` (CSS font shorthand subset — style, variant, weight, size in px/pt/em/rem/% with an optional `/line-height`, and a family list that is parsed and reflected but rasterised with the engine's system font), `textAlign`, `textBaseline`, `maxWidth` horizontal condensing, solid or gradient paint, CTM-aware sampling with AA coverage, `clip()` and `globalAlpha` support, and the save/restore text state.
   - Inverse-CTM linear/radial gradients (`Pad`/`Reflect`/`Repeat`), `createImageData`/`getImageData`/`putImageData`, CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
-- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `ImageDecoder`):**
+- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `Vp8Decoder`, `ImageDecoder`):**
   - Standalone ITU-T T.81 Baseline/Extended/Progressive JPEG decoder (`JpegDecoder`: 4:4:4/4:2:2/4:2:0/4:4:0, Grayscale/YCbCr/RGB/CMYK/YCCK, restart markers, multi-scan progressive refinement).
   - Standalone GIF87a/GIF89a single-frame & animated multi-frame decoder (`GifDecoder`: 2..8-bit LZW, GCT/LCT, 4-pass interlacing, transparency, all 4 disposal methods, loop count).
-  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms; lossy `VP8` and animated files are reported by status, not drawn).
+  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms) and, since Phase 57, a standalone lossy decoder (`Vp8Decoder`: a VP8 key frame — boolean coder, token partitions, 16x16/8x8/4x4 intra prediction, IDCT and Walsh–Hadamard, the whole-frame loop filter, fancy chroma upsampling — with the `ALPH` plane in both compression methods and all three spatial filters). Animated WebP and AVIF are reported by status, not drawn.
   - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, BMP, JPEG, GIF and WebP.
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
@@ -699,7 +699,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 201 engine test suites
+# Run the 203 engine test suites
 make test
 ```
 
@@ -766,14 +766,14 @@ make test
 make test
 ```
 
-Output (195 suites; the first and last lines shown):
+Output (203 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 195 engine test suites passed successfully!
+All 203 engine test suites passed successfully!
 ```
 
 ```bash
@@ -889,7 +889,7 @@ parser/evaluator across scripts, functions, async/generator bodies, blocks,
 try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
 # ReferenceError
 # ReferenceError
-make test            # 201 / 201 unit suites
+make test            # 203 / 203 unit suites
 make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
 make test262         # 12,359 / 15,686 (+43, 0 regressions)
 ```
@@ -919,7 +919,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 195/195 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 203/203 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1077,8 +1077,8 @@ GIF87a/GIF89a (`GifDecoder`), and upgrades `CanvasRenderingContext2D` and
 gradients, full SVG path/elliptical-arc grammar, `<defs>`/`<use>`/`<symbol>`/
 `<clipPath>`, inline `style`, and opacity. `make verify-media` verifies 21 JPEG
 variants pixel-by-pixel against `libjpeg` (52–99 dB PSNR), 9 GIF variants
-bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, 30 lossless WebP
-checks (added in Phase 54) and 5 SVG feature suites; `make fuzz-media` runs
+bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, 53 WebP checks
+(27 lossless in Phase 54, 26 lossy in Phase 57) and 5 SVG feature suites; `make fuzz-media` runs
 2,400 mutated JPEG/GIF/WebP/SVG inputs through `build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
 Phase 38, and `AUDIT.md`, finding 43.
 
@@ -1168,15 +1168,36 @@ decoded with the same reader that decodes the image, plus meta prefix codes and
 a colour cache.
 
 ```bash
-make verify-media   # 63 checks: JPEG, GIF, WebP (bit-exact) and SVG
+make verify-media   # 88 checks: JPEG, GIF, lossless and lossy WebP (bit-exact) and SVG
 make fuzz-media     # 2,400 mutation cases across four formats
 ./build/media_check --decode-webp in.webp out.ppm [out.rgba]
-./build/media_check --probe-webp  in.webp     # "ok", "lossy VP8 is not supported", ...
+./build/media_check --probe-webp  in.webp     # "ok", "animated WebP is not supported", ...
 ```
 
-The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
-a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
-60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
+### Lossy WebP (Phase 57)
+
+The other half of the format — the one libwebp writes by default — is a VP8
+video key frame, decoded by `Vp8Decoder`: the boolean (arithmetic) coder, the
+mode and residual partitions, 16x16/8x8/4x4 intra prediction, the 4x4 IDCT and
+the Walsh–Hadamard transform for Y2, the loop filter over the whole frame, and
+fancy chroma upsampling with libwebp's fixed-point BT.601 matrix. The `VP8X`
+container and its `ALPH` plane (both compression methods, all three spatial
+filters) come with it, so a lossy WebP with transparency also decodes. The
+pixels are not "close": 11 generated streams from 1x1 to 129x97, four
+qualities and odd sizes decode exactly as libwebp does, and the checks reach the
+parts a smooth image never exercises — the loop filter (off and on, strength 0
+and 100, simple, sharpness 7), the token partitions, segmentation, and the alpha
+plane rebuilt by hand from all three filters.
+
+```bash
+./build/media_check --decode-vp8  frame.vp8   out.ppm [out.rgba]   # a bare `VP8 ` payload
+./build/media_check --fuzz-vp8    frame.vp8
+./build/media_check --decode-webp translucent.webp out.ppm out.rgba
+```
+
+Animated WebP (`ANMF` compositing) and AVIF are refused with a status rather
+than approximated: `AUDIT.md`, finding 63, says what was found and
+`ARCHITECTURE.md`, Phase 57, how it is built.
 
 ### Cross-origin `Window` and `Location` reflection (Phase 56)
 

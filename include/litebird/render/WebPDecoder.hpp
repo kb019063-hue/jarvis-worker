@@ -38,7 +38,6 @@ public:
     enum class Status {
         Ok = 0,
         NotWebP,               ///< no `RIFF....WEBP` header
-        UnsupportedLossy,      ///< a lossy `VP8` stream this decoder refuses
         UnsupportedAnimation,  ///< `ANIM`/`ANMF` present
         UnsupportedAlpha,      ///< `ALPH` with level-reduction preprocessing
         TooLarge,              ///< dimension or pixel budget exceeded

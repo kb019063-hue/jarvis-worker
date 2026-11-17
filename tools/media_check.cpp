@@ -1,6 +1,7 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/render/Vp8Decoder.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/html/HtmlParser.hpp"
 
@@ -60,8 +61,8 @@ bool write_rgba(const std::string& path, const litebird::ImageData& img) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--render-svg|"
-                     "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-svg> <in> [out]\n";
+        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--decode-vp8|--render-svg|"
+                     "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-vp8|--fuzz-svg> <in> [out]\n";
         return 2;
     }
     const std::string mode = argv[1];
@@ -79,6 +80,14 @@ int main(int argc, char** argv) {
                 (void)litebird::GifDecoder::decode_frames(b.data(), b.size(), 16);
             } else if (kind == "webp") {
                 (void)litebird::WebPDecoder::decode_detailed(b.data(), b.size());
+            } else if (kind == "vp8") {
+                litebird::Vp8Decoder::Frame frame;
+                std::string error;
+                if (litebird::Vp8Decoder::decode(b.data(), b.size(), frame, error) ==
+                    litebird::Vp8Decoder::Status::Ok) {
+                    std::vector<uint32_t> pixels;
+                    litebird::Vp8Decoder::to_argb(frame, nullptr, 0, pixels);
+                }
             } else if (kind == "svg") {
                 std::string markup(reinterpret_cast<const char*>(b.data()), b.size());
                 auto doc = litebird::HtmlParser::parse(markup);
@@ -152,6 +161,46 @@ int main(int argc, char** argv) {
         }
         std::cout << res.image->width << " " << res.image->height
                   << (res.lossy ? " lossy\n" : " lossless\n");
+        return 0;
+    }
+
+    if (mode == "--decode-vp8") {
+        // The bytes a `VP8 ` chunk carries: the frame tag and everything after
+        // it, with no RIFF around it.
+        if (argc < 4) return 2;
+        litebird::Vp8Decoder::Frame frame;
+        std::string error;
+        const auto status = litebird::Vp8Decoder::decode(bytes.data(), bytes.size(), frame, error);
+        if (status != litebird::Vp8Decoder::Status::Ok) {
+            std::cerr << "VP8 error (" << litebird::Vp8Decoder::status_string(status) << "): " << error << "\n";
+            return 1;
+        }
+        std::vector<uint32_t> pixels;
+        litebird::Vp8Decoder::to_argb(frame, nullptr, 0, pixels);
+        litebird::ImageData image;
+        image.width = frame.width;
+        image.height = frame.height;
+        image.pixels = std::move(pixels);
+        if (!write_ppm(argv[3], image)) {
+            std::cerr << "Failed to write PPM\n";
+            return 2;
+        }
+        if (argc >= 5 && !write_rgba(argv[4], image)) {
+            std::cerr << "Failed to write RGBA\n";
+            return 2;
+        }
+        std::cout << image.width << " " << image.height << "\n";
+        return 0;
+    }
+
+    if (mode == "--fuzz-vp8") {
+        litebird::Vp8Decoder::Frame frame;
+        std::string error;
+        if (litebird::Vp8Decoder::decode(bytes.data(), bytes.size(), frame, error) ==
+            litebird::Vp8Decoder::Status::Ok) {
+            std::vector<uint32_t> pixels;
+            litebird::Vp8Decoder::to_argb(frame, nullptr, 0, pixels);
+        }
         return 0;
     }
 

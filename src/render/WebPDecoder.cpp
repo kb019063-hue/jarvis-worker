@@ -1073,7 +1073,6 @@ const char* WebPDecoder::status_string(Status status) {
     switch (status) {
         case Status::Ok: return "ok";
         case Status::NotWebP: return "not a WebP file";
-        case Status::UnsupportedLossy: return "lossy VP8 stream is not supported";
         case Status::UnsupportedAnimation: return "animated WebP is not supported";
         case Status::UnsupportedAlpha:
             return "lossy WebP alpha with level-reduction preprocessing is not supported";

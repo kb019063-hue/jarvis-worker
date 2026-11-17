@@ -2,6 +2,7 @@
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/render/GifDecoder.hpp"
+#include "litebird/render/WebPDecoder.hpp"
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/xml/XmlDom.hpp"
@@ -612,6 +613,9 @@ std::shared_ptr<ImageData> ImageDecoder::decode_bytes(
     }
     if (GifDecoder::is_gif(data, size)) {
         return GifDecoder::decode(data, size);
+    }
+    if (WebPDecoder::is_webp(data, size)) {
+        return WebPDecoder::decode(data, size);
     }
     if (size >= 4 && data[0] == 'B' && data[1] == 'M') {
         return decode_bmp(data, size);

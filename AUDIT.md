@@ -59,7 +59,7 @@ The rest are documented with enough detail to act on.
 | 44 | `<img src>` bypassed `ResourceLoader::load_for_page` and read arbitrary local files directly from `LayoutTree`, and unloaded images without `width`/`height` laid out as `100×100` boxes instead of `0×0` | **High (security / layout)** | ✅ Fixed (Phase 36) |
 | 45 | Worker script loads lacked MIME/module validation, `addEventListener("error")` listeners were never invoked, `Worker` instances leaked via an `inst` ↔ `WorkerObject` cycle, and pages exiting while workers were starting crashed in `SIGSEGV` / `heap-use-after-free` during static teardown of `js_symbol_for_key`'s registry and `DomBindings`'s interface table | **High (crash / security)** | ✅ Fixed (Phase 40); ES module execution, structured clone beyond JSON, and immortalizing `symbol_registry()` / `DomBindings` registry remain open |
 | 46 | The HTML tokenizer compared every attribute name with every name it had already accepted: one element with 50,000 attributes cost the square of the count, and so did an end tag with that many | **Medium (perf)** | ✅ Fixed (Phase 39) |
-| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); `WindowProxy` exotic property descriptors (`getOwnPropertyDescriptor` cross-origin filtering), `MessageChannel`/`MessagePort`, and out-of-process site isolation remain open |
+| 48 | `<iframe>` elements had no nested browsing context (`contentDocument` / `contentWindow` / `sandbox` / `srcdoc` / `window.frames` / `postMessage` did not exist), DOM bindings assumed one global realm per thread, `LayoutTree` skipped `<iframe>` subdocuments, and `.xhtml`/XML CLI loads never executed `<script>` elements — blocking 495 WPT subtests and the `DOMParser-parseFromString-url*` / `.xhtml` suites | **High** | ✅ Fixed (Phase 42); cross-origin `WindowProxy`/`Location` reflection landed in Phase 56 (finding 62); `MessageChannel`/`MessagePort` and out-of-process site isolation remain open |
 | 49 | `new.target` was the function that was running: an abstract class refused its own subclasses and `Reflect.construct(F, [], G)` did not name `G` inside `F`. `super()` dropped an object the parent's constructor returned, `this` could be bound twice or never, and a custom element compiled for older browsers could neither be made nor upgraded | **High** | ✅ Fixed (Phase 43); `this` before `super()`, `eval` in a function and private names remain |
 | 50 | Unicode escapes in JavaScript identifiers (`var \u0061 = 1`, `o.\u2118`, `#\u{1D49C}`) failed with `Invalid or unexpected token`, non-ID Unicode bytes `>= 0x80` (e.g. `U+2E2F`) were accepted as identifiers, and strict/contextual escaped keyword rules were unenforced | **High (spec conformance)** | ✅ Fixed (Phase 44): +1,440 / 0 lost in default 21 Test262 dirs (12,275/15,686); 374/374 (100.0%) in `language/{identifiers,keywords,future-reserved-words,reserved-words}` |
 | 51 | `Promise.all`/`any`/`race`/`allSettled` handed every value straight to `to_promise` inside `js_iterate`, bypassing the constructor's overridable `resolve`, and an iterator with no end was consumed forever before its first value could throw | **High** | ✅ Fixed (Phase 45) |
@@ -67,6 +67,8 @@ The rest are documented with enough detail to act on.
 | 54 | Every sized float rebuilt and sorted the top/bottom edges of all prior nonempty bands before finding the first fitting y, even though the prior bands had not changed | **Medium (perf)** | ✅ Fixed (Phase 48): indexed vertical intervals and subtree maximum capacity; 10,000 packed floats 5.244 → 0.096 s and mixed 12.505 → 0.125 s end-to-end, nine out-of-corpus layouts identical. Remaining: updates to a band spanning many distinct intervals still touch each such interval |
 | 55 | Customizable `<select>` content and `<selectedcontent>` cloning followed pre-2025 parsing rules, failing the final 11 html5lib tree-construction corpus cases | **High (spec conformance)** | ✅ Fixed (Phase 49): **1792/1792 (100.0%)** across all 57 html5lib tree-construction files (CI conformance floor raised `1781 -> 1792`) |
 | 59 | Reading or `substring`-slicing a string ending in a high surrogate half (`0xD800..0xDBFF`) settled/left a 3-byte UTF-8 sequence inside the block so completing the surrogate pair copied the whole string (`58/242/893 ms` at 5k/10k/20k iterations) | **Medium (perf)** | ✅ Fixed (Phase 53): ASCII 1-byte / non-ASCII 2-byte UTF-16 `Buffer` + lazy UTF-8/`Wide` caches + `sole_thread` CAS tail rewind; 20k read-between-halves & slice-complete drop to `17 ms`, `indexOf`-between-halves `154 ms` |
+| 62 | Every cross-origin `WindowProxy` / `Location` described itself with the ordinary own-keys walk: `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys`/spread/rest/`for…in` leaked the child's globals and element ids, `getOwnPropertyDescriptor` answered with ordinary storage, `Object.defineProperty` wrote into the child's own map, `freeze`/`seal`/`preventExtensions`/`setPrototypeOf` mutated it, `getPrototypeOf` returned the child realm's `Window.prototype`, and cross-origin `Location` leaked `href`/`pathname`/`origin` outright | **High (security)** | ✅ Fixed (Phase 56): one cross-origin predicate (`dom::cross_origin_own_keys`) drives every reflection seam; `Location` gained a security exotic; cross-origin reflection is exactly the spec's index + table names + `then`; define/delete/integrity/`instanceof`/prototype all refuse. 80 targeted checks in `tests/cross_origin_windows.cpp` (`make test`) |
+| 65 | Derived constructor `this` before `super(...)` and `let`/`const`/`class` declarations had no Temporal Dead Zone: pre-`super()` `this` read/wrote the allocated object, `typeof z` before `let z` returned `"undefined"`, block `let` failed to shadow above its line, and `c = 2` before `const c` created a global | **High (spec conformance)** | ✅ Fixed (Phase 59): `JsEnvironment::Binding::is_initialized`, `AssignResult::Uninitialized`, derived `this` TDZ enforcement, and parser/evaluator lexical pre-declaration across blocks, functions, `switch`, loops, `try/catch`, classes, and default params (`construct.dat` 49/50, `lexical.dat` 41/41, +43 default / +49 TDZ test262, 0 regressions) |
 
 ---
 
@@ -3225,10 +3227,10 @@ and the multi-origin `DOMParser-parseFromString-url*` suite:
   `600` XML + `1,800` media fuzz runs, `0` findings), and `make deep`.
 
 **What is still open.** Cross-origin `Object.getOwnPropertyDescriptor` /
-`Reflect.ownKeys` filtering on `WindowProxy` (`[[OwnPropertyKeys]]` exotic trap),
-cross-origin `Location` setter navigation (`childWin.location = ...`),
-`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc` CSP
-inheritance, and process-level site isolation remain open.
+`Reflect.ownKeys` filtering on `WindowProxy` was closed in Phase 56 (finding
+62); cross-origin `Location` navigation is limited to a fragment move,
+`MessageChannel` / `MessagePort` / `structuredClone` transferables, `srcdoc`
+CSP inheritance, and process-level site isolation remain open.
 
 ---
 
@@ -4119,3 +4121,205 @@ pure ASCII buffers remain 1 byte per unit and `sizeof(JsString)` shrinks from
 **Still open.**
 - In JS, truncating a completed pair and appending a low half (`s += '\uD83D\uDE00'; s = s.substring(0, s.length - 1); s += '\uDE00'`) still holds `refs == 2` across the JS variable binding and the `+=` operand temporary (`JsEval.cpp` / VM), so JS still copies even though a single-owner C++ handle rewinds in 23 blocks.
 - Repeatedly calling host `.view()` on a `JsString` while its buffer ends in an unpaired high surrogate allocates a bounded `Utf8Slice` per call so `Utf8Cache` never pins `\xED\xA0\xBD`; standard JS string operations do not call `.view()`.
+
+## 60. ✅ WebP was a hole in the image pipeline (Phase 54)
+
+**The hole.** `ImageDecoder::decode_bytes` recognized PNG, JPEG, GIF, BMP and
+PPM by their magic bytes and fell back to an SVG sniff. A `RIFF....WEBP` file
+matched neither, so it returned `nullptr`: `<img src="x.webp">` — which is what
+a page serving WebP through `<picture>`, a CDN or `canvas` hands the engine
+today — laid out an empty box. Nothing failed; the image was simply not there.
+
+**The fix.** `include/litebird/render/WebPDecoder.hpp` and
+`src/render/WebPDecoder.cpp` read the container and the lossless (VP8L)
+bitstream, with no dependency added:
+
+- **Container.** `RIFF`/`WEBP`, a simple file with one `VP8L` chunk or an
+  extended `VP8X` file (whose canvas is checked against the image), a chunk walk
+  with RIFF padding, and a misreported RIFF size clamped rather than trusted.
+- **Entropy layer.** A least-significant-bit-first bit reader, canonical prefix
+  codes decoded bit by bit with the over-subscription check, both code-length
+  forms (simple, and the 19-symbol code-length code with its repeat symbols),
+  meta prefix codes (an *entropy image* of code-group indices), the colour
+  cache (`(0x1e35a7bd * argb) >> (32 - bits)`), and LZ77 with the 120
+  near-neighbour distance codes mapped back to scan-line distances.
+- **The four transforms**, each described by a sub-image decoded recursively
+  with the same reader and inverted in reverse order: predictor (14 modes, with
+  the rightmost column's top-right pixel being the first pixel of the row being
+  rebuilt), cross-colour (3.5-fixed-point per-channel deltas), subtract-green,
+  and colour indexing with delta-coded palettes and pixel bundling (8, 4 or 2
+  indices per byte for 2, 4 and 16 colours).
+
+The rule worth recording: a prefix code with a **single symbol costs no bits at
+all**. libwebp builds that table with `bits == 0`, so the symbol is implied and
+the stream carries nothing for it; reading the specification's `code_lengths[symbol0]
+= 1` literally and consuming one bit shifts every following read. The symptom
+was a 1x1 image whose alpha literal decoded as "corrupt" while the palette entry
+three bits later — `#123456` — came out right, which is what pointed at the
+missing rule rather than at an off-by-one in the container.
+
+**Refusals rather than wrong pictures.** Lossy `VP8` (a keyframe of the VP8
+video codec: macroblock prediction, DCT, loop filter) is reported as
+`UnsupportedLossy`, animated WebP (`ANIM`/`ANMF`) as `UnsupportedAnimation`, a
+short file as `Truncated`, and a dimension or a decoded-pixel budget past the
+limit as `TooLarge`. `WebPDecoder::probe()` returns the same classification
+without decoding.
+
+**Verification.** `make verify-media` gained 30 checks (63 in total): 17
+generated lossless images — palettes of 2, 4, 16 and 256 colours, alpha ramps
+and a transparent disc, bilevel noise, 1x1, 7x3, 3x40, 129x3, a 300x20 repeat
+that exercises LZ77, 200x150 and 256x256 — decoded **bit-exactly** in RGBA and
+then in the PPM colour channels against libwebp 1.2.4 through ImageMagick
+(lossless has no error budget), an extended `VP8X` container, five refusals
+(lossy, animated, truncated, a JPEG, an empty file), four `probe()`
+classifications, and a determinism check. `make fuzz-media` gained 600 WebP
+mutation cases over hand-built hostile seeds (a 16384 x 16384 header, a lossy
+chunk, an animation flag, a RIFF size past the buffer): 2,400 cases in total,
+0 crashes. `make test` **193 → 195** suites —
+`webp_lossless_decodes_every_transform` (five fixtures embedded as bytes, every
+pixel compared against libwebp's decode, plus an
+`<img src="data:image/webp;base64,…">` end-to-end check that the box takes the
+decoded 9 x 5 intrinsic size) and
+`webp_unsupported_and_malformed_input_is_refused` (lossy, animated, five
+truncation points, a container with no image chunk, a null pointer, a
+dimension bomb, a header-only stream). The rest of the scoreboard is unchanged:
+`make conformance` 1792/1792, `make dom-conformance` 669/669,
+`make js-conformance` 974/989, `make url-conformance` 1188/1188,
+`make xml-conformance` 1718/1718, `make wpt` 7998/8009, `make diff-trees` 0
+differ, `make diff-xml` 0 DIFFER and 3000/3000 round trips, `make deep` 1332
+runs 0 failed, `make asan` green.
+
+**Still open.** The lossy `VP8` codec, animated WebP (frame compositing and
+disposal), AVIF (an AV1 still image, a different codec entirely), and an
+`ALPH` chunk, which only accompanies a lossy image and is therefore refused
+with it.
+
+---
+
+## 61. ✅ RegExp lacked Unicode 17.0 property escapes, `v`/`d` flags, ES2025 modifiers / duplicate named groups / `RegExp.escape()`, parse-time literal validation, and `Symbol.*` dispatch (Phase 55)
+
+**Problem.** Before Phase 55, Litebird's RegExp engine (`src/js/BuiltinsRegExp.cpp`) only recognized six flags (`g`, `i`, `m`, `s`, `u`, `y`), had no Unicode property-escape tables (`\p{L}` approximated a small handful of BMP ranges and rejected scripts, binary properties, and Properties of Strings), folded case only for ASCII letters, did not support ES2024 `v` (`unicodeSets`), ES2022 `d` (`hasIndices`), ES2025 `(?ims-ims:...)` modifiers, ES2025 duplicate named capturing groups, or ES2025 `RegExp.escape()`, did not validate regex literals at parse time in `JsParser.cpp`, and lacked well-known `Symbol.{match, matchAll, replace, search, split, species}` methods and `String.prototype` symbol delegation. As a result, Test262 scored only **739 / 1,879 (39.3%)** on `built-ins/RegExp` and **68 / 240 (28.3%)** on `language/literals/regexp`, and `make diff-strings` carried 24 `\p{L}` RegExp mismatches (`95` total diffs).
+
+**Fix.**
+- Generated compact deduplicated Unicode 17.0 RegExp tables (`include/litebird/js/RegExpUnicodeTables.hpp`, `src/js/RegExpUnicodeTables.cpp`, via `tools/generate_regexp_unicode_tables.py`): 22,207 shared ranges covering 80 `General_Category`, 98 Binary, 344 `Script`, and 344 `Script_Extensions` aliases, all 7 Properties of Strings (2,760 multi-CP sequences, 11,196 flattened code points), 1,482 Unicode 17.0 simple case-folding classes, and 1,144 legacy non-Unicode `Canonicalize` classes.
+- Upgraded `src/js/BuiltinsRegExp.cpp`:
+  - Normalized O(log R) `CharClass` with compile-time case closure (`close_case`), Unicode `\w`/`\W`/`\b`/`\B` folding on `ſ`/`K`, strict `u`-mode escapes/ranges, and exact `iu` vs `iv` complement ordering.
+  - Full ES2024 `v` (`unicodeSets`) parser & matcher: `ClassSet` (`--`, `&&` with `[lookahead != &]`, nested `[...]`, `\q{...}`, Properties of Strings, static `MayContainStrings` negation checks, reserved double punctuators, `u`+`v` mutual exclusion) compiled to a single indexed `RegExpOp::MatchStringSet` instruction supporting longest-first forward and lookbehind backtracking via `m_ends_pool`.
+  - Full ES2022 `d` (`hasIndices`): `match.indices` and `match.indices.groups` created with `CreateDataProperty` (`define_property`) sharing identical `[start, end]` pair arrays.
+  - Full ES2025 duplicate named capturing groups across disjunction branches, multi-group `\k<name>`, and Unicode `RegExpIdentifierName` (`JsIdentifierTables.hpp` + `\uXXXX`/`\u{...}` escapes).
+  - Full ES2025 inline modifiers `(?ims-ims:...)` via 3-bit `mode_flags` on `Node` and `RegExpInsn`.
+  - Full ES2025 `RegExp.escape(S)`, `RegExp[Symbol.species]`, `Symbol.{match, matchAll, replace, search, split, species}`, non-constructor built-in methods (`not_constructor = true`), generic `RegExp.prototype[Symbol.*]` methods, and spec-accurate flag/source getters (`get ...` names, canonical `dgimsuvy` order).
+- Added `js_regexp_validate(pattern, flags, err)` (`include/litebird/js/JsBuiltins.hpp`) and wired parse-time regex literal validation into `src/js/JsParser.cpp`.
+- Updated `src/js/BuiltinsString.cpp` (`split`, `replace`, `replaceAll`, `match`, `matchAll`, `search`) to delegate through `GetMethod` on object arguments (`Symbol.*`), enforce `flags` checks on `matchAll`/`replaceAll`, and mark methods non-constructible.
+
+**Verification.**
+- **Test262** (`2e58f87d8350`, Unicode 17.0):
+  - `built-ins/RegExp`: **739 → 1,849 / 1,879 (98.4%, +1,110 tests / +59.1%)** (`fail 26, skip 4`; 100% of runnable RegExp feature tests pass; `RGI_Emoji.js` also verified directly via `--run-script`).
+  - `language/literals/regexp`: **68 → 237 / 240 (98.8%, +169 tests / +70.5%, 0 fail, 3 skip)**.
+  - `built-ins/String/prototype/{match,matchAll,replace,replaceAll,search,split}`: **333 / 339 (98.2%, 6 fail — all BigInt literals)**.
+- **Differential & spec verification (`make verify-regexp`, `tools/conformance/verify_regexp.py`)**: **588 / 588** matched vs Node.js v22.22.3 (`88` curated + `500` seeded fuzz; also verified at `2,088 / 2,088` with `--fuzz-count 2000`, `0` discrepancies) + **112 / 112** ES2025 spec checks (modifiers, duplicate named groups, `RegExp.escape()`).
+- **Corpora & floors**:
+  - `tests/js-conformance/regexp_unicode.dat`: **25 / 25** passing on both Node.js (`1,014 / 1,014`) and Litebird (`999 / 1,014`, everyday `90 / 90`; CI floor raised `974 → 999`, ASan floor `972 → 997`).
+  - `make diff-strings`: **50,509 / 50,580** equal to Node.js (`71` differ, down from `95` — all 24 `\p{L}` RegExp diffs eliminated; `STRING_DIFF_CEILING` lowered `95 → 71`).
+  - `make test`: **198 / 198** unit suites (added 3 Phase 55 suites).
+  - `make dom-conformance`: **669 / 669**; `make wpt`: **7,998 / 8,009** (`0` unlisted failures).
+  - **ASan + UBSan**: `build-asan/test_suite` **198 / 198**, `verify_regexp.py` **588 / 588 + 112 / 112**, `js-conformance` **998 / 1,014** (`--min-pass 997`), `0` sanitizer errors.
+
+**Still open.**
+- The 26 remaining failures in Test262 `built-ins/RegExp` are outside the RegExp engine: 12 cross-realm `$262.createRealm` tests, 10 `BigInt` literal tests, 2 `JsValue.cpp` null-prototype `__proto__` own-property reads (`groups-object.js`, `indices-groups-object.js`), 1 `BuiltinsArray.cpp` dense-array descriptor check (`indices-array-properties.js`), and 1 `globalThis` `RegExp` own-property descriptor check (`prop-desc.js`). Four Test262 tests are skipped by the harness (3 with embedded NUL bytes, 1 `RGI_Emoji.js` > 128 KB argv limit that passes via `--run-script`).
+
+## 62. ✅ Every cross-origin `Window` and `Location` described itself with the ordinary own-keys walk (Phase 56)
+
+**The hole.** Phase 42 made cross-origin reads and writes refuse
+(`WindowExotic::get`/`set` throw `SecurityError` for non-safelisted names,
+finding 48). Everything that *describes* a cross-origin object was still the
+ordinary path, so a parent could enumerate, describe and mutate what it may
+not name:
+
+```js
+const w = document.querySelector('iframe').contentWindow;   // cross-origin
+Object.getOwnPropertyNames(w);   // the child's ordinary own keys — not the spec's list
+Object.getOwnPropertyDescriptor(w, 'length');   // whatever was stored, or undefined
+Object.defineProperty(w, 'name', { value: 'owned' });  // writes into the child's own map
+Object.freeze(w);                // flips the child's cell bits from another realm
+Object.getPrototypeOf(w);        // the child realm's Window.prototype (spec: null)
+for (const k in w) …;            // enumerated the child's interface members
+const L = w.location;
+L.href;                          // the child's full address, no error
+L.pathname; L.origin; L.reload(); // same, plus a callable
+```
+
+**The fix.** One cross-origin predicate drives every reflection seam; see
+`ARCHITECTURE.md`, Phase 56, for the mechanics.
+
+- `dom::cross_origin_own_keys` (DomWindowBindings.cpp, declared in
+  `DomBindings.hpp`) answers for a cross-origin `Window`/`Location` and fills
+  the list `[[OwnPropertyKeys]]` must return: the child navigable indices
+  ascending, then (when the caller wants non-enumerable names too) the
+  cross-origin table names in spec order, then `then`. Every reflection site
+  consults it instead of (or before) the ordinary walk: `Object.keys`/
+  `values`/`entries`/`assign`, `getOwnPropertyNames`/`getOwnPropertyDescriptors`,
+  `Reflect.ownKeys`, `getOwnPropertyDescriptor`, `for…in`, spread, object
+  rest, `JSON.stringify`.
+- `descriptor_for` answers for a cross-origin object with spec-shaped
+  descriptors: indices are enumerable data descriptors holding the child
+  proxy; `then` is a configurable, non-enumerable `undefined`; an attribute
+  entry of the table is an accessor descriptor with a native get wrapper (and,
+  for `location`, a set wrapper); a method entry is a configurable,
+  non-enumerable data descriptor holding the child's function.
+  `Object.defineProperty`/`Reflect.defineProperty` on a cross-origin object
+  always throw `SecurityError` before reading the descriptor (HTML
+  §7.2.3.6/§7.2.4.6).
+- `Location` gained `LocationExotic`: cross-origin it exposes only `then`,
+  `href` (set, not get — reading throws `SecurityError`) and `replace()`.
+- `has()` reports only indices, table names, `then` and named child navigables;
+  `delete` throws `SecurityError`; `Object.freeze`/`seal`/`preventExtensions`
+  throw `TypeError`; `setPrototypeOf` refuses (`Reflect` answers `false`);
+  `getPrototypeOf` answers `null`; `instanceof` is `false`; `for…in`
+  enumerates only the indices.
+- `location` joined the cross-origin attribute safelist it was missing
+  (`win.location = url` already navigated the child via the set path; reading
+  it threw `SecurityError` in error, and `'location' in win` was `false`).
+
+**Verification.** `tests/cross_origin_windows.cpp` — **80 checks** over a
+parent realm at `https://app.example.test` and a cross-origin child at
+`https://other.example.test` (served from a temporary origin root; the child
+has one named `srcdoc` grandchild), run by `make test`; `tests/test_suite.cpp`
+is untouched here. Full merged-tree verification (Release): `make test`
+**198/198**; `js-conformance` **999/1014**; `dom-conformance` **669/669**;
+`xml-conformance` **1718/1718**; `url-conformance` **1188/1188**; `wpt`
+**7998/8009** (11 fail as listed, 0 unlisted).
+
+**Still open.** Cross-document navigation (`childWin.location = url` with a
+non-fragment URL — `navigate()` is fragment-only by design); the three symbol
+keys in `Reflect.ownKeys` (no symbol key is reported anywhere in the engine);
+`in` on a non-exposed name answers `false` rather than throwing; a
+`[[CrossOriginPropertyDescriptorMap]]` cache (wrapper identities differ from
+the child's functions); `MessageChannel`/`MessagePort`; process-level site
+isolation.
+
+---
+
+## 65. ✅ Derived constructor `this` before `super()` and `let`/`const`/`class` TDZ (Phase 59)
+
+**The hole.** Phase 43 introduced `JsEnvironment::this_binding` for derived constructors and noted (`ARCHITECTURE.md`, Phase 43, §8) that the engine still had no uninitialized binding state:
+
+- In a derived constructor, `this.x = 1; super();`, `() => this`, `super.m()`, `super[expr]`, and `return this` before `super(...)` read/wrote the pre-allocated instance or evaluated `expr` instead of throwing a `ReferenceError`.
+- In blocks, functions, loops, `switch` bodies, `catch` clauses, parameter defaults, and top-level scripts, `let`, `const`, and `class` bindings did not exist until execution reached their declaration statement, so `typeof z` returned `"undefined"`, a block `let` failed to shadow outer bindings above its line, `let x = x` read the outer `x` or `undefined`, and `c = 2; const c = 1` succeeded in sloppy mode by creating an implicit global.
+
+**The fix.** Implemented across `include/litebird/js/{JsInterpreter,JsParser}.hpp` and `src/js/{JsParser,JsEval}.cpp`:
+
+- Added `Binding::is_initialized` (using existing struct tail padding, zero `sizeof(Binding)` growth), `AssignResult::Uninitialized`, and `declare_lexical` / `initialize_lexical` / `mark_uninitialized` on `JsEnvironment`, checking `!is_initialized` before `is_const` in `try_assign` so TDZ writes to `const` throw `ReferenceError` rather than `TypeError`.
+- Marked derived constructor `"this"` uninitialized on entry until `eval_super_call` binds it, and updated `SuperMember` evaluation (read, call, and `resolve_reference` writes) to check `"this"` before evaluating computed property keys.
+- Collected `lexical_decls` in `JsParser` for `BlockStmt` (including `Program` and function bodies) and `SwitchStmt`, and pre-declared uninitialized lexical bindings on entry to scripts, functions, async/generator frames, non-simple parameter lists, blocks, `switch`, `for`/`for-of`/`for-in` heads (rooted in `EnvScope`), `try/catch` destructuring params/blocks, and `class` `extends`/computed-key environments (before initializing static fields and `static {}` blocks).
+
+**Verification.**
+
+- `make test`: **201/201** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make js-conformance`: **1003/1017** Release (**1002/1017** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **1017/1017**.
+- `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
+- Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **9538/9744** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,509/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
+
+**Still open.**
+- Separate `<script>` tags evaluate `run_program` per script, so referencing a `let` declared in a later `<script>` throws `"x is not defined"` (`ReferenceError`) rather than `"Cannot access 'x' before initialization"`, and redeclaring the same lexical name across two `<script>` tags overwrites `m_global_env` instead of raising a `SyntaxError`.
+- Direct `eval` scope (tracked separately in `AGENTS.md`) and parse-time early `SyntaxError` for `{ let x; { var x; } }` remain open.

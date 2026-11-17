@@ -29,19 +29,20 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **974 / 989 (98.5%)**; ten of the 15 that fail were recorded in Phases 34 and 43 for what classes still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1003 / 1017 (98.6%)**; nine of the 14 that fail were recorded in Phases 34 and 43 for what classes and `eval` still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7968 / 8009 subtests** across 103 files; the 41 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`) | **7998 / 8009 subtests** across 103 files; the 11 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 193 suites, all passing | `make test` |
+| Engine unit tests | 201 suites, all passing | `make test` |
+| RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
-| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 5 SVG suites; 1,800+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
-| Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 1,800 mutated JPEG/GIF/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
+| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 17 lossless WebP images bit-exact vs libwebp (plus refusals), 5 SVG suites; 2,400+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
+| Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
 ```bash
@@ -53,14 +54,15 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 193 engine suites
+make test            # 201 engine suites
+make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
 make verify-color    # CSS Color 4/5 15-space rational oracle, §13.2 gamut map, and WPT vectors
 make fuzz-color      # adversarial grammar & mutation fuzzing for CSS Color 4/5
-make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, and SVG conformance
-make fuzz-media      # mutation fuzzing for JPEG, GIF, and SVG decoders/renderer
+make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, lossless WebP vs libwebp, and SVG conformance
+make fuzz-media      # mutation fuzzing for JPEG, GIF, WebP, and SVG decoders/renderer
 make deep            # pages nested 200,000 deep, oversized bitmaps, very long runs of one thing
 make asan            # sanitizer build, tests, the JavaScript, DOM, URL and XML corpora, web-platform-tests, a fuzz run and the deep pages
 make tsan            # the string type's stress tests under ThreadSanitizer, and under ASan with leak checking
@@ -72,13 +74,13 @@ make bench-surrogates # six surrogate-pair scripts (including reads and substrin
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
 make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
-make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 95 differ
+make diff-strings    # 50,580 string results compared with Node's; fails if more than the known 71 differ
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 989 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,017 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -92,20 +94,22 @@ Read the number for what it is:
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
   27,872 pass (58.1%; 26,012 / 54.2% before Phase 44); of the 15,686
-  on functions, classes and objects, 12,316 pass (78.5%; 10,835 / 69.1%
-  before Phase 44). `make test262` runs the latter. It is used for what a
-  change moved between two builds, not as a score (Phase 34: 108 more pass
-  and none fewer in those directories; Phase 44: 1,440 more pass and none
-  fewer in those 21 directories, plus 374/374 = 100.0% in
-  `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
-  Phase 43: 43 more in the whole suite and none fewer).
-- **Five of the 15 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other ten were
+  on functions, classes and objects, 12,359 pass (78.8%; 12,316 / 78.5%
+  before Phase 59, 10,835 / 69.1% before Phase 44). `make test262` runs the
+  latter. It is used for what a change moved between two builds, not as a
+  score (Phase 34: 108 more pass and none fewer in those directories; Phase
+  44: 1,440 more pass and none fewer in those 21 directories, plus 374/374 =
+  100.0% in `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
+  Phase 43: 43 more in the whole suite and none fewer; Phase 59: 43 more in
+  those 21 directories and 49 more across 13 TDZ/scope directories, none
+  fewer).
+- **Five of the 14 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Two are in `construct.dat`:
-  `this` used before `super()` has run, and `eval` inside a function, which
-  sees nothing of the function (Phase 43, section 8).
+  things; ARCHITECTURE.md, Phase 34, section 9). One is in `construct.dat`:
+  `eval` inside a function, which sees nothing of the function (Phase 43,
+  section 8; `this` before `super()` was fixed in Phase 59).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -118,9 +122,9 @@ Four other checks sit behind the number. A differential run evaluates 67,545
 generated expressions in Litebird and in Node and compares the results: 99
 (0.15%) differ, mostly the last digit of `Math.atan2`, `cbrt` and `pow`.
 `make diff-strings` does the same for strings (36 subjects through every
-string method and 51 regular expressions): 95 of 50,580 results differ, all
+string method and 51 regular expressions): 71 of 50,580 results differ, all
 of them Unicode data the engine does not have (collation, normalization, some
-case mappings, part of `\p{L}`).
+case mappings; Phase 55 eliminated all 24 `\p{L}` RegExp diffs).
 63 of the corpus cases (`deep-nesting.dat`) hand the engine input nested
 200,000 deep, which used to end the process and must now end in an error the
 script can catch. And 34 (`long-strings.dat`) loop over, build or take apart
@@ -134,11 +138,11 @@ prototype chain: the parent of a class, the prototype of an object,
 TypeScript compile classes for older browsers, which stopped at their first
 class before. 68 of the 76 pass; the engine before Phase 34 passes 7.
 
-49 cases (`construct.dat`, Phase 43) are about what a constructor makes:
-`new.target` in a parent's constructor and under `Reflect.construct`, an
-object a parent's constructor returns, when `this` is bound, and three more
-programs as Babel and TypeScript compile classes. 47 of the 49 pass; the
-engine before Phase 43 passes 13.
+50 cases (`construct.dat`, Phase 43 / Phase 59) are about what a constructor
+makes: `new.target` in a parent's constructor and under `Reflect.construct`, an
+object a parent's constructor returns, when `this` is bound (including TDZ
+checks before `super()`), and three more programs as Babel and TypeScript
+compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -578,10 +582,11 @@ Litebird implements the complete modern browser rendering pipeline:
   - Geometric & path primitives: `fillRect`, `clearRect`, `strokeRect`, `rect`, `roundRect`, `arc`, `ellipse`, `arcTo`, `quadraticCurveTo`, `bezierCurveTo`, `isPointInPath`.
   - Text (Phase 46): `fillText`, `strokeText`, `measureText` with `font` (CSS font shorthand subset — style, variant, weight, size in px/pt/em/rem/% with an optional `/line-height`, and a family list that is parsed and reflected but rasterised with the engine's system font), `textAlign`, `textBaseline`, `maxWidth` horizontal condensing, solid or gradient paint, CTM-aware sampling with AA coverage, `clip()` and `globalAlpha` support, and the save/restore text state.
   - Inverse-CTM linear/radial gradients (`Pad`/`Reflect`/`Repeat`), `createImageData`/`getImageData`/`putImageData`, CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
-- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `ImageDecoder`):**
+- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `ImageDecoder`):**
   - Standalone ITU-T T.81 Baseline/Extended/Progressive JPEG decoder (`JpegDecoder`: 4:4:4/4:2:2/4:2:0/4:4:0, Grayscale/YCbCr/RGB/CMYK/YCCK, restart markers, multi-scan progressive refinement).
   - Standalone GIF87a/GIF89a single-frame & animated multi-frame decoder (`GifDecoder`: 2..8-bit LZW, GCT/LCT, 4-pass interlacing, transparency, all 4 disposal methods, loop count).
-  - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, and BMP (`JpegDecoder`/`GifDecoder` wiring into `ImageDecoder::decode` tracked as follow-up once PR #39 lands).
+  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms; lossy `VP8` and animated files are reported by status, not drawn).
+  - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, BMP, JPEG, GIF and WebP.
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
 
@@ -606,9 +611,12 @@ twice.
   function and returns to its caller; `for await` and async generators work.
   A rejection nothing handles is reported as `Uncaught (in promise)`.
 - **Standard library:** `Object`, `Function`, `Array`, `String`, `Number`,
-  `Boolean`, `Symbol`, `Math`, `JSON`, `Date`, `RegExp` (a backtracking matcher
-  with lookaround, named groups and the `g`, `i`, `m`, `s`, `u`, `y` flags),
-  `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, the `Error` family,
+  `Boolean`, `Symbol`, `Math`, `JSON`, `Date`, `RegExp` (an iterative bytecode
+  backtracking VM with lookaround, `d`/`g`/`i`/`m`/`s`/`u`/`v`/`y` flags,
+  Unicode 17.0 `\p`/`\P` property escapes & Properties of Strings, `v`-mode
+  set operations `--`/`&&`/`\q{...}`, `match.indices`, ES2025 `(?ims-ims:...)`
+  modifiers, duplicate named groups, `RegExp.escape()`, and `Symbol.*`
+  dispatch), `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, the `Error` family,
   `structuredClone`, `globalThis`, `eval` and `Function`. Methods live on
   shared prototypes; each interpreter has its own set (a realm).
 - **Event loop:** tasks, microtasks and timers, with a microtask checkpoint
@@ -691,7 +699,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 193 engine test suites
+# Run the 201 engine test suites
 make test
 ```
 
@@ -758,14 +766,14 @@ make test
 make test
 ```
 
-Output (193 suites; the first and last lines shown):
+Output (195 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 193 engine test suites passed successfully!
+All 195 engine test suites passed successfully!
 ```
 
 ```bash
@@ -860,6 +868,35 @@ pair still copies; that shape is a row of the task table. Details and repro are
 in `ARCHITECTURE.md`, Phase 41, and `AUDIT.md`, finding 47.
 
 
+### Temporal dead zone for derived `this` and lexical bindings (Phase 59)
+
+Derived constructor `this` and `let`/`const`/`class` bindings previously lacked
+an uninitialized state: reading or writing `this` before `super()` touched the
+pre-allocated object instead of throwing a `ReferenceError`, `typeof z` before
+`let z` returned `"undefined"`, a block `let` failed to shadow outer bindings
+above its declaration line, and `c = 2` before `const c` created an implicit
+global.
+
+Phase 59 (finding 65) adds `JsEnvironment::Binding::is_initialized` and
+`AssignResult::Uninitialized`, marks derived constructor `this` uninitialized on
+entry until `super(...)` completes, and pre-declares lexical bindings in the
+parser/evaluator across scripts, functions, async/generator bodies, blocks,
+`switch` statements, `for`/`for-of`/`for-in` heads, `try/catch`, class
+`extends`/computed keys, and non-simple parameter defaults.
+
+```bash
+./build/litebird --run-js 'class Base {} class Derived extends Base { constructor() { try { this.x = 1; } catch (e) { console.log(e.name); } super(); } } new Derived();
+try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
+# ReferenceError
+# ReferenceError
+make test            # 201 / 201 unit suites
+make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
+make test262         # 12,359 / 15,686 (+43, 0 regressions)
+```
+
+Details are in `ARCHITECTURE.md`, Phase 59, and `AUDIT.md`, finding 65.
+
+
 ### UTF-16 storage for non-ASCII strings (Phase 53)
 
 Phase 53 (finding 59) stores non-ASCII `JsString` buffers as two-byte UTF-16
@@ -882,7 +919,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 193/193 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 195/195 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -980,7 +1017,8 @@ dependencies:
   `<base href>`, `media` attributes, recursive `@import`, classic and `defer`
   `<script src>` execution in HTML order, and PNG/JPEG/GIF/SVG `<img src>`
   subresource decoding gated by `ResourceLoader::load_for_page` (`AUDIT.md`,
-  finding 44).
+  finding 44). Lossless WebP joined the list in Phase 54 (`AUDIT.md`,
+  finding 60).
 - **Live DOM geometry, TrueType `.ttf` text & `--gui` browser**: On-demand
   reflow for `getBoundingClientRect()`/`offset*`/`client*`, block-in-inline
   splitting (`<a>x<p>y</p></a>`), form-control `InlineBlock` layout, a pure-C++20
@@ -993,9 +1031,10 @@ dependencies:
 ./build/litebird --gui --port=8080
 ```
 
-Still open: `<iframe>` nested documents, WebP/AVIF images, `@font-face`/WOFF2
-and HarfBuzz/bidi shaping, CORS preflight `OPTIONS`, and `ArrayBuffer`. Full
-details are in `ARCHITECTURE.md`, Phase 36, and `AUDIT.md`, finding 44.
+Still open: `<iframe>` nested documents, lossy `VP8` and AVIF images,
+`@font-face`/WOFF2 and HarfBuzz/bidi shaping, CORS preflight `OPTIONS`, and
+`ArrayBuffer`. Full details are in `ARCHITECTURE.md`, Phase 36, and `AUDIT.md`,
+finding 44.
 
 
 ### Iterative RegExp VM, Modern CSS Cascade/Units, CSSOM `el.style`, and HTML5 Date/Time Inputs (Phase 37)
@@ -1038,9 +1077,9 @@ GIF87a/GIF89a (`GifDecoder`), and upgrades `CanvasRenderingContext2D` and
 gradients, full SVG path/elliptical-arc grammar, `<defs>`/`<use>`/`<symbol>`/
 `<clipPath>`, inline `style`, and opacity. `make verify-media` verifies 21 JPEG
 variants pixel-by-pixel against `libjpeg` (52–99 dB PSNR), 9 GIF variants
-bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, and 5 SVG feature
-suites; `make fuzz-media` runs 1,800 mutated JPEG/GIF/SVG inputs through
-`build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
+bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, 30 lossless WebP
+checks (added in Phase 54) and 5 SVG feature suites; `make fuzz-media` runs
+2,400 mutated JPEG/GIF/WebP/SVG inputs through `build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
 Phase 38, and `AUDIT.md`, finding 43.
 
 
@@ -1116,3 +1155,44 @@ with `big5-decode-extra.html` alone at 2,472); unit suites 174 → 177. The
 Fuji Xerox XML documents in EUC-JP, Shift_JIS, ISO-2022-JP and UTF-16 now
 serialize to the same canonical bytes as their UTF-8 translation.
 Details are in `ARCHITECTURE.md`, Phase 47, and `AUDIT.md`, finding 53.
+
+### Lossless WebP (Phase 54)
+
+`WebPDecoder` reads the RIFF container and the lossless `VP8L` bitstream, so
+`<img src="x.webp">`, a `data:image/webp` URI and a WebP file on disk reach the
+layout and the raster the same way a PNG does. Lossless WebP is a Huffman-coded
+LZ77 stream over ARGB pixels preceded by up to four self-similarity transforms
+— predictor (14 modes), cross-colour, subtract-green and colour-indexing with
+delta-coded palettes and pixel bundling — each described by a sub-image that is
+decoded with the same reader that decodes the image, plus meta prefix codes and
+a colour cache.
+
+```bash
+make verify-media   # 63 checks: JPEG, GIF, WebP (bit-exact) and SVG
+make fuzz-media     # 2,400 mutation cases across four formats
+./build/media_check --decode-webp in.webp out.ppm [out.rgba]
+./build/media_check --probe-webp  in.webp     # "ok", "lossy VP8 is not supported", ...
+```
+
+The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
+a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
+60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
+
+### Cross-origin `Window` and `Location` reflection (Phase 56)
+
+A script embedded in one origin could already not read a cross-origin frame
+(`SecurityError` on non-safelisted names, since Phase 42), but everything that
+*describes* the frame's window answered the ordinary way: `Object.keys`,
+`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
+described ordinary storage, `Object.defineProperty` wrote into it,
+`Object.freeze` flipped its cell, and `location` handed over the child's
+address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
+the cross-origin table of the HTML Standard instead: the window reports
+exactly its child-frame indices and the exposed names (`window`, `self`,
+`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
+`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
+`href` (writable, not readable cross-origin) and `replace()`, both refuse
+define/delete/integrity changes with `SecurityError`/`TypeError`, and
+`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
+and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
+finding 62.

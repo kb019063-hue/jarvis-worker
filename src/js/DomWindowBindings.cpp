@@ -167,7 +167,7 @@ struct WindowExotic : JsExotic {
         return name == "window" || name == "self" || name == "frames" ||
                name == "close" || name == "closed" || name == "focus" || name == "blur" ||
                name == "postMessage" || name == "length" || name == "top" ||
-               name == "opener" || name == "parent";
+               name == "opener" || name == "parent" || name == "location";
     }
 
     // Indexed child browsing contexts (`window[0]`, `frames[0]`) come first,
@@ -248,8 +248,33 @@ struct WindowExotic : JsExotic {
         }
         return false;
     }
+    bool remove(JsObject*, const std::string& name, bool& result) override {
+        if (!realm || !realm->alive) return false;
+        Realm& caller = current_realm();
+        if (!same_effective_origin(caller, *realm)) {
+            throw_dom(caller, "SecurityError",
+                      "Blocked a frame from deleting property '" + name + "' on a cross-origin Window.");
+        }
+        (void)result;
+        return false;
+    }
     bool has(JsObject*, const std::string& name) override {
         if (!realm->alive || name.empty() || name[0] == '%' || name[0] == '@') return false;
+        {
+            Realm& caller = current_realm();
+            if (!same_effective_origin(caller, *realm)) {
+                // HTML §7.2.3.5: what exists is the indices, the cross-origin
+                // table names (plus the "then" fallback) and the names of the
+                // document-tree child navigables. Nothing else: in particular
+                // no ids, no interfaces, no globals of the child.
+                std::size_t index = 0;
+                if (parse_index(name, index))
+                    return index < collect_child_frame_windows(*realm).size();
+                if (name == "then") return true;
+                if (is_cross_origin_safelisted(name)) return true;
+                return find_named_child_frame_window(*realm, name).is_object();
+            }
+        }
         std::size_t index = 0;
         if (parse_index(name, index)) {
             if (index < collect_child_frame_windows(*realm).size()) return true;
@@ -297,6 +322,67 @@ struct WindowExotic : JsExotic {
         }
         auto found = part.ids.find(name);
         return found == part.ids.end() ? nullptr : found->second.lock();
+    }
+};
+
+// The Location object, as a cross-origin object it sees only what the
+// standard exposes of it (HTML §7.2.4: `href` and `replace`). Everything
+// else throws, the same SecurityError the Window throws. A same-origin
+// caller gets the ordinary object: no hook answers, and the ordinary
+// accessors and methods do as they do today.
+//
+// What crosses the origin boundary is decided here, per HTML §7.2.1.3.4:
+// `href` has no getter (reading it throws SecurityError) but is writable
+// (the write navigates the child, a fragment move as everywhere in the
+// engine); `replace()` is exposed; everything else throws. All of those
+// fall through to the child's own bindings when allowed, which is what the
+// ordinary accessors and methods are.
+// Nothing else can be reached: no attribute, no method, no property the
+// child has of its own.
+struct LocationExotic : JsExotic {
+    Realm* owner{nullptr};
+
+    bool cross_origin() const {
+        if (!owner || !owner->alive) return false;
+        Realm& caller = current_realm();
+        return !same_effective_origin(caller, *owner);
+    }
+    static bool is_exposed(const std::string& name) {
+        return name == "href" || name == "replace" || name == "then";
+    }
+    bool get(JsObject*, const std::string& name, JsValue& out) override {
+        if (!cross_origin()) return false;
+        if (name == "then") {
+            out = undefined();
+            return true;
+        }
+        if (name == "replace") return false; // the ordinary method answers
+        Realm& caller = current_realm();
+        if (name == "href") {
+            // The cross-origin href entry has no getter (HTML §7.2.1.3.4):
+            // reading it is refused. Writing it is not (see `set`).
+            throw_dom(caller, "SecurityError",
+                      "Blocked a frame from reading 'location.href' on a cross-origin Window.");
+        }
+        throw_dom(caller, "SecurityError",
+                  "Blocked a frame from reading 'location." + name + "' on a cross-origin Window.");
+    }
+    bool set(JsObject*, const std::string& name, const JsValue&) override {
+        if (!cross_origin()) return false;
+        if (name == "href") return false; // the ordinary href setter navigates the child
+        throw_dom(current_realm(), "SecurityError",
+                  "Blocked a frame from setting 'location." + name + "' on a cross-origin Window.");
+    }
+    bool has(JsObject*, const std::string& name) override {
+        if (!cross_origin()) return false;
+        return is_exposed(name);
+    }
+    bool remove(JsObject*, const std::string& name, bool& result) override {
+        if (!cross_origin()) return false;
+        (void)result;
+        Realm& caller = current_realm();
+        throw_dom(caller, "SecurityError",
+                  "Blocked a frame from deleting property '" + name + "' on a cross-origin Location.");
     }
 };
 
@@ -1347,7 +1433,13 @@ void setup_window(Iface& I) {
     I.accessor("location",
         [](Realm& r) {
             Realm& wr = resolve_window_realm(r);
-            return cached(wr.window, "location", [&]() { return branded(wr, "Location"); });
+            return cached(wr.window, "location", [&]() {
+                JsValue object = branded(wr, "Location");
+                auto state = std::make_shared<LocationExotic>();
+                state->owner = &wr;
+                object.object_val->exotic = std::move(state);
+                return object;
+            });
         },
         [](Realm& r, const JsValue& value) {
             Realm& wr = resolve_window_realm(r);
@@ -1615,6 +1707,44 @@ void setup_window(Iface& I) {
 }
 
 } // namespace
+
+bool cross_origin_own_keys(const JsValue& object, bool include_non_enumerable,
+                           std::vector<std::string>& out) {
+    if (object.type != JsType::Object || !object.object_val) return false;
+    Realm& caller = current_realm();
+    static const char* const kWindowKeys[] = {"window", "self", "location", "close", "closed",
+                                              "focus",  "blur",  "frames",  "length",
+                                              "top",    "opener", "parent", "postMessage"};
+    static const char* const kLocationKeys[] = {"href", "replace"};
+    if (const auto* wx = state_of<WindowExotic>(object)) {
+        if (!wx->realm || !wx->realm->alive) return false;
+        if (same_effective_origin(caller, *wx->realm)) return false;
+        // HTML §7.2.3.10 ([[OwnPropertyKeys]]): the indices ascending, then
+        // (for the list, which is how the engine asks for non-enumerable
+        // keys) CrossOriginOwnPropertyKeys: the cross-origin table names in
+        // order, then "then". (The spec's three symbol keys are not reported:
+        // no symbol key is, anywhere in this engine.) The named-property
+        // set of the child navigables is deliberately NOT here: it takes
+        // part in named access, not in [[OwnPropertyKeys]].
+        const std::size_t n = collect_child_frame_windows(*wx->realm).size();
+        for (std::size_t i = 0; i < n; ++i) out.push_back(std::to_string(i));
+        if (include_non_enumerable) {
+            for (const char* name : kWindowKeys) out.push_back(name);
+            out.push_back("then");
+        }
+        return true;
+    }
+    if (const auto* lx = state_of<LocationExotic>(object)) {
+        if (!lx->owner || !lx->owner->alive) return false;
+        if (same_effective_origin(caller, *lx->owner)) return false;
+        if (include_non_enumerable) {
+            for (const char* name : kLocationKeys) out.push_back(name);
+            out.push_back("then");
+        }
+        return true;
+    }
+    return false;
+}
 
 JsValue window_of(Realm& realm) {
     return realm.window.is_object() ? realm.window : null();

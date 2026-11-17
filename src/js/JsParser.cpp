@@ -1,4 +1,5 @@
 #include "litebird/js/JsParser.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsOps.hpp"
 #include <algorithm>
 
@@ -325,6 +326,13 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
             auto decl = parse_var_declaration(kind, false);
             consume_semicolon();
             m_blocks.back()->has_lexical = true;
+            std::vector<std::string> names;
+            for (const auto& d : decl->decls) {
+                if (d.target) d.target->collect_names(names);
+            }
+            for (auto& name : names) {
+                m_blocks.back()->lexical_decls.push_back(LexicalDecl{std::move(name), kind == JsDeclKind::Const});
+            }
             result = std::move(decl);
             break;
         }
@@ -340,6 +348,9 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
             advance();
             auto decl = std::make_unique<ClassDeclStmt>(parse_class(true));
             m_blocks.back()->has_lexical = true;
+            if (!decl->cls->name.empty()) {
+                m_blocks.back()->lexical_decls.push_back(LexicalDecl{decl->cls->name, false});
+            }
             result = std::move(decl);
             break;
         }
@@ -526,6 +537,7 @@ std::unique_ptr<Stmt> JsParser::parse_switch_statement() {
     consume(JsTokenType::CloseBrace, "Expected '}' after switch body.");
     auto stmt = std::make_unique<SwitchStmt>(std::move(discriminant), std::move(cases));
     stmt->functions = std::move(scratch.functions);
+    stmt->lexical_decls = std::move(scratch.lexical_decls);
     return stmt;
 }
 
@@ -1723,6 +1735,10 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             break;
         case JsTokenType::Regex: {
             const JsToken& t = advance();
+            std::string regex_err;
+            if (!js_regexp_validate(t.text, t.flags, regex_err)) {
+                fail(regex_err);
+            }
             result = std::make_unique<RegexLiteralExpr>(t.text, t.flags);
             break;
         }

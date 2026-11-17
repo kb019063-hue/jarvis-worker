@@ -24,6 +24,7 @@
 #include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
+#include "litebird/render/WebPDecoder.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
 #include <filesystem>
@@ -32,7 +33,9 @@
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsIdentifierTables.hpp"
+#include "litebird/js/RegExpUnicodeTables.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
@@ -11775,6 +11778,280 @@ static void canvas_ink_extent(const litebird::CanvasRenderingContext2D& ctx, int
     }
 }
 
+// kWebp1x1: 38 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebp1x1[] = {
+    0x52, 0x49, 0x46, 0x46, 0x1E, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C,
+    0x11, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x00, 0x00, 0x07, 0x50, 0x9A, 0x4A, 0xD4, 0xAA, 0xFF,
+    0x81, 0x88, 0xE8, 0x7F, 0x00, 0x00,
+};
+
+// kWebpPalette2: 44 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpPalette2[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C,
+    0x18, 0x00, 0x00, 0x00, 0x2F, 0x01, 0x40, 0x00, 0x00, 0x0F, 0x30, 0xFF, 0xF3, 0x3F, 0xFF, 0xF3,
+    0x1F, 0x78, 0x50, 0x08, 0x20, 0x00, 0x0A, 0x9A, 0x88, 0xFE, 0x47, 0x03,
+};
+
+// kWebpAlpha4x4: 44 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpAlpha4x4[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C,
+    0x18, 0x00, 0x00, 0x00, 0x2F, 0x03, 0xC0, 0x00, 0x10, 0x1F, 0x10, 0x31, 0xFF, 0x53, 0x15, 0xAC,
+    0x10, 0x08, 0x10, 0x26, 0x4D, 0x9A, 0xB4, 0x11, 0xD1, 0xFF, 0xC0, 0x06,
+};
+
+// kWebpPalette4: 64 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpPalette4[] = {
+    0x52, 0x49, 0x46, 0x46, 0x38, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C,
+    0x2B, 0x00, 0x00, 0x00, 0x2F, 0x08, 0x00, 0x01, 0x00, 0x17, 0x10, 0x02, 0x81, 0x14, 0xAB, 0x64,
+    0xF6, 0x02, 0x81, 0xC4, 0xDF, 0xA2, 0xC9, 0x56, 0x99, 0xFF, 0xF0, 0x13, 0x30, 0x90, 0xB6, 0x4D,
+    0x37, 0x2E, 0xE0, 0xE6, 0x66, 0xB2, 0x8A, 0x23, 0xFA, 0x1F, 0x5A, 0xED, 0x96, 0x3F, 0x00, 0x00,
+};
+
+// kWebpGradient8x8: 280 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpGradient8x8[] = {
+    0x52, 0x49, 0x46, 0x46, 0x10, 0x01, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C,
+    0x04, 0x01, 0x00, 0x00, 0x2F, 0x07, 0xC0, 0x01, 0x00, 0xE7, 0xE1, 0x38, 0xB2, 0x6D, 0xD3, 0x5A,
+    0xCF, 0xB6, 0x35, 0x7D, 0xF9, 0x67, 0xF4, 0xA6, 0xD6, 0xB7, 0x7F, 0x1A, 0x6E, 0x6D, 0xDB, 0x36,
+    0xAB, 0xD8, 0xB6, 0x8D, 0x2E, 0x75, 0xFE, 0xFF, 0x1F, 0x52, 0xE1, 0x19, 0x95, 0xED, 0xE3, 0x36,
+    0x00, 0x00, 0xB2, 0x89, 0xED, 0xC9, 0xBA, 0x36, 0x2F, 0x65, 0xCC, 0x96, 0x37, 0x6C, 0xDB, 0xED,
+    0xFC, 0x07, 0xC8, 0x3F, 0x0A, 0x20, 0xF8, 0x01, 0xB4, 0xCB, 0xE5, 0x4F, 0x87, 0x06, 0x04, 0x05,
+    0xB4, 0xC8, 0x40, 0x18, 0x7F, 0x90, 0x13, 0x08, 0x9B, 0x8E, 0x22, 0x62, 0xEA, 0x16, 0x5C, 0x53,
+    0xCF, 0x2D, 0x29, 0x62, 0x68, 0x72, 0x8B, 0x29, 0x7E, 0xA3, 0x8E, 0x0B, 0xEC, 0xBA, 0x84, 0xE0,
+    0x74, 0x67, 0x7D, 0x0B, 0xBC, 0x4C, 0xFB, 0x8F, 0x63, 0x65, 0x01, 0x00, 0xC6, 0x05, 0xF9, 0x24,
+    0xA2, 0xA0, 0x1F, 0x7E, 0xE3, 0xF5, 0xE0, 0x77, 0xE2, 0xFC, 0x43, 0x88, 0x01, 0x54, 0x28, 0x90,
+    0x0C, 0x16, 0x22, 0x6C, 0x58, 0xFD, 0xBC, 0x17, 0x24, 0xED, 0x8C, 0xB9, 0xFE, 0x45, 0xFA, 0xFD,
+    0xAF, 0x27, 0x21, 0xDE, 0x59, 0x72, 0xF0, 0x2A, 0x76, 0x34, 0x2E, 0x1C, 0x2E, 0x10, 0xCE, 0x0D,
+    0x61, 0x82, 0x4A, 0x1A, 0x50, 0xD3, 0xD3, 0xCE, 0x9D, 0xA3, 0x7F, 0x08, 0xEE, 0x96, 0xC5, 0x67,
+    0x65, 0x53, 0xED, 0x21, 0x72, 0xC9, 0xE9, 0xA0, 0x2D, 0x17, 0x60, 0x18, 0x00, 0x60, 0xD1, 0xF8,
+    0x96, 0x6D, 0xDB, 0x5E, 0x76, 0x45, 0xF4, 0x3F, 0xF2, 0x34, 0xA9, 0xBD, 0x38, 0x2C, 0xFE, 0xA8,
+    0x6A, 0xAC, 0xAC, 0x0C, 0xDE, 0xC1, 0x6E, 0x3F, 0xDF, 0x35, 0xB7, 0x65, 0x44, 0x4E, 0xDF, 0x21,
+    0x76, 0x5E, 0x35, 0xDD, 0x78, 0x26, 0x9A, 0x13, 0x77, 0x55, 0x11, 0x98, 0xEB, 0x26, 0xCF, 0x43,
+    0xE6, 0x29, 0x5C, 0x22, 0x00, 0x80, 0x18, 0x00,
+};
+
+// kWebpAnimated: 176 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpAnimated[] = {
+    0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58,
+    0x0A, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00, 0x41, 0x4E,
+    0x49, 0x4D, 0x06, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x41, 0x4E, 0x4D, 0x46,
+    0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x64, 0x00, 0x00, 0x02, 0x56, 0x50, 0x38, 0x4C, 0x0F, 0x00, 0x00, 0x00, 0x2F, 0x07, 0xC0, 0x01,
+    0x00, 0x07, 0x10, 0xFD, 0x8F, 0xFE, 0x07, 0x22, 0xA2, 0xFF, 0x01, 0x00, 0x41, 0x4E, 0x4D, 0x46,
+    0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C, 0x0F, 0x00, 0x00, 0x00, 0x2F, 0x07, 0xC0, 0x01,
+    0x00, 0x07, 0x10, 0xD1, 0xFF, 0xFE, 0x07, 0x22, 0xA2, 0xFF, 0x01, 0x00, 0x52, 0x49, 0x46, 0x46,
+    0x1C, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4C, 0x0F, 0x00, 0x00, 0x00,
+    0x2F, 0x07, 0xC0, 0x01, 0x00, 0x07, 0x10, 0xFD, 0x8F, 0xFE, 0x07, 0x22, 0xA2, 0xFF, 0x01, 0x00,
+};
+
+// kWebpLossy: 62 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpLossy[] = {
+    0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
+    0x2A, 0x00, 0x00, 0x00, 0x90, 0x01, 0x00, 0x9D, 0x01, 0x2A, 0x08, 0x00, 0x08, 0x00, 0x02, 0x40,
+    0x38, 0x25, 0xA0, 0x02, 0x74, 0xBA, 0x00, 0x03, 0x98, 0x00, 0xFE, 0xEC, 0x26, 0x5F, 0xFC, 0xE2,
+    0x5F, 0xC9, 0x1F, 0xA0, 0x5E, 0x90, 0x7F, 0xE0, 0x37, 0x5F, 0x16, 0xCB, 0xE0, 0x00,
+};
+
+static const uint32_t kExpect1x1[] = {
+    0xFF123456
+};
+
+static const uint32_t kExpectPalette2[] = {
+    0xFF000000, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+};
+
+static const uint32_t kExpectAlpha4x4[] = {
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x550000FF, 0x550000FF, 0x550000FF, 0x550000FF,
+    0xAA0000FF, 0xAA0000FF, 0xAA0000FF, 0xAA0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF
+};
+
+static const uint32_t kExpectPalette4[] = {
+    0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020,
+    0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020, 0xFFDF0020,
+    0xFFDF0020, 0xFFDF0020, 0xFF800080, 0xFF800080, 0xFF800080, 0xFF800080, 0xFF800080, 0xFF800080,
+    0xFF800080, 0xFF800080, 0xFF800080, 0xFF2000DF, 0xFF2000DF, 0xFF800080, 0xFF2000DF, 0xFF2000DF,
+    0xFF800080, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF,
+    0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF, 0xFF2000DF
+};
+
+static const uint32_t kExpectGradient8x8[] = {
+    0xFFE6003A, 0xFFD7001E, 0xFFBA0018, 0xFFAA1429, 0xFFBF0034, 0xFFC8001A, 0xFFD20027, 0xFFE5172D,
+    0xFFB42A0D, 0xFFCB0022, 0xFFC81920, 0xFF9C1B2F, 0xFFA50953, 0xFFD60038, 0xFFE41922, 0xFFCF022D,
+    0xFF6E002B, 0xFF870F53, 0xFFBC1352, 0xFF9A1040, 0xFF8F041A, 0xFFCE002C, 0xFFAB003B, 0xFFA61C57,
+    0xFF631679, 0xFF570073, 0xFF7F0078, 0xFF92006D, 0xFFAC133B, 0xFF950041, 0xFF90183F, 0xFF92006D,
+    0xFF4100BA, 0xFF650088, 0xFF350178, 0xFF6E358D, 0xFF81259F, 0xFF9D2597, 0xFF5000A4, 0xFF720086,
+    0xFF2800CA, 0xFF4500DA, 0xFF402DBC, 0xFF3E3384, 0xFF6456C6, 0xFF673DD6, 0xFF4C1CD8, 0xFF3C00C9,
+    0xFF2005D4, 0xFF2915EC, 0xFF0700DD, 0xFF0A0EB5, 0xFF1326A5, 0xFF2F39D0, 0xFF4608DE, 0xFF0600C9,
+    0xFF0018F8, 0xFF2726C5, 0xFF0717D8, 0xFF0000FF, 0xFF0000FF, 0xFF1000FF, 0xFF0D11FF, 0xFF0000FF
+};
+
+static constexpr int kExpectPalette4Width = 9;
+static constexpr int kExpectPalette4Height = 5;
+
+/// A VP8L file of `width` x `height` pixels, decoded to 0xAARRGGBB and
+/// compared with what libwebp produced for the same bytes.
+static void check_webp_pixels(
+    const uint8_t* bytes,
+    size_t size,
+    const uint32_t* expected,
+    int width,
+    int height,
+    const char* name
+) {
+    using namespace litebird;
+    auto decoded = WebPDecoder::decode_detailed(bytes, size);
+    assert(decoded.ok());
+    assert(decoded.image->width == width);
+    assert(decoded.image->height == height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const uint32_t actual = decoded.image->get_pixel(x, y);
+            const uint32_t want = expected[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)];
+            if (actual != want) {
+                std::cerr << name << ": pixel " << x << "," << y << " is 0x" << std::hex << actual
+                          << ", expected 0x" << want << std::dec << "\n";
+                assert(false);
+            }
+        }
+    }
+}
+
+TEST(webp_lossless_decodes_every_transform) {
+    using namespace litebird;
+
+    assert(WebPDecoder::is_webp(kWebp1x1, sizeof(kWebp1x1)));
+    assert(!WebPDecoder::is_webp(reinterpret_cast<const uint8_t*>("RIFF"), 4));
+
+    // 1x1: the smallest possible stream — one colour-indexing transform, a
+    // one-entry palette, and a palette index that is never read.
+    check_webp_pixels(kWebp1x1, sizeof(kWebp1x1), kExpect1x1, 1, 1, "1x1");
+
+    // Two colours: colour indexing with pixel bundling (eight indices per byte).
+    check_webp_pixels(kWebpPalette2, sizeof(kWebpPalette2), kExpectPalette2, 2, 2, "palette2");
+
+    // Four colours: two indices per byte, and an alpha channel that is 0, 0x55,
+    // 0xaa and 0xff down the image — the colour under a fully transparent pixel
+    // must survive (`0x00000000` above is what libwebp decodes too).
+    check_webp_pixels(kWebpPalette4, sizeof(kWebpPalette4), kExpectPalette4, 9, 5, "palette4");
+    check_webp_pixels(kWebpAlpha4x4, sizeof(kWebpAlpha4x4), kExpectAlpha4x4, 4, 4, "alpha4x4");
+
+    // Eight colours with the predictor and cross-colour transforms: every
+    // pixel, not a sample, because lossless means exact.
+    check_webp_pixels(kWebpGradient8x8, sizeof(kWebpGradient8x8), kExpectGradient8x8, 8, 8, "gradient8x8");
+
+    // The same bytes decode the same way twice, and through the generic
+    // ImageDecoder entry point that <img> uses.
+    auto first = WebPDecoder::decode(kWebpGradient8x8, sizeof(kWebpGradient8x8));
+    auto second = WebPDecoder::decode(kWebpGradient8x8, sizeof(kWebpGradient8x8));
+    assert(first != nullptr && second != nullptr && first->pixels == second->pixels);
+    std::vector<uint8_t> bytes(kWebpGradient8x8, kWebpGradient8x8 + sizeof(kWebpGradient8x8));
+    auto via_decoder = ImageDecoder::decode(bytes, "image/webp");
+    assert(via_decoder != nullptr && via_decoder->pixels == first->pixels);
+
+    // probe() classifies without decoding.
+    assert(WebPDecoder::probe(kWebp1x1, sizeof(kWebp1x1)) == WebPDecoder::Status::Ok);
+    assert(std::string(WebPDecoder::status_string(WebPDecoder::Status::Ok)) == "ok");
+
+    // A data: URI reaches the decoder through the same path <img src> uses,
+    // and the decoded size is the intrinsic size the box lays itself out at:
+    // the palette_4 fixture is 9 x 5.
+    auto data_uri = ImageDecoder::decode_data_uri(
+        "data:image/webp;base64,"
+        "UklGRjgAAABXRUJQVlA4TCsAAAAvCAABABcQAoEUq2T2AoHE36LJVpn/8BMwkLZNNy7g5mayiiP6H1rtlj8AAA==");
+    assert(data_uri != nullptr);
+    assert(data_uri->width == kExpectPalette4Width && data_uri->height == kExpectPalette4Height);
+    assert(data_uri->pixels.size() == static_cast<size_t>(kExpectPalette4Width) * static_cast<size_t>(kExpectPalette4Height));
+    for (size_t i = 0; i < data_uri->pixels.size(); ++i) assert(data_uri->pixels[i] == kExpectPalette4[i]);
+
+    const std::string html =
+        "<body><img id=webp src=\"data:image/webp;base64,"
+        "UklGRjgAAABXRUJQVlA4TCsAAAAvCAABABcQAoEUq2T2AoHE36LJVpn/8BMwkLZNNy7g5mayiiP6H1rtlj8AAA=="
+        "\"></body>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 200.0f, 200.0f);
+    assert(root != nullptr);
+    std::function<const LayoutBox*(const LayoutBox*)> find_image = [&](const LayoutBox* box) -> const LayoutBox* {
+        if (box == nullptr) return nullptr;
+        if (box->box_type == BoxType::ImageNode && box->image != nullptr) return box;
+        for (const auto& child : box->children) {
+            if (const LayoutBox* found = find_image(child.get())) return found;
+        }
+        return nullptr;
+    };
+    const LayoutBox* image_box = find_image(root.get());
+    assert(image_box != nullptr);
+    assert(image_box->image->width == kExpectPalette4Width);
+    assert(image_box->image->height == kExpectPalette4Height);
+    assert(image_box->dimensions.content.width == static_cast<float>(kExpectPalette4Width));
+    assert(image_box->dimensions.content.height == static_cast<float>(kExpectPalette4Height));
+}
+
+TEST(webp_unsupported_and_malformed_input_is_refused) {
+    using namespace litebird;
+
+    // Lossy VP8 is a different codec: refuse it rather than approximate it.
+    auto lossy = WebPDecoder::decode_detailed(kWebpLossy, sizeof(kWebpLossy));
+    assert(!lossy.ok());
+    assert(lossy.status == WebPDecoder::Status::UnsupportedLossy);
+    assert(lossy.error.find("lossy") != std::string::npos);
+    assert(WebPDecoder::probe(kWebpLossy, sizeof(kWebpLossy)) == WebPDecoder::Status::UnsupportedLossy);
+    assert(WebPDecoder::decode(kWebpLossy, sizeof(kWebpLossy)) == nullptr);
+
+    // Animated WebP: the frames are VP8/VP8L images on a canvas, which is a
+    // compositing job this decoder does not do.
+    auto animated = WebPDecoder::decode_detailed(kWebpAnimated, sizeof(kWebpAnimated));
+    assert(!animated.ok());
+    assert(animated.status == WebPDecoder::Status::UnsupportedAnimation);
+    assert(WebPDecoder::probe(kWebpAnimated, sizeof(kWebpAnimated)) ==
+           WebPDecoder::Status::UnsupportedAnimation);
+
+    // A truncated file must not decode to a partial or garbage image.
+    auto truncated = WebPDecoder::decode_detailed(kWebpGradient8x8, 20);
+    assert(!truncated.ok());
+    assert(truncated.status == WebPDecoder::Status::Truncated);
+    assert(truncated.error.find("truncated") != std::string::npos);
+    for (size_t cut : {size_t{12}, size_t{21}, size_t{30}, size_t{64}, size_t{200}}) {
+        assert(!WebPDecoder::decode_detailed(kWebpGradient8x8, cut).ok());
+    }
+
+    // Not a WebP file at all: no RIFF/WEBP header, an empty buffer, a null
+    // pointer, and a RIFF container with no image chunk in it.
+    const uint8_t junk[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+    auto not_webp = WebPDecoder::decode_detailed(junk, sizeof(junk));
+    assert(!not_webp.ok());
+    assert(not_webp.status == WebPDecoder::Status::Corrupt);
+    assert(WebPDecoder::decode(junk, sizeof(junk)) == nullptr);
+    assert(WebPDecoder::decode(nullptr, 0) == nullptr);
+    assert(WebPDecoder::decode(reinterpret_cast<const uint8_t*>(""), 0) == nullptr);
+    const uint8_t png_ish[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    assert(WebPDecoder::decode_detailed(png_ish, sizeof(png_ish)).status == WebPDecoder::Status::NotWebP);
+    assert(WebPDecoder::probe(png_ish, sizeof(png_ish)) == WebPDecoder::Status::NotWebP);
+
+    // A hand-built VP8L header claiming 16384 x 16384 pixels: 268 million
+    // pixels, past the decoded-pixel budget, and refused before allocating.
+    const uint8_t bomb[] = {
+        'R', 'I', 'F', 'F', 0x1D, 0, 0, 0, 'W', 'E', 'B', 'P',
+        'V', 'P', '8', 'L', 0x09, 0, 0, 0,
+        0x2F, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00,
+    };
+    auto too_large = WebPDecoder::decode_detailed(bomb, sizeof(bomb));
+    assert(!too_large.ok());
+    assert(too_large.status == WebPDecoder::Status::TooLarge);
+    assert(too_large.error.find("pixel budget") != std::string::npos ||
+           too_large.error.find("dimension") != std::string::npos);
+
+    // A stream that ends right after the header is truncated, not empty.
+    const uint8_t header_only[] = {
+        'R', 'I', 'F', 'F', 0x19, 0, 0, 0, 'W', 'E', 'B', 'P',
+        'V', 'P', '8', 'L', 0x05, 0, 0, 0,
+        0x2F, 0x00, 0x00, 0x00, 0x00,
+    };
+    auto empty_stream = WebPDecoder::decode_detailed(header_only, sizeof(header_only));
+    assert(!empty_stream.ok());
+    assert(empty_stream.status == WebPDecoder::Status::Truncated);
+}
+
 TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
     using namespace litebird;
 
@@ -14629,6 +14906,410 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
+// ============================================================================
+// Phase 55: RegExp Unicode 17.0 properties, v/d flags, ES2025 modifiers & Symbol.*
+// ============================================================================
+
+TEST(regexp_unicode17_tables_and_parse_time_validation) {
+    using namespace litebird;
+    using namespace litebird::regexp_unicode;
+
+    // 1. Unicode 17.0 property lookup across GC, Binary, Script, Script_Extensions, and Strings.
+    auto lu = lookup_unicode_property("", "Lu", false);
+    assert(lu.kind == PropertyKind::CodePoints && lu.ranges.count > 0);
+    auto gc_lu = lookup_unicode_property("General_Category", "Uppercase_Letter", false);
+    assert(gc_lu.kind == PropertyKind::CodePoints && gc_lu.ranges.data == lu.ranges.data);
+
+    auto ascii = lookup_unicode_property("", "ASCII", false);
+    assert(ascii.kind == PropertyKind::CodePoints && ascii.ranges.count == 1 &&
+           ascii.ranges.data[0].lo == 0 && ascii.ranges.data[0].hi == 0x7F);
+
+    auto garay = lookup_unicode_property("sc", "Garay", false);
+    assert(garay.kind == PropertyKind::CodePoints && garay.ranges.count > 0);
+    auto scx_hira = lookup_unicode_property("Script_Extensions", "Hiragana", false);
+    assert(scx_hira.kind == PropertyKind::CodePoints && scx_hira.ranges.count > 0);
+
+    // Properties of strings require allow_strings=true (v-mode only).
+    assert(lookup_unicode_property("", "RGI_Emoji", false).kind == PropertyKind::Invalid);
+    auto rgi = lookup_unicode_property("", "RGI_Emoji", true);
+    assert(rgi.kind == PropertyKind::Strings && rgi.seq_count > 2000 && rgi.ranges.count > 0);
+
+    // Strict case/alias validation: official aliases like "digit" (Nd) work,
+    // while misspelled or unknown names are rejected.
+    auto nd = lookup_unicode_property("", "Nd", false);
+    auto digit = lookup_unicode_property("", "digit", false);
+    assert(digit.kind == PropertyKind::CodePoints && digit.ranges.data == nd.ranges.data);
+    assert(lookup_unicode_property("", "letter", false).kind == PropertyKind::Invalid);
+    assert(lookup_unicode_property("gc", "UnknownProp", false).kind == PropertyKind::Invalid);
+    assert(lookup_unicode_property("", "ASCII_", false).kind == PropertyKind::Invalid);
+
+    // Unicode 17.0 Simple Case Folding vs legacy Canonicalize.
+    assert(unicode_case_canonical('S') == unicode_case_canonical(0x017F));
+    assert(unicode_case_canonical('K') == unicode_case_canonical(0x212A));
+    assert(unicode_case_canonical(0x10400) == unicode_case_canonical(0x10428));
+    assert(legacy_case_canonical('S') != legacy_case_canonical(0x017F));
+    assert(legacy_case_canonical('a') == legacy_case_canonical('A'));
+
+    // 2. Parse-time js_regexp_validate checks (early SyntaxError before evaluation).
+    std::string err;
+    assert(js_regexp_validate("\\p{L}+", "u", err));
+    assert(js_regexp_validate("[\\p{RGI_Emoji}--[a-z]]", "v", err));
+    assert(js_regexp_validate("(?i:abc)(?:(?<x>a)|(?<x>b))\\k<x>", "d", err));
+    assert(!js_regexp_validate("a", "uv", err));
+    assert(!js_regexp_validate("\\p{NotAProperty}", "u", err));
+    assert(!js_regexp_validate("\\P{RGI_Emoji}", "v", err));
+    assert(!js_regexp_validate("[^\\p{RGI_Emoji}]", "v", err));
+    assert(!js_regexp_validate("[^[\\p{RGI_Emoji}--\\p{RGI_Emoji}]]", "v", err));
+    assert(!js_regexp_validate("[(]", "v", err));
+    assert(!js_regexp_validate("[a&&&b]", "v", err));
+    assert(!js_regexp_validate("(?<x>a)(?<x>b)", "", err));
+    assert(!js_regexp_validate("(?i-i:a)", "", err));
+}
+
+TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval(R"JS(
+        var r = new RegExp("[\\p{Decimal_Number}--[0-9]]+", "v");
+        var v_checks = [
+            r.flags === "v",
+            r.unicodeSets === true,
+            r.unicode === false,
+            r.test("٠١٢٣"),
+            !r.test("123"),
+            /^[\p{Script=Greek}&&\p{Lu}]+$/v.test("ΑΒΓΩ"),
+            !/^[\p{Script=Greek}&&\p{Lu}]+$/v.test("αβγ"),
+            /[\q{a|ab|abc}]/v.exec("abc")[0] === "abc",
+            /[\q{ab}--\q{AB}]/iv.test("ab") === false,
+            /[\q{ab}&&\q{AB}]/iv.test("aB") === true,
+            /^\p{RGI_Emoji}+$/v.test("😀1\uFE0F\u20E3\u{1F1FA}\u{1F1F8}\u{1F468}\u200D\u{1F4BB}"),
+            /(?<=[\q{ab|abc}])X/v.exec("abcX").index === 3,
+            // u+i vs v+i complement semantics
+            /\P{Lowercase_Letter}/iu.test("a") === true,
+            /\P{Lowercase_Letter}/iv.test("a") === false,
+            /\P{Lowercase_Letter}/iv.test("A") === false,
+            /\w/iu.test("\u017f") === true,
+            /\w/iu.test("\u212a") === true,
+            /\W/iu.test("\u017f") === false,
+            /\W/iv.test("s") === false
+        ];
+        var m = /(?<w>[a-z]+)-(?<n>\d+)?/d.exec("hi foo-42!");
+        var d_checks = [
+            m.indices[0][0] === 3 && m.indices[0][1] === 9,
+            m.indices[1][0] === 3 && m.indices[1][1] === 6,
+            m.indices[2][0] === 7 && m.indices[2][1] === 9,
+            m.indices.groups.w === m.indices[1],
+            m.indices.groups.n === m.indices[2]
+        ];
+        var all_ok = v_checks.every(Boolean) && d_checks.every(Boolean);
+    )JS");
+    assert(js.eval("all_ok").is_truthy());
+}
+
+TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
+    using namespace litebird;
+    auto doc = std::make_shared<Document>();
+    JsInterpreter js(doc);
+    js.eval(R"JS(
+        // ES2025 inline modifiers (?ims-ims:...)
+        var mod_ok =
+            /(?i:abc)def/.test("ABCdef") &&
+            !/(?i:abc)def/.test("ABCDEF") &&
+            /(?-i:abc)def/i.test("abcDEF") &&
+            !/(?-i:abc)def/i.test("ABCdef") &&
+            /(?i:a(?-i:b)c)/.test("AbC") &&
+            !/(?i:a(?-i:b)c)/.test("ABC") &&
+            /(?s:.)/.test("\n") &&
+            !/(?-s:.)/s.test("\n") &&
+            /(?m:^b$)/.test("a\nb\nc") &&
+            !/(?-m:^b$)/m.test("a\nb\nc") &&
+            /(?i:\w)/u.test("\u017f") &&
+            !/(?-i:\w)/iu.test("\u017f");
+
+        // ES2025 duplicate named capturing groups across disjunction branches
+        var dateRe = /^(?:(?<y>\d{4})-(?<m>\d{2})|(?<m>\d{2})\/(?<y>\d{4}))$/d;
+        var d1 = dateRe.exec("2026-11");
+        var d2 = dateRe.exec("11/2026");
+        var dup_ok =
+            d1.groups.y === "2026" && d1.groups.m === "11" &&
+            d2.groups.y === "2026" && d2.groups.m === "11" &&
+            Object.keys(d1.groups).join(",") === "y,m" &&
+            d2.indices.groups.y === d2.indices[4] &&
+            /^(?:(?<x>a)|(?<x>b))-\k<x>$/.test("b-b") &&
+            !/^(?:(?<x>a)|(?<x>b))-\k<x>$/.test("a-b") &&
+            "b-1".replace(/(?:(?<x>a)|(?<x>b))-(\d)/, "$<x>:$3") === "b:1";
+
+        // ES2025 RegExp.escape(S)
+        var escTypeErr = false;
+        try { RegExp.escape(42); } catch (e) { escTypeErr = e instanceof TypeError; }
+        var sample = "a0^$\\.*+?()[]{}|/\t\n ,-=<>#&!%:;@~'\"`😀\uD800";
+        var esc_ok =
+            escTypeErr &&
+            RegExp.escape("abc") === "\\x61bc" &&
+            RegExp.escape("^$.*+?()[]{}|/") === "\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\/" &&
+            new RegExp("^" + RegExp.escape(sample) + "$", "u").test(sample) &&
+            new RegExp("^" + RegExp.escape(sample) + "$", "v").test(sample);
+
+        // Well-known symbols & RegExp[Symbol.species]
+        var custom = {
+            flags: "g",
+            [Symbol.match](s) { return "M:" + s; },
+            [Symbol.replace](s, r) { return "R:" + s + ":" + r; },
+            [Symbol.search](s) { return 7; },
+            [Symbol.split](s) { return [s, "ok"]; }
+        };
+        var sym_ok =
+            RegExp[Symbol.species] === RegExp &&
+            "hi".match(custom) === "M:hi" &&
+            "hi".replace(custom, "X") === "R:hi:X" &&
+            "hi".search(custom) === 7 &&
+            "hi".split(custom).join("|") === "hi|ok";
+
+        var phase55_ok = mod_ok && dup_ok && esc_ok && sym_ok;
+    )JS");
+    assert(js.eval("phase55_ok").is_truthy());
+}
+
+// ============================================================================
+// Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
+// ============================================================================
+
+TEST(js_derived_this_temporal_dead_zone) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        class Base {
+            constructor(fail, extra) {
+                if (fail) throw new Error('parent-fail');
+                this.base = extra ?? 10;
+            }
+            tag() { return 'Base'; }
+        }
+
+        var log = [];
+        class Derived extends Base {
+            constructor(getThis = () => this) {
+                // Ordinary nested functions have their own `this`, unaffected by the derived TDZ.
+                function inner() { return typeof this; }
+                log.push(inner());
+
+                try { this.x = 1; log.push('wrote'); } catch (e) { log.push(e.name); }
+                try { void this; log.push('read'); } catch (e) { log.push(e.name); }
+                try { typeof this; log.push('typeof'); } catch (e) { log.push(e.name); }
+                try { super.tag(); log.push('super-call'); } catch (e) { log.push(e.name); }
+                try { super['missing']; log.push('super-prop'); } catch (e) { log.push(e.name); }
+                try { getThis(); log.push('arrow'); } catch (e) { log.push(e.name); }
+                try { super(false, this); log.push('super-arg'); } catch (e) { log.push(e.name); }
+
+                // Side effects in computed super[...] key must not run before `this` TDZ check.
+                var keySideEffect = false;
+                try {
+                    super[(keySideEffect = true, 'tag')];
+                } catch (e) {
+                    log.push(e.name + ':' + keySideEffect);
+                }
+
+                // Throwing inside parent keeps `this` uninitialised.
+                try { super(true); } catch (e) { log.push(e.message); }
+                try { getThis(); log.push('still-uninit'); } catch (e) { log.push('still:' + e.name); }
+
+                // Inner derived class has its own `this` binding.
+                class Inner extends Base {
+                    constructor() {
+                        super(false, 7);
+                        this.inner = true;
+                    }
+                }
+                log.push(new Inner().base);
+                try { void this; } catch (e) { log.push('outer:' + e.name); }
+
+                // GC while `this` is uninitialised must preserve the pre-allocated object.
+                if (typeof gc === 'function') gc();
+
+                (() => super(false, 25))();
+                log.push(getThis() === this, super.tag(), this.base);
+            }
+        }
+        var d = new Derived();
+        log.push(d.base);
+
+        // Derived constructor returning `this` before super() throws ReferenceError.
+        class EarlyReturn extends Base {
+            constructor() {
+                try { return this; } catch (e) { log.push('ret:' + e.name); }
+                super(false, 3);
+            }
+        }
+        log.push(new EarlyReturn().base);
+
+        // Derived constructor returning a custom object without calling super() succeeds.
+        class CustomReturn extends Base {
+            constructor() { return { custom: 99 }; }
+        }
+        log.push(new CustomReturn().custom);
+
+        // Parent returning replacement object updates arrow-captured `this`.
+        function AltParent() { return { replaced: true }; }
+        class AltChild extends AltParent {
+            constructor() {
+                var read = () => this;
+                try { read(); log.push('alt-pre'); } catch (e) { log.push('alt:' + e.name); }
+                super();
+                log.push(read() === this, this.replaced);
+            }
+        }
+        new AltChild();
+
+        var summary = log.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "undefined ReferenceError ReferenceError ReferenceError ReferenceError ReferenceError ReferenceError "
+           "ReferenceError ReferenceError:false parent-fail still:ReferenceError 7 outer:ReferenceError true Base 25 "
+           "25 ret:ReferenceError 3 99 alt:ReferenceError true true");
+}
+
+TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        var out = [];
+
+        // Top-level lexical TDZ and `typeof` vs undeclared identifier.
+        out.push('missing:' + typeof neverDeclaredAnywhere);
+        out.push('onGlobalBefore:' + ('topLet' in globalThis) + ':' + typeof globalThis.topLet);
+        try { void topLet; } catch (e) { out.push('read:' + e.name); }
+        try { typeof topLet; } catch (e) { out.push('typeof:' + e.name); }
+        try { topConst = 2; } catch (e) { out.push('constAssign:' + e.name); }
+        let topLet = 42;
+        const topConst = 7;
+        out.push('onGlobalAfter:' + ('topLet' in globalThis) + ':' + typeof globalThis.topLet + ':' + topLet);
+        try { topConst = 8; } catch (e) { out.push('constReassign:' + e.name); }
+
+        // Block `let` shadows outer variable from the top of the block, including hoisted block functions.
+        let outerX = 'outer';
+        {
+            function readInner() { return outerX; }
+            try { readInner(); } catch (e) { out.push('hoist:' + e.name); }
+            try { typeof outerX; } catch (e) { out.push('blkTypeof:' + e.name); }
+            try { outerX = 'early'; } catch (e) { out.push('blkAssign:' + e.name); }
+            let outerX = 'inner';
+            out.push('blkAfter:' + outerX + ':' + readInner());
+        }
+        out.push('outerAfter:' + outerX);
+
+        // `let undefined` in a function scope triggers TDZ before its declaration line.
+        (function () {
+            try { void undefined; } catch (e) { out.push('undefRead:' + e.name); }
+            try { typeof undefined; } catch (e) { out.push('undefTypeof:' + e.name); }
+            let undefined = 'shadowed';
+            out.push('undefVal:' + undefined);
+        })();
+        out.push('globalUndef:' + (undefined === void 0));
+
+        // Class declaration and expression TDZ (extends self, computed keys, forward ref).
+        try { class Self extends Self {} } catch (e) { out.push('selfExt:' + e.name); }
+        try { (class ExprSelf extends ExprSelf {}); } catch (e) { out.push('exprExt:' + e.name); }
+        try { class CompKey { [CompKey]() {} } } catch (e) { out.push('compKey:' + e.name); }
+        try { typeof LateCls; class LateCls {} } catch (e) { out.push('lateCls:' + e.name); }
+        try { class Sub extends Forward {} class Forward {} } catch (e) { out.push('fwdCls:' + e.name); }
+        class Good { static selfRef = Good; method() { return Good; } }
+        out.push('good:' + (Good.selfRef === Good) + ':' + (new Good().method() === Good));
+
+        // Async and generator bodies observe TDZ across suspension points.
+        function* gen() {
+            try { void gv; } catch (e) { out.push('gen1:' + e.name); }
+            yield 1;
+            try { typeof gv; } catch (e) { out.push('gen2:' + e.name); }
+            let gv = 55;
+            out.push('gen3:' + gv);
+        }
+        var it = gen();
+        it.next();
+        it.next();
+
+        var summary = out.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "missing:undefined onGlobalBefore:false:undefined read:ReferenceError typeof:ReferenceError "
+           "constAssign:ReferenceError onGlobalAfter:false:undefined:42 constReassign:TypeError "
+           "hoist:ReferenceError blkTypeof:ReferenceError blkAssign:ReferenceError blkAfter:inner:inner "
+           "outerAfter:outer undefRead:ReferenceError undefTypeof:ReferenceError undefVal:shadowed globalUndef:true "
+           "selfExt:ReferenceError exprExt:ReferenceError compKey:ReferenceError lateCls:ReferenceError "
+           "fwdCls:ReferenceError good:true:true gen1:ReferenceError gen2:ReferenceError gen3:55");
+}
+
+TEST(js_temporal_dead_zone_in_control_flow_and_patterns) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"(
+        var out = [];
+
+        // Destructuring declaration defaults see later sibling bindings in TDZ.
+        try { const { a = b, b = 1 } = {}; } catch (e) { out.push('dstr:' + e.name); }
+        {
+            const { a = 5, b = a + 2 } = {};
+            out.push('dstrOk:' + a + ':' + b);
+        }
+
+        // Switch case statements and case tests share one TDZ scope; discriminant uses outer scope.
+        try {
+            switch (1) { case 1: void swVar; case 2: let swVar = 3; }
+        } catch (e) { out.push('swBody:' + e.name); }
+        try {
+            switch (1) { case swCase: break; default: let swCase = 1; }
+        } catch (e) { out.push('swCase:' + e.name); }
+        {
+            let swDisc = 'outer';
+            switch (swDisc) {
+                case 'outer':
+                    let swDisc = 'inner';
+                    out.push('swDisc:' + swDisc);
+                    break;
+            }
+        }
+
+        // for, for-of, and for-in lexical head bindings are in TDZ during init/iterable evaluation.
+        try { for (let i = i; ;) break; } catch (e) { out.push('for:' + e.name); }
+        let iterVar = [1, 2];
+        try { for (let iterVar of iterVar) {} } catch (e) { out.push('forOf:' + e.name); }
+        try { for (const iterVar in { a: iterVar }) {} } catch (e) { out.push('forIn:' + e.name); }
+        try { for (let [p = q, q = 1] of [[]]) {} } catch (e) { out.push('forOfDstr:' + e.name); }
+
+        // Per-iteration closure bindings preserve values while body `let` enters TDZ each turn.
+        var closures = [];
+        for (let i = 0; i < 3; i++) {
+            var seen = '';
+            try { void bodyVar; } catch (e) { seen = e.name; }
+            let bodyVar = i * 10;
+            closures.push(() => i + ':' + bodyVar + ':' + seen);
+        }
+        out.push('loops:' + closures.map(f => f()).join(','));
+
+        // catch destructured parameter and handler block TDZ.
+        try { try { throw {}; } catch ({ ca = cb, cb = 1 }) {} } catch (e) { out.push('catchParam:' + e.name); }
+        try { throw 'err'; } catch (e) {
+            try { void innerC; } catch (err) { out.push('catchBlk:' + err.name); }
+            let innerC = e;
+            out.push('catchOk:' + innerC);
+        }
+
+        // Non-simple default parameter list places later parameters in TDZ.
+        function defParams(a = b, b = 2) { return a + b; }
+        try { defParams(); } catch (e) { out.push('param:' + e.name); }
+        function defSelf(a = a) { return a; }
+        try { defSelf(); } catch (e) { out.push('paramSelf:' + e.name); }
+
+        var summary = out.join(' ');
+    )");
+    assert(js.global_env()->get("summary").to_string() ==
+           "dstr:ReferenceError dstrOk:5:7 swBody:ReferenceError swCase:ReferenceError swDisc:inner "
+           "for:ReferenceError forOf:ReferenceError forIn:ReferenceError forOfDstr:ReferenceError "
+           "loops:0:0:ReferenceError,1:10:ReferenceError,2:20:ReferenceError "
+           "catchParam:ReferenceError catchBlk:ReferenceError catchOk:err "
+           "param:ReferenceError paramSelf:ReferenceError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -14815,6 +15496,8 @@ int main() {
     // Phase 38: real-web JPEG/GIF decoders, Canvas 2D, and SVG vector rendering.
     RUN_TEST(jpeg_decoder_baseline_progressive_and_guards);
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
+    RUN_TEST(webp_lossless_decodes_every_transform);
+    RUN_TEST(webp_unsupported_and_malformed_input_is_refused);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
@@ -14857,6 +15540,16 @@ int main() {
     RUN_TEST(css_color4_spaces_gamut_and_serialization);
     RUN_TEST(css_color5_mix_relative_and_light_dark);
     RUN_TEST(css_color45_style_resolver_dom_and_svg_integration);
+
+    // Phase 55: RegExp Unicode 17.0 properties, v (unicodeSets), d (hasIndices), ES2025 modifiers/dup-groups/escape/symbols.
+    RUN_TEST(regexp_unicode17_tables_and_parse_time_validation);
+    RUN_TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices);
+    RUN_TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols);
+
+    // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class bindings.
+    RUN_TEST(js_derived_this_temporal_dead_zone);
+    RUN_TEST(js_lexical_temporal_dead_zone_blocks_and_classes);
+    RUN_TEST(js_temporal_dead_zone_in_control_flow_and_patterns);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

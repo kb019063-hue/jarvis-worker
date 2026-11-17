@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Mutation and adversarial fuzzer for Litebird's JPEG, GIF, and SVG stack.
+"""Mutation and adversarial fuzzer for Litebird's JPEG, GIF, WebP, and SVG stack.
 
-Generates real JPEG/GIF seeds (using ImageMagick when present, plus minimal
+Generates real JPEG/GIF/WebP seeds (using ImageMagick when present, plus minimal
 hand-crafted binary seeds so the fuzzer also runs offline without convert) and
 complex SVG seeds, then applies byte/bit/truncation/marker/structural mutations
 plus explicit hostile edge cases (dimension bombs, <use>/gradient cycles,
@@ -42,6 +42,33 @@ def minimal_jpeg_seeds(tmpdir: str) -> list[bytes]:
         ]):
             p = os.path.join(tmpdir, f"seed_{idx}.jpg")
             subprocess.run([convert_bin] + flags + [p], check=True, capture_output=True)
+            with open(p, "rb") as f:
+                seeds.append(f.read())
+    return seeds
+
+
+def minimal_webp_seeds(tmpdir: str) -> list[bytes]:
+    seeds: list[bytes] = []
+    # Hand-crafted headers: a bare VP8L chunk with no payload, a dimension bomb
+    # (16384 x 16384), a lossy VP8 chunk, a VP8X header with the animation flag,
+    # and a RIFF whose stated size runs past the buffer.
+    seeds.append(b"RIFF\x0c\x00\x00\x00WEBPVP8L\x00\x00\x00\x00")
+    seeds.append(b"RIFF\x1e\x00\x00\x00WEBPVP8L\x11\x00\x00\x00\x2f\xff\xff\xff\x0f\x00\x00\x00\x00")
+    seeds.append(b"RIFF\x14\x00\x00\x00WEBPVP8 \x08\x00\x00\x00\x30\x01\x00\x9d\x01\x2a\x00\x00")
+    seeds.append(b"RIFF\x1a\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x02\x00\x00\x00")
+    seeds.append(b"RIFF\xff\xff\xff\x7fWEBPVP8L\xff\xff\x00\x00\x2f\x00\x00\x00")
+    convert_bin = shutil.which("convert")
+    if convert_bin:
+        for idx, args in enumerate([
+            ["-size", "16x16", "gradient:red-blue"],
+            ["-size", "13x9", "gradient:rgba(0,255,0,0)-rgba(255,0,0,1)"],
+            ["-size", "17x11", "xc:", "+noise", "Random", "-colors", "4", "+dither"],
+            ["-size", "24x24", "plasma:fuchsia-aqua", "-colors", "16", "+dither"],
+            ["-size", "20x20", "xc:#102030", "-fill", "#f0e0d0", "-draw", "circle 4,4 9,9"],
+        ]):
+            p = os.path.join(tmpdir, f"seed_w{idx}.webp")
+            subprocess.run([convert_bin] + args + ["-define", "webp:lossless=true", "-quality", "100", p],
+                           check=True, capture_output=True)
             with open(p, "rb") as f:
                 seeds.append(f.read())
     return seeds
@@ -169,9 +196,9 @@ def fuzz_kind(binary: str, kind: str, seeds: list[bytes], interesting: list[byte
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fuzz Litebird JPEG, GIF, and SVG decoders/renderer.")
+    parser = argparse.ArgumentParser(description="Fuzz Litebird JPEG, GIF, WebP, and SVG decoders/renderer.")
     parser.add_argument("--binary", default="build/media_check", help="Path to media_check binary")
-    parser.add_argument("--iterations", type=int, default=600, help="Cases per format (total = 3x)")
+    parser.add_argument("--iterations", type=int, default=600, help="Cases per format (total = 4x)")
     parser.add_argument("--seed", type=int, default=20261115, help="PRNG seed")
     parser.add_argument("--timeout", type=float, default=30.0, help="Timeout per batch (seconds)")
     args = parser.parse_args()
@@ -185,6 +212,8 @@ def main() -> int:
                    b"\xFF\xDA", b"\xFF\xDD", b"\xFF\xD0", b"\xFF\x00", b"\xFF\xFF", b"\x00\x00"]
     gif_tokens = [b"GIF87a", b"GIF89a", b"\x21\xF9\x04", b"\x21\xFF\x0B", b"\x2C", b"\x3B",
                   b"\x00", b"\xFF", b"\x08", b"\x0C"]
+    webp_tokens = [b"RIFF", b"WEBP", b"VP8L", b"VP8 ", b"VP8X", b"ANIM", b"ANMF", b"\x2f",
+                   b"\xff\xff\xff\xff", b"\x00\x00\x00\x00", b"\x0f"]
     svg_tokens = [b"<svg", b"</svg>", b"<path d=\"", b"A1,1 0 1 1 2,2", b"url(#g)", b"<use href=\"#a\"/>",
                   b"transform=\"rotate(45) scale(1e9)\"", b"clip-path=\"url(#c)\"", b"NaN", b"1e300", b"-0.0"]
 
@@ -198,11 +227,15 @@ def main() -> int:
                           args.iterations, rng, tmpdir, args.timeout)
         print(f"  [PASS] GIF  fuzzing: {n_gif} cases, 0 crashes/timeouts")
 
+        n_webp = fuzz_kind(args.binary, "webp", minimal_webp_seeds(tmpdir), webp_tokens,
+                           args.iterations, rng, tmpdir, args.timeout)
+        print(f"  [PASS] WebP fuzzing: {n_webp} cases, 0 crashes/timeouts")
+
         n_svg = fuzz_kind(args.binary, "svg", svg_seeds(), svg_tokens,
                           args.iterations, rng, tmpdir, args.timeout)
         print(f"  [PASS] SVG  fuzzing: {n_svg} cases, 0 crashes/timeouts")
 
-    print(f"\nAll {n_jpg + n_gif + n_svg} media fuzz cases completed cleanly!")
+    print(f"\nAll {n_jpg + n_gif + n_webp + n_svg} media fuzz cases completed cleanly!")
     return 0
 
 

@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1085 / 1112 (97.6%)**; of the 27 that fail, nine were recorded in Phases 34 and 43 for what classes and `eval` still lack, and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1124 / 1150 (97.6%)**; of the 26 that fail, eight were recorded in Phase 34 for what classes still lack and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 208 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 209 suites + 80 cross-origin checks, all passing | `make test` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -82,7 +82,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 1,112 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,150 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -107,18 +107,19 @@ Read the number for what it is:
   those 21 directories and 49 more across 13 TDZ/scope directories, none
   fewer; Phase 63: 10 more in the whole suite and 4 fewer, each of the four
   a row of the task table).
-- **Five of the 27 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 22 were
+- **Five of the 26 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 21 were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). One is in `construct.dat`:
-  `eval` inside a function, which sees nothing of the function (Phase 43,
-  section 8; `this` before `super()` was fixed in Phase 59). Thirteen are in
+  things; ARCHITECTURE.md, Phase 34, section 9). Thirteen are in
   `iteration.dat`: the places that still read an array without asking it
   for its iterator (array destructuring, `Array.from`), `yield*` in an async
   generator, and what the built-in iterators themselves get wrong (Phase 63,
-  section 6). Each of the 22 belongs to a row of the task table in
-  `AGENTS.md`.
+  section 6). Each of the 21 belongs to a row of the task table in
+  `AGENTS.md`. `construct.dat` had one until Phase 65: `eval` inside a
+  function saw nothing of the function, and now runs in its caller's scope
+  ([`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
+  `this` before `super()` was fixed in Phase 59).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -1127,7 +1128,7 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 974 / 989; construct.dat 47 / 49
+make js-conformance      # 1124 / 1150; construct.dat 50 / 50
 make dom-conformance     # 669 / 669; compiled.dat 25 / 25
 ```
 
@@ -1135,8 +1136,8 @@ What is still missing: an upgrade still runs the constructor on the element
 itself, where the standard hands the element over when the constructor asks
 for it (a constructor written as a function can tell, and one that never
 reaches `HTMLElement` is accepted); `this` can be used before `super()` has
-run; `eval` inside a function sees nothing of the function; and a private
-name is a property that `obj['#p']` reads. Those and what else was found on the way
+run; and a private name is a property that `obj['#p']` reads. Those and what
+else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.
@@ -1166,7 +1167,7 @@ var r = new Rows(); r.push("a", "b", "c");
 var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; };
 console.log([...r].join(), Array.from(r).join(), [...own].join(), Math.max(...own))'
 # c,b,a c,b,a 9,8 9        (before: a,b,c a,b,c 1,2 2)
-make js-conformance      # 1085 / 1112; iteration.dat 65 / 78
+make js-conformance      # 1124 / 1150; iteration.dat 65 / 78
 ```
 
 What got worse, in three cases a test suite meets and a page hardly will:
@@ -1180,6 +1181,40 @@ does not ask the array, and the `Map` and `Set` constructors do not call
 `set` and `add`. All of it is in the 13 failing cases of `iteration.dat` and
 in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 63, has
 the design, and `AUDIT.md`, finding 69, says what found what.
+
+### `eval` runs in the scope that called it (Phase 65)
+
+`eval` was `run(source)`: parse the text, run it against the global
+environment. That is the *indirect* eval — what `(0, eval)(x)` and
+`window.eval(x)` do — applied to every call, so a function could not read its
+own `var` through it, `eval('this')` was the global object, `eval('super()')`
+in a derived constructor was a `SyntaxError`, and `eval('var x = 1')` planted
+`x` on `window`. Now a call written `eval(...)` whose identifier resolves to
+the global `eval` is direct: it runs in the calling function's environment,
+shares its `this`, `arguments`, `new.target`, `super` and strictness, its
+`let`/`const`/`class` stay inside the eval, and its sloppy `var`s belong to
+the function. `(0, eval)`, an alias and a shadowed `eval` are ordinary calls
+and stay global.
+
+The bindings a function normally hoists only for names its *body* mentions —
+`arguments`, `%fn`, `%new.target`, `%home` — are now hoisted for any function
+that calls `eval`, from the parser: the text is a string, and what it names is
+not known until it runs.
+
+```bash
+./build/litebird --run-js 'function f() { var local = 5; return eval("local + 1"); }
+function g(a, b) { return eval("arguments.length"); }
+class A { constructor() { this.a = 1; } }
+class B extends A { constructor() { eval("super()"); this.b = this.a + 1; } }
+console.log(f(), g(7, 8), new B().b)'
+# 6 2 2        (before: Uncaught ReferenceError: local is not defined)
+make js-conformance      # 1124 / 1150; eval.dat 38 / 38
+```
+
+The design and what it costs are in
+[`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
+[`docs/findings/71-direct-eval-scope.md`](docs/findings/71-direct-eval-scope.md)
+says what was found, and `AGENTS.md` no longer carries the row.
 
 ### The encodings pages are written in (Phase 47)
 

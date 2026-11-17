@@ -15577,6 +15577,99 @@ TEST(js_derived_this_temporal_dead_zone) {
            "25 ret:ReferenceError 3 99 alt:ReferenceError true true");
 }
 
+TEST(js_direct_eval_runs_in_the_callers_scope) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var log = [];
+
+        // The caller's bindings are visible to a direct eval, and its own
+        // lexical ones stay inside it.
+        function visible() { var local = 5; let outer = 'o'; { let inner = 'i'; return eval('local + outer + inner'); } }
+        log.push(visible());
+        function hides() { var x = 1; eval('let x = 2'); return x; }
+        log.push(hides());
+        function leaks() { eval('let y = 1'); return typeof y; }
+        log.push(leaks());
+
+        // A sloppy eval's `var` belongs to the function that called it; a
+        // strict one's stays inside the eval. Function declarations follow
+        // the same split.
+        function sloppyVar() { eval('var made = 42'); return made; }
+        log.push(sloppyVar(), typeof made);
+        function strictVar() { 'use strict'; eval('var other = 42'); return typeof other; }
+        log.push(strictVar());
+        function strictText() { eval('"use strict"; var third = 1'); return typeof third; }
+        log.push(strictText());
+        function sloppyFn() { eval('function inner() { return 7; }'); return inner(); }
+        log.push(sloppyFn(), typeof inner);
+        function strictFn() { 'use strict'; eval('function hidden() { return 1; }'); return typeof hidden; }
+        log.push(strictFn());
+
+        // this, arguments, new.target and super come from the function the
+        // text is written in.
+        var holder = { tag: 'holder', run: function () { return eval('this.tag'); } };
+        log.push(holder.run());
+        function strictThis() { 'use strict'; return eval('this') === undefined; }
+        log.push(strictThis());
+        function args(a, b) { return eval('arguments.length + ":" + arguments[1]'); }
+        log.push(args(7, 8));
+        function arrowArgs() { var g = () => eval('arguments.length'); return g(); }
+        log.push(arrowArgs(1, 2, 3));
+        function NewTarget() { this.made = eval('new.target === NewTarget'); }
+        log.push(new NewTarget().made, NewTarget() === undefined);
+
+        class Base { constructor() { this.a = 1; } m() { return 'Base'; } }
+        class Derived extends Base {
+            constructor() { eval('super()'); this.b = this.a + 1; }
+            m() { return eval('super.m()') + '!'; }
+        }
+        var derived = new Derived();
+        log.push(derived.a, derived.b, derived instanceof Base, derived.m());
+        function noSuper() { return eval('super.m()'); }
+        try { noSuper(); log.push('no super error'); } catch (e) { log.push(e.name); }
+
+        // Indirect eval is global code, whichever way it is reached.
+        function indirect() { var local = 5; return (0, eval)('typeof local'); }
+        log.push(indirect());
+        function alias() { var local = 5; var e = eval; return e('typeof local'); }
+        log.push(alias());
+        function shadowed() { var local = 5; function eval() { return typeof local; } return eval('x'); }
+        log.push(shadowed());
+        function strictIndirect() { 'use strict'; return (0, eval)('this === undefined'); }
+        log.push(strictIndirect(), (0, eval)('this === globalThis'));
+
+        // The rest of what eval does to its caller.
+        function completion() { return eval('1; 2; 3'); }
+        log.push(completion(), eval('var x = 9;'), eval(42));
+        function twice() { return [eval('var n = 1; n'), eval('n + 1')].join(','); }
+        log.push(twice());
+        function syntaxError() { try { eval('var = ;'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(syntaxError());
+        function nested() { return eval('let a = 1; eval("a + 1")'); }
+        log.push(nested());
+        function strictAssign() { 'use strict'; try { eval('undeclaredName = 1'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(strictAssign());
+        function loopBindings() { var out = []; for (let i = 0; i < 3; i++) out.push(eval('i')); return out.join(','); }
+        log.push(loopBindings());
+        function closure() { var captured = 'c'; function inner() { return eval('captured'); } return inner(); }
+        log.push(closure());
+        log.push(typeof eval, eval.length, eval.name);
+
+        var summary = log.join(' ');
+    )js");
+    // Every value here is what Node prints for this same script; the corpus in
+    // tests/js-conformance/eval.dat covers the same ground case by case, and
+    // `--reference "node -e"` re-runs it. Note `sloppyFn`'s second value: the
+    // function declaration went into the calling function's scope, so it is
+    // there inside it and gone once it returns.
+    assert(js.global_env()->get("summary").to_string() ==
+           "5oi 1 undefined 42 undefined undefined undefined 7 undefined undefined "
+           "holder true 2:8 3 true true 1 2 true Base! SyntaxError undefined undefined "
+           "number false true 3  42 1,2 SyntaxError 2 ReferenceError "
+           "0,1,2 c function 1 eval");
+}
+
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -16206,6 +16299,9 @@ int main() {
     RUN_TEST(string_unicode17_normalization_tables_and_api);
     RUN_TEST(string_unicode17_full_and_locale_case_mapping);
     RUN_TEST(string_cldr48_uca_collation_and_ecma402_validation);
+
+    // Phase 65: a direct eval runs in the caller's scope.
+    RUN_TEST(js_direct_eval_runs_in_the_callers_scope);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);

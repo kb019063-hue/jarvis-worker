@@ -1,0 +1,275 @@
+#name a caller's variable is visible to a direct eval
+#code
+function f() { var local = 5; return eval('local + 1'); }
+console.log(f());
+#expect
+6
+
+#name a caller's parameter is visible to a direct eval
+#code
+function f(a, b) { return eval('a * b'); }
+console.log(f(6, 7));
+#expect
+42
+
+#name a block scoped binding the eval can see
+#code
+function f() { let outer = 'x'; { let inner = 'y'; return eval('outer + inner'); } }
+console.log(f());
+#expect
+xy
+
+#name an eval's let stays inside the eval
+#code
+function f() { eval('let hidden = 1'); return typeof hidden; }
+console.log(f(), typeof eval('2'));
+#expect
+undefined number
+
+#name an eval's let shadows the caller's without replacing it
+#code
+function f() { var x = 1; eval('let x = 2'); return x; }
+console.log(f());
+#expect
+1
+
+#name a sloppy eval's var belongs to the calling function
+#code
+function f() { eval('var made = 42'); return made; }
+console.log(f(), typeof made);
+#expect
+42 undefined
+
+#name a sloppy eval's var does not reach the global scope
+#code
+function f() { eval('var made = 42;'); return typeof made; }
+console.log(f(), typeof globalThis.made);
+#expect
+number undefined
+
+#name a strict eval keeps its var to itself
+#code
+function f() { 'use strict'; eval('var made = 42'); return typeof made; }
+console.log(f());
+#expect
+undefined
+
+#name eval text that starts with use strict keeps its var to itself
+#code
+function f() { eval('"use strict"; var made = 42'); return typeof made; }
+console.log(f());
+#expect
+undefined
+
+#name a direct eval shares the caller's this
+#code
+var holder = { tag: 'holder', run: function () { return eval('this.tag'); } };
+console.log(holder.run());
+#expect
+holder
+
+#name a direct eval in strict code has an undefined this
+#code
+function f() { 'use strict'; return eval('this'); }
+console.log(f() === undefined);
+#expect
+true
+
+#name a direct eval sees the caller's arguments
+#code
+function f(a, b) { return eval('arguments.length + ":" + arguments[1]'); }
+console.log(f(7, 8));
+#expect
+2:8
+
+#name an arrow's eval sees the enclosing function's arguments
+#code
+function f() { var g = () => eval('arguments.length'); return g(); }
+console.log(f(1, 2, 3));
+#expect
+3
+
+#name a direct eval sees the caller's new.target
+#code
+function F() { this.made = eval('new.target === F'); }
+console.log(new F().made, F());
+#expect
+true undefined
+
+#name a direct eval can call super() in a derived constructor
+#code
+class A { constructor() { this.a = 1; } }
+class B extends A { constructor() { eval('super()'); this.b = this.a + 1; } }
+var b = new B();
+console.log(b.a, b.b, b instanceof A);
+#expect
+1 2 true
+
+#name a direct eval can call a super method
+#code
+class A { m() { return 'A'; } }
+class B extends A { m() { return eval('super.m()') + '!'; } }
+console.log(new B().m());
+#expect
+A!
+
+#name super in eval text outside a method is a SyntaxError
+#code
+function f() { return eval('super.m()'); }
+try { f(); } catch (e) { console.log(e.name); }
+#expect
+SyntaxError
+
+#name a strict eval that assigns an undeclared name throws
+#code
+function f() { 'use strict'; try { eval('undeclaredName = 1'); return 'no throw'; } catch (e) { return e.name; } }
+console.log(f());
+#expect
+ReferenceError
+
+#name an indirect eval runs in the global scope
+#code
+function f() { var local = 5; return (0, eval)('typeof local'); }
+console.log(f());
+#expect
+undefined
+
+#name eval called through an alias runs in the global scope
+#code
+function f() { var local = 5; var e = eval; return e('typeof local'); }
+console.log(f(), eval('typeof local'));
+#expect
+undefined undefined
+
+#name an indirect eval runs as sloppy code whatever its caller is
+#code
+function f() { 'use strict'; return (0, eval)('this === undefined'); }
+console.log(f(), (0, eval)('this === globalThis'));
+#expect
+false true
+
+#name eval of a non-string gives the value back
+#code
+console.log(eval(42), typeof eval(undefined), eval({a: 1}) === undefined);
+#expect
+42 undefined false
+
+#name the completion value of eval is its last statement
+#code
+function f() { return eval('1; 2; 3'); }
+console.log(f(), eval('var x = 9;'), eval('{}'));
+#expect
+3 undefined undefined
+
+#name an eval of the same text twice sees what the first declared
+#code
+function f() { return [eval('var n = 1; n'), eval('n + 1')]; }
+console.log(f().join(','));
+#expect
+1,2
+
+#name a SyntaxError in eval text leaves the caller running
+#code
+function f() { try { eval('var = ;'); return 'no throw'; } catch (e) { return e.name; } }
+console.log(f());
+#expect
+SyntaxError
+
+#name eval nested in an eval sees the inner declarations of the outer
+#code
+function f() { return eval('let a = 1; eval("a + 1")'); }
+console.log(f());
+#expect
+2
+
+#name a direct eval's function declaration stays inside the eval
+#code
+function f() { eval('function inner() { return 1; }'); return typeof inner; }
+console.log(f());
+#expect
+function
+
+#name eval inside a method sees this
+#code
+class C { constructor() { this.n = 4; } get2() { return eval('this.n * 2'); } }
+console.log(new C().get2());
+#expect
+8
+
+#name typeof eval is function and its length is one
+#code
+console.log(typeof eval, eval.length, eval.name);
+#expect
+function 1 eval
+
+
+#name a sloppy eval's function declaration belongs to the caller
+#code
+function f() { eval('function inner() { return 7; }'); return inner(); }
+console.log(f(), typeof inner);
+#expect
+7 undefined
+
+#name a strict eval's function declaration stays inside it
+#code
+function f() { 'use strict'; eval('function inner() { return 1; }'); return typeof inner; }
+function g() { eval('"use strict"; function inner() { return 1; }'); return typeof inner; }
+console.log(f(), g());
+#expect
+undefined undefined
+
+#name a shadowed eval is an ordinary function
+#code
+function f() { var local = 5; function eval(s) { return typeof local; } return eval('x'); }
+console.log(f());
+#expect
+number
+
+#name eval of a string naming the caller's closure
+#code
+function outer() { var captured = 'c'; function inner() { return eval('captured'); } return inner(); }
+console.log(outer());
+#expect
+c
+
+#name eval that declares a name the caller also uses
+#code
+function f() { var n = 1; eval('var n = n + 10'); return n; }
+console.log(f());
+#expect
+11
+
+#name eval inside a getter sees this
+#code
+var o = { v: 3, get twice() { return eval('this.v * 2'); } };
+console.log(o.twice);
+#expect
+6
+
+#name eval inside a loop body sees the loop's let
+#code
+function f() { var out = []; for (let i = 0; i < 3; i++) out.push(eval('i')); return out.join(','); }
+console.log(f());
+#expect
+0,1,2
+
+#name an eval that throws leaves the caller's scope intact
+#code
+function f() { var keep = 1; try { eval('throw new Error("boom")'); } catch (e) { return keep + ':' + e.message; } }
+console.log(f());
+#expect
+1:boom
+
+
+#name a reassigned eval is no longer the direct one
+#code
+var real = eval;
+eval = function () { return 'fake'; };
+function g() { var local = 9; return eval('local'); }
+var out = [g(), eval('1+1')];
+eval = real;
+function h() { var local = 9; return eval('local'); }
+console.log(out.join(','), h());
+#expect
+fake,fake 9
+

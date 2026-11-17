@@ -8,7 +8,14 @@ Tests:
   2. GIF decoding (GIF87a, GIF89a, 2..8-bit LZW, transparency, 4-pass
      interlacing, multi-frame animations with Dispose None/Background/Previous)
      pixel-by-pixel for EXACT bit-for-bit equality against ImageMagick -coalesce.
-  3. Real-world SVG vector rendering (viewBox, preserveAspectRatio, full path
+  3. WebP lossless (VP8L) decoding: the container (simple and extended
+     `VP8X`), the entropy-coded image stream (meta prefix codes, colour cache,
+     LZ77), and all four self-similarity transforms (predictor, cross-colour,
+     subtract-green, colour-indexing with 2/4/16/256-entry palettes and pixel
+     bundling) — bit-exact against libwebp, since lossless has no tolerance.
+     Refusals are checked too: lossy `VP8`, animated `ANIM`/`ANMF`, truncated
+     and non-WebP input must be reported, not drawn.
+  4. Real-world SVG vector rendering (viewBox, preserveAspectRatio, full path
      grammar including W3C F.6.5/F.6.6 elliptical arcs and compact flags,
      transforms, evenodd/nonzero fill rules, linear/radial gradients, <use>,
      <clipPath>, inline styles, rgba/#RRGGBBAA, opacity, currentColor).
@@ -301,6 +308,168 @@ def pixel_at(rgba, w, x, y):
     return rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3]
 
 
+
+
+def decode_webp_with_imagemagick(convert_bin, webp_path):
+    ident = subprocess.run([convert_bin, webp_path, "-format", "%w %h", "info:"],
+                           capture_output=True, check=True)
+    w, h = map(int, ident.stdout.decode("ascii").strip().split())
+    res = subprocess.run([convert_bin, webp_path, "-depth", "8", "rgba:-"],
+                         capture_output=True, check=True)
+    return w, h, res.stdout
+
+
+def verify_webp_decoding(binary, convert_bin, tmpdir):
+    """Lossless WebP must decode bit-exactly: there is no error budget here."""
+    cases = [
+        # name, width, height, ImageMagick source, palette size
+        ("flat_rgb_8x8", 8, 8, ["xc:#3366cc", "-fill", "#cc9933", "-draw", "rectangle 2,2 5,5"], None),
+        ("gradient_rgb_16x16", 16, 16, ["gradient:red-blue"], None),
+        ("gradient_rgb_1x1", 1, 1, ["xc:#123456"], None),
+        ("odd_7x3", 7, 3, ["plasma:red-yellow", "-seed", "3"], None),
+        ("tall_3x40", 3, 40, ["gradient:white-black"], None),
+        ("wide_129x3", 129, 3, ["gradient:red-blue"], None),
+        ("alpha_ramp_12x9", 12, 9, ["gradient:rgba(255,0,0,0)-rgba(0,0,255,255)"], None),
+        ("alpha_disc_10x10", 10, 10, ["xc:none", "-fill", "rgba(0,128,255,0.4)", "-draw", "circle 5,5 8,5"], None),
+        ("palette_2_9x5", 9, 5, ["xc:#000000", "-fill", "#ffffff", "-draw", "rectangle 0,0 4,4"], 2),
+        ("palette_4_13x7", 13, 7, ["gradient:red-blue"], 4),
+        ("palette_16_17x11", 17, 11, ["plasma:red-blue", "-seed", "1"], 16),
+        ("palette_256_32x32", 32, 32, ["plasma:green-blue", "-seed", "2"], 256),
+        ("bilevel_40x40", 40, 40, ["xc:", "+noise", "Random", "-threshold", "50%"], None),
+        ("noise_64x64", 64, 64, ["xc:", "+noise", "Random"], None),
+        ("repeat_lz77_300x20", 300, 20, ["xc:#ffffff", "-fill", "#123456", "-draw", "rectangle 0,0 3,20"], None),
+        ("photo_200x150", 200, 150, ["xc:", "+noise", "Random", "-blur", "0x2"], None),
+        ("large_256x256", 256, 256, ["plasma:red-blue", "-seed", "9"], None),
+    ]
+
+    passed = 0
+    for name, w, h, source, colors in cases:
+        webp_path = os.path.join(tmpdir, f"{name}.webp")
+        cmd = [convert_bin, "-size", f"{w}x{h}"] + source
+        if colors is not None:
+            cmd += ["-colors", str(colors), "+dither"]
+        cmd += ["-define", "webp:lossless=true", "-quality", "100", webp_path]
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        ref_w, ref_h, ref_rgba = decode_webp_with_imagemagick(convert_bin, webp_path)
+        ppm_path = os.path.join(tmpdir, f"{name}.out.ppm")
+        rgba_path = os.path.join(tmpdir, f"{name}.out.rgba")
+        meta = run_media_check(binary, ["--decode-webp", webp_path, ppm_path, rgba_path]).strip()
+        with open(rgba_path, "rb") as f:
+            act_rgba = f.read()
+        ppm_w, ppm_h, act_rgb = read_ppm(ppm_path)
+
+        if (ppm_w, ppm_h) != (ref_w, ref_h):
+            raise AssertionError(f"[WebP {name}] size mismatch: got {ppm_w}x{ppm_h}, expected {ref_w}x{ref_h}")
+        if len(act_rgba) != len(ref_rgba):
+            raise AssertionError(
+                f"[WebP {name}] alpha buffer is {len(act_rgba)} bytes, expected {len(ref_rgba)}"
+            )
+        if act_rgba != ref_rgba:
+            first = next(i for i in range(0, len(ref_rgba), 4) if act_rgba[i:i + 4] != ref_rgba[i:i + 4])
+            raise AssertionError(
+                f"[WebP {name}] pixel {first // 4} differs: got {list(act_rgba[first:first + 4])}, "
+                f"expected {list(ref_rgba[first:first + 4])} (lossless must be exact)"
+            )
+        # The PPM path drops alpha; it must agree on the colour channels.
+        for i in range(0, len(ref_rgba), 4):
+            if act_rgb[i // 4 * 3:i // 4 * 3 + 3] != ref_rgba[i:i + 3]:
+                raise AssertionError(f"[WebP {name}] PPM colour differs at pixel {i // 4}")
+
+        print(f"  [PASS] WebP {name:20s} {w:3d}x{h:<3d} {meta.split()[2]:8s} {w * h:6d} px exact")
+        passed += 1
+
+    # An extended (VP8X) container: the still image sits inside a container that
+    # carries extra chunks we must skip.
+    vp8x_path = os.path.join(tmpdir, "vp8x_container.webp")
+    subprocess.run(
+        [convert_bin, "-size", "20x20", "gradient:red-yellow", "-define", "webp:lossless=true",
+         "-quality", "100", vp8x_path],
+        check=True, capture_output=True,
+    )
+    ref_w, ref_h, ref_rgba = decode_webp_with_imagemagick(convert_bin, vp8x_path)
+    ppm_path = os.path.join(tmpdir, "vp8x.out.ppm")
+    run_media_check(binary, ["--decode-webp", vp8x_path, ppm_path])
+    with open(ppm_path, "rb") as f:
+        ppm_bytes = f.read()
+    if ppm_bytes[:2] != b"P6":
+        raise AssertionError("[WebP vp8x_container] no PPM produced")
+    print(f"  [PASS] WebP vp8x_container       {ref_w}x{ref_h} container parsed")
+    passed += 1
+
+    # Refusals: every one of these must be reported rather than drawn wrong.
+    def expect_refusal(name, blob_path, needle):
+        nonlocal passed
+        out = os.path.join(tmpdir, "refusal.ppm")
+        res = subprocess.run([binary, "--decode-webp", blob_path, out], capture_output=True)
+        message = res.stderr.decode("utf-8", errors="replace")
+        if res.returncode == 0:
+            raise AssertionError(f"[WebP {name}] decoded, but must be refused")
+        if needle.lower() not in message.lower():
+            raise AssertionError(f"[WebP {name}] message {message.strip()!r} does not mention {needle!r}")
+        print(f"  [PASS] WebP {name:20s} refused: {message.strip().splitlines()[0][:64]}")
+        passed += 1
+
+    lossy_path = os.path.join(tmpdir, "lossy.webp")
+    subprocess.run([convert_bin, "-size", "8x8", "xc:#3366cc", "-quality", "70", lossy_path],
+                   check=True, capture_output=True)
+    expect_refusal("lossy_vp8", lossy_path, "lossy")
+
+    anim_path = os.path.join(tmpdir, "animated.webp")
+    subprocess.run([convert_bin, "-delay", "10", "-loop", "0",
+                    "(", "-size", "8x8", "xc:red", ")", "(", "-size", "8x8", "xc:blue", ")",
+                    "-define", "webp:lossless=true", anim_path],
+                   check=True, capture_output=True)
+    expect_refusal("animated", anim_path, "animat")
+
+    truncated_path = os.path.join(tmpdir, "truncated.webp")
+    with open(truncated_path, "wb") as f:
+        with open(vp8x_path, "rb") as src:
+            f.write(src.read()[:24])
+    expect_refusal("truncated", truncated_path, "truncat")
+
+    jpeg_path = os.path.join(tmpdir, "not_webp.jpg")
+    subprocess.run([convert_bin, "-size", "8x8", "xc:red", jpeg_path], check=True, capture_output=True)
+    expect_refusal("not_webp", jpeg_path, "not a webp")
+
+    empty_path = os.path.join(tmpdir, "empty.webp")
+    with open(empty_path, "wb"):
+        pass
+    expect_refusal("empty", empty_path, "not a webp")
+
+    # probe() must classify without decoding.
+    for name, path, expected in [
+        ("probe_lossless", vp8x_path, "ok"),
+        ("probe_lossy", lossy_path, "lossy VP8 is not supported"),
+        ("probe_animated", anim_path, "animated WebP is not supported"),
+        ("probe_truncated", truncated_path, "truncated WebP file"),
+    ]:
+        res = subprocess.run([binary, "--probe-webp", path], capture_output=True)
+        text = res.stdout.decode("utf-8", errors="replace").strip()
+        if text != expected:
+            raise AssertionError(f"[WebP {name}] probe said {text!r}, expected {expected!r}")
+        print(f"  [PASS] WebP {name:20s} {text}")
+        passed += 1
+
+    # Decoding the same bytes twice must give the same pixels: no decoder state
+    # may leak between images.
+    first = os.path.join(tmpdir, "repeat1.rgba")
+    second = os.path.join(tmpdir, "repeat2.rgba")
+    for target in (first, second):
+        run_media_check(binary, ["--decode-webp", os.path.join(tmpdir, "palette_16_17x11.webp"),
+                                 os.path.join(tmpdir, "repeat.ppm"), target])
+    with open(first, "rb") as f:
+        a = f.read()
+    with open(second, "rb") as f:
+        b = f.read()
+    if a != b:
+        raise AssertionError("[WebP determinism] two decodes of the same file differ")
+    print("  [PASS] WebP determinism          two decodes byte-identical")
+    passed += 1
+
+    return passed
+
+
 def verify_svg_rendering(binary, tmpdir):
     passed = 0
 
@@ -466,8 +635,9 @@ def main():
             print(f"Oracle: ImageMagick ({convert_bin})")
             total_passed += verify_jpegs_with_oracle(args.binary, convert_bin, tmpdir)
             total_passed += verify_gifs_with_oracle(args.binary, convert_bin, tmpdir)
+            total_passed += verify_webp_decoding(args.binary, convert_bin, tmpdir)
         else:
-            print("WARNING: ImageMagick 'convert' not found; skipping libjpeg/GIF differential oracle.")
+            print("WARNING: ImageMagick 'convert' not found; skipping libjpeg/GIF/WebP differential oracle.")
 
         total_passed += verify_svg_rendering(args.binary, tmpdir)
 

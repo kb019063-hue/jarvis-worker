@@ -61,6 +61,13 @@ jobs:
         run: |
           make verify-media
           make fuzz-media
+      - name: CSS Color 4/5 rational oracle, WPT vectors, and fuzzing
+        # Cross-checks all 15 color spaces against an independent exact-rational
+        # Python W3C CSS Color 4 oracle, verifies §13.2 OKLCH gamut mapping,
+        # WPT valid/invalid computed vectors, and 5,000 adversarial fuzz inputs.
+        run: |
+          make verify-color
+          make fuzz-color
 
   conformance:
     name: DOM conformance (html5lib corpus)
@@ -131,17 +138,13 @@ jobs:
         run: make js-conformance
       - name: Enforce the JavaScript floor
         # The corpus is fixed and timers run on a virtual clock, so the score
-        # does not vary: 926 of 940 pass, and the floor is that score (raised by
-        # 14 in finding 50, 4 in finding 51, and 1 in finding 42). It used to sit
-        # one below for
-        # `pairs made a half at a time in a long string` (long-strings.dat),
-        # which copied the whole string at every pair and took 6 of the 10
-        # seconds a case is allowed, so it timed out on a busy machine. Finding
-        # 47 fixed that: the case now takes 0.035 s. Raise the floor as the
-        # engine improves; it exists to catch regressions.
+        # does not vary: 1003 of 1017 pass (raised by 25 in finding 61 with
+        # tests/js-conformance/regexp_unicode.dat and 4 in finding 65 across
+        # construct.dat and lexical.dat, on top of finding 50/51/42/49).
+        # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 926
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1003
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -149,9 +152,9 @@ jobs:
         # of the length, not on a slow runner. It also compares results.
         run: make bench
       - name: Surrogate halves appended one at a time stay linear
-        # The same scripts at two sizes a doubling apart, best of three, with
-        # a limit of one second: 20,000 pairs take about 20 ms and 40,000 about
-        # 35 ms, where copying the text at every pair took 5.6 s and 23 s.
+        # Six scripts (20k, 40k, kept prefixes, read between halves, indexOf
+        # between halves, and substring slice read then completed), best of
+        # three, with a limit of one second against Node.js.
         run: make bench-surrogates
       - name: Promise combinators resolve before advancing the iterator
         # Four reference-checked adversarial cases in async.dat: an unbounded
@@ -162,8 +165,14 @@ jobs:
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on
         # the spot. The ceiling in the Makefile is the number that differ
-        # today, all of them Unicode data the engine does not have.
+        # today (dropped from 95 to 71 in Phase 55 once Unicode 17.0 RegExp
+        # property escapes landed).
         run: make diff-strings
+      - name: RegExp Unicode 17.0, v-mode, d-mode, and ES2025 differential & spec verification
+        # Cross-checks 88 curated + 500 seeded fuzz Unicode/v-mode/d-mode
+        # RegExp patterns against Node.js (0 discrepancies) plus 112 direct
+        # ES2025 assertions (modifiers, duplicate named groups, RegExp.escape).
+        run: make verify-regexp
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report
@@ -197,7 +206,7 @@ jobs:
         # a regression.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 644
+          python3 tools/conformance/run_dom_conformance.py --quiet --json build/dom-conformance.json --min-pass 669
       - name: URL scoreboard (web-platform-tests data)
         # tests/url holds the URL parsing and setter cases browsers are tested
         # with. The floor in the Makefile is the number that pass today; the
@@ -302,14 +311,27 @@ jobs:
           path: build/xml-conformance/xmlts20130923.zip
           key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
       - name: Sanitizer build, tests, the corpora (JavaScript, DOM, URL, XML, web-platform-tests) and a fuzz smoke run
+        # The output is also kept in a file: the last step of this job says
+        # from it what failed.
         env:
           ASAN_OPTIONS: detect_leaks=0
           GITHUB_TOKEN: ${{ github.token }}
-        run: make -j"$(nproc)" asan-core
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-core 2>&1 | tee "$RUNNER_TEMP/asan-core.log"
       - name: Deep and oversized pages in the sanitizer build
         # For memory errors on these pages. They are a twentieth as deep as in
         # the deep-pages job, which is the one that looks for recursion: a
         # sanitizer build is several times slower.
         env:
           ASAN_OPTIONS: detect_leaks=0
-        run: make asan-deep
+        run: |
+          set -o pipefail
+          make asan-deep 2>&1 | tee "$RUNNER_TEMP/asan-deep.log"
+      - name: What failed, as annotations
+        # This job takes a quarter of an hour and has failed with nothing but
+        # `exit code 2` to go by where the log could not be fetched (finding
+        # 49). The annotations of a job are served by the API itself:
+        #   gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$RUNNER_TEMP/asan-core.log" "$RUNNER_TEMP/asan-deep.log"

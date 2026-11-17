@@ -788,6 +788,22 @@ std::shared_ptr<Element> create_element(Realm& realm, Document& document, const 
 /// `document.search` for `<form name="search">`.
 std::shared_ptr<JsExotic> document_exotic(Realm& realm, Document& document);
 
+// --- DomWindowBindings.cpp ----------------------------------------------------------
+/// Cross-origin WindowProxy and Location: the own-property keys a
+/// cross-origin exotic exposes (HTML §7.2.3, CrossOriginOwnPropertyKeys):
+/// the indices of the child browsing contexts as strings, then the
+/// cross-origin table names in spec order (a named child frame name
+/// replaces nothing; it is appended after the table), then "then". Symbols
+/// are not reported: the engine's own-key plumbing deals in strings only.
+///
+/// Returns false when the object is not a cross-origin Window or Location
+/// (or is same-origin), in which case the caller falls back to the ordinary
+/// answer. `include_non_enumerable` selects every exposed key; without it,
+/// only the enumerable indices are reported (the cross-origin named keys
+/// are not enumerable).
+bool cross_origin_own_keys(const JsValue& object, bool include_non_enumerable,
+                           std::vector<std::string>& out);
+
 // --- DomUrlBindings.cpp ------------------------------------------------------------
 void register_url_interfaces();
 

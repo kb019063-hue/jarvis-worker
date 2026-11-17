@@ -3,6 +3,7 @@
 
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -53,6 +54,18 @@ bool parse_index(const std::string& key, size_t& out) {
     return true;
 }
 
+/// `object.own_keys()` with the cross-origin Window/Location rule applied:
+/// when the object is a cross-origin WindowProxy or Location (HTML §7.2.3),
+/// only its exposed keys are reported, in the spec's order — the indices,
+/// then (for reflection that asks for the non-enumerable keys too) the
+/// table names, the names of the child frames and "then". Same-origin or
+/// anything else, the ordinary answer.
+std::vector<std::string> reflected_own_keys(const JsValue& object, bool include_non_enumerable) {
+    std::vector<std::string> keys;
+    if (litebird::dom::cross_origin_own_keys(object, include_non_enumerable, keys)) return keys;
+    return object.own_keys(include_non_enumerable);
+}
+
 /// The table that holds `value`'s own named properties, if it has one.
 PropertyMap* own_table(const JsValue& value, bool create) {
     if (JsObject* cell = value.property_cell(create)) return &cell->properties;
@@ -60,6 +73,83 @@ PropertyMap* own_table(const JsValue& value, bool create) {
 }
 
 JsValue descriptor_for(const JsValue& object, const std::string& key) {
+    {
+        // A cross-origin WindowProxy or Location describes exactly its
+        // exposed keys, each configurable, and nothing else (HTML §7.2.3.5,
+        // §7.2.4.5). Indices are enumerable; everything else is not.
+        //
+        // The shape depends on the entry: an attribute of the table is an
+        // accessor descriptor whose get is a native calling-sequence function
+        // that reads the property (the spec's crossOriginGet), and whose set
+        // exists only when the entry has NeedsSetter (location, href);
+        // a method entry is a data descriptor whose value is the
+        // child's own function (the engine has no caller-realm anonymous
+        // built-in to put there, the properties are otherwise as specified).
+        // `then` and the indices are data descriptors.
+        std::vector<std::string> exposed;
+        if (litebird::dom::cross_origin_own_keys(object, /*include_non_enumerable=*/true, exposed)) {
+            struct CrossOriginEntry { const char* key; bool needs_get; bool needs_set; };
+            static const CrossOriginEntry kWindow[] = {
+                {"window", true, false}, {"self", true, false}, {"location", true, true},
+                {"close", false, false}, {"closed", true, false}, {"focus", false, false},
+                {"blur", false, false}, {"frames", true, false}, {"length", true, false},
+                {"top", true, false}, {"opener", true, false}, {"parent", true, false},
+                {"postMessage", false, false},
+            };
+            static const CrossOriginEntry kLocation[] = {
+                {"href", false, true}, {"replace", false, false},
+            };
+            const bool is_location =
+                std::find(exposed.begin(), exposed.end(), "replace") != exposed.end() &&
+                std::find(exposed.begin(), exposed.end(), "postMessage") == exposed.end();
+            const CrossOriginEntry* table = is_location ? kLocation : kWindow;
+            const size_t table_size = is_location ? sizeof(kLocation) / sizeof(kLocation[0])
+                                                     : sizeof(kWindow) / sizeof(kWindow[0]);
+
+            auto data_wrap = [&](const JsValue& value, bool enumerable) {
+                JsValue d = JsValue::make_object();
+                d.set_property("value", value);
+                d.set_property("writable", JsValue::make_boolean(false));
+                d.set_property("enumerable", JsValue::make_boolean(enumerable));
+                d.set_property("configurable", JsValue::make_boolean(true));
+                return d;
+            };
+            const bool listed =
+                std::find(exposed.begin(), exposed.end(), key) != exposed.end();
+            if (!listed) return JsValue::make_undefined();
+            if (key == "then") return data_wrap(JsValue::make_undefined(), false);
+            size_t index = 0;
+            if (parse_index(key, index)) return data_wrap(object.get_property(key), true);
+            for (size_t i = 0; i < table_size; ++i) {
+                const CrossOriginEntry& entry = table[i];
+                if (key != entry.key) continue;
+                if (!entry.needs_get && !entry.needs_set) {
+                    return data_wrap(object.get_property(key), false);
+                }
+                JsValue d = JsValue::make_object();
+                JsValue get = entry.needs_get
+                    ? js_make_native(("get " + key).c_str(), 0,
+                                     [object, key](Args) { return object.get_property(key); })
+                    : JsValue::make_undefined();
+                const std::string property = key;
+                JsValue set = entry.needs_set
+                    ? js_make_native(("set " + key).c_str(), 1,
+                                     [target = object, property](Args args) mutable -> JsValue {
+                                         target.set_property(
+                                             property,
+                                             args.empty() ? JsValue::make_undefined() : args[0]);
+                                         return JsValue::make_undefined();
+                                     })
+                    : JsValue::make_undefined();
+                d.set_property("get", get);
+                d.set_property("set", set);
+                d.set_property("enumerable", JsValue::make_boolean(false));
+                d.set_property("configurable", JsValue::make_boolean(true));
+                return d;
+            }
+            return JsValue::make_undefined();
+        }
+    }
     // The `prototype` of a constructor function is made on first use, and
     // describing it is a use.
     if (object.type == JsType::Function && key == "prototype") (void)object.get_property(key);
@@ -130,6 +220,17 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
 /// allow the change (`Reflect.defineProperty` reports, the others throw).
 bool define_from_descriptor(JsValue object, const std::string& key, const JsValue& descriptor,
                             bool should_throw = true) {
+    // A cross-origin WindowProxy or Location refuses every definition with a
+    // SecurityError (HTML §7.2.3.6, §7.2.4.6). CrossOriginOwnPropertyKeys
+    // reporting the object as cross-origin is what tells us which case this
+    // is; same-origin ones fall through to the ordinary path.
+    {
+        std::vector<std::string> exposed;
+        if (litebird::dom::cross_origin_own_keys(object, /*include_non_enumerable=*/true, exposed)) {
+            litebird::dom::throw_dom(litebird::dom::current_realm(), "SecurityError",
+                                     "Blocked a frame from defining a property on a cross-origin Window.");
+        }
+    }
     if (!descriptor.is_object_like()) js_throw_type_error("Property description must be an object");
 
     // The descriptor is read first, field by field: reading one can run a
@@ -317,7 +418,7 @@ JsValue structured_clone(const JsValue& value, std::unordered_map<const void*, J
         copy.object_val->klass = cell->klass;
         copy.object_val->internal = cell->internal;
     }
-    for (const auto& key : value.own_keys(cell->klass == ObjectClass::Error)) {
+    for (const auto& key : reflected_own_keys(value, cell->klass == ObjectClass::Error)) {
         copy.set_property(key, structured_clone(value.get_property(key), seen));
     }
     return copy;
@@ -377,27 +478,27 @@ void install_object_builtins(JsIntrinsics& realm) {
 
     js_define_method(object_ctor, "keys", 1, [](Args args) {
         if (js_arg(args, 0).is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
-        return make_string_array(js_arg(args, 0).own_keys());
+        return make_string_array(reflected_own_keys(js_arg(args, 0), false));
     });
     js_define_method(object_ctor, "values", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         if (object.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
         std::vector<JsValue> values;
-        for (const auto& key : object.own_keys()) values.push_back(object.get_property(key));
+        for (const auto& key : reflected_own_keys(object, false)) values.push_back(object.get_property(key));
         return JsValue::make_array(values);
     });
     js_define_method(object_ctor, "entries", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         if (object.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
         std::vector<JsValue> entries;
-        for (const auto& key : object.own_keys()) {
+        for (const auto& key : reflected_own_keys(object, false)) {
             entries.push_back(JsValue::make_array({JsValue::make_string(key), object.get_property(key)}));
         }
         return JsValue::make_array(entries);
     });
     js_define_method(object_ctor, "getOwnPropertyNames", 1, [](Args args) {
         if (js_arg(args, 0).is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
-        return make_string_array(js_arg(args, 0).own_keys(true));
+        return make_string_array(reflected_own_keys(js_arg(args, 0), true));
     });
     js_define_method(object_ctor, "getOwnPropertySymbols", 1, [](Args args) {
         std::vector<JsValue> symbols;
@@ -414,12 +515,21 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (target.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
         for (size_t i = 1; i < args.size(); ++i) {
             if (args[i].is_nullish()) continue;
-            for (const auto& key : args[i].own_keys()) target.set_property(key, args[i].get_property(key));
+            for (const auto& key : reflected_own_keys(args[i], false)) target.set_property(key, args[i].get_property(key));
         }
         return target;
     });
-    js_define_method(object_ctor, "freeze", 1, [](Args args) {
+    /// A cross-origin WindowProxy or Location refuses [[PreventExtensions]]
+    /// (HTML §7.2.3.4, §7.2.4.4); the Object methods report that as a
+    /// TypeError, as ordinary non-configurable failures do.
+    auto refuse_frozen_exotic = [&](const JsValue& object) {
+        std::vector<std::string> exposed;
+        if (litebird::dom::cross_origin_own_keys(object, true, exposed))
+            js_throw_type_error("Cannot change the integrity level of a cross-origin Window or Location.");
+    };
+    js_define_method(object_ctor, "freeze", 1, [&](Args args) {
         const JsValue& object = js_arg(args, 0);
+        refuse_frozen_exotic(object);
         if (JsObject* cell = object.property_cell(object.is_function())) {
             cell->frozen = true;
             cell->sealed = true;
@@ -433,8 +543,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsObject* cell = object.property_cell();
         return JsValue::make_boolean(cell && cell->frozen);
     });
-    js_define_method(object_ctor, "seal", 1, [](Args args) {
+    js_define_method(object_ctor, "seal", 1, [&](Args args) {
         const JsValue& object = js_arg(args, 0);
+        refuse_frozen_exotic(object);
         if (JsObject* cell = object.property_cell(object.is_function())) {
             cell->sealed = true;
             cell->extensible = false;
@@ -447,8 +558,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsObject* cell = object.property_cell();
         return JsValue::make_boolean(cell && (cell->sealed || cell->frozen));
     });
-    js_define_method(object_ctor, "preventExtensions", 1, [](Args args) {
+    js_define_method(object_ctor, "preventExtensions", 1, [&](Args args) {
         const JsValue& object = js_arg(args, 0);
+        refuse_frozen_exotic(object);
         if (JsObject* cell = object.property_cell(object.is_function())) cell->extensible = false;
         return object;
     });
@@ -461,6 +573,12 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "getPrototypeOf", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         if (object.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
+        {
+            // A cross-origin WindowProxy or Location has no prototype (HTML
+            // §7.2.3.1, §7.2.4.1).
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(object, true, exposed)) return JsValue::make_null();
+        }
         const auto& intrinsics = JsIntrinsics::get();
         JsObject* proto = nullptr;
         switch (object.type) {
@@ -477,6 +595,17 @@ void install_object_builtins(JsIntrinsics& realm) {
         const JsValue& proto = js_arg(args, 1);
         if (object.type == JsType::Undefined || object.type == JsType::Null) {
             js_throw_type_error("Object.setPrototypeOf called on null or undefined");
+        }
+        {
+            // A cross-origin WindowProxy or Location has an immutable
+            // prototype (HTML §7.2.3.2, §7.2.4.2): it is never changed here.
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(object, true, exposed)) {
+                if (proto.type != JsType::Null && !proto.is_object_like()) {
+                    js_throw_type_error("Object prototype may only be an Object or null");
+                }
+                js_throw_type_error("Cannot set the prototype of a cross-origin Window or Location.");
+            }
         }
         if (!proto.is_object_like() && proto.type != JsType::Null) {
             js_throw_type_error("Object prototype may only be an Object or null");
@@ -500,7 +629,7 @@ void install_object_builtins(JsIntrinsics& realm) {
         object.object_val->prototype = proto.type == JsType::Null ? nullptr : proto.as_prototype();
         const JsValue& props = js_arg(args, 1);
         if (props.is_object_like()) {
-            for (const auto& key : props.own_keys()) define_from_descriptor(object, key, props.get_property(key));
+            for (const auto& key : reflected_own_keys(props, false)) define_from_descriptor(object, key, props.get_property(key));
         }
         return object;
     });
@@ -513,7 +642,7 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue object = require_object(js_arg(args, 0), "Object.defineProperties");
         const JsValue& props = js_arg(args, 1);
         if (props.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
-        for (const auto& key : props.own_keys()) define_from_descriptor(object, key, props.get_property(key));
+        for (const auto& key : reflected_own_keys(props, false)) define_from_descriptor(object, key, props.get_property(key));
         return object;
     });
     js_define_method(object_ctor, "getOwnPropertyDescriptor", 2, [](Args args) {
@@ -523,7 +652,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "getOwnPropertyDescriptors", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         JsValue result = JsValue::make_object();
-        for (const auto& key : object.own_keys(true)) result.set_property(key, descriptor_for(object, key));
+        for (const auto& key : reflected_own_keys(object, true)) result.set_property(key, descriptor_for(object, key));
         return result;
     });
     js_define_method(object_ctor, "fromEntries", 1, [](Args args) {
@@ -583,10 +712,13 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
             std::vector<JsValue> all = bound_args;
             all.insert(all.end(), call_args.begin(), call_args.end());
-            // `new boundFn()` constructs the target and ignores the bound `this`.
-            if (JsValue::current_is_construct()) return js_construct(target, all);
+            // `new boundFn()` constructs the target and ignores the bound
+            // `this`. Inside, new.target is the target, or whatever function
+            // Reflect.construct or a subclass's super() named instead.
+            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
             return target.call_with_this(bound_this, all);
         });
+        bound.set_forwards_construct();
         double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());
         bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
                               PropertyMap::Configurable);
@@ -674,7 +806,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Reflect ----------------------------------------------------------
     JsValue reflect = JsValue::make_object();
     js_define_method(reflect, "ownKeys", 1, [](Args args) {
-        return make_string_array(require_object(js_arg(args, 0), "Reflect.ownKeys").own_keys(true));
+        return make_string_array(reflected_own_keys(require_object(js_arg(args, 0), "Reflect.ownKeys"), true));
     });
     js_define_method(reflect, "has", 2, [](Args args) {
         return JsValue::make_boolean(require_object(js_arg(args, 0), "Reflect.has")
@@ -693,6 +825,11 @@ void install_object_builtins(JsIntrinsics& realm) {
         return JsValue::make_boolean(target.delete_property(js_to_property_key(js_arg(args, 1))));
     });
     js_define_method(reflect, "setPrototypeOf", 2, [](Args args) {
+        {
+            const JsValue& target = require_object(js_arg(args, 0), "Reflect.setPrototypeOf");
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(target, true, exposed)) return JsValue::make_boolean(false);
+        }
         JsValue object = require_object(js_arg(args, 0), "Reflect.setPrototypeOf");
         const JsValue& proto = js_arg(args, 1);
         if (!proto.is_object_like() && proto.type != JsType::Null) {
@@ -706,7 +843,12 @@ void install_object_builtins(JsIntrinsics& realm) {
         return JsValue::make_boolean(js_set_prototype(cell, target));
     });
     js_define_method(reflect, "getPrototypeOf", 1, [](Args args) {
-        JsObject* proto = require_object(js_arg(args, 0), "Reflect.getPrototypeOf").prototype_object();
+        const JsValue& reflected = require_object(js_arg(args, 0), "Reflect.getPrototypeOf");
+        {
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(reflected, true, exposed)) return JsValue::make_null();
+        }
+        JsObject* proto = reflected.prototype_object();
         return proto ? JsValue::make_object(proto) : JsValue::make_null();
     });
     js_define_method(reflect, "defineProperty", 3, [](Args args) {
@@ -721,8 +863,16 @@ void install_object_builtins(JsIntrinsics& realm) {
         // The third argument is new.target: whose `prototype` the new object
         // gets. Compiled classes are built on it (Babel's `_createSuper`
         // calls `Reflect.construct(Super, arguments, NewTarget)`).
-        return js_construct(js_arg(args, 0), array_like_to_vector(js_arg(args, 1)),
-                            args.size() > 2 ? &args[2] : nullptr);
+        const JsValue target = js_arg(args, 0);
+        const JsValue* new_target = args.size() > 2 ? &args[2] : nullptr;
+        // The list of arguments has to be an object, and it is looked at
+        // only once both functions are known to be constructors.
+        std::vector<JsValue> list;
+        if (js_is_constructor(target) && (!new_target || js_is_constructor(*new_target))) {
+            if (!js_arg(args, 1).is_object_like()) js_throw_type_error("CreateListFromArrayLike called on non-object");
+            list = array_like_to_vector(js_arg(args, 1));
+        }
+        return js_construct(target, list, new_target);      // refuses what is not a constructor, in its own words
     });
     realm.add_global("Reflect", reflect);
 

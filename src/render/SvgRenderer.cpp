@@ -68,84 +68,14 @@ std::string extract_fragment_id(std::string_view ref) {
     return {};
 }
 
-// Parses #RGB, #RGBA, #RRGGBB, #RRGGBBAA, rgb(...), rgba(...), and named colors.
+// Parses any CSS Color 4/5 color (#hex, rgb/rgba, hsl/hsla, hwb, lab/lch,
+// oklab/oklch, color(), color-mix(), relative colors, light-dark(), named colors).
 bool parse_svg_color(std::string_view raw, Color& out) {
-    std::string_view s = trim_wsp(raw);
-    if (s.empty()) return false;
+    return Color::try_parse(raw, out);
+}
 
-    auto hex_nibble = [](char c, uint8_t& val) -> bool {
-        if (c >= '0' && c <= '9') { val = static_cast<uint8_t>(c - '0'); return true; }
-        if (c >= 'a' && c <= 'f') { val = static_cast<uint8_t>(c - 'a' + 10); return true; }
-        if (c >= 'A' && c <= 'F') { val = static_cast<uint8_t>(c - 'A' + 10); return true; }
-        return false;
-    };
-
-    if (s.starts_with("#")) {
-        std::string_view h = s.substr(1);
-        if (h.size() == 3 || h.size() == 4) {
-            uint8_t r = 0, g = 0, b = 0, a = 15;
-            if (!hex_nibble(h[0], r) || !hex_nibble(h[1], g) || !hex_nibble(h[2], b)) return false;
-            if (h.size() == 4 && !hex_nibble(h[3], a)) return false;
-            out = Color(static_cast<uint8_t>(r * 17), static_cast<uint8_t>(g * 17),
-                        static_cast<uint8_t>(b * 17), static_cast<uint8_t>(a * 17));
-            return true;
-        }
-        if (h.size() == 6 || h.size() == 8) {
-            uint8_t vals[8]{};
-            for (size_t i = 0; i < h.size(); ++i) {
-                if (!hex_nibble(h[i], vals[i])) return false;
-            }
-            const uint8_t r = static_cast<uint8_t>((vals[0] << 4) | vals[1]);
-            const uint8_t g = static_cast<uint8_t>((vals[2] << 4) | vals[3]);
-            const uint8_t b = static_cast<uint8_t>((vals[4] << 4) | vals[5]);
-            const uint8_t a = (h.size() == 8) ? static_cast<uint8_t>((vals[6] << 4) | vals[7]) : 255;
-            out = Color(r, g, b, a);
-            return true;
-        }
-        return false;
-    }
-
-    std::string lower = to_lower_ascii(s);
-    if ((lower.starts_with("rgb(") || lower.starts_with("rgba(")) && lower.ends_with(")")) {
-        const size_t open = lower.find('(');
-        std::string inner = lower.substr(open + 1, lower.size() - open - 2);
-        for (char& ch : inner) {
-            if (ch == ',' || ch == '/') ch = ' ';
-        }
-        std::stringstream ss(inner);
-        std::string t0, t1, t2, t3;
-        if (ss >> t0 >> t1 >> t2) {
-            auto parse_chan = [](const std::string& tok) -> uint8_t {
-                bool pct = !tok.empty() && tok.back() == '%';
-                double v = std::strtod(tok.c_str(), nullptr);
-                if (pct) v = v * 2.55;
-                return static_cast<uint8_t>(std::clamp(std::lround(v), 0l, 255l));
-            };
-            uint8_t a = 255;
-            if (ss >> t3) {
-                bool pct = !t3.empty() && t3.back() == '%';
-                double av = std::strtod(t3.c_str(), nullptr);
-                if (pct) av /= 100.0;
-                a = static_cast<uint8_t>(std::clamp(std::lround(av * 255.0), 0l, 255l));
-            }
-            out = Color(parse_chan(t0), parse_chan(t1), parse_chan(t2), a);
-            return true;
-        }
-        return false;
-    }
-
-    if (lower == "transparent") {
-        out = Color(0, 0, 0, 0);
-        return true;
-    }
-    unsigned named = 0;
-    if (Color::named_color_value(lower, named)) {
-        out = Color(static_cast<uint8_t>((named >> 16) & 0xFF),
-                    static_cast<uint8_t>((named >> 8) & 0xFF),
-                    static_cast<uint8_t>(named & 0xFF), 255);
-        return true;
-    }
-    return false;
+bool parse_svg_color(std::string_view raw, Color& out, const Color& current_color) {
+    return Color::try_parse(raw, out, current_color);
 }
 
 bool parse_float_value(std::string_view raw, float& out, float pct_ref = 100.0f) {
@@ -300,7 +230,7 @@ bool parse_url_ref(std::string_view raw, std::string& out_id, std::string_view& 
     return !out_id.empty();
 }
 
-bool parse_paint_server(std::string_view raw, PaintServer& out) {
+bool parse_paint_server(std::string_view raw, PaintServer& out, const Color& current_color) {
     std::string_view s = trim_wsp(raw);
     if (s.empty()) return false;
     std::string lower = to_lower_ascii(s);
@@ -320,7 +250,7 @@ bool parse_paint_server(std::string_view raw, PaintServer& out) {
         out.has_fallback = false;
         if (!rem.empty() && to_lower_ascii(rem) != "none") {
             Color fb;
-            if (parse_svg_color(rem, fb)) {
+            if (parse_svg_color(rem, fb, current_color)) {
                 out.has_fallback = true;
                 out.fallback = fb;
             }
@@ -328,7 +258,7 @@ bool parse_paint_server(std::string_view raw, PaintServer& out) {
         return true;
     }
     Color c;
-    if (parse_svg_color(s, c)) {
+    if (parse_svg_color(s, c, current_color)) {
         out.kind = PaintServer::Kind::Solid;
         out.color = c;
         return true;
@@ -371,11 +301,11 @@ void apply_style_property(SvgStyle& style, std::string_view prop_raw, std::strin
 
     if (prop == "color") {
         Color c;
-        if (parse_svg_color(val, c)) style.color = c;
+        if (parse_svg_color(val, c, style.color)) style.color = c;
     } else if (prop == "fill") {
-        parse_paint_server(val, style.fill);
+        parse_paint_server(val, style.fill, style.color);
     } else if (prop == "stroke") {
-        parse_paint_server(val, style.stroke);
+        parse_paint_server(val, style.stroke, style.color);
     } else if (prop == "stroke-width") {
         float w = 1.0f;
         if (parse_float_value(val, w, ref_size) && w >= 0.0f) style.stroke_width = w;

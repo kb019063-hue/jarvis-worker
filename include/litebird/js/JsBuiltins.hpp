@@ -35,7 +35,17 @@ double js_parse_date_string(const std::string& text);
 // The subject is passed as the string value's own text, so that a pattern
 // applied again and again to one long string (an exec() loop) does not copy
 // or convert the string on every call.
+inline constexpr const char* kSymbolMatchKey    = "@@match";
+inline constexpr const char* kSymbolMatchAllKey = "@@matchAll";
+inline constexpr const char* kSymbolReplaceKey  = "@@replace";
+inline constexpr const char* kSymbolSearchKey   = "@@search";
+inline constexpr const char* kSymbolSplitKey    = "@@split";
+inline constexpr const char* kSymbolSpeciesKey  = "@@species";
+
 bool js_is_regexp(const JsValue& value);
+/// Validates a RegExp pattern and flags at parse time (no JS heap allocation).
+/// Returns true if valid; otherwise writes the SyntaxError reason into `error_out`.
+bool js_regexp_validate(const std::string& pattern, const std::string& flags, std::string& error_out);
 JsValue js_regexp_create(const std::string& pattern, const std::string& flags);
 /// String.prototype.replace / replaceAll with a regular expression.
 JsValue js_regexp_replace(const JsValue& regex, const JsString& subject, const JsValue& replacement);

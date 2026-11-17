@@ -13,11 +13,12 @@ python3 tools/conformance/run_dom_conformance.py --reference   # check the corpu
 python3 tools/conformance/compare_with_jsdom.py page.html script.js   # outside the corpus: where do jsdom and Litebird differ?
 ```
 
-640 cases in 24 files, and Litebird passes all of them. Of the 572 that
+669 cases in 25 files, and Litebird passes all of them. Of the 572 that
 Phase 27 wrote, the engine before it (`main` at `6f08a70`) passes 61; of the
 57 that Phase 28 wrote (`xml.dat`, `xhr.dat`), the engine before it passes
 none; of the 11 that Phase 34 wrote (`interfaces.dat`), the engine before it
-passes none.
+passes none; of the 25 that Phase 43 wrote (`compiled.dat`), the engine
+before it passes 2.
 
 ## Where the expectations come from
 
@@ -96,6 +97,13 @@ leaves the text so that what it writes can be read back.
 | `abort()` while the response is arriving | `readystatechange`, `abort`, `loadend`, and nothing after | One more `progress` |
 | `Object.getPrototypeOf(EventTarget) === Function.prototype`, `HTMLDivElement instanceof Function`, `Object.getPrototypeOf(DOMException) === Function.prototype` | `true`, all three: an interface object is a function of the realm its script runs in | `false`, all three: jsdom's interface objects are made in Node's realm and the script runs in another, so they are functions whose `Function.prototype` is not the script's. `interfaces.dat` asks for `typeof` and for the walk from one interface object to the next, which are the same in both |
 
+Interfaces constructed with a `new.target` (`js_compiled_custom_elements_are_constructed`):
+
+| Point | The standard | jsdom 31 |
+| :--- | :--- | :--- |
+| `Reflect.construct(Event, ['z'], NewTarget)`: how often `NewTarget.prototype` is read | Once, when the object is made (Web IDL) | Twice |
+| The same when `NewTarget.prototype` is not an object | An event with `Event.prototype`: the interface's own prototype is the fallback | Something that is not an event: `instanceof Event` is `false` and `type` is `undefined` |
+
 Do not "fix" a failing case by recording such an answer. If Litebird and jsdom
 disagree, read the standard first.
 
@@ -134,6 +142,7 @@ case that dies early fails because its output is cut short.
 | `document.dat`, `window.dat`, `loading.dat` | The document, the global object, location, history, storage, timers, the load events |
 | `events.dat`, `forms.dat` | Dispatch, the event classes, handlers; form controls, their state, validation and submission |
 | `components.dat` | Custom elements and shadow trees |
+| `compiled.dat` | Custom elements and other interfaces built without `class`: a constructor written for ES5 that gets its element from `Reflect.construct(HTMLElement, [], new.target)`, what Babel emits (`_wrapNativeSuper`, `_createSuper`) two classes deep, a class on top of a compiled constructor, a compiled subclass of a class that extends `HTMLElement`, a customized built-in. Made by `new` and `createElement`, and upgraded where they stand: in the page's markup, from `innerHTML`, by `cloneNode`, by `customElements.upgrade`. The element is given out once: what happens when a constructor asks twice, when a second instance of the class is made while it is being upgraded, and when the interface that asks is not the element's (a customized built-in that asks `HTMLElement`, a class that extends `Event`, and classes that extend `Map`, `Error`, `Array`, `Text` and `DocumentFragment`: the element's object is not made an event, a map or a text node). A constructor that reaches its interface from the body of a generator or of an async function, which run on threads of their own here. `Reflect.construct` of `Event`, `CustomEvent` and `EventTarget` with a `new.target`, and `new.target` in the parent class of a custom element |
 | `interfaces.dat` | The interface objects as functions with prototypes of their own: `Object.getPrototypeOf(HTMLDivElement)` is `HTMLElement`, then `Element`, `Node`, `EventTarget`; the same for events and for nodes that are not elements; constants inherited along the way (`HTMLElement.ELEMENT_NODE`); a class and an ES5 constructor that extend an interface |
 | `errors.dat` | Which exception each misuse throws, and what a page sees of an uncaught one |
 | `xml.dat` | `DOMParser` with the XML types and what it gives when the text is not well formed, namespaces, CDATA sections and processing instructions, `createDocument`, `XMLSerializer`, `innerHTML` in an XML document, which names are names |
@@ -161,7 +170,7 @@ fixed. They are not cases and the runner does not read them:
 | :--- | :--- |
 | `open/inline-style.html`, `.js` | `el.style`: shorthands kept whole, `length` and `item()`, values not rewritten in CSSOM's form. 27 lines, 15 differ; a few of those are jsdom's (it drops the quotes of a font family) |
 | `open/dates-and-svg.html`, `.js` | Date and time inputs, the SVG DOM. 7 lines, all differ. (Until Phase 28 the file was `dates-and-xml` and had three lines more, for `DOMParser` with an XML type; those are cases in `xml.dat` now) |
-| `open/compiled-custom-elements.html`, `.js` | A custom element as Babel 7 compiles `class Greeter extends HTMLElement` for older browsers, the same written by hand with `Reflect.construct(HTMLElement, [], Old)`, and `Reflect.construct` of `Event` and `EventTarget` with a subclass. 9 lines, 5 differ: the constructor is `Illegal constructor`, because `new.target` inside a function is the function that is running and not the class `Reflect.construct` was given (ARCHITECTURE.md, Phase 34, section 9). Before Phase 34, 8 differed |
+| `open/compiled-custom-elements.html`, `.js` | What an upgrade does with the constructor it runs. 5 lines, 4 differ. The standard constructs the definition's constructor the ordinary way and the element gets the class's prototype when `HTMLElement` hands it out; here the element is given the prototype first and is `this`. So in a constructor written as a function `this` is the element, one that never reaches `HTMLElement` is accepted, and after one that throws early the element keeps the class's prototype. The fourth is the selector's: a customized built-in whose upgrade failed still matches `:defined` (ARCHITECTURE.md, Phase 43, section 5). Until Phase 43 the file held a compiled custom element being made and upgraded, 9 lines of which 5 differed; all of that works and is `compiled.dat` now |
 
 ```bash
 python3 tools/conformance/compare_with_jsdom.py tests/dom-conformance/open/inline-style.html tests/dom-conformance/open/inline-style.js

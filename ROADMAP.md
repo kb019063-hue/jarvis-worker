@@ -30,7 +30,7 @@ a row from Open tasks over anything here, take that row.
 ## Where Litebird stands today (the honest baseline)
 
 WPT-grade HTML/DOM/XML parsing for the covered corpora; JavaScript interpreted
-on a tree-walking evaluator (plus a half-finished bytecode VM), 840/845 on its
+on a tree-walking evaluator (plus a half-finished bytecode VM), 974/989 on its
 recorded corpus; layout with an 8×8 bitmap font; a terminal/ANSI renderer;
 `http://` only — no TLS at all; XHR for `data:` URLs only; no typed arrays,
 `Proxy`, BigInt or ES modules; pixels are **unmeasured** by any scoreboard.
@@ -52,9 +52,9 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
-| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, complete RegExp flags (`u`, `v`, `d`), and array-hole semantics. (The recursive matcher of finding 26 was replaced by an iterative heap-stack bytecode VM in Phase 37.) | M |
+| 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, and array-hole semantics. (Iterative heap-stack RegExp bytecode VM landed in Phase 37; complete RegExp flags `d`/`u`/`v`, ES2025 modifiers `(?ims-ims:...)`, duplicate named capturing groups, `RegExp.escape()`, and `Symbol.{match,matchAll,replace,search,split,species}` landed in Phase 55.) | M |
 | 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
-| 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, property escapes, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. | L |
+| 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): full case mapping, `normalize()`, collation, `DateTimeFormat`/`NumberFormat`/`Segmenter`. (Unicode 17.0 RegExp property escapes — General_Category, Binary Properties, Script, Script_Extensions, Properties of Strings — and Unicode/legacy RegExp case folding landed in Phase 55.) | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
 
 ## Wave 3 — Real pages (layout & CSS)
@@ -66,7 +66,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 13 | **Flexbox/Grid gap closure** vs WPT `css/flex` and `css/grid`. | M–L |
 | 14 | **Selectors level 4** — `:has()`, `:focus-visible`, `@container`, CSS nesting, `::part`. (`:is()`, `:where()`, `:not()` selector lists, combinators `>`/`+`/`~`, `@layer`, and `@supports` landed in Phase 37.) | M–L |
 | 15 | **Container queries** — `@container` evaluation inside the cascade. (Media Queries Level 4 range syntax and boolean operators landed in Phase 37.) | S–M |
-| 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. | M |
+| 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. **Done (Phase 50)**: unified `CssColor` engine covering all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, §13.2 OKLCH chroma-reduction gamut mapping, `color-mix()` (1..N args, all hue modifiers, missing-component carry-forward), relative color syntax (`from ...`), `light-dark()` + `color-scheme` inheritance, and CSS Values 4 math (`calc`/`min`/`max`/`clamp`/trig/constants) wired through `StyleResolver`, `DomStyleBindings`, and `SvgRenderer` (`make verify-color`, `make fuzz-color`, 4,860/4,860 upstream WPT `color-computed-*.html`). Open: wide-gamut (>8-bit sRGB) raster buffer, `@color-profile`, `contrast-color()`. | M |
 | 17 | **Table completeness** — `border-collapse` widest-wins (the wider border of a shared edge wins, its colour included; style and positional priorities are not modelled — this engine has a single solid border style — and row borders are not painted), `table-layout: fixed` (the first row decides; later rows cannot resize a column), `caption-side`, `empty-cells` (inherited, separate borders only). **Done.** | S–M |
 | 18 | **Multicol + fragmentation** — columns, `break-inside`. | M–L |
 | 19 | **Scrolling & positioning corners** — `overflow: auto` actually scrolls, `position: sticky` robustness. | M |
@@ -81,6 +81,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. **Decoding done (Phase 47)**: 40 encodings and 228 labels from `whatwg/encoding`, `<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR and subresources (WPT 7,968/8,009 across 103 files, the XML suite 1,718/1,718). Open: `TextDecoder`/`TextEncoder` in script, encoders, and streaming. | M |
 | 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
+| 25a | **Cross-origin `Window`/`Location` reflection** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal. **Done (Phase 56)**. | M |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
 

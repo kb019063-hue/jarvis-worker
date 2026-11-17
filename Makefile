@@ -5,7 +5,8 @@ BUILD_DIR ?= build
 ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
-SRCS = src/dom/Node.cpp \
+SRCS = src/common/Color.cpp \
+       src/dom/Node.cpp \
        src/dom/Selector.cpp \
        src/dom/FormState.cpp \
        src/dom/Document.cpp \
@@ -35,6 +36,7 @@ SRCS = src/dom/Node.cpp \
        src/render/FontRenderer.cpp \
        src/render/JpegDecoder.cpp \
        src/render/GifDecoder.cpp \
+       src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -58,6 +60,7 @@ SRCS = src/dom/Node.cpp \
        src/js/BuiltinsCollections.cpp \
        src/js/BuiltinsJson.cpp \
        src/js/BuiltinsRegExp.cpp \
+       src/js/RegExpUnicodeTables.cpp \
        src/js/BuiltinsDate.cpp \
        src/js/Json.cpp \
        src/js/Promise.cpp \
@@ -97,7 +100,9 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
+CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
+COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -109,7 +114,7 @@ XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 7998
+WPT_FLOOR ?= 9538
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -121,12 +126,13 @@ XML_ASAN_ROUNDTRIP_COUNT ?= 1000
 URL_FLOOR ?= 1188
 # Cases that must pass in the sanitizer build. One below what the sanitizer build
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
-# case that the normal build passes. Combined Phase 37 + Phase 45 scores 925/940
-# under ASan and 926/940 in Release. Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 924
+# case that the normal build passes. With Phases 37, 43, 44, 45, 55, and 59
+# together, 1002 of 1017 pass under ASan and 1003 in Release (which is what
+# the CI floor requires). Leave one case of runner headroom.
+JS_ASAN_FLOOR ?= 1001
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 644
+DOM_ASAN_FLOOR ?= 669
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -135,8 +141,9 @@ STRING_STRESS_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -fno-omit-frame-
 
 # How many results of the string grid may differ from Node's. Every one of them
 # today is Unicode data the engine does not have (collation, normalization,
-# some case mappings, part of \p{L}); lower this as that data arrives.
-STRING_DIFF_CEILING ?= 95
+# some case mappings); lower this as that data arrives. (Phase 55 removed all
+# 24 \p{L} RegExp mismatches, dropping this ceiling from 95 to 71.)
+STRING_DIFF_CEILING ?= 71
 
 # Random pages at the parser's nesting limit, on top of the fixed deep pages:
 # how many `make deep` runs, and how many the sanitizer build runs. The
@@ -145,7 +152,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings diff-trees diff-xml fuzz fuzz-media verify-media deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -168,12 +175,21 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
+$(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/cross_origin_windows.cpp -o $@
+
 $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
 
-test: $(TEST_TARGET)
+$(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
+
+test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
+	@./$(CROSS_ORIGIN_TARGET)
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
@@ -208,7 +224,7 @@ dom-conformance: $(TARGET)
 ## what a change to functions, classes, prototypes or property definition
 ## can move. Downloaded the first time into build/test262, at a pinned
 ## commit; needs the network once. It is not a scoreboard and has no floor
-## (about two thirds pass). It is for the difference between two builds,
+## (about four fifths pass). It is for the difference between two builds,
 ##   python3 tools/conformance/run_test262.py --binary before=PATH --binary now=build/litebird
 ## which lists every test that passes in the first and not in the second,
 ## and fails if there is one. About three minutes for two builds.
@@ -230,11 +246,12 @@ url-conformance: $(TARGET)
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
 
-## The web-platform-tests in tests/wpt (dom/nodes and domparsing), the tests
-## browsers are tested with, run with their own testharness.js. Needs nothing
-## but the binary. Fails when fewer than the floor pass, when a subtest fails
-## that tests/wpt/expected-failures.txt does not list, when a listed one
-## passes, and when a file differs from tests/wpt/MANIFEST.txt.
+## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
+## Flexbox parsing suites), the tests browsers are tested with, run with their
+## own testharness.js. Needs nothing but the binary. Fails when fewer than
+## the floor pass, when a subtest fails that tests/wpt/expected-failures.txt
+## does not list, when a listed one passes, and when a file differs from
+## tests/wpt/MANIFEST.txt.
 wpt: $(TARGET)
 	@$(WPT) --min-pass $(WPT_FLOOR)
 
@@ -252,6 +269,12 @@ diff-xml: $(TARGET)
 ## Needs Node.js; there are no expectations to maintain.
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
+
+## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
+## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,
+## duplicate named capturing groups, and RegExp.escape().
+verify-regexp: $(TARGET)
+	@python3 tools/conformance/verify_regexp.py --binary $(TARGET)
 
 ## Random pages, a few dozen misnested tags each, parsed by Litebird and by
 ## parse5 (an independent HTML parser), trees compared: 1,500 pages of each of
@@ -278,6 +301,7 @@ fuzz:
 	@python3 tools/fuzz/fuzz_pipeline.py
 	@python3 tools/fuzz/fuzz_xml.py
 	@$(MAKE) fuzz-media
+	@$(MAKE) fuzz-color
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -306,6 +330,8 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
@@ -363,12 +389,13 @@ bench-attributes: $(TARGET)
 bench-tokenizer-attributes: $(TARGET)
 	@python3 tools/bench/bench_tokenizer_attributes.py --reps 3 --max-ms 1000
 
-## A string built half a surrogate pair at a time, at two sizes a doubling
-## apart. The character the halves spell starts inside the text already
-## written, so every pair used to copy the whole string: 20,000 pairs took
-## 5.6 s and 40,000 took 23 s (AUDIT.md, finding 47). They now take about 20
-## and 35 ms; the limit is a second, so this fails on a cost that grows with
-## the square of the length and not on a slow runner. Results face Node.js.
+## A string built half a surrogate pair at a time across six cases (including
+## reading, indexOf, and slicing from substring between halves). Under the
+## old UTF-8 storage, writing a surrogate half settled or left a 3-byte UTF-8
+## tail inside the block so every pair copied (5.6 s / 23 s at 20k/40k in
+## Phase 41; 893 ms at 20k when read between halves). Phase 53 stores non-ASCII
+## text in UTF-16 so all six cases complete in place well within the one-second
+## guard. Results face Node.js.
 bench-surrogates: $(TARGET)
 	@python3 tools/bench/bench_strings.py --only surrogate --reps 3 --max-ms 1000
 
@@ -393,9 +420,20 @@ verify-media: $(MEDIA_CHECK_TARGET)
 fuzz-media: $(MEDIA_CHECK_TARGET)
 	@python3 tools/fuzz/fuzz_media.py --binary $(MEDIA_CHECK_TARGET)
 
+## Verifies CSS Color 4/5 space conversions (all 15 spaces against an
+## independent exact-rational Python oracle), §13.2 OKLCH gamut mapping,
+## and upstream WPT CSS Color 4/5 valid/invalid computed vectors.
+verify-color: $(COLOR_CHECK_TARGET)
+	@python3 tools/verify_color.py --binary $(COLOR_CHECK_TARGET)
+
+## Adversarial grammar + mutation fuzzing of the CSS Color 4/5 parser, math
+## evaluator, color-mix(), relative colors, and space conversions.
+fuzz-color: $(COLOR_CHECK_TARGET)
+	@python3 tools/verify_color.py --binary $(COLOR_CHECK_TARGET) --fuzz 5000
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"

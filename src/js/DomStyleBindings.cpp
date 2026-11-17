@@ -21,6 +21,7 @@
 #include "litebird/dom/Selector.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/common/Color.hpp"
+#include "litebird/css/GridGrammar.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -124,6 +125,32 @@ bool is_custom_property(const std::string& name) {
     return name.size() > 2 && name[0] == '-' && name[1] == '-';
 }
 
+// The flexbox properties: the legacy -webkit- names are aliases for the
+// standard properties (css-flexbox §3.1.1), read and written as the
+// standard property.
+const std::unordered_map<std::string, std::string>& webkit_aliases() {
+    static const std::unordered_map<std::string, std::string> s_aliases = {
+        {"-webkit-align-content", "align-content"},
+        {"-webkit-align-items", "align-items"},
+        {"-webkit-align-self", "align-self"},
+        {"-webkit-flex", "flex"},
+        {"-webkit-flex-basis", "flex-basis"},
+        {"-webkit-flex-direction", "flex-direction"},
+        {"-webkit-flex-flow", "flex-flow"},
+        {"-webkit-flex-grow", "flex-grow"},
+        {"-webkit-flex-shrink", "flex-shrink"},
+        {"-webkit-flex-wrap", "flex-wrap"},
+        {"-webkit-justify-content", "justify-content"},
+        {"-webkit-order", "order"},
+    };
+    return s_aliases;
+}
+
+std::string canonicalize_property_name(const std::string& name) {
+    const auto found = webkit_aliases().find(name);
+    return canonical_css_property(found == webkit_aliases().end() ? name : found->second);
+}
+
 bool is_css_property(const std::string& name) {
     return is_custom_property(name) || known_properties().count(name) != 0;
 }
@@ -151,7 +178,7 @@ std::string css_name_for(const std::string& property) {
         }
         if (property.find('-') != std::string::npos) return std::string();
     }
-    dashed = canonical_css_property(dashed);
+    dashed = canonicalize_property_name(dashed);
     return known_properties().count(dashed) ? dashed : std::string();
 }
 
@@ -262,59 +289,7 @@ bool may_be_negative(const std::string& property) {
     return s_never.count(property) == 0;
 }
 
-int hex_digit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-std::string rgb_text(double r, double g, double b, double alpha) {
-    auto channel = [](double value) {
-        return format_number(std::round(std::min(255.0, std::max(0.0, value))));
-    };
-    if (alpha >= 1) return "rgb(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ")";
-    const double rounded = std::round(std::max(0.0, alpha) * 1000) / 1000;
-    return "rgba(" + channel(r) + ", " + channel(g) + ", " + channel(b) + ", " + format_number(rounded) + ")";
-}
-
-// Splits the arguments of a function on commas, whitespace and "/".
-std::vector<std::string> function_arguments(const std::string& inside) {
-    std::vector<std::string> out;
-    std::string current;
-    for (char c : inside) {
-        if (c == ',' || c == '/' || is_ascii_space(c)) {
-            if (!current.empty()) out.push_back(current);
-            current.clear();
-        } else {
-            current += c;
-        }
-    }
-    if (!current.empty()) out.push_back(current);
-    return out;
-}
-
-bool parse_channel(const std::string& text, double scale, double& out) {
-    std::size_t at = 0;
-    double number = 0;
-    if (!parse_css_number(text, at, number)) return false;
-    const std::string unit = text.substr(at);
-    if (unit == "%") out = number / 100 * scale;
-    else if (unit.empty()) out = number;
-    else return false;
-    return true;
-}
-
-double hue_to_channel(double p, double q, double t) {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1.0 / 6) return p + (q - p) * 6 * t;
-    if (t < 1.0 / 2) return q;
-    if (t < 2.0 / 3) return p + (q - p) * (2.0 / 3 - t) * 6;
-    return p;
-}
-
-// A colour, written the way a browser gives it back.
+// A colour, written the way a browser gives it back (CSS Color 4 / 5).
 bool normalize_color(const std::string& text, std::string& out) {
     const std::string lower = ascii_lower(text);
     unsigned named = 0;
@@ -328,65 +303,25 @@ bool normalize_color(const std::string& text, std::string& out) {
         out = text;
         return true;
     }
-    if (!lower.empty() && lower[0] == '#') {
-        const std::string digits = lower.substr(1);
-        for (char c : digits) {
-            if (hex_digit(c) < 0) return false;
-        }
-        double channels[4] = {0, 0, 0, 255};
-        if (digits.size() == 3 || digits.size() == 4) {
-            for (std::size_t i = 0; i < digits.size(); ++i) channels[i] = hex_digit(digits[i]) * 17;
-        } else if (digits.size() == 6 || digits.size() == 8) {
-            for (std::size_t i = 0; i < digits.size() / 2; ++i) {
-                channels[i] = hex_digit(digits[2 * i]) * 16 + hex_digit(digits[2 * i + 1]);
-            }
-        } else {
-            return false;
-        }
-        // Eight bits of alpha are written with two decimals when two are
-        // enough to get the same eight bits back, and with three otherwise:
-        // #11223380 is 0.5, not 0.502.
-        double alpha = 1;
-        if (channels[3] < 255) {
-            const double hundredths = std::round(channels[3] * 100 / 255.0);
-            alpha = std::round(hundredths * 255 / 100.0) == channels[3] ? hundredths / 100
-                                                                         : std::round(channels[3] * 1000 / 255.0) / 1000;
-        }
-        out = rgb_text(channels[0], channels[1], channels[2], alpha);
+    // Deferred light-dark(): validate both branches strictly and preserve
+    // the specified expression so getComputedStyle resolves against color-scheme.
+    if (is_function_value(lower, "light-dark")) {
+        if (!CssColor::is_valid_syntax(text)) return false;
+        out = text;
         return true;
     }
-    const bool is_rgb = is_function_value(lower, "rgb") || is_function_value(lower, "rgba");
-    const bool is_hsl = is_function_value(lower, "hsl") || is_function_value(lower, "hsla");
-    if (!is_rgb && !is_hsl) return false;
-    const auto open = lower.find('(');
-    const auto arguments = function_arguments(lower.substr(open + 1, lower.size() - open - 2));
-    if (arguments.size() != 3 && arguments.size() != 4) return false;
-    double alpha = 1;
-    if (arguments.size() == 4 && !parse_channel(arguments[3], 1, alpha)) return false;
-    if (is_rgb) {
-        double r = 0, g = 0, b = 0;
-        if (!parse_channel(arguments[0], 255, r) || !parse_channel(arguments[1], 255, g) || !parse_channel(arguments[2], 255, b)) {
-            return false;
-        }
-        out = rgb_text(r, g, b, alpha);
+    CssColor parsed;
+    if (CssColor::parse(text, parsed) && !parsed.is_currentcolor) {
+        out = parsed.serialize_computed();
         return true;
     }
-    std::size_t at = 0;
-    double hue = 0, saturation = 0, lightness = 0;
-    if (!parse_css_number(arguments[0], at, hue)) return false;
-    if (!parse_channel(arguments[1], 1, saturation) || !parse_channel(arguments[2], 1, lightness)) return false;
-    if (arguments[1].back() != '%' || arguments[2].back() != '%') return false;
-    hue = std::fmod(std::fmod(hue, 360) + 360, 360) / 360;
-    double r = lightness, g = lightness, b = lightness;
-    if (saturation != 0) {
-        const double q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
-        const double p = 2 * lightness - q;
-        r = hue_to_channel(p, q, hue + 1.0 / 3);
-        g = hue_to_channel(p, q, hue);
-        b = hue_to_channel(p, q, hue - 1.0 / 3);
+    // Valid color-mix() or relative color referencing currentcolor: preserve
+    // the specified expression for computed-value resolution against `color`.
+    if (CssColor::is_valid_syntax(text)) {
+        out = text;
+        return true;
     }
-    out = rgb_text(r * 255, g * 255, b * 255, alpha);
-    return true;
+    return false;
 }
 
 bool one_of(const std::string& value, std::initializer_list<const char*> options) {
@@ -473,6 +408,8 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
         rules["font-style"] = {ValueKind::Keyword, {"normal", "italic", "oblique"}};
         rules["text-transform"] = {ValueKind::Keyword, {"none", "capitalize", "uppercase", "lowercase", "full-width"}};
         rules["opacity"] = {ValueKind::Number, {}};
+        rules["flex-direction"] = {ValueKind::Keyword, {"row", "row-reverse", "column", "column-reverse"}};
+        rules["flex-wrap"] = {ValueKind::Keyword, {"nowrap", "wrap", "wrap-reverse"}};
         rules["flex-grow"] = {ValueKind::Number, {}};
         rules["flex-shrink"] = {ValueKind::Number, {}};
         rules["z-index"] = {ValueKind::Integer, {"auto"}};
@@ -483,6 +420,36 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
         return rules;
     }();
     return s_rules;
+}
+
+// The grid properties have a grammar of their own (include/litebird/css/
+// GridGrammar.hpp): whether the text is one of the values they accept, and
+// how it is written back. False for the properties that are not grid
+// properties; for a grid property, the grammar decides.
+bool grid_property_canonical(const std::string& property, const std::string& value, std::string& out) {
+    if (property == "grid-template-columns" || property == "grid-template-rows") return grid_track_list(value, out);
+    if (property == "grid-auto-columns" || property == "grid-auto-rows") return grid_auto_tracks(value, out);
+    if (property == "grid-template") return grid_template_value(value, out);
+    if (property == "grid-template-areas") return grid_template_areas(value, out);
+    if (property == "grid") return grid_shorthand(value, out);
+    if (property == "grid-auto-flow") return grid_auto_flow(value, out);
+    if (property == "grid-column-start" || property == "grid-column-end" || property == "grid-row-start" ||
+        property == "grid-row-end") {
+        return grid_line_token(value, out);
+    }
+    if (property == "grid-column" || property == "grid-row") return grid_line_pair(value, out);
+    if (property == "grid-area") return grid_area_value(value, out);
+    return false;
+}
+
+bool is_grid_property(const std::string& property) {
+    static const std::unordered_set<std::string> kNames = {
+        "grid-template-columns", "grid-template-rows", "grid-auto-columns", "grid-auto-rows",
+        "grid-template", "grid-template-areas", "grid", "grid-auto-flow",
+        "grid-column-start", "grid-column-end", "grid-row-start", "grid-row-end",
+        "grid-column", "grid-row", "grid-area",
+    };
+    return kNames.count(property) != 0;
 }
 
 std::string canonicalize_css_value(const std::string& property, const std::string& raw) {
@@ -626,6 +593,17 @@ bool normalize_value(const std::string& property, const std::string& text, std::
         return true;
     }
     const std::string lower = ascii_lower(value);
+    if (is_grid_property(property)) {
+        if (is_global_keyword(lower)) {
+            out = lower;
+            return true;
+        }
+        if (is_function_value(lower, "var")) {
+            out = value;
+            return true;
+        }
+        return grid_property_canonical(property, value, out);
+    }
     auto found = property_rules().find(property);
     if (found == property_rules().end()) {
         if (!inline_mode || lower.find("var(") != std::string::npos) {
@@ -680,11 +658,24 @@ bool normalize_value(const std::string& property, const std::string& text, std::
         case ValueKind::Number: {
             std::size_t at = 0;
             double number = 0;
-            if (!parse_css_number(lower, at, number)) return false;
-            const std::string unit = lower.substr(at);
-            if (!unit.empty() && !(unit == "%" && property == "opacity")) return false;
-            out = lower;
-            return true;
+            if (parse_css_number(lower, at, number)) {
+                const std::string unit = lower.substr(at);
+                if (!unit.empty() && !(unit == "%" && property == "opacity")) return false;
+                out = format_number(number);
+                return true;
+            }
+            // A calc() is a number: a static one folds into "calc(<n>)", the
+            // rest is kept as written.
+            if (!litebird::grid_calc_family(lower).empty()) {
+                double stat = 0;
+                if (litebird::grid_static_number(lower, stat)) {
+                    out = "calc(" + litebird::grid_number_text(stat) + ")";
+                } else {
+                    out = lower;
+                }
+                return true;
+            }
+            return false;
         }
         case ValueKind::Integer: {
             std::size_t at = 0;
@@ -766,7 +757,14 @@ bool has_unquoted_comma(const std::string& text) {
 // Shorthands
 // ---------------------------------------------------------------------------
 
-enum class ShorthandKind { FourSides, Side, Border, Background };
+using Parts = std::vector<std::pair<std::string, std::string>>;
+bool decompose(const std::string& name, const std::string& value, Parts& out);
+bool take_apart(const std::string& name, const std::string& value, Parts& out);
+bool covered_by(const std::string& shorthand, const std::string& name);
+std::string put_together(const std::string& name, const std::vector<std::string>& v, bool collapse = true);
+const std::vector<std::string>* parts_of(const std::string& name);
+
+enum class ShorthandKind { FourSides, Side, Border, Background, GridLinePair, GridArea, GridTemplate, Grid, FlexFlow, Flex };
 
 struct Shorthand {
     std::string name;
@@ -802,6 +800,21 @@ const std::vector<Shorthand>& shorthands() {
             table.push_back(entry);
         }
         table.push_back({"background", ShorthandKind::Background, {"background-color"}});
+        // The grid shorthands: the widest covers the narrower ones.
+        Shorthand grid{"grid", ShorthandKind::Grid,
+                       {"grid-template-rows", "grid-template-columns", "grid-template-areas",
+                        "grid-auto-rows", "grid-auto-columns", "grid-auto-flow"}};
+        table.push_back(grid);
+        Shorthand grid_template{"grid-template", ShorthandKind::GridTemplate,
+                                {"grid-template-rows", "grid-template-columns", "grid-template-areas"}};
+        table.push_back(grid_template);
+        Shorthand grid_area{"grid-area", ShorthandKind::GridArea,
+                            {"grid-row-start", "grid-column-start", "grid-row-end", "grid-column-end"}};
+        table.push_back(grid_area);
+        table.push_back({"grid-row", ShorthandKind::GridLinePair, {"grid-row-start", "grid-row-end"}});
+        table.push_back({"grid-column", ShorthandKind::GridLinePair, {"grid-column-start", "grid-column-end"}});
+        table.push_back({"flex", ShorthandKind::Flex, {"flex-grow", "flex-shrink", "flex-basis"}});
+        table.push_back({"flex-flow", ShorthandKind::FlexFlow, {"flex-direction", "flex-wrap"}});
         return table;
     }();
     return s_table;
@@ -967,63 +980,16 @@ bool expand_inline_shorthand(const InlineShorthandDef& def, const std::string& t
     }
 
     if (name == "flex-flow") {
-        if (parts.size() > 2) return false;
-        std::string dir = "row", wrap = "nowrap";
-        bool seen_dir = false, seen_wrap = false;
-        for (const auto& part : parts) {
-            const std::string w = ascii_lower(part);
-            if (!seen_dir && (w == "row" || w == "row-reverse" || w == "column" || w == "column-reverse")) {
-                dir = w;
-                seen_dir = true;
-            } else if (!seen_wrap && (w == "nowrap" || w == "wrap" || w == "wrap-reverse")) {
-                wrap = w;
-                seen_wrap = true;
-            } else {
-                return false;
-            }
-        }
-        out.emplace_back("flex-direction", dir);
-        out.emplace_back("flex-wrap", wrap);
+        Parts decomposed;
+        if (!decompose(name, trim(text), decomposed)) return false;
+        out = std::move(decomposed);
         return true;
     }
 
     if (name == "flex") {
-        if (parts.size() > 3) return false;
-        std::string grow, shrink, basis;
-        if (parts.size() == 1 && lower == "none") {
-            grow = "0";
-            shrink = "0";
-            basis = "auto";
-        } else if (parts.size() == 1 && lower == "auto") {
-            grow = "1";
-            shrink = "1";
-            basis = "auto";
-        } else {
-            for (const auto& part : parts) {
-                std::size_t at = 0;
-                double num = 0;
-                const std::string pl = ascii_lower(part);
-                if (parse_css_number(pl, at, num) && at == pl.size()) {
-                    if (num < 0) return false;
-                    if (grow.empty()) grow = format_number(num);
-                    else if (shrink.empty()) shrink = format_number(num);
-                    else if (basis.empty() && num == 0) basis = "0px";
-                    else return false;
-                } else if (basis.empty()) {
-                    std::string norm;
-                    if (!normalize_value("flex-basis", part, norm, true)) return false;
-                    basis = norm;
-                } else {
-                    return false;
-                }
-            }
-            if (grow.empty()) grow = "1";
-            if (shrink.empty()) shrink = "1";
-            if (basis.empty()) basis = "0%";
-        }
-        out.emplace_back("flex-grow", grow);
-        out.emplace_back("flex-shrink", shrink);
-        out.emplace_back("flex-basis", basis);
+        Parts decomposed;
+        if (!decompose(name, trim(text), decomposed)) return false;
+        out = std::move(decomposed);
         return true;
     }
 
@@ -1320,6 +1286,13 @@ public:
             else if (e->important != first_imp) return std::string();
             values.push_back(e->value);
         }
+        // A shorthand whose longhands all carry the same CSS-wide keyword is
+        // written as that keyword (like put_together does).
+        if (std::all_of(values.begin(), values.end(),
+                        [&](const std::string& part) { return part == values.front(); }) &&
+            is_global_keyword(ascii_lower(values.front()))) {
+            return values.front();
+        }
         const std::string& name = def.name;
         if (name == "margin" || name == "padding" || name == "border-width" || name == "border-style" ||
             name == "border-color" || name == "inset" || name == "border-radius") {
@@ -1367,6 +1340,10 @@ public:
             return values[0] + " " + values[1] + " " + values[2];
         }
         if (name == "flex-flow") {
+            // The shortest serialization that round-trips: nowrap is the
+            // initial wrap, row the initial direction.
+            if (values[1] == "nowrap") return values[0];
+            if (values[0] == "row") return values[1];
             return values[0] + " " + values[1];
         }
         if (name == "font") {
@@ -1445,6 +1422,41 @@ public:
                 if (const Entry* pending = find(name)) return pending->value;
                 return serialize_inline(*def, *this);
             }
+            if (!parts_of(name) && !find_shorthand(name)) {
+                const Entry* entry = find(name);
+                return entry ? entry->value : std::string();
+            }
+            // Otherwise: assemble from the longhands like the non-inline
+            // case does (the shorthand machinery wrote them).
+        }
+        // A declaration whose var() the grammar could not look through is
+        // kept whole under the shorthand's name: no longhands exist, and the
+        // declaration reads back as written.
+        if (const Shorthand* shorthand = find_shorthand(name)) {
+            if (const Entry* marker = find(name)) {
+                bool any_longhand = false;
+                for (const auto& longhand : shorthand->longhands) {
+                    if (find(longhand)) { any_longhand = true; break; }
+                }
+                if (!any_longhand) return marker->value;
+            }
+        }
+        if (const std::vector<std::string>* parts = parts_of(name)) {
+            std::vector<std::string> values;
+            values.reserve(parts->size());
+            bool all_known = true;
+            for (const auto& longhand : *parts) {
+                const Entry* entry = find(longhand);
+                if (!entry || entry->value.empty()) {
+                    all_known = false;
+                    break;
+                }
+                values.push_back(entry->value);
+            }
+            if (all_known) {
+                const std::string assembled = put_together(name, values);
+                if (!assembled.empty()) return assembled;
+            }
             const Entry* entry = find(name);
             return entry ? entry->value : std::string();
         }
@@ -1465,6 +1477,97 @@ public:
             values.push_back(entry->value);
         }
         switch (shorthand->kind) {
+            case ShorthandKind::GridLinePair: {
+                const std::string& start = values[0];
+                const std::string& end = values[1];
+                if (start.empty()) return std::string();
+                if (end == litebird::grid_recoverable_end(start)) return start;
+                return start + " / " + end;
+            }
+            case ShorthandKind::GridArea: {
+                std::vector<std::string> lines = {values[0], values[1], values[2], values[3]};
+                for (const auto& line : lines) {
+                    if (line.empty()) return std::string();
+                }
+                if (lines[3] == litebird::grid_recoverable_end(lines[1])) lines.resize(3);
+                if (lines.size() == 3 && lines[2] == litebird::grid_recoverable_end(lines[0])) lines.resize(2);
+                if (lines.size() == 2 && lines[1] == litebird::grid_recoverable_end(lines[0])) lines.resize(1);
+                std::string out = lines[0];
+                for (std::size_t i = 1; i < lines.size(); ++i) out += " / " + lines[i];
+                return out;
+            }
+            case ShorthandKind::GridTemplate: {
+                const std::string& rows = values[0];
+                const std::string& cols = values[1];
+                const std::string& areas = values[2];
+                const auto global = [](const std::string& v) {
+                    const std::string lower = ascii_lower(v);
+                    return lower == "inherit" || lower == "initial" || lower == "unset" || lower == "revert" ||
+                           lower == "revert-layer";
+                };
+                if (global(rows) || global(cols) || global(areas)) return std::string();
+                if (areas == "none") {
+                    if (rows == "none" && cols == "none") return "none";
+                    return rows + " / " + cols;
+                }
+                std::string composed;
+                if (!litebird::grid_template_from_longhands(rows, cols, areas, composed)) return std::string();
+                return composed;
+            }
+            case ShorthandKind::Grid: {
+                // Serializes whenever the longhands stand for a value the
+                // shorthand can round-trip; representability is what licenses
+                // it, not whether the shorthand was declared.
+                const std::string& rows = values[0];
+                const std::string& cols = values[1];
+                const std::string& areas = values[2];
+                const std::string& auto_rows = values[3];
+                const std::string& auto_cols = values[4];
+                const std::string& auto_flow = values[5];
+                const auto global = [](const std::string& v) {
+                    const std::string lower = ascii_lower(v);
+                    return lower == "inherit" || lower == "initial" || lower == "unset" || lower == "revert" ||
+                           lower == "revert-layer";
+                };
+                if (global(rows) || global(cols) || global(areas) || global(auto_rows) || global(auto_cols) ||
+                    global(auto_flow)) {
+                    return std::string();
+                }
+                const bool dense = auto_flow == "dense" || auto_flow == "column dense";
+                if (auto_flow == "row" && auto_rows == "auto" && auto_cols == "auto") {
+                    // The <grid-template> form round-trips: an auto-flow grid
+                    // with initial implicit-track sizes is rewritten to the
+                    // equivalent template.
+                    if (areas == "none") {
+                        if (rows == "none" && cols == "none") return "none"; // everything at its initial value
+                        return rows + " / " + cols;
+                    }
+                    std::string composed;
+                    if (!litebird::grid_template_from_longhands(rows, cols, areas, composed)) return std::string();
+                    return composed;
+                }
+                // The auto-flow forms cannot express an areas declaration.
+                if (areas != "none") return std::string();
+                if (auto_flow == "row" || auto_flow == "dense") {
+                    // [ auto-flow && dense? ] <grid-auto-rows>? / <grid-template-columns>
+                    if (rows == "none" && auto_cols == "auto") {
+                        std::string side = dense ? "auto-flow dense" : "auto-flow";
+                        if (auto_rows != "auto") side += ' ' + auto_rows;
+                        return side + " / " + cols;
+                    }
+                    return std::string();
+                }
+                if (auto_flow == "column" || auto_flow == "column dense") {
+                    // <grid-template-rows> / [ auto-flow && dense? ] <grid-auto-columns>?
+                    if (cols == "none" && auto_rows == "auto") {
+                        std::string side = dense ? "auto-flow dense" : "auto-flow";
+                        if (auto_cols != "auto") side += ' ' + auto_cols;
+                        return rows + " / " + side;
+                    }
+                    return std::string();
+                }
+                return std::string();
+            }
             case ShorthandKind::FourSides:
                 return four_sides(values[0], values[1], values[2], values[3]);
             case ShorthandKind::Side:
@@ -1478,6 +1581,10 @@ public:
                 }
                 return join_parts({values[0], values[4], values[8]});
             }
+            case ShorthandKind::FlexFlow:
+            case ShorthandKind::Flex:
+                // Not reachable: the parts_of() branch above returns first.
+                break;
             case ShorthandKind::Background:
                 break;
         }
@@ -1531,19 +1638,20 @@ public:
                 for (const auto& [lh, val] : expanded) store(lh, val, important, false);
                 return true;
             }
-            std::string value;
-            if (!normalize_value(name, text, value, true)) return false;
-            entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
-                const InlineShorthandDef* def = find_inline_shorthand(e.name);
-                return def != nullptr && inline_covers(*def, name);
-            }), entries.end());
-            store(name, value, important, false);
-            return true;
         }
         if (const Shorthand* shorthand = find_shorthand(name)) {
             std::vector<std::string> values;
             std::string raw;
-            if (!expand(*shorthand, text, values, raw)) return false;
+            bool understood = expand(*shorthand, text, values, raw);
+            bool kept_whole = false;
+            if (!understood) {
+                // A var() the grammar cannot look through is kept as it came,
+                // like any longhand with a var() in it; its longhands are not
+                // known. Everything else is invalid.
+                if (ascii_lower(trim(text)).find("var(") == std::string::npos) return false;
+                raw = trim(text);
+                kept_whole = true;
+            }
             const bool covered = covered_by_listed(*shorthand);
             if (!covered) {
                 // What this shorthand stands for is no longer listed on its own.
@@ -1564,13 +1672,41 @@ public:
                     return other && is_part_of(*other, *shorthand);
                 }), entries.end());
             }
-            for (std::size_t i = 0; i < shorthand->longhands.size(); ++i) {
-                store(shorthand->longhands[i], values[i], important, true);
+            if (!kept_whole) {
+                for (std::size_t i = 0; i < shorthand->longhands.size(); ++i) {
+                    store(shorthand->longhands[i], values[i], important, true);
+                }
+                // The listed entry stands for the longhands: give it the
+                // assembled (canonical) text, falling back to the
+                // canonicalizer on the declaration as written, so reads of
+                // the shorthand and the attribute text agree.
+                std::string assembled = get(name, inline_mode);
+                if (assembled.empty()) {
+                    std::string canonical;
+                    if (grid_property_canonical(name, trim(text), canonical)) assembled = canonical;
+                }
+                if (assembled.empty()) assembled = trim(text);
+                if (Entry* marker = find(name)) marker->value = assembled;
             }
             return true;
         }
+        const std::string trimmed = trim(text);
+        if (parts_of(name)) {
+            Parts decomposed;
+            const bool understood = take_apart(name, trimmed, decomposed);
+            const bool kept_whole = !understood && ascii_lower(trimmed).find("var(") != std::string::npos;
+            if (!understood && !kept_whole) return false;
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                         [&](const Entry& kept) {
+                                             return kept.name == name || covered_by(name, kept.name);
+                                         }),
+                          entries.end());
+            entries.push_back({name, trimmed, important, false});
+            for (const auto& [longhand, value] : decomposed) store(longhand, value, important, true);
+            return true;
+        }
         std::string value;
-        if (!normalize_value(name, text, value)) return false;
+        if (!normalize_value(name, text, value, inline_mode)) return false;
         bool covered = false;
         for (const auto& shorthand : shorthands()) {
             if (covers(shorthand, name) && find(shorthand.name)) {
@@ -1578,12 +1714,63 @@ public:
                 if (shorthand.kind == ShorthandKind::Background) find(shorthand.name)->value = value;
             }
         }
+        if (inline_mode) {
+            // A longhand written on its own no longer stands for the inline
+            // shorthand that covered it.
+            entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
+                const InlineShorthandDef* def = find_inline_shorthand(e.name);
+                return def != nullptr && inline_covers(*def, name);
+            }), entries.end());
+        }
         store(name, value, important, covered);
         return true;
     }
 
+    // A listed shorthand whose longhands are no longer all there cannot be
+    // written as one value any more: it is unfolded into the longhands that
+    // remain, which become listed themselves. A marker with no longhands at
+    // all is kept: it stands for a declaration the grammar kept whole (a var()).
+    void unfold_dead_shorthands() {
+        const std::vector<Shorthand> table = shorthands();
+        for (std::size_t i = 0; i < entries.size();) {
+            const std::string listed_name = entries[i].name;
+            const Shorthand* shorthand = nullptr;
+            for (const auto& candidate : table) {
+                if (candidate.name == listed_name) { shorthand = &candidate; break; }
+            }
+            if (!shorthand) { ++i; continue; }
+            std::size_t present = 0;
+            for (const auto& longhand : shorthand->longhands) {
+                if (find(longhand)) ++present;
+            }
+            if (present == shorthand->longhands.size() || present == 0) { ++i; continue; }
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                         [&](const Entry& e) { return e.name == listed_name; }),
+                          entries.end());
+        }
+        for (auto& other : entries) {
+            for (const auto& candidate : table) {
+                if (covers(candidate, other.name)) {
+                    const Entry* marker = find(candidate.name);
+                    if (!marker) {
+                        // The listed shorthand is gone; the parts it covered are listed themselves.
+                        for (auto& candidate2 : entries) {
+                            if (covers(candidate, candidate2.name)) candidate2.implicit = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Removes a property; returns the value it had.
     std::string remove(const std::string& name, bool inline_mode = false) {
+        const std::string old = remove_impl(name, inline_mode);
+        unfold_dead_shorthands();
+        return old;
+    }
+
+    std::string remove_impl(const std::string& name, bool inline_mode = false) {
         const std::string old = get(name, inline_mode);
         if (inline_mode) {
             if (const InlineShorthandDef* def = find_inline_shorthand(name)) {
@@ -1592,9 +1779,19 @@ public:
                 }), entries.end());
                 return old;
             }
-            entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& e) {
-                return e.name == name;
-            }), entries.end());
+            // Otherwise: the shared longhand bookkeeping below (removing one
+            // part of a listed shorthand un-marks the rest).
+        }
+        if (const std::vector<std::string>* parts = parts_of(name)) {
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                         [&](const Entry& entry) {
+                                             if (entry.name == name) return true;
+                                             for (const auto& longhand : *parts) {
+                                                 if (entry.name == longhand) return true;
+                                             }
+                                             return false;
+                                         }),
+                          entries.end());
             return old;
         }
         if (const Shorthand* shorthand = find_shorthand(name)) {
@@ -1634,6 +1831,32 @@ public:
         };
         if (inline_mode) {
             std::unordered_set<std::string> emitted;
+            // CSSOM serialization prints the shortest form the declaration
+            // can be expressed in: the six grid longhands are one `grid`
+            // whenever they are all present and the value round-trips. (The
+            // `grid` marker exists while the shorthand stands; this is for
+            // the unfolded form left when a part of it was removed and set
+            // again.)
+            if (!find("grid")) {
+                static const char* const kGridLonghands[] = {"grid-template-rows", "grid-template-columns",
+                                                             "grid-template-areas", "grid-auto-rows",
+                                                             "grid-auto-columns", "grid-auto-flow"};
+                bool all_present = true;
+                bool important = false;
+                for (const char* longhand : kGridLonghands) {
+                    const Entry* part = find(longhand);
+                    if (!part) { all_present = false; break; }
+                    important = important || part->important;
+                }
+                if (all_present) {
+                    const std::string assembled = get("grid", /*inline_mode=*/true);
+                    if (!assembled.empty()) {
+                        write("grid", assembled, important);
+                        for (const char* longhand : kGridLonghands) emitted.insert(longhand);
+                        emitted.insert("grid-template"); // the nested marker stands for the same tracks
+                    }
+                }
+            }
             for (const auto& entry : entries) {
                 if (entry.implicit || emitted.count(entry.name)) continue;
                 bool collapsed = false;
@@ -1652,7 +1875,10 @@ public:
                     break;
                 }
                 if (!collapsed) {
-                    write(entry.name, entry.value, entry.important);
+                    const Shorthand* shorthand = find_shorthand(entry.name);
+                    std::string value = shorthand ? get(entry.name) : entry.value;
+                    if (value.empty()) value = entry.value;
+                    write(entry.name, value, entry.important);
                     emitted.insert(entry.name);
                 }
             }
@@ -1668,6 +1894,17 @@ public:
             const std::string value = get(entry.name);
             if (!value.empty()) {
                 write(entry.name, value, entry.important);
+                continue;
+            }
+            if (entry.name == "grid") {
+                // The grid shorthand no longer serializes: try the nested
+                // grid-template shorthand for the track part, then the rest.
+                const std::string template_value = get("grid-template");
+                if (!template_value.empty()) write("grid-template", template_value, entry.important);
+                for (const char* longhand : {"grid-auto-rows", "grid-auto-columns", "grid-auto-flow"}) {
+                    const Entry* part = find(longhand);
+                    if (part && !part->value.empty()) write(longhand, part->value, part->important);
+                }
                 continue;
             }
             // The parts no longer fit one value: they are written out.
@@ -1726,6 +1963,22 @@ private:
         entries.push_back({name, value, important, implicit});
     }
 
+    // Splits "a / b / c" into its lines (the lines never contain "/").
+    static std::vector<std::string> split_slashes(const std::string& text) {
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t slash = text.find(" / ", start);
+            if (slash == std::string::npos) {
+                parts.push_back(trim(text.substr(start)));
+                break;
+            }
+            parts.push_back(trim(text.substr(start, slash - start)));
+            start = slash + 3;
+        }
+        return parts;
+    }
+
     // The values of a shorthand's longhands, in the order of its table entry.
     static bool expand(const Shorthand& shorthand, const std::string& text, std::vector<std::string>& values,
                        std::string& raw) {
@@ -1772,6 +2025,79 @@ private:
                 }
                 return true;
             }
+            case ShorthandKind::FlexFlow: {
+                Parts decomposed;
+                if (!decompose("flex-flow", value, decomposed)) return false;
+                values.clear();
+                for (const char* longhand : {"flex-direction", "flex-wrap"}) {
+                    for (const auto& [name, part] : decomposed) {
+                        if (name == longhand) values.push_back(part);
+                    }
+                }
+                return values.size() == 2;
+            }
+            case ShorthandKind::Flex: {
+                Parts decomposed;
+                if (!decompose("flex", value, decomposed)) return false;
+                values.clear();
+                for (const char* longhand : {"flex-grow", "flex-shrink", "flex-basis"}) {
+                    for (const auto& [name, part] : decomposed) {
+                        if (name == longhand) values.push_back(part);
+                    }
+                }
+                return values.size() == 3;
+            }
+            case ShorthandKind::GridLinePair: {
+                std::string canonical;
+                if (!litebird::grid_line_pair(value, canonical)) return false;
+                const std::vector<std::string> lines = split_slashes(canonical);
+                const std::string first = lines[0];
+                const std::string second = lines.size() == 2 ? lines[1] : litebird::grid_recoverable_end(first);
+                values = {first, second};
+                return true;
+            }
+            case ShorthandKind::GridArea: {
+                std::string canonical;
+                if (!litebird::grid_area_value(value, canonical)) return false;
+                const std::vector<std::string> lines = split_slashes(canonical);
+                const std::size_t n = lines.size();
+                std::string rs = lines[0];
+                std::string cs, re, ce;
+                if (n == 1) {
+                    cs = litebird::grid_recoverable_end(rs);
+                    re = litebird::grid_recoverable_end(rs);
+                    ce = litebird::grid_recoverable_end(rs);
+                } else if (n == 2) {
+                    cs = lines[1];
+                    re = litebird::grid_recoverable_end(rs);
+                    ce = litebird::grid_recoverable_end(cs);
+                } else if (n == 3) {
+                    cs = lines[1];
+                    re = lines[2];
+                    ce = litebird::grid_recoverable_end(cs);
+                } else {
+                    cs = lines[1];
+                    re = lines[2];
+                    ce = lines[3];
+                }
+                values = {rs, cs, re, ce}; // row-start, column-start, row-end, column-end
+                return true;
+            }
+            case ShorthandKind::GridTemplate: {
+                std::string rows, columns, areas;
+                if (!litebird::grid_template_longhands(value, rows, columns, areas)) return false;
+                values = {rows, columns, areas};
+                return true;
+            }
+            case ShorthandKind::Grid: {
+                std::string rows, columns, areas, auto_rows, auto_columns, auto_flow;
+                if (!litebird::grid_shorthand_longhands(value, rows, columns, areas, auto_rows, auto_columns,
+                                                        auto_flow)) {
+                    return false;
+                }
+                values = {rows, columns, areas, auto_rows, auto_columns, auto_flow};
+                return true;
+            }
             case ShorthandKind::Background: {
                 raw = value;
                 std::string color;
@@ -1809,9 +2135,7 @@ std::vector<RawDeclaration> parse_declarations(const std::string& text) {
             RawDeclaration declaration;
             declaration.name = trim(current.substr(0, colon));
             declaration.value = trim(current.substr(colon + 1));
-            if (!is_custom_property(declaration.name)) {
-                declaration.name = canonical_css_property(ascii_lower(declaration.name));
-            }
+            if (!is_custom_property(declaration.name)) declaration.name = canonicalize_property_name(ascii_lower(declaration.name));
             // "!important", in any case, with or without space after the "!".
             const auto bang = declaration.value.rfind('!');
             if (bang != std::string::npos && ascii_lower(trim(declaration.value.substr(bang + 1))) == "important") {
@@ -2176,8 +2500,6 @@ textarea { white-space: pre-wrap }
 // are the others a script reads the parts of: `overflow: hidden` must answer
 // for `overflowY`, `font: 12px/1.5 Arial` for `fontSize`.
 
-using Parts = std::vector<std::pair<std::string, std::string>>;
-
 const std::vector<std::string>* parts_of(const std::string& name) {
     static const std::unordered_map<std::string, std::vector<std::string>> s_parts = {
         {"overflow", {"overflow-x", "overflow-y"}},
@@ -2210,7 +2532,64 @@ bool starts_like_a_number(const std::string& text) {
 // The longhands a shorthand declaration stands for. False when the value is
 // not understood (a var(), a system font): the declaration is then kept
 // under its own name and its longhands are not known (see covered_by).
-bool take_apart(const std::string& name, const std::string& value, Parts& out) {
+// Walks a calc() text looking for a unit token (a number immediately
+// followed by a unit) or a percentage. False for number-typed expressions.
+bool calc_has_unit(const std::string& text) {
+    const std::size_t n = text.size();
+    for (std::size_t i = 0; i < n;) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (!std::isdigit(c) && c != '.') {
+            ++i;
+            continue;
+        }
+        std::size_t j = i;
+        while (j < n && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
+        if (j < n && text[j] == '.') {
+            ++j;
+            while (j < n && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
+        }
+        if (j < n && (text[j] == 'e' || text[j] == 'E')) {
+            std::size_t e = j + 1;
+            if (e < n && (text[e] == '+' || text[e] == '-')) ++e;
+            std::size_t digits = 0;
+            while (e < n && std::isdigit(static_cast<unsigned char>(text[e]))) {
+                ++e;
+                ++digits;
+            }
+            if (digits != 0) j = e;
+        }
+        const std::size_t unit_start = j;
+        while (j < n && (std::isalpha(static_cast<unsigned char>(text[j])) || text[j] == '%')) ++j;
+        if (j > unit_start) {
+            const std::string unit = ascii_lower(text.substr(unit_start, j - unit_start));
+            if (unit == "%" || litebird::grid_length_unit(unit)) return true;
+        }
+        i = j > i ? j : i + 1;
+    }
+    return false;
+}
+
+// A number word for flex-grow or flex-shrink: a plain number, or a calc()
+// (a static calc() folds into "calc(<number>)"; anything else is kept as
+// written, unless it carries units, in which case it is a length and not a
+// number).
+bool flex_number(const std::string& part, std::string& word) {
+    if (is_plain_number(part)) {
+        word = part;
+        return true;
+    }
+    if (litebird::grid_calc_family(part).empty()) return false;
+    double stat = 0;
+    if (litebird::grid_static_number(part, stat)) {
+        word = "calc(" + litebird::grid_number_text(stat) + ")";
+        return true;
+    }
+    if (calc_has_unit(part)) return false;
+    word = litebird::grid_normalize_function(part);
+    return true;
+}
+
+bool decompose(const std::string& name, const std::string& value, Parts& out) {
     const std::vector<std::string>* longhands = parts_of(name);
     if (!longhands) return false;
     const std::string lower = ascii_lower(trim(value));
@@ -2243,15 +2622,17 @@ bool take_apart(const std::string& name, const std::string& value, Parts& out) {
         return true;
     }
     if (name == "flex-flow") {
-        std::string direction = "row", wrap = "nowrap";
+        std::string direction, wrap;
         for (const auto& part : parts) {
             const std::string word = ascii_lower(part);
-            if (word == "row" || word == "row-reverse" || word == "column" || word == "column-reverse") direction = word;
-            else if (word == "nowrap" || word == "wrap" || word == "wrap-reverse") wrap = word;
+            const bool is_direction = word == "row" || word == "row-reverse" || word == "column" || word == "column-reverse";
+            const bool is_wrap = word == "nowrap" || word == "wrap" || word == "wrap-reverse";
+            if (is_direction && direction.empty()) direction = word;
+            else if (is_wrap && wrap.empty()) wrap = word;
             else return false;
         }
-        out.emplace_back("flex-direction", direction);
-        out.emplace_back("flex-wrap", wrap);
+        out.emplace_back("flex-direction", direction.empty() ? "row" : direction);
+        out.emplace_back("flex-wrap", wrap.empty() ? "nowrap" : wrap);
         return true;
     }
     if (name == "flex") {
@@ -2262,10 +2643,40 @@ bool take_apart(const std::string& name, const std::string& value, Parts& out) {
             basis = "auto";
         } else {
             for (const auto& part : parts) {
-                if (is_plain_number(part) && grow.empty()) grow = part;
-                else if (is_plain_number(part) && shrink.empty()) shrink = part;
-                else if (basis.empty()) basis = is_plain_number(part) ? part + "px" : part;
-                else return false;
+                if (ascii_lower(part) == "none") return false; // "none" stands alone or not at all
+                std::string number_word;
+                const bool is_number = flex_number(part, number_word);
+                if (is_number && grow.empty()) {
+                    grow = number_word;
+                    continue;
+                }
+                if (is_number && shrink.empty()) {
+                    shrink = number_word;
+                    continue;
+                }
+                if (basis.empty()) {
+                    if (is_number) {
+                        // Three numbers: the last one would be a unitless
+                        // basis, where only a literal zero is a length.
+                        if (!is_plain_number(part)) return false;
+                        double literal = 0;
+                        std::size_t at = 0;
+                        parse_css_number(part, at, literal);
+                        if (literal != 0) return false;
+                        basis = "0px";
+                        continue;
+                    }
+                    if (!litebird::grid_calc_family(part).empty()) {
+                        double stat = 0;
+                        if (litebird::grid_static_number(part, stat)) return false; // a number, not a <length-percentage>
+                        if (!calc_has_unit(part)) return false; // number-typed, not a <length-percentage>
+                        basis = litebird::grid_normalize_function(part);
+                        continue;
+                    }
+                    basis = part; // auto, content, a length, a percentage, a non-static calc(...)
+                    continue;
+                }
+                return false;
             }
             // `flex: 30px` grows and shrinks; `flex: 2` has no basis to keep.
             if (grow.empty()) grow = "1";
@@ -2375,11 +2786,29 @@ bool take_apart(const std::string& name, const std::string& value, Parts& out) {
     return true;
 }
 
+// take_apart is decompose minus the properties the shorthand table takes
+// care of (the table path is what inline style goes through).
+bool take_apart(const std::string& name, const std::string& value, Parts& out) {
+    if (find_shorthand(name)) return false;
+    return decompose(name, value, out);
+}
+
 // The value of a shorthand, from the computed values of its parts in the
 // order parts_of() has them. "" when one of them is not known.
-std::string put_together(const std::string& name, const std::vector<std::string>& v) {
+std::string put_together(const std::string& name, const std::vector<std::string>& v, bool collapse) {
     for (const auto& part : v) {
         if (part.empty()) return std::string();
+    }
+    if (std::all_of(v.begin(), v.end(), [&](const std::string& part) { return part == v.front(); }) &&
+        is_global_keyword(ascii_lower(v.front()))) {
+        return v.front();
+    }
+    if (collapse && name == "flex-flow") {
+        // The shortest serialization that round-trips: nowrap is the
+        // initial wrap, row the initial direction.
+        if (v[1] == "nowrap") return v[0];
+        if (v[0] == "row") return v[1];
+        return v[0] + " " + v[1];
     }
     if (name == "overflow" || name == "gap") return v[0] == v[1] ? v[0] : v[0] + " " + v[1];
     if (name == "inset" || name == "border-radius") {
@@ -2521,7 +2950,7 @@ void compute_block(Realm& realm, const Element& element, Block& block, const Nod
         }
         if (!block.set(declaration.name, declaration.value, declaration.important)) continue;
         block.entries.erase(std::remove_if(block.entries.begin(), block.entries.end(),
-                                           [&](const Entry& kept) { return covered_by(declaration.name, kept.name); }),
+                                           [&](const Entry& kept) { return !kept.implicit && covered_by(declaration.name, kept.name); }),
                             block.entries.end());
     }
 }
@@ -2809,17 +3238,105 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
                      const std::string& name, const std::string& value, int depth) {
     if (is_custom_property(name)) return value;
     const std::string lower = ascii_lower(value);
+    // A flex grow or shrink factor computes to a plain number. A negative
+    // one clamps to zero, like any number whose grammar has a zero floor
+    // (CSS Values §10.4.1).
+    if (name == "flex-grow" || name == "flex-shrink") {
+        std::size_t at = 0;
+        double number = 0;
+        if (parse_css_number(lower, at, number) && at == lower.size()) {
+            return format_number(std::max(0.0, number));
+        }
+        if (!litebird::grid_calc_family(lower).empty()) {
+            double stat = 0;
+            if (litebird::grid_static_number(lower, stat)) return format_number(std::max(0.0, stat));
+            return value;
+        }
+        return value;
+    }
     if (is_color_property(name)) {
         if (lower == "currentcolor") {
             return name == "color" ? std::string("rgb(0, 0, 0)") : computed_value(realm, from, block, "color", depth + 1);
         }
         if (lower == "transparent") return "rgba(0, 0, 0, 0)";
-        unsigned rgb = 0;
-        if (Color::named_color_value(lower, rgb)) return rgb_text((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 1);
+        ColorResolveContext ctx;
+        if (lower.find("light-dark(") != std::string::npos) {
+            const std::string scheme = ascii_lower(computed_value(realm, from, block, "color-scheme", depth + 1));
+            ctx.dark_scheme = (scheme == "dark" || scheme == "only dark");
+        }
+        CssColor cc;
+        if (lower.find("currentcolor") != std::string::npos) {
+            std::string cc_str = "rgb(0, 0, 0)";
+            if (name == "color") {
+                std::shared_ptr<Node> keep;
+                if (const Element* parent_el = parent_element_of(from, keep)) {
+                    Block parent_block;
+                    compute_block(realm, *parent_el, parent_block, tree_root_of(from));
+                    cc_str = computed_value(realm, *parent_el, parent_block, "color", depth + 1);
+                }
+            } else {
+                cc_str = computed_value(realm, from, block, "color", depth + 1);
+            }
+            if (CssColor::parse(cc_str, cc)) ctx.current_color = &cc;
+        }
+        CssColor parsed;
+        if (CssColor::parse(value, parsed, ctx)) {
+            if (parsed.is_currentcolor) {
+                return name == "color" ? std::string("rgb(0, 0, 0)")
+                                       : computed_value(realm, from, block, "color", depth + 1);
+            }
+            return parsed.serialize_computed();
+        }
         return value;
     }
     if (name == "font-size") return px_text(font_size_px(realm, from));
     if (name == "font-weight") return format_number(font_weight_of(realm, from));
+    // A grid line computes with its static calc() folded and its span count
+    // clamped forward like any span.
+    if (name == "grid-column-start" || name == "grid-column-end" || name == "grid-row-start" ||
+        name == "grid-row-end") {
+        std::string line;
+        if (litebird::grid_line_computed(value, line)) return line;
+        return value;
+    }
+
+    // A grid track list computes with its lengths absolute and, on a grid
+    // container, with its repeats expanded (css-grid §7.2.6, the resolved
+    // value). The percentage basis is the container's content size, read
+    // from the same block when it is definite.
+    if (name == "grid-template-rows" || name == "grid-template-columns" || name == "grid-auto-rows" ||
+        name == "grid-auto-columns") {
+        const double em = font_size_px(realm, from);
+        const double rem = root_font_size(realm, from);
+        const std::string display = ascii_lower(computed_value(realm, from, block, "display", depth + 1));
+        const bool is_grid = display == "grid" || display == "inline-grid";
+        // An intrinsic auto-repeat is a grid-lanes feature (css-grid-3); on
+        // anything but a grid-lanes container the resolved value is `none`.
+        if (grid_has_intrinsic_auto_repeat(ascii_lower(value)) && display != "grid-lanes" &&
+            display != "inline-grid-lanes" && (name == "grid-template-rows" || name == "grid-template-columns")) {
+            return "none";
+        }
+        double basis = -1.0;
+        if (is_grid && (name == "grid-template-rows" || name == "grid-template-columns")) {
+            const char* basis_name = name == "grid-template-rows" ? "height" : "width";
+            const std::string basis_value = ascii_lower(computed_value(realm, from, block, basis_name, depth + 1));
+            double px = 0;
+            if (length_px(realm, from, basis_value, px)) basis = px;
+        }
+        const auto simplify_calc = [&](const std::string& calc_text, double& px, double& percent) {
+            CalcValue sum;
+            const std::string lowered = ascii_lower(calc_text);
+            if (!eval_calc(lowered, em, rem, sum)) return false;
+            px = sum.px;
+            percent = sum.percent;
+            return true;
+        };
+        std::string resolved_list;
+        if (litebird::grid_resolved_track_list(value, em, rem, basis, is_grid, simplify_calc, resolved_list)) {
+            return resolved_list;
+        }
+        return value;
+    }
 
     // A calc() of lengths is a length. With a percentage in it there is
     // nothing more to do without layout, and it is written the short way.
@@ -2830,13 +3347,20 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
         const double rem = lower.find("rem") != std::string::npos ? root_font_size(realm, from) : 16;
         CalcValue sum;
         if (!eval_calc(lower, em, rem, sum)) return value;
+        // A calc with a percentage in it keeps its calc at computed-value
+        // time (percentages resolve against a basis that is not here); a
+        // zero one is written as it came in.
+        const bool has_percent = lower.find('%') != std::string::npos;
+        if (has_percent && sum.percent == 0) return value;
         if (sum.percent != 0) {
             const std::string percent = format_number(sum.percent) + "%";
             if (sum.px == 0) return percent;
             std::string length = px_text(std::fabs(sum.px));
             return "calc(" + percent + (sum.px < 0 ? " - " : " + ") + length + ")";
         }
-        text = px_text(sum.px);
+        // A negative length is clamped to zero where the property does not
+        // accept negative lengths, for example a flex-basis.
+        text = (name == "flex-basis" && sum.px < 0) ? "0px" : px_text(sum.px);
     }
 
     std::size_t at = 0;
@@ -2945,11 +3469,6 @@ std::string computed_longhand(Realm& realm, const Element& element, const Block&
 std::string computed_value(Realm& realm, const Element& element, const Block& block, const std::string& name,
                            int depth) {
     if (depth > 4) return std::string();
-    if (const std::vector<std::string>* parts = parts_of(name)) {
-        std::vector<std::string> values;
-        for (const auto& part : *parts) values.push_back(computed_longhand(realm, element, block, part, depth + 1));
-        return put_together(name, values);
-    }
     if (const Shorthand* shorthand = find_shorthand(name)) {
         if (shorthand->kind == ShorthandKind::Background) {
             // Only the colour of a background is known here.
@@ -2961,7 +3480,22 @@ std::string computed_value(Realm& realm, const Element& element, const Block& bl
         for (const auto& longhand : shorthand->longhands) {
             parts.entries.push_back({longhand, computed_longhand(realm, element, block, longhand, depth + 1), false, true});
         }
+        if (shorthand->kind == ShorthandKind::FlexFlow) {
+            // The computed value is the two longhands' computed values,
+            // whole; el.style.flexFlow collapses the initial ones instead.
+            std::vector<std::string> values;
+            for (const auto& entry : parts.entries) {
+                if (entry.value.empty()) return std::string();
+                values.push_back(entry.value);
+            }
+            return put_together(name, values, /*collapse=*/false);
+        }
         return parts.get(name);
+    }
+    if (const std::vector<std::string>* parts = parts_of(name)) {
+        std::vector<std::string> values;
+        for (const auto& part : *parts) values.push_back(computed_longhand(realm, element, block, part, depth + 1));
+        return put_together(name, values);
     }
     return computed_longhand(realm, element, block, name, depth);
 }
@@ -3024,11 +3558,9 @@ struct StyleState : JsExotic {
         refuse_write();
         load();
         if (trim(text).empty()) {
-            if (block.find(name) || find_inline_shorthand(name)) {
-                const std::string before = block.text(true);
-                block.remove(name, true);
-                if (block.text(true) != before) store();
-            }
+            const std::string before = block.text(true);
+            block.remove(name, true);
+            if (block.text(true) != before) store();
             return;
         }
         const std::string before = block.text(true);
@@ -3080,7 +3612,7 @@ StyleState& this_style() {
 
 std::string property_argument(const JsValue& value) {
     std::string name = to_str(value);
-    return is_custom_property(name) ? name : canonical_css_property(ascii_lower(name));
+    return is_custom_property(name) ? name : canonicalize_property_name(ascii_lower(name));
 }
 
 void setup_style_declaration(Iface& I) {

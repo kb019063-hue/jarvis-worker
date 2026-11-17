@@ -19,65 +19,22 @@ namespace {
 // Iteration shared by the lists
 // ---------------------------------------------------------------------------
 
-/// Item `index` of the list `self`; false past the end. Throws when `self`
-/// is not the right kind of object.
-using IndexFn = bool (*)(Realm&, const JsValue& self, std::size_t index, JsValue& out);
-
-void define_list_iteration(Iface& I, IndexFn at, bool with_pairs) {
-    auto values = make_function(I.realm, "values", 0, [at](Realm& r, Args) -> JsValue {
-        const JsValue self = JsValue::current_this();
-        JsValue probe;
-        at(r, self, 0, probe);                  // checks the receiver
-        auto index = std::make_shared<std::size_t>(0);
-        Realm* realm = &r;
-        return js_make_iterator([realm, self, index, at](JsValue& value) {
-            if (!realm->alive || !at(*realm, self, *index, value)) return false;
-            ++*index;
-            return true;
-        }, {self});
-    });
+// Web IDL's "define the iteration methods": an interface with an indexed
+// property getter takes %Array.prototype.values% as its @@iterator — the
+// very same function object, not a copy of it, and not a lookalike.
+// One with a value iterator also takes the array entries/keys/values/forEach
+// functions as its own data properties (non-enumerable, like the array's).
+void define_list_iteration(Iface& I, bool with_pairs) {
+    Realm& realm = I.realm;
+    JsIntrinsics& intrinsics = realm.intrinsics ? *realm.intrinsics : JsIntrinsics::get();
+    JsValue array_proto = JsValue::make_object(intrinsics.array_proto);
+    const JsValue values = array_proto.get_property("values");
     define_method_value(I.proto, kIteratorKey, values, PropertyMap::Hidden);
     if (!with_pairs) return;
-    define_method_value(I.proto, "values", values);
-    I.method("keys", 0, [at](Realm& r, Args) -> JsValue {
-        const JsValue self = JsValue::current_this();
-        JsValue probe;
-        at(r, self, 0, probe);
-        auto index = std::make_shared<std::size_t>(0);
-        Realm* realm = &r;
-        return js_make_iterator([realm, self, index, at](JsValue& value) {
-            JsValue ignored;
-            if (!realm->alive || !at(*realm, self, *index, ignored)) return false;
-            value = num(static_cast<double>((*index)++));
-            return true;
-        }, {self});
-    });
-    I.method("entries", 0, [at](Realm& r, Args) -> JsValue {
-        const JsValue self = JsValue::current_this();
-        JsValue probe;
-        at(r, self, 0, probe);
-        auto index = std::make_shared<std::size_t>(0);
-        Realm* realm = &r;
-        return js_make_iterator([realm, self, index, at](JsValue& value) {
-            JsValue item;
-            if (!realm->alive || !at(*realm, self, *index, item)) return false;
-            value = JsValue::make_array({num(static_cast<double>(*index)), item});
-            ++*index;
-            return true;
-        }, {self});
-    });
-    I.method("forEach", 1, [at](Realm& r, Args args) -> JsValue {
-        const JsValue self = JsValue::current_this();
-        require_args(args, 1, "forEach");
-        const JsValue callback = args[0];
-        if (!callback.is_function()) js_throw_type_error("Failed to execute 'forEach': parameter 1 is not of type 'Function'.");
-        const JsValue this_arg = js_arg(args, 1);
-        JsValue item;
-        for (std::size_t i = 0; at(r, self, i, item); ++i) {
-            js_call(callback, this_arg, {item, num(static_cast<double>(i)), self});
-        }
-        return undefined();
-    });
+    define_method_value(I.proto, "values", values, PropertyMap::Hidden);
+    define_method_value(I.proto, "keys", array_proto.get_property("keys"), PropertyMap::Hidden);
+    define_method_value(I.proto, "entries", array_proto.get_property("entries"), PropertyMap::Hidden);
+    define_method_value(I.proto, "forEach", array_proto.get_property("forEach"), PropertyMap::Hidden);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,15 +166,6 @@ ListState& this_list() {
     return this_state<ListState>("NodeList");
 }
 
-bool list_item_at(Realm& r, const JsValue& self, std::size_t index, JsValue& out) {
-    ListState* state = state_of<ListState>(self);
-    if (!state) throw_illegal_invocation("NodeList");
-    const NodeVector& list = state->items();
-    if (index >= list.size()) return false;
-    out = wrap(r, list[index]);
-    return true;
-}
-
 void setup_node_list(Iface& I) {
     I.getter("length", [](Realm&) { return num(static_cast<double>(this_list().items().size())); });
     I.method("item", 1, [](Realm& r, Args args) {
@@ -226,7 +174,7 @@ void setup_node_list(Iface& I) {
         const std::size_t index = to_ulong(args[0]);
         return index < list.size() ? wrap(r, list[index]) : null();
     });
-    define_list_iteration(I, &list_item_at, true);
+    define_list_iteration(I, true);
 }
 
 void setup_html_collection(Iface& I) {
@@ -242,7 +190,7 @@ void setup_html_collection(Iface& I) {
         JsValue out;
         return this_list().lookup_name(to_str(args[0]), out) ? out : null();
     });
-    define_list_iteration(I, &list_item_at, false);
+    define_list_iteration(I, false);
 }
 
 bool is_collection_interface(Realm& realm, const char* iface) {
@@ -353,15 +301,6 @@ std::string checked_token(Realm& realm, const JsValue& value) {
     return token;
 }
 
-bool token_at(Realm&, const JsValue& self, std::size_t index, JsValue& out) {
-    TokenListState* state = state_of<TokenListState>(self);
-    if (!state) throw_illegal_invocation("DOMTokenList");
-    const auto list = state->tokens();
-    if (index >= list.size()) return false;
-    out = str(list[index]);
-    return true;
-}
-
 void setup_token_list(Iface& I) {
     I.getter("length", [](Realm&) { return num(static_cast<double>(this_tokens().tokens().size())); });
     I.accessor("value",
@@ -458,7 +397,7 @@ void setup_token_list(Iface& I) {
         const std::string token = ascii_lower(to_str(args[0]));
         return boolean(std::find(state.supported.begin(), state.supported.end(), token) != state.supported.end());
     });
-    define_list_iteration(I, &token_at, true);
+    define_list_iteration(I, true);
 }
 
 } // namespace
@@ -873,7 +812,7 @@ void setup_attribute_map(Iface& I) {
         state.element->remove_attribute_ns(attribute->namespace_uri(), std::string(attribute->local_name()));
         return attr;
     });
-    define_list_iteration(I, &attribute_at, false);
+    define_list_iteration(I, false);
 }
 
 } // namespace

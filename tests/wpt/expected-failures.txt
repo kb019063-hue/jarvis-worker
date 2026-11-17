@@ -13,7 +13,6 @@ domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization
 domparsing/XMLSerializer-serializeToString.html	Check if "ns1" is generated even if the element already has xmlns:ns1.	serializer-not-well-formed
 domparsing/XMLSerializer-serializeToString.html	Check if a prefix bound to an empty namespace URI ("no namespace") serialize	serializer-redundant-xmlns
 domparsing/innerhtml-05.xhtml	innerHTML in XHTML	test-checks-parent-global
-dom/nodes/Node-childNodes.html	Iterator behavior of Node.childNodes	nodelist-iterator
 domparsing/xml-serialization.xhtml	DocumentType: 'QUOTATION MARK' (U+0022)	serializer-not-well-formed
 domparsing/xml-serialization.xhtml	DocumentType: 'APOSTROPHE' (U+0027) and 'QUOTATION MARK' (U+0022)	serializer-not-well-formed
 # CSS Grid and Flexbox parsing (the css-grid and css-flexbox parsing suites)

@@ -9,6 +9,7 @@
 
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/DomBindings.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Generator.hpp"
 #include "litebird/js/Heap.hpp"
@@ -1201,7 +1202,10 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 if (element.rest) {
                     // Everything not already picked out, own and enumerable.
                     JsValue rest = JsValue::make_object();
-                    for (const auto& key : value.own_keys()) {
+                    std::vector<std::string> rest_keys;
+                    if (!litebird::dom::cross_origin_own_keys(value, false, rest_keys))
+                        rest_keys = value.own_keys();
+                    for (const auto& key : rest_keys) {
                         if (std::find(used.begin(), used.end(), key) != used.end()) continue;
                         rest.set_property(key, value.get_property(key));
                     }
@@ -1504,12 +1508,26 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
         if (subject.is_nullish()) return Flow::Normal;
         std::vector<std::string> keys;
         std::unordered_set<std::string> seen;
-        for (const auto& key : subject.own_keys(true)) {
-            seen.insert(key);
+        std::vector<std::string> cross_keys;
+        const bool cross_origin = litebird::dom::cross_origin_own_keys(subject, true, cross_keys);
+        if (cross_origin) {
+            for (const auto& key : cross_keys) seen.insert(key);
+            for (const auto& key : cross_keys) {
+                // The cross-origin table names are not enumerable; only the
+                // indices are seen for-in.
+                if (!key.empty() && key.find_first_not_of("0123456789") == std::string::npos) keys.push_back(key);
+            }
+        } else {
+            for (const auto& key : subject.own_keys(true)) {
+                seen.insert(key);
+            }
+            for (auto& key : subject.own_keys(false)) keys.push_back(std::move(key));
         }
-        for (auto& key : subject.own_keys(false)) keys.push_back(std::move(key));
         int guard = 0;
-        for (JsObject* proto = subject.type == JsType::String ? nullptr : subject.prototype_object();
+        // A cross-origin WindowProxy or Location has no prototype (HTML
+        // §7.2.3.1), so the chain contributes nothing.
+        for (JsObject* proto = (cross_origin || subject.type == JsType::String) ? nullptr
+                               : subject.prototype_object();
              proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
             JsValue holder = JsValue::make_object(proto);
             std::vector<std::string> all = holder.own_keys(true);
@@ -2005,7 +2023,10 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             // {...source}: own enumerable properties, in order.
             JsValue source = evaluate(prop.value.get(), env);
             if (source.is_nullish()) continue;
-            for (const auto& key : source.own_keys()) {
+            std::vector<std::string> spread_keys;
+            if (!litebird::dom::cross_origin_own_keys(source, false, spread_keys))
+                spread_keys = source.own_keys();
+            for (const auto& key : spread_keys) {
                 object.set_property(key, source.get_property(key));
             }
             continue;

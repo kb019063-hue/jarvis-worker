@@ -74,7 +74,7 @@ one passes, so the list stays what is true today.
 | :--- | ---: | :--- |
 | `strict-write` | 2 | Assigning to an index of an `HTMLCollection` that is out of range must throw a `TypeError` in strict mode. The write is refused — the index is not created, and `list[5]` stays `undefined` — but the refusal is not reported to the caller, so nothing throws. A browser throws from `[[Set]]`; here the exotic object's `set` returns "handled" and the strictness of the assignment lives in `JsEval.cpp`, which is claimed by another change (see `ARCHITECTURE.md`, "Known gaps") |
 | `nodelist-iterator` | 1 | `NodeList.prototype[Symbol.iterator]` is not the same function as `Array.prototype[Symbol.iterator]` |
-| `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
+| `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`. The engine throws `window[0]`'s exception, as browsers do: a node's realm is its document's, so the binding's current realm is `window[0]`'s. The same rule is what `dom/nodes/Document-createElement.html` asks of 240 subtests that name the frame's constructor, and no implementation passes both. See `AUDIT.md`, finding 56 |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 
 ### `XMLSerializer`: five subtests Litebird fails on purpose

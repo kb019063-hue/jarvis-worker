@@ -12814,6 +12814,124 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
 }
 
 // ============================================================================
+// Warning 5: a DOMException is made in the Realm of the object it is about
+// ============================================================================
+//
+// Web IDL creates an exception in the current realm of the function that
+// throws, and for a platform object that realm is the object's relevant realm.
+// For a node that is the realm of its document's window, so
+// `window[0].document.createElement('')` throws `window[0].DOMException` and
+// `dom/nodes/Document-createElement.html` asks exactly that of every failing
+// call on a frame's document.
+//
+// `domparsing/innerhtml-05.xhtml` asks for the opposite: the element it sets
+// `innerHTML` on belongs to `window[0]`, and the test wants the exception from
+// the realm that called. Both cannot hold for a node that belongs to another
+// realm, and browsers keep the rule this engine keeps (the realm of the node),
+// which is why the test is one of the eleven listed failures. `make wpt` says
+// so: the subtest is listed as `test-checks-parent-global`, and it fails
+// because the exception came from the frame, not from the page.
+//
+// This suite pins that down: the rule, and the standard's example of it in
+// Web IDL — an exception is never the caller's when the receiver is another
+// realm's platform object, and it is the caller's when the receiver is a
+// primitive or an object of a plain kind.
+
+// A page with an `<iframe>` whose document is XML, as the one in
+// `domparsing/innerhtml-05.xhtml` is: an XML fragment that is not well formed
+// is a `SyntaxError`, where an HTML one is recovered from. `window[0]` is the
+// frame's realm, and it is a different realm from the page's.
+static const char* kCrossRealmPage = R"html(<!doctype html><html><body>
+  <iframe id="frame" src="data:text/xml,&lt;html xmlns='http://www.w3.org/1999/xhtml'&gt;&lt;foo/&gt;&lt;/html&gt;"></iframe>
+</body></html>)html";
+
+TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://realm.example.test/caller.html");
+    JsInterpreter js(doc);
+    js.load_page(kCrossRealmPage, true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    // The frame really is another realm, with its own DOMException.
+    assert(js.eval("var w = document.getElementById('frame').contentWindow;"
+                   " var d = document.getElementById('frame').contentDocument;"
+                   " w !== window && d !== document").is_truthy());
+    assert(js.eval("var foreignCtor = w.DOMException;"
+                   " foreignCtor !== DOMException && typeof foreignCtor === 'function'").is_truthy());
+
+    // 1. A method of the frame's document that throws throws the frame's
+    //    DOMException: Web IDL's "current realm" for that call is the frame's.
+    //    `Document-createElement.html` runs this 240 times, once per invalid
+    //    name in each of an HTML, an XML and an XHTML document.
+    assert(js.eval(R"js((function() {
+        try { d.createElement('1foo'); return 'no throw'; }
+        catch (e) {
+            if (e.name !== 'InvalidCharacterError') return 'wrong name: ' + e.name;
+            return e.constructor === foreignCtor && e.constructor !== DOMException ? 'ok' : 'wrong global';
+        }
+    })())js").to_string() == "ok");
+
+    // 2. The same for an XML fragment that is not well formed: `innerHTML` on
+    //    a node of the frame's document, set from the page, throws the
+    //    frame's exception. This is the shape of `innerhtml-05.xhtml`, whose
+    //    expectation is the other way round; the test is listed, and this is
+    //    what the engine does instead.
+    assert(js.eval(R"js((function() {
+        var el = d.createElement('el');
+        try { el.innerHTML = 'x<\/foo--><!--y'; return 'no throw'; }
+        catch (e) {
+            if (e.name !== 'SyntaxError') return 'wrong name: ' + e.name;
+            if (e.constructor === foreignCtor) return 'ok';
+            return 'the caller DOMException';
+        }
+    })())js").to_string() == "ok");
+
+    // 3. Nothing the page does makes it the page's: not reading the element
+    //    into a variable of the page, and not passing it to a function of the
+    //    frame's that the page calls.
+    assert(js.eval(R"js((function () {
+        w.eval("window.__setInner = function (el) {"
+             + " try { el.innerHTML = '<a>'; return 'no throw'; }"
+             + " catch (e) { return e.constructor === self.DOMException; } };");
+        return typeof w.__setInner;
+    })())js").to_string() == "function");
+    assert(js.eval("w.__setInner(d.createElement('el2'))").is_truthy());
+
+    // 4. The DOMException's own prototype is the frame's, so it is not an
+    //    instance in the page even though its name and code read the same.
+    assert(js.eval(R"js((function() {
+        try { d.createElement('1foo'); return 'no throw'; }
+        catch (e) {
+            return (e instanceof foreignCtor) && !(e instanceof DOMException) &&
+                   Object.getPrototypeOf(e) === foreignCtor.prototype && e.code === 5;
+        }
+    })())js").to_string() == "true");
+
+    // 5. An exception made by `new DOMException(...)` in the frame is the
+    //    frame's, and one made in the page is the page's: the rule is about
+    //    which realm the exception is made in, not about DOMExceptions of a
+    //    frame being contagious.
+    assert(js.eval("(function() { var e = new w.DOMException('m', 'SyntaxError');"
+                   " return e.constructor === foreignCtor && e.constructor !== DOMException; })()").is_truthy());
+    assert(js.eval("(function() { var e = new DOMException('m', 'SyntaxError');"
+                   " return e.constructor === DOMException && e.constructor !== foreignCtor; })()").is_truthy());
+
+    // 6. A receiver of the page's own still throws the page's exception, or
+    //    the two realms would be indistinguishable and the rule untested.
+    assert(js.eval(R"js((function() {
+        try { document.createElement('1foo'); return 'no throw'; }
+        catch (e) { return e.name === 'InvalidCharacterError' && e.constructor === DOMException ? 'ok' : 'wrong global'; }
+    })())js").to_string() == "ok");
+
+    js.eval("w = null; d = null; foreignCtor = null;");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+}
+
+// ============================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
 // ============================================================================
 
@@ -13491,6 +13609,8 @@ int main() {
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
     RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
+    // Warning 5: a DOMException is made in the realm of the object it is about.
+    RUN_TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about);
 
     // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.
     RUN_TEST(js_unicode_identifier_tables_and_lexer_escapes);

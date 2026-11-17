@@ -54,7 +54,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 | # | What | Row | Why it is here |
 | :--- | :--- | :--- | :--- |
-| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64):** a codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily. Still open: `font-family` is parsed and never read, no `@font-face`, no italic face, no shaping, no bidi. |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)** and **`font-family` selection done (Phase 67):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it — `pre { font-family: monospace }` measures differently from a heading in the default face, which it did not before. Still open: no `@font-face`, no italic face, no shaping, no bidi. |
 | 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |

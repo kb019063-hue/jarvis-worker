@@ -674,6 +674,141 @@ TEST(per_glyph_font_fallback) {
     fr.set_fallbacks(saved_paths);   // leave the renderer as the next suite expects it
 }
 
+TEST(font_family_selects_a_face) {
+    using namespace litebird;
+
+    // `font-family` was parsed, kept, and never read. Every element on the
+    // page was drawn in the one face the renderer happened to have loaded, so
+    // `pre { font-family: monospace }` was a fact about the stylesheet and not
+    // about what came out.
+    //
+    // The oracle is Ahem, vendored under tests/wpt/fonts for the WPT corpus.
+    // Every glyph in it is exactly 1em wide — its advance is 1000 of its 1000
+    // units per em, for all 278 of its codepoints — so a run of n characters
+    // measures n * font_size in Ahem and in essentially nothing else. That
+    // makes this an absolute test rather than a comparison: four characters at
+    // 16 px is 64.0 px, or the family was not selected.
+    FontRenderer& fr = FontRenderer::instance();
+
+    fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    const int ahem = fr.family_id_for("Ahem");
+    if (ahem == FontRenderer::kDefaultFamily) return;   // the vendored font is absent
+
+    // --- the oracle -------------------------------------------------------
+    const float four_in_ahem = fr.measure_text("XXXX", 16.0f, 400, "Ahem");
+    assert(std::fabs(four_in_ahem - 64.0f) < 0.5f);
+    assert(fr.measure_text("iiii", 16.0f, 400, "Ahem") > 63.5f);   // every glyph, not just 'X'
+    // The family was selected because it was named: unnamed, the same string
+    // measures differently.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400) - four_in_ahem) > 1.0f);
+
+    // --- matching ---------------------------------------------------------
+    // Case, quoting and repeated spaces are all irrelevant, as CSS says.
+    assert(fr.family_id_for("AHEM") == ahem);
+    assert(fr.family_id_for("  ahem  ") == ahem);
+    assert(fr.family_id_for("\"Ahem\"") == ahem);
+
+    // A list is tried left to right, and a family nobody has is skipped rather
+    // than ending the search.
+    assert(fr.family_id_for("No Such Font At All, Ahem") == ahem);
+    // A comma inside quotes separates words and not entries.
+    assert(fr.family_id_for("'Font, Inc', Ahem") == ahem);
+
+    // The first entry that can be had wins — including when that is the
+    // default family. Getting this wrong is how `sans-serif, Ahem` draws Ahem
+    // on a host that has a sans face, because "the default" and "not resolved
+    // yet" look alike when the default is family 0.
+    assert(fr.family_id_for("sans-serif, Ahem") == fr.family_id_for("sans-serif"));
+    assert(fr.family_id_for("sans-serif, Ahem") != ahem);
+
+    // --- the glyph cache is keyed by family -------------------------------
+    // Without that, a line drawn in one family hands its rasterized glyphs to
+    // the next line drawn in another, which is a bug that appears as the first
+    // line of a paragraph being right and the rest wrong.
+    if (fr.has_truetype_font()) {
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        assert(from_ahem.width != from_default.width);
+    }
+
+    // --- generic families, when the host has them -------------------------
+    // Not asserted unconditionally: whether a host has a serif or a monospace
+    // face is a fact about the host, and a test that fails there would be
+    // failing about the wrong thing. Where they exist they are distinguished
+    // by measurement, which is the only thing that makes a generic mean
+    // anything.
+    const int mono = fr.family_id_for("monospace");
+    if (mono != FontRenderer::kDefaultFamily) {
+        // A monospace face advances every glyph the same amount; 'i' and 'W'
+        // are the pair that differ most in a proportional face.
+        const float narrow = fr.measure_text("iiii", 16.0f, 400, "monospace");
+        const float wide = fr.measure_text("WWWW", 16.0f, 400, "monospace");
+        assert(std::fabs(narrow - wide) < 0.5f);
+        if (fr.has_truetype_font()) {
+            // ...and the default, which is not monospace here, does not.
+            assert(std::fabs(fr.measure_text("iiii", 16.0f, 400) -
+                             fr.measure_text("WWWW", 16.0f, 400)) > 1.0f);
+        }
+    }
+    const int serif = fr.family_id_for("serif");
+    if (serif != FontRenderer::kDefaultFamily && serif != fr.family_id_for("sans-serif")) {
+        // Two different generic families that resolve to two different faces
+        // must not measure the same.
+        assert(std::fabs(fr.measure_text("WWWW", 16.0f, 400, "serif") -
+                         fr.measure_text("WWWW", 16.0f, 400, "sans-serif")) > 0.5f);
+    }
+
+    // Nothing that cannot be named is served: a family nobody has falls back
+    // rather than failing, which is what CSS asks for.
+    assert(fr.family_id_for("cursive") == FontRenderer::kDefaultFamily ||
+           fr.family_id_for("cursive") != ahem);
+    assert(fr.family_id_for("") == FontRenderer::kDefaultFamily);
+}
+
+TEST(font_family_reaches_layout_from_css) {
+    using namespace litebird;
+
+    // The whole path, and not only the renderer: `font-family` has to survive
+    // the cascade, inherit, and reach the thing that measures a word. The
+    // renderer half is proved by measurement above; this proves the CSS half.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-family: Ahem">
+            <span id="inner">XXXX</span>
+            <span id="overridden" style="font-family: sans-serif">XXXX</span>
+        </div>
+    )");
+
+    StyleResolver resolver;
+
+    auto outer = doc->get_element_by_id("outer");
+    auto inner = doc->get_element_by_id("inner");
+    auto overridden = doc->get_element_by_id("overridden");
+    assert(outer && inner && overridden);
+
+    const ComputedStyle outer_style = resolver.resolve_style(outer, nullptr);
+
+    // It is the property, kept as written: resolution is the font layer's
+    // business and this layer has no business guessing at file names.
+    assert(outer_style.font_family == "Ahem");
+
+    // It inherits, like font-size does.
+    const ComputedStyle inner_style = resolver.resolve_style(inner, &outer_style);
+    assert(inner_style.font_family == "Ahem");
+
+    // ...and a declaration on the element itself beats the inherited one.
+    const ComputedStyle overridden_style = resolver.resolve_style(overridden, &outer_style);
+    assert(overridden_style.font_family == "sans-serif");
+
+    // An element with no `font-family` anywhere inherits an empty list, which
+    // the renderer reads as "the default family" rather than as a family
+    // called "".
+    const ComputedStyle bare = resolver.resolve_style(outer, nullptr);
+    assert(FontRenderer::instance().family_id_for(bare.font_family) ==
+           FontRenderer::instance().family_id_for("Ahem"));
+    assert(FontRenderer::instance().family_id_for(std::string_view{}) ==
+           FontRenderer::kDefaultFamily);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -16043,6 +16178,8 @@ int main() {
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
     RUN_TEST(inline_formatting_context);
+    RUN_TEST(font_family_selects_a_face);
+    RUN_TEST(font_family_reaches_layout_from_css);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

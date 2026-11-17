@@ -3649,6 +3649,10 @@ custom constructor discards it. This is disclosed, not silenced or presented
 as a conformance gain. Array holes and the general collector audit are also
 outside this change.
 
+(Finding 62, Phase 56: the array fast path now asks. `Promise.all(a)` above
+resolves to `[9]`, and a `resolve` that throws closes the iterator the array
+handed out.)
+
 ---
 ## 52. ✅ Canvas 2D could draw every shape except text
 

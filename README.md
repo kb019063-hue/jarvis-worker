@@ -908,8 +908,8 @@ checked with Node. The old binary passes 30/34, with timeouts. The full JS
 score is now 925/939 after merging Phase 44's identifiers (911/925 before
 that merge); `make test` passes 170 suites (163 on the original base). A page
 outside the corpus, through `tools/conformance/compare_with_jsdom.py`, prints
-`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator is still
-ignored by `js_iterate`'s array fast path, and subclassed Promises still
+`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator was still
+ignored by `js_iterate`'s array fast path (until Phase 56, below), and subclassed Promises still
 make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
 The full release and sanitizer chain passed on the base tree, again after
 merging main's frames/table work, and again with Phase 44's Unicode identifiers:

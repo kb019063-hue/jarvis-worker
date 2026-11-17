@@ -121,9 +121,10 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   step 4 above is for. Three more took a number that an open pull request
   already had: #63 took 52 and 58 half an hour after #62 had them, #66 took
   53 and 59 two hours after #64, and #71 took 54 (which #67 held) and then 55.
-  Count the open pull requests, not `main` alone. The phase table in
-  ARCHITECTURE.md is not complete either (51, 52 and 54 had a section and no
-  row until Phase 56 added the rows): the `## Phase N` headings count too.
+  Count the open pull requests, not `main` alone. And count the `## Phase N`
+  headings of ARCHITECTURE.md, not its phase table alone: seven phases (36,
+  42, 45, 47, 51, 52, 54) had a section and no row until Phase 56 added the
+  rows.
 - **A claim nobody can read.** #65 and #71 have no `Task:`, `Files:` and
   `Phase P, finding F` lines. So nothing said that #71 changes
   `src/js/JsEval.cpp`, which #68 names, and `src/js/JsOps.cpp`, which #70

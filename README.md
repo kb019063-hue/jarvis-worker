@@ -1146,3 +1146,22 @@ make fuzz-media     # 2,400 mutation cases across four formats
 The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
 a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
 60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
+
+### Cross-origin `Window` and `Location` reflection (Phase 56)
+
+A script embedded in one origin could already not read a cross-origin frame
+(`SecurityError` on non-safelisted names, since Phase 42), but everything that
+*describes* the frame's window answered the ordinary way: `Object.keys`,
+`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
+described ordinary storage, `Object.defineProperty` wrote into it,
+`Object.freeze` flipped its cell, and `location` handed over the child's
+address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
+the cross-origin table of the HTML Standard instead: the window reports
+exactly its child-frame indices and the exposed names (`window`, `self`,
+`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
+`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
+`href` (writable, not readable cross-origin) and `replace()`, both refuse
+define/delete/integrity changes with `SecurityError`/`TypeError`, and
+`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
+and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
+finding 62.

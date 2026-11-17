@@ -100,6 +100,7 @@ OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/litebird
 TEST_TARGET = $(BUILD_DIR)/test_suite
+CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
@@ -174,6 +175,10 @@ $(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
 
+$(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) tests/cross_origin_windows.cpp -o $@
+
 $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/media_check.cpp -o $@
@@ -182,8 +187,9 @@ $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
+	@./$(CROSS_ORIGIN_TARGET)
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.

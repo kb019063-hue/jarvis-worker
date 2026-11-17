@@ -361,7 +361,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 | **Phase 49** | **Customizable `<select>` content and `<selectedcontent>` cloning:** adds `"select"` as a default scope boundary in `m_scope_boundary_indices[0]`, reconstructs active formatting elements on characters and `<option>`/`<optgroup>`/`<hr>` in `Mode::InSelect`, restricts `<select>` breakout to `<input>` (keeping `<keygen>`/`<textarea>` inside `<select>` via `send_to_in_body`), pops open elements in `stop_parsing()`, and iteratively clones the selected `<option>`'s children into the `<select>`'s first `<selectedcontent>` (outside nested `<select>`/`<datalist>`) with disabled/ancestor-`<optgroup>`/`multiple`/`size` checks and `m_script_ran` fallback. | ✅ Completed (**1792/1792 (100.0%)** html5lib tree construction; 181/181 unit suites; CI floor `1781 → 1792`) |
 | **Phase 50** | **CSS Color 4/5 color spaces, §13.2 OKLCH gamut mapping, `color-mix()`, relative colors, and `light-dark()`:** replaces three duplicate legacy parsers with a unified `CssColor` engine (`include/litebird/common/Color.hpp`, `src/common/Color.cpp`) implementing all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, per-channel missing-component (`none`) and powerless-hue semantics, §13.2 OKLCH chroma-reduction gamut mapping, CSS Values 4 math inside color channels, 1..N-argument `color-mix()` with all hue modifiers, relative color syntax (`from ...`), `light-dark()` with `color-scheme` inheritance, and §15 computed serialization, wired through `StyleResolver` (also fixing balanced-paren `drop-shadow`/`box-shadow`/`border` parsing), `DomStyleBindings`, and `SvgRenderer`. | ✅ Completed (185/185 unit suites; `make verify-color` 180/180 space matrix, 13/13 gamut map, 133/133 WPT valid, 61/61 invalid; `make fuzz-color` 5,008 inputs, 0 crashes in Release & ASan+UBSan; 4,860/4,860 live upstream WPT `color-computed-*.html`) |
 | **Phase 53** | **UTF-16 storage for non-ASCII `JsString`:** stores ASCII buffers in 1 byte per code unit and non-ASCII buffers in 2-byte UTF-16 (`char16_t`) code units while keeping `sizeof(JsString) == 24` and building UTF-8 (`Utf8Cache` + `marks[]`, `Utf8Slice`) and wide `Utf16View` (`Wide`) caches lazily. High surrogates are ordinary 16-bit code units rather than 3-byte UTF-8 prefixes that must rewrite into 4 bytes when a low half follows, so completing a surrogate pair after reading, `indexOf`, or `substring` writes in place (`17 ms` vs Node `81 ms` at 20,000 pairs with reads, down from `893 ms`), alongside a 64-unit stack fast path in `Utf16View::{find,rfind}` and a `sole_thread` + `cache_covers_past` CAS tail rewind. | ✅ Completed (193/193 unit suites; `make tsan` green; `make bench` 45/45; `make bench-surrogates` 6/6; `make diff-strings` 50,485/50,580) |
-| **Phase 55** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (196/196 unit suites; `make js-conformance` 978/992, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
+| **Phase 55** | **Temporal dead zone for derived constructor `this` and `let`/`const`/`class` bindings:** adds `JsEnvironment::Binding::is_initialized` (zero `sizeof(Binding)` increase) and `AssignResult::Uninitialized`, enforces TDZ on derived `this` (`lookup_identifier("this")`, arrow captures, `super.m` / `super[computed]` before evaluating the key, and early `return this` before `super()`), and pre-declares lexical bindings in `Program`, `BlockStmt`, `SwitchStmt`, function/async/generator bodies, non-simple parameters, `for`/`for-of`/`for-in` heads (with `EnvScope` rooting), `try/catch`, and class `extends`/computed keys (while keeping `static` field initializers and `static {}` blocks after initialization). | ✅ Completed (198/198 unit suites; `make js-conformance` 978/992, `construct.dat` 49/50, `lexical.dat` 41/41; `make test262` 12,359/15,686 (+43, 0 regressions); 13 TDZ/scope dirs +49, 0 regressions; Release & ASan+UBSan green) |
 
 ---
 
@@ -3160,9 +3160,10 @@ make -j$(nproc) && make test
 - **Frames (`<iframe>` / `<frame>`)**: `iframe.contentDocument` /
   `contentWindow` and nested browsing contexts do not exist yet (495 listed WPT
   subtests).
-- **Additional image & font formats**: PNG, JPEG, GIF, SVG, BMP, and PPM are
-  decoded through `ImageDecoder`; WebP, AVIF, `@font-face` remote font loading,
-  WOFF/WOFF2, and complex script shaping (HarfBuzz/bidi) remain open.
+- **Additional image & font formats**: PNG, JPEG, GIF, WebP (lossless, Phase
+  54), SVG, BMP, and PPM are decoded through `ImageDecoder`; lossy `VP8`,
+  animated WebP, AVIF, `@font-face` remote font loading, WOFF/WOFF2, and
+  complex script shaping (HarfBuzz/bidi) remain open.
 - **Networking & CSSOM corners**: CORS preflight `OPTIONS` requests,
   credentialed cross-origin cookies, HTTP/2, `ArrayBuffer`/binary XHR bodies,
   and CSSOM `sheet.cssRules` remain open.
@@ -3722,7 +3723,32 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   sub-rectangle compositing onto a persistent canvas buffer.
 - **Bounds:** Enforces `kMaxDecodedPixels` and `kMaxFrames` (default 256).
 
-### 3. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
+### 3. Standalone Lossless WebP Decoder (`WebPDecoder.hpp`, `src/render/WebPDecoder.cpp`)
+
+- **Container:** `RIFF`/`WEBP` with a padding-aware chunk walk, a simple file
+  holding one `VP8L` chunk, or an extended `VP8X` file whose canvas is checked
+  against the image; a `VP8 ` (lossy) chunk, `ANIM`/`ANMF` (animation), a RIFF
+  size past the buffer, and a container with no image chunk each get their own
+  `Status` (`UnsupportedLossy`, `UnsupportedAnimation`, `Truncated`,
+  `Corrupt`) instead of a null image.
+- **Bitstream:** LSB-first bit reader with an explicit end-of-stream latch;
+  canonical prefix codes (simple codes, and code-length codes with repeat
+  symbols) with a **single-symbol code that consumes zero bits**, the rule that
+  silently breaks every stream when it is missed; meta prefix codes (an entropy
+  image selects one of up to 256 prefix groups per 16-pixel tile), the
+  32-entry colour cache, and LZ77 with the 120 near-neighbour distance codes
+  mapped onto scan-line distances.
+- **Transforms:** predictor (14 modes, with the rightmost column's top-right
+  pixel taken from the row being rebuilt), cross-colour (3.5-fixed-point
+  per-channel delta), subtract-green, and colour-indexing (delta-coded palettes
+  of up to 256 entries, with 8/4/2 indices packed per byte and a zero tail).
+  Each is described by a sub-image decoded with the same reader, and inverted in
+  reverse order after the pixel loop — which is also why decoding is recursive
+  and the pixel budget is charged once, up front.
+- **Bounds:** `kMaxDecodedPixels` (64M px) and `kMaxDimension` (16384) are
+  checked from the 14-bit header before any allocation.
+
+### 4. Upgraded Canvas 2D (`Canvas2D.hpp`, `src/render/Canvas2D.cpp`)
 
 - **Transform & state stack:** Full 2D affine Current Transformation Matrix
   (`TransformMatrix2D`) with `save()`/`restore()`, `translate()`, `rotate()`,
@@ -3740,7 +3766,7 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   `JsValue::define_accessor` (`globalAlpha`, `lineCap`, `lineJoin`,
   `miterLimit`, `lineDashOffset`).
 
-### 4. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
+### 5. Real-World SVG Renderer (`SvgRenderer.hpp`, `src/render/SvgRenderer.cpp`)
 
 - **DOM & CSS integration:** Iterative ID indexing (safe on 200,000-deep DOMs),
   `<defs>` exclusion, presentation attributes + inline `style` parsing,
@@ -3755,15 +3781,18 @@ implementations verified pixel-by-pixel against `libjpeg` and ImageMagick.
   `spreadMethod`; `<use>` (with recursion/cycle guard) + `<symbol>`;
   `<clipPath>`; rounded `<rect rx ry>`; nested `<svg>`.
 
-### 5. Verification & what remains open
+### 6. Verification & what remains open
 
 `make verify-media` compares 21 generated JPEGs against `libjpeg` (52–99 dB
 PSNR, MAE ≤ 0.39), 9 single/animated GIFs against ImageMagick `-coalesce`
-(exact `max_diff = 0` on every frame), and 5 SVG feature suites. `make fuzz-media`
-mutates JPEG, GIF, and SVG inputs (1,800 cases in Release, 4,500 under
-ASan+UBSan+LSan). Wiring `JpegDecoder` and `GifDecoder` into `ImageDecoder.cpp`
-is deferred until PR #39 merges; WebP/AVIF, SVG `<text>`/CSS stylesheets/filters,
-and Canvas 2D text/shadows/patterns remain open (see `AUDIT.md`, finding 43).
+(exact `max_diff = 0` on every frame), 17 lossless WebP images against libwebp
+bit-exactly (plus a `VP8X` container, five refusals and four `probe()`
+classifications, added in Phase 54), and 5 SVG feature suites. `make fuzz-media`
+mutates JPEG, GIF, WebP, and SVG inputs (2,400 cases in Release, 6,000 under
+ASan+UBSan+LSan). `JpegDecoder` and `GifDecoder`, like `WebPDecoder`, are wired
+into `ImageDecoder.cpp`; lossy `VP8`, animated WebP, AVIF, SVG
+`<text>`/CSS stylesheets/filters, and Canvas 2D shadows/patterns remain open
+(see `AUDIT.md`, findings 43 and 60).
 
 ---
 
@@ -5638,6 +5667,82 @@ only when **all three** invariants hold:
 
 ---
 
+## Phase 54 Architecture: Lossless WebP — the Container and the `VP8L` Bitstream
+
+### 1. The hole
+
+`ImageDecoder` dispatched on magic bytes: PNG, JPEG, GIF, BMP, PPM, then an SVG
+sniff. WebP has none of those signatures, so the function returned `nullptr` and
+every page serving `.webp` — the default for most modern `<picture>` sources and
+image CDNs — drew an empty box. `AUDIT.md`, finding 60.
+
+### 2. Layers, top to bottom
+
+`src/render/WebPDecoder.cpp` is four layers, each one testable on its own:
+
+1. **`read_chunks`** — walks `RIFF`/`WEBP` chunks with RIFF padding, accepts a
+   simple file (one `VP8L`) or an extended one (`VP8X` canvas, then the image),
+   and clamps a RIFF size larger than the buffer instead of trusting it. An
+   extended file whose animation flag is set, or which carries `ANIM`/`ANMF`,
+   stops here as `UnsupportedAnimation`; a `VP8 ` chunk as `UnsupportedLossy`;
+   an empty chunk list as `Corrupt`.
+2. **`BitReader`** — least-significant-bit-first, a five-byte window, and an
+   explicit end-of-stream latch so that reads past the end are reported as
+   truncated instead of returning fabricated zero bits.
+3. **`HuffmanTree`** — canonical codes built from code lengths, with the
+   over-subscription check. `single_symbol_` is the important state: a
+   one-symbol prefix code has code length 0 in libwebp (`bits = 0`), so it
+   consumes **no bits at all**. Reading the spec's `code_lengths[symbol0] = 1`
+   literally shifts the rest of the stream by one bit per use.
+4. **`Vp8lDecoder`** — image header (`0x2f`, 14-bit width-1/height-1, alpha
+   hint, 3-bit version), the transform list, the per-level prefix groups with a
+   1-bit colour-cache flag and 4-bit cache size, meta prefix codes, the pixel
+   loop, and the four inverse transforms.
+
+### 3. The five alphabets and the pixel loop
+
+Every level decodes with the same five prefix groups: green (`256 + 24 + cache
+size` symbols: literals, then the length/distance prefixes packed in the high
+byte), red, blue, alpha (256 each), and distance (40 symbols). A pixel is a
+`green` symbol: `>= 256` means a length/distance copy — the length is
+`prefix < 4 ? prefix + 1 : ((2 + (prefix & 1)) << ((prefix - 2) >> 1)) + bits + 1`
+and the distance comes from the 40-symbol code, with the first 120 values mapped
+back to 2-D offsets by `kCodeToPlane` and larger ones by `code - 120`.
+
+### 4. The four transforms
+
+The transforms are self-similar: the predictor, cross-colour, subtract-green and
+colour-indexing descriptions are each a *sub-image*, decoded by recursing into
+the same decoder. They are inverted in reverse order once the entropy-decoded
+image exists. Predictor mode 0 of the first column reads the pixel to the left
+(wrapping to the row above), the rightmost column's top-right pixel is the first
+pixel of the row being rebuilt, and the borders use the `0xff000000` /
+left / top defaults that `lossless.c` uses — three rules that a from-scratch
+implementation gets wrong long before it gets the Huffman layer wrong.
+
+### 5. Verification
+
+- `make verify-media` → **63/63**, of which 30 are WebP: 17 lossless images
+  decoded bit-exactly in RGBA and in the PPM channels against libwebp through
+  ImageMagick, a `VP8X` container, five refusals, four `probe()`
+  classifications, determinism.
+- `make fuzz-media` → **2,400 cases** (600 WebP) over hostile seeds: a 16384 x
+  16384 header, a lossy chunk, animation flags, RIFF sizes past the buffer.
+- `make test` → **195 suites** (`193 → 195`): every pixel of five embedded
+  fixtures, the `data:` URI path, and the `<img>` box taking the decoded
+  intrinsic size; plus the refusal matrix.
+- `make asan` green; `make conformance`/`dom`/`js`/`url`/`xml`/`wpt`, `diff-trees`,
+  `diff-xml` and `deep` are untouched by the change and re-run below.
+
+### 6. What is still open
+
+Lossy `VP8` (macroblock prediction, DCT, loop filter — a video codec, not a
+variation), animated WebP (`ANMF` compositing and disposal), the `ALPH` chunk
+that only accompanies a lossy image, and AVIF (an AV1 still image). SVG
+`<text>` remains open too. The AGENTS.md row now names exactly these.
+
+---
+
 ## Phase 55 Architecture: Temporal Dead Zone for Derived `this` and Lexical Bindings
 
 ### 1. Why TDZ checks were missing
@@ -5710,7 +5815,7 @@ execution reached their declaration statement. As a result:
 
 ### 4. Verification & remaining boundaries
 
-- `make test`: **196/196** unit suites pass in both Release and ASan+UBSan
+- `make test`: **198/198** unit suites pass in both Release and ASan+UBSan
   (`build-asan/test_suite`), including three new Phase 55 suites
   (`js_derived_this_temporal_dead_zone`,
   `js_lexical_temporal_dead_zone_blocks_and_classes`,
@@ -5739,4 +5844,3 @@ execution reached their declaration statement. As a result:
   - Direct `eval` inside a function (separate `AGENTS.md` row) and `var`
     inside a block shadowing an outer block `let`/`const` early SyntaxError
     remain open.
-

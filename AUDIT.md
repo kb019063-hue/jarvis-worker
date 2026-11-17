@@ -4121,6 +4121,78 @@ pure ASCII buffers remain 1 byte per unit and `sizeof(JsString)` shrinks from
 - In JS, truncating a completed pair and appending a low half (`s += '\uD83D\uDE00'; s = s.substring(0, s.length - 1); s += '\uDE00'`) still holds `refs == 2` across the JS variable binding and the `+=` operand temporary (`JsEval.cpp` / VM), so JS still copies even though a single-owner C++ handle rewinds in 23 blocks.
 - Repeatedly calling host `.view()` on a `JsString` while its buffer ends in an unpaired high surrogate allocates a bounded `Utf8Slice` per call so `Utf8Cache` never pins `\xED\xA0\xBD`; standard JS string operations do not call `.view()`.
 
+## 60. ✅ WebP was a hole in the image pipeline (Phase 54)
+
+**The hole.** `ImageDecoder::decode_bytes` recognized PNG, JPEG, GIF, BMP and
+PPM by their magic bytes and fell back to an SVG sniff. A `RIFF....WEBP` file
+matched neither, so it returned `nullptr`: `<img src="x.webp">` — which is what
+a page serving WebP through `<picture>`, a CDN or `canvas` hands the engine
+today — laid out an empty box. Nothing failed; the image was simply not there.
+
+**The fix.** `include/litebird/render/WebPDecoder.hpp` and
+`src/render/WebPDecoder.cpp` read the container and the lossless (VP8L)
+bitstream, with no dependency added:
+
+- **Container.** `RIFF`/`WEBP`, a simple file with one `VP8L` chunk or an
+  extended `VP8X` file (whose canvas is checked against the image), a chunk walk
+  with RIFF padding, and a misreported RIFF size clamped rather than trusted.
+- **Entropy layer.** A least-significant-bit-first bit reader, canonical prefix
+  codes decoded bit by bit with the over-subscription check, both code-length
+  forms (simple, and the 19-symbol code-length code with its repeat symbols),
+  meta prefix codes (an *entropy image* of code-group indices), the colour
+  cache (`(0x1e35a7bd * argb) >> (32 - bits)`), and LZ77 with the 120
+  near-neighbour distance codes mapped back to scan-line distances.
+- **The four transforms**, each described by a sub-image decoded recursively
+  with the same reader and inverted in reverse order: predictor (14 modes, with
+  the rightmost column's top-right pixel being the first pixel of the row being
+  rebuilt), cross-colour (3.5-fixed-point per-channel deltas), subtract-green,
+  and colour indexing with delta-coded palettes and pixel bundling (8, 4 or 2
+  indices per byte for 2, 4 and 16 colours).
+
+The rule worth recording: a prefix code with a **single symbol costs no bits at
+all**. libwebp builds that table with `bits == 0`, so the symbol is implied and
+the stream carries nothing for it; reading the specification's `code_lengths[symbol0]
+= 1` literally and consuming one bit shifts every following read. The symptom
+was a 1x1 image whose alpha literal decoded as "corrupt" while the palette entry
+three bits later — `#123456` — came out right, which is what pointed at the
+missing rule rather than at an off-by-one in the container.
+
+**Refusals rather than wrong pictures.** Lossy `VP8` (a keyframe of the VP8
+video codec: macroblock prediction, DCT, loop filter) is reported as
+`UnsupportedLossy`, animated WebP (`ANIM`/`ANMF`) as `UnsupportedAnimation`, a
+short file as `Truncated`, and a dimension or a decoded-pixel budget past the
+limit as `TooLarge`. `WebPDecoder::probe()` returns the same classification
+without decoding.
+
+**Verification.** `make verify-media` gained 30 checks (63 in total): 17
+generated lossless images — palettes of 2, 4, 16 and 256 colours, alpha ramps
+and a transparent disc, bilevel noise, 1x1, 7x3, 3x40, 129x3, a 300x20 repeat
+that exercises LZ77, 200x150 and 256x256 — decoded **bit-exactly** in RGBA and
+then in the PPM colour channels against libwebp 1.2.4 through ImageMagick
+(lossless has no error budget), an extended `VP8X` container, five refusals
+(lossy, animated, truncated, a JPEG, an empty file), four `probe()`
+classifications, and a determinism check. `make fuzz-media` gained 600 WebP
+mutation cases over hand-built hostile seeds (a 16384 x 16384 header, a lossy
+chunk, an animation flag, a RIFF size past the buffer): 2,400 cases in total,
+0 crashes. `make test` **193 → 195** suites —
+`webp_lossless_decodes_every_transform` (five fixtures embedded as bytes, every
+pixel compared against libwebp's decode, plus an
+`<img src="data:image/webp;base64,…">` end-to-end check that the box takes the
+decoded 9 x 5 intrinsic size) and
+`webp_unsupported_and_malformed_input_is_refused` (lossy, animated, five
+truncation points, a container with no image chunk, a null pointer, a
+dimension bomb, a header-only stream). The rest of the scoreboard is unchanged:
+`make conformance` 1792/1792, `make dom-conformance` 669/669,
+`make js-conformance` 974/989, `make url-conformance` 1188/1188,
+`make xml-conformance` 1718/1718, `make wpt` 7998/8009, `make diff-trees` 0
+differ, `make diff-xml` 0 DIFFER and 3000/3000 round trips, `make deep` 1332
+runs 0 failed, `make asan` green.
+
+**Still open.** The lossy `VP8` codec, animated WebP (frame compositing and
+disposal), AVIF (an AV1 still image, a different codec entirely), and an
+`ALPH` chunk, which only accompanies a lossy image and is therefore refused
+with it.
+
 ---
 
 ## 61. ✅ Derived constructor `this` before `super()` and `let`/`const`/`class` TDZ (Phase 55)
@@ -4138,7 +4210,7 @@ pure ASCII buffers remain 1 byte per unit and `sizeof(JsString)` shrinks from
 
 **Verification.**
 
-- `make test`: **196/196** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
+- `make test`: **198/198** unit suites pass in both Release and ASan+UBSan (`build-asan/test_suite`), including `js_derived_this_temporal_dead_zone`, `js_lexical_temporal_dead_zone_blocks_and_classes`, and `js_temporal_dead_zone_in_control_flow_and_patterns`.
 - `make js-conformance`: **978/992** Release (**977/992** ASan+UBSan; `construct.dat` **49/50**, `lexical.dat` **41/41**, everyday **90/90**); Node `--reference "node -e"` **992/992**.
 - `make test262` (`before=/tmp/litebird-before` vs `now=build/litebird`): **12,359 / 15,686** in the default 21 dirs (**+43 pass**, **0 regressions**) and **8,195 / 10,622** across 13 TDZ/scope dirs (**+49 pass**, **0 regressions**; **0** failures remaining in `language/block-scope/` and **0** TDZ failures in `language/statements/{let,const}/`).
 - Release & ASan+UBSan regression sweeps: `dom-conformance` **669/669**, `url-conformance` **1188/1188**, `conformance` **1792/1792**, `wpt` **7998/8009** (`0` unlisted), `verify-promise-iterators` **34/34**, `make bench`, `make diff-strings` (`50,485/50,580`), `fuzz_parser` (400) & `fuzz_pipeline` (400) **0** findings, and `deep_pages` (targeted + 150 random ASan) **0** failures.
@@ -4146,4 +4218,3 @@ pure ASCII buffers remain 1 byte per unit and `sizeof(JsString)` shrinks from
 **Still open.**
 - Separate `<script>` tags evaluate `run_program` per script, so referencing a `let` declared in a later `<script>` throws `"x is not defined"` (`ReferenceError`) rather than `"Cannot access 'x' before initialization"`, and redeclaring the same lexical name across two `<script>` tags overwrites `m_global_env` instead of raising a `SyntaxError`.
 - Direct `eval` scope (tracked separately in `AGENTS.md`) and parse-time early `SyntaxError` for `{ let x; { var x; } }` remain open.
-

@@ -606,6 +606,74 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     assert(found_rounded_rect);
 }
 
+TEST(per_glyph_font_fallback) {
+    using namespace litebird;
+
+    // A face is asked only for the codepoints it covers. Before this, the one
+    // loaded face was asked for everything, and a codepoint outside its cmap
+    // rasterized to an empty bitmap: the glyph was not drawn wrong, it was not
+    // drawn at all.
+    //
+    // The faces are Ahem (a 278-codepoint web-platform-tests font, vendored)
+    // and the host's DejaVuSans, which is what the renderer picks as primary.
+    // Their coverage was measured by dumping both cmaps, not assumed:
+    //
+    //     'A'   U+0041   in both       -> must come from the primary
+    //     'Ā'   U+0100   DejaVu only   -> must come from the primary
+    //     '一'  U+4E00   Ahem only     -> must come from the fallback
+    //
+    // Ahem covers 20 codepoints DejaVu does not — U+3000, U+4E00 and other
+    // CJK it carries for the tests — and that is what makes the last case a
+    // test of the chain rather than of either face alone.
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;   // no system .ttf on this host
+
+    TrueTypeFont ahem_face;
+    const std::string ahem = "tests/wpt/fonts/Ahem.ttf";
+    if (!ahem_face.load_file(ahem)) return;   // the vendored font is missing
+    assert(ahem_face.has_glyph(0x0041));
+    assert(ahem_face.has_glyph(0x4E00));
+    assert(!ahem_face.has_glyph(0x0100));
+
+    const std::vector<std::string> saved_paths = fr.fallback_paths();
+
+    const TrueTypeFont* primary = fr.face_for(0x0041, false);
+    assert(primary != nullptr);
+    if (primary->has_glyph(0x4E00)) {
+        // This host's primary already covers CJK, so there is no gap for a
+        // fallback to fill and nothing here would be proved either way.
+        return;
+    }
+
+    fr.set_fallbacks({ahem});
+
+    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, false);
+    const TrueTypeFont* for_macron = fr.face_for(0x0100, false);
+    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, false);
+
+    assert(for_ascii != nullptr && for_macron != nullptr && for_cjk != nullptr);
+    // Fallback fills gaps; it does not take the face over.
+    assert(for_ascii == primary);
+    assert(for_macron == primary);          // Ahem does not have 'Ā'
+    assert(for_cjk != primary);             // only Ahem has '一'
+    assert(for_cjk->has_glyph(0x4E00));
+
+    // The rasterizer and the measurer agree, which is what layout asks for.
+    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, false);
+    assert(cjk.width > 0 && cjk.height > 0);
+    assert(!cjk.coverage.empty());
+    assert(fr.measure_text("\xE4\xB8\x80", 16.0f) > 0.0f);   // "一"
+
+    // Discovery walks the system directories, and a vendored test font under
+    // the repository is not one of them.
+    for (const std::string& p : saved_paths) {
+        assert(p != ahem);
+        assert(p.size() > 4 && p.compare(p.size() - 4, 4, ".ttf") == 0);
+    }
+
+    fr.set_fallbacks(saved_paths);   // leave the renderer as the next suite expects it
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -15979,6 +16047,10 @@ int main() {
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
+
+    // Per-glyph font fallback: a codepoint the primary face does not cover is
+    // drawn from another face instead of painting nothing.
+    RUN_TEST(per_glyph_font_fallback);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

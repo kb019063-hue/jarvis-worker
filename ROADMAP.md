@@ -54,7 +54,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 | # | What | Row | Why it is here |
 | :--- | :--- | :--- | :--- |
-| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | One face is loaded (regular, bold). A glyph it lacks paints nothing; `font-family: "Segoe UI", sans-serif` is ignored; no webfont has ever loaded. |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64):** a codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily. Still open: `font-family` is parsed and never read, no `@font-face`, no italic face, no shaping, no bidi. |
 | 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |
@@ -99,7 +99,7 @@ because the last third of it has no oracle to converge on.
 
 | # | Phase | Size |
 | :--- | :--- | :--- |
-| 1 | **Fonts and shaping** — system font loading, `@font-face` web fonts, real metrics, complex-script shaping (adopt HarfBuzz-class shaping), bidi/RTL text, OpenType basics. The single biggest visual gap. | XL |
+| 1 | **Fonts and shaping** — system font loading, `@font-face` web fonts, real metrics, complex-script shaping (adopt HarfBuzz-class shaping), bidi/RTL text, OpenType basics. The single biggest visual gap. (**Per-glyph fallback across the discovered system faces landed in Phase 64** — a codepoint the primary face lacks no longer paints nothing. `@font-face`, shaping and bidi remain open.) | XL |
 | 2 | **Rasterizer upgrade** — anti-aliased, scaled glyphs replace the 8×8 bitmap; image resampling; transforms at raster time. | L |
 | 3 | **Windowed shell** — a real window with keyboard/mouse/touch, focus, scrolling, cursor; terminal renderer kept as a fallback. | L |
 | 4 | **Image codecs** — PNG, GIF (animated), WebP (JPEG optional, AVIF later). Today: BMP/PPM only. Oracle: WPT `image/`. | M–L |

@@ -46,6 +46,24 @@ public:
     /// was not drawn at all. Asking first is what lets another face answer.
     bool has_glyph(uint32_t codepoint) const { return glyph_index(codepoint) != 0; }
 
+    /// The family and subfamily a font file says it is.
+    ///
+    /// `font-family` turns on this question: to decide whether to load
+    /// DejaVuSerif.ttf for `font-family: serif`, something has to know that
+    /// that file *is* DejaVu Serif, and it has to know it before loading it —
+    /// a host can have hundreds of faces and a page asks for two. So this is
+    /// static and reads the `name` table out of the file without parsing the
+    /// outlines: the table directory and one table, not the whole font.
+    struct Names {
+        std::string family;     ///< name id 16 (typographic family) when present, else 1
+        std::string subfamily;  ///< name id 17 (typographic subfamily) when present, else 2
+    };
+
+    /// Reads `out` from the `name` table of `path`. False when the file is not
+    /// a font, has no `name` table, or has no record this can decode — a font
+    /// nobody can name is a font nobody can ask for by name, and falls back.
+    static bool read_names(const std::string& path, Names& out);
+
 private:
     struct Vec2 {
         float x{0.0f};
@@ -117,20 +135,103 @@ public:
     /// the primary, which is what CSS asks for — one line box per line, from
     /// the element's own font, not from whichever face happened to supply a
     /// rare codepoint inside it.
-    const TrueTypeFont* face_for(uint32_t codepoint, bool bold) const;
+    ///
+    /// `family_id` is a family resolved by `family_id_for`; `kDefaultFamily`
+    /// means "the element asked for nothing in particular", which is every
+    /// call site that has not been taught about `font-family` yet.
+    const TrueTypeFont* face_for(uint32_t codepoint, bool bold, int family_id = kDefaultFamily) const;
+
+    // --- families -----------------------------------------------------------
+    //
+    // `font-family` was parsed and kept and never read. It is read now: a face
+    // is chosen for the family an element names.
+
+    /// "No family was named", which is not the same as "family number 0".
+    ///
+    /// It is negative so that it cannot collide with a real id. It was `0`
+    /// once, and `family_face` rejected `family_id <= kDefaultFamily`, which
+    /// meant the first family the registry ever saw — on a host with no system
+    /// fonts, the one a test registers by hand — could not be selected by
+    /// name at all: `font-family: Ahem` drew the default face, silently. The
+    /// third time this sentinel has been the bug, in three different places.
+    static constexpr int kDefaultFamily = -1;
+
+    /// "This generic family has no face on this host", which is not the same
+    /// as "it resolved to the default one". Public because `generic_family_id`
+    /// returns it and a caller has to be able to compare against it.
+    ///
+    /// And not `kDefaultFamily`: a generic is perfectly entitled to name the
+    /// default family, and using a real id as the "not chosen yet" marker is
+    /// how `sans-serif` came out as DejaVu Sans Mono, because DejaVu Sans —
+    /// the right answer — looked unchosen forever.
+    static constexpr int kNoFamily = -2;
+
+    /// The id of the family a CSS `font-family` list asks for.
+    ///
+    /// The list is tried left to right: the first entry that names a family on
+    /// this host, or a generic family this host has a face for, wins.
+    /// `kDefaultFamily` when nothing in the list can be had — which is what CSS
+    /// asks for, and why this cannot fail.
+    ///
+    /// Quotes, case and repeated spaces are all irrelevant to matching, as CSS
+    /// says they are. Resolution is cached: an element asks about its own list
+    /// once per word of text, and the answer does not change.
+    int family_id_for(std::string_view css_family_list) const;
+
+    /// The family a generic name — `serif`, `sans-serif`, `monospace` — means
+    /// on this host, or `kNoFamily` when nothing here fits it.
+    ///
+    /// This is the question `family_id_for` cannot answer: when a generic has
+    /// no face it returns `kDefaultFamily`, which is also what it returns for a
+    /// family that resolved to the default one. A test has to be able to tell
+    /// "this host has no serif" from "this host's serif *is* the default", or
+    /// it ends up asserting a fact about the machine it was written on.
+    int generic_family_id(std::string_view generic) const;
+
+    /// The family `kDefaultFamily` stands for: whichever one the primary
+    /// regular face belongs to. `kNoFamily` when there is no primary face.
+    int default_family_id() const { return m_default_family; }
+
+    /// Adds a font file to the registry, under the family name it declares, and
+    /// returns the id of the family it joined. For tests, which have to say
+    /// which font they mean rather than depend on what a host happens to have;
+    /// and for a host that keeps its fonts somewhere the search does not look.
+    ///
+    /// `kNoFamily` when the file is not a font or declares no name. The id is
+    /// returned rather than left for the caller to look up, because looking it
+    /// up by name is what a caller cannot do when the answer is `0`: `0` used
+    /// to read as "no family" and such a family was unselectable.
+    int register_font_file(const std::string& path);
+
+    /// The families known, by id. `family_names()[id]` is family `id`; empty
+    /// when no face has one, which is a host with no `.ttf` files at all.
+    const std::vector<std::string>& family_names() const { return m_family_names; }
 
     /// Measures exact horizontal advance of UTF-8 text in pixels.
-    float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400);
+    ///
+    /// `css_family` is the element's `font-family` list, resolved here and the
+    /// answer cached, so a caller can hand over the string it already has
+    /// rather than keep an id of its own.
+    float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400,
+                       std::string_view css_family = {});
 
     /// Scaled em metrics for `font_size` px: the ascent above the baseline and
     /// the descent below it (positive). Uses the bold font when one is loaded
     /// and `font_weight` asks for bold. Falls back to (0.8em, 0.2em) when no
     /// font is available, matching the embedded 8x8 fallback.
-    std::pair<float, float> em_ascent_descent(float font_size, int font_weight = 400) const;
+    ///
+    /// `css_family` says which font's metrics: a line box is the element's own
+    /// font's, and DejaVu Serif and DejaVu Sans do not agree on where a
+    /// baseline sits. It stays the *element's* family and not the family of
+    /// whichever fallback face happened to supply a rare codepoint inside the
+    /// line — CSS asks for one line box per line, from one font.
+    std::pair<float, float> em_ascent_descent(float font_size, int font_weight = 400,
+                                              std::string_view css_family = {}) const;
 
     /// Horizontal advance of one codepoint at `font_size` px (exact size, not
     /// rounded to a whole pixel size). Sums to `measure_text` for a string.
-    float glyph_advance_px(uint32_t codepoint, float font_size, int font_weight = 400) const;
+    float glyph_advance_px(uint32_t codepoint, float font_size, int font_weight = 400,
+                           std::string_view css_family = {}) const;
 
     /// Draws anti-aliased UTF-8 text whose line-box top is `(top_x, top_y)`.
     /// Calls `emit_pixel(px, py, coverage)` for every covered pixel (`coverage` in 1..255).
@@ -140,10 +241,15 @@ public:
         std::string_view utf8_text,
         float font_size,
         int font_weight,
-        const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel
+        const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
+        std::string_view css_family = {}
     );
 
-    const GlyphBitmap& get_glyph(uint32_t codepoint, int pixel_size, bool bold);
+    /// The rasterized glyph, cached by (family, size, bold, codepoint). Takes a
+    /// resolved `family_id` and not a list, because it is the one call here that
+    /// runs per glyph of every line of every page.
+    const GlyphBitmap& get_glyph(uint32_t codepoint, int pixel_size, bool bold,
+                                 int family_id = kDefaultFamily);
 
 private:
     FontRenderer();
@@ -157,6 +263,71 @@ private:
     mutable std::size_t m_next_fallback{0};
     std::unordered_map<uint64_t, GlyphBitmap> m_cache;
     static constexpr std::size_t kMaxCachedGlyphs = 4096;
+
+    // --- the family registry ------------------------------------------------
+    //
+    // What `font-family` is matched against. A face is described before it is
+    // loaded, from its `name` table alone: the point of the registry is to
+    // decide which file to load, so it cannot load them all first.
+
+    /// One font file, as described by its own `name` table.
+    struct FaceEntry {
+        std::string path;
+        std::string family;      ///< as the font states it
+        std::string key;         ///< lower-cased, spaces collapsed: what is matched
+        std::string subfamily;   ///< "Book", "Bold", "Bold Italic"...
+        int weight{400};
+        bool italic{false};
+    };
+
+    /// One family: a name and the faces that carry it, at several weights.
+    struct Family {
+        std::string name;
+        std::string key;
+        std::vector<std::size_t> faces;   ///< indices into `m_face_entries`
+    };
+
+    /// How many faces of named families are held loaded at once. A page uses
+    /// two or three; the cap is what stops a hostile page that cycles through
+    /// every family on the host from holding all of them parsed at once.
+    static constexpr std::size_t kMaxLoadedFamilyFaces = 8;
+
+    static FaceEntry describe(const std::string& path);   ///< empty when the file says no name
+
+    /// Which of a family's faces best answers `weight` and `bold`.
+    std::size_t pick_face(const Family&, int weight, bool bold) const;
+
+    /// The loaded face of `family_id` at `weight`, parsing it if this is the
+    /// first time it has been asked for. Null when the family has no face that
+    /// could be loaded.
+    const TrueTypeFont* family_face(int family_id, int weight, bool bold) const;
+
+    /// `glyph_advance_px` for a family already resolved, so that `measure_text`
+    /// resolves once for the whole string and not once per codepoint.
+    float advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
+                            int family_id) const;
+
+    std::vector<FaceEntry> m_face_entries;
+    std::vector<Family> m_families;
+    std::vector<std::string> m_family_names;                    ///< by id, for `family_names()`
+    std::unordered_map<std::string, int> m_family_by_key;       ///< "dejavu sans mono" -> id
+
+    /// The family the primary regular face belongs to, which is what
+    /// `kDefaultFamily` actually names. `kNoFamily` when the primary did not
+    /// load or declares no family.
+    ///
+    /// Needed because "the default" is not a claim about a font, it is a claim
+    /// about whichever file the host had: on a host whose only face is
+    /// monospace, the default *is* monospace, and a caller that assumes the
+    /// default is proportional is asserting a fact about the machine.
+    int m_default_family{kNoFamily};
+
+    int m_generic_serif{kNoFamily};
+    int m_generic_sans{kNoFamily};
+    int m_generic_mono{kNoFamily};
+    mutable std::unordered_map<std::string, int> m_resolved;    ///< a whole list -> id
+    mutable std::vector<TrueTypeFont> m_family_faces;           ///< grown lazily
+    mutable std::unordered_map<uint64_t, std::size_t> m_family_face_index;
 };
 
 } // namespace litebird

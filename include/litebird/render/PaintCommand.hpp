@@ -42,6 +42,10 @@ struct DrawTextCommand {
     Color color;
     float font_size{16.0f};
     int font_weight{400};
+    /// The `font-family` list the text was laid out in. Carried through from
+    /// the style rather than resolved here, so that painting measures and
+    /// draws with exactly the face layout measured with.
+    std::string font_family;
 };
 
 struct DrawImageCommand {

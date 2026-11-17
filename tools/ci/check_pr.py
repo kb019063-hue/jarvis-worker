@@ -61,6 +61,14 @@ SHARED = {
     "tests/test_suite.cpp", "Makefile", ".github/workflows/ci.yml",
 }
 DOCUMENT = re.compile(r"\.md$")
+# "No phase, no finding:", "takes no phase or finding number", "is not a phase".
+# A pull request that claims no numbers has to say that it claims none, rather
+# than merely omit the line: silence is how a number gets forgotten, not how a
+# numberless change announces itself.
+NO_NUMBERS_RE = re.compile(
+    r"no phase,? (?:no|or) finding|takes no phase|is not a phase|not a phase and takes no",
+    re.IGNORECASE,
+)
 REPO = "repos/{owner}/{repo}"      # `gh api` fills the two in from the clone
 
 
@@ -85,6 +93,13 @@ def claim_of(pr: dict) -> dict:
     body = (pr.get("body") or "").replace("\r\n", "\n")
     head = body.split("\n")[:16]
     task = next((line for line in head if line.startswith("Task:")), None)
+    # A change that takes no numbers says so, in place of the `Phase P, finding F`
+    # line. AGENTS.md: "A change like this one -- documents, tooling, CI, nothing
+    # that moves a scoreboard -- is not a phase and takes no phase or finding
+    # number." #76 was merged saying "No phase, no finding:", and this used to
+    # call it a missing claim, which is a wrong answer rather than an error: it
+    # blocks work that announced itself correctly.
+    no_numbers = NO_NUMBERS_RE.search(body) is not None
     numbers = next((m for m in (re.match(r"Phase (\d+), finding (\d+)\s*$", line) for line in head) if m), None)
     phase = int(numbers.group(1)) if numbers else None
     finding = int(numbers.group(2)) if numbers else None
@@ -116,7 +131,7 @@ def claim_of(pr: dict) -> dict:
         "title": pr["title"],
         "task": task[len("Task:"):].strip() if task else None,
         "files": named | changed,       # what it says it will change, and what it has changed
-        "has_claim_lines": task is not None and has_files_line and numbers is not None,
+        "has_claim_lines": task is not None and has_files_line and (numbers is not None or no_numbers),
         "phase": phase,
         "finding": finding,
         "head": pr.get("headRefOid", ""),

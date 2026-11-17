@@ -172,6 +172,12 @@ struct ComputedStyle {
     BoxShadow box_shadow;
     float font_size{16.0f};
     int font_weight{400};
+    /// The `font-family` list exactly as it was written — quotes, commas and
+    /// all. It is not resolved here: which file on the host answers to a name
+    /// is the font layer's business, and layout is where it is asked, once per
+    /// measured run of text. Empty means "inherit whichever family the parent
+    /// got", which for the root is the engine's default face.
+    std::string font_family;
     // Line height: a -1 sentinel means "not declared" (normal; layout falls
     // back to 1.25 * font_size). line_height holds a computed px length;
     // line_height_number holds a bare unitless multiplier. Both inherit per

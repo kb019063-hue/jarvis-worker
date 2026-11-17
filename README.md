@@ -1254,8 +1254,10 @@ plane rebuilt by hand from all three filters.
 ```
 
 Animated WebP (`ANMF` compositing) and AVIF are refused with a status rather
-than approximated: `AUDIT.md`, finding 63, says what was found and
-`ARCHITECTURE.md`, Phase 57, how it is built.
+than approximated: [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md)
+says what was found and
+[`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
+how it is built.
 
 ### Cross-origin `Window` and `Location` reflection (Phase 56)
 

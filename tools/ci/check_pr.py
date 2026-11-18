@@ -169,7 +169,8 @@ def main_commit() -> str:
     `tools/next_ids.py --ref` reads a ref out of the local clone, and the
     local `main` is where the clone was made. On 18 November that was one
     merge behind: asked for `main`, the allocator answered with floors of 66
-    and 72 and no Phase 68 an hour after #83 had put 68 and 74 on `main`.
+    and 72 and no Phase 68, twenty minutes after #83 had put 68 and 74 on
+    `main`.
     Whether a number has landed is the one question that must not be answered
     from before it landed, so the commit is asked of GitHub and fetched when
     the clone does not have it.

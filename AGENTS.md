@@ -195,10 +195,10 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   one at or below a floor.
 - **`main`, as the clone remembers it.** From #80 the same question was put
   to the clone's own branch `main`, which is where the clone was made and
-  which `git fetch` of `origin` does not move. An hour after #83 had put
-  Phase 68 and finding 74 on `main`, a clone made before it still answered
-  with floors of 66 and 72 and no Phase 68; a clone with no branch `main`
-  answered that no number was taken, without an error. That is the answer
+  which `git fetch` of `origin` does not move. Twenty minutes after #83 had
+  put Phase 68 and finding 74 on `main`, a clone made before it still
+  answered with floors of 66 and 72 and no Phase 68; a clone with no branch
+  `main` answered that no number was taken, without an error. That is the answer
   from before a number landed, to the question whether it has landed.
   `check_pr.py` now asks GitHub which commit `main` is, fetches it when the
   clone does not have it, and reads that.

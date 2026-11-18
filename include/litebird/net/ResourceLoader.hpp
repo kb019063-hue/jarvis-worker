@@ -94,9 +94,10 @@ public:
 
     static ResourceResponse load_file(const std::string& file_path);
 
-    /// Performs an HTTP/1.1 or HTTPS (TLS) request, following redirects,
-    /// consulting/updating the HTTP cache and CookieJar, and decoding chunked
-    /// transfer-encoding and gzip/deflate content-encoding.
+    /// Performs an HTTP/1.1 or HTTPS (TLS) request with persistent keep-alive
+    /// socket pooling, following redirects, consulting/updating the HTTP cache
+    /// and CookieJar, and decoding chunked transfer-encoding and
+    /// gzip/deflate/br content-encoding.
     static ResourceResponse load_http(
         const std::string& url,
         const std::string& method = "GET",
@@ -117,6 +118,10 @@ public:
     static void clear_http_cache();
     static std::size_t http_cache_size();
     static std::size_t cors_preflight_cache_size();
+
+    /// Clears all idle HTTP/1.1 and HTTPS sockets held in the keep-alive pool.
+    static void clear_http_connection_pool();
+    static std::size_t http_connection_pool_size();
 
     /// Optional custom CA bundle path for deterministic loopback HTTPS testing.
     static void set_ca_bundle_for_testing(std::string ca_file_path);

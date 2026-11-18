@@ -1,4 +1,4 @@
-# Phase 73 — `@font-face` brings the font with the page
+# Phase 74 — `@font-face` brings the font with the page
 
 A page may bring its own typeface. `@font-face` declares a family name and
 where the bytes are; everything downstream — the cascade, `font-family`

@@ -1,4 +1,4 @@
-# Finding 79 — `@font-face` was skipped, and `font-family` never reached the text
+# Finding 80 — `@font-face` was skipped, and `font-family` never reached the text
 
 **Severity:** high — one rule the parser threw away, and one gap that made
 Phase 67's whole `font-family` work invisible on the page.

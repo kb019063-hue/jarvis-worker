@@ -89,6 +89,14 @@ jobs:
         run: |
           make verify-color
           make fuzz-color
+      - name: RFC 7932 Brotli vector, bomb-cap, and mutation fuzz verification
+        # Verifies pure C++20 RFC 7932 Brotli decoding across built-in edge
+        # vectors, exact bomb-cap boundaries, invalid headers, and 2,000
+        # truncation/bit-flip/random fuzz inputs (live Node differential checks
+        # also run in js-conformance where Node 22 is provisioned).
+        run: |
+          make verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
+          make fuzz-brotli BROTLI_VERIFY_FLAGS=--skip-node
 
   docs:
     name: Documentation shape
@@ -237,6 +245,13 @@ jobs:
         # 1,112 curated+fuzz multi-char strings, 1,038 collation pairs, and 25
         # ECMA-262/ECMA-402 validation checks against Node.js (0 discrepancies).
         run: make verify-string-unicode
+      - name: RFC 7932 Brotli differential verification against Node.js zlib
+        # Differential-tests quality 0..11, window bits 10..24, all modes,
+        # >1 MiB streams, dictionary transforms, bomb caps, and 2,000 fuzzed
+        # inputs against Node 22 zlib.brotliCompressSync.
+        run: |
+          make verify-brotli
+          make fuzz-brotli
       - uses: actions/upload-artifact@v4
         with:
           name: js-conformance-report

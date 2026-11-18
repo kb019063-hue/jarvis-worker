@@ -60,11 +60,14 @@ public:
 
 private:
     void receiver_thread_loop();
+    void fail_connection(const char* message);
     bool perform_handshake(int sock);
     bool read_exact(int sock, void* buf, size_t len);
 
     std::string m_url;
     std::string m_protocol;
+    bool m_request_valid{false};
+    bool m_secure{false};
     std::string m_host;
     uint16_t m_port{80};
     std::string m_path{"/"};

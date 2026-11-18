@@ -48,7 +48,7 @@ including the forward reference a method makes to a field written below it.
 ## 3. How it was verified
 
 ```
-make test                     # 236 suites: private_names_are_identities_and_not_strings
+make test                     # 242 suites: private_names_are_identities_and_not_strings
 make test262                  # before 12657 (80.7%) -> now 13630 (86.9%) of 15,686
                               # 973 pass in now and not in before, 0 lost
 ```

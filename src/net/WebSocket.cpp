@@ -1,4 +1,5 @@
 #include "litebird/net/WebSocket.hpp"
+#include "litebird/net/UrlParser.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include <sys/types.h>
@@ -8,6 +9,8 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <chrono>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -111,34 +114,81 @@ std::string WebSocketObject::calculate_accept_key(const std::string& client_key)
     return base64_encode(sha);
 }
 
+namespace {
+
+bool http_token_char(unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') || std::string_view("!#$%&'*+-.^_`|~").find(c) != std::string_view::npos;
+}
+
+// The current public API takes one comma-separated list, not the Web IDL
+// sequence. Accept only complete HTTP tokens, with no empty entries or duplicates.
+std::string trim_http(std::string s) {
+    const auto first = s.find_first_not_of(" \t");
+    if (first == std::string::npos) return {};
+    return s.substr(first, s.find_last_not_of(" \t") - first + 1);
+}
+
+std::string lower_ascii(std::string s) {
+    for (char& c : s) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    return s;
+}
+
+bool list_contains(const std::string& list, const std::string& wanted, bool case_insensitive) {
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(',', start);
+        if (end == std::string::npos) end = list.size();
+        std::string value = trim_http(list.substr(start, end - start));
+        if ((case_insensitive ? lower_ascii(value) : value) == wanted) return true;
+        if (end == list.size()) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+bool valid_protocols(const std::string& protocols) {
+    if (protocols.empty()) return true;
+    std::vector<std::string> seen;
+    size_t start = 0;
+    while (start < protocols.size()) {
+        size_t end = protocols.find(',', start);
+        if (end == std::string::npos) end = protocols.size();
+        size_t first = start, last = end;
+        while (first < last && protocols[first] == ' ') ++first;
+        while (last > first && protocols[last - 1] == ' ') --last;
+        if (first == last) return false;
+        for (size_t i = first; i < last; ++i)
+            if (!http_token_char(static_cast<unsigned char>(protocols[i]))) return false;
+        std::string token = protocols.substr(first, last - first);
+        if (std::find(seen.begin(), seen.end(), token) != seen.end()) return false;
+        seen.push_back(std::move(token));
+        if (end == protocols.size()) return true;
+        start = end + 1;
+    }
+    return false;
+}
+
+} // namespace
+
 WebSocketObject::WebSocketObject(std::string url, std::string protocols)
     : m_url(std::move(url)), m_protocol(std::move(protocols)) {
-    // Parse ws://host[:port]/path
-    std::string s = m_url;
-    bool is_wss = false;
-    if (s.starts_with("ws://")) {
-        s = s.substr(5);
-        m_port = 80;
-    } else if (s.starts_with("wss://")) {
-        s = s.substr(6);
-        m_port = 443;
-        is_wss = true;
-    }
-    (void)is_wss;
-
-    size_t slash_pos = s.find('/');
-    std::string host_port = (slash_pos != std::string::npos) ? s.substr(0, slash_pos) : s;
-    m_path = (slash_pos != std::string::npos) ? s.substr(slash_pos) : "/";
-
-    size_t colon_pos = host_port.find(':');
-    if (colon_pos != std::string::npos) {
-        m_host = host_port.substr(0, colon_pos);
-        try {
-            m_port = static_cast<uint16_t>(std::stoi(host_port.substr(colon_pos + 1)));
-        } catch (...) {}
-    } else {
-        m_host = host_port;
-    }
+    // Parse before building the HTTP request. Raw control characters must not
+    // become headers or request lines, even if a URL parser would strip them.
+    if (m_url.size() > 16384 || m_protocol.size() > 16384 ||
+        std::any_of(m_url.begin(), m_url.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }) ||
+        !valid_protocols(m_protocol)) return;
+    Url parsed;
+    if (!Url::parse(m_url, static_cast<const Url*>(nullptr), parsed) ||
+        (parsed.scheme != "ws" && parsed.scheme != "wss") || !parsed.has_host || parsed.host.empty() ||
+        parsed.has_fragment || !parsed.username.empty() || !parsed.password.empty()) return;
+    m_secure = parsed.scheme == "wss";
+    m_host = parsed.host;
+    m_port = static_cast<uint16_t>(parsed.port < 0 ? (m_secure ? 443 : 80) : parsed.port);
+    m_path = parsed.pathname() + parsed.search();
+    if (m_path.empty()) m_path = "/";
+    m_url = parsed.href();
+    m_request_valid = true;
 }
 
 WebSocketObject::~WebSocketObject() {
@@ -195,45 +245,105 @@ bool WebSocketObject::perform_handshake(int sock) {
     req << "\r\n";
 
     std::string req_str = req.str();
-    if (::send(sock, req_str.data(), req_str.size(), 0) <= 0) {
-        return false;
+    size_t sent = 0;
+    while (sent < req_str.size()) {
+        ssize_t n = ::send(sock, req_str.data() + sent, req_str.size() - sent, MSG_NOSIGNAL);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
     }
 
-    // Read HTTP response header until "\r\n\r\n"
+    // Bound both the response header size and a stalled handshake. Read one
+    // byte at a time so no first WebSocket frame is consumed with the header.
+    timeval timeout{5, 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) return false;
     std::string resp;
     char ch;
-    while (::recv(sock, &ch, 1, 0) > 0) {
+    bool complete = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (resp.size() < 65536) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+        pollfd fd{sock, POLLIN, 0};
+        if (::poll(&fd, 1, static_cast<int>(remaining)) <= 0 || ::recv(sock, &ch, 1, 0) != 1) break;
         resp.push_back(ch);
-        if (resp.size() >= 4 && resp.substr(resp.size() - 4) == "\r\n\r\n") {
+        if (resp.size() >= 4 && resp.compare(resp.size() - 4, 4, "\r\n\r\n") == 0) {
+            complete = true;
             break;
         }
     }
+    timeval no_timeout{0, 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &no_timeout, sizeof(no_timeout)) != 0) return false;
+    if (!complete) return false;
 
-    // Validate 101 Switching Protocols
-    if (resp.find("101") == std::string::npos && resp.find("Switching Protocols") == std::string::npos) {
-        return false;
+    const size_t first_line = resp.find("\r\n");
+    const std::string status = resp.substr(0, first_line);
+    if (status.size() < 12 || status.compare(0, 12, "HTTP/1.1 101") != 0 ||
+        (status.size() > 12 && status[12] != ' ')) return false;
+
+    bool upgrade = false, connection = false, accept_seen = false, protocol_seen = false;
+    std::string selected;
+    size_t pos = first_line + 2;
+    while (pos < resp.size() - 2) {
+        size_t end = resp.find("\r\n", pos);
+        if (end == pos) break;
+        if (end == std::string::npos) return false;
+        const std::string line = resp.substr(pos, end - pos);
+        size_t colon = line.find(':');
+        if (colon == std::string::npos || colon == 0) return false;
+        for (size_t i = 0; i < colon; ++i)
+            if (!http_token_char(static_cast<unsigned char>(line[i]))) return false;
+        const std::string name = lower_ascii(line.substr(0, colon));
+        const std::string value = trim_http(line.substr(colon + 1));
+        if (name == "upgrade") upgrade |= list_contains(value, "websocket", true);
+        else if (name == "connection") connection |= list_contains(value, "upgrade", true);
+        else if (name == "sec-websocket-accept") {
+            if (accept_seen || value != expected_accept) return false;
+            accept_seen = true;
+        } else if (name == "sec-websocket-protocol") {
+            if (protocol_seen) return false;
+            protocol_seen = true;
+            selected = value;
+        } else if (name == "sec-websocket-extensions") {
+            // No extension was requested; accepting one would change framing.
+            return false;
+        }
+        pos = end + 2;
     }
+    if (!upgrade || !connection || !accept_seen) return false;
+    if (m_protocol.empty()) return !protocol_seen;
+    return protocol_seen && list_contains(m_protocol, selected, false);
+}
 
-    // Validate Sec-WebSocket-Accept
-    if (resp.find(expected_accept) == std::string::npos) {
-        return false;
-    }
-
-    return true;
+void WebSocketObject::fail_connection(const char* message) {
+    m_ready_state = WebSocketReadyState::Closed;
+    EventLoop::default_loop().post_task([weak_self = weak_from_this(), message = std::string(message)]() {
+        auto self = weak_self.lock();
+        if (!self) return;
+        JsValue error = JsValue::make_object(Heap::default_heap().allocate_object());
+        error.set_property("type", JsValue::make_string("error"));
+        error.set_property("message", JsValue::make_string(message));
+        if (self->m_onerror.is_function()) self->m_onerror.call({error});
+        for (auto& listener : self->m_error_listeners) if (listener.is_function()) listener.call({error});
+        JsValue close = JsValue::make_object(Heap::default_heap().allocate_object());
+        close.set_property("type", JsValue::make_string("close"));
+        close.set_property("code", JsValue::make_number(1006));
+        close.set_property("reason", JsValue::make_string(""));
+        close.set_property("wasClean", JsValue::make_boolean(false));
+        if (self->m_onclose.is_function()) self->m_onclose.call({close});
+        for (auto& listener : self->m_close_listeners) if (listener.is_function()) listener.call({close});
+    });
 }
 
 void WebSocketObject::receiver_thread_loop() {
+    // There is no TLS transport in this client. Never connect a wss URL over
+    // a cleartext socket: failing closed is safer than silently downgrading.
+    if (!m_request_valid || m_secure) {
+        fail_connection("Invalid WebSocket request or unsupported secure transport");
+        return;
+    }
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        m_ready_state = WebSocketReadyState::Closed;
-        EventLoop::default_loop().post_task([weak_self = weak_from_this()]() {
-            auto self = weak_self.lock();
-            if (self && self->m_onerror.is_function()) {
-                JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-                ev.set_property("message", JsValue::make_string("Socket creation failed"));
-                self->m_onerror.call({ev});
-            }
-        });
+        fail_connection("Socket creation failed");
         return;
     }
 
@@ -247,15 +357,7 @@ void WebSocketObject::receiver_thread_loop() {
         struct hostent* he = gethostbyname(m_host.c_str());
         if (!he) {
             ::close(sock);
-            m_ready_state = WebSocketReadyState::Closed;
-            EventLoop::default_loop().post_task([weak_self = weak_from_this()]() {
-                auto self = weak_self.lock();
-                if (self && self->m_onerror.is_function()) {
-                    JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-                    ev.set_property("message", JsValue::make_string("Host resolution failed"));
-                    self->m_onerror.call({ev});
-                }
-            });
+            fail_connection("Host resolution failed");
             return;
         }
         memcpy(&server_addr.sin_addr, he->h_addr_list[0], he->h_length);
@@ -263,29 +365,13 @@ void WebSocketObject::receiver_thread_loop() {
 
     if (::connect(sock, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
         ::close(sock);
-        m_ready_state = WebSocketReadyState::Closed;
-        EventLoop::default_loop().post_task([weak_self = weak_from_this()]() {
-            auto self = weak_self.lock();
-            if (self && self->m_onerror.is_function()) {
-                JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-                ev.set_property("message", JsValue::make_string("Connection failed"));
-                self->m_onerror.call({ev});
-            }
-        });
+        fail_connection("Connection failed");
         return;
     }
 
     if (!perform_handshake(sock)) {
         ::close(sock);
-        m_ready_state = WebSocketReadyState::Closed;
-        EventLoop::default_loop().post_task([weak_self = weak_from_this()]() {
-            auto self = weak_self.lock();
-            if (self && self->m_onerror.is_function()) {
-                JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-                ev.set_property("message", JsValue::make_string("WebSocket handshake failed"));
-                self->m_onerror.call({ev});
-            }
-        });
+        fail_connection("WebSocket handshake failed");
         return;
     }
 
@@ -479,7 +565,7 @@ void WebSocketObject::close(int code, const std::string& reason) {
             frame.push_back(static_cast<uint8_t>(reason[i]) ^ mask[(2 + i) % 4]);
         }
 
-        ::send(m_socket_fd, frame.data(), frame.size(), 0);
+        ::send(m_socket_fd, frame.data(), frame.size(), MSG_NOSIGNAL);
         ::shutdown(m_socket_fd, SHUT_RDWR);
     }
 }
@@ -543,8 +629,6 @@ std::shared_ptr<WebSocketObject::LoopbackServer> WebSocketObject::start_loopback
 
 JsValue WebSocketObject::create_js_instance(std::string_view url, std::string_view protocols) {
     auto ws = std::make_shared<WebSocketObject>(std::string(url), std::string(protocols));
-    ws->connect();
-
     JsValue inst = JsValue::make_object(Heap::default_heap().allocate_object());
 
     inst.set_property("url", JsValue::make_string(ws->url()));
@@ -602,6 +686,8 @@ JsValue WebSocketObject::create_js_instance(std::string_view url, std::string_vi
         return JsValue::make_number(static_cast<double>(ws->ready_state()));
     }));
 
+    // Install dispatch callbacks before the worker can report an early failure.
+    ws->connect();
     return inst;
 }
 

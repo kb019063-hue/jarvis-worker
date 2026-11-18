@@ -124,7 +124,7 @@ ordinary again. The `%` prefix stays hidden, which is a row of its own below.
 `make test` — one new suite, `private_names_are_identities_and_not_strings`,
 which asserts all of the above (the field is not a property, the brand, the
 cross-class and cross-evaluation isolation, the accessor directions, and eleven
-syntax errors). 236 suites in all, and the direct-eval suite #103 added is
+syntax errors). 242 suites in all, and the direct-eval suite #103 added is
 one of them.
 
 `make test262` — the pinned suite over its 21 default directories, against a

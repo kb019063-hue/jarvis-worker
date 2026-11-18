@@ -25,11 +25,13 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/net/Brotli.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
 #include <filesystem>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
@@ -67,6 +69,7 @@
 extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #endif
 
+#include <poll.h>
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -81,6 +84,7 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <thread>
 #include <chrono>
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -637,7 +641,7 @@ TEST(per_glyph_font_fallback) {
 
     const std::vector<std::string> saved_paths = fr.fallback_paths();
 
-    const TrueTypeFont* primary = fr.face_for(0x0041, false);
+    const TrueTypeFont* primary = fr.face_for(0x0041, 400);
     assert(primary != nullptr);
     if (primary->has_glyph(0x4E00)) {
         // This host's primary already covers CJK, so there is no gap for a
@@ -647,9 +651,9 @@ TEST(per_glyph_font_fallback) {
 
     fr.set_fallbacks({ahem});
 
-    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, false);
-    const TrueTypeFont* for_macron = fr.face_for(0x0100, false);
-    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, false);
+    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, 400);
+    const TrueTypeFont* for_macron = fr.face_for(0x0100, 400);
+    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, 400);
 
     assert(for_ascii != nullptr && for_macron != nullptr && for_cjk != nullptr);
     // Fallback fills gaps; it does not take the face over.
@@ -659,7 +663,7 @@ TEST(per_glyph_font_fallback) {
     assert(for_cjk->has_glyph(0x4E00));
 
     // The rasterizer and the measurer agree, which is what layout asks for.
-    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, false);
+    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, 400);
     assert(cjk.width > 0 && cjk.height > 0);
     assert(!cjk.coverage.empty());
     assert(fr.measure_text("\xE4\xB8\x80", 16.0f) > 0.0f);   // "一"
@@ -768,8 +772,8 @@ TEST(font_family_selects_a_face) {
     // the next line drawn in another, which is a bug that appears as the first
     // line of a paragraph being right and the rest wrong.
     if (fr.has_truetype_font()) {
-        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
-        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, 400, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, 400, FontRenderer::kDefaultFamily);
         assert(from_ahem.width != from_default.width);
     }
 
@@ -1373,17 +1377,17 @@ TEST(a_family_with_an_italic_face_is_not_sheared) {
     assert(upright_only != FontRenderer::kNoFamily);
 
     bool sheared = true;
-    const TrueTypeFont* italic_face = fr.face_for('X', false, slanty, /*italic=*/true, &sheared);
+    const TrueTypeFont* italic_face = fr.face_for('X', 400, slanty, /*italic=*/true, &sheared);
     assert(italic_face);
     assert(!sheared);   // the family's own italic answered: nothing to synthesise
 
     sheared = true;
-    const TrueTypeFont* upright_face = fr.face_for('X', false, slanty, /*italic=*/false, &sheared);
+    const TrueTypeFont* upright_face = fr.face_for('X', 400, slanty, /*italic=*/false, &sheared);
     assert(upright_face);
     assert(!sheared);   // an upright request has nothing to shear
 
     sheared = false;
-    const TrueTypeFont* stand_in = fr.face_for('X', false, upright_only, /*italic=*/true, &sheared);
+    const TrueTypeFont* stand_in = fr.face_for('X', 400, upright_only, /*italic=*/true, &sheared);
     assert(stand_in);
     // No italic on this host: the upright face answers and the caller is told
     // to shear it. Reporting this rather than assuming it is what keeps
@@ -1447,7 +1451,7 @@ TEST(text_is_drawn_at_the_advances_it_was_measured_at) {
     // '一' U+4E00 is Ahem's and not DejaVu's or DejaVu Sans Mono's, which is
     // what makes it the one codepoint that forces the fallback chain.
     if (mono_face.has_glyph(0x4E00) || !ahem_face.has_glyph(0x4E00)) return;
-    if (const TrueTypeFont* primary = fr.face_for(0x0041, false)) {
+    if (const TrueTypeFont* primary = fr.face_for(0x0041, 400)) {
         if (primary->has_glyph(0x4E00)) return;   // this host's primary covers CJK
     }
 
@@ -1471,6 +1475,278 @@ TEST(text_is_drawn_at_the_advances_it_was_measured_at) {
     // space measured for it and sitting in a gap.
     assert(wide_rightmost - 20 >= 29);
     assert(wide_rightmost - 20 <= 34);
+}
+
+TEST(a_face_weight_comes_from_the_font_not_its_name) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const ResourceResponse ahem = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!ahem.success || ahem.body.empty()) return;
+
+    // A file's weight is a number in its `OS/2` table, and its slant is a bit
+    // in `OS/2` or in `head`. Both used to be guessed from the subfamily name:
+    // "Bold" means 700, "Italic" means slanted, everything else is a regular
+    // face. That guess is right for the fonts on this machine and wrong for a
+    // foundry that writes "Halbfett", and there is no reason to guess when the
+    // file answers.
+    //
+    // Nowhere on this host is there a face where the name and the table
+    // disagree -- every DejaVu file agrees with itself -- so the disagreement
+    // is made here: the vendored Ahem, whose subfamily says "Regular" (it says
+    // so in a name table nobody touches), with its `OS/2` rewritten.
+    const auto table_offset = [](const std::string& font, const char* tag) -> std::size_t {
+        if (font.size() < 12) return 0;
+        const auto u16 = [&font](std::size_t o) {
+            return (static_cast<unsigned>(static_cast<unsigned char>(font[o])) << 8) |
+                   static_cast<unsigned>(static_cast<unsigned char>(font[o + 1]));
+        };
+        const auto u32 = [&font](std::size_t o) {
+            return (static_cast<std::size_t>(static_cast<unsigned char>(font[o])) << 24) |
+                   (static_cast<std::size_t>(static_cast<unsigned char>(font[o + 1])) << 16) |
+                   (static_cast<std::size_t>(static_cast<unsigned char>(font[o + 2])) << 8) |
+                   static_cast<std::size_t>(static_cast<unsigned char>(font[o + 3]));
+        };
+        const unsigned count = u16(4);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::size_t record = 12 + 16 * static_cast<std::size_t>(i);
+            if (record + 16 > font.size()) return 0;
+            if (font.compare(record, 4, tag) == 0) return u32(record + 8);
+        }
+        return 0;
+    };
+
+    const int family = fr.family_id_for("Ahem");   // whichever test registered it
+    // The control: the unpatched file says 400 and upright, and the name says
+    // the same, so nothing below depends on which of the two was read.
+    bool saw_upright_400 = false;
+    bool saw_slant_before = false;
+    for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+        if (f.weight_min == 400 && f.weight_max == 400 && !f.italic) saw_upright_400 = true;
+        if (f.italic) saw_slant_before = true;
+    }
+    std::printf("      [weight] Ahem before patching: 400/upright=%s italic=%s\n",
+                saw_upright_400 ? "yes" : "no", saw_slant_before ? "yes" : "no");
+    std::fflush(stdout);
+    assert(saw_upright_400);
+    assert(!saw_slant_before);
+
+    // Three artefacts, because three separate fields say what a face is and
+    // each can be wrong on its own: `OS/2.usWeightClass`, `OS/2.fsSelection`
+    // bit 0, and `head.macStyle` bit 1. Every one of them was ignored before
+    // this phase, so every one of them gets a file that sets it and nothing
+    // else -- the name table is never touched, and still says "Regular".
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::filesystem::path heavy_path = dir / "litebird_phase81_weight_700.ttf";
+    const std::filesystem::path os2_italic_path = dir / "litebird_phase81_os2_italic.ttf";
+    const std::filesystem::path head_italic_path = dir / "litebird_phase81_head_italic.ttf";
+
+    const auto write_file = [](const std::filesystem::path& path, const std::string& bytes) {
+        std::ofstream out(path, std::ios::binary);
+        assert(out);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return out.good();
+    };
+
+    // 700, which is not what the subfamily says.
+    std::string heavy = ahem.body;
+    const std::size_t heavy_os2 = table_offset(heavy, "OS/2");
+    assert(heavy_os2 != 0 && heavy_os2 + 64 <= heavy.size());
+    heavy[heavy_os2 + 4] = static_cast<char>(700 >> 8);
+    heavy[heavy_os2 + 5] = static_cast<char>(700 & 0xFF);
+    assert(write_file(heavy_path, heavy));
+
+    // `OS/2.fsSelection` bit 0, the bit nearly every modern font uses.
+    std::string os2_italic = ahem.body;
+    const std::size_t italic_os2 = table_offset(os2_italic, "OS/2");
+    assert(italic_os2 != 0 && italic_os2 + 64 <= os2_italic.size());
+    os2_italic[italic_os2 + 63] = static_cast<char>(static_cast<unsigned char>(os2_italic[italic_os2 + 63]) | 0x01);
+    assert(write_file(os2_italic_path, os2_italic));
+
+    // `head.macStyle` bit 1, which older fonts use instead.
+    std::string head_italic = ahem.body;
+    const std::size_t italic_head = table_offset(head_italic, "head");
+    assert(italic_head != 0 && italic_head + 46 <= head_italic.size());
+    head_italic[italic_head + 45] = static_cast<char>(static_cast<unsigned char>(head_italic[italic_head + 45]) | 0x02);
+    assert(write_file(head_italic_path, head_italic));
+
+    const int heavy_id = fr.register_font_file(heavy_path.string());
+    assert(heavy_id != FontRenderer::kNoFamily);
+    // Both files call themselves "Ahem" -- the name table was not touched --
+    // so they joined the family the host face is in, which is what makes the
+    // facts below a mix of everything registered under that name.
+    assert(heavy_id == family || family == FontRenderer::kDefaultFamily);
+
+    const auto count_italic_faces = [&fr]() {
+        int slanted = 0;
+        for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+            if (f.italic) ++slanted;
+        }
+        return slanted;
+    };
+    const auto has_weight = [&fr](int weight) {
+        for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+            if (f.weight_min == weight && f.weight_max == weight && !f.italic) return true;
+        }
+        return false;
+    };
+
+    // The name says "Regular" and the table says 700: the table won.
+    assert(has_weight(700));
+    assert(count_italic_faces() == 0);
+
+    // `OS/2.fsSelection`, then `head.macStyle`. Neither file says "Italic"
+    // anywhere, and each adds exactly one slanted face -- which is the only
+    // way to tell which of the two bits was read.
+    assert(fr.register_font_file(os2_italic_path.string()) != FontRenderer::kNoFamily);
+    const int after_os2 = count_italic_faces();
+    assert(fr.register_font_file(head_italic_path.string()) != FontRenderer::kNoFamily);
+    const int after_head = count_italic_faces();
+    std::printf("      [weight] italic faces: by-os2=%d by-head=%d\n", after_os2, after_head);
+    std::fflush(stdout);
+    assert(after_os2 == 1);
+    assert(after_head == 2);
+
+    // ...and the slant is not merely recorded, it is chosen: an italic request
+    // in this family now finds a face that is already slanted, so there is
+    // nothing for the caller to shear.
+    bool sheared = true;
+    const TrueTypeFont* picked = fr.face_for('X', 400, family, /*italic=*/true, &sheared);
+    assert(picked);
+    assert(!sheared);
+}
+
+TEST(font_weight_matching_follows_the_css_order) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+    fr.clear_webfonts();
+
+    // Two faces of one family, far apart in weight and easy to tell apart by
+    // measurement: the vendored Ahem at 500, where four characters at 16 px
+    // measure 64.00, and the host's sans at 700.
+    const std::string sans_path = fr.face_path("sans-serif");
+    if (sans_path.empty()) return;
+    const ResourceResponse sans = ResourceLoader::load_file(sans_path);
+    const ResourceResponse ahem = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!sans.success || sans.body.empty() || !ahem.success || ahem.body.empty()) return;
+
+    const std::vector<std::uint8_t> sans_bytes(sans.body.begin(), sans.body.end());
+    const std::vector<std::uint8_t> ahem_bytes(ahem.body.begin(), ahem.body.end());
+    // Registered 700 first and 500 second, which puts the 500 at the front of
+    // the family's list -- so a tie that is broken by "whichever came first"
+    // picks the Ahem face, and a tie broken by the spec picks the sans.
+    fr.register_webfont("Weights", {[sans_bytes]() { return sans_bytes; }}, 700, 700);
+    fr.register_webfont("Weights", {[ahem_bytes]() { return ahem_bytes; }}, 500, 500);
+
+    const float at_500 = fr.measure_text("XXXX", 16.0f, 500, "Weights");
+    const float at_700 = fr.measure_text("XXXX", 16.0f, 700, "Weights");
+    assert(std::fabs(at_500 - 64.0f) < 0.5f);          // the Ahem face
+    assert(std::fabs(at_700 - at_500) > 1.0f);         // ...and it is not this one
+    const float at_600 = fr.measure_text("XXXX", 16.0f, 600, "Weights");
+    const float at_400 = fr.measure_text("XXXX", 16.0f, 400, "Weights");
+    std::printf("      [weights] 400=%.2f 500=%.2f 600=%.2f 700=%.2f\n",
+                at_400, at_500, at_600, at_700);
+    std::fflush(stdout);
+
+    // CSS Fonts 4 §5.2.1 does not ask for the nearest weight. Above 500 it
+    // looks upward first, so 600 is answered by 700 -- the distance rule sees
+    // 600 as a tie between 500 and 700 and takes whichever was registered
+    // first, which is the Ahem face.
+    assert(std::fabs(at_600 - at_700) < 0.5f);
+    // In the 400..500 band it looks upward first too, so 400 is answered by the
+    // 500 face rather than by nothing.
+    assert(std::fabs(at_400 - at_500) < 0.5f);
+
+    // And the weight a page asks for is the weight the registry is asked at.
+    // It used to arrive as a bool -- `bold = weight >= 600` -- so the only
+    // questions ever put to a family were 400 and 700, and a family with a 200
+    // face could not be asked for it. Here 350 must reach the 200 face: below
+    // 400 the search steps down first. Flattened to 400 it would land on the
+    // 500 face instead, and the two are different fonts.
+    fr.register_webfont("WeightFloor", {[ahem_bytes]() { return ahem_bytes; }}, 500, 500);
+    fr.register_webfont("WeightFloor", {[sans_bytes]() { return sans_bytes; }}, 200, 200);
+    const float floor_350 = fr.measure_text("XXXX", 16.0f, 350, "WeightFloor");
+    const float floor_500 = fr.measure_text("XXXX", 16.0f, 500, "WeightFloor");
+    std::printf("      [weights] 350=%.2f (500 face would be %.2f)\n", floor_350, floor_500);
+    std::fflush(stdout);
+    assert(std::fabs(floor_500 - 64.0f) < 0.5f);        // the Ahem face is the 500 one
+    assert(std::fabs(floor_350 - floor_500) > 1.0f);    // ...and 350 is not answered by it
+    assert(std::fabs(floor_350 - at_700) < 0.5f);       // it is the other font
+
+    fr.clear_webfonts();
+}
+
+TEST(bolder_and_lighter_are_relative_to_the_parent) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(R"(
+        <body>
+            <div id="bold" style="font-weight: 700">
+                <span id="b-from-bold" style="font-weight: bolder">x</span>
+                <span id="l-from-bold" style="font-weight: lighter">x</span>
+                <span id="shorthand" style="font: bolder 16px monospace">x</span>
+            </div>
+            <div id="light" style="font-weight: 300">
+                <span id="b-from-light" style="font-weight: bolder">x</span>
+            </div>
+            <div id="plain" style="font-weight: 400">
+                <span id="b-from-plain" style="font-weight: bolder">y</span>
+                <span id="l-from-plain" style="font-weight: lighter">y</span>
+            </div>
+            <div id="heavy" style="font-weight: 900">
+                <span id="b-from-heavy" style="font-weight: bolder">x</span>
+                <span id="l-from-heavy" style="font-weight: lighter">x</span>
+            </div>
+            <p id="big" style="font-weight: 5000">x</p>
+            <p id="small" style="font-weight: -5">x</p>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    // The span's own weight, resolved against its parent's: `bolder` is a
+    // question about the parent, so the parent has to be resolved first.
+    auto weight_of = [&](const char* id) {
+        const auto el = doc->get_element_by_id(id);
+        assert(el);
+        const auto parent = std::dynamic_pointer_cast<Element>(el->parent());
+        assert(parent);
+        const ComputedStyle parent_style = resolver.resolve_style(parent, nullptr);
+        return resolver.resolve_style(el, &parent_style).font_weight;
+    };
+
+    // CSS Fonts 4 §5.2.2's table, not `+100`: from 700, `bolder` is 900 and
+    // `lighter` is 400. Both used to be synonyms for `bold` and `normal`, so
+    // this table said 700 and 400 whatever the parent was.
+    const int b_from_bold = weight_of("b-from-bold");
+    const int l_from_bold = weight_of("l-from-bold");
+    const int b_from_light = weight_of("b-from-light");
+    const int b_from_plain = weight_of("b-from-plain");
+    const int l_from_plain = weight_of("l-from-plain");
+    const int b_from_heavy = weight_of("b-from-heavy");
+    const int l_from_heavy = weight_of("l-from-heavy");
+    const int shorthand = weight_of("shorthand");
+    std::printf("      [weights] 700+bolder=%d 700+lighter=%d 300+bolder=%d 400+bolder=%d "
+                "400+lighter=%d 900+bolder=%d 900+lighter=%d shorthand=%d\n",
+                b_from_bold, l_from_bold, b_from_light, b_from_plain,
+                l_from_plain, b_from_heavy, l_from_heavy, shorthand);
+    std::fflush(stdout);
+
+    assert(b_from_bold == 900);
+    assert(l_from_bold == 400);
+    assert(b_from_light == 400);   // +100 would say 400 too, but by accident
+    assert(b_from_plain == 700);
+    assert(l_from_plain == 100);
+    assert(b_from_heavy == 900);   // nothing bolder than boldest
+    assert(l_from_heavy == 700);
+    // The shorthand passes the keyword through rather than resolving it to a
+    // number it cannot know: the parent's weight is not its business.
+    assert(shorthand == 900);
+
+    // A number outside the scale is clamped to it, not taken as written.
+    assert(resolver.resolve_style(doc->get_element_by_id("big"), nullptr).font_weight == 1000);
+    assert(resolver.resolve_style(doc->get_element_by_id("small"), nullptr).font_weight == 1);
 }
 
 TEST(inline_formatting_context) {
@@ -3786,6 +4062,109 @@ TEST(websocket_rfc6455_client_and_handshake) {
     assert(received_from_client == "ping-from-client");
     assert(js.global_env()->get("wsReply").to_string() == "pong-from-server");
     assert(js.global_env()->get("wsClosed").is_truthy() == true);
+}
+
+// RFC 6455 sections 4.1/4.2.2: an upgrade is not established merely
+// because the response contains the digits 101 or echoes the accept key.
+TEST(websocket_handshake_security_and_secure_transport) {
+    using namespace litebird;
+    auto check = [](const std::string& scheme, const std::string& path, const std::string& protocols,
+                    int response_kind, bool expect_connection, bool expect_open) {
+        int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(listener >= 0);
+        int opt = 1;
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        assert(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        assert(::listen(listener, 1) == 0);
+        socklen_t len = sizeof(addr);
+        assert(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        std::atomic<bool> connected{false}, release{false};
+        std::string request;
+        std::thread server([&] {
+            pollfd fd{listener, POLLIN, 0};
+            if (::poll(&fd, 1, 700) <= 0) return;
+            int client = ::accept(listener, nullptr, nullptr);
+            if (client < 0) return;
+            connected = true;
+            timeval timeout{2, 0};
+            ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            char c;
+            while (request.size() < 16384 && ::recv(client, &c, 1, 0) == 1) {
+                request += c;
+                if (request.size() >= 4 && request.compare(request.size()-4, 4, "\r\n\r\n") == 0) break;
+            }
+            const std::string header = "Sec-WebSocket-Key: ";
+            size_t k = request.find(header);
+            std::string key = k == std::string::npos ? "" : request.substr(k + header.size(), request.find("\r\n", k) - k - header.size());
+            std::string accept = WebSocketObject::calculate_accept_key(key);
+            std::string status = response_kind == 1 ? "HTTP/1.1 200 OK\r\nX-Fake: 101 Switching Protocols\r\n" : "HTTP/1.1 101 Switching Protocols\r\n";
+            std::string upgrade = response_kind == 2 ? "Upgrade: h2c\r\n" : "UpGrAdE: WebSocket\r\n";
+            std::string connection = response_kind == 3 ? "Connection: keep-alive\r\n" : "Connection: keep-alive, Upgrade\r\n";
+            std::string accept_header = response_kind == 4 ? "X-Accept: " + accept + "\r\n" : "Sec-WebSocket-Accept: " + accept + "\r\n";
+            if (response_kind == 5) accept_header += "Sec-WebSocket-Accept: " + accept + "\r\n";
+            std::string protocol = response_kind == 6 ? "Sec-WebSocket-Protocol: unknown\r\n" :
+                                   response_kind == 7 ? "Sec-WebSocket-Protocol: chat\r\n" : "";
+            std::string response = status + upgrade + connection + accept_header + protocol;
+            if (response_kind == 8) response += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            if (response_kind == 9) response += "X-Large: " + std::string(65536, 'a') + "\r\n";
+            response += "\r\n";
+            ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!release && std::chrono::steady_clock::now() < until)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        });
+        auto ws = std::make_shared<WebSocketObject>(scheme + "://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + path, protocols);
+        ws->connect();
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() == WebSocketReadyState::Connecting && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const bool opened = ws->ready_state() == WebSocketReadyState::Open;
+        const bool closed = ws->ready_state() == WebSocketReadyState::Closed;
+        if (opened) ws->close();
+        release = true;
+        server.join();
+        ::close(listener);
+        ws.reset();
+        assert(connected == expect_connection);
+        assert(opened == expect_open);
+        assert(expect_open || closed);
+        if (expect_connection) assert(request.rfind("GET /chat?x=1 HTTP/1.1\r\n", 0) == 0);
+    };
+    check("ws", "/chat?x=1", "", 0, true, true);
+    for (int kind = 1; kind <= 6; ++kind) check("ws", "/chat?x=1", "", kind, true, false);
+    check("ws", "/chat?x=1", "", 8, true, false);
+    check("ws", "/chat?x=1", "", 9, true, false);
+    check("ws", "/chat?x=1", "chat, other", 7, true, true);
+    check("ws", "/chat?x=1", "chat", 0, true, false);
+    check("ws", "/chat?x=1", "chat", 6, true, false);
+    check("wss", "/chat?x=1", "", 0, false, false);
+    check("ws", "/chat?x=1\r\nInjected: yes", "", 0, false, false);
+    check("ws", "/chat?x=1", "chat\r\nInjected: yes", 0, false, false);
+    check("ws", "/chat?x=1", "chat,chat", 0, false, false);
+    check("http", "/chat?x=1", "", 0, false, false);
+
+    // Even an immediate fail-closed result is delivered asynchronously to
+    // handlers installed by the caller after the constructor returns.
+    JsInterpreter js(nullptr);
+    js.eval(R"(
+        var wsEvents = [];
+        var secureWs = new WebSocket('wss://127.0.0.1:1/');
+        secureWs.onerror = function(e) { wsEvents.push(e.type); };
+        secureWs.addEventListener('error', function(e) { wsEvents.push('listener:' + e.type); });
+        secureWs.onclose = function(e) { wsEvents.push(e.type + ':' + e.code + ':' + e.wasClean); };
+    )");
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (js.eval("wsEvents.length").to_number() < 3 && std::chrono::steady_clock::now() < until) {
+        EventLoop::default_loop().tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(js.eval("wsEvents.join(',')").to_string() == "error,listener:error,close:1006:false");
 }
 
 TEST(mutation_observer_api) {
@@ -18920,6 +19299,594 @@ TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers) {
     ResourceLoader::clear_http_cache();
 }
 
+TEST(brotli_rfc7932_decoder_and_http_content_encoding) {
+    using namespace litebird;
+    ResourceLoader::clear_http_cache();
+    ResourceLoader::clear_http_connection_pool();
+
+    // 1. Direct RFC 7932 Brotli unit verification (empty, compressed, bomb caps, malformed)
+    static const uint8_t kEmptyWbits16[] = {0x06};
+    static const uint8_t kEmptyWbits24[] = {0x3b};
+    static const uint8_t kPayload1Raw[] = {
+        0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,
+        0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,
+        0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,
+        0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,
+        0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,
+        0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,
+        0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,
+        0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,
+        0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,
+        0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,
+        0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,
+        0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,
+        0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,
+        0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,
+        0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,
+        0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,
+        0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,
+        0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,
+        0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,
+        0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,
+        0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,
+        0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,
+        0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,
+        0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,
+        0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,
+        0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20
+    };
+    static const uint8_t kPayload1Br[] = {
+        0x1b,0x9f,0x01,0xf8,0x45,0xdd,0x96,0xea,0x9e,0xcf,0x2f,0x0f,0xd5,0x64,0xa9,0x86,
+        0x85,0xe3,0x41,0x11,0xb1,0x05,0x51,0x04,0x18,0x0e,0xf5,0x10,0xcc,0x74,0x83,0x12,
+        0xc7,0xea,0x4a,0x1f,0xaa,0x61,0xd2,0xc2,0x03,0x8b,0x3c,0x36,0x2b,0x3f,0xa1,0xe8,
+        0x77,0xbf,0x4a,0x01
+    };
+    static const uint8_t kStackedGzipOfBr[] = {
+        0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0xe3,0x16,0x6a,0xf0,0x49,0xac,
+        0x4c,0x2d,0x4a,0x4d,0x51,0x48,0xaf,0xca,0x2c,0xd0,0x4e,0x2a,0x52,0x48,0xca,0x4f,
+        0xa9,0x54,0x48,0xce,0x48,0x4d,0xce,0x56,0x30,0x34,0x32,0x36,0x31,0x35,0x33,0xb7,
+        0xb0,0x34,0x60,0x06,0x00,0xf9,0xbe,0x5f,0xf0,0x29,0x00,0x00,0x00
+    };
+    static const uint8_t kStackedBrOfGzip[] = {
+        0x0b,0x1c,0x80,0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0xf3,0x49,0xac,
+        0x4c,0x2d,0x4a,0x4d,0x51,0x48,0x2a,0xd2,0x4e,0xaf,0xca,0x2c,0x50,0x48,0xca,0x4f,
+        0xa9,0x54,0x48,0xce,0x48,0x4d,0xce,0x56,0x30,0x34,0x32,0x36,0x31,0x35,0x33,0xb7,
+        0xb0,0x34,0x00,0x00,0xce,0x0a,0x09,0xd4,0x25,0x00,0x00,0x00,0x03
+    };
+
+    std::vector<uint8_t> out;
+    assert(Brotli::decompress(kEmptyWbits16, sizeof(kEmptyWbits16), out, 0) && out.empty());
+    assert(Brotli::decompress(kEmptyWbits24, sizeof(kEmptyWbits24), out, 16) && out.empty());
+    assert(!Brotli::decompress(nullptr, 0, out, 64));
+    assert(Brotli::decompress(kPayload1Br, sizeof(kPayload1Br), out, sizeof(kPayload1Raw)));
+    assert(out.size() == sizeof(kPayload1Raw));
+    assert(std::memcmp(out.data(), kPayload1Raw, sizeof(kPayload1Raw)) == 0);
+    assert(!Brotli::decompress(kPayload1Br, sizeof(kPayload1Br), out, sizeof(kPayload1Raw) - 1));
+    assert(!Brotli::decompress(kPayload1Br, sizeof(kPayload1Br) - 1, out, 4096));
+
+    // RFC 7932 §9.2: non-zero padding bits in the final byte of ISLAST must be refused;
+    // trailing bytes beyond the stream end stop at `bytes_consumed`.
+    static const uint8_t kNonZeroPadBit[] = {0x86};
+    assert(!Brotli::decompress(kNonZeroPadBit, sizeof(kNonZeroPadBit), out, 4096));
+    std::vector<uint8_t> with_trailing(kPayload1Br, kPayload1Br + sizeof(kPayload1Br));
+    with_trailing.push_back(0xab);
+    std::size_t consumed = 0;
+    assert(Brotli::decompress(with_trailing.data(), with_trailing.size(), out, 4096, &consumed));
+    assert(consumed == sizeof(kPayload1Br));
+
+    // 2. End-to-end HTTP/1.1 Content-Encoding: br, and stacked encodings
+    std::string seen_accept_encoding;
+    LoopbackHttpTestServer server([&](const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (auto it = req.headers.find("accept-encoding"); it != req.headers.end()) {
+            seen_accept_encoding = it->second;
+        }
+        if (req.path == "/br") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br"});
+            resp.body.assign(reinterpret_cast<const char*>(kPayload1Br), sizeof(kPayload1Br));
+            return;
+        }
+        if (req.path == "/br-gzip") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br, gzip"});
+            resp.body.assign(reinterpret_cast<const char*>(kStackedGzipOfBr), sizeof(kStackedGzipOfBr));
+            return;
+        }
+        if (req.path == "/gzip-br") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "gzip, br"});
+            resp.body.assign(reinterpret_cast<const char*>(kStackedBrOfGzip), sizeof(kStackedBrOfGzip));
+            return;
+        }
+        if (req.path == "/br-bad") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br"});
+            resp.body = std::string("\xff\xff\xff", 3);
+            return;
+        }
+        if (req.path == "/unsupported") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "zstd"});
+            resp.body = "raw";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+
+    ResourceResponse r_br = ResourceLoader::load_http(base + "/br");
+    assert(r_br.success && r_br.status_code == 200);
+    assert(seen_accept_encoding.find("br") != std::string::npos);
+    assert(seen_accept_encoding.find("gzip") != std::string::npos);
+    assert(seen_accept_encoding.find("deflate") != std::string::npos);
+    assert(r_br.body == std::string(reinterpret_cast<const char*>(kPayload1Raw), sizeof(kPayload1Raw)));
+
+    ResourceResponse r_br_gz = ResourceLoader::load_http(base + "/br-gzip");
+    assert(r_br_gz.success && r_br_gz.body == "Layered gzip+br body check 1234567890");
+
+    ResourceResponse r_gz_br = ResourceLoader::load_http(base + "/gzip-br");
+    assert(r_gz_br.success && r_gz_br.body == "Layered br+gzip body check 1234567890");
+
+    ResourceResponse r_bad = ResourceLoader::load_http(base + "/br-bad");
+    assert(!r_bad.success && r_bad.error_message.find("Brotli") != std::string::npos);
+
+    ResourceResponse r_unsup = ResourceLoader::load_http(base + "/unsupported");
+    assert(!r_unsup.success && r_unsup.error_message.find("zstd") != std::string::npos);
+
+    server.stop();
+    ResourceLoader::clear_http_connection_pool();
+    ResourceLoader::clear_http_cache();
+}
+
+TEST(http11_keep_alive_socket_pooling_and_tls_reuse) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+    ResourceLoader::clear_http_cache();
+    ResourceLoader::clear_http_connection_pool();
+    assert(ResourceLoader::http_connection_pool_size() == 0);
+
+    auto read_wire_request = [](int fd, std::string& method_out, std::string& path_out,
+                                std::unordered_map<std::string, std::string>& hdrs_out,
+                                std::string& body_out) -> bool {
+        hdrs_out.clear();
+        body_out.clear();
+        std::string raw;
+        char buf[4096];
+        std::size_t hdr_end = std::string::npos;
+        while ((hdr_end = raw.find("\r\n\r\n")) == std::string::npos) {
+            const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) return false;
+            raw.append(buf, static_cast<std::size_t>(n));
+        }
+        std::istringstream iss(raw.substr(0, hdr_end));
+        std::string line;
+        if (!std::getline(iss, line)) return false;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        {
+            std::istringstream rl(line);
+            rl >> method_out >> path_out;
+        }
+        std::size_t cl = 0;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string k = line.substr(0, colon);
+            for (char& ch : k) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            std::string v = line.substr(colon + 1);
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+            hdrs_out[k] = v;
+            if (k == "content-length") cl = static_cast<std::size_t>(std::strtoull(v.c_str(), nullptr, 10));
+        }
+        body_out = raw.substr(hdr_end + 4);
+        while (body_out.size() < cl) {
+            const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) return false;
+            body_out.append(buf, static_cast<std::size_t>(n));
+        }
+        return true;
+    };
+
+    auto send_wire = [](int fd, const std::string& wire) -> bool {
+        std::size_t off = 0;
+        while (off < wire.size()) {
+            const ssize_t w = ::send(fd, wire.data() + off, wire.size() - off, MSG_NOSIGNAL);
+            if (w <= 0) return false;
+            off += static_cast<std::size_t>(w);
+        }
+        return true;
+    };
+
+    auto open_listen = [](int& port_out) -> int {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(fd >= 0);
+        int opt = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        assert(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        assert(::listen(fd, 16) == 0);
+        socklen_t len = sizeof(addr);
+        assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port_out = ntohs(addr.sin_port);
+        return fd;
+    };
+
+    // 1. Multi-request persistent TCP socket reuse (CL + split chunked + 204 + HEAD + Connection: close)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> accepts{0};
+        std::atomic<int> reqs{0};
+        std::atomic<bool> saw_keep_alive{true};
+
+        std::thread srv([&]() {
+            for (int conn_idx = 0; conn_idx < 2; ++conn_idx) {
+                const int cfd = ::accept(lfd, nullptr, nullptr);
+                if (cfd < 0) break;
+                ++accepts;
+                timeval tv{3, 0};
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                while (true) {
+                    std::string method, path, body;
+                    std::unordered_map<std::string, std::string> hdrs;
+                    if (!read_wire_request(cfd, method, path, hdrs, body)) break;
+                    ++reqs;
+                    if (!hdrs.count("connection") || hdrs["connection"] != "keep-alive") {
+                        saw_keep_alive = false;
+                    }
+                    if (path == "/p1") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nalpha");
+                    } else if (path == "/chunked") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello");
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        send_wire(cfd, "\r\n7\r\n brotli\r\n0\r\nX-Trailer: ok\r\n\r\n");
+                    } else if (path == "/nocontent") {
+                        send_wire(cfd, "HTTP/1.1 204 No Content\r\n\r\n");
+                    } else if (path == "/headcheck") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n");
+                    } else if (path == "/close") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 4\r\n\r\ndone");
+                        break;
+                    } else {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nagain");
+                        break;
+                    }
+                }
+                ::close(cfd);
+            }
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse r1 = ResourceLoader::load_http(base + "/p1");
+        assert(r1.success && r1.body == "alpha");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        ResourceResponse r2 = ResourceLoader::load_http(base + "/chunked");
+        assert(r2.success && r2.body == "hello brotli");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        ResourceResponse r3 = ResourceLoader::load_http(base + "/nocontent");
+        assert(r3.success && r3.status_code == 204 && r3.body.empty());
+        assert(accepts.load() == 1);
+
+        ResourceResponse r4 = ResourceLoader::load_http(base + "/headcheck", "HEAD");
+        assert(r4.success && r4.status_code == 200 && r4.body.empty());
+        assert(accepts.load() == 1);
+
+        ResourceResponse r5 = ResourceLoader::load_http(base + "/close");
+        assert(r5.success && r5.body == "done");
+        assert(accepts.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        ResourceResponse r6 = ResourceLoader::load_http(base + "/again");
+        assert(r6.success && r6.body == "again");
+        assert(accepts.load() == 2);
+        srv.join();
+        assert(saw_keep_alive.load());
+        assert(reqs.load() == 6);
+        ResourceLoader::clear_http_connection_pool();
+    }
+
+    // 2. Keep-Alive: timeout/max honoring + HTTP/1.0 opt-in rules
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> accepts{0};
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=10, max=2\r\nContent-Length: 2\r\n\r\nk1");
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=10, max=2\r\nContent-Length: 2\r\n\r\nk2");
+            ::close(c1);
+
+            int c2 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c2, m, p, h, b));
+            send_wire(c2, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=0\r\nContent-Length: 2\r\n\r\nk3");
+            ::close(c2);
+
+            int c3 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c3, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c3, m, p, h, b));
+            send_wire(c3, "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nk4");
+            ::close(c3);
+
+            int c4 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c4, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c4, m, p, h, b));
+            send_wire(c4, "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nk5");
+            assert(read_wire_request(c4, m, p, h, b));
+            send_wire(c4, "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nk6");
+            ::close(c4);
+
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        assert(ResourceLoader::load_http(base + "/1").body == "k1");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        assert(ResourceLoader::load_http(base + "/2").body == "k2");
+        assert(accepts.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/3").body == "k3");
+        assert(accepts.load() == 2);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/4").body == "k4");
+        assert(accepts.load() == 3);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/5").body == "k5");
+        assert(accepts.load() == 4);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(ResourceLoader::load_http(base + "/6").body == "k6");
+        assert(accepts.load() == 4);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+        srv.join();
+        ResourceLoader::clear_http_connection_pool();
+    }
+
+    // 3. Stale socket race retry (GET retries once, POST never retries)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> post_attempts{0};
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok1");
+            assert(read_wire_request(c1, m, p, h, b));
+            ::close(c1);
+
+            int c2 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            assert(read_wire_request(c2, m, p, h, b));
+            send_wire(c2, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok2");
+            assert(read_wire_request(c2, m, p, h, b));
+            assert(m == "POST");
+            ++post_attempts;
+            ::close(c2);
+
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        assert(ResourceLoader::load_http(base + "/seed").body == "ok1");
+        ResourceResponse retried_get = ResourceLoader::load_http(base + "/retry-get");
+        assert(retried_get.success && retried_get.body == "ok2");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceResponse unsafe_post = ResourceLoader::load_http(base + "/no-retry", "POST", {}, "x=1");
+        assert(!unsafe_post.success && !unsafe_post.network_ok);
+        assert(post_attempts.load() == 1);
+        srv.join();
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+    }
+
+    // 4. Conflicting Content-Length rejection and concurrent per-key pool cap (<= 4)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nContent-Length: 2, 5\r\n\r\nab");
+            ::close(c1);
+
+            std::vector<int> conns;
+            for (int i = 0; i < 6; ++i) {
+                int c = ::accept(lfd, nullptr, nullptr);
+                assert(c >= 0);
+                ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                conns.push_back(c);
+                assert(read_wire_request(c, m, p, h, b));
+            }
+            for (int c : conns) {
+                send_wire(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            }
+            for (int c : conns) ::close(c);
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse bad_cl = ResourceLoader::load_http(base + "/badcl");
+        assert(!bad_cl.success && bad_cl.error_message.find("Content-Length") != std::string::npos);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        std::vector<std::thread> clients;
+        std::atomic<int> ok_count{0};
+        for (int i = 0; i < 6; ++i) {
+            clients.emplace_back([&, i]() {
+                ResourceResponse r = ResourceLoader::load_http(base + "/c" + std::to_string(i));
+                if (r.success && r.body == "ok") ++ok_count;
+            });
+        }
+        for (auto& t : clients) t.join();
+        assert(ok_count.load() == 6);
+        assert(ResourceLoader::http_connection_pool_size() <= 4);
+        ResourceLoader::clear_http_connection_pool();
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+        srv.join();
+    }
+
+    // 5. Persistent HTTPS (SSL*) keep-alive reuse + Brotli + set_ca_bundle_for_testing pool clear
+    {
+        void* ssl_lib = ::dlopen("libssl.so.3", RTLD_LAZY | RTLD_LOCAL);
+        assert(ssl_lib != nullptr);
+        auto load_sym = [&](auto& fn, const char* sym) {
+            void* p = ::dlsym(ssl_lib, sym);
+            assert(p != nullptr);
+            std::memcpy(&fn, &p, sizeof(p));
+        };
+        const void* (*tls_server_method_fn)() = nullptr;
+        void* (*ctx_new_fn)(const void*) = nullptr;
+        void (*ctx_free_fn)(void*) = nullptr;
+        int (*ctx_use_cert_fn)(void*, const char*, int) = nullptr;
+        int (*ctx_use_key_fn)(void*, const char*, int) = nullptr;
+        void* (*ssl_new_fn)(void*) = nullptr;
+        void (*ssl_free_fn)(void*) = nullptr;
+        int (*ssl_set_fd_fn)(void*, int) = nullptr;
+        int (*ssl_accept_fn)(void*) = nullptr;
+        int (*ssl_read_fn)(void*, void*, int) = nullptr;
+        int (*ssl_write_fn)(void*, const void*, int) = nullptr;
+        int (*ssl_shutdown_fn)(void*) = nullptr;
+
+        load_sym(tls_server_method_fn, "TLS_server_method");
+        load_sym(ctx_new_fn, "SSL_CTX_new");
+        load_sym(ctx_free_fn, "SSL_CTX_free");
+        load_sym(ctx_use_cert_fn, "SSL_CTX_use_certificate_file");
+        load_sym(ctx_use_key_fn, "SSL_CTX_use_PrivateKey_file");
+        load_sym(ssl_new_fn, "SSL_new");
+        load_sym(ssl_free_fn, "SSL_free");
+        load_sym(ssl_set_fd_fn, "SSL_set_fd");
+        load_sym(ssl_accept_fn, "SSL_accept");
+        load_sym(ssl_read_fn, "SSL_read");
+        load_sym(ssl_write_fn, "SSL_write");
+        load_sym(ssl_shutdown_fn, "SSL_shutdown");
+
+        const fs::path cert_dir = fs::temp_directory_path() / "litebird_phase85_tls_test";
+        fs::create_directories(cert_dir);
+        const fs::path key_path = cert_dir / "srv.key";
+        const fs::path cert_path = cert_dir / "srv.crt";
+        const std::string cmd =
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes "
+            "-keyout \"" + key_path.string() + "\" -out \"" + cert_path.string() + "\" "
+            "-days 2 -subj \"/CN=127.0.0.1\" -addext \"subjectAltName=IP:127.0.0.1,DNS:localhost\" "
+            ">/dev/null 2>&1";
+        assert(std::system(cmd.c_str()) == 0);
+
+        void* sctx = ctx_new_fn(tls_server_method_fn());
+        assert(sctx != nullptr);
+        assert(ctx_use_cert_fn(sctx, cert_path.string().c_str(), 1) == 1);
+        assert(ctx_use_key_fn(sctx, key_path.string().c_str(), 1) == 1);
+
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> tls_handshakes{0};
+        std::thread tls_srv([&]() {
+            const int cfd = ::accept(lfd, nullptr, nullptr);
+            assert(cfd >= 0);
+            timeval tv{3, 0};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            void* ssl = ssl_new_fn(sctx);
+            assert(ssl != nullptr);
+            assert(ssl_set_fd_fn(ssl, cfd) == 1);
+            assert(ssl_accept_fn(ssl) == 1);
+            ++tls_handshakes;
+
+            static const uint8_t kHelloBr[] = {
+                0x8b,0x10,0x80,0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x4c,0x69,0x74,0x65,0x62,0x69,
+                0x72,0x64,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x2b,0x20,0x42,0x72,
+                0x6f,0x74,0x6c,0x69,0x21,0x03
+            };
+
+            for (int req_i = 0; req_i < 2; ++req_i) {
+                std::string raw;
+                char buf[4096];
+                while (raw.find("\r\n\r\n") == std::string::npos) {
+                    const int n = ssl_read_fn(ssl, buf, sizeof(buf));
+                    if (n <= 0) break;
+                    raw.append(buf, static_cast<std::size_t>(n));
+                }
+                std::string wire;
+                if (req_i == 0) {
+                    wire = "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: " +
+                           std::to_string(sizeof(kHelloBr)) + "\r\n\r\n" +
+                           std::string(reinterpret_cast<const char*>(kHelloBr), sizeof(kHelloBr));
+                } else {
+                    wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\ntls-ok-\r\n1\r\n2\r\n0\r\n\r\n";
+                }
+                assert(ssl_write_fn(ssl, wire.data(), static_cast<int>(wire.size())) == static_cast<int>(wire.size()));
+            }
+            char drain[64];
+            (void)ssl_read_fn(ssl, drain, sizeof(drain));
+            (void)ssl_shutdown_fn(ssl);
+            ssl_free_fn(ssl);
+            ::close(cfd);
+            ::close(lfd);
+        });
+
+        ResourceLoader::set_ca_bundle_for_testing(cert_path.string());
+        const std::string tls_base = "https://127.0.0.1:" + std::to_string(port);
+
+        ResourceResponse t1 = ResourceLoader::load_http(tls_base + "/hello.br");
+        assert(t1.success && t1.body == "Hello, Litebird HTTP/1.1 + Brotli!");
+        assert(tls_handshakes.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceResponse t2 = ResourceLoader::load_http(tls_base + "/chunk");
+        assert(t2.success && t2.body == "tls-ok-2");
+        assert(tls_handshakes.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceLoader::set_ca_bundle_for_testing("");
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        tls_srv.join();
+        ctx_free_fn(sctx);
+        ::dlclose(ssl_lib);
+        fs::remove_all(cert_dir);
+    }
+
+    ResourceLoader::clear_http_connection_pool();
+    ResourceLoader::clear_http_cache();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -18946,6 +19913,9 @@ int main() {
     RUN_TEST(font_style_italic_slants_the_glyphs_it_draws);
     RUN_TEST(a_family_with_an_italic_face_is_not_sheared);
     RUN_TEST(text_is_drawn_at_the_advances_it_was_measured_at);
+    RUN_TEST(a_face_weight_comes_from_the_font_not_its_name);
+    RUN_TEST(font_weight_matching_follows_the_css_order);
+    RUN_TEST(bolder_and_lighter_are_relative_to_the_parent);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -18980,6 +19950,7 @@ int main() {
     RUN_TEST(web_workers_and_concurrent_execution);
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
+    RUN_TEST(websocket_handshake_security_and_secure_transport);
     RUN_TEST(mutation_observer_api);
     RUN_TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts);
     RUN_TEST(custom_elements_api);
@@ -19219,6 +20190,10 @@ int main() {
     RUN_TEST(http_cache_rfc9111_freshness_etag_304_vary_and_invalidation);
     RUN_TEST(cors_preflight_options_max_age_authorization_and_mixed_content);
     RUN_TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers);
+
+    // Phase 85: RFC 7932 Brotli Content-Encoding and HTTP/1.1 + TLS keep-alive socket pooling.
+    RUN_TEST(brotli_rfc7932_decoder_and_http_content_encoding);
+    RUN_TEST(http11_keep_alive_socket_pooling_and_tls_reuse);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -530,7 +530,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     std::size_t pos = 0;
     while (pos < text.size()) {
         const uint32_t cp = canvas_utf8_next(text, pos);
-        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold, family_id, italic);
+        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, parsed.weight, family_id, italic);
         const float pen_rel = pen - layout.pad_x;
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;

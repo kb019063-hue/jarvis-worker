@@ -44,6 +44,15 @@ std::deque<JsValue>& elements_of(const JsValue& array) {
     return array.object_val->array_elements;
 }
 
+// Array iteration uses ToLength on the original receiver. In particular,
+// Infinity and lengths above 2^53 - 1 must not be cast directly to size_t:
+// out-of-range floating-to-integer conversion is undefined in C++.
+size_t iteration_length(const JsValue& receiver) {
+    const double length = js_to_integer(js_to_number(receiver.get_property("length")));
+    if (length <= 0) return 0;
+    return static_cast<size_t>(std::min(length, 9007199254740991.0));
+}
+
 /// Resolves a relative index argument (negative counts from the end) into
 /// [0, length].
 size_t relative_index(const JsValue& arg, size_t length, size_t fallback) {
@@ -467,10 +476,10 @@ void install_array_builtins(JsIntrinsics& realm) {
         if (me.is_nullish()) {
             js_throw_type_error("Array.prototype.forEach called on null or undefined");
         }
+        const size_t length = iteration_length(me); // LengthOfArrayLike precedes IsCallable.
         JsValue callback = require_callback(js_arg(args, 0), "forEach");
         const JsValue this_arg = js_arg(args, 1);
-        double length = js_to_integer(js_to_number(me.get_property("length")));
-        for (size_t i = 0; i < static_cast<size_t>(length < 0 ? 0 : length); ++i) {
+        for (size_t i = 0; i < length; ++i) {
             const std::string key = js_number_to_string(static_cast<double>(i));
             if (!me.has_property(key)) continue;
             callback.call_with_this(this_arg, {me.get_property(key), JsValue::make_number(static_cast<double>(i)), me});
@@ -584,8 +593,7 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             auto index = std::make_shared<size_t>(0);
             return js_make_iterator([me, index, kind](JsValue& value) {
-                double length = js_to_integer(js_to_number(me.get_property("length")));
-                if (*index >= static_cast<size_t>(length < 0 ? 0 : length)) return false;
+                if (*index >= iteration_length(me)) return false;
                 size_t i = (*index)++;
                 switch (kind) {
                     case Kind::Keys: value = JsValue::make_number(static_cast<double>(i)); break;

@@ -864,6 +864,325 @@ TEST(font_family_reaches_layout_from_css) {
            FontRenderer::kDefaultFamily);
 }
 
+namespace {
+
+using namespace litebird;
+
+/// The vendored Ahem face as a `data:` URL a stylesheet can name.
+///
+/// `@font-face` is about bytes that arrive from a URL, so a test of it has to
+/// fetch them and not call into the rasterizer directly -- otherwise what is
+/// proved is the registry, which `font_family_selects_a_face` already covers.
+/// A `data:` URL is the one kind that needs no server, no document origin and
+/// no fonts on the host, so this says the same thing on a shared runner as it
+/// does on a laptop.
+std::string base64(const std::string& bytes) {
+    static const char* kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const unsigned char b0 = bytes[i];
+        const unsigned char b1 = i + 1 < bytes.size() ? bytes[i + 1] : 0;
+        const unsigned char b2 = i + 2 < bytes.size() ? bytes[i + 2] : 0;
+        out += kAlphabet[b0 >> 2];
+        out += kAlphabet[((b0 & 0x03) << 4) | (b1 >> 4)];
+        out += i + 1 < bytes.size() ? kAlphabet[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=';
+        out += i + 2 < bytes.size() ? kAlphabet[b2 & 0x3f] : '=';
+    }
+    return out;
+}
+
+std::string ahem_data_url() {
+    const ResourceResponse r = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!r.success || r.body.empty()) return {};
+    return "data:font/ttf;base64," + base64(r.body);
+}
+
+/// The first box that laid out `node` as text, if there is one.
+std::shared_ptr<LayoutBox> text_box_for(const std::shared_ptr<LayoutBox>& box,
+                                        const std::shared_ptr<Node>& node) {
+    if (!box) return nullptr;
+    if (box->node == node && box->box_type == BoxType::TextNode) return box;
+    for (const auto& child : box->children) {
+        if (auto found = text_box_for(child, node)) return found;
+    }
+    return nullptr;
+}
+
+/// The width a text node was actually laid out at, from the fragment the line
+/// builder produced -- which is the number the painter uses too, so it is the
+/// one that says whether a webfont reached the page and not only the
+/// rasterizer.
+float laid_out_width(const std::shared_ptr<LayoutBox>& root,
+                     const std::shared_ptr<Node>& node) {
+    const auto box = text_box_for(root, node);
+    if (!box) return -1.0f;
+    if (auto parent = box->parent.lock()) {
+        for (const LineBox& line : parent->line_boxes) {
+            for (const InlineFragment& frag : line.fragments) {
+                if (frag.text == box->text) return frag.rect.width;
+            }
+        }
+    }
+    return -1.0f;
+}
+
+} // namespace
+
+TEST(font_face_declares_the_family_the_page_names) {
+    using namespace litebird;
+
+    // Before this, `@font-face` was one of the at-rules the parser skipped:
+    // `skip_at_rule_remainder` threw it and everything in it away. So a page
+    // that brought its own font was rendered in whatever the host had, which
+    // for a page whose whole look is its typeface is the page not working.
+    const StyleSheet sheet = CssParser::parse(R"(
+        @font-face {
+            font-family: "Page Font";
+            src: url("a.woff") format("woff"), url(b.ttf) format("truetype");
+            font-weight: 100 400;
+            font-style: italic;
+        }
+        @font-face {
+            font-family: Body Text;
+            src: local("Some Local"), url(c.ttf);
+        }
+        @font-face { font-family: Heavy; src: url(d.ttf); font-weight: bold; }
+        p { color: red; }
+    )");
+
+    // An `@font-face` block is not a style rule: it has no selector, and its
+    // declarations must not end up in the cascade as if `p` had asked for them.
+    assert(sheet.rules.size() == 1);
+    assert(sheet.font_faces.size() == 3);
+
+    // The family is the name the *rule* declares, quotes removed, and not the
+    // name inside a file: a page may call a font anything it likes.
+    assert(sheet.font_faces[0].family == "Page Font");
+    // `src` is a fallback list, in the order it was written, and `format()` is
+    // a promise about the bytes rather than part of the URL.
+    assert(sheet.font_faces[0].sources.size() == 2);
+    assert(sheet.font_faces[0].sources[0].url == "a.woff");
+    assert(sheet.font_faces[0].sources[0].format == "woff");
+    assert(sheet.font_faces[0].sources[1].url == "b.ttf");
+    assert(sheet.font_faces[0].sources[1].format == "truetype");
+    // A weight range, and a style.
+    assert(sheet.font_faces[0].weight_min == 100);
+    assert(sheet.font_faces[0].weight_max == 400);
+    assert(sheet.font_faces[0].italic);
+
+    // An unquoted name of several words is one family and not a list of three.
+    assert(sheet.font_faces[1].family == "Body Text");
+    // `local()` names a font on the host and has no URL; it comes first here,
+    // which is the point of the idiom -- use what is installed, fetch if not.
+    assert(sheet.font_faces[1].sources.size() == 2);
+    assert(sheet.font_faces[1].sources[0].local == "Some Local");
+    assert(sheet.font_faces[1].sources[0].url.empty());
+    assert(sheet.font_faces[1].sources[1].url == "c.ttf");
+    // An unspecified descriptor is `normal`, not zero and not unset.
+    assert(sheet.font_faces[1].weight_min == 400);
+    assert(sheet.font_faces[1].weight_max == 400);
+    assert(!sheet.font_faces[1].italic);
+    // A source with no `format()` says nothing about the bytes.
+    assert(sheet.font_faces[1].sources[1].format.empty());
+
+    // A keyword weight, as a range of one.
+    assert(sheet.font_faces[2].weight_min == 700);
+    assert(sheet.font_faces[2].weight_max == 700);
+
+    // A rule inside an `@media` that does not match declares nothing.
+    const StyleSheet gated = CssParser::parse(R"(
+        @media (min-width: 999999px) {
+            @font-face { font-family: Hidden; src: url(x.ttf); }
+        }
+        @font-face { font-family: Shown; src: url(y.ttf); }
+    )");
+    bool saw_hidden = false;
+    bool saw_shown = false;
+    for (const FontFaceRule& f : gated.font_faces) {
+        if (f.family == "Hidden") saw_hidden = true;
+        if (f.family == "Shown") saw_shown = true;
+    }
+    assert(saw_shown);
+    // Printed rather than asserted silently whichever way it goes: whether the
+    // parser can tell a media query does not match without a viewport is not
+    // something this test is entitled to assume about the host.
+    std::printf("      [@font-face] gated hidden=%s shown=%s\n",
+                saw_hidden ? "yes" : "no", saw_shown ? "yes" : "no");
+    std::fflush(stdout);
+}
+
+TEST(font_face_brings_the_family_the_page_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // A webfont belongs to the document that declared it, and the registry is
+    // a singleton because the rasterizer is. Left over from another page, a
+    // family name would resolve to whichever page was laid out first.
+    fr.clear_webfonts();
+
+    const std::string url = ahem_data_url();
+    if (url.empty()) return;   // the vendored face is absent; nothing to prove
+
+    // The oracle is the same one `font_family_selects_a_face` uses: every
+    // glyph in Ahem is exactly 1em wide, so four characters at 16 px measure
+    // 64.00 px in Ahem and in nothing else on this host. The font is arriving
+    // through the URL in `src` here, not through a call to the rasterizer.
+    auto doc = HtmlParser::parse(
+        "<style>"
+        "@font-face { font-family: \"Page Font\"; src: url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: 'Ahem'; src: url('" + url + "'); font-weight: 700; }"
+        "@font-face { font-family: Broken; src: url('data:font/ttf;base64,AAAA') format('truetype'),"
+        "                                       url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: Local Font; src: local('Ahem'); }"
+        "@font-face { font-family: Woff Only; src: url('" + url + "') format('woff'); }"
+        "</style>"
+        "<div id=\"web\" style=\"font-family: 'Page Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"host\" style=\"font-family: Ahem; font-size: 16px\">XXXX</div>"
+        "<div id=\"second\" style=\"font-family: Broken; font-size: 16px\">XXXX</div>"
+        "<div id=\"local\" style=\"font-family: 'Local Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"plain\" style=\"font-size: 16px\">XXXX</div>");
+
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    const int page_font = fr.family_id_for("Page Font");
+    assert(page_font != FontRenderer::kNoFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") - 64.0f) < 0.5f);
+
+    // The bytes were fetched and parsed as a font, and not merely registered:
+    // a family that never loaded measures like the default face.
+    if (fr.has_truetype_font()) {
+        assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") -
+                         fr.measure_text("XXXX", 16.0f, 400)) > 1.0f);
+    }
+
+    // A webfont outranks a host family of the same name. "Ahem" here names
+    // both a system face (registered above by `font_family_selects_a_face`)
+    // and this rule's, and CSS's answer is the page's. The rule declares
+    // `font-weight: 700`, so at 400 the host's Ahem is what answers and at
+    // 700 the page's is -- both are Ahem, so what proves the precedence is
+    // the weight, which only the page's rule declares.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 700, "Ahem") - 64.0f) < 0.5f);
+
+    // `src` is a fallback list: the first source is four zero bytes, which is
+    // not a font, so the second is what is used. A source that will not parse
+    // is not failure, it is an instruction to try the next one.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Broken") - 64.0f) < 0.5f);
+
+    // `local()` names a face the host already has and is answered out of the
+    // registry rather than fetched -- the "use what is installed" half of
+    // `local("Font"), url(font.ttf)`.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Local Font") - 64.0f) < 0.5f);
+
+    // `format()` is a promise about the bytes, and a promise of `woff` is one
+    // this engine cannot keep: it reads TrueType outlines and nothing else.
+    // Such a source is not fetched, so the rule registers no face at all
+    // rather than a face that would fail to load the moment it was wanted.
+    assert(fr.family_id_for("Woff Only") == FontRenderer::kDefaultFamily);
+
+    // --- and it reaches layout, not only the renderer --------------------
+    // The fragment width is the observable that matters: it is what the line
+    // builder measured and what the painter will draw, so a webfont that
+    // reached the registry but not the page scores 64.00 here and nowhere.
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+    for (const char* id : {"web", "second", "local"}) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        const float width = laid_out_width(root, el->first_child());
+        std::printf("      [@font-face] #%-7s 'XXXX' laid out at %.2f px\n", id, width);
+        std::fflush(stdout);
+        assert(std::fabs(width - 64.0f) < 0.5f);
+    }
+
+    // `font-family` inherits into the box that measures text, which is what
+    // makes any of this visible. It did not use to: the style a text box is
+    // built with carried `font-size` and `font-weight` and not `font-family`,
+    // so a text node was measured in the default face whatever its element
+    // asked for -- and `<pre>`, which the UA stylesheet gives
+    // `font-family: monospace`, was laid out proportional.
+    auto host_el = doc->get_element_by_id("host");
+    assert(host_el);
+    const float host_width = laid_out_width(root, host_el->first_child());
+    assert(std::fabs(host_width - 64.0f) < 0.5f);
+
+    // An element that named no family is not given the page's font by
+    // accident. This is the assertion that would pass if registration were
+    // global rather than by name.
+    if (fr.has_truetype_font()) {
+        auto plain = doc->get_element_by_id("plain")->first_child();
+        const float plain_width = laid_out_width(root, plain);
+        std::printf("      [@font-face] #plain   'XXXX' laid out at %.2f px\n", plain_width);
+        std::fflush(stdout);
+        assert(plain_width < 0.0f || std::fabs(plain_width - 64.0f) > 1.0f);
+    }
+
+    // Forgetting a document's webfonts takes the family with it, and does not
+    // take the host's own faces -- "Ahem" is still Ahem after this, because
+    // `font_family_selects_a_face` registered it from disk and not from a page.
+    fr.clear_webfonts();
+    assert(fr.family_id_for("Page Font") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Broken") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Local Font") == FontRenderer::kDefaultFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+}
+
+TEST(font_family_reaches_the_box_that_measures_text) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // `<pre>` is the case that shows it: the UA stylesheet gives it
+    // `font-family: monospace`, and the whole point of a monospaced face is
+    // that its glyphs are the same width. A `<pre>` laid out proportional is
+    // a `<pre>` whose columns do not line up, which is a `<pre>` that does not
+    // do the one thing it exists to do.
+    if (fr.generic_family_id("monospace") == FontRenderer::kNoFamily) return;
+    if (!fr.has_truetype_font()) return;
+    // ...and a host whose default face is itself monospace could not tell the
+    // two apart, so the comparison below would prove nothing.
+    if (fr.default_family_id() == fr.generic_family_id("monospace")) return;
+
+    auto doc = HtmlParser::parse(R"(
+        <pre id="narrow">iiii</pre>
+        <pre id="wide">WWWW</pre>
+        <p id="pnarrow">iiii</p>
+        <p id="pwide">WWWW</p>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+
+    // The width of an element's text, as the line builder measured it -- which
+    // is the number the painter draws with, so it is the one that says whether
+    // a family reached the page and not only the resolver.
+    auto text_width = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        return laid_out_width(root, el->first_child());
+    };
+
+    const float narrow = text_width("narrow");
+    const float wide = text_width("wide");
+    const float p_narrow = text_width("pnarrow");
+    const float p_wide = text_width("pwide");
+    if (narrow < 0.0f || wide < 0.0f || p_narrow < 0.0f || p_wide < 0.0f) return;
+
+    std::printf("      [font-family] <pre> iiii=%.2f WWWW=%.2f\n", narrow, wide);
+    std::printf("      [font-family]  <p> iiii=%.2f WWWW=%.2f\n", p_narrow, p_wide);
+    std::fflush(stdout);
+
+    // In a monospace face 'i' and 'W' advance the same. That is what
+    // `monospace` means, and it is the assertion that failed before: the style
+    // a text box is built with carried `font-size` and `font-weight` and not
+    // `font-family`, so every text node was measured in the default face.
+    assert(std::fabs(narrow - wide) < 0.5f);
+    // ...and the same two lines in a proportional face do not, which is what
+    // makes the assertion above mean anything.
+    assert(std::fabs(p_narrow - p_wide) > 1.0f);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -16498,6 +16817,9 @@ int main() {
     RUN_TEST(inline_formatting_context);
     RUN_TEST(font_family_selects_a_face);
     RUN_TEST(font_family_reaches_layout_from_css);
+    RUN_TEST(font_face_declares_the_family_the_page_names);
+    RUN_TEST(font_face_brings_the_family_the_page_names);
+    RUN_TEST(font_family_reaches_the_box_that_measures_text);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

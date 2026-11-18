@@ -32,7 +32,7 @@ a row from Open tasks over anything here, take that row.
 WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
 1,792/1,792; `make wpt` 9,538/9,744 subtests across 190 files); JavaScript
 interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
-1,124/1,150 on its recorded corpus and 29,450/47,967 of test262; TrueType
+1,126/1,152 on its recorded corpus and 29,450/47,967 of test262; TrueType
 rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;
 a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
 time, certificate and hostname verified); `fetch()`, `XMLHttpRequest` and
@@ -54,7 +54,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 | # | What | Row | Why it is here |
 | :--- | :--- | :--- | :--- |
-| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)** and **`font-family` selection done (Phase 67):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it — `pre { font-family: monospace }` measures differently from a heading in the default face, which it did not before. Still open: no `@font-face`, no italic face, no shaping, no bidi. |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)**, **`font-family` selection done (Phase 67)** and **`@font-face` done (Phase 74):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it; a page may also bring its own typeface, fetched from the `src` list the first time it is wanted. `pre { font-family: monospace }` now measures differently from a heading in the default face, which it did not before — and did not after Phase 67 either, because the style a text box is built with did not carry `font-family` (Phase 74 fixed that too). Still open: no WOFF/WOFF2, no `unicode-range`, no italic face, no shaping, no bidi. |
 | 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |

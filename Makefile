@@ -156,7 +156,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench check-numbers bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-collections check-numbers bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -206,6 +206,11 @@ check-numbers:
 bench-floats: $(TARGET)
 	@python3 tools/bench/bench_sized_floats.py $(TARGET) --out $(BUILD_DIR)/bench-floats --sizes 1000 10000 --max-seconds 4
 
+## Completed Map/Set iterators must not make a later equal batch slower. The
+## runner has its own checksums and makes both batches in one process, without gc().
+bench-collections: $(TARGET)
+	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
+
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
 
@@ -222,6 +227,11 @@ js-conformance: $(TARGET)
 ## resolve(), overran the iterator or timed out. All 34 cases must pass.
 verify-promise-iterators: $(TARGET)
 	@$(JS_CONFORMANCE) --filter async --quiet --timeout 3 --min-pass 34
+
+## Map/Set compaction, clear, insertion order, and done-latching are recorded
+## against Node. The two other cases in this file require absent Uint8Array and Proxy.
+verify-collection-iterators: $(TARGET)
+	@$(JS_CONFORMANCE) --filter collections-iterators --quiet --min-pass 32
 
 ## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
 ## Running it needs nothing but the binary. Checking or recording the
@@ -453,4 +463,4 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, check-numbers, clean"

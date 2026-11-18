@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 
@@ -27,10 +28,22 @@ struct CollectionData {
         bool deleted{false};
     };
 
+    // A cursor is registered only while its iterator can still produce a
+    // value. Its slot makes unregistering a finished iterator constant-time:
+    // removing it must not turn a run of short, completed loops into a scan
+    // of every cursor that came before it.
+    struct Cursor {
+        static constexpr size_t kUnregistered = static_cast<size_t>(-1);
+        size_t position{0};
+        size_t slot{kUnregistered};
+    };
+
     std::vector<Entry> entries;
     std::unordered_map<std::string, size_t> index;      // hash key -> position in `entries`
     size_t live{0};
-    std::vector<std::weak_ptr<size_t>> cursors;         // positions held by live iterators
+    std::vector<std::weak_ptr<Cursor>> cursors;         // positions held by iterators that may resume
+    static constexpr size_t kCursorPruneMinimum = 64;
+    size_t cursor_prune_at{kCursorPruneMinimum};
 
     /// A string that is equal for two keys exactly when SameValueZero says so.
     static std::string hash_key(const JsValue& key) {
@@ -86,11 +99,64 @@ struct CollectionData {
         return true;
     }
 
-    void clear() {
-        // Iterators positioned anywhere are now past the end.
-        for (auto& weak : cursors) {
-            if (auto cursor = weak.lock()) *cursor = 0;
+    void schedule_cursor_prune() {
+        if (cursors.size() < kCursorPruneMinimum) {
+            cursor_prune_at = kCursorPruneMinimum;
+        } else if (cursors.size() > std::numeric_limits<size_t>::max() / 2) {
+            cursor_prune_at = std::numeric_limits<size_t>::max();
+        } else {
+            cursor_prune_at = cursors.size() * 2;
         }
+    }
+
+    /// Drop abandoned cursors and repair each live cursor's vector slot.
+    /// This is called only at geometrically growing sizes, so a collection
+    /// whose abandoned iterators have not been collected yet costs O(n) work
+    /// in total over n new cursors, not a growing scan on every new cursor.
+    void prune_expired_cursors() {
+        std::vector<std::weak_ptr<Cursor>> still_alive;
+        still_alive.reserve(cursors.size());
+        for (auto& weak : cursors) {
+            if (auto cursor = weak.lock()) {
+                cursor->slot = still_alive.size();
+                still_alive.push_back(std::move(weak));
+            }
+        }
+        cursors = std::move(still_alive);
+        schedule_cursor_prune();
+    }
+
+    /// A completed iterator can never resume: js_make_iterator latches its
+    /// first done result. Remove its cursor now instead of waiting for a GC
+    /// cycle to turn its weak pointer into an expired one.
+    void release_cursor(const std::shared_ptr<Cursor>& cursor) {
+        if (cursor->slot == Cursor::kUnregistered) return;
+        const size_t slot = cursor->slot;
+        const size_t last = cursors.size() - 1;
+        if (slot != last) {
+            cursors[slot] = std::move(cursors[last]);
+            if (auto moved = cursors[slot].lock()) moved->slot = slot;
+        }
+        cursors.pop_back();
+        cursor->slot = Cursor::kUnregistered;
+        schedule_cursor_prune();
+    }
+
+    void clear() {
+        // Iterators positioned anywhere are now past the old entries. Retain
+        // only cursors that can still be asked for a next result, and give
+        // each one a slot in the compacted registry.
+        std::vector<std::weak_ptr<Cursor>> still_alive;
+        still_alive.reserve(cursors.size());
+        for (auto& weak : cursors) {
+            if (auto cursor = weak.lock()) {
+                cursor->position = 0;
+                cursor->slot = still_alive.size();
+                still_alive.push_back(std::move(weak));
+            }
+        }
+        cursors = std::move(still_alive);
+        schedule_cursor_prune();
         entries.clear();
         index.clear();
         live = 0;
@@ -110,14 +176,17 @@ struct CollectionData {
         }
         new_position[entries.size()] = next;
 
-        std::vector<std::weak_ptr<size_t>> still_alive;
+        std::vector<std::weak_ptr<Cursor>> still_alive;
+        still_alive.reserve(cursors.size());
         for (auto& weak : cursors) {
             if (auto cursor = weak.lock()) {
-                *cursor = new_position[std::min(*cursor, entries.size())];
-                still_alive.push_back(weak);
+                cursor->position = new_position[std::min(cursor->position, entries.size())];
+                cursor->slot = still_alive.size();
+                still_alive.push_back(std::move(weak));
             }
         }
         cursors = std::move(still_alive);
+        schedule_cursor_prune();
 
         std::vector<Entry> packed;
         packed.reserve(live);
@@ -130,16 +199,10 @@ struct CollectionData {
         entries = std::move(packed);
     }
 
-    std::shared_ptr<size_t> new_cursor() {
-        if (cursors.size() >= 64) {
-            // Forget iterators that have gone away.
-            std::vector<std::weak_ptr<size_t>> still_alive;
-            for (auto& weak : cursors) {
-                if (!weak.expired()) still_alive.push_back(weak);
-            }
-            cursors = std::move(still_alive);
-        }
-        auto cursor = std::make_shared<size_t>(0);
+    std::shared_ptr<Cursor> new_cursor() {
+        if (cursors.size() >= cursor_prune_at) prune_expired_cursors();
+        auto cursor = std::make_shared<Cursor>();
+        cursor->slot = cursors.size();
         cursors.push_back(cursor);
         return cursor;
     }
@@ -184,8 +247,8 @@ JsValue make_collection_iterator(const JsValue& collection, const std::shared_pt
                                  IterKind kind) {
     auto cursor = data->new_cursor();
     return js_make_iterator([data, cursor, kind](JsValue& value) {
-        while (*cursor < data->entries.size()) {
-            const auto& entry = data->entries[(*cursor)++];
+        while (cursor->position < data->entries.size()) {
+            const auto& entry = data->entries[(cursor->position)++];
             if (entry.deleted) continue;
             switch (kind) {
                 case IterKind::Keys: value = entry.key; break;
@@ -194,6 +257,7 @@ JsValue make_collection_iterator(const JsValue& collection, const std::shared_pt
             }
             return true;
         }
+        data->release_cursor(cursor);
         return false;
     }, {collection});
 }
@@ -249,12 +313,18 @@ void install_collection_builtins(JsIntrinsics& realm) {
         if (!callback.is_function()) js_throw_type_error("Map.prototype.forEach: callback is not a function");
         const JsValue this_arg = js_arg(args, 1);
         auto cursor = data->new_cursor();
-        while (*cursor < data->entries.size()) {
-            // Copy: the callback may delete or add entries.
-            auto entry = data->entries[(*cursor)++];
-            if (entry.deleted) continue;
-            callback.call_with_this(this_arg, {entry.value, entry.key, map});
+        try {
+            while (cursor->position < data->entries.size()) {
+                // Copy: the callback may delete or add entries.
+                auto entry = data->entries[(cursor->position)++];
+                if (entry.deleted) continue;
+                callback.call_with_this(this_arg, {entry.value, entry.key, map});
+            }
+        } catch (...) {
+            data->release_cursor(cursor);
+            throw;
         }
+        data->release_cursor(cursor);
         return JsValue::make_undefined();
     });
     auto map_iter = [](IterKind kind, const char* name) {
@@ -330,11 +400,17 @@ void install_collection_builtins(JsIntrinsics& realm) {
         if (!callback.is_function()) js_throw_type_error("Set.prototype.forEach: callback is not a function");
         const JsValue this_arg = js_arg(args, 1);
         auto cursor = data->new_cursor();
-        while (*cursor < data->entries.size()) {
-            auto entry = data->entries[(*cursor)++];
-            if (entry.deleted) continue;
-            callback.call_with_this(this_arg, {entry.key, entry.key, set});
+        try {
+            while (cursor->position < data->entries.size()) {
+                auto entry = data->entries[(cursor->position)++];
+                if (entry.deleted) continue;
+                callback.call_with_this(this_arg, {entry.key, entry.key, set});
+            }
+        } catch (...) {
+            data->release_cursor(cursor);
+            throw;
         }
+        data->release_cursor(cursor);
         return JsValue::make_undefined();
     });
     auto set_iter = [](IterKind kind, const char* name) {

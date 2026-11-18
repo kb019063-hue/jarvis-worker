@@ -43,15 +43,6 @@ void hash_color(std::size_t& h, const Color& c) {
     hash_combine(h, packed);
 }
 
-bool equal_transform(const TransformMatrix2D& a, const TransformMatrix2D& b) {
-    return a.a == b.a && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e && a.f == b.f;
-}
-
-bool equal_filter(const FilterFunction& a, const FilterFunction& b) {
-    return a.type == b.type && a.amount == b.amount && a.color == b.color &&
-           a.dx == b.dx && a.dy == b.dy && a.blur_radius == b.blur_radius;
-}
-
 bool ascii_iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -111,82 +102,6 @@ bool parse_timing_function(std::string_view val, TimingFunction& out) {
 }
 
 } // namespace
-
-bool ComputedStyle::operator==(const ComputedStyle& other) const {
-    if (display != other.display || color != other.color ||
-        background_color != other.background_color || dark_color_scheme != other.dark_color_scheme ||
-        width != other.width || height != other.height ||
-        !(margin == other.margin) || !(padding == other.padding) ||
-        width_percent != other.width_percent || height_percent != other.height_percent ||
-        min_width_percent != other.min_width_percent || max_width_percent != other.max_width_percent ||
-        min_height_percent != other.min_height_percent || max_height_percent != other.max_height_percent ||
-        !(margin_percent == other.margin_percent) || !(padding_percent == other.padding_percent) ||
-        !(border_width == other.border_width) || border_color != other.border_color ||
-        border_radius != other.border_radius || border_radius_percent != other.border_radius_percent ||
-        !(box_shadow == other.box_shadow) ||
-        font_size != other.font_size || font_weight != other.font_weight ||
-        font_style != other.font_style || font_family != other.font_family ||
-        line_height != other.line_height || line_height_number != other.line_height_number ||
-        text_align != other.text_align || text_decoration != other.text_decoration ||
-        float_type != other.float_type || clear_type != other.clear_type || overflow != other.overflow ||
-        border_collapse != other.border_collapse ||
-        border_spacing_x != other.border_spacing_x || border_spacing_y != other.border_spacing_y ||
-        table_layout != other.table_layout || empty_cells != other.empty_cells ||
-        caption_side != other.caption_side ||
-        position != other.position ||
-        top != other.top || right != other.right || bottom != other.bottom || left != other.left ||
-        has_top != other.has_top || has_right != other.has_right ||
-        has_bottom != other.has_bottom || has_left != other.has_left ||
-        z_index != other.z_index || has_z_index != other.has_z_index ||
-        box_sizing != other.box_sizing ||
-        min_width != other.min_width || max_width != other.max_width ||
-        min_height != other.min_height || max_height != other.max_height ||
-        margin_top_auto != other.margin_top_auto || margin_bottom_auto != other.margin_bottom_auto ||
-        margin_left_auto != other.margin_left_auto || margin_right_auto != other.margin_right_auto ||
-        flex_direction != other.flex_direction || flex_wrap != other.flex_wrap ||
-        justify_content != other.justify_content || align_items != other.align_items ||
-        align_content != other.align_content ||
-        gap != other.gap || flex_grow != other.flex_grow ||
-        flex_shrink != other.flex_shrink || flex_basis != other.flex_basis ||
-        grid_column_gap != other.grid_column_gap || grid_row_gap != other.grid_row_gap ||
-        grid_auto_fit_columns != other.grid_auto_fit_columns ||
-        !(grid_auto_fit_def == other.grid_auto_fit_def) ||
-        opacity != other.opacity || animation_duration != other.animation_duration ||
-        animation_timing_function != other.animation_timing_function ||
-        animation_iteration_count != other.animation_iteration_count ||
-        transition_duration != other.transition_duration ||
-        transition_timing_function != other.transition_timing_function ||
-        transition_delay != other.transition_delay ||
-        has_transform != other.has_transform ||
-        grid_row_start != other.grid_row_start || grid_row_end != other.grid_row_end ||
-        grid_column_start != other.grid_column_start || grid_column_end != other.grid_column_end ||
-        containment != other.containment ||
-        animation_name != other.animation_name ||
-        transition_property != other.transition_property ||
-        transform_str != other.transform_str ||
-        transform_origin != other.transform_origin ||
-        grid_area_name != other.grid_area_name ||
-        grid_template_columns != other.grid_template_columns ||
-        grid_template_rows != other.grid_template_rows ||
-        grid_col_track_defs != other.grid_col_track_defs ||
-        grid_row_track_defs != other.grid_row_track_defs) {
-        return false;
-    }
-    if (!equal_transform(transform_matrix, other.transform_matrix)) {
-        return false;
-    }
-    if (filters.size() != other.filters.size()) return false;
-    for (std::size_t i = 0; i < filters.size(); ++i) {
-        if (!equal_filter(filters[i], other.filters[i])) return false;
-    }
-    if (backdrop_filters.size() != other.backdrop_filters.size()) return false;
-    for (std::size_t i = 0; i < backdrop_filters.size(); ++i) {
-        if (!equal_filter(backdrop_filters[i], other.backdrop_filters[i])) return false;
-    }
-    if (custom_properties != other.custom_properties) return false;
-    if (grid_named_areas != other.grid_named_areas) return false;
-    return true;
-}
 
 std::size_t ComputedStyle::hash() const {
     std::size_t h = static_cast<std::size_t>(display);

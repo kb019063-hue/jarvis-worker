@@ -419,7 +419,14 @@ struct ComputedStyle {
     bool is_positioned() const { return position != Position::Static; }
     bool is_out_of_flow() const { return position == Position::Absolute || position == Position::Fixed; }
 
-    bool operator==(const ComputedStyle& other) const;
+    // Every member, in the order they are declared: the compiler writes it,
+    // so a property added to this struct cannot be left out of it.
+    // ComputedStylePool shares one style between boxes whose styles compare
+    // equal; while this was written by hand, a member missing here was a
+    // property that every such box silently took from another (font_style,
+    // when Phase 78 met Phase 71). hash() is still by hand, and a member
+    // missing there costs a longer bucket and nothing else.
+    bool operator==(const ComputedStyle& other) const = default;
     std::size_t hash() const;
 };
 

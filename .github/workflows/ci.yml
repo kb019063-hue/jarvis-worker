@@ -207,6 +207,8 @@ jobs:
         # iterator must be closed when resolve/then throws; the old walk
         # advanced forever before it looked at the first yielded value.
         run: make verify-promise-iterators
+      - name: Generator delegation against Node.js
+        run: python3 tools/conformance/verify_async_generator.py
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

@@ -248,15 +248,11 @@ std::shared_ptr<JsEnvironment> copy_scope(const std::shared_ptr<JsEnvironment>& 
 //
 // When an async generator's `yield*` finds no `@@asyncIterator`, the spec
 // (ES §7.4.3) wraps the sync iterator in an async one. The wrapper's
-// `next`/`return`/`throw` each call the sync method with the argument they
-// were handed, and return a promise; a throwing call rejects that promise, a
-// non-object result rejects it with a TypeError, and the value is handed to
-// the awaiting machinery (a thenable is awaited). The `return` and `throw`
-// methods exist on the wrapper only when the sync iterator has them, so a
-// delegating `yield*` sees their absence exactly as the spec's
-// CreateAsyncFromSyncIterator makes them absent — and performs its cleanup
-// (the `return` call) and error ("The iterator does not provide a 'throw'
-// method.") accordingly.
+// `next`/`return`/`throw` call the sync iterator with the argument they
+// were handed, and return a promise; a throwing call or a non-object result
+// rejects that promise, and the result's value is awaited. The wrapper has
+// its own `return` and `throw` methods even if the sync iterator lacks them;
+// those methods handle the missing delegate method themselves.
 JsValue iterator_result_pair(const JsValue& value, bool done) {
     JsValue object = JsValue::make_object();
     object.set_property("value", value);
@@ -309,8 +305,10 @@ JsValue js_call_awaited(const JsValue& sync_iterator, const char* key, const JsV
                              : method.call_with_this(sync_iterator, {});
     }, thrown);
     if (!call_ok) return Promise::make_rejected(thrown);
-    // IteratorComplete/IteratorValue coerce a primitive result (null and
-    // undefined throw out of the Get, which rejects like any abrupt step).
+    // The sync iterator's result must be an object, before either property
+    // is read. In particular, numbers and strings must not be boxed here.
+    if (!result.is_object_like())
+        return Promise::make_rejected(js_make_error(JsErrorKind::TypeError, "Iterator result is not an object."));
     JsValue done_value, value_value;
     if (!js_capture_throw([&] {
             done_value = result.get_property("done");
@@ -2462,9 +2460,11 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
         // close was made with (the injected throw is then never raised).
         auto close_inner_propagating = [&]() {
             JsValue ret = iterator.get_property("return");
-            if (!ret.is_function()) return;
+            if (ret.is_nullish()) return;
+            if (!ret.is_function()) js_throw_type_error("Iterator return is not callable.");
             JsValue closed = js_call(ret, iterator, {});
-            if (async_gen) eval_await(closed);
+            if (async_gen) closed = eval_await(closed);
+            if (!closed.is_object_like()) js_throw_type_error("Iterator result is not an object.");
         };
 
         // The sent value flows into the delegate; the delegate's return value
@@ -2482,10 +2482,11 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
                     // absent (or null) `throw` closes the iterator and then
                     // raises a TypeError.
                     JsValue thrown_method = iterator.get_property("throw");
-                    if (!thrown_method.is_function()) {
+                    if (thrown_method.is_nullish()) {
                         close_inner_propagating();
                         js_throw_type_error("The iterator does not provide a 'throw' method.");
                     }
+                    if (!thrown_method.is_function()) js_throw_type_error("Iterator throw is not callable.");
                     step = js_call(thrown_method, iterator, {pending});
                 } else if (generator->take_pending_return(pending)) {
                     // A return completion at the yield point: the value of an
@@ -2494,11 +2495,12 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
                     // is raised at the yield point, in this body.
                     JsValue received = async_gen ? eval_await(std::move(pending)) : std::move(pending);
                     JsValue return_method = iterator.get_property("return");
-                    if (!return_method.is_function()) {
+                    if (return_method.is_nullish()) {
                         // ReturnCompletion(received): an absent `return`
                         // completes the `yield*` with the received value.
                         throw GeneratorReturnException(std::move(received));
                     }
+                    if (!return_method.is_function()) js_throw_type_error("Iterator return is not callable.");
                     JsValue return_result = js_call(return_method, iterator, {received});
                     if (async_gen) return_result = eval_await(std::move(return_result));
                     if (!return_result.is_object_like())

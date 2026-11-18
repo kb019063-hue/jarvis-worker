@@ -37,7 +37,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 219 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 220 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
@@ -59,7 +59,8 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 218 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 220 engine suites + 114 cross-origin Window/Location/channel checks
+make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -726,7 +727,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 219 engine test suites
+# Run the 220 engine test suites
 make test
 ```
 
@@ -794,14 +795,14 @@ make test
 make test
 ```
 
-Output (219 suites; the first and last lines shown):
+Output (220 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 219 engine test suites passed successfully!
+All 220 engine test suites passed successfully!
 ```
 
 ```bash
@@ -824,7 +825,7 @@ functions and fixed the `Node.childNodes` WPT identity check. This follow-up
 pins live mutations and borrowed array-like iteration in a unit suite, clamps
 `length` to the ECMAScript `ToLength` maximum before converting it to a C++
 index (so `Infinity` does not produce a finished iterator), and reads
-`forEach`'s length before checking the callback. `make test` runs 219/219
+`forEach`'s length before checking the callback. `make test` runs 220/220
 suites; `make wpt` passes **9550/9744** across 190 files (194 listed,
 0 unlisted). The WPT floor now enforces the eleven gains PR #77 left without
 a raised floor. See `docs/phases/58-indexed-dom-list-iteration.md` and
@@ -961,7 +962,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 219/219 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 220/220 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1220,7 +1221,7 @@ browser.
 
 ```bash
 make dom-conformance     # 678 / 678; upgrades.dat 9 / 9
-make test                # 219 suites; js_an_upgrade_constructs_the_definition_the_ordinary_way
+make test                # 220 suites; js_an_upgrade_constructs_the_definition_the_ordinary_way
 ```
 
 The five lines that measured this before the fix lived in

@@ -16985,6 +16985,182 @@ TEST(js_iteration_asks_the_value_for_its_iterator) {
     assert(text("gc(); [...plain, ...'ab'].join()") == "1,2,3,a,b");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 75: Map/Set constructors dispatch through their instance methods
+// (finding 81)
+// ---------------------------------------------------------------------------
+
+TEST(js_map_set_constructors_dispatch_to_instance_methods) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var log = [];
+        function source(name, entries) {
+            var iterable = {};
+            iterable[Symbol.iterator] = function () {
+                var index = 0;
+                log.push(name + ':iterator');
+                return {
+                    next: function () {
+                        log.push(name + ':next');
+                        if (index === 3) return { value: undefined, done: true };
+                        var value = entries ? [index, index + 10] : index + 20;
+                        index++;
+                        return { value: value, done: false };
+                    },
+                    return: function () { log.push(name + ':close'); return {}; }
+                };
+            };
+            return iterable;
+        }
+
+        // A subclass receives its own instance before its adder is looked up.
+        class LoggedMap extends Map {
+            set(key, value) {
+                log.push('map:set:' + key + ':' + value);
+                return Map.prototype.set.call(this, key, value);
+            }
+        }
+        class LoggedSet extends Set {
+            add(value) {
+                log.push('set:add:' + value);
+                return Set.prototype.add.call(this, value);
+            }
+        }
+        var map = new LoggedMap(source('map', true));
+        var set = new LoggedSet(source('set', false));
+        var normalSummary = [map instanceof LoggedMap, map.size, map.get(2),
+                             set instanceof LoggedSet, set.size, set.has(22), log.join(',')].join('|');
+
+        // Get set/add once before GetIterator. A nullish iterable takes the
+        // early return and does not look up either method at all.
+        log = [];
+        class GetterMap extends Map {}
+        Object.defineProperty(GetterMap.prototype, 'set', { get: function () {
+            log.push('getter-map:get');
+            return function (key, value) {
+                log.push('getter-map:call:' + key);
+                return Map.prototype.set.call(this, key, value);
+            };
+        } });
+        class GetterSet extends Set {}
+        Object.defineProperty(GetterSet.prototype, 'add', { get: function () {
+            log.push('getter-set:get');
+            return function (value) {
+                log.push('getter-set:call:' + value);
+                return Set.prototype.add.call(this, value);
+            };
+        } });
+        var getterMap = new GetterMap(source('getter-map', true));
+        var getterSet = new GetterSet(source('getter-set', false));
+        new GetterMap(null);
+        new GetterSet(undefined);
+        var getterSummary = [getterMap instanceof GetterMap, getterMap.size,
+                             getterSet instanceof GetterSet, getterSet.size, log.join(',')].join('|');
+
+        // A non-callable adder throws before acquiring the iterator.
+        log = [];
+        class BadMap extends Map {}
+        Object.defineProperty(BadMap.prototype, 'set', { get: function () { log.push('bad-map:get'); return 7; } });
+        class BadSet extends Set {}
+        Object.defineProperty(BadSet.prototype, 'add', { get: function () { log.push('bad-set:get'); return 7; } });
+        try { new BadMap(source('bad-map', true)); } catch (error) { log.push('bad-map:' + error.name); }
+        try { new BadSet(source('bad-set', false)); } catch (error) { log.push('bad-set:' + error.name); }
+        var badSummary = log.join(',');
+
+        // An exception from a retrieved adder closes the source iterator.
+        log = [];
+        class ThrowingMap extends Map {
+            set(key, value) {
+                log.push('throw-map:set:' + key);
+                if (key === 1) throw new Error('map boom');
+                return Map.prototype.set.call(this, key, value);
+            }
+        }
+        class ThrowingSet extends Set {
+            add(value) {
+                log.push('throw-set:add:' + value);
+                if (value === 21) throw new Error('set boom');
+                return Set.prototype.add.call(this, value);
+            }
+        }
+        try { new ThrowingMap(source('throw-map', true)); } catch (error) { log.push(error.message); }
+        try { new ThrowingSet(source('throw-set', false)); } catch (error) { log.push(error.message); }
+        var closeSummary = log.join(',');
+
+        // Reflect.construct has to make its new.target object before looking
+        // up the adder, rather than retargeting a filled base collection later.
+        log = [];
+        function ForeignMap() {}
+        ForeignMap.prototype = Object.create(Map.prototype);
+        ForeignMap.prototype.set = function (key, value) {
+            log.push('reflect-map:set:' + key);
+            return Map.prototype.set.call(this, key, value);
+        };
+        function ForeignSet() {}
+        ForeignSet.prototype = Object.create(Set.prototype);
+        ForeignSet.prototype.add = function (value) {
+            log.push('reflect-set:add:' + value);
+            return Set.prototype.add.call(this, value);
+        };
+        var reflectMap = Reflect.construct(Map, [[['r', 9]]], ForeignMap);
+        var reflectSet = Reflect.construct(Set, [[8]], ForeignSet);
+        var reflectSummary = [reflectMap instanceof ForeignMap, reflectMap instanceof Map, reflectMap.get('r'),
+                              reflectSet instanceof ForeignSet, reflectSet instanceof Set, reflectSet.has(8),
+                              log.join(',')].join('|');
+    )js");
+
+    // Recorded against Node 22.22.3. Keep the protocol order visible: a
+    // direct data write would produce the sizes, but none of these logs.
+    assert(js.global_env()->get("normalSummary").to_string() ==
+           "true|3|12|true|3|true|"
+           "map:iterator,map:next,map:set:0:10,map:next,map:set:1:11,map:next,map:set:2:12,map:next,"
+           "set:iterator,set:next,set:add:20,set:next,set:add:21,set:next,set:add:22,set:next");
+    assert(js.global_env()->get("getterSummary").to_string() ==
+           "true|3|true|3|"
+           "getter-map:get,getter-map:iterator,getter-map:next,getter-map:call:0,getter-map:next,"
+           "getter-map:call:1,getter-map:next,getter-map:call:2,getter-map:next,"
+           "getter-set:get,getter-set:iterator,getter-set:next,getter-set:call:20,getter-set:next,"
+           "getter-set:call:21,getter-set:next,getter-set:call:22,getter-set:next");
+    assert(js.global_env()->get("badSummary").to_string() ==
+           "bad-map:get,bad-map:TypeError,bad-set:get,bad-set:TypeError");
+    assert(js.global_env()->get("closeSummary").to_string() ==
+           "throw-map:iterator,throw-map:next,throw-map:set:0,throw-map:next,throw-map:set:1,throw-map:close,map boom,"
+           "throw-set:iterator,throw-set:next,throw-set:add:20,throw-set:next,throw-set:add:21,throw-set:close,set boom");
+    assert(js.global_env()->get("reflectSummary").to_string() ==
+           "true|true|9|true|true|true|reflect-map:set:r,reflect-set:add:8");
+
+    // The ordinary constructors keep their intrinsic prototypes and normal
+    // collection behavior after the instance-method dispatch path above.
+    assert(js.eval("var directMap = new Map([['one', 1], ['two', 2], ['one', 3]]);"
+                   "var directSet = new Set(['a', 'b', 'a']);"
+                   "[directMap instanceof Map, Object.getPrototypeOf(directMap) === Map.prototype,"
+                   " directMap.size, directMap.get('one'), directMap.get('two'),"
+                   " directSet instanceof Set, Object.getPrototypeOf(directSet) === Set.prototype,"
+                   " directSet.size, directSet.has('a'), directSet.has('b')].join('|')").to_string() ==
+           "true|true|2|3|2|true|true|2|true|true");
+
+    // AddEntriesFromIterable rejects a primitive entry and closes the outer
+    // iterator while unwinding the TypeError.
+    assert(js.eval(R"js(
+        var malformedClosed = 0;
+        var malformedEntries = {};
+        malformedEntries[Symbol.iterator] = function () {
+            var emitted = false;
+            return {
+                next: function () {
+                    if (emitted) return { done: true };
+                    emitted = true;
+                    return { value: 7, done: false };
+                },
+                return: function () { malformedClosed++; return {}; }
+            };
+        };
+        try { new Map(malformedEntries); 'no error'; }
+        catch (error) { error.name + '|' + malformedClosed; }
+    )js").to_string() == "TypeError|1");
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -17290,6 +17466,9 @@ int main() {
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
+
+    // Phase 75: Map/Set constructor dispatch through set/add.
+    RUN_TEST(js_map_set_constructors_dispatch_to_instance_methods);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

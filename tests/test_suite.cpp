@@ -17307,6 +17307,673 @@ TEST(js_iteration_of_another_realms_array) {
     assert(text("[...[7, 8]].join()") == "7,8");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 73: HTTP/1.1 CookieJar wiring, RFC 9111 HTTP cache, and CORS preflight
+// ---------------------------------------------------------------------------
+
+TEST(http_cookie_jar_rfc6265_domain_path_security_and_redirects) {
+    using namespace litebird;
+    CookieJar& jar = CookieJar::default_jar();
+    jar.clear();
+    ResourceLoader::clear_http_cache();
+
+    // 1. Host-only vs Domain= suffix matching, public-suffix rejection, and path boundaries
+    jar.set_cookie_from_header("host_only=1; Path=/app", "https://example.com/app/login");
+    jar.set_cookie_from_header("domain_wide=2; Domain=.example.com; Path=/", "https://app.example.com/start");
+    jar.set_cookie_from_header("bad_tld=evil; Domain=com; Path=/", "https://app.example.com/");
+    jar.set_cookie_from_header("wrong_dom=evil; Domain=other.com; Path=/", "https://app.example.com/");
+    jar.set_cookie_from_header("default_p=3", "https://example.com/dir/sub/page.html");
+
+    assert(jar.get_cookie_header("https://example.com/app/dashboard").find("host_only=1") != std::string::npos);
+    assert(jar.get_cookie_header("https://sub.example.com/app/dashboard").find("host_only=1") == std::string::npos);
+    assert(jar.get_cookie_header("https://example.com/apple").find("host_only=1") == std::string::npos);
+    assert(jar.get_cookie_header("https://sub.example.com/anywhere").find("domain_wide=2") != std::string::npos);
+    assert(jar.get_cookie_header("https://badexample.com/").find("domain_wide=2") == std::string::npos);
+    assert(jar.get_cookie_header("https://other.com/").empty());
+    assert(jar.get_cookie_header("https://example.com/dir/sub/next").find("default_p=3") != std::string::npos);
+    assert(jar.get_cookie_header("https://example.com/dir/other").find("default_p=3") == std::string::npos);
+
+    // Longest-path-first ordering in Cookie header (RFC 6265 §5.4)
+    const std::string ordered = jar.get_cookie_header("https://example.com/app");
+    assert(ordered == "host_only=1; domain_wide=2");
+
+    // 2. HttpOnly isolation, Secure, SameSite, and __Secure- / __Host- prefixes
+    jar.clear();
+    jar.set_cookie_from_header("sid=secret123; Path=/; HttpOnly", "https://bank.example/login");
+    jar.set_cookie_from_header("theme=solar; Path=/", "https://bank.example/login");
+    assert(jar.get_cookie_header("https://bank.example/account") == "sid=secret123; theme=solar");
+    assert(jar.get_document_cookie("https://bank.example/account") == "theme=solar");
+    // Script cannot set HttpOnly or overwrite/delete an existing HttpOnly cookie
+    jar.set_document_cookie("forged=1; Path=/; HttpOnly", "https://bank.example/account");
+    jar.set_document_cookie("sid=hacked; Path=/", "https://bank.example/account");
+    jar.set_document_cookie("sid=; Path=/; Max-Age=0", "https://bank.example/account");
+    assert(jar.get_cookie_header("https://bank.example/account") == "sid=secret123; theme=solar");
+
+    // Secure & prefixes & SameSite
+    jar.clear();
+    jar.set_cookie_from_header("sec_over_http=no; Secure; Path=/", "http://plain.example/");
+    assert(jar.size() == 0);
+    jar.set_cookie_from_header("samesite_none_no_sec=no; SameSite=None; Path=/", "https://sec.example/");
+    assert(jar.size() == 0);
+    jar.set_cookie_from_header("__Host-bad=1; Secure; Domain=sec.example; Path=/", "https://sec.example/");
+    jar.set_cookie_from_header("__Host-bad2=1; Secure; Path=/sub", "https://sec.example/sub");
+    assert(jar.size() == 0);
+    jar.set_cookie_from_header("__Host-ok=ok; Secure; Path=/; SameSite=Strict", "https://sec.example/");
+    jar.set_cookie_from_header("lax_c=lax; Secure; Path=/; SameSite=Lax", "https://sec.example/");
+    jar.set_cookie_from_header("none_c=none; Secure; Path=/; SameSite=None", "https://sec.example/");
+    assert(jar.get_cookie_header("http://sec.example/").empty());
+    // Same-site subresource (initiator `app.sec.example` -> host-only `sec.example`) sees all three
+    assert(jar.get_cookie_header("https://sec.example/v1", "https://app.sec.example/", false, "GET") ==
+           "__Host-ok=ok; lax_c=lax; none_c=none");
+    // Cross-site subresource sees only SameSite=None
+    assert(jar.get_cookie_header("https://sec.example/v1", "https://foreign.example/", false, "GET") ==
+           "none_c=none");
+    // Cross-site top-level GET navigation sees Lax + None, but not Strict
+    assert(jar.get_cookie_header("https://sec.example/welcome", "https://foreign.example/", true, "GET") ==
+           "lax_c=lax; none_c=none");
+    // Cross-site top-level POST navigation withholds Lax as well
+    assert(jar.get_cookie_header("https://sec.example/welcome", "https://foreign.example/", true, "POST") ==
+           "none_c=none");
+
+    // 3. End-to-end HTTP 302 login redirect setting multiple Set-Cookie headers
+    jar.clear();
+    WebBrowserServer server(320.0f, 240.0f);
+    std::string seen_dashboard_cookie;
+    std::string seen_omit_cookie;
+    server.set_custom_handler([&](const HttpServerRequest& req, HttpServerResponse& resp) -> bool {
+        if (req.path == "/auth/login") {
+            resp.status = 302;
+            resp.status_text = "Found";
+            resp.headers.push_back({"Location", "/auth/dashboard"});
+            resp.headers.push_back({"Set-Cookie", "sess=tok_99; Path=/auth; HttpOnly"});
+            resp.headers.push_back({"Set-Cookie", "ui=compact; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT"});
+            resp.body = "";
+            return true;
+        }
+        if (req.path == "/auth/dashboard") {
+            auto it = req.headers.find("cookie");
+            seen_dashboard_cookie = (it != req.headers.end()) ? it->second : "";
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.body = "ok:" + seen_dashboard_cookie;
+            return true;
+        }
+        if (req.path == "/auth/anon") {
+            auto it = req.headers.find("cookie");
+            seen_omit_cookie = (it != req.headers.end()) ? it->second : "";
+            resp.status = 200;
+            resp.headers.push_back({"Set-Cookie", "ignored_anon=1; Path=/"});
+            resp.body = "anon";
+            return true;
+        }
+        if (req.path == "/auth/cors-denied-cookie") {
+            resp.status = 200;
+            resp.headers.push_back({"Set-Cookie", "evil_cors=1; Path=/"});
+            resp.body = "no-acao";
+            return true;
+        }
+        return false;
+    });
+    assert(server.start_background(0, "127.0.0.1"));
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.bound_port());
+
+    ResourceResponse nav = ResourceLoader::load_navigation(base + "/auth/login");
+    assert(nav.success && nav.status_code == 200);
+    assert(nav.url == base + "/auth/dashboard");
+    assert(seen_dashboard_cookie == "sess=tok_99; ui=compact");
+    assert(jar.get_document_cookie(base + "/auth/dashboard") == "ui=compact");
+
+    // `omit_credentials` neither sends existing cookies nor stores Set-Cookie
+    ResourceRequestContext omit_ctx;
+    omit_ctx.document_url = base + "/auth/dashboard";
+    omit_ctx.omit_credentials = true;
+    ResourceResponse anon_resp = ResourceLoader::load_for_page(base + "/auth/anon", omit_ctx);
+    assert(anon_resp.success && seen_omit_cookie.empty());
+    assert(jar.get_cookie_header(base + "/auth/anon").find("ignored_anon") == std::string::npos);
+
+    // Failed cross-origin CORS response must not mutate CookieJar
+    ResourceRequestContext xorig_ctx;
+    xorig_ctx.document_url = "http://other-app.localhost/index.html";
+    xorig_ctx.mode = RequestMode::Cors;
+    xorig_ctx.include_credentials = true;
+    ResourceResponse denied = ResourceLoader::load_for_page(base + "/auth/cors-denied-cookie", xorig_ctx);
+    assert(!denied.network_ok);
+    assert(jar.get_cookie_header(base + "/").find("evil_cors") == std::string::npos);
+
+    server.stop();
+    jar.clear();
+    ResourceLoader::clear_http_cache();
+}
+
+#include <poll.h>
+
+namespace {
+
+struct LoopbackHttpTestServer {
+    using Handler = std::function<void(const litebird::HttpServerRequest&, litebird::HttpServerResponse&)>;
+
+    int listen_fd{-1};
+    uint16_t port{0};
+    std::atomic<bool> running{false};
+    std::thread worker;
+    Handler handler;
+
+    explicit LoopbackHttpTestServer(Handler h) : handler(std::move(h)) {
+        listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(listen_fd >= 0);
+        int yes = 1;
+        ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        assert(::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        assert(::getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port = ntohs(addr.sin_port);
+        assert(::listen(listen_fd, 32) == 0);
+        running.store(true);
+        worker = std::thread([this]() { serve_loop(); });
+    }
+
+    ~LoopbackHttpTestServer() {
+        stop();
+    }
+
+    void stop() {
+        if (!running.exchange(false)) return;
+        if (listen_fd >= 0) {
+            ::shutdown(listen_fd, SHUT_RDWR);
+            ::close(listen_fd);
+            listen_fd = -1;
+        }
+        if (worker.joinable()) worker.join();
+    }
+
+    void serve_loop() {
+        while (running.load()) {
+            pollfd pfd{};
+            pfd.fd = listen_fd;
+            pfd.events = POLLIN;
+            const int pr = ::poll(&pfd, 1, 50);
+            if (pr <= 0) continue;
+            sockaddr_in cli{};
+            socklen_t clen = sizeof(cli);
+            const int cfd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&cli), &clen);
+            if (cfd < 0) continue;
+
+            timeval tv{};
+            tv.tv_sec = 2;
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ::setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            std::string raw;
+            char buf[4096];
+            std::size_t hdr_end = std::string::npos;
+            while ((hdr_end = raw.find("\r\n\r\n")) == std::string::npos) {
+                const ssize_t n = ::recv(cfd, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                raw.append(buf, static_cast<std::size_t>(n));
+            }
+            if (hdr_end != std::string::npos) {
+                litebird::HttpServerRequest req;
+                std::istringstream iss(raw.substr(0, hdr_end));
+                std::string line;
+                if (std::getline(iss, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    std::istringstream rl(line);
+                    rl >> req.method >> req.raw_target;
+                    const auto q = req.raw_target.find('?');
+                    req.path = (q == std::string::npos) ? req.raw_target : req.raw_target.substr(0, q);
+                    req.query = (q == std::string::npos) ? "" : req.raw_target.substr(q + 1);
+                }
+                std::size_t cl = 0;
+                while (std::getline(iss, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    const auto colon = line.find(':');
+                    if (colon == std::string::npos) continue;
+                    std::string hn = line.substr(0, colon);
+                    for (char& ch : hn) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    std::string hv = line.substr(colon + 1);
+                    while (!hv.empty() && (hv.front() == ' ' || hv.front() == '\t')) hv.erase(hv.begin());
+                    while (!hv.empty() && (hv.back() == ' ' || hv.back() == '\t')) hv.pop_back();
+                    req.headers[hn] = hv;
+                    if (hn == "content-length") cl = static_cast<std::size_t>(std::strtoull(hv.c_str(), nullptr, 10));
+                }
+                req.body = raw.substr(hdr_end + 4);
+                while (req.body.size() < cl) {
+                    const ssize_t n = ::recv(cfd, buf, sizeof(buf), 0);
+                    if (n <= 0) break;
+                    req.body.append(buf, static_cast<std::size_t>(n));
+                }
+
+                litebird::HttpServerResponse resp;
+                handler(req, resp);
+
+                std::ostringstream out;
+                out << "HTTP/1.1 " << resp.status << " " << resp.status_text << "\r\n";
+                if (!resp.content_type.empty()) {
+                    out << "Content-Type: " << resp.content_type << "\r\n";
+                }
+                for (const auto& [hk, hv] : resp.headers) {
+                    out << hk << ": " << hv << "\r\n";
+                }
+                if (resp.status != 204 && resp.status != 304) {
+                    out << "Content-Length: " << resp.body.size() << "\r\n";
+                }
+                out << "Connection: close\r\n\r\n";
+                if (resp.status != 204 && resp.status != 304) {
+                    out << resp.body;
+                }
+                const std::string wire = out.str();
+                std::size_t sent = 0;
+                while (sent < wire.size()) {
+                    const ssize_t w = ::send(cfd, wire.data() + sent, wire.size() - sent, MSG_NOSIGNAL);
+                    if (w <= 0) break;
+                    sent += static_cast<std::size_t>(w);
+                }
+            }
+            ::close(cfd);
+        }
+    }
+};
+
+} // namespace
+
+TEST(http_cache_rfc9111_freshness_etag_304_vary_and_invalidation) {
+    using namespace litebird;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    std::atomic<int> fresh_hits{0};
+    std::atomic<int> etag_hits{0};
+    std::atomic<int> nostore_hits{0};
+    std::atomic<int> vary_hits{0};
+    std::atomic<int> current_version{1};
+    std::string last_if_none_match;
+    std::string last_if_modified_since;
+    std::mutex obs_mutex;
+
+    LoopbackHttpTestServer server([&](const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (req.path == "/cache/fresh" && req.method == "GET") {
+            const int n = ++fresh_hits;
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Cache-Control", "max-age=120"});
+            resp.headers.push_back({"Set-Cookie", "once_only=1; Path=/"});
+            resp.body = "fresh-" + std::to_string(n) + "-v" + std::to_string(current_version.load());
+            return;
+        }
+        if (req.path == "/cache/mutate" || (req.path == "/cache/fresh" && req.method == "POST")) {
+            ++current_version;
+            resp.status = 200;
+            resp.body = "mutated";
+            return;
+        }
+        if (req.path == "/cache/etag") {
+            const int n = ++etag_hits;
+            std::string inm;
+            std::string ims;
+            if (auto it = req.headers.find("if-none-match"); it != req.headers.end()) inm = it->second;
+            if (auto it = req.headers.find("if-modified-since"); it != req.headers.end()) ims = it->second;
+            {
+                std::lock_guard<std::mutex> lk(obs_mutex);
+                last_if_none_match = inm;
+                last_if_modified_since = ims;
+            }
+            if (inm == "\"rev-1\"") {
+                resp.status = 304;
+                resp.status_text = "Not Modified";
+                resp.content_type = "";
+                resp.headers.push_back({"ETag", "\"rev-1\""});
+                resp.headers.push_back({"Cache-Control", "max-age=60"});
+                resp.headers.push_back({"X-Revalidated", "yes"});
+                resp.body = "";
+                return;
+            }
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.headers.push_back({"ETag", "\"rev-1\""});
+            resp.headers.push_back({"Last-Modified", "Wed, 21 Oct 2026 07:28:00 GMT"});
+            resp.headers.push_back({"Cache-Control", "max-age=0, must-revalidate"});
+            resp.body = "{\"hit\":" + std::to_string(n) + "}";
+            return;
+        }
+        if (req.path == "/cache/nostore") {
+            const int n = ++nostore_hits;
+            resp.status = 200;
+            resp.headers.push_back({"Cache-Control", "no-store"});
+            resp.body = "ns-" + std::to_string(n);
+            return;
+        }
+        if (req.path == "/cache/vary") {
+            ++vary_hits;
+            std::string lang = "default";
+            if (auto it = req.headers.find("accept-language"); it != req.headers.end()) lang = it->second;
+            resp.status = 200;
+            resp.headers.push_back({"Cache-Control", "max-age=120"});
+            resp.headers.push_back({"Vary", "Accept-Language"});
+            resp.body = "lang:" + lang;
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+
+    ResourceRequestContext ctx;
+    ctx.document_url = base + "/index.html";
+
+    // 1. Fresh hit avoids socket roundtrip and does NOT replay Set-Cookie
+    ResourceResponse r1 = ResourceLoader::load_for_page(base + "/cache/fresh", ctx);
+    assert(r1.success && !r1.from_cache && r1.body == "fresh-1-v1" && fresh_hits.load() == 1);
+    assert(CookieJar::default_jar().get_cookie_header(base + "/") == "once_only=1");
+    CookieJar::default_jar().clear();
+
+    ResourceResponse r2 = ResourceLoader::load_for_page(base + "/cache/fresh", ctx);
+    assert(r2.success && r2.from_cache && !r2.revalidated && r2.body == "fresh-1-v1");
+    assert(fresh_hits.load() == 1);
+    assert(CookieJar::default_jar().size() == 0);
+
+    // 2. CacheMode::Reload bypasses cache read and updates stored representation
+    ResourceRequestContext reload_ctx = ctx;
+    reload_ctx.cache_mode = CacheMode::Reload;
+    ResourceResponse r3 = ResourceLoader::load_for_page(base + "/cache/fresh", reload_ctx);
+    assert(r3.success && !r3.from_cache && r3.body == "fresh-2-v1" && fresh_hits.load() == 2);
+
+    // 3. Unsafe POST to `/cache/fresh` invalidates the cached entry (RFC 9111 §4.4)
+    ResourceResponse post_r = ResourceLoader::load_for_page(base + "/cache/fresh", ctx, "POST", {}, "x=1");
+    assert(post_r.success && post_r.body == "mutated");
+    ResourceResponse r4 = ResourceLoader::load_for_page(base + "/cache/fresh", ctx);
+    assert(r4.success && !r4.from_cache && r4.body == "fresh-3-v2" && fresh_hits.load() == 3);
+
+    // 4. Stale `max-age=0` + ETag / Last-Modified -> 304 Not Modified revalidation & header merge
+    ResourceResponse e1 = ResourceLoader::load_for_page(base + "/cache/etag", ctx);
+    assert(e1.success && !e1.from_cache && e1.body == "{\"hit\":1}" && etag_hits.load() == 1);
+
+    ResourceResponse e2 = ResourceLoader::load_for_page(base + "/cache/etag", ctx);
+    assert(e2.success && e2.status_code == 200 && e2.from_cache && e2.revalidated);
+    assert(e2.body == "{\"hit\":1}" && etag_hits.load() == 2);
+    assert(e2.headers["x-revalidated"] == "yes");
+    {
+        std::lock_guard<std::mutex> lk(obs_mutex);
+        assert(last_if_none_match == "\"rev-1\"");
+        assert(last_if_modified_since == "Wed, 21 Oct 2026 07:28:00 GMT");
+    }
+    // Because the 304 upgraded Cache-Control to max-age=60, the 3rd request is now a zero-network fresh hit!
+    ResourceResponse e3 = ResourceLoader::load_for_page(base + "/cache/etag", ctx);
+    assert(e3.success && e3.from_cache && !e3.revalidated && e3.body == "{\"hit\":1}");
+    assert(etag_hits.load() == 2);
+
+    // 5. `Cache-Control: no-store` never caches
+    ResourceResponse ns1 = ResourceLoader::load_for_page(base + "/cache/nostore", ctx);
+    ResourceResponse ns2 = ResourceLoader::load_for_page(base + "/cache/nostore", ctx);
+    assert(ns1.body == "ns-1" && ns2.body == "ns-2" && !ns2.from_cache && nostore_hits.load() == 2);
+
+    // 6. `Vary: Accept-Language` stores distinct representations per request header value
+    ResourceResponse v_en = ResourceLoader::load_for_page(
+        base + "/cache/vary", ctx, "GET", {{"Accept-Language", "en-US"}}
+    );
+    ResourceResponse v_fr = ResourceLoader::load_for_page(
+        base + "/cache/vary", ctx, "GET", {{"Accept-Language", "fr-CA"}}
+    );
+    ResourceResponse v_en_cached = ResourceLoader::load_for_page(
+        base + "/cache/vary", ctx, "GET", {{"Accept-Language", "en-US"}}
+    );
+    assert(v_en.body == "lang:en-US" && v_fr.body == "lang:fr-CA");
+    assert(v_en_cached.from_cache && v_en_cached.body == "lang:en-US" && vary_hits.load() == 2);
+
+    server.stop();
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+}
+
+TEST(cors_preflight_options_max_age_authorization_and_mixed_content) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    std::atomic<int> options_hits{0};
+    std::atomic<int> put_hits{0};
+    std::atomic<int> forbidden_delete_hits{0};
+    std::string seen_acrm;
+    std::string seen_acrh;
+    std::string seen_options_cookie;
+    bool allow_explicit_auth = false;
+    std::mutex pf_mutex;
+
+    WebBrowserServer server(320.0f, 240.0f);
+    server.set_custom_handler([&](const HttpServerRequest& req, HttpServerResponse& resp) -> bool {
+        if (req.path == "/api/items") {
+            if (req.method == "OPTIONS") {
+                ++options_hits;
+                std::lock_guard<std::mutex> lk(pf_mutex);
+                seen_acrm = req.headers.count("access-control-request-method")
+                                ? req.headers.at("access-control-request-method")
+                                : "";
+                seen_acrh = req.headers.count("access-control-request-headers")
+                                ? req.headers.at("access-control-request-headers")
+                                : "";
+                seen_options_cookie = req.headers.count("cookie") ? req.headers.at("cookie") : "";
+                resp.status = 204;
+                resp.status_text = "No Content";
+                resp.headers.push_back({"Access-Control-Allow-Origin", "https://webapp.example"});
+                resp.headers.push_back({"Access-Control-Allow-Methods", "GET, POST, PUT"});
+                resp.headers.push_back({
+                    "Access-Control-Allow-Headers",
+                    allow_explicit_auth ? "*, authorization" : "content-type, x-api-key"
+                });
+                resp.headers.push_back({"Access-Control-Max-Age", "60"});
+                resp.body = "";
+                return true;
+            }
+            if (req.method == "PUT" || req.method == "POST") {
+                ++put_hits;
+                resp.status = 200;
+                resp.content_type = "application/json";
+                resp.headers.push_back({"Access-Control-Allow-Origin", "https://webapp.example"});
+                resp.body = "{\"saved\":" + std::to_string(put_hits.load()) + "}";
+                return true;
+            }
+            if (req.method == "DELETE") {
+                ++forbidden_delete_hits;
+                resp.status = 200;
+                resp.headers.push_back({"Access-Control-Allow-Origin", "https://webapp.example"});
+                resp.body = "deleted";
+                return true;
+            }
+        }
+        return false;
+    });
+    assert(server.start_background(0, "127.0.0.1"));
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.bound_port());
+    CookieJar::default_jar().set_cookie_from_header("loopback_c=1; Path=/", base + "/");
+
+    ResourceRequestContext cors_ctx;
+    cors_ctx.document_url = "https://webapp.example/app.html";
+    cors_ctx.mode = RequestMode::Cors;
+
+    // 1. Simple CORS POST (`text/plain`) needs no OPTIONS preflight
+    ResourceResponse simple = ResourceLoader::load_for_page(
+        base + "/api/items", cors_ctx, "POST", {{"Content-Type", "text/plain;charset=utf-8"}}, "hello"
+    );
+    assert(simple.success && options_hits.load() == 0 && put_hits.load() == 1);
+
+    // 2. Non-simple PUT with JSON + X-Api-Key runs OPTIONS preflight (without cookies!) and caches Max-Age
+    ResourceResponse p1 = ResourceLoader::load_for_page(
+        base + "/api/items",
+        cors_ctx,
+        "PUT",
+        {{"X-Api-Key", "k1"}, {"Content-Type", "application/json"}},
+        "{\"a\":1}"
+    );
+    assert(p1.success && p1.body == "{\"saved\":2}");
+    assert(options_hits.load() == 1 && put_hits.load() == 2);
+    {
+        std::lock_guard<std::mutex> lk(pf_mutex);
+        assert(seen_acrm == "PUT");
+        assert(seen_acrh == "content-type,x-api-key");
+        assert(seen_options_cookie.empty());
+    }
+    assert(ResourceLoader::cors_preflight_cache_size() == 1);
+
+    // Second PUT reuses preflight cache -> zero new OPTIONS requests!
+    ResourceResponse p2 = ResourceLoader::load_for_page(
+        base + "/api/items",
+        cors_ctx,
+        "PUT",
+        {{"X-Api-Key", "k2"}, {"Content-Type", "application/json"}},
+        "{\"a\":2}"
+    );
+    assert(p2.success && options_hits.load() == 1 && put_hits.load() == 3);
+
+    // 3. Disallowed DELETE method is blocked at preflight before DELETE ever reaches the server
+    ResourceResponse del_denied = ResourceLoader::load_for_page(
+        base + "/api/items", cors_ctx, "DELETE"
+    );
+    assert(!del_denied.network_ok && forbidden_delete_hits.load() == 0);
+
+    // 4. `Authorization` is NOT covered by wildcard `*` unless explicitly named (WHATWG Fetch §4.5)
+    ResourceLoader::clear_http_cache();
+    {
+        std::lock_guard<std::mutex> lk(pf_mutex);
+        allow_explicit_auth = false;
+    }
+    ResourceResponse auth_denied = ResourceLoader::load_for_page(
+        base + "/api/items", cors_ctx, "GET", {{"Authorization", "Bearer tok"}}
+    );
+    assert(!auth_denied.network_ok);
+
+    ResourceLoader::clear_http_cache();
+    {
+        std::lock_guard<std::mutex> lk(pf_mutex);
+        allow_explicit_auth = true;
+    }
+    ResourceResponse auth_ok = ResourceLoader::load_for_page(
+        base + "/api/items", cors_ctx, "POST", {{"Authorization", "Bearer tok"}}, "ok"
+    );
+    assert(auth_ok.success);
+
+    // 5. Mixed-content policy blocks non-loopback `http://` subresources from `https://` documents
+    const fs::path tmp_dir = fs::temp_directory_path() / "litebird_phase73_mixed";
+    fs::create_directories(tmp_dir);
+    {
+        std::ofstream f(tmp_dir / "data.txt");
+        f << "payload";
+    }
+    ResourceLoader::set_origin_root_for_testing("http://insecure.example.test", tmp_dir.string());
+    ResourceLoader::set_origin_root_for_testing("https://secure.example.test", tmp_dir.string());
+    {
+        std::ofstream hf(tmp_dir / "data.txt.headers");
+        hf << "Access-Control-Allow-Origin: *\r\n";
+    }
+
+    ResourceResponse mixed_blocked = ResourceLoader::load_for_page(
+        "http://insecure.example.test/data.txt", cors_ctx
+    );
+    assert(!mixed_blocked.network_ok);
+    assert(mixed_blocked.error_message.find("mixed-content") != std::string::npos);
+
+    ResourceResponse https_allowed = ResourceLoader::load_for_page(
+        "https://secure.example.test/data.txt", cors_ctx
+    );
+    assert(https_allowed.success && https_allowed.body == "payload");
+
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(tmp_dir);
+    server.stop();
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+}
+
+TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers) {
+    using namespace litebird;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    std::string first_post_x_client;
+    std::string seen_x_pair;
+    std::string first_post_method;
+    std::atomic<int> api_hits{0};
+
+    LoopbackHttpTestServer server([&](const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (req.path == "/fetch/echo") {
+            if (req.method == "OPTIONS") {
+                resp.status = 204;
+                resp.status_text = "No Content";
+                resp.content_type = "";
+                resp.headers.push_back({"Access-Control-Allow-Origin", "https://portal.example"});
+                resp.headers.push_back({"Access-Control-Allow-Methods", "GET, POST"});
+                resp.headers.push_back({"Access-Control-Allow-Headers", "x-client, x-pair"});
+                return;
+            }
+            ++api_hits;
+            if (req.method == "POST") {
+                first_post_method = req.method;
+                first_post_x_client = req.headers.count("x-client") ? req.headers.at("x-client") : "";
+            }
+            seen_x_pair = req.headers.count("x-pair") ? req.headers.at("x-pair") : "";
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.headers.push_back({"Access-Control-Allow-Origin", "https://portal.example"});
+            resp.headers.push_back({"Access-Control-Expose-Headers", "X-Visible"});
+            resp.headers.push_back({"X-Visible", "shown-42"});
+            resp.headers.push_back({"X-Secret", "hidden-99"});
+            resp.headers.push_back({"Set-Cookie", "cant_read_in_fetch=1; Path=/"});
+            resp.headers.push_back({"Cache-Control", "max-age=60"});
+            resp.body = "{\"n\":" + std::to_string(api_hits.load()) + "}";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+    const std::string endpoint = "http://127.0.0.1:" + std::to_string(server.port) + "/fetch/echo";
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://portal.example/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    const std::string script =
+        "var out = '';\n"
+        "var h = new Headers({'X-Client': 'litebird'});\n"
+        "h.append('X-Client', 'phase73');\n"
+        "fetch('" + endpoint + "', { method: 'post', headers: h, body: 'hi' })\n"
+        "  .then(function(r) {\n"
+        "    out += [r.status, r.headers.get('x-visible'), String(r.headers.get('x-secret')), String(r.headers.get('set-cookie'))].join('|');\n"
+        "    return fetch('" + endpoint + "', { headers: [['X-Pair', 'a'], ['X-Pair', 'b']] });\n"
+        "  })\n"
+        "  .then(function(r1) { return r1.text(); })\n"
+        "  .then(function(t1) {\n"
+        "    out += '|' + t1;\n"
+        "    return fetch('" + endpoint + "', { headers: [['X-Pair', 'a'], ['X-Pair', 'b']] });\n"
+        "  })\n"
+        "  .then(function(r2) { return r2.text(); })\n"
+        "  .then(function(t2) {\n"
+        "    out += '|' + t2;\n"
+        "    return fetch('" + endpoint + "', { cache: 'reload', headers: [['X-Pair', 'a'], ['X-Pair', 'b']] });\n"
+        "  })\n"
+        "  .then(function(r3) { return r3.text(); })\n"
+        "  .then(function(t3) {\n"
+        "    out += '|' + t3;\n"
+        "    return fetch('" + endpoint + "', { method: 'TRACE' }).then(function() { return 'unexpected'; }, function(e) { return 'rejected'; });\n"
+        "  })\n"
+        "  .then(function(tr) { out += '|' + tr; });\n";
+    js.eval(script);
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    assert(first_post_method == "POST");
+    assert(first_post_x_client == "litebird, phase73");
+    assert(seen_x_pair == "a, b");
+    assert(js.eval("out").to_string() == "200|shown-42|null|null|{\"n\":2}|{\"n\":2}|{\"n\":3}|rejected");
+
+    server.stop();
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -17580,6 +18247,12 @@ int main() {
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.
     RUN_TEST(per_glyph_font_fallback);
+
+    // Phase 73: HTTP/1.1 CookieJar wiring, RFC 9111 HTTP cache, CORS preflight, and Fetch Headers.
+    RUN_TEST(http_cookie_jar_rfc6265_domain_path_security_and_redirects);
+    RUN_TEST(http_cache_rfc9111_freshness_etag_304_vary_and_invalidation);
+    RUN_TEST(cors_preflight_options_max_age_authorization_and_mixed_content);
+    RUN_TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

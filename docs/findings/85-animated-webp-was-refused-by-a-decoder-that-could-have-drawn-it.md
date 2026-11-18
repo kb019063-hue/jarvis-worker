@@ -1,4 +1,4 @@
-# Finding 82 — Animated WebP was refused by a decoder that could have drawn it
+# Finding 85 — Animated WebP was refused by a decoder that could have drawn it
 
 **Severity:** low — nothing was drawn wrong; a format the engine claimed to
 support was reported as unsupported, and `<img src="…webp">` with an animation
@@ -24,7 +24,7 @@ animated WebP at all, which is the more common file on the web today.
 
 ## 2. What changed
 
-Phase 76 adds `WebPDecoder::decode_frames()` and `first_frame()`, walks the
+Phase 79 adds `WebPDecoder::decode_frames()` and `first_frame()`, walks the
 `ANMF` chunks, decodes each frame with the existing still decoders, and
 composites them onto the `VP8X` canvas — the first frame, then each one blended
 or written over what is there, with disposal applied after the frame is handed
@@ -48,6 +48,6 @@ animations — and the five that differed were the interesting ones:
 - the blend's fixed-point arithmetic has an exact form; the plausible variants
   are one unit off.
 
-All four are recorded in `docs/phases/76-animated-webp-frames-on-a-canvas.md`
+All four are recorded in `docs/phases/79-animated-webp-frames-on-a-canvas.md`
 with the source of each rule, and `verify-media` now checks the compositor on
 every run instead of asserting a refusal.

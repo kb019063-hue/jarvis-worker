@@ -1,4 +1,4 @@
-# Phase 76 — Animated WebP: frames, a canvas, and the order they are drawn in
+# Phase 79 — Animated WebP: frames, a canvas, and the order they are drawn in
 
 ## 1. What was missing
 

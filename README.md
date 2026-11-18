@@ -29,9 +29,9 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1127 / 1152 (97.8%)**; of the 25 that fail, eight were recorded in Phase 34 for what classes still lack and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1128 / 1152 (97.9%)**; of the 24 that fail, eight were recorded in Phase 34 for what classes still lack and 11 in Phase 63 for iteration gaps | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9550 / 9744 subtests** across 190 files; the 194 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 9538 before PR #77 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9550 / 9744 subtests** across 190 files; the 194 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
@@ -117,15 +117,15 @@ Read the number for what it is:
   those 21 directories and 49 more across 13 TDZ/scope directories, none
   fewer; Phase 63: 10 more in the whole suite and 4 fewer, each of the four
   a row of the task table).
-- **Five of the 26 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 21 were
+- **Five of the 24 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 19 were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Thirteen are in
+  things; ARCHITECTURE.md, Phase 34, section 9). Eleven are in
   `iteration.dat`: the places that still read an array without asking it
-  for its iterator (array destructuring, `Array.from`), `yield*` in an async
-  generator, and what the built-in iterators themselves get wrong (Phase 63,
-  section 6). Each of the 21 belongs to a row of the task table in
+  for its iterator (array destructuring, `Array.from`), the default constructor
+  spread, and what built-in iterators get wrong (Phase 63, section 6).
+  Each of the 19 belongs to a row of the task table in
   `AGENTS.md`. `construct.dat` had one until Phase 65: `eval` inside a
   function saw nothing of the function, and now runs in its caller's scope
   ([`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
@@ -169,7 +169,7 @@ compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
 iterated: an iterator a script put on an array, on a subclass of `Array`, on
 `Array.prototype` or on `String.prototype`, through each construct that
 iterates; the order in which the protocol reads and calls; closing an
-iterator that is left early; and the plain cases, which must not change. 65
+iterator that is left early; and the plain cases, which must not change. 67
 of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
@@ -1273,7 +1273,9 @@ of iterable it handled by accident. Still as it was: array destructuring
 does not ask the array, and the `Map` and `Set` constructors do not call
 `set` and `add`. All of it is in the 13 failing cases of `iteration.dat` and
 in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 63, has
-the design, and `AUDIT.md`, finding 69, says what found what.
+the design, and `AUDIT.md`, finding 69, says what found what. Since that
+measurement, Phase 75 fixed Map/Set constructor dispatch and Phase 77 fixed
+async-generator delegation; 11 cases remain.
 
 ### `eval` runs in the scope that called it (Phase 65)
 
@@ -1459,3 +1461,16 @@ collation pairs against Node.js at **0 diffs**, and the 9 Test262 String
 Unicode/locale suites rise to **152 / 156 (97.4%)** (`Intl.Collator` and
 locale-specific CLDR tailorings remain open). See `ARCHITECTURE.md`, Phase 60,
 and `AUDIT.md`, finding 66.
+
+
+### Async-generator delegation (Phase 77)
+
+An async generator's `yield*` now asks for `Symbol.asyncIterator`, falls back
+through an async-from-sync adapter, and forwards return and throw completions.
+A direct async `yield` awaits its operand. Synchronous `yield*` passes the
+iterator's result object through without eagerly reading its value. The new
+Node differential `python3 tools/conformance/verify_async_generator.py` checks
+seven cases; the pinned test262 delegation/yield differential gains 178 passing
+cases with no newly failing cases. Async request queuing and promise-job timing
+remain incomplete; see [Phase 77](docs/phases/77-async-generator-yield-star.md)
+and [finding 83](docs/findings/83-async-generator-delegation.md).

@@ -10777,6 +10777,144 @@ TEST(inline_style_cssom_shorthands_and_aliases) {
            "\"Helvetica Neue\", Arial|2|1|10px|hidden|auto|1px|2px|3px|4px|4px|8px|6px|translateX(10px)|200ms|rgb(1, 2, 3)");
 }
 
+TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
+    using namespace litebird;
+    // Phase 72. `HTMLStyleElement.sheet` was null and `document.styleSheets`
+    // answered plain objects with no `cssRules`. What the CSSOM is for is that
+    // what a script writes there is what the page is styled with, so most of
+    // the assertions below are about `getComputedStyle` afterwards.
+    //
+    // Every assertion is a comparison made in the page (`ok(...)`), because
+    // what a script sees is the thing being tested.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>#target { color: red } .gone { display: none }</style></head>"
+        "<body><div id=\"target\">x</div><p class=\"gone\">y</p></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        var style = document.querySelector('style');
+        var sheet = style.sheet;
+        var target = document.getElementById('target');
+
+        // The objects.
+        ok('sheet is stable', sheet === style.sheet, true);
+        ok('brand', Object.prototype.toString.call(sheet), '[object CSSStyleSheet]');
+        ok('instanceof', sheet instanceof CSSStyleSheet, true);
+        ok('rule list brand', Object.prototype.toString.call(sheet.cssRules), '[object CSSRuleList]');
+        ok('rule list instanceof', sheet.cssRules instanceof CSSRuleList, true);
+        ok('ownerNode', sheet.ownerNode === style, true);
+        ok('type', sheet.type, 'text/css');
+        ok('href', sheet.href, null);
+        ok('title', sheet.title, '');
+        ok('disabled', sheet.disabled, false);
+        ok('rules', sheet.cssRules.length, 2);
+        ok('selectorText', sheet.cssRules[0].selectorText, '#target');
+        ok('one object per rule', sheet.cssRules.item(0) === sheet.cssRules[0], true);
+        ok('rule instanceof', sheet.cssRules[0] instanceof CSSStyleRule, true);
+        ok('rule is a CSSRule', sheet.cssRules[0] instanceof CSSRule, true);
+        ok('rule type', sheet.cssRules[0].type, CSSRule.STYLE_RULE);
+        ok('the constant', CSSStyleRule.STYLE_RULE, 1);
+        ok('another constant', CSSRule.MEDIA_RULE, 4);
+        ok('cssText', sheet.cssRules[0].cssText, '#target { color: red; }');
+        ok('rule.style', sheet.cssRules[0].style instanceof CSSStyleDeclaration, true);
+        ok('rule.style.color', sheet.cssRules[0].style.color, 'red');
+        ok('document.styleSheets', document.styleSheets.length, 1);
+        ok('the same sheet', document.styleSheets[0] === sheet, true);
+
+        // A sheet styles the page, and an inserted rule does too, at once.
+        // Specificity and order decide which one wins, as for rules written by hand.
+        ok('before', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        ok('insertRule returns the index', sheet.insertRule('#target { color: blue }', 1), 1);
+        ok('the later rule wins', getComputedStyle(target).color, 'rgb(0, 0, 255)');
+        sheet.insertRule('#target { color: green }', 0);
+        ok('an earlier rule loses', getComputedStyle(target).color, 'rgb(0, 0, 255)');
+        sheet.cssRules[2].style.color = 'purple';
+        ok('a write through rule.style', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('the rule it was written to', sheet.cssRules[2].style.color, 'purple');
+        // A later rule with the same specificity wins; an earlier one does not,
+        // even when its selector is more specific — by id here.
+        ok('still the later rule', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        sheet.cssRules[0].selectorText = 'span';
+        ok('a rule that stops matching', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        sheet.cssRules[0].selectorText = '#target';
+        ok('a rule that starts again', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('four rules', sheet.cssRules.length, 4);
+        sheet.deleteRule(1);
+        ok('deleted', sheet.cssRules.length, 3);
+
+        // The errors the standard names, and what is not one.
+        function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+        ok('an unclosed block', name(function () { sheet.insertRule('a {', 0); }), 'SyntaxError');
+        ok('not a rule', name(function () { sheet.insertRule('}', 0); }), 'SyntaxError');
+        ok('an at-rule', name(function () { sheet.insertRule('@media print { a {} }', 0); }), 'SyntaxError');
+        ok('two blocks', name(function () { sheet.insertRule('a { } b { }', 0); }), 'SyntaxError');
+        ok('an index past the end', name(function () { sheet.insertRule('a {}', 99); }), 'IndexSizeError');
+        ok('deleting what is not there', name(function () { sheet.deleteRule(99); }), 'IndexSizeError');
+        ok('an invalid selector', name(function () { sheet.cssRules[0].selectorText = 'a >'; }), 'SyntaxError');
+
+        // A rule object follows its rule, and keeps what it had once removed.
+        var rule = sheet.cssRules[0];
+        sheet.insertRule('b { margin: 0 }', 0);
+        ok('the object follows the rule', rule === sheet.cssRules[1], true);
+        var text = rule.cssText;
+        sheet.deleteRule(1);
+        ok('a removed rule keeps its text', rule.cssText, text);
+        ok('and it is no longer in the list', rule === sheet.cssRules[0], false);
+
+        // A sheet a script makes, and `disabled`, which takes a sheet out of the
+        // cascade without taking it out of `document.styleSheets`.
+        var made = document.createElement('style');
+        ok('a style element in no document', made.sheet, null);
+        made.textContent = '#target { color: lime }';
+        document.head.appendChild(made);
+        ok('its rules', made.sheet.cssRules.length, 1);
+        ok('it styles the page', getComputedStyle(target).color, 'rgb(0, 255, 0)');
+        made.sheet.disabled = true;
+        ok('disabled takes it out', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('disabled reads back', made.sheet.disabled, true);
+        ok('but the rules are still there', made.sheet.cssRules.length, 1);
+        made.sheet.disabled = false;
+        ok('and back', getComputedStyle(target).color, 'rgb(0, 255, 0)');
+        ok('document.styleSheets', document.styleSheets.length, 2);
+        var held = made.sheet;
+        document.head.removeChild(made);
+        ok('sheet is null out of the document', made.sheet, null);
+        ok('a script that held it still reads it', held.cssRules.length, 1);
+        ok('and it styles nothing', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('document.styleSheets drops it', document.styleSheets.length, 1);
+        document.head.appendChild(made);
+        ok('put back, the same sheet', made.sheet === held, true);
+        ok('and it styles again', getComputedStyle(target).color, 'rgb(0, 255, 0)');
+
+        // The text of the element is the sheet's rules: what a script writes to
+        // the element's text is what the next `getComputedStyle` applies.
+        made.textContent = '#target { color: teal }';
+        ok('a new text, new rules', made.sheet.cssRules.length, 1);
+        ok('and a new colour', getComputedStyle(target).color, 'rgb(0, 128, 128)');
+
+        // `document.fonts`: what `document.fonts.ready.then(...)` needs, which
+        // is all the two grid tests of the WPT suite ask of it.
+        ok('the same set', document.fonts === document.fonts, true);
+        ok('its brand', Object.prototype.toString.call(document.fonts), '[object FontFaceSet]');
+        ok('status', document.fonts.status, 'loaded');
+        ok('size', document.fonts.size, 0);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+
+    // `ready` is a promise, resolved with the set: the callbacks a page hangs
+    // off it run, which is all the two grid tests of the WPT suite need.
+    js.eval("document.fonts.ready.then(function (set) { document.fonts.answered = (set === document.fonts); });");
+    assert(js.eval("document.fonts.answered").to_string() == "true");
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
     auto doc = std::make_shared<Document>();
@@ -18374,6 +18512,10 @@ int main() {
 
     // Phase 75: Map/Set constructor dispatch through set/add.
     RUN_TEST(js_map_set_constructors_dispatch_to_instance_methods);
+
+    // Phase 72: the CSS Object Model — CSSStyleSheet, CSSRule, CSSRuleList,
+    // rule.style, insertRule/deleteRule, and document.fonts.
+    RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

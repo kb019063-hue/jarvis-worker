@@ -68,8 +68,8 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 Multicol and fragmentation (18); `overflow: auto` and `position: sticky` (19);
 Selectors L4 `:has()` and container queries (14, 15); `Proxy`, BigInt, `Intl`
 (9, 10); finish the bytecode VM — the tree-walker is **50–100× slower than
-V8** on loops and calls (7); `getComputedStyle`, `sheet.cssRules`,
-`document.write`; `TextDecoder`/`TextEncoder` (24); extend WPT to `html/`,
+V8** on loops and calls (7); `getComputedStyle`, `document.write`;
+`TextDecoder`/`TextEncoder` (24); extend WPT to `html/`,
 `url/`, `fetch/` and the rest of `css-*` (37).
 
 ### Tier 3 — Chromium-class

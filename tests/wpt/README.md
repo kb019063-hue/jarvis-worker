@@ -102,14 +102,13 @@ with `--quiet`.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**9,550 of 9,744 subtests pass. 194 are listed:** the 8 below from the DOM
-and encoding suites, and these 186 from the CSS parsing suites.
+**9,567 of 9,824 subtests pass. 257 are listed:** the 8 below from the DOM
+and encoding suites, and these 249 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `grid-resolved-tracks` | 120 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does |
+| `grid-resolved-tracks` | 185 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does. 65 of them are newer than the rest: until Phase 72 the two files below a `document.fonts.ready` call (`grid-columns-rows-get-set-multiple.html`, `grid-content-sized-columns-resolution.html`) reported one `(harness)` row each and ran no subtest at all — `document.fonts` is in since then, and their subtests are listed one by one with this word |
 | `intrinsic-auto-repeat-lanes` | 64 | `repeat(auto-fill, <intrinsic-size>)` — an intrinsic size inside an auto-repetition. The current Grid 3 draft (21 October 2026) makes that a grid-lanes feature only and says the declaration on a non-lanes grid computes to `none`, which is what Litebird does; these `.tentative.html` tests expect the lanes behavior, resolved against a layout, and are expected to move with the spec |
-| `document-fonts` | 2 | `document.fonts` (`FontFaceSet`) is not implemented; two tests call `document.fonts.ready.then(…)` and harness-error before any subtest runs |
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |

@@ -959,7 +959,7 @@ void setup_video(Iface& I) {
 void setup_style_element(Iface& I) {
     setup_reflecting(I);
     Html H(I);
-    H.getter("sheet", [](Realm&, Element&) { return null(); });
+    H.getter("sheet", [](Realm& r, Element& el) { return style_sheet(r, el); });
 }
 
 void setup_link_element(Iface& I) {

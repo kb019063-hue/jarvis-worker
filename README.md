@@ -114,7 +114,7 @@ Read the number for what it is:
   strings, arrays, regular expressions, dates, JSON), not every clause of the
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  30,997 pass (64.6%; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
+  31,070 pass (64.8%; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
   58.1% before Phase 55, 26,012 / 54.2% before Phase 44); of the 15,686
   on functions, classes and objects, 13,630 pass (86.9%; 12,657 / 80.7%
   before Phase 88, 12,359 / 78.8% before Phase 59, 10,835 / 69.1% before

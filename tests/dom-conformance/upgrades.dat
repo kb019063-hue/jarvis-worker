@@ -1,0 +1,183 @@
+#fixture
+<html><head><title>Upgrades</title></head><body><x-greeting id="greeting" lang="en">hello</x-greeting><x-plain id="plain"></x-plain><x-other id="other"></x-other><x-throws id="throws"></x-throws><x-early id="early"></x-early><x-twice id="twice"></x-twice><button id="builtin" is="x-builtin">b</button><div id="host"></div></body></html>
+
+#name an upgrade constructs the ordinary way: this is not the element until super()
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var log = [];
+class Greeting extends HTMLElement {
+    field = 'f';
+    constructor() {
+        var early;
+        try { early = this; } catch (e) { early = e.name; }
+        var from = super();
+        log.push(early, from === this, this === document.getElementById('greeting'),
+                 new.target === Greeting, this.id + ' ' + this.getAttribute('lang') + ' ' + this.textContent);
+    }
+}
+customElements.define('x-greeting', Greeting);
+var greeting = document.getElementById('greeting');
+console.log(greeting instanceof Greeting, greeting.field, greeting.matches(':defined'), greeting.localName);
+console.log(log.join(' '));
+#expect
+true f true x-greeting
+ReferenceError true true true greeting en hello
+
+#name what a constructor writes on this before it asks for the element is not on the element
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var seen = null;
+var Plain = inherit(function () {
+    this.early = true;
+    var self = Reflect.construct(HTMLElement, [], new.target);
+    self.late = true;
+    seen = [this === self, this.early, 'early' in self].join();
+    return self;
+}, HTMLElement);
+customElements.define('x-plain', Plain);
+var plain = document.getElementById('plain');
+console.log(plain instanceof Plain, plain.late, plain.early === undefined, 'early' in plain, plain.matches(':defined'));
+console.log(seen);
+#expect
+true true true false true
+false,true,false
+
+#name the object a script held before the definition is the element's object after the upgrade
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var before = document.getElementById('other');
+var wasPlain = [before instanceof HTMLElement, Object.getPrototypeOf(before) === HTMLElement.prototype].join();
+var Other = inherit(function () {
+    var self = Reflect.construct(HTMLElement, [], new.target);
+    self.made = true;
+    return self;
+}, HTMLElement);
+customElements.define('x-other', Other);
+var after = document.getElementById('other');
+console.log(wasPlain, before === after, after instanceof Other, after.made, after.constructor === Other,
+            Object.getPrototypeOf(after) === Other.prototype, after.matches(':defined'));
+#expect
+true,true true true true true true true
+
+#name a constructor that returns another element fails the upgrade
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var elsewhere = document.createElement('div');
+var wrong = 0;
+var Foreign = inherit(function () {
+    Reflect.construct(HTMLElement, [], new.target);
+    wrong++;
+    return elsewhere;
+}, HTMLElement);
+customElements.define('x-other', Foreign);
+var other = document.getElementById('other');
+console.log(other instanceof Foreign, other.matches(':defined'), Object.getPrototypeOf(other) === HTMLElement.prototype,
+            other === elsewhere, elsewhere.isConnected, wrong);
+#expect
+true false false false false 1
+
+#name a constructor that throws after super() leaves the element a plain HTMLElement
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var Throws = inherit(function () {
+    var self = Reflect.construct(HTMLElement, [], new.target);
+    self.seen = self.id;
+    throw new RangeError('after');
+}, HTMLElement);
+customElements.define('x-throws', Throws);
+var thrown = document.getElementById('throws');
+console.log(thrown instanceof Throws, thrown.seen === undefined, thrown.matches(':defined'),
+            Object.getPrototypeOf(thrown) === HTMLElement.prototype, thrown.localName, thrown.tagName);
+#expect
+true false false false x-throws X-THROWS
+
+#name a constructor that throws before it reaches super() leaves the element a plain HTMLElement
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var Early = inherit(function () { throw new RangeError('before'); }, HTMLElement);
+customElements.define('x-early', Early);
+var early = document.getElementById('early');
+console.log(early instanceof Early, Object.getPrototypeOf(early) === HTMLElement.prototype, early.matches(':defined'),
+            early.localName);
+#expect
+false true false x-early
+
+#name super() twice during an upgrade is refused
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var Twice = inherit(function () {
+    var self = Reflect.construct(HTMLElement, [], new.target);
+    try {
+        Reflect.construct(HTMLElement, [], new.target);
+        self.again = 'no error';
+    } catch (e) {
+        self.again = e.name + ': ' + e.message;
+    }
+    return self;
+}, HTMLElement);
+customElements.define('x-twice', Twice);
+var twice = document.getElementById('twice');
+console.log(twice instanceof Twice, twice.matches(':defined'), twice.again);
+#expect
+true true TypeError: This instance is already constructed
+
+#name a customized built-in whose upgrade failed is not :defined
+#code
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+var Builtin = inherit(function () { throw new TypeError('no'); }, HTMLButtonElement);
+customElements.define('x-builtin', Builtin, { extends: 'button' });
+var button = document.getElementById('builtin');
+console.log(button instanceof Builtin, button instanceof HTMLButtonElement, button.localName, button.matches(':defined'),
+            document.querySelectorAll('button:defined').length, document.querySelectorAll('x-builtin').length,
+            button.getAttribute('is'));
+#expect
+false true button false 0 0 x-builtin
+
+#name define upgrades elements already in the page: observed attributes, then connected
+#code
+var order = [];
+function inherit(C, Parent) {
+    C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+    return Object.setPrototypeOf(C, Parent);
+}
+document.getElementById('host').innerHTML = '<x-order id="order" a="1" b="2"><span>in</span></x-order>';
+var Order = inherit(function () {
+    var self = Reflect.construct(HTMLElement, [], new.target);
+    order.push('constructed ' + self.id + ' ' + (self.isConnected ? 'connected' : 'loose'));
+    return self;
+}, HTMLElement);
+Order.observedAttributes = ['a', 'b'];
+Order.prototype.attributeChangedCallback = function (name, before, after) { order.push(name + ':' + before + '>' + after); };
+Order.prototype.connectedCallback = function () { order.push('connected ' + this.children.length); };
+customElements.define('x-order', Order);
+var element = document.getElementById('order');
+element.setAttribute('c', '3');
+console.log(element instanceof Order, element.matches(':defined'), element.querySelector('span').textContent);
+console.log(order.join('|'));
+#expect
+true true in
+constructed order connected|a:null>1|b:null>2|connected 1

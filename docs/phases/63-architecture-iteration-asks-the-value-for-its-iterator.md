@@ -243,11 +243,20 @@ edge of what this machine can measure.
 
 ### 6. What is still open
 
-Six things, each in a file that an open pull request held while this was
-written, and each a row of AGENTS.md with its failing cases in
-`iteration.dat`. The first three are where this change made something
-**worse than it was on `main`**, in one case each that a page is unlikely to
-meet and a test suite does meet. They come first for that reason.
+Six things, each a row of AGENTS.md with its failing cases in
+`iteration.dat`. The first four are in files that an open pull request held
+while this was written: `BuiltinsArray.cpp` (#63 and #73), `JsParser.cpp`
+and `JsEval.cpp` (#68, until it was merged at 03:58 on 17 November, an hour
+and a half before this was). The fifth is in `BuiltinsCollections.cpp`,
+which nobody held. The sixth is several small things; of the three files
+its row names, #63 named two and nobody the third. The first three are where
+this change made something **worse than it was on `main`**, in one case each
+that a page is unlikely to meet and a test suite does meet. They come first
+for that reason.
+
+(Corrected on 18 November. As merged, this paragraph said that each of the
+six was in a file an open pull request held. That was written from memory,
+and it is true of the first four.)
 
 1. **`Array.from`** (`BuiltinsArray.cpp`) decides what is iterable by
    `is_array()` and by type before it calls `js_iterable_to_vector`. With an

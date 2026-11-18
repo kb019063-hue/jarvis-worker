@@ -37,11 +37,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 211 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 219 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
+| **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
+| **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
-| Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
+| Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 5 SVG suites; 2,400 mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -56,12 +59,13 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 211 engine suites + 80 cross-origin Window/Location checks
+make test            # 219 engine suites + 114 cross-origin Window/Location/channel checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
+make bench-collections # Map/Set completed-iterator growth guard, two 8,192-loop batches without gc()
 make verify-color    # CSS Color 4/5 15-space rational oracle, §13.2 gamut map, and WPT vectors
 make fuzz-color      # adversarial grammar & mutation fuzzing for CSS Color 4/5
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, lossless WebP vs libwebp, and SVG conformance
@@ -75,15 +79,16 @@ make bench-attributes # attribute-list end removals: expected DOM checksums, eac
 make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
 make bench-surrogates # six surrogate-pair scripts (including reads and substring slices between halves): results face Node, each under 1 s
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
+make verify-collection-iterators # Map/Set compaction, clear, insertion-order, and done-latch cases from Node
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
-make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
+make security-worker # Worker MIME/static-module policy, EventTarget dispatch, classic importScripts boundary, and 60x startup/exit stability
 make diff-strings    # 50,580 string results compared with Node's; fails if any differ (ceiling: 0)
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 1,150 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,152 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -172,7 +177,7 @@ selected `<option>`'s children into `<selectedcontent>`.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 669 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 678 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -192,7 +197,8 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
 | Phase 34, with 11 cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
 | Phase 37, with 4 more cases (`forms.dat` date/time inputs, `style.dat` CSSOM `el.style` shorthands) | 644 / 644 |
-| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Phase 43, with 25 more cases (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Now, with the 9 cases of Phase 69 (`upgrades.dat`: what an upgrade's construction is) | 678 / 678 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -662,11 +668,13 @@ twice.
 - **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
   `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
   `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
-  interpreter and event loop; messages are copied as JSON),
-  `canvas.getContext("2d")`, and the DOM: section 1, "The DOM a script
-  sees".
-- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`,
-  modules (`import`/`export`), `with`, holes in arrays, `Intl`. See "Known
+  interpreter and event loop; `Worker`, `Window`, and same-agent
+  `MessagePort` messages use a neutral structured-clone packet for primitives,
+  ordinary objects, and arrays), `canvas.getContext("2d")`, and the DOM:
+  section 1, "The DOM a script sees".
+- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`, a
+  general ES-module language runtime (only module workers have the documented
+  static import/export subset), `with`, holes in arrays, `Intl`. See "Known
   gaps" in `ARCHITECTURE.md` for the limits of what is there.
 - **Bytecode VM:** an earlier experiment, kept for `--dump-bytecode`. It
   covers a small subset of the language and scripts do not run on it.
@@ -722,7 +730,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 211 engine test suites
+# Run the 219 engine test suites
 make test
 ```
 
@@ -790,14 +798,14 @@ make test
 make test
 ```
 
-Output (211 suites; the first and last lines shown):
+Output (218 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 211 engine test suites passed successfully!
+All 217 engine test suites passed successfully!
 ```
 
 ```bash
@@ -943,7 +951,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 210/210 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 218/218 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1134,18 +1142,84 @@ var one = {}; function Single() { return one; } class Child extends Single { con
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
 make js-conformance      # 1124 / 1150; construct.dat 50 / 50
-make dom-conformance     # 669 / 669; compiled.dat 25 / 25
+make dom-conformance     # 678 / 678; compiled.dat 25 / 25, upgrades.dat 9 / 9
 ```
 
-What is still missing: an upgrade still runs the constructor on the element
-itself, where the standard hands the element over when the constructor asks
-for it (a constructor written as a function can tell, and one that never
-reaches `HTMLElement` is accepted); `this` can be used before `super()` has
-run; and a private name is a property that `obj['#p']` reads. Those and what
+What is still missing: a private name is a property that `obj['#p']` reads,
+and `this` in a derived constructor is unbound until `super()` runs but a
+`class` field initializer can still be reached through `eval`. Those and what
 else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
-what.
+what. The upgrade itself stopped being one of them in Phase 69, below.
+
+### An upgrade is an ordinary construction (Phase 69)
+
+A custom element that is already in the page is upgraded when its class is
+defined, and until Phase 69 the engine did that by handing the element's own
+object to the constructor as `this`. The standard does not: it constructs the
+class the ordinary way, on an object of its own, and the element is what
+`HTMLElement` gives out when the constructor asks for it — through
+`super(...)`, or through `Reflect.construct(HTMLElement, [], new.target)` —
+and the upgrade fails unless the constructor comes back with that element. So
+the definition now keeps the standard's construction stack (`run_upgrade`
+pushes the element, `construct_custom_element` takes it and marks the entry),
+and a constructor can tell what it is:
+
+```bash
+cat > up.html <<'HTML'
+<!DOCTYPE html><body><x-e id="e"></x-e></body>
+HTML
+cat > up.js <<'JS'
+class E extends HTMLElement {
+  field = 1;
+  constructor() {
+    var early; try { early = this; } catch (err) { early = err.name; }
+    super();
+    console.log(early, this === document.getElementById('e'), new.target === E);
+  }
+}
+customElements.define('x-e', E);
+var e = document.getElementById('e');
+console.log(e.field, e instanceof E, e.matches(':defined'));
+var Plain = function () { this.touched = true; };
+Plain.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Plain } });
+Object.setPrototypeOf(Plain, HTMLElement);
+document.body.insertAdjacentHTML('beforeend', '<x-p id="p"></x-p>');
+customElements.define('x-p', Plain);
+var p = document.getElementById('p');
+console.log(p.touched === undefined, p.matches(':defined'), Object.getPrototypeOf(p) === HTMLElement.prototype);
+JS
+./build/litebird --run-script up.js up.html
+# ReferenceError true true         `this` is unbound before super(), then the element
+# 1 true true                      a field initializer lands on the element, `:defined`
+# Uncaught TypeError: The custom element constructor returned a different object.
+# true false true                  `this.touched` is on no element; the upgrade failed
+```
+
+What follows from it: a constructor written as a plain function is no longer
+`this === self`, one that never reaches `HTMLElement` has written on an object
+that is not the element and its upgrade fails, `super()` returns the element
+and a second `super()` is a `TypeError`, and a constructor that throws or
+returns something else leaves the element a plain `HTMLElement` that is not
+`:defined` — including a customized built-in, which `Element::is_defined` used
+to call defined. The object a script held before the definition existed stays
+the element's object; the class's prototype is put on it when the interface
+hands it out, and stays there if the upgrade then fails, as it does in a
+browser.
+
+```bash
+make dom-conformance     # 678 / 678; upgrades.dat 9 / 9
+make test                # 218 suites; js_an_upgrade_constructs_the_definition_the_ordinary_way
+```
+
+The five lines that measured this before the fix lived in
+`tests/dom-conformance/open/compiled-custom-elements.js` (4 of 5 differed);
+they are cases in `tests/dom-conformance/upgrades.dat` now.
+[`docs/phases/69-custom-element-construction-stack.md`](docs/phases/69-custom-element-construction-stack.md)
+says how it is built and
+[`docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md`](docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md)
+what was found.
 
 ### Iteration asks the value for its iterator (Phase 63)
 
@@ -1299,24 +1373,53 @@ says what was found and
 [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
 how it is built.
 
-### Cross-origin `Window` and `Location` reflection (Phase 56)
+### Cross-origin `Window` / `Location`, navigation, module workers and message ports (Phases 56, 61 & 66)
 
-A script embedded in one origin could already not read a cross-origin frame
-(`SecurityError` on non-safelisted names, since Phase 42), but everything that
-*describes* the frame's window answered the ordinary way: `Object.keys`,
-`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
-described ordinary storage, `Object.defineProperty` wrote into it,
-`Object.freeze` flipped its cell, and `location` handed over the child's
-address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
-the cross-origin table of the HTML Standard instead: the window reports
-exactly its child-frame indices and the exposed names (`window`, `self`,
-`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
-`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
-`href` (writable, not readable cross-origin) and `replace()`, both refuse
-define/delete/integrity changes with `SecurityError`/`TypeError`, and
-`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
-and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
-finding 62.
+A script embedded in one origin cannot read a cross-origin frame (`SecurityError`
+on non-safelisted names), and Phase 56 made its *reflection* surface follow the
+cross-origin table of the HTML Standard: the window reports exactly its
+child-frame indices and exposed names (`window`, `self`, `location`, `close`,
+`closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`, `parent`,
+`postMessage`, then `then`), while `Location` exposes only `href` (writable,
+not readable cross-origin) and `replace()`. Define/delete/integrity changes
+refuse with `SecurityError`/`TypeError`, and `getPrototypeOf` answers `null`.
+Same-origin pages are untouched.
+
+Phase 61 makes the writable entries do useful work: setting `child.location`
+or `child.location.href`, and calling `child.location.replace(url)`, schedules
+a real nested-frame document navigation without changing the iframe's `src`
+markup. The child keeps its `WindowProxy` identity, but receives a new
+Document; the existing iframe loader continues to apply sandbox, MIME,
+origin-root and load-order rules.
+
+Phase 66 also lets `{ type: "module" }` workers load a MIME-checked,
+CORS-aware static module graph. The supported subset has side-effect,
+default/named/namespace imports; simple declaration/default/named exports; and
+named re-exports. Modules execute in dependency order inside strict,
+module-local wrappers; classic `importScripts()` is not exposed there.
+
+`new MessageChannel()` creates two stable `MessagePort` EventTargets.
+`postMessage()` queues FIFO `message` events, `onmessage` starts a port,
+`start()` releases messages accumulated after `addEventListener`, and `close()`
+drops later messages. Worker, Window, and same-agent port delivery now writes a
+neutral structured-clone graph before scheduling: `undefined`, `NaN`,
+infinities, `-0`, strings, ordinary objects, arrays, aliases, and cycles retain
+their supported value semantics without retaining a sender-realm `JsValue`.
+Functions, symbols, DOM/host/exotic values, and non-empty transfer lists throw
+`DataCloneError`; an empty transfer list is a no-op. Ports themselves are still
+not transferable or cross-agent.
+
+`tests/cross_origin_windows.cpp`, run by `make test`, now has **114 checks**:
+reflection security, three cross-origin navigation entry points, direct
+navigation over both `src` and `srcdoc`, proxy identity, unchanged markup and
+continued cross-origin read refusal, plus asynchronous FIFO channel delivery,
+GC-safe cloned graphs, ordinary EventTarget target/receiver behavior, delayed
+start and close-before/after-delivery behavior. The design and remaining limits
+are in
+[`docs/phases/61-child-location-navigation-and-message-channel.md`](docs/phases/61-child-location-navigation-and-message-channel.md),
+[`docs/phases/66-es-module-workers-and-structured-clone.md`](docs/phases/66-es-module-workers-and-structured-clone.md),
+[`docs/findings/67-child-location-navigation-and-message-ports.md`](docs/findings/67-child-location-navigation-and-message-ports.md),
+and [`docs/findings/72-es-module-workers-and-structured-clone.md`](docs/findings/72-es-module-workers-and-structured-clone.md).
 
 ### String Unicode 17.0 normalization, full/locale case mapping, and CLDR 48 UCA collation (Phase 60)
 

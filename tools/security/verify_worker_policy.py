@@ -3,9 +3,10 @@
 and concurrent startup/exit stability against the real CLI binary.
 
 Spins up a local loopback HTTP server returning JavaScript and non-JavaScript
-Content-Type headers, verifies classic vs module worker options, error listener
-delivery, importScripts MIME/origin boundaries, and runs a multi-process
-concurrent startup/shutdown stress loop to catch exit-time SIGSEGV regressions.
+Content-Type headers, verifies classic workers plus a static module-worker
+import graph, error listener delivery, importScripts MIME/origin boundaries,
+and runs a multi-process concurrent startup/shutdown stress loop to catch
+exit-time SIGSEGV regressions.
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ class WorkerTestHandler(http.server.BaseHTTPRequestHandler):
             return
         routes: dict[str, tuple[int, str | None, bytes]] = {
             "/ok.js": (200, "text/javascript; charset=utf-8", b"postMessage('http-ok');"),
+            "/module-dep.js": (200, "text/javascript", b"export const MODULE_VALUE = 88;"),
+            "/module-entry.js": (200, "text/javascript", b"import { MODULE_VALUE } from './module-dep.js'; postMessage('module:' + MODULE_VALUE + ':' + typeof importScripts);"),
             "/helper.js": (200, "application/javascript", b"var IMPORTED_VALUE = 77;"),
             "/plain.js": (200, "text/plain", b"postMessage('MUST_NOT_RUN_PLAIN');"),
             "/html.js": (200, "text/html", b"postMessage('MUST_NOT_RUN_HTML');"),
@@ -100,7 +103,7 @@ def main() -> int:
             secret_js = root / "secret.js"
             secret_js.write_text("postMessage('LOCAL_LEAK');", encoding="utf-8")
 
-            # 1. HTTP MIME policy + data: MIME policy + module policy + EventTarget error listeners
+            # 1. HTTP/data MIME policy + static module graph + error listeners
             html = f"""<!doctype html><meta charset="utf-8"><script>
 var pending = 0;
 function probe(name, url, opts) {{
@@ -121,7 +124,7 @@ probe('http_404', '{base}/not-found.js');
 probe('data_js', 'data:text/javascript,postMessage("data-ok")');
 probe('data_plain', 'data:text/plain,postMessage("BAD")');
 probe('data_default', 'data:,postMessage("BAD")');
-probe('module', '{base}/ok.js', {{ type: 'module', name: 'm' }});
+probe('module', '{base}/module-entry.js', {{ type: 'module', name: 'm' }});
 probe('classic_name', 'data:text/javascript,postMessage(self.name)', {{ type: 'classic', name: 'w-alpha' }});
 probe('import_ok', 'data:text/javascript,importScripts("{base}/helper.js"); postMessage(IMPORTED_VALUE);');
 probe('import_bad_mime', 'data:text/javascript,try {{ importScripts("{base}/plain.js"); postMessage("BAD"); }} catch (e) {{ postMessage("BLOCKED:" + e.message); }}');
@@ -164,7 +167,7 @@ setTimeout(waitWorkers, 1);
             check("data:text/javascript executes", res.get("msg_data_js") == "data-ok")
             check("data:text/plain refused", "msg_data_plain" not in res and "text/plain" in res.get("err_data_plain", ""))
             check("data:, (default text/plain) refused", "msg_data_default" not in res and "text/plain" in res.get("err_data_default", ""))
-            check("{type:'module'} refused instead of running classic", "msg_module" not in res and "Module workers" in res.get("err_module", ""))
+            check("{type:'module'} loads a static module graph without classic importScripts", res.get("msg_module") == "module:88:undefined" and "err_module" not in res)
             check("{type:'classic', name} exposes self.name", res.get("msg_classic_name") == "w-alpha")
             check("invalid WorkerOptions.type throws TypeError", res.get("invalid_type") == "TypeError")
             check("importScripts loads valid JS MIME", res.get("msg_import_ok") == "77")

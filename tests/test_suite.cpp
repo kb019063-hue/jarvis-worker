@@ -674,6 +674,515 @@ TEST(per_glyph_font_fallback) {
     fr.set_fallbacks(saved_paths);   // leave the renderer as the next suite expects it
 }
 
+TEST(font_family_selects_a_face) {
+    using namespace litebird;
+
+    // `font-family` was parsed, kept, and never read. Every element on the
+    // page was drawn in the one face the renderer happened to have loaded, so
+    // `pre { font-family: monospace }` was a fact about the stylesheet and not
+    // about what came out.
+    //
+    // The oracle is Ahem, vendored under tests/wpt/fonts for the WPT corpus.
+    // Every glyph in it is exactly 1em wide -- its advance is 1000 of its 1000
+    // units per em, for all 278 of its codepoints -- so a run of n characters
+    // measures n * font_size in Ahem and in essentially nothing else. That
+    // makes this an absolute test rather than a comparison: four characters at
+    // 16 px is 64.0 px, or the family was not selected.
+    FontRenderer& fr = FontRenderer::instance();
+
+    // The returned id, and not a lookup by name afterwards: looking "Ahem" up
+    // returns 0 on a host with no other font, and 0 used to read as "no
+    // family", which left such a family unselectable by name.
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;   // the vendored font is absent
+
+    // What this host actually has. Printed because the assertions below turn on
+    // it, and a test that passes for a reason nobody can see is not much of a
+    // test: the shared runner may hold different faces than a laptop does.
+    std::printf("      [font-family] truetype=%s families=%zu",
+                fr.has_truetype_font() ? "yes" : "no", fr.family_names().size());
+    for (std::size_t i = 0; i < fr.family_names().size() && i < 6; ++i)
+        std::printf(" [%d]%s", static_cast<int>(i), fr.family_names()[i].c_str());
+    std::printf("\n      [font-family] generic serif=%d sans=%d mono=%d default=%d\n",
+                fr.generic_family_id("serif"), fr.generic_family_id("sans-serif"),
+                fr.generic_family_id("monospace"), fr.default_family_id());
+    // Flushed because the whole point of printing this is to be there when an
+    // assertion below fails: stdout is block-buffered when it is not a
+    // terminal, and abort() does not flush it. Without this the diagnostics
+    // vanish into the same void as the failing run they explain.
+    std::fflush(stdout);
+
+    // Every family the registry knows is reachable by its own name -- family 0
+    // included. It did not used to be: `kDefaultFamily` was 0, so the first
+    // family found resolved to the value that means "nothing was named" and
+    // `family_face` refused it, and on a host with no system fonts that is the
+    // one a test registers by hand. `font-family: Ahem` drew the default.
+    for (std::size_t i = 0; i < fr.family_names().size(); ++i) {
+        assert(fr.family_id_for(fr.family_names()[i]) == static_cast<int>(i));
+        assert(fr.family_id_for(fr.family_names()[i]) != FontRenderer::kDefaultFamily);
+    }
+
+    // --- the oracle -------------------------------------------------------
+    const float four_in_ahem = fr.measure_text("XXXX", 16.0f, 400, "Ahem");
+    std::printf("      [font-family] 'XXXX' at 16px: ahem=%.2f default=%.2f\n",
+                four_in_ahem, fr.measure_text("XXXX", 16.0f, 400));
+    assert(std::fabs(four_in_ahem - 64.0f) < 0.5f);
+    assert(fr.measure_text("iiii", 16.0f, 400, "Ahem") > 63.5f);   // every glyph, not just 'X'
+    // The family was selected because it was named: unnamed, the same string
+    // measures differently.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400) - four_in_ahem) > 1.0f);
+
+    // --- matching ---------------------------------------------------------
+    // Case, quoting and repeated spaces are all irrelevant, as CSS says.
+    assert(fr.family_id_for("AHEM") == ahem);
+    assert(fr.family_id_for("  ahem  ") == ahem);
+    assert(fr.family_id_for("\"Ahem\"") == ahem);
+
+    // A list is tried left to right, and a family nobody has is skipped rather
+    // than ending the search.
+    assert(fr.family_id_for("No Such Font At All, Ahem") == ahem);
+    // A comma inside quotes separates words and not entries.
+    assert(fr.family_id_for("'Font, Inc', Ahem") == ahem);
+
+    // --- the first entry that can be had wins -----------------------------
+    // This is the bug the test is really here for. `kDefaultFamily` was 0,
+    // which is also the id of the first family found; used as the "not chosen
+    // yet" marker it meant a generic could never be assigned, and the list
+    // fell through to the next entry. Both regimes are asserted, because
+    // which one applies is a fact about the host:
+    for (const char* generic : {"sans-serif", "serif", "monospace"}) {
+        if (fr.generic_family_id(generic) != FontRenderer::kNoFamily) {
+            // This host has such a face, so the list stops there.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") != ahem);
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") ==
+                   fr.family_id_for(generic));
+        } else {
+            // It has none, so CSS's own rule is to keep looking, and Ahem is
+            // what is left. Falling through is correct here and wrong above.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") == ahem);
+        }
+    }
+
+    // --- the glyph cache is keyed by family -------------------------------
+    // Without that, a line drawn in one family hands its rasterized glyphs to
+    // the next line drawn in another, which is a bug that appears as the first
+    // line of a paragraph being right and the rest wrong.
+    if (fr.has_truetype_font()) {
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        assert(from_ahem.width != from_default.width);
+    }
+
+    // --- generic families, when the host has them -------------------------
+    const int mono = fr.generic_family_id("monospace");
+    if (mono != FontRenderer::kNoFamily) {
+        // A monospace face advances every glyph the same amount; 'i' and 'W'
+        // are the pair that differ most in a proportional face.
+        const float narrow = fr.measure_text("iiii", 16.0f, 400, "monospace");
+        const float wide = fr.measure_text("WWWW", 16.0f, 400, "monospace");
+        assert(std::fabs(narrow - wide) < 0.5f);
+        // ...and the default is only asserted proportional when it is a
+        // different family. "The default" is not a claim about a font, it is a
+        // claim about whichever file this host had: where the only face is
+        // monospace the default *is* monospace, and 'i' and 'W' advance the
+        // same. Asserting otherwise would be a fact about the machine rather
+        // than about the code, and it is exactly what failed on a host whose
+        // primary face was a mono one.
+        if (fr.has_truetype_font() && mono != fr.default_family_id()) {
+            assert(std::fabs(fr.measure_text("iiii", 16.0f, 400) -
+                             fr.measure_text("WWWW", 16.0f, 400)) > 1.0f);
+        }
+    }
+    const int serif = fr.generic_family_id("serif");
+    const int sans = fr.generic_family_id("sans-serif");
+    if (serif != FontRenderer::kNoFamily && sans != FontRenderer::kNoFamily &&
+        serif != sans) {
+        // Two generics that resolve to two different faces must not measure
+        // the same. Asked of several strings and not one, because
+        // metric-compatible families exist by design -- Liberation Serif and
+        // Liberation Sans are cut to Times and Arial's widths -- and a single
+        // string is a claim about a typeface rather than about the code.
+        bool differs = false;
+        for (const char* s : {"WWWW", "iiii", "ll1i", "Hello, world"}) {
+            const float a = fr.measure_text(s, 16.0f, 400, "serif");
+            const float b = fr.measure_text(s, 16.0f, 400, "sans-serif");
+            std::printf("      [font-family] %-14s serif=%8.2f sans=%8.2f\n", s, a, b);
+            if (std::fabs(a - b) > 0.5f) differs = true;
+        }
+        std::fflush(stdout);
+        assert(differs);
+    }
+
+    // Nothing that cannot be named is served: an unresolvable family falls
+    // back rather than failing, which is what CSS asks for.
+    assert(fr.family_id_for("cursive") == FontRenderer::kDefaultFamily ||
+           fr.family_id_for("cursive") != ahem);
+    assert(fr.family_id_for("") == FontRenderer::kDefaultFamily);
+}
+
+TEST(font_family_reaches_layout_from_css) {
+    using namespace litebird;
+
+    // The whole path, and not only the renderer: `font-family` has to survive
+    // the cascade, inherit, and reach the thing that measures a word. The
+    // renderer half is proved by measurement above; this proves the CSS half.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-family: Ahem">
+            <span id="inner">XXXX</span>
+            <span id="overridden" style="font-family: sans-serif">XXXX</span>
+        </div>
+    )");
+
+    StyleResolver resolver;
+
+    auto outer = doc->get_element_by_id("outer");
+    auto inner = doc->get_element_by_id("inner");
+    auto overridden = doc->get_element_by_id("overridden");
+    assert(outer && inner && overridden);
+
+    const ComputedStyle outer_style = resolver.resolve_style(outer, nullptr);
+
+    // It is the property, kept as written: resolution is the font layer's
+    // business and this layer has no business guessing at file names.
+    assert(outer_style.font_family == "Ahem");
+
+    // It inherits, like font-size does.
+    const ComputedStyle inner_style = resolver.resolve_style(inner, &outer_style);
+    assert(inner_style.font_family == "Ahem");
+
+    // ...and a declaration on the element itself beats the inherited one.
+    const ComputedStyle overridden_style = resolver.resolve_style(overridden, &outer_style);
+    assert(overridden_style.font_family == "sans-serif");
+
+    // An element with no `font-family` anywhere inherits an empty list, which
+    // the renderer reads as "the default family" rather than as a family
+    // called "".
+    const ComputedStyle bare = resolver.resolve_style(outer, nullptr);
+    assert(FontRenderer::instance().family_id_for(bare.font_family) ==
+           FontRenderer::instance().family_id_for("Ahem"));
+    assert(FontRenderer::instance().family_id_for(std::string_view{}) ==
+           FontRenderer::kDefaultFamily);
+}
+
+namespace {
+
+using namespace litebird;
+
+/// The vendored Ahem face as a `data:` URL a stylesheet can name.
+///
+/// `@font-face` is about bytes that arrive from a URL, so a test of it has to
+/// fetch them and not call into the rasterizer directly -- otherwise what is
+/// proved is the registry, which `font_family_selects_a_face` already covers.
+/// A `data:` URL is the one kind that needs no server, no document origin and
+/// no fonts on the host, so this says the same thing on a shared runner as it
+/// does on a laptop.
+std::string base64(const std::string& bytes) {
+    static const char* kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const unsigned char b0 = bytes[i];
+        const unsigned char b1 = i + 1 < bytes.size() ? bytes[i + 1] : 0;
+        const unsigned char b2 = i + 2 < bytes.size() ? bytes[i + 2] : 0;
+        out += kAlphabet[b0 >> 2];
+        out += kAlphabet[((b0 & 0x03) << 4) | (b1 >> 4)];
+        out += i + 1 < bytes.size() ? kAlphabet[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=';
+        out += i + 2 < bytes.size() ? kAlphabet[b2 & 0x3f] : '=';
+    }
+    return out;
+}
+
+std::string ahem_data_url() {
+    const ResourceResponse r = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!r.success || r.body.empty()) return {};
+    return "data:font/ttf;base64," + base64(r.body);
+}
+
+/// The first box that laid out `node` as text, if there is one.
+std::shared_ptr<LayoutBox> text_box_for(const std::shared_ptr<LayoutBox>& box,
+                                        const std::shared_ptr<Node>& node) {
+    if (!box) return nullptr;
+    if (box->node == node && box->box_type == BoxType::TextNode) return box;
+    for (const auto& child : box->children) {
+        if (auto found = text_box_for(child, node)) return found;
+    }
+    return nullptr;
+}
+
+/// The width a text node was actually laid out at, from the fragment the line
+/// builder produced -- which is the number the painter uses too, so it is the
+/// one that says whether a webfont reached the page and not only the
+/// rasterizer.
+float laid_out_width(const std::shared_ptr<LayoutBox>& root,
+                     const std::shared_ptr<Node>& node) {
+    const auto box = text_box_for(root, node);
+    if (!box) return -1.0f;
+    if (auto parent = box->parent.lock()) {
+        for (const LineBox& line : parent->line_boxes) {
+            for (const InlineFragment& frag : line.fragments) {
+                if (frag.text == box->text) return frag.rect.width;
+            }
+        }
+    }
+    return -1.0f;
+}
+
+} // namespace
+
+TEST(font_face_declares_the_family_the_page_names) {
+    using namespace litebird;
+
+    // Before this, `@font-face` was one of the at-rules the parser skipped:
+    // `skip_at_rule_remainder` threw it and everything in it away. So a page
+    // that brought its own font was rendered in whatever the host had, which
+    // for a page whose whole look is its typeface is the page not working.
+    const StyleSheet sheet = CssParser::parse(R"(
+        @font-face {
+            font-family: "Page Font";
+            src: url("a.woff") format("woff"), url(b.ttf) format("truetype");
+            font-weight: 100 400;
+            font-style: italic;
+        }
+        @font-face {
+            font-family: Body Text;
+            src: local("Some Local"), url(c.ttf);
+        }
+        @font-face { font-family: Heavy; src: url(d.ttf); font-weight: bold; }
+        p { color: red; }
+    )");
+
+    // An `@font-face` block is not a style rule: it has no selector, and its
+    // declarations must not end up in the cascade as if `p` had asked for them.
+    assert(sheet.rules.size() == 1);
+    assert(sheet.font_faces.size() == 3);
+
+    // The family is the name the *rule* declares, quotes removed, and not the
+    // name inside a file: a page may call a font anything it likes.
+    assert(sheet.font_faces[0].family == "Page Font");
+    // `src` is a fallback list, in the order it was written, and `format()` is
+    // a promise about the bytes rather than part of the URL.
+    assert(sheet.font_faces[0].sources.size() == 2);
+    assert(sheet.font_faces[0].sources[0].url == "a.woff");
+    assert(sheet.font_faces[0].sources[0].format == "woff");
+    assert(sheet.font_faces[0].sources[1].url == "b.ttf");
+    assert(sheet.font_faces[0].sources[1].format == "truetype");
+    // A weight range, and a style.
+    assert(sheet.font_faces[0].weight_min == 100);
+    assert(sheet.font_faces[0].weight_max == 400);
+    assert(sheet.font_faces[0].italic);
+
+    // An unquoted name of several words is one family and not a list of three.
+    assert(sheet.font_faces[1].family == "Body Text");
+    // `local()` names a font on the host and has no URL; it comes first here,
+    // which is the point of the idiom -- use what is installed, fetch if not.
+    assert(sheet.font_faces[1].sources.size() == 2);
+    assert(sheet.font_faces[1].sources[0].local == "Some Local");
+    assert(sheet.font_faces[1].sources[0].url.empty());
+    assert(sheet.font_faces[1].sources[1].url == "c.ttf");
+    // An unspecified descriptor is `normal`, not zero and not unset.
+    assert(sheet.font_faces[1].weight_min == 400);
+    assert(sheet.font_faces[1].weight_max == 400);
+    assert(!sheet.font_faces[1].italic);
+    // A source with no `format()` says nothing about the bytes.
+    assert(sheet.font_faces[1].sources[1].format.empty());
+
+    // A keyword weight, as a range of one.
+    assert(sheet.font_faces[2].weight_min == 700);
+    assert(sheet.font_faces[2].weight_max == 700);
+
+    // A rule inside an `@media` that does not match declares nothing.
+    const StyleSheet gated = CssParser::parse(R"(
+        @media (min-width: 999999px) {
+            @font-face { font-family: Hidden; src: url(x.ttf); }
+        }
+        @font-face { font-family: Shown; src: url(y.ttf); }
+    )");
+    bool saw_hidden = false;
+    bool saw_shown = false;
+    for (const FontFaceRule& f : gated.font_faces) {
+        if (f.family == "Hidden") saw_hidden = true;
+        if (f.family == "Shown") saw_shown = true;
+    }
+    assert(saw_shown);
+    // Printed rather than asserted silently whichever way it goes: whether the
+    // parser can tell a media query does not match without a viewport is not
+    // something this test is entitled to assume about the host.
+    std::printf("      [@font-face] gated hidden=%s shown=%s\n",
+                saw_hidden ? "yes" : "no", saw_shown ? "yes" : "no");
+    std::fflush(stdout);
+}
+
+TEST(font_face_brings_the_family_the_page_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // A webfont belongs to the document that declared it, and the registry is
+    // a singleton because the rasterizer is. Left over from another page, a
+    // family name would resolve to whichever page was laid out first.
+    fr.clear_webfonts();
+
+    const std::string url = ahem_data_url();
+    if (url.empty()) return;   // the vendored face is absent; nothing to prove
+
+    // The oracle is the same one `font_family_selects_a_face` uses: every
+    // glyph in Ahem is exactly 1em wide, so four characters at 16 px measure
+    // 64.00 px in Ahem and in nothing else on this host. The font is arriving
+    // through the URL in `src` here, not through a call to the rasterizer.
+    auto doc = HtmlParser::parse(
+        "<style>"
+        "@font-face { font-family: \"Page Font\"; src: url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: 'Ahem'; src: url('" + url + "'); font-weight: 700; }"
+        "@font-face { font-family: Broken; src: url('data:font/ttf;base64,AAAA') format('truetype'),"
+        "                                       url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: Local Font; src: local('Ahem'); }"
+        "@font-face { font-family: Woff Only; src: url('" + url + "') format('woff'); }"
+        "</style>"
+        "<div id=\"web\" style=\"font-family: 'Page Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"host\" style=\"font-family: Ahem; font-size: 16px\">XXXX</div>"
+        "<div id=\"second\" style=\"font-family: Broken; font-size: 16px\">XXXX</div>"
+        "<div id=\"local\" style=\"font-family: 'Local Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"plain\" style=\"font-size: 16px\">XXXX</div>");
+
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    const int page_font = fr.family_id_for("Page Font");
+    assert(page_font != FontRenderer::kNoFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") - 64.0f) < 0.5f);
+
+    // The bytes were fetched and parsed as a font, and not merely registered:
+    // a family that never loaded measures like the default face.
+    if (fr.has_truetype_font()) {
+        assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") -
+                         fr.measure_text("XXXX", 16.0f, 400)) > 1.0f);
+    }
+
+    // A webfont outranks a host family of the same name. "Ahem" here names
+    // both a system face (registered above by `font_family_selects_a_face`)
+    // and this rule's, and CSS's answer is the page's. The rule declares
+    // `font-weight: 700`, so at 400 the host's Ahem is what answers and at
+    // 700 the page's is -- both are Ahem, so what proves the precedence is
+    // the weight, which only the page's rule declares.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 700, "Ahem") - 64.0f) < 0.5f);
+
+    // `src` is a fallback list: the first source is four zero bytes, which is
+    // not a font, so the second is what is used. A source that will not parse
+    // is not failure, it is an instruction to try the next one.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Broken") - 64.0f) < 0.5f);
+
+    // `local()` names a face the host already has and is answered out of the
+    // registry rather than fetched -- the "use what is installed" half of
+    // `local("Font"), url(font.ttf)`.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Local Font") - 64.0f) < 0.5f);
+
+    // `format()` is a promise about the bytes, and a promise of `woff` is one
+    // this engine cannot keep: it reads TrueType outlines and nothing else.
+    // Such a source is not fetched, so the rule registers no face at all
+    // rather than a face that would fail to load the moment it was wanted.
+    assert(fr.family_id_for("Woff Only") == FontRenderer::kDefaultFamily);
+
+    // --- and it reaches layout, not only the renderer --------------------
+    // The fragment width is the observable that matters: it is what the line
+    // builder measured and what the painter will draw, so a webfont that
+    // reached the registry but not the page scores 64.00 here and nowhere.
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+    for (const char* id : {"web", "second", "local"}) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        const float width = laid_out_width(root, el->first_child());
+        std::printf("      [@font-face] #%-7s 'XXXX' laid out at %.2f px\n", id, width);
+        std::fflush(stdout);
+        assert(std::fabs(width - 64.0f) < 0.5f);
+    }
+
+    // `font-family` inherits into the box that measures text, which is what
+    // makes any of this visible. It did not use to: the style a text box is
+    // built with carried `font-size` and `font-weight` and not `font-family`,
+    // so a text node was measured in the default face whatever its element
+    // asked for -- and `<pre>`, which the UA stylesheet gives
+    // `font-family: monospace`, was laid out proportional.
+    auto host_el = doc->get_element_by_id("host");
+    assert(host_el);
+    const float host_width = laid_out_width(root, host_el->first_child());
+    assert(std::fabs(host_width - 64.0f) < 0.5f);
+
+    // An element that named no family is not given the page's font by
+    // accident. This is the assertion that would pass if registration were
+    // global rather than by name.
+    if (fr.has_truetype_font()) {
+        auto plain = doc->get_element_by_id("plain")->first_child();
+        const float plain_width = laid_out_width(root, plain);
+        std::printf("      [@font-face] #plain   'XXXX' laid out at %.2f px\n", plain_width);
+        std::fflush(stdout);
+        assert(plain_width < 0.0f || std::fabs(plain_width - 64.0f) > 1.0f);
+    }
+
+    // Forgetting a document's webfonts takes the family with it, and does not
+    // take the host's own faces -- "Ahem" is still Ahem after this, because
+    // `font_family_selects_a_face` registered it from disk and not from a page.
+    fr.clear_webfonts();
+    assert(fr.family_id_for("Page Font") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Broken") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Local Font") == FontRenderer::kDefaultFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+}
+
+TEST(font_family_reaches_the_box_that_measures_text) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // `<pre>` is the case that shows it: the UA stylesheet gives it
+    // `font-family: monospace`, and the whole point of a monospaced face is
+    // that its glyphs are the same width. A `<pre>` laid out proportional is
+    // a `<pre>` whose columns do not line up, which is a `<pre>` that does not
+    // do the one thing it exists to do.
+    if (fr.generic_family_id("monospace") == FontRenderer::kNoFamily) return;
+    if (!fr.has_truetype_font()) return;
+    // ...and a host whose default face is itself monospace could not tell the
+    // two apart, so the comparison below would prove nothing.
+    if (fr.default_family_id() == fr.generic_family_id("monospace")) return;
+
+    auto doc = HtmlParser::parse(R"(
+        <pre id="narrow">iiii</pre>
+        <pre id="wide">WWWW</pre>
+        <p id="pnarrow">iiii</p>
+        <p id="pwide">WWWW</p>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+
+    // The width of an element's text, as the line builder measured it -- which
+    // is the number the painter draws with, so it is the one that says whether
+    // a family reached the page and not only the resolver.
+    auto text_width = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        return laid_out_width(root, el->first_child());
+    };
+
+    const float narrow = text_width("narrow");
+    const float wide = text_width("wide");
+    const float p_narrow = text_width("pnarrow");
+    const float p_wide = text_width("pwide");
+    if (narrow < 0.0f || wide < 0.0f || p_narrow < 0.0f || p_wide < 0.0f) return;
+
+    std::printf("      [font-family] <pre> iiii=%.2f WWWW=%.2f\n", narrow, wide);
+    std::printf("      [font-family]  <p> iiii=%.2f WWWW=%.2f\n", p_narrow, p_wide);
+    std::fflush(stdout);
+
+    // In a monospace face 'i' and 'W' advance the same. That is what
+    // `monospace` means, and it is the assertion that failed before: the style
+    // a text box is built with carried `font-size` and `font-weight` and not
+    // `font-family`, so every text node was measured in the default face.
+    assert(std::fabs(narrow - wide) < 0.5f);
+    // ...and the same two lines in a proportional face do not, which is what
+    // makes the assertion above mean anything.
+    assert(std::fabs(p_narrow - p_wide) > 1.0f);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -12749,7 +13258,8 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
 }
 
 // ============================================================================
-// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
+// module execution and structured-clone delivery below.
 // ============================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
@@ -13002,20 +13512,24 @@ TEST(worker_options_module_policy_and_global_scope) {
     assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
     assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
 
-    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
-    //    it queues an error event to both onerror and addEventListener('error').
+    // 2. A module worker is a strict module wrapper, not a classic fallback.
+    //    It runs a data: entry module, keeps its configured name, and does not
+    //    expose classic importScripts(). The static import graph itself is
+    //    covered by the Phase 66 clone/module test below.
     js.eval(
-        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
-        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
-        "wm.onmessage = function() { modRan = true; };"
-        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "var modInfo = null, modOnErr = '', modEvErr = '';"
+        "var wm = new Worker('data:text/javascript,postMessage({ name:self.name, globalName:name, topThis:this === undefined, importScriptsType:typeof importScripts })', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function(e) { modInfo = e.data; };"
+        "wm.onerror = function(e) { modOnErr = e.message; };"
         "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
     );
-    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
-    assert(!js.eval("modRan").is_truthy());
-    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
-    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
-    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    assert(wait_for(js, "modInfo !== null"));
+    assert(js.eval("modInfo.name").to_string() == "mod1");
+    assert(js.eval("modInfo.globalName").to_string() == "mod1");
+    assert(js.eval("modInfo.topThis").is_truthy());
+    assert(js.eval("modInfo.importScriptsType").to_string() == "undefined");
+    assert(js.eval("modOnErr").to_string().empty());
+    assert(js.eval("modEvErr").to_string().empty());
     js.eval("wm.terminate();");
 
     // 3. Classic options (name, self.location, null/undefined options) and importScripts().
@@ -13176,6 +13690,171 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     );
     WorkerObject::shutdown_all_workers();
     EventLoop::default_loop().tick();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 66: structured-clone delivery across Worker, Window and MessagePort.
+// ---------------------------------------------------------------------------
+
+TEST(structured_clone_message_delivery_and_refusal) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://clone.example.test/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    js.eval(R"js(
+        var workerReply, workerCloneReport, pageCloneError = '', transferCloneError = '';
+        var worker = new Worker('data:text/javascript,self.onmessage = function(e) { e.data.shared.leaf = 22; postMessage(e.data); };');
+        worker.onmessage = function(e) { workerReply = e.data; };
+        var shared = { leaf: 7 };
+        var workerSent = { shared: shared, alias: shared, missing: undefined,
+                           nan: 0 / 0, inf: 1 / 0, neg: -0, items: [1, undefined] };
+        workerSent.self = workerSent;
+        worker.postMessage(workerSent);
+        shared.leaf = 99;
+        try { worker.postMessage(function() {}); } catch (e) { pageCloneError = e.name + ':' + e.code; }
+        try { worker.postMessage({x: 1}, [{}]); } catch (e) { transferCloneError = e.name + ':' + e.code; }
+
+        var errorWorker = new Worker('data:text/javascript,try { postMessage(function() {}); } catch (e) { postMessage({name: e.name, code: e.code}); }');
+        errorWorker.onmessage = function(e) { workerCloneReport = e.data; };
+
+        var channelReply, channelSent = { child: { n: 2 } };
+        channelSent.self = channelSent;
+        var channel = new MessageChannel();
+        channel.port2.onmessage = function(e) { channelReply = e.data; };
+        channel.port1.postMessage(channelSent, []);
+        channelSent.child.n = 9;
+
+        var windowReply, windowSent = { kind: 'window-copy', child: { n: 3 } };
+        windowSent.self = windowSent;
+        window.addEventListener('message', function(e) {
+          if (e.data && e.data.kind === 'window-copy') windowReply = e.data;
+        });
+        window.postMessage(windowSent, '*');
+        windowSent.child.n = 11;
+    )js");
+
+    assert(wait_for(js, "workerReply !== undefined && workerCloneReport !== undefined && channelReply !== undefined && windowReply !== undefined"));
+
+    // Page -> worker -> page: nested data is copied at send time, special
+    // numeric values survive, and graph aliases/cycles remain aliases/cycles
+    // inside the receiving agent rather than pointing back at sender objects.
+    assert(js.eval(
+        "workerReply !== workerSent && workerReply.self === workerReply && "
+        "workerReply.shared === workerReply.alias && workerReply.shared !== shared && "
+        "workerReply.shared.leaf === 22 && shared.leaf === 99 && "
+        "('missing' in workerReply) && workerReply.missing === undefined && "
+        "workerReply.nan !== workerReply.nan && workerReply.inf === 1 / 0 && "
+        "workerReply.neg === 0 && 1 / workerReply.neg < 0 && workerReply.items[1] === undefined"
+    ).is_truthy());
+
+    // The same packet model applies to same-agent ports and windows: their
+    // asynchronous deliveries are copies too, not retained source identities.
+    assert(js.eval("channelReply !== channelSent && channelReply.self === channelReply && channelReply.child.n === 2 && channelSent.child.n === 9").is_truthy());
+    assert(js.eval("windowReply !== windowSent && windowReply.self === windowReply && windowReply.child.n === 3 && windowSent.child.n === 11").is_truthy());
+
+    // Functions and non-empty transfer lists are refused synchronously at the
+    // sender; the worker reports the same DOMException when it is the sender.
+    assert(js.eval("pageCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("transferCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("workerCloneReport.name + ':' + workerCloneReport.code").to_string() == "DataCloneError:25");
+
+    js.eval("worker.terminate(); errorWorker.terminate(); channel.port1.close(); channel.port2.close();");
+}
+
+TEST(module_worker_static_graph_loading_and_refusal) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const fs::path root = fs::temp_directory_path() /
+                          ("litebird_module_worker_" + std::to_string(static_cast<long>(::getpid())));
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        std::ofstream math(root / "math.js");
+        math << "export const base = 40;\n"
+                "export const label = 'module';\n"
+                "export function add(a, b) { return a + b; }\n";
+    }
+    {
+        std::ofstream tools(root / "tools.js");
+        tools << "import { base, add as plus } from './math.js';\n"
+                 "export const answer = plus(base, 2);\n"
+                 "export default function decorate(value) { return 'answer:' + value; }\n";
+    }
+    {
+        std::ofstream reexport(root / "reexport.js");
+        reexport << "export { answer as finalAnswer } from './tools.js';\n";
+    }
+    {
+        std::ofstream entry(root / "entry.js");
+        entry << "import decorate from './tools.js';\n"
+                 "import { finalAnswer } from './reexport.js';\n"
+                 "import * as math from './math.js';\n"
+                 "postMessage({ text: decorate(finalAnswer), label: math.label, sum: math.add(1, 2), "
+                 "topThis: this === undefined, classicImport: typeof importScripts });\n";
+    }
+    {
+        std::ofstream unsupported(root / "unsupported.js");
+        unsupported << "export * from './math.js';\npostMessage('MUST_NOT_RUN');\n";
+    }
+
+    ResourceLoader::set_origin_root_for_testing("https://module.example.test", root.string());
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://module.example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+
+    js.eval(R"js(
+        var moduleReply = null, moduleError = '', unsupportedReply = '', unsupportedError = '';
+        var moduleWorker = new Worker('/entry.js', { type: 'module', name: 'graph-worker' });
+        moduleWorker.onmessage = function(e) { moduleReply = e.data; };
+        moduleWorker.onerror = function(e) { moduleError = e.message; };
+        var unsupportedWorker = new Worker('/unsupported.js', { type: 'module' });
+        unsupportedWorker.onmessage = function(e) { unsupportedReply = e.data; };
+        unsupportedWorker.onerror = function(e) { unsupportedError = e.message; };
+    )js");
+
+    assert(wait_for(js, "moduleReply !== null && unsupportedError !== ''"));
+    assert(js.eval("moduleError").to_string().empty());
+    assert(js.eval("moduleReply.text").to_string() == "answer:42");
+    assert(js.eval("moduleReply.label").to_string() == "module");
+    assert(js.eval("moduleReply.sum").to_number() == 3.0);
+    assert(js.eval("moduleReply.topThis").is_truthy());
+    assert(js.eval("moduleReply.classicImport").to_string() == "undefined");
+    assert(js.eval("unsupportedReply").to_string().empty());
+    assert(js.eval("unsupportedError").to_string().find("export *") != std::string::npos);
+
+    js.eval("moduleWorker.terminate(); unsupportedWorker.terminate();");
+    WorkerObject::shutdown_all_workers();
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -14152,12 +14831,15 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     auto text = [&](const char* source) { return js.eval(source).to_string(); };
 
     // An element of the page, there before its class is defined. The upgrade
-    // runs the constructor on the element's own object; a constructor written
-    // for ES5 does not pass `this` on but asks HTMLElement for its element
-    // with new.target, and is given that object (JsValue.cpp, "Constructions
-    // in place"). Until Phase 43 it was given nothing: "Illegal constructor".
-    // What it is told afterwards comes in the order of the standard: the
-    // attributes it observes, then that it is connected.
+    // constructs the class the ordinary way; a constructor written for ES5
+    // does not pass `this` on but asks HTMLElement for its element with
+    // new.target, is given that object (JsValue.cpp, "Constructions in
+    // place"), and returns it, which is what makes the upgrade succeed
+    // (Phase 69; until then the element's object was handed to the
+    // constructor as `this`, and until Phase 43 the interface refused:
+    // "Illegal constructor"). What it is told afterwards comes in the order
+    // of the standard: the attributes it observes, then that it is
+    // connected.
     js.eval_ast(R"(
         function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
         function inherit(C, Parent) {
@@ -14215,9 +14897,9 @@ TEST(js_compiled_custom_elements_are_upgraded) {
            "true,true,false,,true,true");
 
     // A class on top of the function: its `super()` reaches the function
-    // with the element as `this` and the class as new.target, the function
-    // gets the element back from HTMLElement, and the class's field goes on
-    // it.
+    // with the class as new.target, the function gets the element back from
+    // HTMLElement and returns it, so the element is `this` in the class and
+    // its field goes on it.
     js.eval_ast(R"(
         class Modern extends Old {
             field = 7;
@@ -14541,6 +15223,153 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     assert(text("[fdoc.body.firstChild.made, fdoc.body.firstChild.matches(':defined'), fdoc.body.lastChild.made, "
                 "fdoc.body.lastChild instanceof Both, across.join()].join()") ==
            ",false,both,true,true,page,true");
+}
+
+// Phase 69. An upgrade is an ordinary construction: the definition's
+// constructor runs on an object of its own, the element is what the interface
+// hands out and what `super(...)` returns, and the upgrade fails unless the
+// constructor comes back with the element. The object a script held before the
+// definition existed stays the element's object, and gets the class's
+// prototype at the moment the interface hands the element out.
+TEST(js_an_upgrade_constructs_the_definition_the_ordinary_way) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><x-one id='one' lang='en'>hello</x-one><x-two id='two'></x-two>"
+        "<x-three id='three'></x-three><x-four id='four'></x-four><x-five id='five'></x-five>"
+        "<x-six id='six'></x-six><x-eight id='eight'></x-eight>"
+        "<button is='x-seven' id='seven'>b</button><div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    js.eval_ast(R"(
+        function inherit(C, Parent) {
+            C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+            return Object.setPrototypeOf(C, Parent);
+        }
+        var $ = function (id) { return document.getElementById(id); }, log = [], seen = null;
+    )");
+
+    // A class: `this` is not bound before `super(...)`, `super(...)` hands back
+    // the element, and `this` is that object from then on. The object `new` made
+    // is left behind, so what is written on it before `super(...)` is on no
+    // element. The field initializes on the element.
+    js.eval_ast(R"(
+        class One extends HTMLElement {
+            field = 'f';
+            constructor() {
+                var early;
+                try { early = this; } catch (e) { early = e.name; }
+                var from = super();
+                log.push(early, from === this, this === $('one'), new.target === One,
+                         this.id + ' ' + this.getAttribute('lang') + ' ' + this.textContent);
+            }
+        }
+        customElements.define('x-one', One);
+        var one = $('one');
+    )");
+    assert(text("[one instanceof One, one.field, one.matches(':defined'), one.localName, log.join()].join()") ==
+           "true,f,true,x-one,ReferenceError,true,true,true,one en hello");
+
+    // A constructor written for ES5 is told the same thing: `this` is not the
+    // element until it asks for it, and the element is what it is given.
+    js.eval_ast(R"(
+        var Two = inherit(function () {
+            this.early = true;
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.late = true;
+            seen = [this === self, this.early, 'early' in self].join();
+            return self;
+        }, HTMLElement);
+        customElements.define('x-two', Two);
+        var two = $('two');
+    )");
+    assert(text("[two instanceof Two, two.late, two.early === undefined, two.matches(':defined'), seen].join()") ==
+           "true,true,true,true,false,true,false");
+
+    // The object a script reached the element with before the definition
+    // existed is still the element's object afterwards, with the class's
+    // prototype on it.
+    js.eval_ast(R"(
+        var before = $('three');
+        var Three = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'three'; return self; }, HTMLElement);
+        customElements.define('x-three', Three);
+        var three = $('three');
+    )");
+    assert(text("[before === three, three instanceof Three, three.made, Object.getPrototypeOf(three) === "
+                "Three.prototype].join()") ==
+           "true,true,three,true");
+
+    // A constructor that returns something else fails the upgrade: the element
+    // keeps the interface it had and is never `:defined`.
+    js.eval_ast(R"(
+        var elsewhere = document.createElement('div');
+        var Four = inherit(function () { Reflect.construct(HTMLElement, [], new.target); return elsewhere; }, HTMLElement);
+        customElements.define('x-four', Four);
+        var four = $('four');
+    )");
+    // The prototype the interface gave the element when it handed it out stays
+    // on it, as it does in a browser: the standard sets it while the
+    // constructor runs, and only the state and the reactions are rolled back.
+    assert(text("[four instanceof Four, four.matches(':defined'), Object.getPrototypeOf(four) === "
+                "Four.prototype, four === elsewhere].join()") ==
+           "true,false,true,false");
+
+    // A constructor that throws, before or after it reached the interface,
+    // leaves the element as it was.
+    js.eval_ast(R"(
+        var Five = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.seen = 'wrote';
+            throw new RangeError('after');
+        }, HTMLElement);
+        customElements.define('x-five', Five);
+        var FiveSix = inherit(function () { throw new RangeError('before'); }, HTMLElement);
+        customElements.define('x-six', FiveSix);
+        var five = $('five'), six = $('six');
+    )");
+    assert(text("[five instanceof Five, five.seen, five.matches(':defined'), "
+                "Object.getPrototypeOf(five) === Five.prototype, five.localName].join()") ==
+           "true,wrote,false,true,x-five");
+    assert(text("[six instanceof FiveSix, six.matches(':defined'), Object.getPrototypeOf(six) === "
+                "HTMLElement.prototype, six.localName].join()") ==
+           "false,false,true,x-six");
+
+    // The element is handed out once: a second `Reflect.construct` in the same
+    // upgrade is a TypeError, and the upgrade still succeeds.
+    js.eval_ast(R"(
+        var Eight = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            try { Reflect.construct(HTMLElement, [], new.target); self.again = 'no error'; }
+            catch (e) { self.again = e.name + ': ' + e.message; }
+            return self;
+        }, HTMLElement);
+        customElements.define('x-eight', Eight);
+        var eight = $('eight');
+    )");
+    assert(text("[eight instanceof Eight, eight.matches(':defined'), eight.again].join()") ==
+           "true,true,TypeError: This instance is already constructed");
+
+    // A customized built-in whose upgrade failed is not `:defined`, and it is
+    // still a button.
+    js.eval_ast(R"(
+        var Seven = inherit(function () { throw new TypeError('no'); }, HTMLButtonElement);
+        customElements.define('x-seven', Seven, { extends: 'button' });
+        var seven = $('seven');
+    )");
+    assert(text("[seven instanceof Seven, seven instanceof HTMLButtonElement, seven.localName, "
+                "seven.matches(':defined'), document.querySelectorAll('button:defined').length].join()") ==
+           "false,true,button,false,0");
+
+    // `new` and createElement are untouched by any of it: each makes an element
+    // of its own with the class's prototype.
+    js.eval_ast(R"(
+        var Nine = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.kind = 'made'; return self; }, HTMLElement);
+        customElements.define('x-nine', Nine);
+        var made = new Nine(), created = document.createElement('x-nine');
+    )");
+    assert(text("[made instanceof Nine, made.kind, made.localName, made.matches(':defined'), created instanceof "
+                "Nine, created.kind, made !== created].join()") ==
+           "true,made,x-nine,true,true,made,true");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {
@@ -16274,6 +17103,11 @@ int main() {
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
     RUN_TEST(inline_formatting_context);
+    RUN_TEST(font_family_selects_a_face);
+    RUN_TEST(font_family_reaches_layout_from_css);
+    RUN_TEST(font_face_declares_the_family_the_page_names);
+    RUN_TEST(font_face_brings_the_family_the_page_names);
+    RUN_TEST(font_family_reaches_the_box_that_measures_text);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -16458,6 +17292,10 @@ int main() {
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
+    // Phase 66: module-worker graph loading and structured-clone message packets.
+    RUN_TEST(structured_clone_message_delivery_and_refusal);
+    RUN_TEST(module_worker_static_graph_loading_and_refusal);
+
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
@@ -16469,6 +17307,7 @@ int main() {
     RUN_TEST(js_new_target_and_returned_objects_are_collected);
     RUN_TEST(js_compiled_custom_elements_are_constructed);
     RUN_TEST(js_compiled_custom_elements_are_upgraded);
+    RUN_TEST(js_an_upgrade_constructs_the_definition_the_ordinary_way);
     RUN_TEST(js_a_page_with_compiled_custom_elements_is_collected);
 
     // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.

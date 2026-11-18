@@ -203,9 +203,36 @@ struct Rule {
     std::string layer_name;
 };
 
+/// One entry of an `@font-face` `src` list.
+///
+/// A source is either a URL to fetch or `local()`, which names a font already
+/// on the host. `format()` says what the bytes are *claimed* to be, and lets a
+/// face the engine cannot parse be skipped before anything is fetched for it.
+struct FontFaceSrc {
+    std::string url;      ///< empty when this is a `local()`
+    std::string local;    ///< the family name `local()` asks for; empty for a URL
+    std::string format;   ///< lower-cased `format()` hint: "truetype", "woff", "" when none
+};
+
+/// One `@font-face` rule.
+///
+/// The family is the name the *rule* declares and not the name inside the file:
+/// a page is entitled to call a font anything it likes, and two rules may serve
+/// two weights of the same family from two different files. That is the whole
+/// difference between a webfont and a face found on disk, where the file's own
+/// `name` table is the only name there is.
+struct FontFaceRule {
+    std::string family;
+    std::vector<FontFaceSrc> sources;
+    int weight_min{400};   ///< both ends inclusive; `font-weight: 100 400` is a range
+    int weight_max{400};
+    bool italic{false};
+};
+
 struct StyleSheet {
     std::vector<Rule> rules;
     std::vector<KeyframesRule> keyframes;
+    std::vector<FontFaceRule> font_faces;
     std::vector<std::string> layers;
 };
 

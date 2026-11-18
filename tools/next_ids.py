@@ -49,6 +49,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -275,6 +276,59 @@ def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int
     return phases, findings, sources, warning
 
 
+# The two documents the write-ups were in until they were frozen. Nothing is
+# added to them any more, so what they say of a number is a write-up of it.
+FROZEN_DOCS = ("ARCHITECTURE.md", "AUDIT.md")
+
+
+def written(ref: str | None = None) -> tuple[set[int], set[int]]:
+    """The phase and finding numbers that have a write-up: no floor, no pull
+    request, and not what one document says about another's number.
+
+    A write-up is a file `docs/phases/NN-….md` or `docs/findings/NN-….md`,
+    by its name, or a place in one of the two frozen documents.
+
+    "Taken" and "written" are two questions. A floor makes every number up to
+    it taken, so that none of them is handed out again; it does not put a
+    write-up of that number on `main`. `tools/ci/check_pr.py` asked the first
+    question and reported the answer as the second: it told #63 (Phase 62,
+    finding 68) and #73 (Phase 58, finding 64), both open, both overtaken by
+    the floors and both holding numbers that had no write-up, that their
+    numbers were "on main already", and that they were not ready to merge.
+
+    A sentence is not a write-up either. `AGENTS.md`, `README.md` and
+    `ROADMAP.md` talk about numbers, and so does the prose of every write-up:
+    the paragraph of `AGENTS.md` that tells the story above names those four
+    numbers, and counted as writing, it would have told the two pull requests
+    the same thing again from the day it was merged.
+    """
+    phases: set[int] = set()
+    findings: set[int] = set()
+    read = (lambda path: git_show(ref, path)) if ref else (
+        lambda path: (ROOT / path).read_text(encoding="utf-8", errors="replace")
+        if (ROOT / path).is_file() else None
+    )
+    for name in FROZEN_DOCS:
+        text = read(name)
+        if text is not None:
+            doc_phases, doc_findings = scan_text(text)
+            phases.update(doc_phases)
+            findings.update(doc_findings)
+    docs_dir = ROOT / "docs"
+    listed = git_ls(ref, "docs/") if ref else (
+        sorted(p.relative_to(ROOT).as_posix() for p in docs_dir.rglob("*.md"))
+        if docs_dir.is_dir() else []
+    )
+    for rel in listed:
+        parts = rel.split("/")
+        m = PHASE_FILE_RE.match(parts[-1])
+        if m and len(parts) >= 2 and parts[-2] == "phases":
+            phases.add(int(m.group(1)))
+        elif m and len(parts) >= 2 and parts[-2] == "findings":
+            findings.add(int(m.group(1)))
+    return phases, findings
+
+
 def collect(ref: str | None = None) -> tuple[int, int, dict[str, tuple[int, int]], str | None]:
     """Returns (next_phase, next_finding, per-source maxima, gh warning)."""
     phases, findings, sources, warning = collect_sets(ref)
@@ -356,7 +410,53 @@ def ref_cases() -> list[tuple[bool, str, str]]:
     cases.append((set(no_prs[0]) <= set(with_prs[0]) and set(no_prs[1]) <= set(with_prs[1]),
                   "--no-prs only ever takes numbers away",
                   "the open pull requests added nothing, which is fine, or took some away"))
+
+    written_phases, written_findings = written("HEAD")
+    missing_p = sorted(written_phases - set(no_prs[0]))
+    missing_f = sorted(written_findings - set(no_prs[1]))
+    cases.append((bool(written_phases) and bool(written_findings) and not missing_p and not missing_f,
+                  "every number that has a write-up on HEAD is taken",
+                  f"written and not taken: phases {missing_p}, findings {missing_f}"
+                  if missing_p or missing_f else ""))
     return cases
+
+
+def floor_cases() -> list[tuple[bool, str, str]]:
+    """What makes a number taken, and what makes it written.
+
+    Asked of a tree made for the question: floors of 10 and 12; a write-up of
+    Phase 3 and one of finding 4, each of which talks about other numbers; a
+    frozen document with a section for Phase 2; and an `AGENTS.md` that
+    tells of a pull request holding Phase 8 and finding 11.
+    """
+    global ROOT, STATE
+    kept = ROOT, STATE
+    with tempfile.TemporaryDirectory() as made:
+        ROOT = Path(made)
+        STATE = ROOT / "docs" / "state.json"
+        (ROOT / "docs" / "phases").mkdir(parents=True)
+        (ROOT / "docs" / "findings").mkdir()
+        STATE.write_text('{"phase_floor": 10, "finding_floor": 12}', encoding="utf-8")
+        (ROOT / "docs" / "phases" / "03-a-write-up.md").write_text(
+            "# 3. A write-up\n\nIt closes finding 4, as Phase 9 will close finding 12.\n", encoding="utf-8")
+        (ROOT / "docs" / "findings" / "04-what-was-wrong.md").write_text(
+            "# 4. What was wrong\n\nSee Phase 3. Finding 6 is another matter.\n", encoding="utf-8")
+        (ROOT / "ARCHITECTURE.md").write_text("## Phase 2: an old section\n\nText.\n", encoding="utf-8")
+        (ROOT / "AGENTS.md").write_text(
+            "#8 has held Phase 8 and finding 11 since Tuesday, and Phase 14 is planned.\n", encoding="utf-8")
+        try:
+            taken_phases, taken_findings, _sources, _warning = collect_sets(None, with_prs=False)
+            written_phases, written_findings = written(None)
+        finally:
+            ROOT, STATE = kept
+    return [
+        (taken_phases == set(range(1, 11)) | {14} and taken_findings == set(range(1, 13)),
+         "every number up to a floor is taken, and every number a document mentions",
+         f"taken: phases {sorted(taken_phases)}, findings {sorted(taken_findings)}"),
+        (written_phases == {2, 3} and written_findings == {4},
+         "written is a write-up by its file name or a place in a frozen document, not a sentence about a number",
+         f"written: phases {sorted(written_phases)}, findings {sorted(written_findings)}"),
+    ]
 
 
 def self_test() -> int:
@@ -383,7 +483,15 @@ def self_test() -> int:
         if detail:
             print(f"         {detail}")
 
-    total = len(SELF_TEST_CASES) + len(ref_results)
+    floor_results = floor_cases()
+    print(f"\na floor: {len(floor_results)} cases")
+    for ok, name, detail in floor_results:
+        if not ok:
+            failed += 1
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        print(f"         {detail}")
+
+    total = len(SELF_TEST_CASES) + len(ref_results) + len(floor_results)
     print(f"\n{total - failed}/{total} pass")
     return 1 if failed else 0
 
@@ -416,9 +524,17 @@ def main() -> int:
 
     if args.taken:
         phases, findings, sources, warning = collect_sets(args.ref, not args.no_prs)
+        written_phases, written_findings = written(args.ref)
+        phase_floor, finding_floor, _ = scan_state(args.ref)
         print(json.dumps({
             "phases": sorted(phases),
             "findings": sorted(findings),
+            # What has a write-up, apart from what a floor, a pull request
+            # or a sentence adds: "is this number on main" is asked of these.
+            "written_phases": sorted(written_phases),
+            "written_findings": sorted(written_findings),
+            "phase_floor": phase_floor,
+            "finding_floor": finding_floor,
             "next_phase": max(phases, default=0) + 1,
             "next_finding": max(findings, default=0) + 1,
             "warning": warning,

@@ -177,6 +177,152 @@ GlyphBitmap rasterize_fallback_8x8(uint32_t cp, int pixel_size, bool bold) {
 
 } // namespace
 
+// --- the `name` table -------------------------------------------------------
+//
+// A CSS `font-family` list names families in English words ("DejaVu Serif",
+// "monospace"). The only place a font file says which of those it is is its
+// `name` table, so family selection has to read it — and to read it for every
+// `.ttf` on the host without loading a single one of them, because the whole
+// point of asking is to decide what to load.
+//
+// The table is: uint16 format, uint16 count, uint16 stringOffset, then `count`
+// records of {platformID, encodingID, languageID, nameID, length, offset}, with
+// the strings themselves at `stringOffset` from the start of the table.
+//
+// Name ids: 1 family, 2 subfamily, 16 typographic family, 17 typographic
+// subfamily. Where 16/17 exist they are the better answer: a family of eight
+// weights is one typographic family and four legacy families.
+
+namespace {
+
+constexpr uint16_t kNameFamily = 1;
+constexpr uint16_t kNameSubfamily = 2;
+constexpr uint16_t kNameTypoFamily = 16;
+constexpr uint16_t kNameTypoSubfamily = 17;
+
+/// How much a `name` record is preferred, higher first. Windows UCS-2 is what
+/// essentially every font on the platforms this runs on has; Unicode-platform
+/// records are the same encoding and equally good; Mac Roman is a last resort,
+/// because decoding it properly needs a table nobody here can test.
+int name_record_rank(uint16_t platform, uint16_t encoding, bool is_english) {
+    if ((platform == 3 && (encoding == 1 || encoding == 0)) || platform == 0) {
+        return is_english ? 30 : 20;
+    }
+    if (platform == 1 && encoding == 0) {
+        return is_english ? 10 : 5;
+    }
+    return 0;                     // an encoding this cannot decode is not an answer
+}
+
+/// The bytes of a `name` record as UTF-8.
+///
+/// Windows and Unicode-platform strings are UTF-16BE ( UCS-4 for the two
+/// encodings nobody ships, which are left out rather than guessed at). Mac
+/// Roman is taken byte by byte, and a byte outside ASCII is dropped: a mangled
+/// name would match the wrong family, and a short one merely fails to match,
+/// which falls through to the next candidate. That is the right way to be
+/// wrong.
+std::string name_record_string(const std::vector<uint8_t>& table,
+                               std::size_t strings, uint16_t length,
+                               uint16_t offset, uint16_t platform) {
+    const std::size_t start = strings + offset;
+    if (offset + length > table.size() || start + length > table.size()) return {};
+
+    if (platform == 1) {
+        std::string out;
+        for (uint16_t i = 0; i < length; ++i) {
+            const uint8_t b = table[start + i];
+            if (b < 0x80 && b != 0) out.push_back(static_cast<char>(b));
+        }
+        return out;
+    }
+
+    std::string out;
+    for (uint16_t i = 0; i + 1 < length; i += 2) {
+        const uint32_t cp = (static_cast<uint32_t>(table[start + i]) << 8) |
+                            static_cast<uint32_t>(table[start + i + 1]);
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+bool TrueTypeFont::read_names(const std::string& path, Names& out) {
+    out = Names{};
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+
+    uint8_t header[12];
+    if (!file.read(reinterpret_cast<char*>(header), sizeof(header))) return false;
+    const uint32_t sfnt = (static_cast<uint32_t>(header[0]) << 24) |
+                          (static_cast<uint32_t>(header[1]) << 16) |
+                          (static_cast<uint32_t>(header[2]) << 8) |
+                          static_cast<uint32_t>(header[3]);
+    if (sfnt != 0x00010000u && sfnt != 0x74727565u && sfnt != 0x4F54544Fu) return false;
+
+    const uint16_t num_tables = (static_cast<uint16_t>(header[4]) << 8) | header[5];
+    uint32_t name_off = 0, name_len = 0;
+    for (uint16_t i = 0; i < num_tables; ++i) {
+        uint8_t rec[16];
+        if (!file.read(reinterpret_cast<char*>(rec), sizeof(rec))) return false;
+        if (std::memcmp(rec, "name", 4) != 0) continue;
+        name_off = (static_cast<uint32_t>(rec[8]) << 24) |
+                   (static_cast<uint32_t>(rec[9]) << 16) |
+                   (static_cast<uint32_t>(rec[10]) << 8) | rec[11];
+        name_len = (static_cast<uint32_t>(rec[12]) << 24) |
+                   (static_cast<uint32_t>(rec[13]) << 16) |
+                   (static_cast<uint32_t>(rec[14]) << 8) | rec[15];
+        break;
+    }
+    if (name_len < 6 || name_len > 4u * 1024u * 1024u) return false;
+
+    std::vector<uint8_t> table(name_len);
+    file.clear();
+    file.seekg(static_cast<std::streamoff>(name_off), std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(table.data()), static_cast<std::streamsize>(name_len))) {
+        return false;
+    }
+
+    const uint16_t count = read_u16_be(table, 2);
+    const uint16_t strings = read_u16_be(table, 4);
+    if (6u + static_cast<std::size_t>(count) * 12u > table.size()) return false;
+
+    // Best record seen so far for each of the four ids.
+    int best_rank[18] = {0};
+    std::string best[18];
+    for (uint16_t i = 0; i < count; ++i) {
+        const std::size_t rec = 6u + static_cast<std::size_t>(i) * 12u;
+        const uint16_t platform = read_u16_be(table, rec);
+        const uint16_t encoding = read_u16_be(table, rec + 2);
+        const uint16_t language = read_u16_be(table, rec + 4);
+        const uint16_t name_id = read_u16_be(table, rec + 6);
+        const uint16_t length = read_u16_be(table, rec + 8);
+        const uint16_t offset = read_u16_be(table, rec + 10);
+        if (name_id >= 18) continue;
+
+        const int rank = name_record_rank(platform, encoding, language == 0x0409);
+        if (rank <= best_rank[name_id]) continue;
+        std::string s = name_record_string(table, strings, length, offset, platform);
+        if (s.empty()) continue;
+        best_rank[name_id] = rank;
+        best[name_id] = std::move(s);
+    }
+
+    out.family = best[kNameTypoFamily].empty() ? best[kNameFamily] : best[kNameTypoFamily];
+    out.subfamily = best[kNameTypoSubfamily].empty() ? best[kNameSubfamily] : best[kNameTypoSubfamily];
+    return !out.family.empty();
+}
+
 bool TrueTypeFont::find_table(const char tag[4], uint32_t& offset_out, uint32_t& length_out) const {
     offset_out = 0;
     length_out = 0;
@@ -694,10 +840,12 @@ const char* const kFontDirectories[] = {
     "/Library/Fonts",
 };
 
-/// Every `.ttf` under the system font directories, except the two the primary
-/// faces came from — a face is no use as a fallback for itself.
-std::vector<std::string> discover_system_fonts(const std::string& exclude_a,
-                                               const std::string& exclude_b) {
+/// Every `.ttf` under the system font directories, in a stable order.
+///
+/// `limit` bounds the walk, not the answer: a host can hold a thousand faces
+/// and the walk is a `stat` per file. Nothing here loads or parses anything —
+/// the names are read later, and only for the files that are kept.
+std::vector<std::string> discover_font_files(std::size_t limit) {
     std::vector<std::string> out;
     std::error_code ec;
     for (const char* dir : kFontDirectories) {
@@ -708,13 +856,69 @@ std::vector<std::string> discover_system_fonts(const std::string& exclude_a,
             if (ec) break;
             const std::string ext = it->path().extension().string();
             if (ext != ".ttf" && ext != ".TTF") continue;
-            std::string path = it->path().string();
-            if (path == exclude_a || path == exclude_b) continue;
-            out.push_back(std::move(path));
-            if (out.size() >= FontRenderer::kMaxFallbackFaces) return out;
+            out.push_back(it->path().string());
+            if (out.size() >= limit) return out;
         }
     }
+    std::sort(out.begin(), out.end());
     return out;
+}
+
+/// The discovered files minus the two the primary faces came from — a face is
+/// no use as a fallback for itself.
+std::vector<std::string> discover_system_fonts(const std::string& exclude_a,
+                                               const std::string& exclude_b) {
+    std::vector<std::string> out;
+    for (std::string& path : discover_font_files(64)) {
+        if (path == exclude_a || path == exclude_b) continue;
+        out.push_back(std::move(path));
+        if (out.size() >= FontRenderer::kMaxFallbackFaces) break;
+    }
+    return out;
+}
+
+/// "DejaVu Sans Mono" -> "dejavu sans mono". What CSS matching compares: the
+/// spec says family names are matched case-insensitively, and a name written
+/// with two spaces matches one written with one.
+std::string family_key(std::string_view name) {
+    std::string out;
+    bool pending_space = false;
+    for (const char c : name) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (std::isspace(u)) {
+            pending_space = !out.empty();
+            continue;
+        }
+        if (pending_space) {
+            out.push_back(' ');
+            pending_space = false;
+        }
+        out.push_back(static_cast<char>(std::tolower(u)));
+    }
+    return out;
+}
+
+/// What a font file's subfamily says about its weight and its slant.
+///
+/// CSS asks for a weight as a number, 100 to 900, and a font file answers with
+/// a word in its `name` table: "Book", "Bold", "Condensed Light Italic". There
+/// is no table that turns all of them into numbers — the `OS/2` table's
+/// `usWeightClass` is the right answer and is not parsed here — so the words
+/// CSS itself uses are the ones read, in the order CSS lists them, and
+/// anything else is 400. A font whose subfamily says nothing usable is a
+/// regular face, which is what it almost always is.
+void weight_and_slant(const std::string& subfamily, int& weight_out, bool& italic_out) {
+    std::string s;
+    for (const char c : subfamily) s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    italic_out = s.find("italic") != std::string::npos || s.find("oblique") != std::string::npos;
+    if (s.find("black") != std::string::npos || s.find("heavy") != std::string::npos) weight_out = 900;
+    else if (s.find("extrabold") != std::string::npos || s.find("ultrabold") != std::string::npos) weight_out = 800;
+    else if (s.find("bold") != std::string::npos) weight_out = 700;
+    else if (s.find("semibold") != std::string::npos || s.find("demibold") != std::string::npos) weight_out = 600;
+    else if (s.find("medium") != std::string::npos) weight_out = 500;
+    else if (s.find("extralight") != std::string::npos || s.find("ultralight") != std::string::npos) weight_out = 200;
+    else if (s.find("light") != std::string::npos) weight_out = 300;
+    else weight_out = 400;
 }
 
 }  // namespace
@@ -753,6 +957,361 @@ FontRenderer::FontRenderer() {
     }
 
     m_fallback_paths = discover_system_fonts(m_regular_path, m_bold_path);
+
+    // Every face on the host is in the registry, the primary ones included: a
+    // page that asks for `font-family: DejaVu Sans` by name is entitled to the
+    // same file the default gets, and one that asks for another family is not
+    // served it by accident.
+    for (const std::string& path : discover_font_files(64)) {
+        register_font_file(path);
+    }
+    // The primary faces, whether or not discovery walked past them. A host can
+    // keep its fonts where the search does not look -- the paths above are
+    // guessed at precisely because there is no fontconfig to ask -- and a
+    // primary that is not in the registry leaves `default_family_id()` with no
+    // answer, which is the question "is the default monospace" needs asked.
+    register_font_file(m_regular_path);
+    register_font_file(m_bold_path);
+}
+
+// --- the family registry ---------------------------------------------------
+
+FontRenderer::FaceEntry FontRenderer::describe(const std::string& path) {
+    TrueTypeFont::Names names;
+    if (!TrueTypeFont::read_names(path, names)) return {};
+    if (names.family.empty()) return {};
+    FaceEntry e;
+    e.path = path;
+    e.family = names.family;
+    e.key = family_key(names.family);
+    e.subfamily = names.subfamily;
+    int weight = 400;
+    weight_and_slant(names.subfamily, weight, e.italic);
+    e.weight_min = weight;
+    e.weight_max = weight;
+    return e;
+}
+
+int FontRenderer::generic_family_id(std::string_view generic) const {
+    const std::string key = family_key(generic);
+    if (key == "serif") return m_generic_serif;
+    if (key == "sans-serif") return m_generic_sans;
+    if (key == "monospace" || key == "ui-monospace") return m_generic_mono;
+    if (key == "system-ui" || key == "-apple-system") return m_generic_sans;
+    return kNoFamily;
+}
+
+int FontRenderer::register_font_file(const std::string& path) {
+    if (path.empty()) return kNoFamily;
+    for (const FaceEntry& have : m_face_entries) {
+        if (have.path == path) {                // registered already, by discovery or by hand
+            const auto it = m_family_by_key.find(have.key);
+            return it == m_family_by_key.end() ? kNoFamily : it->second;
+        }
+    }
+    FaceEntry entry = describe(path);
+    if (entry.key.empty()) return kNoFamily;    // a font that cannot name itself cannot be asked for
+
+    const std::size_t index = m_face_entries.size();
+    m_face_entries.push_back(std::move(entry));
+
+    auto known = m_family_by_key.find(m_face_entries[index].key);
+    if (known == m_family_by_key.end()) {
+        const int id = static_cast<int>(m_families.size());
+        Family f;
+        f.name = m_face_entries[index].family;
+        f.key = m_face_entries[index].key;
+        f.faces.push_back(index);
+        m_families.push_back(std::move(f));
+        m_family_names.push_back(m_families.back().name);
+        m_family_by_key.emplace(m_families.back().key, id);
+    } else {
+        m_families[known->second].faces.push_back(index);
+    }
+
+    // Which family each generic name means is a judgement about this host, so
+    // it is made once, here, from the names the host's fonts declare. It is
+    // not fontconfig: there is no fontconfig, and no dependency is being
+    // added to get one.
+    // The three are mutually exclusive and mono is asked first: "DejaVu Sans
+    // Mono" has "sans" in its name and is not a sans-serif face.
+    const std::string& key = m_face_entries[index].key;
+    const int id_of_key = [this, &key] {
+        const auto it = m_family_by_key.find(key);
+        return it == m_family_by_key.end() ? kNoFamily : it->second;
+    }();
+    if (id_of_key != kNoFamily) {
+    if (key.find("mono") != std::string::npos) {
+        if (m_generic_mono == kNoFamily) m_generic_mono = id_of_key;
+    } else if (key.find("sans") != std::string::npos) {
+        if (m_generic_sans == kNoFamily) m_generic_sans = id_of_key;
+    } else if (key.find("serif") != std::string::npos) {
+        if (m_generic_serif == kNoFamily) m_generic_serif = id_of_key;
+    }
+    }
+
+    // A family that has appeared, or a generic that now maps somewhere else,
+    // changes what a list resolves to.
+    m_resolved.clear();
+    const auto it = m_family_by_key.find(m_face_entries[index].key);
+    const int id = it == m_family_by_key.end() ? kNoFamily : it->second;
+    // What `kDefaultFamily` names, for a caller that has to say it: "the
+    // default" is whichever face this host had, and on a host whose only face
+    // is monospace the default *is* monospace.
+    if (path == m_regular_path) m_default_family = id;
+    return id;
+}
+
+int FontRenderer::register_webfont(std::string family, std::vector<WebfontFetcher> sources,
+                                   int weight_min, int weight_max, bool italic) {
+    const std::string key = family_key(family);
+    if (key.empty() || sources.empty()) return kNoFamily;
+
+    if (weight_min > weight_max) std::swap(weight_min, weight_max);
+
+    FaceEntry entry;
+    // No path: the bytes are not on disk, they are wherever the URL points.
+    // The family is the one the page declared, so the name inside the file is
+    // never asked for -- a page may serve "Body Text" from a file that calls
+    // itself something else entirely, and the page's name is the one CSS means.
+    entry.family = std::move(family);
+    entry.key = key;
+    entry.weight_min = weight_min;
+    entry.weight_max = weight_max;
+    entry.italic = italic;
+    entry.webfont = true;
+    entry.sources = std::move(sources);
+
+    const std::size_t index = m_face_entries.size();
+    m_face_entries.push_back(std::move(entry));
+
+    auto known = m_family_by_key.find(key);
+    if (known == m_family_by_key.end()) {
+        const int id = static_cast<int>(m_families.size());
+        Family f;
+        f.name = m_face_entries[index].family;
+        f.key = key;
+        f.faces.push_back(index);
+        m_family_names.push_back(f.name);   // read before `f` is moved from
+        m_families.push_back(std::move(f));
+        m_family_by_key.emplace(key, id);
+    } else {
+        // Put the webfont ahead of whatever this host already had under the
+        // name: a `@font-face` family is the answer for that name, and a
+        // system family of the same name is only what it falls back to.
+        // `pick_face` would otherwise be free to choose either.
+        m_families[known->second].faces.insert(m_families[known->second].faces.begin(), index);
+    }
+
+    // A new family, or a family that gained a face, changes what every list
+    // mentioning it resolves to.
+    m_resolved.clear();
+    return m_family_by_key[key];
+}
+
+std::string FontRenderer::face_path(std::string_view css_family_list) const {
+    const int id = family_id_for(css_family_list);
+    if (id < 0 || static_cast<std::size_t>(id) >= m_families.size()) return {};
+    const Family& family = m_families[static_cast<std::size_t>(id)];
+    const std::size_t index = pick_face(family, 400, false);
+    if (index == static_cast<std::size_t>(-1)) return {};
+    // A webfont has no path: its bytes were never on this disk. `local()` is
+    // asking for a font the host already has, so a webfont is the one thing it
+    // cannot be answered with.
+    const FaceEntry& e = m_face_entries[index];
+    return e.webfont ? std::string() : e.path;
+}
+
+void FontRenderer::clear_webfonts() {
+    // Whether there is anything to do, asked *before* anything is moved.
+    // "Nothing to do" is the common case -- most documents declare no webfonts
+    // -- and a check made after the moves below would be too late: the entries
+    // are moved into `kept`, and a `kept` that is then discarded on an early
+    // return leaves every face on the host with an empty path. The registry
+    // still looked whole, and could no longer load a single system font.
+    std::size_t survivors = 0;
+    for (const FaceEntry& e : m_face_entries) {
+        if (!e.webfont) ++survivors;
+    }
+    if (survivors == m_face_entries.size()) return;
+
+    // Which face indices survive, and where they end up.
+    std::vector<std::size_t> remap(m_face_entries.size(), static_cast<std::size_t>(-1));
+    std::vector<FaceEntry> kept;
+    kept.reserve(survivors);
+    for (std::size_t i = 0; i < m_face_entries.size(); ++i) {
+        if (m_face_entries[i].webfont) continue;
+        remap[i] = kept.size();
+        kept.push_back(std::move(m_face_entries[i]));
+    }
+
+    for (Family& f : m_families) {
+        std::vector<std::size_t> faces;
+        faces.reserve(f.faces.size());
+        for (const std::size_t index : f.faces) {
+            if (remap[index] != static_cast<std::size_t>(-1)) faces.push_back(remap[index]);
+        }
+        f.faces = std::move(faces);
+    }
+
+    // Faces already parsed are held by index into `m_family_faces`, and a
+    // webfont's bytes live only in the face that parsed them -- so a loaded
+    // webfont has to be dropped, and with it the index that finds it. The
+    // glyph cache is deliberately left alone: a `GlyphBitmap` is a value, not
+    // a view into the face that made it.
+    m_family_faces.clear();
+    m_family_face_index.clear();
+    m_face_entries = std::move(kept);
+    m_resolved.clear();
+}
+
+std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold) const {
+    if (family.faces.empty()) return static_cast<std::size_t>(-1);
+    const int wanted = bold ? std::max(weight, 600) : weight;
+    std::size_t best = family.faces.front();
+    int best_distance = std::numeric_limits<int>::max();
+    bool best_is_webfont = false;
+    for (const std::size_t index : family.faces) {
+        const FaceEntry& e = m_face_entries[index];
+        // A slanted face answers only when the slant was asked for, and vice
+        // versa: `font-style` is not implemented, so nothing asks for italic,
+        // and an italic face must not be handed out by accident.
+        if (e.italic != bold && e.italic) continue;
+        // Distance to the range this face declared, not to one number: a
+        // webfont serving `100 400` is an exact answer for anything in it.
+        const int distance = wanted < e.weight_min   ? e.weight_min - wanted
+                             : wanted > e.weight_max ? wanted - e.weight_max
+                                                     : 0;
+        // A webfont outranks a host family it shares a name with, so it wins
+        // ties outright -- and, having won, it is not displaced by a host face
+        // that happens to be nearer the weight asked for.
+        const bool better = distance < best_distance || (distance == best_distance && e.webfont && !best_is_webfont);
+        if (better) {
+            best_distance = distance;
+            best = index;
+            best_is_webfont = e.webfont;
+        }
+    }
+    return best;
+}
+
+const TrueTypeFont* FontRenderer::family_face(int family_id, int weight, bool bold) const {
+    if (family_id < 0 || static_cast<std::size_t>(family_id) >= m_families.size()) {
+        return nullptr;
+    }
+    const Family& family = m_families[static_cast<std::size_t>(family_id)];
+    const std::size_t index = pick_face(family, weight, bold);
+    if (index == static_cast<std::size_t>(-1)) return nullptr;
+
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 32) |
+                         static_cast<uint64_t>(static_cast<uint32_t>(index));
+    const auto seen = m_family_face_index.find(key);
+    if (seen != m_family_face_index.end()) {
+        return &m_family_faces[seen->second];
+    }
+    if (m_family_faces.size() >= kMaxLoadedFamilyFaces) {
+        // Drop the lot and start again. A cache that keeps one face and evicts
+        // another would thrash on a page that alternates between three. The
+        // glyph cache is deliberately left alone: a `GlyphBitmap` is a value,
+        // not a view into the face it was rasterized from, so it stays correct
+        // after the face that made it is gone.
+        m_family_faces.clear();
+        m_family_face_index.clear();
+    }
+    TrueTypeFont face;
+    const FaceEntry& chosen = m_face_entries[index];
+    if (chosen.webfont) {
+        // Try the rule's sources in order and keep the first that parses. A
+        // source that returns nothing, or bytes that are not a font this can
+        // read, is not the end -- it is what moves on to the next one, which
+        // is the entire point of `src: url(a.woff), url(a.ttf)`.
+        bool loaded = false;
+        for (const WebfontFetcher& fetch : chosen.sources) {
+            if (!fetch) continue;
+            std::vector<std::uint8_t> bytes = fetch();
+            if (bytes.empty()) continue;
+            if (face.load_memory(std::move(bytes))) {
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded) return nullptr;
+    } else if (!face.load_file(chosen.path)) {
+        return nullptr;
+    }
+    m_family_faces.push_back(std::move(face));
+    const std::size_t slot = m_family_faces.size() - 1;
+    m_family_face_index.emplace(key, slot);
+    return &m_family_faces[slot];
+}
+
+int FontRenderer::family_id_for(std::string_view css_family_list) const {
+    if (css_family_list.empty()) return kDefaultFamily;
+
+    const auto cached = m_resolved.find(std::string(css_family_list));
+    if (cached != m_resolved.end()) return cached->second;
+
+    // A list is split on commas that are not inside quotes, so that
+    // `font-family: "Font, Inc", sans-serif` is two entries and not three.
+    std::string entry;
+    bool quoted = false;
+    int result = kDefaultFamily;
+    // Whether an entry has been matched, which is not the same as whether
+    // `result` has moved off `kDefaultFamily`: the family a generic names can
+    // perfectly well *be* the default one, and a list must stop there rather
+    // than go on to the next entry and take something else.
+    bool matched = false;
+
+    const auto consider = [&](std::string candidate) {
+        if (matched) return;
+        const std::string key = family_key(candidate);
+        if (key.empty()) return;
+
+        int found = kNoFamily;
+        if (key == "serif") {
+            found = m_generic_serif;
+        } else if (key == "sans-serif") {
+            found = m_generic_sans;
+        } else if (key == "monospace" || key == "ui-monospace") {
+            found = m_generic_mono;
+        } else if (key == "system-ui" || key == "-apple-system") {
+            found = m_generic_sans;
+        } else {
+            const auto it = m_family_by_key.find(key);
+            if (it != m_family_by_key.end()) found = it->second;
+        }
+        // A family that has no face behind it is not a family a page can have,
+        // however well its name matched. `clear_webfonts` leaves such an entry
+        // behind -- it drops the faces and keeps the name, because renumbering
+        // families would invalidate every id already handed out -- so the
+        // question is asked here, where the answer is cheap.
+        if (found != kNoFamily && static_cast<std::size_t>(found) < m_families.size() &&
+            m_families[static_cast<std::size_t>(found)].faces.empty()) {
+            found = kNoFamily;
+        }
+        // `cursive` and `fantasy` fall through to here: this host has nothing
+        // by those names, and the default is a better answer than a guess,
+        // because a page is better served by a real face than by one picked
+        // for the sound of its name.
+        if (found == kNoFamily) return;
+        result = found;
+        matched = true;
+    };
+
+    for (const char c : css_family_list) {
+        if (c == '"' || c == '\'') { quoted = !quoted; continue; }
+        if (c == ',' && !quoted) {
+            consider(entry);
+            entry.clear();
+            continue;
+        }
+        entry.push_back(c);
+        if (matched) break;
+    }
+    consider(entry);
+
+    m_resolved.emplace(std::string(css_family_list), result);
+    return result;
 }
 
 void FontRenderer::set_fallbacks(std::vector<std::string> paths) {
@@ -763,10 +1322,18 @@ void FontRenderer::set_fallbacks(std::vector<std::string> paths) {
     m_cache.clear();
 }
 
-const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold) const {
+const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int family_id) const {
     const TrueTypeFont* primary = (bold && m_bold.is_loaded())
                                       ? &m_bold
                                       : (m_regular.is_loaded() ? &m_regular : nullptr);
+
+    // The element named a family, and the family has the glyph. This is the
+    // whole of `font-family`: before it, the primary answered for every element
+    // on the page and a `<pre>` was drawn in the same face as a heading.
+    if (const TrueTypeFont* named = family_face(family_id, bold ? 700 : 400, bold)) {
+        if (named->has_glyph(codepoint)) return named;
+    }
+
     if (primary && primary->has_glyph(codepoint)) return primary;
 
     // Already loaded as a result of an earlier miss.
@@ -793,12 +1360,17 @@ const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold) const 
     return primary;
 }
 
-std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int font_weight) const {
+std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int font_weight,
+                                                        std::string_view css_family) const {
     if (!(font_size > 0.0f)) return {0.0f, 0.0f};
     const bool want_bold = font_weight >= 600;
-    const TrueTypeFont* font = (want_bold && m_bold.is_loaded())
-                                   ? &m_bold
-                                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    const TrueTypeFont* font = family_face(family_id, font_weight, want_bold);
+    if (!font) {
+        font = (want_bold && m_bold.is_loaded())
+                   ? &m_bold
+                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    }
     if (!font) return {font_size * 0.8f, font_size * 0.2f};
     const float scale = font_size / static_cast<float>(font->units_per_em());
     const float asc = static_cast<float>(font->ascent()) * scale;
@@ -806,27 +1378,41 @@ std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int fon
     return {asc, desc};
 }
 
-float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight) const {
-    const bool want_bold = font_weight >= 600;
-    const TrueTypeFont* font = face_for(codepoint, want_bold);
+float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight,
+                                     std::string_view css_family) const {
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    return advance_in_family(codepoint, font_size, font_weight >= 600, family_id);
+}
+
+float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
+                                      int family_id) const {
+    const TrueTypeFont* font = face_for(codepoint, want_bold, family_id);
     if (font) return font->glyph_advance(codepoint, font_size);
     return std::max(1.0f, font_size * 0.55f);
 }
 
-float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight) {
+float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight,
+                                 std::string_view css_family) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     float total = 0.0f;
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        total += glyph_advance_px(cp, font_size, font_weight);
+        total += advance_in_family(cp, font_size, font_weight >= 600, family_id);
     }
     return total;
 }
 
-const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, bool bold) {
+const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, bool bold,
+                                           int family_id) {
     const int px = std::clamp(pixel_size, 6, 160);
-    const uint64_t key = (static_cast<uint64_t>(bold ? 1u : 0u) << 40) |
+    // The family is part of the key. Without it the cache would answer with a
+    // glyph rasterized from one family for an element that asked for another,
+    // which is the bug that makes `font-family` look like it works in the
+    // first line of a paragraph and not in the rest.
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 41) |
+                         (static_cast<uint64_t>(bold ? 1u : 0u) << 40) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(px)) << 32) |
                          static_cast<uint64_t>(codepoint);
     auto it = m_cache.find(key);
@@ -837,7 +1423,7 @@ const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, b
     }
 
     GlyphBitmap bmp;
-    const TrueTypeFont* face = face_for(codepoint, bold);
+    const TrueTypeFont* face = face_for(codepoint, bold, family_id);
     if (face) {
         bmp = face->rasterize_glyph(codepoint, px);
     } else {
@@ -854,9 +1440,11 @@ void FontRenderer::draw_text(
     std::string_view utf8_text,
     float font_size,
     int font_weight,
-    const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel
+    const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
+    std::string_view css_family
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     const int px_size = std::clamp(static_cast<int>(std::lround(font_size)), 6, 160);
     const bool bold = font_weight >= 600;
     const bool synthetic_bold = bold && !m_bold.is_loaded() && m_regular.is_loaded();
@@ -880,7 +1468,7 @@ void FontRenderer::draw_text(
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        const GlyphBitmap& g = get_glyph(cp, px_size, bold);
+        const GlyphBitmap& g = get_glyph(cp, px_size, bold, family_id);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;
             const int gy0 = baseline_y - g.bearing_y;

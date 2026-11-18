@@ -104,7 +104,7 @@ was found on the host already, so there is never anything to wait for and
 
 ## 3. How it is verified
 
-- **`make test`** → **219 / 219** suites. The new one,
+- **`make test`** → **220 / 220** suites. The new one,
   `cssom_sheets_rules_insert_amounts_and_fonts`, drives a page and asserts
   **60** facts, every one of them a comparison made in the page: the objects
   and their brands, that `insertRule` styles the page, which rule wins by
@@ -119,7 +119,7 @@ was found on the host already, so there is never anything to wait for and
 - **`make dom-conformance`** → 678 / 678, unchanged (jsdom implements none of
   this: `compare_with_jsdom.py` would take the first of it as a difference, so
   the CSSOM is asserted in the unit suite instead).
-- **`make js-conformance`** 1126 / 1152, **`make url-conformance`** 1188 / 1188,
+- **`make js-conformance`** 1127 / 1152, **`make url-conformance`** 1188 / 1188,
   **`make xml-conformance`** 1718 / 1718: unchanged.
 - `Makefile`: `WPT_FLOOR` 9538 → **9567**.
 

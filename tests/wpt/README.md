@@ -113,7 +113,7 @@ and encoding suites, and these 186 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`; WebIDL throws from the setter's Realm (`window[0]`) |
+| `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`. The engine throws `window[0]`'s exception, as browsers do: a node's realm is its document's, so the binding's current realm is `window[0]`'s. The same rule is what `dom/nodes/Document-createElement.html` asks of 240 subtests that name the frame's constructor, and no implementation passes both. See [`docs/findings/68-the-realm-of-a-domexception.md`](../../docs/findings/68-the-realm-of-a-domexception.md) |
 | the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
 
 ### `XMLSerializer`: five subtests Litebird fails on purpose

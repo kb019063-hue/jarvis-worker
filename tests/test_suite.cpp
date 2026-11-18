@@ -1808,6 +1808,82 @@ TEST(javascript_prototype_chain_and_arrays) {
     assert(is_arr.to_string() == "true false");
 }
 
+// Phase 58: indexed-value iterables borrow the actual Array methods, while
+// ordinary array-likes and live DOM lists are read from their original object.
+TEST(indexed_dom_lists_use_live_generic_array_iteration) {
+    using namespace litebird;
+    JsInterpreter js(std::make_shared<Document>());
+    assert(js.eval(R"(
+        var names = ['keys', 'values', 'entries', 'forEach'];
+        var same = function(proto) {
+            return names.every(function(name) { return proto[name] === Array.prototype[name]; }) &&
+                   proto[Symbol.iterator] === Array.prototype[Symbol.iterator];
+        };
+        var host = document.createElement('div');
+        var a = document.createElement('a'), b = document.createElement('b');
+        host.appendChild(a); host.appendChild(b);
+        var list = host.childNodes;
+        var id = same(NodeList.prototype) && same(DOMTokenList.prototype) &&
+                 Array.prototype.values === Array.prototype[Symbol.iterator] &&
+                 list.values === Array.prototype.values;
+        var values = list.values(), keys = list.keys(), entries = list.entries();
+        var first = values.next().value === a && keys.next().value === 0 &&
+                    entries.next().value[1] === a;
+        var c = document.createElement('c');
+        host.appendChild(c); host.removeChild(a);
+        var changed = values.next().value === c && values.next().done &&
+                      keys.next().value === 1 && keys.next().done &&
+                      entries.next().value[1] === c && entries.next().done;
+        var words = document.createElement('p').classList;
+        words.add('one');
+        var tokens = words.values();
+        var tokenLive = tokens.next().value === 'one';
+        words.add('two');
+        tokenLive = tokenLive && tokens.next().value === 'two' && tokens.next().done;
+        var seen = [];
+        var that = {};
+        list.forEach(function(node, index, owner) {
+            seen.push(node === (index === 0 ? b : c) && owner === list && this === that);
+            if (index === 0) host.appendChild(document.createElement('d'));
+        }, that);
+        id && first && changed && tokenLive && seen.join() === 'true,true';
+    )").is_truthy());
+
+    assert(js.eval(R"(
+        var target = {0: 'a', 1: 'b', length: 2};
+        var iterator = Array.prototype.values.call(target);
+        var first = iterator.next().value === 'a';
+        target[1] = 'changed'; target[2] = 'added'; target.length = 3;
+        var live = iterator.next().value === 'changed' &&
+                   iterator.next().value === 'added' && iterator.next().done;
+        var seen = [];
+        Array.prototype.forEach.call(target, function(value, index, owner) {
+            seen.push(value + index + (owner === target));
+            if (index === 0) { target[1] = 'updated'; target[3] = 'ignored'; target.length = 4; }
+        });
+        var hole = {0: 'x', 2: 'z', length: 3};
+        var skipped = [];
+        Array.prototype.forEach.call(hole, function(value) { skipped.push(value); });
+        first && live && seen.join() === 'a0true,updated1true,added2true' &&
+        skipped.join() === 'x,z' &&
+        Array.prototype.entries.call({0: 7, length: 1}).next().value[1] === 7 &&
+        Array.prototype.keys.call({length: 2}).next().value === 0;
+    )").is_truthy());
+
+    // ToLength clamps non-finite/oversized lengths before C++ integer
+    // conversion; forEach evaluates the receiver's length before IsCallable.
+    assert(js.eval(R"(
+        var infinite = Array.prototype.keys.call({length: Infinity}).next();
+        var huge = Array.prototype.entries.call({0: 'ok', length: 1e100}).next();
+        var calls = [];
+        try {
+            Array.prototype.forEach.call({get length() { calls.push('length'); return 0; }}, null);
+        } catch (error) { calls.push(error.name); }
+        infinite.value === 0 && !infinite.done && huge.value[1] === 'ok' &&
+        calls.join() === 'length,TypeError';
+    )").is_truthy());
+}
+
 TEST(incremental_layout_and_invalidation) {
     using namespace litebird;
 
@@ -15522,6 +15598,124 @@ static void test_css_color45_style_resolver_dom_and_svg_integration() {
 }
 
 // ============================================================================
+// Warning 5: a DOMException is made in the Realm of the object it is about
+// ============================================================================
+//
+// Web IDL creates an exception in the current realm of the function that
+// throws, and for a platform object that realm is the object's relevant realm.
+// For a node that is the realm of its document's window, so
+// `window[0].document.createElement('')` throws `window[0].DOMException` and
+// `dom/nodes/Document-createElement.html` asks exactly that of every failing
+// call on a frame's document.
+//
+// `domparsing/innerhtml-05.xhtml` asks for the opposite: the element it sets
+// `innerHTML` on belongs to `window[0]`, and the test wants the exception from
+// the realm that called. Both cannot hold for a node that belongs to another
+// realm, and browsers keep the rule this engine keeps (the realm of the node),
+// which is why the test is one of the eleven listed failures. `make wpt` says
+// so: the subtest is listed as `test-checks-parent-global`, and it fails
+// because the exception came from the frame, not from the page.
+//
+// This suite pins that down: the rule, and the standard's example of it in
+// Web IDL — an exception is never the caller's when the receiver is another
+// realm's platform object, and it is the caller's when the receiver is a
+// primitive or an object of a plain kind.
+
+// A page with an `<iframe>` whose document is XML, as the one in
+// `domparsing/innerhtml-05.xhtml` is: an XML fragment that is not well formed
+// is a `SyntaxError`, where an HTML one is recovered from. `window[0]` is the
+// frame's realm, and it is a different realm from the page's.
+static const char* kCrossRealmPage = R"html(<!doctype html><html><body>
+  <iframe id="frame" src="data:text/xml,&lt;html xmlns='http://www.w3.org/1999/xhtml'&gt;&lt;foo/&gt;&lt;/html&gt;"></iframe>
+</body></html>)html";
+
+TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://realm.example.test/caller.html");
+    JsInterpreter js(doc);
+    js.load_page(kCrossRealmPage, true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    // The frame really is another realm, with its own DOMException.
+    assert(js.eval("var w = document.getElementById('frame').contentWindow;"
+                   " var d = document.getElementById('frame').contentDocument;"
+                   " w !== window && d !== document").is_truthy());
+    assert(js.eval("var foreignCtor = w.DOMException;"
+                   " foreignCtor !== DOMException && typeof foreignCtor === 'function'").is_truthy());
+
+    // 1. A method of the frame's document that throws throws the frame's
+    //    DOMException: Web IDL's "current realm" for that call is the frame's.
+    //    `Document-createElement.html` runs this 240 times, once per invalid
+    //    name in each of an HTML, an XML and an XHTML document.
+    assert(js.eval(R"js((function() {
+        try { d.createElement('1foo'); return 'no throw'; }
+        catch (e) {
+            if (e.name !== 'InvalidCharacterError') return 'wrong name: ' + e.name;
+            return e.constructor === foreignCtor && e.constructor !== DOMException ? 'ok' : 'wrong global';
+        }
+    })())js").to_string() == "ok");
+
+    // 2. The same for an XML fragment that is not well formed: `innerHTML` on
+    //    a node of the frame's document, set from the page, throws the
+    //    frame's exception. This is the shape of `innerhtml-05.xhtml`, whose
+    //    expectation is the other way round; the test is listed, and this is
+    //    what the engine does instead.
+    assert(js.eval(R"js((function() {
+        var el = d.createElement('el');
+        try { el.innerHTML = 'x<\/foo--><!--y'; return 'no throw'; }
+        catch (e) {
+            if (e.name !== 'SyntaxError') return 'wrong name: ' + e.name;
+            if (e.constructor === foreignCtor) return 'ok';
+            return 'the caller DOMException';
+        }
+    })())js").to_string() == "ok");
+
+    // 3. Nothing the page does makes it the page's: not reading the element
+    //    into a variable of the page, and not passing it to a function of the
+    //    frame's that the page calls.
+    assert(js.eval(R"js((function () {
+        w.eval("window.__setInner = function (el) {"
+             + " try { el.innerHTML = '<a>'; return 'no throw'; }"
+             + " catch (e) { return e.constructor === self.DOMException; } };");
+        return typeof w.__setInner;
+    })())js").to_string() == "function");
+    assert(js.eval("w.__setInner(d.createElement('el2'))").is_truthy());
+
+    // 4. The DOMException's own prototype is the frame's, so it is not an
+    //    instance in the page even though its name and code read the same.
+    assert(js.eval(R"js((function() {
+        try { d.createElement('1foo'); return 'no throw'; }
+        catch (e) {
+            return (e instanceof foreignCtor) && !(e instanceof DOMException) &&
+                   Object.getPrototypeOf(e) === foreignCtor.prototype && e.code === 5;
+        }
+    })())js").to_string() == "true");
+
+    // 5. An exception made by `new DOMException(...)` in the frame is the
+    //    frame's, and one made in the page is the page's: the rule is about
+    //    which realm the exception is made in, not about DOMExceptions of a
+    //    frame being contagious.
+    assert(js.eval("(function() { var e = new w.DOMException('m', 'SyntaxError');"
+                   " return e.constructor === foreignCtor && e.constructor !== DOMException; })()").is_truthy());
+    assert(js.eval("(function() { var e = new DOMException('m', 'SyntaxError');"
+                   " return e.constructor === DOMException && e.constructor !== foreignCtor; })()").is_truthy());
+
+    // 6. A receiver of the page's own still throws the page's exception, or
+    //    the two realms would be indistinguishable and the rule untested.
+    assert(js.eval(R"js((function() {
+        try { document.createElement('1foo'); return 'no throw'; }
+        catch (e) { return e.name === 'InvalidCharacterError' && e.constructor === DOMException ? 'ok' : 'wrong global'; }
+    })())js").to_string() == "ok");
+
+    js.eval("w = null; d = null; foreignCtor = null;");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+}
+
+// ============================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
 // ============================================================================
 
@@ -17939,6 +18133,7 @@ int main() {
     RUN_TEST(css_positioning_and_stacking_contexts);
     RUN_TEST(box_sizing_and_constraints);
     RUN_TEST(javascript_prototype_chain_and_arrays);
+    RUN_TEST(indexed_dom_lists_use_live_generic_array_iteration);
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
     RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
@@ -18123,6 +18318,8 @@ int main() {
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
     RUN_TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering);
+    // Warning 5: a DOMException is made in the realm of the object it is about.
+    RUN_TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about);
 
     // Phase 43: new.target, and what a constructor makes.
     RUN_TEST(js_new_target_is_the_function_new_was_applied_to);

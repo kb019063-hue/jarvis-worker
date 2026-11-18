@@ -832,7 +832,10 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     return fn;
 }
 
-std::string JsParser::parse_property_name(std::unique_ptr<Expr>& computed) {
+// A private name is only a property name inside a class body: `#p: 1` in an
+// object literal and `#p` anywhere else are syntax errors, so `allow_private`
+// is what a class element passes and nothing else does.
+std::string JsParser::parse_property_name(std::unique_ptr<Expr>& computed, bool allow_private) {
     const JsToken& t = peek();
     if (t.type == JsTokenType::OpenBracket) {
         advance();
@@ -845,11 +848,78 @@ std::string JsParser::parse_property_name(std::unique_ptr<Expr>& computed) {
         double value = advance().number_value;
         return js_number_to_string(value);
     }
+    if (t.type == JsTokenType::PrivateName && !allow_private) {
+        fail("Private names may only be used in a class body");
+    }
     if (t.type == JsTokenType::String || t.type == JsTokenType::Identifier ||
         t.type == JsTokenType::PrivateName || t.is_keyword) {
         return advance().text;
     }
     fail_unexpected();
+}
+
+namespace {
+// The kinds a private name can be declared as inside one class body: a single
+// field, method or static holds the name; a getter and a setter may share it.
+constexpr uint8_t kPrivateGet = 1;
+constexpr uint8_t kPrivateSet = 2;
+constexpr uint8_t kPrivateStatic = 4;   // bit 2: declared with `static`
+}   // namespace
+
+bool JsParser::private_declared(const std::string& name) const {
+    for (const auto& scope : m_private_scopes) {
+        for (const auto& declared : scope) {
+            if (declared == name) return true;
+        }
+    }
+    return false;
+}
+
+bool JsParser::check_private_name(const std::string& name) {
+    if (name.empty() || name[0] != '#') return false;
+    // Declared further down the same body is fine: a method may read a field
+    // written after it, so an unresolved name waits for the closing brace.
+    if (!private_declared(name)) {
+        if (m_private_pending.empty()) {
+            fail("Private field '" + name + "' must be declared in an enclosing class");
+        }
+        m_private_pending.back().emplace_back(name, peek().line);
+    }
+    return true;
+}
+
+void JsParser::seed_private_names(std::vector<std::string> names) {
+    if (names.empty()) return;
+    m_private_scopes.push_back(std::move(names));
+    m_private_kinds.emplace_back(m_private_scopes.back().size(), 3);
+    m_private_pending.emplace_back();
+}
+
+void JsParser::finish_private_scope() {
+    std::vector<std::pair<std::string, int>> unresolved;
+    for (const auto& reference : m_private_pending.back()) {
+        if (!private_declared(reference.first)) unresolved.push_back(reference);
+    }
+    m_private_scopes.pop_back();
+    m_private_kinds.pop_back();
+    m_private_pending.pop_back();
+    if (unresolved.empty()) return;
+    if (!m_private_pending.empty()) {
+        // An enclosing body may still declare it: hand the question up.
+        for (const auto& reference : unresolved) m_private_pending.back().push_back(reference);
+        return;
+    }
+    fail("Private field '" + unresolved.front().first + "' must be declared in an enclosing class");
+}
+
+int JsParser::private_declaration_kind(const std::string& name) const {
+    if (m_private_scopes.empty()) return 0;
+    const auto& scope = m_private_scopes.back();
+    const auto& kinds = m_private_kinds.back();
+    for (size_t i = 0; i < scope.size(); ++i) {
+        if (scope[i] == name) return kinds[i];
+    }
+    return 0;
 }
 
 // Called with `class` already consumed.
@@ -877,6 +947,11 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
     consume(JsTokenType::OpenBrace, "Expected '{' before class body.");
 
     FlagScope in_scope(m_no_in, false);
+    // The names this body may use; a nested class body starts its own and can
+    // still see these (its methods may read an outer class's fields).
+    m_private_scopes.emplace_back();
+    m_private_kinds.emplace_back();
+    m_private_pending.emplace_back();
 
     auto can_follow_modifier = [&]() {
         const JsToken& next = peek(1);
@@ -925,8 +1000,35 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
         }
 
         std::unique_ptr<Expr> computed;
-        member.key = parse_property_name(computed);
+        member.is_private = check(JsTokenType::PrivateName);
+        member.key = parse_property_name(computed, /*allow_private=*/true);
         member.computed_key = std::move(computed);
+        if (member.is_private) {
+            if (member.key == "#constructor") fail("Class constructor may not be a private method");
+            // One name, one slot. A getter and a setter may share it, but only
+            // on the same side of `static`: `static get #x` and `set #x` are
+            // two declarations of one name, and that is an error.
+            const int existing = private_declaration_kind(member.key);
+            const uint8_t wanted = static_cast<uint8_t>((member.kind == ClassMember::Kind::Getter ? kPrivateGet
+                                             : member.kind == ClassMember::Kind::Setter ? kPrivateSet
+                                                                                       : 3) |
+                                             (member.is_static ? kPrivateStatic : 0));
+            if (existing != 0) {
+                const bool both_accessors = (existing & 3) != 3 && (wanted & 3) != 3;
+                const bool same_static = ((existing & kPrivateStatic) != 0) == ((wanted & kPrivateStatic) != 0);
+                const bool complementary = (existing & 3) != (wanted & 3);
+                if (!both_accessors || !same_static || !complementary) {
+                    fail("Identifier '" + member.key + "' has already been declared");
+                }
+                auto& scope = m_private_scopes.back();
+                for (size_t i = 0; i < scope.size(); ++i) {
+                    if (scope[i] == member.key) m_private_kinds.back()[i] = static_cast<uint8_t>(3 | (wanted & kPrivateStatic));
+                }
+            } else {
+                m_private_scopes.back().push_back(member.key);
+                m_private_kinds.back().push_back(wanted);
+            }
+        }
 
         if (check(JsTokenType::OpenParen)) {
             auto fn = parse_method(is_async, is_generator);
@@ -966,6 +1068,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
         cls->members.push_back(std::move(member));
     }
     consume(JsTokenType::CloseBrace, "Expected '}' after class body.");
+    finish_private_scope();
     set_source(*cls, class_token);
     m_functions[enclosing].strict = enclosing_strict;
 
@@ -1321,7 +1424,19 @@ bool is_unparenthesized(const Expr* expr, JsTokenType op) {
 }
 
 std::unique_ptr<Expr> JsParser::parse_binary(int min_precedence) {
-    auto left = parse_unary();
+    // `#p in obj` is the only place a private name stands on its own, and it is
+    // a relational expression: it asks whether the object carries the brand.
+    std::unique_ptr<Expr> left;
+    if (check(JsTokenType::PrivateName)) {
+        const std::string name = check_private_name(peek().text) ? advance().text : std::string();
+        if (m_no_in) fail("Unexpected 'in'");
+        consume(JsTokenType::In, "Expected 'in' after a private name");
+        if (check(JsTokenType::PrivateName)) fail("Unexpected private name");
+        auto object = parse_binary(binary_precedence(JsTokenType::In) + 1);
+        left = std::make_unique<PrivateInExpr>(std::move(object), name);
+    } else {
+        left = parse_unary();
+    }
     while (true) {
         JsTokenType type = peek().type;
         int precedence = binary_precedence(type);
@@ -1368,6 +1483,12 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
         case JsTokenType::Delete: {
             JsTokenType op = advance().type;
             auto operand = parse_unary();
+            // A private field is not a property, so there is nothing to delete;
+            // the language makes it a syntax error rather than a silent `true`.
+            if (op == JsTokenType::Delete && operand->kind == NodeKind::Member &&
+                static_cast<const MemberExpr*>(operand.get())->private_name) {
+                fail("Private fields can not be deleted");
+            }
             return std::make_unique<UnaryExpr>(op, std::move(operand));
         }
         // Prefix increment/decrement: `++i` yields the value *after* the change.
@@ -1436,7 +1557,9 @@ std::unique_ptr<Expr> JsParser::parse_new() {
     while (true) {
         if (match(JsTokenType::Dot)) {
             if (!(check(JsTokenType::Identifier) || check(JsTokenType::PrivateName) || peek().is_keyword)) fail_unexpected();
-            callee = std::make_unique<MemberExpr>(std::move(callee), advance().text);
+            auto member = std::make_unique<MemberExpr>(std::move(callee), advance().text);
+            member->private_name = check_private_name(member->property);
+            callee = std::move(member);
         } else if (check(JsTokenType::OpenBracket)) {
             advance();
             FlagScope scope(m_no_in, false);
@@ -1460,7 +1583,9 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
     while (true) {
         if (match(JsTokenType::Dot)) {
             if (!(check(JsTokenType::Identifier) || check(JsTokenType::PrivateName) || peek().is_keyword)) fail_unexpected();
-            expr = std::make_unique<MemberExpr>(std::move(expr), advance().text);
+            auto member = std::make_unique<MemberExpr>(std::move(expr), advance().text);
+            member->private_name = check_private_name(member->property);
+            expr = std::move(member);
         } else if (match(JsTokenType::QuestionDot)) {
             has_optional_link = true;
             if (check(JsTokenType::OpenParen)) {
@@ -1477,6 +1602,7 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
             } else {
                 if (!(check(JsTokenType::Identifier) || check(JsTokenType::PrivateName) || peek().is_keyword)) fail_unexpected();
                 auto node = std::make_unique<MemberExpr>(std::move(expr), advance().text);
+                node->private_name = check_private_name(node->property);
                 node->optional = true;
                 expr = std::move(node);
             }
@@ -1620,7 +1746,7 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
         const bool key_is_identifier = check(JsTokenType::Identifier) ||
                                        check(JsTokenType::Yield) || check(JsTokenType::Await) || check(JsTokenType::Let);
         if (!is_property_name_token()) fail_unexpected();
-        prop.key = parse_property_name(prop.computed_key);
+        prop.key = parse_property_name(prop.computed_key, /*allow_private=*/false);
 
         if (prop.kind != ObjectProperty::Kind::Init) {
             auto fn = parse_method(false, false);

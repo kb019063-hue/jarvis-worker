@@ -15,7 +15,7 @@ enum class NodeKind : uint8_t {
     Literal, Identifier, TemplateLiteral, TaggedTemplate, ArrayLiteral, ObjectLiteral,
     Function, Class, Regex, Unary, Update, Binary, Assign, Conditional, Call, New,
     Member, Index, Sequence, Spread, Yield, Await, SuperCall, SuperMember,
-    OptionalChain, NewTarget,
+    OptionalChain, NewTarget, PrivateIn,
     // Statements
     ExprStmt, VarDecl, Block, If, While, DoWhile, For, ForEach, Return, Break,
     Continue, Throw, Try, Switch, FunctionDecl, ClassDecl, Labeled, Empty,
@@ -209,9 +209,24 @@ public:
     std::unique_ptr<Expr> object;
     std::string property;
     bool optional{false};   // `a?.b`
+    /// `a.#p`: the name is a private name, so `property` is the source spelling
+    /// (`"#p"`) and what is read and written is the slot the class that
+    /// declared it minted when it was evaluated, not a property called `#p`.
+    bool private_name{false};
 
     MemberExpr(std::unique_ptr<Expr> obj, std::string prop)
         : Expr(NodeKind::Member), object(std::move(obj)), property(std::move(prop)) {}
+};
+
+/// `#p in obj`: the one place a private name appears on its own. It asks
+/// whether `obj` carries the brand, which is a question no string key can ask.
+class PrivateInExpr : public Expr {
+public:
+    std::unique_ptr<Expr> object;
+    std::string name;       // with the '#', as written
+
+    PrivateInExpr(std::unique_ptr<Expr> obj, std::string n)
+        : Expr(NodeKind::PrivateIn), object(std::move(obj)), name(std::move(n)) {}
 };
 
 class IndexExpr : public Expr {
@@ -346,6 +361,9 @@ struct ClassMember {
     enum class Kind : uint8_t { Method, Getter, Setter, Field, StaticBlock };
     Kind kind{Kind::Method};
     bool is_static{false};
+    /// `#p`: `key` is then the source spelling and the member lives in the
+    /// object's private slots rather than in its properties.
+    bool is_private{false};
     std::string key;
     std::shared_ptr<Expr> computed_key;
     std::shared_ptr<FunctionNode> fn;    // Method, Getter, Setter, StaticBlock
@@ -649,6 +667,12 @@ public:
     /// Parses a whole script. Throws JsSyntaxError on malformed input.
     std::unique_ptr<Program> parse_program();
 
+    /// The private names already in scope, for code that is parsed where they
+    /// are: a direct eval inside a class body reads that class's fields
+    /// (`v = eval("this.#m()")`), so its text is parsed with the names of the
+    /// class it was written in.
+    void seed_private_names(std::vector<std::string> names);
+
 private:
     struct FunctionContext {
         FunctionNode* fn{nullptr};          // null for the program
@@ -730,7 +754,27 @@ private:
     std::unique_ptr<Expr> parse_object_literal();
     std::unique_ptr<Expr> parse_template(std::unique_ptr<Expr> tag);
     std::vector<std::unique_ptr<Expr>> parse_arguments();
-    std::string parse_property_name(std::unique_ptr<Expr>& computed);
+    std::string parse_property_name(std::unique_ptr<Expr>& computed, bool allow_private = false);
+    /// Private names in scope: one entry per class body being parsed, outermost
+    /// first, holding the names as written (`"#p"`). A method may use a name its
+    /// own class declares or one an enclosing class does, and nothing else.
+    bool private_declared(const std::string& name) const;
+    /// Resolves the names one class body mentioned against every class body
+    /// open around it, and reports what nothing declares. A method may read a
+    /// field the class declares further down, so the names of a body are only
+    /// complete when its closing brace is.
+    void finish_private_scope();
+    /// True when `name` is a private name, and takes note of a use that no
+    /// class body has declared yet. False for an ordinary property name.
+    bool check_private_name(const std::string& name);
+    /// How many `#p` declarations in the innermost class body: 0 if it is new,
+    /// 1 for a getter, 2 for a setter, 3 when that pair is already complete.
+    int private_declaration_kind(const std::string& name) const;
+    std::vector<std::vector<std::string>> m_private_scopes;
+    std::vector<std::vector<uint8_t>> m_private_kinds;
+    /// Names mentioned in a body that nothing had declared at the time, one
+    /// list per open body, with the line each was written on.
+    std::vector<std::vector<std::pair<std::string, int>>> m_private_pending;
     bool is_arrow_ahead() const;
     FunctionNode* nearest_non_arrow_function();
     static bool is_assignable(const Expr* expr);

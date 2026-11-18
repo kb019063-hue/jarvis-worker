@@ -147,7 +147,7 @@ gives are asserted, since the corpus is jsdom's answers):
 
 ```bash
 make test
-# All 215 engine test suites passed successfully!
+# All 218 engine test suites passed successfully!
 ```
 
 Nothing else moved:

@@ -72,7 +72,7 @@ python3 tools/conformance/run_dom_conformance.py --reference --quiet
 # 678 / 678 — the expectations are still jsdom's answers
 
 make test
-# All 215 engine test suites passed successfully!
+# All 218 engine test suites passed successfully!
 ```
 
 The probe's five lines are nine recorded cases in

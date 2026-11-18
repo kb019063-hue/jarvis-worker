@@ -8,9 +8,13 @@
     "this file automatically: bump a floor by hand, in the commit that retires",
     "the numbers below it, when no document or pull request mentions it any more."
   ],
-  "phase_floor": 68,
-  "finding_floor": 74,
+  "phase_floor": 75,
+  "finding_floor": 81,
   "history": [
+    {
+      "date": "2026-11-17",
+      "what": "Phase 75 and finding 81 documented observable Map/Set constructor dispatch through instance set/add methods. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
     {
       "date": "2026-11-17",
       "what": "Phase 68 and finding 74 documented bounded Map/Set iterator cursor cleanup. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."

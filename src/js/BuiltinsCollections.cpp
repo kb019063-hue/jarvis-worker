@@ -216,9 +216,13 @@ std::shared_ptr<CollectionData> data_of(const JsValue& value, ObjectClass klass,
     return std::static_pointer_cast<CollectionData>(value.object_val->internal);
 }
 
-JsValue make_collection(ObjectClass klass, JsObject* proto) {
-    JsObject* cell = Heap::default_heap().allocate_object();
-    cell->prototype = proto;
+JsValue make_collection(ObjectClass klass, JsObject* proto, const JsValue* derived = nullptr) {
+    JsObject* cell = (derived && derived->object_val) ? derived->object_val.get()
+                                                       : Heap::default_heap().allocate_object();
+    // A derived constructor already received an object with new.target's
+    // prototype. Keep it; a plain native construction starts at its intrinsic
+    // prototype (or the one Reflect.construct supplied).
+    if (!derived || !derived->object_val) cell->prototype = proto;
     cell->klass = klass;
     auto data = std::make_shared<CollectionData>();
     cell->internal = data;
@@ -268,13 +272,23 @@ void install_collection_builtins(JsIntrinsics& realm) {
     // ---- Map --------------------------------------------------------------
     JsObject* mp = realm.map_proto;
     JsValue map_ctor = js_make_native("Map", 0, [](Args args) {
-        JsValue map = make_collection(ObjectClass::Map, JsIntrinsics::get().map_proto);
+        // In a derived construction this is the object with new.target's
+        // prototype. Under Reflect.construct it also performs that one
+        // prototype lookup, so do it before any user code runs.
+        const JsValue* derived_ptr = JsValue::current_is_construct() ? JsValue::current_derived_this() : nullptr;
+        JsValue derived_holder;
+        if (derived_ptr) derived_holder = *derived_ptr;
+        JsValue map = make_collection(ObjectClass::Map, JsIntrinsics::get().map_proto,
+                                      derived_ptr ? &derived_holder : nullptr);
         const JsValue& source = js_arg(args, 0);
         if (!source.is_nullish()) {
-            auto data = data_of(map, ObjectClass::Map, "Map");
+            // Get once, before asking the source for its iterator. It is a
+            // method of the new instance, so a subclass override is observed.
+            JsValue adder = map.get_property("set");
+            if (!adder.is_function()) js_throw_type_error("Map constructor: set is not a function");
             js_iterate(source, [&](const JsValue& entry) {
                 if (!entry.is_object_like()) js_throw_type_error("Iterator value is not an entry object");
-                data->set(entry.get_property("0"), entry.get_property("1"));
+                js_call(adder, map, {entry.get_property("0"), entry.get_property("1")});
                 return true;
             });
         }
@@ -360,12 +374,19 @@ void install_collection_builtins(JsIntrinsics& realm) {
     // ---- Set --------------------------------------------------------------
     JsObject* sp = realm.set_proto;
     JsValue set_ctor = js_make_native("Set", 0, [](Args args) {
-        JsValue set = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
+        // As for Map, let current_derived_this() make (and retain) the
+        // new.target-prototype object before a source or override can run.
+        const JsValue* derived_ptr = JsValue::current_is_construct() ? JsValue::current_derived_this() : nullptr;
+        JsValue derived_holder;
+        if (derived_ptr) derived_holder = *derived_ptr;
+        JsValue set = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto,
+                                      derived_ptr ? &derived_holder : nullptr);
         const JsValue& source = js_arg(args, 0);
         if (!source.is_nullish()) {
-            auto data = data_of(set, ObjectClass::Set, "Set");
+            JsValue adder = set.get_property("add");
+            if (!adder.is_function()) js_throw_type_error("Set constructor: add is not a function");
             js_iterate(source, [&](const JsValue& item) {
-                data->set(item, item);
+                js_call(adder, set, {item});
                 return true;
             });
         }

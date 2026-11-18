@@ -134,14 +134,16 @@ image), and its WebP mutations now run both `decode_detailed()` and
 `decode_frames()`. 2,400 cases, no findings; a 16,000-case run with the same
 seed was clean too.
 
-The unit suite has `webp_animated_frames_are_composited` (219 → 220 suites): a
+The unit suite has `webp_animated_frames_are_composited` (227 suites in all,
+after the Phase 71 work that merged alongside it): a
 four-frame 8x8 animation embedded as 244 bytes, with every field chosen by hand
 — a red frame drawn without blending, a half-transparent blue frame blended onto
 it, a green frame that clears its rectangle afterwards, and the blue frame again
 over the cleared area. Every frame is checked by an FNV-1a hash of its pixels
 plus the handful of pixels that name each compositor branch, and the file's four
-frames are byte-identical to libwebp's. The malformed-input suite gained the
-cut-frame, outside-the-canvas, wrong-size-image and oversized-canvas refusals.
+frames are byte-identical to libwebp's. The malformed-input suite gained five refusals — a
+cut frame, a frame broken inside its image, a frame outside the canvas, a
+wrong-size image and an oversized canvas.
 
 ## 5. What is left
 

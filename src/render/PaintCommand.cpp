@@ -37,19 +37,20 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     // a level of painting is not a level of building: ask again.
     if (stack_is_exhausted()) return;
 
-    bool has_t = box->style.has_transform && !box->style.transform_matrix.is_identity();
+    const ComputedStyle& s = *box->style;
+    bool has_t = s.has_transform && !s.transform_matrix.is_identity();
     if (has_t) {
-        list.add(PushTransformCommand{box->style.transform_matrix});
+        list.add(PushTransformCommand{s.transform_matrix});
     }
 
     // Overflow clipping: a box that clips paints a clip command before its own
     // background and pops it after its subtree.
     const bool clips =
-        box->style.overflow != Overflow::Visible || box->style.contains_paint();
+        s.overflow != Overflow::Visible || s.contains_paint();
     if (clips) {
         PushClipCommand clip;
         clip.rect = box->dimensions.padding_box();
-        clip.border_radius = box->style.border_radius;
+        clip.border_radius = s.border_radius;
         list.add(clip);
     }
 
@@ -57,28 +58,28 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     // shadow or borders (CSS 2.1 17.5.1.2, `empty-cells: hide`). The
     // collapsed model always paints the shared edges.
     const bool skip_cell_chrome =
-        box->box_type == BoxType::TableCellNode && box->style.empty_cells == EmptyCells::Hide &&
-        box->style.border_collapse != BorderCollapse::Collapse && !table_cell_has_content(*box);
+        box->box_type == BoxType::TableCellNode && s.empty_cells == EmptyCells::Hide &&
+        s.border_collapse != BorderCollapse::Collapse && !table_cell_has_content(*box);
 
     // 0. Box Shadow (rendered underneath background)
-    if (!skip_cell_chrome && box->style.box_shadow.has_shadow &&
-        !box->style.box_shadow.color.is_transparent()) {
+    if (!skip_cell_chrome && s.box_shadow.has_shadow &&
+        !s.box_shadow.color.is_transparent()) {
         DrawShadowCommand shadow;
         shadow.rect = box->dimensions.border_box();
-        shadow.x_offset = box->style.box_shadow.x_offset;
-        shadow.y_offset = box->style.box_shadow.y_offset;
-        shadow.blur = box->style.box_shadow.blur;
-        shadow.border_radius = box->style.border_radius;
-        shadow.color = box->style.box_shadow.color;
+        shadow.x_offset = s.box_shadow.x_offset;
+        shadow.y_offset = s.box_shadow.y_offset;
+        shadow.blur = s.box_shadow.blur;
+        shadow.border_radius = s.border_radius;
+        shadow.color = s.box_shadow.color;
         list.add(shadow);
     }
 
     // 1. Background
-    if (!skip_cell_chrome && !box->style.background_color.is_transparent()) {
+    if (!skip_cell_chrome && !s.background_color.is_transparent()) {
         DrawRectCommand cmd;
         cmd.rect = box->dimensions.padding_box();
-        cmd.color = box->style.background_color;
-        cmd.border_radius = box->style.border_radius;
+        cmd.color = s.background_color;
+        cmd.border_radius = s.border_radius;
         list.add(cmd);
     }
 
@@ -88,8 +89,8 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         DrawBorderCommand cmd;
         cmd.rect = box->dimensions.border_box();
         cmd.width = bw;
-        cmd.color = box->style.border_color;
-        cmd.border_radius = box->style.border_radius;
+        cmd.color = s.border_color;
+        cmd.border_radius = s.border_radius;
         if (box->border_color_override) cmd.edge_colors = *box->border_color_override;
         list.add(cmd);
     }
@@ -99,24 +100,25 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         for (const auto& line : box->line_boxes) {
             for (const auto& frag : line.fragments) {
                 if (frag.is_space) continue;
+                const ComputedStyle& fs = *frag.style;
 
                 // Fragment background (e.g. <span style="background-color: yellow;">)
-                if (!frag.style.background_color.is_transparent()) {
+                if (!fs.background_color.is_transparent()) {
                     DrawRectCommand bg_cmd;
                     bg_cmd.rect = frag.rect;
-                    bg_cmd.color = frag.style.background_color;
-                    bg_cmd.border_radius = frag.style.border_radius;
+                    bg_cmd.color = fs.background_color;
+                    bg_cmd.border_radius = fs.border_radius;
                     list.add(bg_cmd);
                 }
 
                 // Fragment border
-                const auto& fbw = frag.style.border_width;
+                const auto& fbw = fs.border_width;
                 if (fbw.top > 0 || fbw.right > 0 || fbw.bottom > 0 || fbw.left > 0) {
                     DrawBorderCommand b_cmd;
                     b_cmd.rect = frag.rect;
                     b_cmd.width = fbw;
-                    b_cmd.color = frag.style.border_color;
-                    b_cmd.border_radius = frag.style.border_radius;
+                    b_cmd.color = fs.border_color;
+                    b_cmd.border_radius = fs.border_radius;
                     list.add(b_cmd);
                 }
 
@@ -125,10 +127,10 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                     DrawTextCommand text_cmd;
                     text_cmd.position = Point(frag.rect.x, frag.rect.y);
                     text_cmd.text = frag.text;
-                    text_cmd.color = frag.style.color;
-                    text_cmd.font_size = frag.style.font_size;
-                    text_cmd.font_weight = frag.style.font_weight;
-                    text_cmd.font_family = frag.style.font_family;
+                    text_cmd.color = fs.color;
+                    text_cmd.font_size = fs.font_size;
+                    text_cmd.font_weight = fs.font_weight;
+                    text_cmd.font_family = fs.font_family;
                     list.add(text_cmd);
                 }
 
@@ -137,16 +139,16 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                     DrawImageCommand img_cmd;
                     img_cmd.rect = frag.rect;
                     img_cmd.image = frag.box->image;
-                    img_cmd.border_radius = frag.style.border_radius;
+                    img_cmd.border_radius = fs.border_radius;
                     list.add(img_cmd);
                 }
 
                 // Text decoration (e.g. <a> link underline)
-                if (frag.style.text_decoration == "underline") {
+                if (fs.has_underline()) {
                     DrawRectCommand u_cmd;
-                    float u_height = std::max(1.0f, frag.style.font_size * 0.08f);
+                    float u_height = std::max(1.0f, fs.font_size * 0.08f);
                     u_cmd.rect = Rect(frag.rect.x, frag.rect.y + frag.rect.height - u_height, frag.rect.width, u_height);
-                    u_cmd.color = frag.style.color;
+                    u_cmd.color = fs.color;
                     u_cmd.border_radius = 0.0f;
                     list.add(u_cmd);
                 }
@@ -157,26 +159,26 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
 
     // 4. Standalone Text Node (fallback if not in IFC)
     if (box->box_type == BoxType::TextNode) {
-        float line_h = box->style.font_size * 1.25f;
+        float line_h = s.font_size * 1.25f;
         if (!box->lines.empty()) {
             for (size_t i = 0; i < box->lines.size(); ++i) {
                 DrawTextCommand cmd;
                 cmd.position = Point(box->dimensions.content.x, box->dimensions.content.y + i * line_h);
                 cmd.text = box->lines[i];
-                cmd.color = box->style.color;
-                cmd.font_size = box->style.font_size;
-                cmd.font_weight = box->style.font_weight;
-                cmd.font_family = box->style.font_family;
+                cmd.color = s.color;
+                cmd.font_size = s.font_size;
+                cmd.font_weight = s.font_weight;
+                cmd.font_family = s.font_family;
                 list.add(cmd);
             }
         } else if (!box->text.empty()) {
             DrawTextCommand cmd;
             cmd.position = Point(box->dimensions.content.x, box->dimensions.content.y);
             cmd.text = box->text;
-            cmd.color = box->style.color;
-            cmd.font_size = box->style.font_size;
-            cmd.font_weight = box->style.font_weight;
-            cmd.font_family = box->style.font_family;
+            cmd.color = s.color;
+            cmd.font_size = s.font_size;
+            cmd.font_weight = s.font_weight;
+            cmd.font_family = s.font_family;
             list.add(cmd);
         }
     }
@@ -186,7 +188,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         DrawImageCommand cmd;
         cmd.rect = box->dimensions.content;
         cmd.image = box->image;
-        cmd.border_radius = box->style.border_radius;
+        cmd.border_radius = s.border_radius;
         list.add(cmd);
     }
 
@@ -196,10 +198,10 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     std::vector<std::shared_ptr<LayoutBox>> pos_z_children;
 
     for (const auto& child : box->children) {
-        if (child->style.is_positioned() && child->style.has_z_index) {
-            if (child->style.z_index < 0) {
+        if (child->style->is_positioned() && child->style->has_z_index) {
+            if (child->style->z_index < 0) {
                 neg_z_children.push_back(child);
-            } else if (child->style.z_index > 0) {
+            } else if (child->style->z_index > 0) {
                 pos_z_children.push_back(child);
             } else {
                 normal_children.push_back(child);
@@ -210,11 +212,11 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
     }
 
     std::stable_sort(neg_z_children.begin(), neg_z_children.end(), [](const auto& a, const auto& b) {
-        return a->style.z_index < b->style.z_index;
+        return a->style->z_index < b->style->z_index;
     });
 
     std::stable_sort(pos_z_children.begin(), pos_z_children.end(), [](const auto& a, const auto& b) {
-        return a->style.z_index < b->style.z_index;
+        return a->style->z_index < b->style->z_index;
     });
 
     // 1. Negative z-index elements paint first (behind normal flow)

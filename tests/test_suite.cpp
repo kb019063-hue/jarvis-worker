@@ -271,7 +271,7 @@ TEST(style_resolver_indexed_candidates_preserve_cascade) {
     assert(style.color == Color::parse("#123456")); // specificity and sheet order
     assert(style.background_color == Color::parse("#eeeeee")); // indexed compound class
     assert(style.font_weight == 700); // universal fallback bucket for attribute selector
-    assert(style.text_decoration == "none"); // candidate must still pass full matching
+    assert(style.text_decoration == TextDecoration::None); // candidate must still pass full matching
 
     // A class attribute is a list separated by any ASCII whitespace, and
     // markup formatted by a tool breaks a long list across lines. The index
@@ -578,11 +578,11 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     assert(root != nullptr);
 
     auto card = root->children[0];
-    assert(card->style.border_radius == 12.0f);
-    assert(card->style.box_shadow.has_shadow);
-    assert(card->style.box_shadow.x_offset == 4.0f);
-    assert(card->style.box_shadow.y_offset == 6.0f);
-    assert(card->style.box_shadow.blur == 8.0f);
+    assert(card->style->border_radius == 12.0f);
+    assert(card->style->box_shadow.has_shadow);
+    assert(card->style->box_shadow.x_offset == 4.0f);
+    assert(card->style->box_shadow.y_offset == 6.0f);
+    assert(card->style->box_shadow.blur == 8.0f);
 
     auto display_list = DisplayList::build(root);
     bool found_shadow = false;
@@ -1219,17 +1219,17 @@ TEST(inline_formatting_context) {
     for (const auto& line : p1->line_boxes) {
         for (const auto& frag : line.fragments) {
             if (frag.text == "bold" || frag.text == "world") {
-                if (frag.style.font_weight == 700) {
+                if (frag.style->font_weight == 700) {
                     found_bold = true;
                 }
             }
             if (frag.text == "link" || frag.text == "text") {
-                if (frag.style.color == Color::parse("#0066cc") && frag.style.text_decoration == "underline") {
+                if (frag.style->color == Color::parse("#0066cc") && frag.style->has_underline()) {
                     found_link = true;
                 }
             }
             if (frag.text == "highlight") {
-                if (frag.style.background_color == Color::parse("#ffff00") && frag.style.color == Color::parse("#ff0000")) {
+                if (frag.style->background_color == Color::parse("#ffff00") && frag.style->color == Color::parse("#ff0000")) {
                     found_highlight = true;
                 }
             }
@@ -2720,7 +2720,7 @@ TEST(css_transitions_and_animations) {
     ComputedStyle base_style;
     base_style.animation_name = "slide_fade";
     base_style.animation_duration = 2.0f;
-    base_style.animation_timing_function = "linear";
+    base_style.animation_timing_function = TimingFunction::Linear;
 
     // At t = 0.0s (start)
     ComputedStyle style_0 = base_style;
@@ -9685,10 +9685,10 @@ TEST(canvas_and_svg_bitmaps_are_bounded) {
         auto wide = find_box_by_id(root, "wide");
         auto icon = find_box_by_id(root, "icon");
         auto sheet = find_box_by_id(root, "sheet");
-        assert(vast && vast->image == nullptr && vast->style.width == 1e9f);
-        assert(wide && wide->image == nullptr && wide->style.width == 100000.0f);
+        assert(vast && vast->image == nullptr && vast->style->width == 1e9f);
+        assert(wide && wide->image == nullptr && wide->style->width == 100000.0f);
         assert(icon && icon->image != nullptr && icon->image->width == 40 && icon->image->height == 30);
-        assert(sheet && sheet->style.width == 100000.0f);
+        assert(sheet && sheet->style->width == 100000.0f);
         assert(sheet->image != nullptr && sheet->image->pixels.size() == 1);
         assert(find_box_by_id(root, "after") != nullptr);
         DisplayList::build(root);
@@ -17307,6 +17307,124 @@ TEST(js_iteration_of_another_realms_array) {
     assert(text("[...[7, 8]].join()") == "7,8");
 }
 
+TEST(shared_computed_style_deduplicates_boxes_and_fragments) {
+    using namespace litebird;
+
+    static_assert(sizeof(LayoutBox) < 400);
+    static_assert(sizeof(InlineFragment) < 128);
+
+    std::string body_html = "<body><p>";
+    for (int i = 0; i < 200; ++i) {
+        body_html += "word <b>bold</b> <span class=\"hl\">mark</span> ";
+    }
+    body_html += "</p></body>";
+
+    auto doc = HtmlParser::parse(body_html);
+    StyleResolver resolver;
+    resolver.add_stylesheet(CssParser::parse(".hl { background-color: #ff0; color: #c00; }"));
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(root != nullptr);
+
+    std::vector<const ComputedStyle*> distinct_styles;
+    auto record = [&](const SharedComputedStyle& s) {
+        assert(s != nullptr);
+        distinct_styles.push_back(s.get());
+    };
+    std::function<void(const std::shared_ptr<LayoutBox>&)> visit = [&](const std::shared_ptr<LayoutBox>& b) {
+        if (!b) return;
+        record(b->style);
+        for (const auto& line : b->line_boxes) {
+            for (const auto& frag : line.fragments) {
+                record(frag.style);
+            }
+        }
+        for (const auto& ch : b->children) {
+            visit(ch);
+        }
+    };
+    visit(root);
+
+    std::sort(distinct_styles.begin(), distinct_styles.end());
+    distinct_styles.erase(std::unique(distinct_styles.begin(), distinct_styles.end()), distinct_styles.end());
+
+    // Across 200 * 3 inline elements + text nodes + wrapped fragments (> 1,000 objects),
+    // deduplication collapses all styles to a tiny constant set of distinct pointers.
+    assert(distinct_styles.size() <= 8);
+
+    // ComputedStylePool directly interns identical styles and inherited_only caches per parent.
+    ComputedStylePool pool;
+    assert(pool.intern(ComputedStyle{}).get() == default_computed_style().get());
+    ComputedStyle a;
+    a.color = Color::parse("#123456");
+    a.font_size = 18.0f;
+    ComputedStyle b = a;
+    auto sa = pool.intern(std::move(a));
+    auto sb = pool.intern(std::move(b));
+    assert(sa.get() == sb.get());
+    auto ia = pool.inherited_only(sa, Display::Inline);
+    auto ib = pool.inherited_only(sb, Display::Inline);
+    assert(ia.get() == ib.get());
+    assert(ia->color == Color::parse("#123456"));
+    assert(ia->font_size == 18.0f);
+}
+
+TEST(shared_percentage_styles_do_not_clobber_siblings) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<div style=\"width: 200px\"><div id=\"a\" class=\"half\"></div></div>"
+        "<div style=\"width: 400px\"><div id=\"b\" class=\"half\"></div></div>");
+    StyleResolver resolver;
+    resolver.add_stylesheet(CssParser::parse(".half { width: 50%; margin-left: 10%; height: 20px; }"));
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    assert(root != nullptr);
+
+    auto box_a = find_box_by_id(root, "a");
+    auto box_b = find_box_by_id(root, "b");
+    assert(box_a && box_b);
+    assert(std::abs(box_a->dimensions.content.width - 100.0f) < 0.01f);
+    assert(std::abs(box_a->dimensions.margin.left - 20.0f) < 0.01f);
+    assert(std::abs(box_b->dimensions.content.width - 200.0f) < 0.01f);
+    assert(std::abs(box_b->dimensions.margin.left - 40.0f) < 0.01f);
+
+    // Relayouting box_a at a new containing width recomputes from kept percentages.
+    box_a->mark_needs_layout();
+    box_a->layout(300.0f, 0.0f);
+    assert(std::abs(box_a->dimensions.content.width - 150.0f) < 0.01f);
+    assert(std::abs(box_a->dimensions.margin.left - 30.0f) < 0.01f);
+    assert(std::abs(box_b->dimensions.content.width - 200.0f) < 0.01f);
+}
+
+TEST(text_align_and_text_decoration_enums_parse_cleanly) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<div id=\"a\" style=\"text-align: center; text-decoration: underline;\"></div>"
+        "<div id=\"b\" style=\"text-align: right; text-decoration: underline line-through overline;\"></div>"
+        "<div id=\"c\" style=\"text-align: end; text-decoration: none;\"></div>"
+        "<div id=\"d\" style=\"text-align: bogus; text-decoration: solid;\"></div>");
+    StyleResolver resolver;
+
+    auto s_a = resolver.resolve_style(doc->get_element_by_id("a"));
+    assert(s_a.text_align == TextAlign::Center);
+    assert(s_a.has_underline());
+    assert(!s_a.has_line_through());
+
+    auto s_b = resolver.resolve_style(doc->get_element_by_id("b"));
+    assert(s_b.text_align == TextAlign::Right);
+    assert(s_b.has_underline());
+    assert(s_b.has_line_through());
+    assert(s_b.has_overline());
+
+    auto s_c = resolver.resolve_style(doc->get_element_by_id("c"));
+    assert(s_c.text_align == TextAlign::End);
+    assert(!s_c.has_text_decoration());
+
+    auto s_d = resolver.resolve_style(doc->get_element_by_id("d"));
+    assert(s_d.text_align == TextAlign::Left);
+    assert(s_d.text_decoration == TextDecoration::None);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 73: HTTP/1.1 CookieJar wiring, RFC 9111 HTTP cache, and CORS preflight
 // ---------------------------------------------------------------------------
@@ -18247,6 +18365,11 @@ int main() {
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.
     RUN_TEST(per_glyph_font_fallback);
+
+    // Phase 71 / Finding 77: shared immutable ComputedStyle & enum compaction.
+    RUN_TEST(shared_computed_style_deduplicates_boxes_and_fragments);
+    RUN_TEST(shared_percentage_styles_do_not_clobber_siblings);
+    RUN_TEST(text_align_and_text_decoration_enums_parse_cleanly);
 
     // Phase 73: HTTP/1.1 CookieJar wiring, RFC 9111 HTTP cache, CORS preflight, and Fetch Headers.
     RUN_TEST(http_cookie_jar_rfc6265_domain_path_security_and_redirects);

@@ -7,11 +7,428 @@
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/FormState.hpp"
 #include <sstream>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <climits>
+#include <cstring>
+#include <functional>
 
 namespace litebird {
+
+namespace {
+
+void hash_combine(std::size_t& seed, std::size_t v) {
+    seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+std::size_t hash_float(float f) {
+    if (f == 0.0f) return 0u;
+    if (f != f) return 0x7fc00000u;
+    return static_cast<std::size_t>(std::bit_cast<uint32_t>(f));
+}
+
+void hash_edges(std::size_t& h, const EdgeSizes& e) {
+    hash_combine(h, hash_float(e.top));
+    hash_combine(h, hash_float(e.right));
+    hash_combine(h, hash_float(e.bottom));
+    hash_combine(h, hash_float(e.left));
+}
+
+void hash_color(std::size_t& h, const Color& c) {
+    uint32_t packed = (static_cast<uint32_t>(c.r) << 24) |
+                      (static_cast<uint32_t>(c.g) << 16) |
+                      (static_cast<uint32_t>(c.b) << 8) |
+                      static_cast<uint32_t>(c.a);
+    hash_combine(h, packed);
+}
+
+bool equal_transform(const TransformMatrix2D& a, const TransformMatrix2D& b) {
+    return a.a == b.a && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e && a.f == b.f;
+}
+
+bool equal_filter(const FilterFunction& a, const FilterFunction& b) {
+    return a.type == b.type && a.amount == b.amount && a.color == b.color &&
+           a.dx == b.dx && a.dy == b.dy && a.blur_radius == b.blur_radius;
+}
+
+bool ascii_iequals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != static_cast<unsigned char>(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool parse_text_align(std::string_view val_lower, TextAlign& out) {
+    if (ascii_iequals(val_lower, "left")) { out = TextAlign::Left; return true; }
+    if (ascii_iequals(val_lower, "center")) { out = TextAlign::Center; return true; }
+    if (ascii_iequals(val_lower, "right")) { out = TextAlign::Right; return true; }
+    if (ascii_iequals(val_lower, "justify")) { out = TextAlign::Justify; return true; }
+    if (ascii_iequals(val_lower, "start")) { out = TextAlign::Start; return true; }
+    if (ascii_iequals(val_lower, "end")) { out = TextAlign::End; return true; }
+    return false;
+}
+
+bool parse_text_decoration(std::string_view val_lower, TextDecoration& out) {
+    std::string_view trimmed = css_trim_view(val_lower);
+    if (ascii_iequals(trimmed, "none")) {
+        out = TextDecoration::None;
+        return true;
+    }
+    TextDecoration mask = TextDecoration::None;
+    bool any = false;
+    std::size_t i = 0;
+    while (i < trimmed.size()) {
+        while (i < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[i]))) ++i;
+        std::size_t start = i;
+        while (i < trimmed.size() && !std::isspace(static_cast<unsigned char>(trimmed[i]))) ++i;
+        if (i > start) {
+            std::string_view tok = trimmed.substr(start, i - start);
+            if (ascii_iequals(tok, "underline")) { mask |= TextDecoration::Underline; any = true; }
+            else if (ascii_iequals(tok, "line-through")) { mask |= TextDecoration::LineThrough; any = true; }
+            else if (ascii_iequals(tok, "overline")) { mask |= TextDecoration::Overline; any = true; }
+            else if (ascii_iequals(tok, "none")) { any = true; }
+        }
+    }
+    if (!any) return false;
+    out = mask;
+    return true;
+}
+
+bool parse_timing_function(std::string_view val, TimingFunction& out) {
+    std::string_view trimmed = css_trim_view(val);
+    if (ascii_iequals(trimmed, "ease")) { out = TimingFunction::Ease; return true; }
+    if (ascii_iequals(trimmed, "linear")) { out = TimingFunction::Linear; return true; }
+    if (ascii_iequals(trimmed, "ease-in")) { out = TimingFunction::EaseIn; return true; }
+    if (ascii_iequals(trimmed, "ease-out")) { out = TimingFunction::EaseOut; return true; }
+    if (ascii_iequals(trimmed, "ease-in-out")) { out = TimingFunction::EaseInOut; return true; }
+    if (ascii_iequals(trimmed, "step-start")) { out = TimingFunction::StepStart; return true; }
+    if (ascii_iequals(trimmed, "step") || ascii_iequals(trimmed, "step-end")) { out = TimingFunction::StepEnd; return true; }
+    return false;
+}
+
+} // namespace
+
+bool ComputedStyle::operator==(const ComputedStyle& other) const {
+    if (display != other.display || color != other.color ||
+        background_color != other.background_color || dark_color_scheme != other.dark_color_scheme ||
+        width != other.width || height != other.height ||
+        !(margin == other.margin) || !(padding == other.padding) ||
+        width_percent != other.width_percent || height_percent != other.height_percent ||
+        min_width_percent != other.min_width_percent || max_width_percent != other.max_width_percent ||
+        min_height_percent != other.min_height_percent || max_height_percent != other.max_height_percent ||
+        !(margin_percent == other.margin_percent) || !(padding_percent == other.padding_percent) ||
+        !(border_width == other.border_width) || border_color != other.border_color ||
+        border_radius != other.border_radius || border_radius_percent != other.border_radius_percent ||
+        !(box_shadow == other.box_shadow) ||
+        font_size != other.font_size || font_weight != other.font_weight ||
+        font_family != other.font_family ||
+        line_height != other.line_height || line_height_number != other.line_height_number ||
+        text_align != other.text_align || text_decoration != other.text_decoration ||
+        float_type != other.float_type || clear_type != other.clear_type || overflow != other.overflow ||
+        border_collapse != other.border_collapse ||
+        border_spacing_x != other.border_spacing_x || border_spacing_y != other.border_spacing_y ||
+        table_layout != other.table_layout || empty_cells != other.empty_cells ||
+        caption_side != other.caption_side ||
+        position != other.position ||
+        top != other.top || right != other.right || bottom != other.bottom || left != other.left ||
+        has_top != other.has_top || has_right != other.has_right ||
+        has_bottom != other.has_bottom || has_left != other.has_left ||
+        z_index != other.z_index || has_z_index != other.has_z_index ||
+        box_sizing != other.box_sizing ||
+        min_width != other.min_width || max_width != other.max_width ||
+        min_height != other.min_height || max_height != other.max_height ||
+        margin_top_auto != other.margin_top_auto || margin_bottom_auto != other.margin_bottom_auto ||
+        margin_left_auto != other.margin_left_auto || margin_right_auto != other.margin_right_auto ||
+        flex_direction != other.flex_direction || flex_wrap != other.flex_wrap ||
+        justify_content != other.justify_content || align_items != other.align_items ||
+        align_content != other.align_content ||
+        gap != other.gap || flex_grow != other.flex_grow ||
+        flex_shrink != other.flex_shrink || flex_basis != other.flex_basis ||
+        grid_column_gap != other.grid_column_gap || grid_row_gap != other.grid_row_gap ||
+        grid_auto_fit_columns != other.grid_auto_fit_columns ||
+        !(grid_auto_fit_def == other.grid_auto_fit_def) ||
+        opacity != other.opacity || animation_duration != other.animation_duration ||
+        animation_timing_function != other.animation_timing_function ||
+        animation_iteration_count != other.animation_iteration_count ||
+        transition_duration != other.transition_duration ||
+        transition_timing_function != other.transition_timing_function ||
+        transition_delay != other.transition_delay ||
+        has_transform != other.has_transform ||
+        grid_row_start != other.grid_row_start || grid_row_end != other.grid_row_end ||
+        grid_column_start != other.grid_column_start || grid_column_end != other.grid_column_end ||
+        containment != other.containment ||
+        animation_name != other.animation_name ||
+        transition_property != other.transition_property ||
+        transform_str != other.transform_str ||
+        transform_origin != other.transform_origin ||
+        grid_area_name != other.grid_area_name ||
+        grid_template_columns != other.grid_template_columns ||
+        grid_template_rows != other.grid_template_rows ||
+        grid_col_track_defs != other.grid_col_track_defs ||
+        grid_row_track_defs != other.grid_row_track_defs) {
+        return false;
+    }
+    if (!equal_transform(transform_matrix, other.transform_matrix)) {
+        return false;
+    }
+    if (filters.size() != other.filters.size()) return false;
+    for (std::size_t i = 0; i < filters.size(); ++i) {
+        if (!equal_filter(filters[i], other.filters[i])) return false;
+    }
+    if (backdrop_filters.size() != other.backdrop_filters.size()) return false;
+    for (std::size_t i = 0; i < backdrop_filters.size(); ++i) {
+        if (!equal_filter(backdrop_filters[i], other.backdrop_filters[i])) return false;
+    }
+    if (custom_properties != other.custom_properties) return false;
+    if (grid_named_areas != other.grid_named_areas) return false;
+    return true;
+}
+
+std::size_t ComputedStyle::hash() const {
+    std::size_t h = static_cast<std::size_t>(display);
+    hash_color(h, color);
+    hash_color(h, background_color);
+    hash_combine(h, dark_color_scheme ? 1u : 0u);
+    hash_combine(h, hash_float(width));
+    hash_combine(h, hash_float(height));
+    hash_edges(h, margin);
+    hash_edges(h, padding);
+    hash_combine(h, hash_float(width_percent));
+    hash_combine(h, hash_float(height_percent));
+    hash_combine(h, hash_float(min_width_percent));
+    hash_combine(h, hash_float(max_width_percent));
+    hash_combine(h, hash_float(min_height_percent));
+    hash_combine(h, hash_float(max_height_percent));
+    hash_edges(h, margin_percent);
+    hash_edges(h, padding_percent);
+    hash_edges(h, border_width);
+    hash_color(h, border_color);
+    hash_combine(h, hash_float(border_radius));
+    hash_combine(h, hash_float(border_radius_percent));
+    if (box_shadow.has_shadow) {
+        hash_combine(h, 1u);
+        hash_combine(h, hash_float(box_shadow.x_offset));
+        hash_combine(h, hash_float(box_shadow.y_offset));
+        hash_combine(h, hash_float(box_shadow.blur));
+        hash_color(h, box_shadow.color);
+    }
+    hash_combine(h, hash_float(font_size));
+    hash_combine(h, static_cast<std::size_t>(font_weight));
+    if (!font_family.empty()) hash_combine(h, std::hash<std::string>{}(font_family));
+    hash_combine(h, hash_float(line_height));
+    hash_combine(h, hash_float(line_height_number));
+    const uint32_t flags =
+        (static_cast<uint32_t>(text_align)) |
+        (static_cast<uint32_t>(text_decoration) << 4) |
+        (static_cast<uint32_t>(float_type) << 8) |
+        (static_cast<uint32_t>(clear_type) << 10) |
+        (static_cast<uint32_t>(overflow) << 12) |
+        (static_cast<uint32_t>(border_collapse) << 14) |
+        (static_cast<uint32_t>(table_layout) << 15) |
+        (static_cast<uint32_t>(empty_cells) << 16) |
+        (static_cast<uint32_t>(caption_side) << 17) |
+        (static_cast<uint32_t>(position) << 18) |
+        (static_cast<uint32_t>(box_sizing) << 20) |
+        (static_cast<uint32_t>(containment) << 21);
+    hash_combine(h, flags);
+    hash_combine(h, hash_float(border_spacing_x));
+    hash_combine(h, hash_float(border_spacing_y));
+    if (has_top || has_right || has_bottom || has_left || has_z_index) {
+        hash_combine(h, (has_top ? 1u : 0u) | (has_right ? 2u : 0u) |
+                        (has_bottom ? 4u : 0u) | (has_left ? 8u : 0u) |
+                        (has_z_index ? 16u : 0u));
+        hash_combine(h, hash_float(top));
+        hash_combine(h, hash_float(right));
+        hash_combine(h, hash_float(bottom));
+        hash_combine(h, hash_float(left));
+        hash_combine(h, static_cast<std::size_t>(z_index));
+    }
+    hash_combine(h, hash_float(min_width));
+    hash_combine(h, hash_float(max_width));
+    hash_combine(h, hash_float(min_height));
+    hash_combine(h, hash_float(max_height));
+    if (margin_top_auto || margin_bottom_auto || margin_left_auto || margin_right_auto) {
+        hash_combine(h, (margin_top_auto ? 1u : 0u) | (margin_bottom_auto ? 2u : 0u) |
+                        (margin_left_auto ? 4u : 0u) | (margin_right_auto ? 8u : 0u));
+    }
+    if (display == Display::Flex || flex_grow != 0.0f || flex_shrink != 1.0f ||
+        flex_basis >= 0.0f || gap != 0.0f) {
+        hash_combine(h, static_cast<std::size_t>(flex_direction));
+        hash_combine(h, static_cast<std::size_t>(flex_wrap));
+        hash_combine(h, static_cast<std::size_t>(justify_content));
+        hash_combine(h, static_cast<std::size_t>(align_items));
+        hash_combine(h, static_cast<std::size_t>(align_content));
+        hash_combine(h, hash_float(gap));
+        hash_combine(h, hash_float(flex_grow));
+        hash_combine(h, hash_float(flex_shrink));
+        hash_combine(h, hash_float(flex_basis));
+    }
+    if (!grid_template_columns.empty() || !grid_template_rows.empty() ||
+        !grid_col_track_defs.empty() || !grid_row_track_defs.empty() ||
+        grid_column_gap != 0.0f || grid_row_gap != 0.0f || grid_auto_fit_columns ||
+        !grid_named_areas.empty() || !grid_area_name.empty() ||
+        grid_row_start != 0 || grid_row_end != 0 ||
+        grid_column_start != 0 || grid_column_end != 0) {
+        hash_combine(h, grid_template_columns.size());
+        for (float v : grid_template_columns) hash_combine(h, hash_float(v));
+        hash_combine(h, grid_template_rows.size());
+        for (float v : grid_template_rows) hash_combine(h, hash_float(v));
+        hash_combine(h, hash_float(grid_column_gap));
+        hash_combine(h, hash_float(grid_row_gap));
+        hash_combine(h, grid_col_track_defs.size());
+        for (const auto& d : grid_col_track_defs) {
+            hash_combine(h, hash_float(d.min_px));
+            hash_combine(h, hash_float(d.max_px));
+            hash_combine(h, hash_float(d.max_fr));
+        }
+        hash_combine(h, grid_row_track_defs.size());
+        for (const auto& d : grid_row_track_defs) {
+            hash_combine(h, hash_float(d.min_px));
+            hash_combine(h, hash_float(d.max_px));
+            hash_combine(h, hash_float(d.max_fr));
+        }
+        hash_combine(h, grid_auto_fit_columns ? 1u : 0u);
+        if (!grid_area_name.empty()) hash_combine(h, std::hash<std::string>{}(grid_area_name));
+        hash_combine(h, static_cast<std::size_t>(grid_row_start));
+        hash_combine(h, static_cast<std::size_t>(grid_row_end));
+        hash_combine(h, static_cast<std::size_t>(grid_column_start));
+        hash_combine(h, static_cast<std::size_t>(grid_column_end));
+        hash_combine(h, grid_named_areas.size());
+    }
+    hash_combine(h, hash_float(opacity));
+    if (!animation_name.empty() || animation_duration != 0.0f ||
+        animation_timing_function != TimingFunction::Ease || animation_iteration_count != 1.0f) {
+        if (!animation_name.empty()) hash_combine(h, std::hash<std::string>{}(animation_name));
+        hash_combine(h, hash_float(animation_duration));
+        hash_combine(h, static_cast<std::size_t>(animation_timing_function));
+        hash_combine(h, hash_float(animation_iteration_count));
+    }
+    if (!transition_property.empty() || transition_duration != 0.0f ||
+        transition_timing_function != TimingFunction::Ease || transition_delay != 0.0f) {
+        if (!transition_property.empty()) hash_combine(h, std::hash<std::string>{}(transition_property));
+        hash_combine(h, hash_float(transition_duration));
+        hash_combine(h, static_cast<std::size_t>(transition_timing_function));
+        hash_combine(h, hash_float(transition_delay));
+    }
+    if (has_transform || !transform_str.empty() || !transform_origin.empty()) {
+        hash_combine(h, has_transform ? 1u : 0u);
+        hash_combine(h, hash_float(transform_matrix.a));
+        hash_combine(h, hash_float(transform_matrix.b));
+        hash_combine(h, hash_float(transform_matrix.c));
+        hash_combine(h, hash_float(transform_matrix.d));
+        hash_combine(h, hash_float(transform_matrix.e));
+        hash_combine(h, hash_float(transform_matrix.f));
+        if (!transform_str.empty()) hash_combine(h, std::hash<std::string>{}(transform_str));
+        if (!transform_origin.empty()) hash_combine(h, std::hash<std::string>{}(transform_origin));
+    }
+    if (!custom_properties.empty()) {
+        // Order-independent hash for custom_properties map.
+        std::size_t map_xor = custom_properties.size();
+        for (const auto& [k, v] : custom_properties) {
+            std::size_t kv = std::hash<std::string>{}(k);
+            hash_combine(kv, std::hash<std::string>{}(v));
+            map_xor ^= kv;
+        }
+        hash_combine(h, map_xor);
+    }
+    if (!filters.empty()) {
+        hash_combine(h, filters.size());
+        for (const auto& f : filters) {
+            hash_combine(h, static_cast<std::size_t>(f.type));
+            hash_combine(h, hash_float(f.amount));
+        }
+    }
+    if (!backdrop_filters.empty()) {
+        hash_combine(h, backdrop_filters.size());
+        for (const auto& f : backdrop_filters) {
+            hash_combine(h, static_cast<std::size_t>(f.type));
+            hash_combine(h, hash_float(f.amount));
+        }
+    }
+    return h;
+}
+
+const SharedComputedStyle& default_computed_style() {
+    static const SharedComputedStyle* canonical =
+        new SharedComputedStyle(std::make_shared<const ComputedStyle>());
+    return *canonical;
+}
+
+ComputedStylePool::ComputedStylePool() {
+    const SharedComputedStyle& def = default_computed_style();
+    m_buckets[def->hash()].push_back(def);
+}
+
+SharedComputedStyle ComputedStylePool::intern(ComputedStyle&& style) {
+    const std::size_t h = style.hash();
+    auto& bucket = m_buckets[h];
+    for (const auto& existing : bucket) {
+        if (*existing == style) {
+            return existing;
+        }
+    }
+    auto created = std::make_shared<const ComputedStyle>(std::move(style));
+    bucket.push_back(created);
+    return created;
+}
+
+SharedComputedStyle ComputedStylePool::intern(const ComputedStyle& style) {
+    const std::size_t h = style.hash();
+    auto& bucket = m_buckets[h];
+    for (const auto& existing : bucket) {
+        if (*existing == style) {
+            return existing;
+        }
+    }
+    auto created = std::make_shared<const ComputedStyle>(style);
+    bucket.push_back(created);
+    return created;
+}
+
+SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle& parent, Display display) {
+    const ComputedStyle* key = parent ? parent.get() : default_computed_style().get();
+    if (display == Display::Inline) {
+        auto it = m_inherited_inline_cache.find(key);
+        if (it != m_inherited_inline_cache.end()) return it->second;
+    } else if (display == Display::Block) {
+        auto it = m_inherited_block_cache.find(key);
+        if (it != m_inherited_block_cache.end()) return it->second;
+    }
+
+    ComputedStyle s;
+    s.display = display;
+    s.color = key->color;
+    s.font_size = key->font_size;
+    s.font_weight = key->font_weight;
+    s.line_height = key->line_height;
+    s.line_height_number = key->line_height_number;
+    s.text_align = key->text_align;
+    s.text_decoration = key->text_decoration;
+    s.border_collapse = key->border_collapse;
+    s.border_spacing_x = key->border_spacing_x;
+    s.border_spacing_y = key->border_spacing_y;
+    if (!key->custom_properties.empty()) s.custom_properties = key->custom_properties;
+
+    SharedComputedStyle interned = intern(std::move(s));
+    if (display == Display::Inline) {
+        m_inherited_inline_cache.emplace(key, interned);
+    } else if (display == Display::Block) {
+        m_inherited_block_cache.emplace(key, interned);
+    }
+    return interned;
+}
+
+std::size_t ComputedStylePool::unique_count() const {
+    std::size_t total = 0;
+    for (const auto& [h, vec] : m_buckets) {
+        total += vec.size();
+    }
+    return total;
+}
 
 StyleSheet StyleResolver::default_user_agent_stylesheet() {
     const char* ua_css = R"(
@@ -1797,9 +2214,9 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         // now, by FontRenderer, at the point a string is measured and drawn.
         style.font_family = val;
     } else if (prop == "text-align") {
-        style.text_align = val;
+        parse_text_align(val_lower, style.text_align);
     } else if (prop == "text-decoration") {
-        style.text_decoration = val;
+        parse_text_decoration(val_lower, style.text_decoration);
     } else if (prop == "opacity") {
         try { style.opacity = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
     } else if (prop == "animation-name") {
@@ -1816,7 +2233,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         };
         style.animation_duration = parse_sec(val);
     } else if (prop == "animation-timing-function") {
-        style.animation_timing_function = val;
+        parse_timing_function(val_lower, style.animation_timing_function);
     } else if (prop == "animation-iteration-count") {
         if (val == "infinite") style.animation_iteration_count = -1.0f;
         else { try { style.animation_iteration_count = std::stof(val); } catch (...) {} }
@@ -1835,8 +2252,8 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                 } else if (s.back() == 's') {
                     try { style.animation_duration = std::stof(s.substr(0, s.size() - 1)); } catch (...) {}
                 }
-            } else if (token == "linear" || token == "ease" || token == "ease-in" || token == "ease-out" || token == "ease-in-out") {
-                style.animation_timing_function = token;
+            } else if (parse_timing_function(token, style.animation_timing_function)) {
+                // parsed timing function
             } else if (token == "infinite") {
                 style.animation_iteration_count = -1.0f;
             } else if (std::isdigit(token[0])) {
@@ -1858,7 +2275,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         };
         style.transition_duration = parse_sec(val);
     } else if (prop == "transition-timing-function") {
-        style.transition_timing_function = val;
+        parse_timing_function(val_lower, style.transition_timing_function);
     } else if (prop == "transition") {
         // e.g. "opacity 0.5s ease"
         std::stringstream ss(val);
@@ -1872,7 +2289,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                     try { style.transition_duration = std::stof(token.substr(0, token.size() - 1)); } catch (...) {}
                 }
                 if (ss >> token) {
-                    style.transition_timing_function = token;
+                    parse_timing_function(token, style.transition_timing_function);
                 }
             }
         }
@@ -2434,9 +2851,9 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.dark_color_scheme = parent_style->dark_color_scheme;
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
-        style.font_family = parent_style->font_family;
+        if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
-        style.custom_properties = parent_style->custom_properties;
+        if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;
         // empty-cells and caption-side inherit per CSS 2.1 17.5.1.2 and 17.4.1.
         style.empty_cells = parent_style->empty_cells;
         style.caption_side = parent_style->caption_side;
@@ -2705,14 +3122,25 @@ void StyleResolver::apply_animation(ComputedStyle& style, float elapsed_seconds)
     }
 
     // Apply timing function
-    if (style.animation_timing_function == "ease" || style.animation_timing_function == "ease-in-out") {
-        t = t * t * (3.0f - 2.0f * t);
-    } else if (style.animation_timing_function == "ease-in") {
-        t = t * t;
-    } else if (style.animation_timing_function == "ease-out") {
-        t = t * (2.0f - t);
-    } else if (style.animation_timing_function == "step" || style.animation_timing_function == "step-end") {
-        t = (t >= 1.0f) ? 1.0f : 0.0f;
+    switch (style.animation_timing_function) {
+        case TimingFunction::Ease:
+        case TimingFunction::EaseInOut:
+            t = t * t * (3.0f - 2.0f * t);
+            break;
+        case TimingFunction::EaseIn:
+            t = t * t;
+            break;
+        case TimingFunction::EaseOut:
+            t = t * (2.0f - t);
+            break;
+        case TimingFunction::StepStart:
+            t = (t > 0.0f) ? 1.0f : 0.0f;
+            break;
+        case TimingFunction::StepEnd:
+            t = (t >= 1.0f) ? 1.0f : 0.0f;
+            break;
+        case TimingFunction::Linear:
+            break;
     }
 
     if (t <= kfr->keyframes.front().offset) {

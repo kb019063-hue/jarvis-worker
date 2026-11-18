@@ -37,7 +37,8 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 214 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 217 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
@@ -58,13 +59,14 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 214 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 217 engine suites + 114 cross-origin Window/Location/channel checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
 make bench-collections # Map/Set completed-iterator growth guard, two 8,192-loop batches without gc()
+make bench-styles    # 100k repeated inline words/links/spans under 500 MiB peak RSS (`word <b>bold</b>` was 1,382 MiB)
 make verify-color    # CSS Color 4/5 15-space rational oracle, §13.2 gamut map, and WPT vectors
 make fuzz-color      # adversarial grammar & mutation fuzzing for CSS Color 4/5
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, lossless WebP vs libwebp, and SVG conformance
@@ -724,7 +726,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 214 engine test suites
+# Run the 217 engine test suites
 make test
 ```
 
@@ -792,14 +794,14 @@ make test
 make test
 ```
 
-Output (214 suites; the first and last lines shown):
+Output (217 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 214 engine test suites passed successfully!
+All 217 engine test suites passed successfully!
 ```
 
 ```bash
@@ -945,7 +947,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 214/214 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 217/217 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

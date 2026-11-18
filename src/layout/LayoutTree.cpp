@@ -58,23 +58,48 @@ bool is_block_level_box(const LayoutBox& box) {
            box.box_type == BoxType::TableCellNode;
 }
 
-ComputedStyle inherited_only_style(const ComputedStyle& parent) {
-    ComputedStyle s;
-    s.color = parent.color;
-    s.font_size = parent.font_size;
-    s.font_weight = parent.font_weight;
-    s.line_height = parent.line_height;
-    s.line_height_number = parent.line_height_number;
-    s.text_align = parent.text_align;
-    s.text_decoration = parent.text_decoration;
-    s.border_collapse = parent.border_collapse;
-    s.border_spacing_x = parent.border_spacing_x;
-    s.border_spacing_y = parent.border_spacing_y;
-    s.custom_properties = parent.custom_properties;
-    return s;
+SharedComputedStyle resolve_element_style(
+    const std::shared_ptr<Element>& element,
+    const StyleResolver& resolver,
+    const SharedComputedStyle& parent_style,
+    ComputedStylePool& pool
+) {
+    const std::string& tag = element->tag_name();
+    if (!element->is_foreign() && tag == "input" && forms::input_type(*element) == "hidden") {
+        return nullptr;
+    }
+
+    ComputedStyle computed = resolver.resolve_style(element, parent_style.get());
+    if (!element->is_foreign()) {
+        if ((tag == "button" || tag == "input" || tag == "select" || tag == "textarea") &&
+            computed.display == Display::Inline) {
+            computed.display = Display::InlineBlock;
+        }
+        if (tag == "input") {
+            const std::string itype = forms::input_type(*element);
+            if (itype != "checkbox" && itype != "radio" && itype != "submit" &&
+                itype != "button" && itype != "reset") {
+                if (computed.width < 0.0f && computed.width_percent < 0.0f) {
+                    computed.width = 180.0f;
+                }
+                if (computed.height < 0.0f && computed.height_percent < 0.0f) {
+                    computed.min_height = std::max(computed.min_height, computed.font_size * 1.4f);
+                }
+                if (computed.background_color.is_transparent()) {
+                    computed.background_color = Color(255, 255, 255, 255);
+                }
+            }
+        }
+    }
+    if (computed.is_none()) return nullptr;
+    return pool.intern(std::move(computed));
 }
 
-void normalize_block_children(const std::shared_ptr<LayoutBox>& box, const ComputedStyle& parent_style) {
+void normalize_block_children(
+    const std::shared_ptr<LayoutBox>& box,
+    const SharedComputedStyle& parent_style,
+    ComputedStylePool& pool
+) {
     if (!box) return;
     if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock) return;
     if (box->children.empty()) return;
@@ -94,6 +119,7 @@ void normalize_block_children(const std::shared_ptr<LayoutBox>& box, const Compu
 
     std::vector<std::shared_ptr<LayoutBox>> normalized;
     std::shared_ptr<LayoutBox> current_anon = nullptr;
+    SharedComputedStyle anon_style;
 
     for (const auto& ch : box->children) {
         bool is_block_level = is_block_level_box(*ch);
@@ -105,8 +131,9 @@ void normalize_block_children(const std::shared_ptr<LayoutBox>& box, const Compu
                 continue;
             }
             if (!current_anon) {
-                ComputedStyle anon_style = inherited_only_style(parent_style);
-                anon_style.display = Display::Block;
+                if (!anon_style) {
+                    anon_style = pool.inherited_only(parent_style, Display::Block);
+                }
                 current_anon = LayoutBox::create_anonymous(anon_style);
                 normalized.push_back(current_anon);
             }
@@ -176,56 +203,73 @@ std::shared_ptr<ImageData> load_image_for_element(const Element& element) {
 
 void populate_special_element_box(
     const std::shared_ptr<Element>& element,
-    const std::shared_ptr<LayoutBox>& box
+    const std::shared_ptr<LayoutBox>& box,
+    ComputedStylePool& pool
 ) {
     const std::string& tag = element->tag_name();
     if (tag == "img") {
         box->box_type = BoxType::ImageNode;
         std::shared_ptr<ImageData> img_data = load_image_for_element(*element);
+        float resolved_w = box->style->width;
+        float resolved_h = box->style->height;
 
-        if (box->style.width < 0.0f) {
+        if (resolved_w < 0.0f) {
             if (element->has_attribute("width")) {
-                try { box->style.width = std::stof(element->get_attribute("width")); } catch (...) {}
+                try { resolved_w = std::stof(element->get_attribute("width")); } catch (...) {}
             } else if (img_data) {
-                box->style.width = static_cast<float>(img_data->width);
+                resolved_w = static_cast<float>(img_data->width);
             } else {
-                box->style.width = 0.0f;
+                resolved_w = 0.0f;
             }
         }
-        if (box->style.height < 0.0f) {
+        if (resolved_h < 0.0f) {
             if (element->has_attribute("height")) {
-                try { box->style.height = std::stof(element->get_attribute("height")); } catch (...) {}
+                try { resolved_h = std::stof(element->get_attribute("height")); } catch (...) {}
             } else if (img_data) {
-                box->style.height = static_cast<float>(img_data->height);
+                resolved_h = static_cast<float>(img_data->height);
             } else {
-                box->style.height = 0.0f;
+                resolved_h = 0.0f;
             }
+        }
+        if (resolved_w != box->style->width || resolved_h != box->style->height) {
+            ComputedStyle updated = *box->style;
+            updated.width = resolved_w;
+            updated.height = resolved_h;
+            box->style = pool.intern(std::move(updated));
         }
         box->image = img_data;
     } else if (tag == "canvas") {
         box->box_type = BoxType::ImageNode;
         auto ctx = element->get_or_create_canvas_context_2d();
-        if (box->style.width < 0.0f) {
+        float resolved_w = box->style->width;
+        float resolved_h = box->style->height;
+        if (resolved_w < 0.0f) {
             if (element->has_attribute("width")) {
-                try { box->style.width = std::stof(element->get_attribute("width")); } catch (...) {}
+                try { resolved_w = std::stof(element->get_attribute("width")); } catch (...) {}
             } else if (ctx) {
-                box->style.width = static_cast<float>(ctx->width());
+                resolved_w = static_cast<float>(ctx->width());
             } else {
-                box->style.width = 300.0f;
+                resolved_w = 300.0f;
             }
         }
-        if (box->style.height < 0.0f) {
+        if (resolved_h < 0.0f) {
             if (element->has_attribute("height")) {
-                try { box->style.height = std::stof(element->get_attribute("height")); } catch (...) {}
+                try { resolved_h = std::stof(element->get_attribute("height")); } catch (...) {}
             } else if (ctx) {
-                box->style.height = static_cast<float>(ctx->height());
+                resolved_h = static_cast<float>(ctx->height());
             } else {
-                box->style.height = 150.0f;
+                resolved_h = 150.0f;
             }
+        }
+        if (resolved_w != box->style->width || resolved_h != box->style->height) {
+            ComputedStyle updated = *box->style;
+            updated.width = resolved_w;
+            updated.height = resolved_h;
+            box->style = pool.intern(std::move(updated));
         }
         if (ctx) {
-            int target_w = static_cast<int>(box->style.width);
-            int target_h = static_cast<int>(box->style.height);
+            int target_w = static_cast<int>(resolved_w);
+            int target_h = static_cast<int>(resolved_h);
             if (target_w > 0 && target_h > 0 && (ctx->width() != target_w || ctx->height() != target_h)) {
                 ctx->resize(target_w, target_h);
             }
@@ -233,8 +277,8 @@ void populate_special_element_box(
         }
     } else if (tag == "svg") {
         box->box_type = BoxType::ImageNode;
-        float svg_w = box->style.width;
-        float svg_h = box->style.height;
+        float svg_w = box->style->width;
+        float svg_h = box->style->height;
         if (svg_w < 0.0f) {
             if (element->has_attribute("width")) {
                 try { svg_w = std::stof(element->get_attribute("width")); } catch (...) {}
@@ -247,13 +291,17 @@ void populate_special_element_box(
             }
             if (svg_h < 0.0f) svg_h = 150.0f;
         }
-        box->style.width = svg_w;
-        box->style.height = svg_h;
+        if (svg_w != box->style->width || svg_h != box->style->height) {
+            ComputedStyle updated = *box->style;
+            updated.width = svg_w;
+            updated.height = svg_h;
+            box->style = pool.intern(std::move(updated));
+        }
         box->image = SvgRenderer::render(element, svg_w, svg_h);
     } else if (!element->is_foreign() && tag == "iframe") {
         box->box_type = BoxType::ImageNode;
-        float frame_w = box->style.width;
-        float frame_h = box->style.height;
+        float frame_w = box->style->width;
+        float frame_h = box->style->height;
         if (frame_w < 0.0f) {
             if (element->has_attribute("width")) {
                 try { frame_w = std::stof(element->get_attribute("width")); } catch (...) {}
@@ -266,8 +314,12 @@ void populate_special_element_box(
             }
             if (frame_h < 0.0f) frame_h = 150.0f;
         }
-        box->style.width = frame_w;
-        box->style.height = frame_h;
+        if (frame_w != box->style->width || frame_h != box->style->height) {
+            ComputedStyle updated = *box->style;
+            updated.width = frame_w;
+            updated.height = frame_h;
+            box->style = pool.intern(std::move(updated));
+        }
 
         static thread_local int t_iframe_layout_depth = 0;
         if (auto subdoc = element->content_document(); subdoc && t_iframe_layout_depth < 8 && !stack_is_exhausted()) {
@@ -324,7 +376,7 @@ void split_inline_box_around_blocks(
 ) {
     bool has_block = false;
     for (const auto& ch : inline_box->children) {
-        if (is_block_level_box(*ch) && !ch->style.is_out_of_flow() && !ch->style.is_floated()) {
+        if (is_block_level_box(*ch) && !ch->style->is_out_of_flow() && !ch->style->is_floated()) {
             has_block = true;
             break;
         }
@@ -336,7 +388,7 @@ void split_inline_box_around_blocks(
 
     std::shared_ptr<LayoutBox> current_inline = nullptr;
     for (const auto& ch : inline_box->children) {
-        const bool lift_block = is_block_level_box(*ch) && !ch->style.is_out_of_flow() && !ch->style.is_floated();
+        const bool lift_block = is_block_level_box(*ch) && !ch->style->is_out_of_flow() && !ch->style->is_floated();
         if (lift_block) {
             current_inline = nullptr;
             out.push_back(ch);
@@ -359,7 +411,8 @@ void split_inline_box_around_blocks(
 void LayoutTree::build_boxes(
     const std::shared_ptr<Node>& node,
     const StyleResolver& resolver,
-    const ComputedStyle* parent_style,
+    const SharedComputedStyle& parent_style,
+    ComputedStylePool& pool,
     int depth,
     std::vector<std::shared_ptr<LayoutBox>>& out,
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>>& split_inline_blocks
@@ -374,15 +427,17 @@ void LayoutTree::build_boxes(
         std::string raw = text_node->text();
         if (is_all_whitespace(raw)) {
             if (parent_style && parent_style->is_inline()) {
-                ComputedStyle text_style = inherited_only_style(*parent_style);
-                out.push_back(LayoutBox::create_text(node, " ", text_style));
+                SharedComputedStyle text_style = pool.inherited_only(parent_style, Display::Inline);
+                out.push_back(LayoutBox::create_text(node, " ", std::move(text_style)));
             }
             return;
         }
 
-        ComputedStyle text_style = parent_style ? inherited_only_style(*parent_style) : ComputedStyle{};
+        SharedComputedStyle text_style = parent_style
+            ? pool.inherited_only(parent_style, Display::Inline)
+            : default_computed_style();
         std::string collapsed = collapse_whitespace(raw);
-        out.push_back(LayoutBox::create_text(node, collapsed, text_style));
+        out.push_back(LayoutBox::create_text(node, std::move(collapsed), std::move(text_style)));
         return;
     }
 
@@ -397,48 +452,22 @@ void LayoutTree::build_boxes(
             // Represent <br> as a newline/line-break inline box if needed, or preserve existing behavior
         }
 
-        // Held on heap to keep recursive stack frames small (~1 KB).
-        auto style_ptr = std::make_shared<ComputedStyle>(resolver.resolve_style(element, parent_style));
-        if (!element->is_foreign()) {
-            if (tag == "input" && forms::input_type(*element) == "hidden") {
-                return;
-            }
-            if ((tag == "button" || tag == "input" || tag == "select" || tag == "textarea") &&
-                style_ptr->display == Display::Inline) {
-                style_ptr->display = Display::InlineBlock;
-            }
-            if (tag == "input") {
-                const std::string itype = forms::input_type(*element);
-                if (itype != "checkbox" && itype != "radio" && itype != "submit" &&
-                    itype != "button" && itype != "reset") {
-                    if (style_ptr->width < 0.0f && style_ptr->width_percent < 0.0f) {
-                        style_ptr->width = 180.0f;
-                    }
-                    if (style_ptr->height < 0.0f && style_ptr->height_percent < 0.0f) {
-                        style_ptr->min_height = std::max(style_ptr->min_height, style_ptr->font_size * 1.4f);
-                    }
-                    if (style_ptr->background_color.is_transparent()) {
-                        style_ptr->background_color = Color(255, 255, 255, 255);
-                    }
-                }
-            }
-        }
-        const ComputedStyle& style = *style_ptr;
-        if (style.is_none()) return;
+        SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
+        if (!style) return;
 
         std::shared_ptr<LayoutBox> box;
-        if (style.is_table()) {
+        if (style->is_table()) {
             box = LayoutBox::create_table(element, style);
-        } else if (style.is_table_row()) {
+        } else if (style->is_table_row()) {
             box = LayoutBox::create_table_row(element, style);
-        } else if (style.is_table_cell()) {
+        } else if (style->is_table_cell()) {
             box = LayoutBox::create_table_cell(element, style);
-        } else if (style.is_flex()) {
+        } else if (style->is_flex()) {
             box = LayoutBox::create_flex(element, style);
-        } else if (style.is_grid()) {
+        } else if (style->is_grid()) {
             box = LayoutBox::create_grid(element, style);
-        } else if (style.is_block() || style.is_block_level() || style.is_inline_block() ||
-                   style.is_table_caption()) {
+        } else if (style->is_block() || style->is_block_level() || style->is_inline_block() ||
+                   style->is_table_caption()) {
             box = LayoutBox::create_block(element, style);
         } else {
             box = LayoutBox::create_inline(element, style);
@@ -447,7 +476,7 @@ void LayoutTree::build_boxes(
         // Synthesize visual content for void/form controls (<input>, <select>, dirty <textarea>).
         if (!element->is_foreign() && tag == "input") {
             const std::string itype = forms::input_type(*element);
-            ComputedStyle ctrl_text = inherited_only_style(style);
+            SharedComputedStyle ctrl_style = pool.inherited_only(style, Display::Inline);
             std::string label;
             if (itype == "checkbox") {
                 label = forms::checked(*element) ? "[x]" : "[ ]";
@@ -468,31 +497,37 @@ void LayoutTree::build_boxes(
                     }
                 } else if (element->has_attribute("placeholder")) {
                     label = collapse_whitespace(element->get_attribute("placeholder"));
-                    ctrl_text.color = Color(100, 116, 139, 255);
+                    ComputedStyle ph_style = *ctrl_style;
+                    ph_style.color = Color(100, 116, 139, 255);
+                    ctrl_style = pool.intern(std::move(ph_style));
                 }
             }
             if (!label.empty()) {
-                box->append_child(LayoutBox::create_text(nullptr, label, ctrl_text));
+                box->append_child(LayoutBox::create_text(nullptr, std::move(label), std::move(ctrl_style)));
             }
         } else if (!element->is_foreign() && tag == "select") {
             auto sel_opts = forms::selected_options(*element);
             if (!sel_opts.empty() && sel_opts.front()) {
-                ComputedStyle ctrl_text = inherited_only_style(style);
+                SharedComputedStyle ctrl_style = pool.inherited_only(style, Display::Inline);
                 std::string label = collapse_whitespace(forms::option_label(*sel_opts.front()));
                 if (!label.empty()) {
-                    box->append_child(LayoutBox::create_text(nullptr, label, ctrl_text));
+                    box->append_child(LayoutBox::create_text(nullptr, std::move(label), std::move(ctrl_style)));
                 }
             }
         } else if (!element->is_foreign() && tag == "textarea") {
             std::string cur = forms::value(*element);
             if (!cur.empty() || element->has_attribute("placeholder")) {
-                ComputedStyle ctrl_text = inherited_only_style(style);
+                SharedComputedStyle ctrl_style = pool.inherited_only(style, Display::Inline);
                 std::string label = !cur.empty()
                                         ? collapse_whitespace(cur)
                                         : collapse_whitespace(element->get_attribute("placeholder"));
-                if (cur.empty()) ctrl_text.color = Color(100, 116, 139, 255);
+                if (cur.empty()) {
+                    ComputedStyle ph_style = *ctrl_style;
+                    ph_style.color = Color(100, 116, 139, 255);
+                    ctrl_style = pool.intern(std::move(ph_style));
+                }
                 if (!label.empty()) {
-                    box->append_child(LayoutBox::create_text(nullptr, label, ctrl_text));
+                    box->append_child(LayoutBox::create_text(nullptr, std::move(label), std::move(ctrl_style)));
                 }
             }
         } else if (tag != "svg" && (element->is_foreign() || tag != "iframe")) {
@@ -506,15 +541,15 @@ void LayoutTree::build_boxes(
                     auto assigned = ShadowRoot::assigned_nodes(slot_el);
                     if (!assigned.empty()) {
                         for (const auto& a : assigned) {
-                            build_boxes(a, resolver, &style, depth + 1, child_boxes, split_inline_blocks);
+                            build_boxes(a, resolver, style, pool, depth + 1, child_boxes, split_inline_blocks);
                         }
                     } else {
                         for (const auto& slot_ch : slot_el->children()) {
-                            build_boxes(slot_ch, resolver, &style, depth + 1, child_boxes, split_inline_blocks);
+                            build_boxes(slot_ch, resolver, style, pool, depth + 1, child_boxes, split_inline_blocks);
                         }
                     }
                 } else {
-                    build_boxes(ch, resolver, &style, depth + 1, child_boxes, split_inline_blocks);
+                    build_boxes(ch, resolver, style, pool, depth + 1, child_boxes, split_inline_blocks);
                 }
                 for (auto& cb : child_boxes) {
                     if (cb) box->append_child(cb);
@@ -522,14 +557,12 @@ void LayoutTree::build_boxes(
             }
         }
 
-        style_ptr.reset();
-
         if (box->box_type == BoxType::BlockNode) {
-            normalize_block_children(box, box->style);
+            normalize_block_children(box, box->style, pool);
         }
 
         if (tag == "img" || tag == "canvas" || tag == "svg" || (!element->is_foreign() && tag == "iframe")) {
-            populate_special_element_box(element, box);
+            populate_special_element_box(element, box, pool);
         }
 
         if (box->box_type == BoxType::InlineNode) {
@@ -544,12 +577,12 @@ void LayoutTree::build_boxes(
         auto doc = std::static_pointer_cast<Document>(node);
         auto body = doc->body();
         if (body) {
-            build_boxes(body, resolver, nullptr, depth + 1, out, split_inline_blocks);
+            build_boxes(body, resolver, nullptr, pool, depth + 1, out, split_inline_blocks);
             return;
         }
         auto doc_el = doc->document_element();
         if (doc_el) {
-            build_boxes(doc_el, resolver, nullptr, depth + 1, out, split_inline_blocks);
+            build_boxes(doc_el, resolver, nullptr, pool, depth + 1, out, split_inline_blocks);
             return;
         }
     }
@@ -558,22 +591,22 @@ void LayoutTree::build_boxes(
 std::shared_ptr<LayoutBox> LayoutTree::build_box(
     const std::shared_ptr<Node>& node,
     const StyleResolver& resolver,
-    const ComputedStyle* parent_style,
+    const SharedComputedStyle& parent_style,
+    ComputedStylePool& pool,
     int depth
 ) {
     std::vector<std::shared_ptr<LayoutBox>> boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
-    build_boxes(node, resolver, parent_style, depth, boxes, split_inline_blocks);
+    build_boxes(node, resolver, parent_style, pool, depth, boxes, split_inline_blocks);
     if (boxes.empty()) return nullptr;
     if (boxes.size() == 1) return boxes.front();
 
-    ComputedStyle wrapper_style = parent_style ? inherited_only_style(*parent_style) : ComputedStyle{};
-    wrapper_style.display = Display::Block;
+    SharedComputedStyle wrapper_style = pool.inherited_only(parent_style, Display::Block);
     auto wrapper = LayoutBox::create_anonymous(wrapper_style);
     for (auto& b : boxes) {
         wrapper->append_child(b);
     }
-    normalize_block_children(wrapper, wrapper_style);
+    normalize_block_children(wrapper, wrapper_style, pool);
     return wrapper;
 }
 
@@ -595,25 +628,24 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         });
     }
 
+    ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
-    build_boxes(root_node, resolver, nullptr, 0, root_boxes, split_inline_blocks);
+    build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {
         root_box = root_boxes.front();
     } else if (!root_boxes.empty()) {
-        ComputedStyle root_style;
-        root_style.display = Display::Block;
+        SharedComputedStyle root_style = pool.inherited_only(default_computed_style(), Display::Block);
         root_box = LayoutBox::create_anonymous(root_style);
         for (auto& b : root_boxes) {
             root_box->append_child(b);
         }
-        normalize_block_children(root_box, root_style);
+        normalize_block_children(root_box, root_style, pool);
     } else {
-        ComputedStyle root_style;
-        root_style.display = Display::Block;
-        root_box = LayoutBox::create_block(nullptr, root_style);
+        SharedComputedStyle root_style = pool.inherited_only(default_computed_style(), Display::Block);
+        root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
     root_box->dimensions.content.x = 0.0f;

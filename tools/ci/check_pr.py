@@ -4,11 +4,13 @@
     python3 tools/ci/check_pr.py             # the claims, the numbers taken, the next free pair
     python3 tools/ci/check_pr.py claim N     # after opening #N: are its numbers and its files free
     python3 tools/ci/check_pr.py merge N     # before `gh pr merge N --merge`
+    python3 tools/ci/check_pr.py --self-test # how a claim is read, on fixed texts; no network
 
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
 is a thing to look up at a moment when the work feels finished. This looks
-them up. It reads; it changes nothing.
+them up. It reads; it changes nothing on GitHub, and in the clone it only
+fetches `main` when the clone is behind it.
 
 `claim N` fails (exit 1) when
   - #N does not begin with the `Task:`, `Files:` and `Phase P, finding F`
@@ -34,8 +36,10 @@ them up. It reads; it changes nothing.
 
 Everything is asked of GitHub through `gh` (which has to be logged in), and
 nothing of the local clone: a sandbox's clone is shallow, and a shallow clone
-answers "is `main` in this commit" wrongly. Run it inside the repository, so
-that `gh` knows which one is meant.
+answers "is `main` in this commit" wrongly. The one exception is the numbers
+`main` has: `tools/next_ids.py` reads them out of git, from the commit that
+GitHub says `main` is at. Run it inside the repository, so that `gh` knows
+which one is meant.
 
 The one exception is the set of numbers taken, which comes from
 `tools/next_ids.py --taken --ref main` — that tool reads `main` out of git
@@ -51,6 +55,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 NEXT_IDS = ROOT / "tools" / "next_ids.py"      # the one allocator
@@ -69,6 +74,9 @@ NO_NUMBERS_RE = re.compile(
     r"no phase,? (?:no|or) finding|takes no phase|is not a phase|not a phase and takes no",
     re.IGNORECASE,
 )
+# What a file name in a `Files:` line can be followed by: the closing backtick,
+# and the full stop, semicolon or colon of the sentence around it.
+FILE_NAME_END_RE = re.compile(r"[`.;:\s]+$")
 REPO = "repos/{owner}/{repo}"      # `gh api` fills the two in from the clone
 
 
@@ -118,11 +126,18 @@ def claim_of(pr: dict) -> dict:
         if line.startswith("Files:"):
             has_files_line = collecting = True
             line = line[len("Files:"):]
-        elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)):
+        elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)
+                             or NO_NUMBERS_RE.search(line)):
+            # The third line of a claim ends the list whichever of its two forms
+            # it has. `No phase, no finding: ...` used to be read on as more
+            # files, so two pull requests without numbers shared one called
+            # "No phase", and the later was told to stay out of it.
             collecting = False
         if collecting:
             for part in re.sub(r"\([^)]*\)", "", line).split(","):
-                part = part.strip().strip("`").strip()
+                # "`docs/x.md`." at the end of a sentence is docs/x.md; a name
+                # may begin with a full stop (.github/...), so only the end.
+                part = FILE_NAME_END_RE.sub("", part.strip().lstrip("`").strip())
                 if part:
                     named.add(part)
     changed = {entry["path"] for entry in pr.get("files") or []}
@@ -148,8 +163,44 @@ def same_files(mine: set[str], theirs: set[str]) -> list[str]:
     return sorted(shared)
 
 
-def on_main() -> tuple[set[int], set[int]]:
-    """The phase and finding numbers `main` has taken.
+def main_commit() -> str:
+    """The commit `main` is at on GitHub, made sure to be in this clone.
+
+    `tools/next_ids.py --ref` reads a ref out of the local clone, and the
+    local `main` is where the clone was made. On 18 November that was one
+    merge behind: asked for `main`, the allocator answered with floors of 66
+    and 72 and no Phase 68, twenty minutes after #83 had put 68 and 74 on
+    `main`.
+    Whether a number has landed is the one question that must not be answered
+    from before it landed, so the commit is asked of GitHub and fetched when
+    the clone does not have it.
+    """
+    sha = commit("main")["sha"]
+
+    def present() -> bool:
+        return subprocess.run(("git", "cat-file", "-e", f"{sha}^{{commit}}"),
+                              cwd=ROOT, capture_output=True).returncode == 0
+
+    if not present():
+        subprocess.run(("git", "fetch", "--quiet", "origin", "main"), cwd=ROOT, capture_output=True)
+    if not present():
+        sys.exit(f"main is at {sha[:7]} on GitHub, and this clone does not have that commit "
+                 "and could not fetch it (git fetch origin main)")
+    return sha
+
+
+class Main(NamedTuple):
+    """What `main` says about the two counters."""
+    phases: set[int]            # taken: mentioned in a file, or at or below a floor
+    findings: set[int]
+    written_phases: set[int]    # has a write-up (tools/next_ids.py, `written`)
+    written_findings: set[int]
+    phase_floor: int
+    finding_floor: int
+
+
+def on_main() -> Main:
+    """The phase and finding numbers `main` has taken, and those it has written.
 
     Asked of `tools/next_ids.py`, which is the one allocator in the
     repository. This used to parse ARCHITECTURE.md and AUDIT.md here with
@@ -161,13 +212,23 @@ def on_main() -> tuple[set[int], set[int]]:
     places, cannot disagree with itself like that.
 
     `main` and not the working tree, because the question is what `main`
-    has and a sandbox's clone may be behind it. `--no-prs`, because the
+    has and a sandbox's clone may be behind it; and `main` as GitHub has it,
+    not the clone's branch of that name, for the same reason
+    (`main_commit`). `--no-prs`, because the
     open claims are folded in separately below: without it, a pull request
     is told that the number it has just claimed is already taken — by
     itself.
+
+    Taken and written are kept apart. Every number up to a floor of
+    `docs/state.json` is taken, and every number a document mentions, so that
+    the allocator never hands one out again, whether or not a write-up of it
+    exists. This file used to call all of them "on main already": #63 (Phase
+    62, finding 68) and #73 (Phase 58, finding 64) were open, with numbers
+    that had no write-up, when the floors passed them, and were told "not
+    ready" for a reason that was not true.
     """
     result = subprocess.run(
-        [sys.executable, str(NEXT_IDS), "--taken", "--ref", "main", "--no-prs"],
+        [sys.executable, str(NEXT_IDS), "--taken", "--ref", main_commit(), "--no-prs"],
         cwd=ROOT, capture_output=True, text=True,
     )
     if result.returncode not in (0, 1) or not result.stdout.strip():
@@ -182,7 +243,10 @@ def on_main() -> tuple[set[int], set[int]]:
         sys.exit(f"{NEXT_IDS.name} answered with something that is not JSON:\n{result.stdout[:400]}")
     if result.stderr.strip():
         print(f"note: {result.stderr.strip()}", file=sys.stderr)
-    return set(taken["phases"]), set(taken["findings"])
+    phases, findings = set(taken["phases"]), set(taken["findings"])
+    return Main(phases, findings,
+                set(taken.get("written_phases", phases)), set(taken.get("written_findings", findings)),
+                int(taken.get("phase_floor", 0)), int(taken.get("finding_floor", 0)))
 
 
 def open_claims() -> list[dict]:
@@ -204,10 +268,29 @@ def next_free(taken: set[int]) -> int:
     return max(taken, default=0) + 1
 
 
-def taken_numbers(claims: list[dict], main_phases: set[int], main_findings: set[int]) -> tuple[set[int], set[int]]:
-    phases = set(main_phases) | {c["phase"] for c in claims if c["phase"] is not None}
-    findings = set(main_findings) | {c["finding"] for c in claims if c["finding"] is not None}
+def taken_numbers(claims: list[dict], main: Main) -> tuple[set[int], set[int]]:
+    phases = set(main.phases) | {c["phase"] for c in claims if c["phase"] is not None}
+    findings = set(main.findings) | {c["finding"] for c in claims if c["finding"] is not None}
     return phases, findings
+
+
+def numbers_of(claim: dict) -> str:
+    """'Phase 5, finding 7', or what a claim without numbers is called."""
+    return ", ".join(f"{kind} {claim[key]}" for kind, key in (("Phase", "phase"), ("finding", "finding"))
+                     if claim[key] is not None) or "no phase, no finding"
+
+
+def number_on_main(kind: str, number: int, main: Main) -> tuple[bool, str | None]:
+    """(is a write-up of this number on main, what else there is to say about it)."""
+    written, floor = ((main.written_phases, main.phase_floor) if kind == "Phase"
+                      else (main.written_findings, main.finding_floor))
+    if number in written:
+        return True, None
+    if number <= floor:
+        return False, (f"{kind} {number} has no write-up on main. It is at or below the floor of docs/state.json "
+                       f"({floor}), so tools/next_ids.py hands it out no more: it is this pull request's "
+                       "if it was claimed while it was free")
+    return False, None
 
 
 class Report:
@@ -225,18 +308,21 @@ class Report:
         print(f"    {text}")
 
 
-def claim_problems(claim: dict, claims: list[dict], main_phases: set[int], main_findings: set[int]) -> list[tuple[bool, str]]:
+def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bool, str]]:
     """What is wrong with a claim: (does this pull request have to change, what)."""
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
         problems.append((True, "its text does not begin with the Task:, Files: and `Phase P, finding F` lines"))
     others = [c for c in claims if c["number"] != claim["number"]]
-    for kind, key, on in (("Phase", "phase", main_phases), ("finding", "finding", main_findings)):
+    for kind, key in (("Phase", "phase"), ("finding", "finding")):
         number = claim[key]
         if number is None:
             continue
-        if number in on:
+        written, remark = number_on_main(kind, number, main)
+        if written:
             problems.append((True, f"{kind} {number} is on main already"))
+        elif remark:
+            problems.append((False, remark))
         for other in others:
             if other[key] != number:
                 continue
@@ -259,19 +345,17 @@ def claim_problems(claim: dict, claims: list[dict], main_phases: set[int], main_
 
 def show_claims() -> int:
     claims = open_claims()
-    main_phases, main_findings = on_main()
-    print(f"main: phases up to {max(main_phases)}, findings up to {max(main_findings)}")
+    main = on_main()
+    print(f"main: phases up to {max(main.phases)}, findings up to {max(main.findings)}")
     for claim in claims:
         pushed = hours_since(commit(claim["head"])["commit"]["committer"]["date"])
-        numbers = ", ".join(f"{kind} {claim[key]}" for kind, key in (("Phase", "phase"), ("finding", "finding"))
-                            if claim[key] is not None) or "no numbers"
-        print(f"\n#{claim['number']}  {numbers}  (last commit {pushed:.1f} h ago)")
+        print(f"\n#{claim['number']}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
         print(f"    {claim['title'][:110]}")
         own = sorted(claim["files"] - SHARED)
         print("    files: " + (", ".join(own) if own else "(none)"))
-        for blocking, problem in claim_problems(claim, claims, main_phases, main_findings):
+        for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
-    phases, findings = taken_numbers(claims, main_phases, main_findings)
+    phases, findings = taken_numbers(claims, main)
     print(f"\nnext free: Phase {next_free(phases)}, finding {next_free(findings)}")
     return 0
 
@@ -281,14 +365,14 @@ def check_claim(number: int) -> int:
     mine = next((c for c in claims if c["number"] == number), None)
     if mine is None:
         sys.exit(f"#{number} is not an open pull request")
-    main_phases, main_findings = on_main()
+    main = on_main()
     report = Report()
-    for blocking, problem in claim_problems(mine, claims, main_phases, main_findings):
+    for blocking, problem in claim_problems(mine, claims, main):
         (report.no if blocking else report.note)(problem)
     if not report.failed:
-        report.ok(f"#{number}: Phase {mine['phase']}, finding {mine['finding']}; no earlier open pull request has its numbers or its files")
+        report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
-        phases, findings = taken_numbers(claims, main_phases, main_findings)
+        phases, findings = taken_numbers(claims, main)
         report.note(f"next free: Phase {next_free(phases)}, finding {next_free(findings)}")
     return 1 if report.failed else 0
 
@@ -377,16 +461,19 @@ def check_merge(number: int) -> int:
                           f"({', '.join(changed) or 'nothing'}). Say so in the pull request")
 
     claim = claim_of(pr)
-    main_phases, main_findings = on_main()
+    main = on_main()
     if not claim["has_claim_lines"]:
         report.no("the text does not begin with the Task:, Files: and `Phase P, finding F` lines")
-    for kind, mine, on in (("Phase", claim["phase"], main_phases), ("finding", claim["finding"], main_findings)):
+    for kind, mine in (("Phase", claim["phase"]), ("finding", claim["finding"])):
         if mine is None:
             continue
-        if mine in on:
+        written, remark = number_on_main(kind, mine, main)
+        if written:
             report.no(f"{kind} {mine} is on main already")
         else:
             report.ok(f"{kind} {mine} is not on main")
+            if remark:
+                report.note(remark)
     for other in open_claims():
         if other["number"] == number:
             continue
@@ -413,10 +500,74 @@ def check_merge(number: int) -> int:
     return 1 if report.failed else 0
 
 
+def self_test() -> int:
+    """The cases the reading of a claim is trusted for. Needs no network."""
+    def claim(body: str, title: str = "WIP: a change", changed: tuple[str, ...] = ()) -> dict:
+        return claim_of({"number": 1, "title": title, "body": body,
+                         "files": [{"path": path} for path in changed]})
+
+    numbered = claim("Task: a row\nFiles: `src/a.cpp` (new), `include/a.hpp`,\n`tests/test_suite.cpp`\nPhase 5, finding 7\n\ntext, `not/a/file.cpp`")
+    plain = claim("Task: not a row of the table.\nFiles: `ROADMAP.md`\nNo phase, no finding: documents only; no C++ changed.\n\ntext")
+    other = claim("Task: something else.\nFiles: `docs/README.md`\nNo phase, no finding: tooling, nothing that moves a scoreboard.\n")
+    sentence = claim("Task: a row\nFiles: `src/a.cpp`, `.github/workflows/ci.yml`, `docs/findings/64-lists.md`.\nPhase 5, finding 7\n")
+    silent = claim("## What\n\nA change, described.", title="Phase 56: a title that says a number")
+    folder = claim("Task: a row\nFiles: `tests/dom-conformance/`\nPhase 5, finding 7\n")
+    inside = claim("Task: a row\nFiles: `src/b.cpp`\nPhase 6, finding 8\n", changed=("tests/dom-conformance/everyday.dat",))
+
+    cases = [
+        ("the three lines: the numbers", (numbered["phase"], numbered["finding"]), (5, 7)),
+        ("the three lines: the files, over two lines, without what is in brackets",
+         numbered["files"], {"src/a.cpp", "include/a.hpp", "tests/test_suite.cpp"}),
+        ("the three lines are a claim", numbered["has_claim_lines"], True),
+        ("`No phase, no finding` is the third line of a claim, and a claim", plain["has_claim_lines"], True),
+        ("`No phase, no finding` takes no number", (plain["phase"], plain["finding"]), (None, None)),
+        ("`No phase, no finding` ends the list of files: its words are not files", plain["files"], {"ROADMAP.md"}),
+        ("two pull requests without numbers share no file", same_files(plain["files"], other["files"]), []),
+        ("a name at the end of a sentence loses the full stop, one that begins with a full stop keeps it",
+         sentence["files"], {"src/a.cpp", ".github/workflows/ci.yml", "docs/findings/64-lists.md"}),
+        ("no claim lines is no claim", silent["has_claim_lines"], False),
+        ("no claim lines: the number in the title is still a number in use", silent["phase"], 56),
+        ("a name that ends in / is every file under it",
+         same_files(folder["files"], inside["files"]), ["tests/dom-conformance/everyday.dat"]),
+        ("the files every pull request changes are shared by none",
+         same_files({"AGENTS.md", "README.md"}, {"AGENTS.md", "README.md"}), []),
+        ("a claim without numbers is called that, not `Phase None`", numbers_of(plain), "no phase, no finding"),
+        ("a claim with numbers is called by them", numbers_of(numbered), "Phase 5, finding 7"),
+    ]
+
+    # main has write-ups of phases 1-4 and 6 and of findings 1-6 and 8, and
+    # floors of 6 and 8: Phase 5 and finding 7 are taken and have no write-up.
+    main = Main(set(range(1, 7)), set(range(1, 9)), {1, 2, 3, 4, 6}, {1, 2, 3, 4, 5, 6, 8}, 6, 8)
+    below = claim_problems(numbered, [numbered], main)
+    written = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 6, finding 8\n"), [], main)
+    free = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 7, finding 9\n"), [], main)
+    cases += [
+        ("a number at or below a floor that has no write-up does not stop its pull request",
+         [blocking for blocking, _text in below], [False, False]),
+        ("and the remark says where it stands",
+         ["has no write-up on main" in text and "floor" in text for _blocking, text in below], [True, True]),
+        ("a number that has a write-up on main stops it",
+         written, [(True, "Phase 6 is on main already"), (True, "finding 8 is on main already")]),
+        ("a number above the floors that has no write-up is free", free, []),
+    ]
+    failed = 0
+    for name, got, wanted in cases:
+        ok = got == wanted
+        failed += not ok
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        if not ok:
+            print(f"         wanted {wanted!r}")
+            print(f"         got    {got!r}")
+    print(f"\n{len(cases) - failed}/{len(cases)} pass")
+    return 1 if failed else 0
+
+
 def main() -> int:
     arguments = sys.argv[1:]
     if not arguments:
         return show_claims()
+    if arguments == ["--self-test"]:
+        return self_test()
     if len(arguments) == 2 and arguments[0] in ("claim", "merge") and arguments[1].lstrip("#").isdigit():
         number = int(arguments[1].lstrip("#"))
         return check_claim(number) if arguments[0] == "claim" else check_merge(number)

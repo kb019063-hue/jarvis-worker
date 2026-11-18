@@ -33,6 +33,8 @@
 #include <cstdint>
 #include <cstring>
 #include <climits>
+#include <map>
+#include <set>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/JsBuiltins.hpp"
@@ -1747,6 +1749,320 @@ TEST(bolder_and_lighter_are_relative_to_the_parent) {
     // A number outside the scale is clamped to it, not taken as written.
     assert(resolver.resolve_style(doc->get_element_by_id("big"), nullptr).font_weight == 1000);
     assert(resolver.resolve_style(doc->get_element_by_id("small"), nullptr).font_weight == 1);
+}
+
+namespace {
+
+// A reader for a font's own `kern` table and `cmap`, written out here rather
+// than borrowed from the engine. A test that asks the engine what the font says
+// and then asks the engine whether it listened is not a test: the numbers below
+// come from the file, and the engine has to agree with them.
+struct FontKernProbe {
+    std::string bytes;
+    std::size_t pairs_at = 0;
+    unsigned pair_count = 0;
+    std::size_t cmap4 = 0;
+    unsigned upem = 0;
+    bool has_table = false;
+
+    static unsigned u16(const std::string& b, std::size_t o) {
+        if (o + 2 > b.size()) return 0;
+        return (static_cast<unsigned>(static_cast<unsigned char>(b[o])) << 8) |
+               static_cast<unsigned>(static_cast<unsigned char>(b[o + 1]));
+    }
+    static unsigned u32(const std::string& b, std::size_t o) {
+        return (u16(b, o) << 16) | u16(b, o + 2);
+    }
+    static int i16(const std::string& b, std::size_t o) {
+        const unsigned v = u16(b, o);
+        return v >= 0x8000u ? static_cast<int>(v) - 0x10000 : static_cast<int>(v);
+    }
+
+    std::size_t table(const char* tag) const {
+        if (bytes.size() < 12) return 0;
+        const unsigned count = u16(bytes, 4);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::size_t rec = 12 + 16 * static_cast<std::size_t>(i);
+            if (rec + 16 > bytes.size()) return 0;
+            if (bytes.compare(rec, 4, tag, 4) == 0) return u32(bytes, rec + 8);
+        }
+        return 0;
+    }
+
+    bool open(const std::string& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return false;
+        bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        if (bytes.size() < 32) return false;
+        const std::size_t head = table("head");
+        upem = head ? u16(bytes, head + 18) : 0;
+
+        const std::size_t cmap = table("cmap");
+        if (cmap) {
+            const unsigned count = u16(bytes, cmap + 2);
+            for (unsigned i = 0; i < count; ++i) {
+                const std::size_t sub = cmap + u32(bytes, cmap + 4 + 8 * static_cast<std::size_t>(i) + 4);
+                if (sub + 2 <= bytes.size() && u16(bytes, sub) == 4) {
+                    cmap4 = sub;
+                    break;
+                }
+            }
+        }
+
+        const std::size_t kern = table("kern");
+        // Version 0, first subtable, format 0 (pair list), horizontal.
+        if (kern && kern + 18 <= bytes.size() && u16(bytes, kern) == 0 && u16(bytes, kern + 2) >= 1) {
+            const unsigned coverage = u16(bytes, kern + 8);
+            if ((coverage >> 8) == 0 && (coverage & 0x1u) != 0) {
+                pair_count = u16(bytes, kern + 10);
+                pairs_at = kern + 18;
+                has_table = pair_count > 0 && pairs_at + 6 * static_cast<std::size_t>(pair_count) <= bytes.size();
+            }
+        }
+        return true;
+    }
+
+    unsigned glyph(unsigned cp) const {   // cmap format 4, which is what these fonts have
+        if (!cmap4) return 0;
+        const unsigned seg_x2 = u16(bytes, cmap4 + 6);
+        const std::size_t ends = cmap4 + 14;
+        const std::size_t starts = ends + seg_x2 + 2;
+        const std::size_t deltas = starts + seg_x2;
+        const std::size_t ranges = deltas + seg_x2;
+        for (unsigned i = 0; i < seg_x2 / 2; ++i) {
+            const unsigned end = u16(bytes, ends + 2 * i);
+            if (cp > end) continue;
+            const unsigned start = u16(bytes, starts + 2 * i);
+            if (cp < start) return 0;
+            const int delta = i16(bytes, deltas + 2 * i);
+            const unsigned range_offset = u16(bytes, ranges + 2 * i);
+            unsigned g = 0;
+            if (range_offset == 0) {
+                g = (cp + static_cast<unsigned>(delta)) & 0xFFFFu;
+            } else {
+                g = u16(bytes, ranges + 2 * i + range_offset + 2 * (cp - start));
+                if (g != 0) g = (g + static_cast<unsigned>(delta)) & 0xFFFFu;
+            }
+            return g;
+        }
+        return 0;
+    }
+
+    bool pair_at(unsigned index, unsigned& left, unsigned& right, int& value) const {
+        if (!has_table || index >= pair_count) return false;
+        const std::size_t rec = pairs_at + 6 * static_cast<std::size_t>(index);
+        left = u16(bytes, rec);
+        right = u16(bytes, rec + 2);
+        value = i16(bytes, rec + 4);
+        return true;
+    }
+
+    int value_for_glyphs(unsigned left, unsigned right) const {
+        if (!has_table) return 0;
+        for (unsigned i = 0; i < pair_count; ++i) {
+            const std::size_t rec = pairs_at + 6 * static_cast<std::size_t>(i);
+            if (u16(bytes, rec) == left && u16(bytes, rec + 2) == right) return i16(bytes, rec + 4);
+        }
+        return 0;
+    }
+
+    int value(uint32_t left, uint32_t right) const {
+        const unsigned lg = glyph(left), rg = glyph(right);
+        if (lg == 0 || rg == 0) return 0;
+        return value_for_glyphs(lg, rg);
+    }
+};
+
+}  // namespace
+
+TEST(kerning_closes_the_pairs_the_table_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+
+    // The same family is named in every call, and the file the oracle reads is
+    // that family's 400/upright face -- so "the file says X" and "the engine
+    // says X" are about one face by construction and not by luck. (They were
+    // luck on this host: its default family and its `sans-serif` happen to be
+    // the same file, and a host where they are not is a different test.)
+    const char* const kFamily = "sans-serif";
+    FontKernProbe probe;
+    const std::string path = fr.face_path(kFamily);
+    if (path.empty() || !probe.open(path)) {
+        std::printf("      [kern] no face file to read at '%s'\n", path.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    std::printf("      [kern] %s: %u pairs in the `kern` table, %u units per em\n",
+                path.c_str(), probe.has_table ? probe.pair_count : 0u, probe.upem);
+    std::fflush(stdout);
+    if (!probe.has_table) return;   // this host's face does not kern; nothing to check
+
+    // The engine must find the table the file has, and must not be answering
+    // "no" for a font that says yes.
+    assert(fr.font_kerning(kFamily));
+
+    // The pairs are taken from the file where possible: every pair it names
+    // between two printable ASCII characters, up to a bound, so that a font
+    // with different opinions than DejaVu Sans is checked against its own
+    // opinions rather than against this host's.
+    std::map<unsigned, char> char_for_glyph;
+    for (unsigned c = 32; c < 127; ++c) {
+        const unsigned g = probe.glyph(c);
+        if (g != 0) char_for_glyph[g] = static_cast<char>(c);
+    }
+    std::vector<std::string> pairs = {"AV", "VA", "To", "LT", "AT", "Wo", "Ty", "rn", "AA", "LA", "o-"};
+    std::set<std::string> have(pairs.begin(), pairs.end());
+    unsigned from_file = 0;
+    for (unsigned i = 0; i < probe.pair_count && pairs.size() < 80; ++i) {
+        unsigned left_glyph = 0, right_glyph = 0;
+        int value = 0;
+        if (!probe.pair_at(i, left_glyph, right_glyph, value)) break;
+        const auto l = char_for_glyph.find(left_glyph);
+        const auto r = char_for_glyph.find(right_glyph);
+        if (l == char_for_glyph.end() || r == char_for_glyph.end()) continue;
+        std::string pair(1, l->second);
+        pair += r->second;
+        if (have.insert(pair).second) {
+            pairs.push_back(pair);
+            ++from_file;
+        }
+    }
+    std::printf("      [kern] %zu pairs to check, %u of them taken from the file\n", pairs.size(), from_file);
+    std::fflush(stdout);
+    if (from_file == 0) return;   // the table names no pair this can write as text
+
+    constexpr float kSize = 100.0f;
+    int named = 0, file_positive = 0;
+    float most_closed = 0.0f;
+    float most_opened = 0.0f;
+    for (const std::string& pair : pairs) {
+        const auto left = static_cast<uint32_t>(static_cast<unsigned char>(pair[0]));
+        const auto right = static_cast<uint32_t>(static_cast<unsigned char>(pair[1]));
+        const int units = probe.value(left, right);
+        const float expected = static_cast<float>(units) * kSize / static_cast<float>(probe.upem);
+        const float kern = fr.kerning_px(left, right, kSize, 400, kFamily);
+        const float advance_sum = fr.glyph_advance_px(left, kSize, 400, kFamily) +
+                                  fr.glyph_advance_px(right, kSize, 400, kFamily);
+        const float measured = fr.measure_text(pair, kSize, 400, kFamily);
+        if (units != 0) {
+            ++named;
+            if (units > 0) ++file_positive;
+            if (kern < most_closed) most_closed = kern;
+            if (kern > most_opened) most_opened = kern;
+        }
+        if (std::fabs(kern - expected) > 0.01f || std::fabs(measured - (advance_sum + kern)) > 0.01f) {
+            std::printf("      [kern] %s: file %d units -> %.3f px, engine %.3f; measured %.3f vs %.3f\n",
+                        pair.c_str(), units, expected, kern, measured, advance_sum + kern);
+        }
+        // The file says one thing, `kerning_px` says the same thing at this
+        // size, and `measure_text` counts it exactly once.
+        assert(std::fabs(kern - expected) < 0.01f);
+        assert(std::fabs(measured - (advance_sum + kern)) < 0.01f);
+    }
+    std::printf("      [kern] %d named by the file (%d of them positive), most closed by %.3f px, "
+                "most opened by %.3f px, at 100 px\n",
+                named, file_positive, most_closed, most_opened);
+    std::fflush(stdout);
+    assert(named > 0);                  // the table is actually being read
+    assert(most_closed < 0.0f);         // closing is a negative adjustment
+    // A table also *opens* pairs up -- `AA` is +57 units in DejaVu Sans -- so
+    // where the file names a positive pair, the engine's answer is positive too
+    // and nothing here may have assumed that kerning only ever tightens.
+    if (file_positive > 0) assert(most_opened > 0.0f);
+}
+
+TEST(a_face_without_a_kern_table_is_not_kerned) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // The vendored Ahem has no `kern` table. Every advance in it is exactly
+    // 1 em, so two characters at 100 px are 200 px and a third of a pixel of
+    // invented kerning would show.
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;
+
+    FontKernProbe probe;
+    const std::string path = fr.face_path("Ahem");
+    if (!path.empty() && probe.open(path)) {
+        // The premise of the test, read from the file: no pairs to close.
+        std::printf("      [kern] %s: %u pairs\n", path.c_str(), probe.has_table ? probe.pair_count : 0u);
+        std::fflush(stdout);
+        assert(!probe.has_table);
+    }
+
+    assert(!fr.font_kerning("Ahem"));
+    assert(fr.kerning_px('A', 'V', 100.0f, 400, "Ahem") == 0.0f);
+    const float pair = fr.measure_text("AV", 100.0f, 400, "Ahem");
+    std::printf("      [kern] Ahem 'AV' at 100 px = %.3f\n", pair);
+    std::fflush(stdout);
+    assert(std::fabs(pair - 200.0f) < 0.01f);
+
+    // A face that does have a table is a separate question, and the answer is
+    // read from that face's file: where the file closes `AV`, the same two
+    // characters do not measure the sum of their advances.
+    FontKernProbe other;
+    const std::string other_path = fr.face_path("sans-serif");
+    if (!other_path.empty() && other.open(other_path) && other.value('A', 'V') < 0) {
+        const float kerned = fr.measure_text("AV", 100.0f, 400, "sans-serif");
+        const float advances = fr.glyph_advance_px('A', 100.0f, 400, "sans-serif") +
+                               fr.glyph_advance_px('V', 100.0f, 400, "sans-serif");
+        std::printf("      [kern] 'sans-serif' 'AV' at 100 px = %.3f, advances sum to %.3f\n", kerned, advances);
+        std::fflush(stdout);
+        assert(kerned < advances);
+    }
+}
+
+TEST(the_painter_closes_the_same_pairs_the_measurer_counted) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const char* const kFamily = "sans-serif";
+    if (!fr.has_truetype_font() || !fr.font_kerning(kFamily)) return;
+
+    constexpr float kSize = 200.0f;
+    const float kern = fr.kerning_px('A', 'V', kSize, 400, kFamily);
+    if (std::fabs(kern) < 1.5f) return;   // no room in a pixel grid to see it
+
+    struct Extent {
+        int left = INT_MAX;
+        int right = INT_MIN;
+    };
+    const auto draw = [&fr, kFamily](float x, const char* text, Extent& where) {
+        fr.draw_text(x, 10.0f, text, kSize, 400,
+                     [&where](int px, int, uint8_t) {
+                         where.left = std::min(where.left, px);
+                         where.right = std::max(where.right, px);
+                     },
+                     kFamily, false);
+    };
+
+    // Three copies of the same two glyphs: drawn as the engine sees them, drawn
+    // by hand at the kerned positions, and drawn by hand at the unkerned ones.
+    Extent pair_drawn, by_hand_kerned, by_hand_loose;
+    draw(50.0f, "AV", pair_drawn);
+    const float advance_a = fr.glyph_advance_px('A', kSize, 400, kFamily);
+    draw(50.0f, "A", by_hand_kerned);
+    draw(50.0f + advance_a + kern, "V", by_hand_kerned);
+    draw(50.0f, "A", by_hand_loose);
+    draw(50.0f + advance_a, "V", by_hand_loose);
+
+    const int shift = by_hand_loose.right - pair_drawn.right;
+    std::printf("      [kern] 'AV' at 200 px: kern %.2f, hand-kerned [%d..%d], engine [%d..%d], "
+                "unkerned [%d..%d]\n",
+                kern, by_hand_kerned.left, by_hand_kerned.right, pair_drawn.left, pair_drawn.right,
+                by_hand_loose.left, by_hand_loose.right);
+    std::fflush(stdout);
+
+    // The engine's "AV" is the two glyphs at the positions the measurer said
+    // they would be at -- not merely close to them.
+    assert(pair_drawn.left == by_hand_kerned.left);
+    assert(pair_drawn.right == by_hand_kerned.right);
+    // ...and it is the kerned placement, not the unkerned one: the pair is
+    // drawn closer by what `kerning_px` reported, to the pixel.
+    assert(pair_drawn.right < by_hand_loose.right);
+    assert(std::abs(shift - static_cast<int>(std::lround(-kern))) <= 1);
 }
 
 TEST(inline_formatting_context) {
@@ -19952,6 +20268,9 @@ int main() {
     RUN_TEST(a_face_weight_comes_from_the_font_not_its_name);
     RUN_TEST(font_weight_matching_follows_the_css_order);
     RUN_TEST(bolder_and_lighter_are_relative_to_the_parent);
+    RUN_TEST(kerning_closes_the_pairs_the_table_names);
+    RUN_TEST(a_face_without_a_kern_table_is_not_kerned);
+    RUN_TEST(the_painter_closes_the_same_pairs_the_measurer_counted);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

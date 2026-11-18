@@ -2264,20 +2264,6 @@ struct ParsedSheet {
     }
 };
 
-/// The rule with `id` in `rules`, at any depth, and the id of the `@media`
-/// rule that holds it (0 at the top of the sheet).
-SheetRule* find_rule_in(std::vector<SheetRulePtr>& rules, uint64_t id, uint64_t parent, uint64_t* found_parent) {
-    for (auto& rule : rules) {
-        if (!rule) continue;
-        if (rule->id == id) {
-            if (found_parent) *found_parent = parent;
-            return rule.get();
-        }
-        if (SheetRule* found = find_rule_in(rule->children, id, rule->id, found_parent)) return found;
-    }
-    return nullptr;
-}
-
 uint64_t sheet_generation(const std::shared_ptr<ParsedSheet>& sheet) {
     return sheet ? sheet->generation : 0;
 }

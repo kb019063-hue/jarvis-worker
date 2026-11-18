@@ -48,9 +48,9 @@ including the forward reference a method makes to a field written below it.
 ## 3. How it was verified
 
 ```
-make test                     # 235 suites: private_names_are_identities_and_not_strings
-make test262                  # before 12657 (80.7%) -> now 13586 (86.6%) of 15,686
-                              # 929 pass in now and not in before, 0 lost
+make test                     # 236 suites: private_names_are_identities_and_not_strings
+make test262                  # before 12657 (80.7%) -> now 13630 (86.9%) of 15,686
+                              # 973 pass in now and not in before, 0 lost
 ```
 
 and a 21-case battery run in Node.js 22 and in `build/litebird --run-js`, whose
@@ -59,8 +59,11 @@ after it.
 
 ## 4. What is still open
 
-- `eval` text in a class body does not raise the early errors for `super`,
-  `arguments` and `new.target`; that is the direct-eval row of the task table.
+- Indirect `eval` text in a class body does not raise the early errors for
+  `super`, `new.target` and `arguments` (direct eval does, since Phase 80);
+  that is the direct-eval row of the task table.
 - `Proxy` and decorators do not exist, so their private-name tests still fail.
 - The engine's own `%` slots are reachable as string keys, which is the same
-  hole one layer down; it is filed as a row of its own.
+  hole one layer down; it is filed as a row of its own. `#` no longer is: a
+  script-made `o['#p']` is an ordinary enumerable property, as it is in Node,
+  because hiding every `#` key was only ever a stand-in for the private table.

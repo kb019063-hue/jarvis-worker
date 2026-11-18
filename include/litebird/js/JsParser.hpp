@@ -190,6 +190,10 @@ public:
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> args;
     bool optional{false};   // `f?.()`
+    // A syntactic `eval(...)` records which `super` forms its source may
+    // inherit. Runtime still checks that the value called is the realm's eval.
+    bool direct_eval_allows_super_property{false};
+    bool direct_eval_allows_super_call{false};
 
     CallExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
         : Expr(NodeKind::Call), callee(std::move(c)), args(std::move(a)) {}
@@ -658,11 +662,21 @@ public:
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Syntax that a direct eval inherits from the code that contains its call.
+/// `super.x` needs a home-object-capable method; `super(...)` additionally
+/// needs a derived constructor. Ordinary script parsing leaves both false.
+struct JsParserContext {
+    bool direct_eval{false};
+    bool allow_super_property{false};
+    bool allow_super_call{false};
+};
+
 class JsParser {
 public:
     /// `source` is the text the tokens came from. When given, functions and
     /// classes record their extent in it (Function.prototype.toString).
-    explicit JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source = nullptr);
+    explicit JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source = nullptr,
+                      JsParserContext context = {});
 
     /// Parses a whole script. Throws JsSyntaxError on malformed input.
     std::unique_ptr<Program> parse_program();
@@ -684,6 +698,10 @@ private:
         bool forbid_arguments{false};
         bool forbid_await{false};
         bool forbid_yield{false};
+        // Arrows inherit these from the syntactic context around them. An
+        // ordinary nested function starts with neither permission.
+        bool allow_super_property{false};
+        bool allow_super_call{false};
     };
 
     const JsToken& peek(size_t offset = 0) const;
@@ -719,11 +737,14 @@ private:
 
     // Functions and classes
     std::shared_ptr<FunctionNode> parse_function(bool is_async, bool is_declaration);
-    void parse_params_and_body(FunctionNode& fn);
+    void parse_params_and_body(FunctionNode& fn, bool allow_super_property = false,
+                               bool allow_super_call = false);
     void parse_params(FunctionNode& fn);
     void parse_function_body(FunctionNode& fn);
     void finish_params(FunctionNode& fn);
-    std::shared_ptr<FunctionNode> parse_method(bool is_async, bool is_generator);
+    std::shared_ptr<FunctionNode> parse_method(bool is_async, bool is_generator,
+                                               bool allow_super_property = false,
+                                               bool allow_super_call = false);
     /// Records [token `first_token`, the token just consumed] as the source of `node`.
     template <typename Node> void set_source(Node& node, size_t first_token) const {
         if (!m_source || m_current == 0 || first_token >= m_current) return;
@@ -782,6 +803,7 @@ private:
 
     std::vector<JsToken> m_tokens;
     std::shared_ptr<const std::string> m_source;
+    JsParserContext m_context;
     std::vector<int> m_match;        // index of the matching bracket for each opener, or -1
     size_t m_current{0};
     bool m_no_in{false};

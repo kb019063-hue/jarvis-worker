@@ -194,6 +194,8 @@ public:
         return AssignResult::Ok;
     }
 
+    /// Function and global environments are variable environments. Lexical
+    /// block, catch and loop environments deliberately are not.
     void mark_var_scope() { m_is_var_scope = true; }
     std::shared_ptr<JsEnvironment> var_scope() {
         auto scope = shared_from_this();
@@ -371,6 +373,9 @@ public:
     struct EvalFrame {
         const JsEnvironment* environment{nullptr};
         bool direct{false};
+        // Grammar permissions captured at the syntactic direct-eval call.
+        bool allow_super_property{false};
+        bool allow_super_call{false};
     };
     static std::vector<EvalFrame>& eval_call_stack();
 
@@ -549,6 +554,20 @@ private:
     // --- Expressions --------------------------------------------------------
     JsValue evaluate(const Expr* expr, const EnvPtr& env);
     JsValue evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint);
+    // The expression dispatcher is the frame every nested expression pays for,
+    // and a JS call chain nests it several times over. Anything that keeps a
+    // large local (a `Reference`, a vector) alive lives here, out of line, so
+    // that one more local added to a rarely-taken branch cannot make every
+    // expression deeper. Phase 88's private-name work cost `evaluate` 96 bytes
+    // and 7% of the recursion depth before these were split out.
+    JsValue eval_update(const UpdateExpr* expr, const EnvPtr& env);
+    JsValue eval_member(const MemberExpr* expr, const EnvPtr& env);
+    JsValue eval_index(const IndexExpr* expr, const EnvPtr& env);
+    JsValue eval_private_in(const PrivateInExpr* expr, const EnvPtr& env);
+    JsValue eval_sequence(const SequenceExpr* expr, const EnvPtr& env);
+    JsValue eval_template_literal(const TemplateLiteralExpr* expr, const EnvPtr& env);
+    JsValue eval_super_member(const SuperMemberExpr* expr, const EnvPtr& env);
+    JsValue eval_array_literal(const ArrayLiteralExpr* expr, const EnvPtr& env);
     JsValue eval_binary(const BinaryExpr* expr, const EnvPtr& env);
     JsValue eval_binary_chain(const BinaryExpr* expr, const EnvPtr& env);
     JsValue combine_binary(const BinaryExpr* expr, JsValue left, const EnvPtr& env);

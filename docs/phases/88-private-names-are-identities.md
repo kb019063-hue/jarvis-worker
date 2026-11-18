@@ -110,12 +110,22 @@ and checks each use against it:
 operand is a shift expression, so `#a in #b in c` is a `SyntaxError` rather
 than a nested brand test.
 
+The last trace of the old model went with it. While a private field *was* a
+property called `#p`, every `#`-prefixed key had to be hidden from enumeration
+for the field to stay private, so a script could not name a property `#p`
+either: `var o = {}; o['#p'] = 1` gave `Object.keys(o)` of `[]`,
+`getOwnPropertyNames(o).length` of 0 and `JSON.stringify(o)` of `{}`, where
+Node gives `['#p']`, 1 and `{"#p":1}`. Members are in their own table now, so
+`is_hidden_key` stops treating `#` as a prefix of its own and the property is
+ordinary again. The `%` prefix stays hidden, which is a row of its own below.
+
 ## Verification
 
 `make test` — one new suite, `private_names_are_identities_and_not_strings`,
 which asserts all of the above (the field is not a property, the brand, the
 cross-class and cross-evaluation isolation, the accessor directions, and eleven
-syntax errors). 235 suites in all.
+syntax errors). 236 suites in all, and the direct-eval suite #103 added is
+one of them.
 
 `make test262` — the pinned suite over its 21 default directories, against a
 build of the commit this phase started from:
@@ -124,14 +134,14 @@ build of the commit this phase started from:
 python3 tools/conformance/run_test262.py \
     --binary before=<build of the parent commit> --binary now=build/litebird
 before  12657 pass (80.7%)
-now     13586 pass (86.6%)
-929 pass in now and not in before; 0 pass in before and not in now
+now     13630 pass (86.9%)
+973 pass in now and not in before; 0 pass in before and not in now
 ```
 
 The three directories the private-name tests live in, on their own:
 `language/statements/class`, `language/expressions/class` and
-`language/expressions/in` go from **6,832 / 8,551 (79.9%)** to **7,740 / 8,551
-(90.5%)** — 908 tests, none lost.
+`language/expressions/in` go from **6,832 / 8,551 (79.9%)** to **7,776 / 8,551
+(90.9%)** — 908 tests, none lost.
 
 Node.js was the oracle for the behaviour, on a 21-case battery (inherited
 fields, shadowing, accessor order, the four refusal directions, static brands,
@@ -141,15 +151,41 @@ output, byte for byte.
 
 `make js-conformance` stays at 1128/1152.
 
+### The dispatcher's frame
+
+The private-name work made `JsInterpreter::evaluate` — the frame that every
+nested expression pays for, several times per call — 96 bytes larger, and that
+alone cost the engine 7% of its native recursion depth. Measured with
+`function d(n) { return n === 0 ? 0 : 1 + d(n - 1) }`, the deepest `d(2000)`
+that fits:
+
+```
+before this branch (main)          2,089 frames
+this branch as merged              1,931 frames   -> `d(2000)` is a RangeError
+this branch with the split below   2,181 frames
+```
+
+`d(2000)` passing is an expectation in `tests/js-conformance/functions.dat`, so
+the branch that made it fail would have dropped the corpus one case. The fix is
+to keep the dispatcher small: the branches of `evaluate` that hold a large
+local — a `Reference`, a vector, a `std::string` — moved out of line
+(`eval_update`, `eval_member`, `eval_index`, `eval_private_in`,
+`eval_sequence`, `eval_array_literal`, `eval_template_literal`,
+`eval_super_member`), which brings the frame from 528 bytes to 384, below the
+432 it was before this phase. A rarely-taken branch can no longer make every
+expression on the stack deeper, which is what made the depth a side effect of
+where the code was placed.
+
 ## What is still open
 
-- **The early errors of `eval` text written in a class body.** `super()` and
-  `super.x` inside a direct or indirect eval in a field initialiser must be a
-  `SyntaxError` before anything runs, and `arguments` and `new.target` in the
-  same place are early errors too. This engine still answers with a runtime
-  `TypeError` or `ReferenceError`, which is what the remaining ~70 private-name
-  failures in the class directories are. That is the direct-eval row of the task
-  table, not this one.
+- **Indirect `eval` written in a class body.** `super()`, `super.x`,
+  `arguments` and `new.target` inside eval text in a field initialiser must be
+  a `SyntaxError` before anything runs. Phase 80 (merged as #103 while this was
+  in review) gave *direct* eval the caller's grammar permissions, which is the
+  half a class body can seed; 93 of the 775 failures left in the three class
+  directories are the eval-shaped remainder — the `indirect-eval-*` variants,
+  and `arguments`/`new.target` inside arrows in a field initialiser, which are
+  early errors of the arrow body and not of the eval.
 - **A private name in a class evaluated twice through `eval`**, and private
   names inside `Function` constructor bodies: both follow from the same
   seeding of the parser that a direct eval already does; test262 does not ask.

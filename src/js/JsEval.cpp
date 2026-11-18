@@ -453,18 +453,19 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
     }
     EnvScope layer_scope(layer);
 
-    // Everything declared exists before the first statement runs. A `var` of
-    // sloppy eval text is declared in the caller's environment, which is what
-    // leaves it behind afterwards.
+    // Everything declared exists before the first statement runs. A sloppy
+    // direct eval's `var`s skip any lexical loop, catch or block environment
+    // at the call site and land in the caller's variable environment.
     EnvPtr var_target = var_scope_own ? body : target;
+    if (direct_eval && !var_scope_own) var_target = target->var_scope();
     for (const auto& name : program.var_names) {
         if (!var_target->has_own(name)) var_target->define(name, JsValue::make_undefined());
     }
     declare_lexicals(program.lexical_decls, body);
     // A function declaration in sloppy eval text is var-scoped like a `var` is
-    // (ECMA-262 B.3.3.1), so it goes to the caller's environment; in strict
-    // text it is lexical to the eval, like a `let`.
-    hoist_functions(program.functions, var_scope_own ? body : target);
+    // (ECMA-262 B.3.3.1), so it goes to the caller's variable environment; in
+    // strict text it is lexical to the eval, like a `let`.
+    hoist_functions(program.functions, var_target);
 
     Frame frame;
     frame.track_completion = true;
@@ -483,7 +484,11 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     auto text = std::make_shared<const std::string>(source);
     JsLexer lexer(*text);
     auto tokens = lexer.tokenize_all();
-    JsParser parser(std::move(tokens), text);
+    JsParserContext parser_context;
+    parser_context.direct_eval = true;
+    parser_context.allow_super_property = frame.allow_super_property;
+    parser_context.allow_super_call = frame.allow_super_call;
+    JsParser parser(std::move(tokens), text, parser_context);
     // A direct eval written inside a class body can name that class's private
     // fields; the class put them in scope when it was evaluated, so they are
     // found the same way a `let` of the caller's is found.
@@ -602,6 +607,7 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     }
 
     auto env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+    env->mark_var_scope();
     env->strict_mode = node->is_strict ? 1 : 0;
     if (!node->is_arrow) {
         // Arrow functions bind none of these; lookups fall through to the
@@ -2410,7 +2416,8 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     // does not either.
     const bool is_eval = callee->kind == NodeKind::Identifier &&
                          static_cast<const IdentifierExpr*>(callee)->name == "eval";
-    const bool direct = is_eval && m_eval_function.is_function() && strict_equals(m_eval_function, fn);
+    const bool direct = !expr->optional && is_eval && m_eval_function.is_function() &&
+                        strict_equals(m_eval_function, fn);
     // A frame is pushed only where one can matter: for the direct call itself,
     // and -- inside an eval's extent, where the stack is not empty -- for every
     // other call too, so that an indirect eval farther in can mask the direct
@@ -2418,7 +2425,9 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     // expression costs nothing.
     std::vector<EvalFrame>& stack = eval_call_stack();
     if (direct || !stack.empty()) {
-        stack.push_back(EvalFrame{env.get(), direct});
+        stack.push_back(EvalFrame{env.get(), direct,
+                                  direct && expr->direct_eval_allows_super_property,
+                                  direct && expr->direct_eval_allows_super_call});
         struct Pop {
             std::vector<EvalFrame>& stack;
             ~Pop() { stack.pop_back(); }
@@ -2748,6 +2757,112 @@ JsValue JsInterpreter::eval_tagged_template(const TaggedTemplateExpr* expr, cons
     return js_call(fn, this_val, args);
 }
 
+JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) {
+    // The target is resolved once, so `a[i++]++` evaluates `i++` once.
+    Reference ref = resolve_reference(update->target.get(), env);
+    double before = js_to_number(read_reference(ref, env));
+    double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
+    write_reference(ref, JsValue::make_number(after), env);
+    return JsValue::make_number(update->prefix ? after : before);
+}
+
+JsValue JsInterpreter::eval_member(const MemberExpr* member, const EnvPtr& env) {
+    JsValue base = evaluate(member->object.get(), env);
+    if (m_chain_short_circuit) return JsValue::make_undefined();
+    if (member->optional && base.is_nullish()) {
+        m_chain_short_circuit = true;
+        return JsValue::make_undefined();
+    }
+    if (member->private_name) return read_private_member(base, member->property, env);
+    return get_member(base, member->property);
+}
+
+JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
+    JsValue base = evaluate(index->object.get(), env);
+    if (m_chain_short_circuit) return JsValue::make_undefined();
+    if (index->optional && base.is_nullish()) {
+        m_chain_short_circuit = true;
+        return JsValue::make_undefined();
+    }
+    JsValue key = evaluate(index->index.get(), env);
+    // Fast path: array[number].
+    if (key.type == JsType::Number && base.is_array()) {
+        double n = key.number_val;
+        const auto& elements = base.object_val->array_elements;
+        if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
+            return elements[static_cast<size_t>(n)];
+        }
+    }
+    return get_member(base, js_to_property_key(key));
+}
+
+JsValue JsInterpreter::eval_private_in(const PrivateInExpr* private_in, const EnvPtr& env) {
+    // `#p in obj`: is this object branded with the name? A private name is not
+    // a property, so this is the one way to ask without reading.
+    JsValue object = evaluate(private_in->object.get(), env);
+    // Only an object can carry a brand: `#p in 1` is a TypeError, not `false`
+    // (a private name is not a property, so `in` is not the HasProperty it is
+    // for strings).
+    if (!object.is_object_like()) {
+        js_throw_type_error("Cannot use 'in' operator to search for '" + private_in->name + "' in " +
+                            js_describe_thrown(object));
+    }
+    return JsValue::make_boolean(object.has_private(private_key_for(private_in->name, env)));
+}
+
+JsValue JsInterpreter::eval_sequence(const SequenceExpr* sequence, const EnvPtr& env) {
+    JsValue last;
+    for (const auto& item : sequence->expressions) {
+        last = evaluate(item.get(), env);
+    }
+    return last;
+}
+
+JsValue JsInterpreter::eval_array_literal(const ArrayLiteralExpr* literal, const EnvPtr& env) {
+    std::vector<JsValue> elements;
+    for (const auto& element : literal->elements) {
+        if (!element) {
+            elements.push_back(JsValue::make_undefined());      // hole
+        } else if (element->kind == NodeKind::Spread) {
+            JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
+            js_iterate(iterable, [&](const JsValue& item) {
+                elements.push_back(item);
+                return true;
+            });
+        } else {
+            elements.push_back(evaluate(element.get(), env));
+        }
+    }
+    return JsValue::make_array(elements);
+}
+
+JsValue JsInterpreter::eval_template_literal(const TemplateLiteralExpr* literal, const EnvPtr& env) {
+    // parts alternates text, substitution, text, ..., text. Position is what
+    // tells them apart: a substitution can itself be a literal (`${200000}`,
+    // `${true}`), and that has to be converted, not read as if it were a piece
+    // of the template's own text.
+    const auto& parts = literal->parts;
+    std::string result;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i % 2 == 0) {
+            result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val.view();
+        } else {
+            JsValue part = evaluate(parts[i].get(), env);
+            if (part.type == JsType::String) result += part.string_val.view();
+            else result += js_to_string(part);
+        }
+    }
+    return JsValue::make_string(result);
+}
+
+JsValue JsInterpreter::eval_super_member(const SuperMemberExpr* super_member, const EnvPtr& env) {
+    JsValue receiver = lookup_identifier("this", env);
+    std::string key = super_member->computed ? js_to_property_key(evaluate(super_member->computed.get(), env))
+                                             : super_member->property;
+    JsValue base = super_base(env);
+    return get_with_receiver(base.property_cell(), key, receiver);
+}
+
 JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
     // Expression evaluation is itself recursive: `1 + (1 + (1 + ...))` and
     // `return 1 + f(n - 1)` both nest evaluate() once per level, so the stack
@@ -2773,15 +2888,8 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::Assign:
             return eval_assign(static_cast<const AssignExpr*>(expr), env);
 
-        case NodeKind::Update: {
-            auto* update = static_cast<const UpdateExpr*>(expr);
-            // The target is resolved once, so `a[i++]++` evaluates `i++` once.
-            Reference ref = resolve_reference(update->target.get(), env);
-            double before = js_to_number(read_reference(ref, env));
-            double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
-            write_reference(ref, JsValue::make_number(after), env);
-            return JsValue::make_number(update->prefix ? after : before);
-        }
+        case NodeKind::Update:
+            return eval_update(static_cast<const UpdateExpr*>(expr), env);
 
         case NodeKind::Conditional: {
             auto* cond = static_cast<const ConditionalExpr*>(expr);
@@ -2789,60 +2897,17 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                                                                : evaluate(cond->alternate.get(), env);
         }
 
-        case NodeKind::Sequence: {
-            JsValue last;
-            for (const auto& item : static_cast<const SequenceExpr*>(expr)->expressions) {
-                last = evaluate(item.get(), env);
-            }
-            return last;
-        }
+        case NodeKind::Sequence:
+            return eval_sequence(static_cast<const SequenceExpr*>(expr), env);
 
-        case NodeKind::Member: {
-            auto* member = static_cast<const MemberExpr*>(expr);
-            JsValue base = evaluate(member->object.get(), env);
-            if (m_chain_short_circuit) return JsValue::make_undefined();
-            if (member->optional && base.is_nullish()) {
-                m_chain_short_circuit = true;
-                return JsValue::make_undefined();
-            }
-            if (member->private_name) return read_private_member(base, member->property, env);
-            return get_member(base, member->property);
-        }
+        case NodeKind::Member:
+            return eval_member(static_cast<const MemberExpr*>(expr), env);
 
-        case NodeKind::PrivateIn: {
-            // `#p in obj`: is this object branded with the name? A private name
-            // is not a property, so this is the one way to ask without reading.
-            auto* private_in = static_cast<const PrivateInExpr*>(expr);
-            JsValue object = evaluate(private_in->object.get(), env);
-            // Only an object can carry a brand: `#p in 1` is a TypeError, not
-            // `false` (a private name is not a property, so `in` is not the
-            // HasProperty it is for strings).
-            if (!object.is_object_like()) {
-                js_throw_type_error("Cannot use 'in' operator to search for '" + private_in->name + "' in " +
-                                    js_describe_thrown(object));
-            }
-            return JsValue::make_boolean(object.has_private(private_key_for(private_in->name, env)));
-        }
+        case NodeKind::PrivateIn:
+            return eval_private_in(static_cast<const PrivateInExpr*>(expr), env);
 
-        case NodeKind::Index: {
-            auto* index = static_cast<const IndexExpr*>(expr);
-            JsValue base = evaluate(index->object.get(), env);
-            if (m_chain_short_circuit) return JsValue::make_undefined();
-            if (index->optional && base.is_nullish()) {
-                m_chain_short_circuit = true;
-                return JsValue::make_undefined();
-            }
-            JsValue key = evaluate(index->index.get(), env);
-            // Fast path: array[number].
-            if (key.type == JsType::Number && base.is_array()) {
-                double n = key.number_val;
-                const auto& elements = base.object_val->array_elements;
-                if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
-                    return elements[static_cast<size_t>(n)];
-                }
-            }
-            return get_member(base, js_to_property_key(key));
-        }
+        case NodeKind::Index:
+            return eval_index(static_cast<const IndexExpr*>(expr), env);
 
         case NodeKind::OptionalChain: {
             // A short-circuit inside the chain ends the whole chain here.
@@ -2860,42 +2925,11 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::ObjectLiteral:
             return eval_object_literal(static_cast<const ObjectLiteralExpr*>(expr), env);
 
-        case NodeKind::ArrayLiteral: {
-            std::vector<JsValue> elements;
-            for (const auto& element : static_cast<const ArrayLiteralExpr*>(expr)->elements) {
-                if (!element) {
-                    elements.push_back(JsValue::make_undefined());      // hole
-                } else if (element->kind == NodeKind::Spread) {
-                    JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
-                    js_iterate(iterable, [&](const JsValue& item) {
-                        elements.push_back(item);
-                        return true;
-                    });
-                } else {
-                    elements.push_back(evaluate(element.get(), env));
-                }
-            }
-            return JsValue::make_array(elements);
-        }
+        case NodeKind::ArrayLiteral:
+            return eval_array_literal(static_cast<const ArrayLiteralExpr*>(expr), env);
 
-        case NodeKind::TemplateLiteral: {
-            // parts alternates text, substitution, text, ..., text. Position is
-            // what tells them apart: a substitution can itself be a literal
-            // (`${200000}`, `${true}`), and that has to be converted, not
-            // read as if it were a piece of the template's own text.
-            const auto& parts = static_cast<const TemplateLiteralExpr*>(expr)->parts;
-            std::string result;
-            for (size_t i = 0; i < parts.size(); ++i) {
-                if (i % 2 == 0) {
-                    result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val.view();
-                } else {
-                    JsValue part = evaluate(parts[i].get(), env);
-                    if (part.type == JsType::String) result += part.string_val.view();
-                    else result += js_to_string(part);
-                }
-            }
-            return JsValue::make_string(result);
-        }
+        case NodeKind::TemplateLiteral:
+            return eval_template_literal(static_cast<const TemplateLiteralExpr*>(expr), env);
 
         case NodeKind::TaggedTemplate:
             return eval_tagged_template(static_cast<const TaggedTemplateExpr*>(expr), env);
@@ -2908,7 +2942,10 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                 // nothing outside binds that name.
                 auto scope = std::make_shared<JsEnvironment>(env);
                 JsValue fn = make_function(node, scope);
-                scope->define(node->name, fn);
+                // The inner name of a named function expression is an
+                // immutable binding: sloppy writes are ignored and strict
+                // writes throw, including writes made by direct eval.
+                scope->define_readonly(node->name, fn);
                 return fn;
             }
             return make_function(node, env);
@@ -2931,15 +2968,8 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::SuperCall:
             return eval_super_call(static_cast<const SuperCallExpr*>(expr), env);
 
-        case NodeKind::SuperMember: {
-            auto* super_member = static_cast<const SuperMemberExpr*>(expr);
-            JsValue receiver = lookup_identifier("this", env);
-            std::string key = super_member->computed
-                ? js_to_property_key(evaluate(super_member->computed.get(), env))
-                : super_member->property;
-            JsValue base = super_base(env);
-            return get_with_receiver(base.property_cell(), key, receiver);
-        }
+        case NodeKind::SuperMember:
+            return eval_super_member(static_cast<const SuperMemberExpr*>(expr), env);
 
         case NodeKind::NewTarget: {
             auto* binding = env->lookup("%new.target");

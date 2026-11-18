@@ -103,8 +103,9 @@ std::vector<std::string> FunctionNode::simple_param_names() const {
 // Token plumbing
 // ---------------------------------------------------------------------------
 
-JsParser::JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source)
-    : m_tokens(std::move(tokens)), m_source(std::move(source)) {
+JsParser::JsParser(std::vector<JsToken> tokens, std::shared_ptr<const std::string> source,
+                   JsParserContext context)
+    : m_tokens(std::move(tokens)), m_source(std::move(source)), m_context(context) {
     if (m_tokens.empty() || m_tokens.back().type != JsTokenType::Eof) {
         JsToken eof;
         eof.type = JsTokenType::Eof;
@@ -278,6 +279,8 @@ std::unique_ptr<Program> JsParser::parse_program() {
     auto program = std::make_unique<Program>();
     FunctionContext ctx;
     ctx.var_names = &program->var_names;
+    ctx.allow_super_property = m_context.allow_super_property;
+    ctx.allow_super_call = m_context.allow_super_call;
     m_functions.push_back(ctx);
     m_blocks.push_back(program.get());
     parse_statement_list(*program, false);
@@ -729,7 +732,7 @@ void JsParser::parse_function_body(FunctionNode& fn) {
     fn.is_strict = m_functions.back().strict;
 }
 
-void JsParser::parse_params_and_body(FunctionNode& fn) {
+void JsParser::parse_params_and_body(FunctionNode& fn, bool allow_super_property, bool allow_super_call) {
     FunctionContext ctx;
     ctx.fn = &fn;
     ctx.var_names = &fn.var_names;
@@ -737,6 +740,8 @@ void JsParser::parse_params_and_body(FunctionNode& fn) {
     ctx.is_async = fn.is_async;
     ctx.is_generator = fn.is_generator;
     ctx.strict = m_functions.empty() ? false : m_functions.back().strict;
+    ctx.allow_super_property = allow_super_property;
+    ctx.allow_super_call = allow_super_call;
     m_functions.push_back(ctx);
     parse_params(fn);
     parse_function_body(fn);
@@ -772,13 +777,14 @@ std::shared_ptr<FunctionNode> JsParser::parse_function(bool is_async, bool is_de
     return fn;
 }
 
-std::shared_ptr<FunctionNode> JsParser::parse_method(bool is_async, bool is_generator) {
+std::shared_ptr<FunctionNode> JsParser::parse_method(bool is_async, bool is_generator,
+                                                     bool allow_super_property, bool allow_super_call) {
     auto fn = std::make_shared<FunctionNode>();
     fn->line = peek().line;
     fn->is_async = is_async;
     fn->is_generator = is_generator;
     fn->is_method = true;
-    parse_params_and_body(*fn);
+    parse_params_and_body(*fn, allow_super_property, allow_super_call);
     return fn;
 }
 
@@ -799,6 +805,8 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     // ArrowParameters inherit [?Yield, ?Await] from the enclosing scope (ECMA-262 §15.3).
     ctx.forbid_await = is_async || (!m_functions.empty() && (m_functions.back().is_async || m_functions.back().forbid_await));
     ctx.forbid_yield = !m_functions.empty() && (m_functions.back().is_generator || m_functions.back().forbid_yield);
+    ctx.allow_super_property = !m_functions.empty() && m_functions.back().allow_super_property;
+    ctx.allow_super_call = !m_functions.empty() && m_functions.back().allow_super_call;
     m_functions.push_back(ctx);
 
     if (check(JsTokenType::OpenParen)) {
@@ -976,6 +984,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.strict = true;
                 ctx.forbid_arguments = true;
                 ctx.forbid_await = true;
+                ctx.allow_super_property = true;
                 m_functions.push_back(ctx);
                 parse_function_body(*fn);
                 m_functions.pop_back();
@@ -1031,11 +1040,13 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
         }
 
         if (check(JsTokenType::OpenParen)) {
-            auto fn = parse_method(is_async, is_generator);
+            const bool is_constructor = member.kind == ClassMember::Kind::Method && !member.is_static &&
+                                        !member.computed_key && member.key == "constructor";
+            auto fn = parse_method(is_async, is_generator, /*allow_super_property=*/true,
+                                   /*allow_super_call=*/is_constructor && static_cast<bool>(cls->super_class));
             set_source(*fn, member_token);
             fn->name = member.key;
-            if (member.kind == ClassMember::Kind::Method && !member.is_static &&
-                !member.computed_key && member.key == "constructor") {
+            if (is_constructor) {
                 fn->is_method = false;
                 fn->is_class_constructor = true;
                 fn->is_derived_constructor = static_cast<bool>(cls->super_class);
@@ -1058,6 +1069,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.var_names = &scratch.var_names;
                 ctx.strict = true;
                 ctx.forbid_arguments = true;
+                ctx.allow_super_property = true;
                 m_functions.push_back(ctx);
                 member.value = parse_assignment();
                 m_functions.pop_back();
@@ -1622,6 +1634,13 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
                                     static_cast<IdentifierExpr*>(expr.get())->name == "eval";
             auto call = std::make_unique<CallExpr>(std::move(expr), parse_arguments());
             if (calls_eval) {
+                // Only this non-optional spelling can be a direct eval. Save
+                // the syntactic `super` capability with the call so the text
+                // is parsed in the same context if the runtime value is eval.
+                if (!m_functions.empty()) {
+                    call->direct_eval_allows_super_property = m_functions.back().allow_super_property;
+                    call->direct_eval_allows_super_call = m_functions.back().allow_super_call;
+                }
                 if (auto* fn = nearest_non_arrow_function()) {
                     fn->uses_arguments = true;
                     fn->uses_new_target = true;
@@ -1749,12 +1768,12 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
         prop.key = parse_property_name(prop.computed_key, /*allow_private=*/false);
 
         if (prop.kind != ObjectProperty::Kind::Init) {
-            auto fn = parse_method(false, false);
+            auto fn = parse_method(false, false, /*allow_super_property=*/true);
             set_source(*fn, property_token);
             fn->name = prop.key;
             prop.value = std::make_unique<FunctionExpr>(std::move(fn));
         } else if (check(JsTokenType::OpenParen) || is_async || is_generator) {
-            auto fn = parse_method(is_async, is_generator);
+            auto fn = parse_method(is_async, is_generator, /*allow_super_property=*/true);
             set_source(*fn, property_token);
             fn->name = prop.key;
             prop.is_method = true;
@@ -1885,8 +1904,17 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
         }
         case JsTokenType::Super: {
             advance();
+            const bool allows_property = !m_functions.empty() && m_functions.back().allow_super_property;
+            const bool allows_call = !m_functions.empty() && m_functions.back().allow_super_call;
+            const bool is_call = check(JsTokenType::OpenParen);
+            // Direct eval re-parses its text with the caller's grammar
+            // parameters. In particular, an object-literal method has a home
+            // object for `super.x`, but cannot be a super constructor call.
+            if (m_context.direct_eval && (is_call ? !allows_call : !allows_property)) {
+                fail("'super' keyword unexpected here");
+            }
             if (auto* fn = nearest_non_arrow_function()) fn->uses_super = true;
-            if (check(JsTokenType::OpenParen)) {
+            if (is_call) {
                 result = std::make_unique<SuperCallExpr>(parse_arguments());
             } else if (match(JsTokenType::Dot)) {
                 if (!(check(JsTokenType::Identifier) || peek().is_keyword)) fail_unexpected();

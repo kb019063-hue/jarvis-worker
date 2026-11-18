@@ -9,7 +9,8 @@
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
 is a thing to look up at a moment when the work feels finished. This looks
-them up. It reads; it changes nothing.
+them up. It reads; it changes nothing on GitHub, and in the clone it only
+fetches `main` when the clone is behind it.
 
 `claim N` fails (exit 1) when
   - #N does not begin with the `Task:`, `Files:` and `Phase P, finding F`
@@ -35,8 +36,10 @@ them up. It reads; it changes nothing.
 
 Everything is asked of GitHub through `gh` (which has to be logged in), and
 nothing of the local clone: a sandbox's clone is shallow, and a shallow clone
-answers "is `main` in this commit" wrongly. Run it inside the repository, so
-that `gh` knows which one is meant.
+answers "is `main` in this commit" wrongly. The one exception is the numbers
+`main` has: `tools/next_ids.py` reads them out of git, from the commit that
+GitHub says `main` is at. Run it inside the repository, so that `gh` knows
+which one is meant.
 
 The one exception is the set of numbers taken, which comes from
 `tools/next_ids.py --taken --ref main` — that tool reads `main` out of git
@@ -160,6 +163,31 @@ def same_files(mine: set[str], theirs: set[str]) -> list[str]:
     return sorted(shared)
 
 
+def main_commit() -> str:
+    """The commit `main` is at on GitHub, made sure to be in this clone.
+
+    `tools/next_ids.py --ref` reads a ref out of the local clone, and the
+    local `main` is where the clone was made. On 18 November that was one
+    merge behind: asked for `main`, the allocator answered with floors of 66
+    and 72 and no Phase 68 an hour after #83 had put 68 and 74 on `main`.
+    Whether a number has landed is the one question that must not be answered
+    from before it landed, so the commit is asked of GitHub and fetched when
+    the clone does not have it.
+    """
+    sha = commit("main")["sha"]
+
+    def present() -> bool:
+        return subprocess.run(("git", "cat-file", "-e", f"{sha}^{{commit}}"),
+                              cwd=ROOT, capture_output=True).returncode == 0
+
+    if not present():
+        subprocess.run(("git", "fetch", "--quiet", "origin", "main"), cwd=ROOT, capture_output=True)
+    if not present():
+        sys.exit(f"main is at {sha[:7]} on GitHub, and this clone does not have that commit "
+                 "and could not fetch it (git fetch origin main)")
+    return sha
+
+
 class Main(NamedTuple):
     """What `main` says about the two counters."""
     phases: set[int]            # taken: in a file, or at or below a floor
@@ -183,7 +211,9 @@ def on_main() -> Main:
     places, cannot disagree with itself like that.
 
     `main` and not the working tree, because the question is what `main`
-    has and a sandbox's clone may be behind it. `--no-prs`, because the
+    has and a sandbox's clone may be behind it; and `main` as GitHub has it,
+    not the clone's branch of that name, for the same reason
+    (`main_commit`). `--no-prs`, because the
     open claims are folded in separately below: without it, a pull request
     is told that the number it has just claimed is already taken — by
     itself.
@@ -196,7 +226,7 @@ def on_main() -> Main:
     and 72, and were told "not ready" for a reason that was not true.
     """
     result = subprocess.run(
-        [sys.executable, str(NEXT_IDS), "--taken", "--ref", "main", "--no-prs"],
+        [sys.executable, str(NEXT_IDS), "--taken", "--ref", main_commit(), "--no-prs"],
         cwd=ROOT, capture_output=True, text=True,
     )
     if result.returncode not in (0, 1) or not result.stdout.strip():

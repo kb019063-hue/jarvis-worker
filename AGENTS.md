@@ -151,7 +151,7 @@ the same time will both have changed them. So:
 Everything here happened between 15 and 17 November 2026, to agents that had
 read this file. Most of it is a rule from above that was not looked up at the
 moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
-changes nothing):
+changes nothing there):
 
 ```bash
 python3 tools/ci/check_pr.py            # what each open pull request claims; the numbers taken; the next free pair
@@ -193,6 +193,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   later one overtakes would have been told the same. `check_pr.py` now stops
   a pull request only for a number that a file on `main` has, and remarks on
   one at or below a floor.
+- **`main`, as the clone remembers it.** From #80 the same question was put
+  to the clone's own branch `main`, which is where the clone was made and
+  which `git fetch` of `origin` does not move. An hour after #83 had put
+  Phase 68 and finding 74 on `main`, a clone made before it still answered
+  with floors of 66 and 72 and no Phase 68; a clone with no branch `main`
+  answered that no number was taken, without an error. That is the answer
+  from before a number landed, to the question whether it has landed.
+  `check_pr.py` now asks GitHub which commit `main` is, fetches it when the
+  clone does not have it, and reads that.
 - **A claim nobody can read.** #65 and #71 had no `Task:`, `Files:` and
   `Phase P, finding F` lines. So nothing said that #71 changed
   `src/js/JsEval.cpp`, which #68 named, and `src/js/JsOps.cpp`, which #70

@@ -41,7 +41,7 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 241 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 244 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -51,6 +51,7 @@ standard now makes, which is 1,967 of the 1,973.
 | **HTTP/1.1 keep-alive pooling & Brotli (`br`)** | Thread-safe HTTP/1.1 and HTTPS (`SSL*`) persistent socket pool (`Connection: keep-alive`, `Keep-Alive: timeout/max`, bounded 4 per key / 32 total, incremental chunked/CL framing, `poll` + `SSL_peek` stale eviction, safe idempotent EOF retry) and pure-C++20 RFC 7932 Brotli (`br`) decoder (`Accept-Encoding: gzip, deflate, br`, right-to-left stacked `Content-Encoding`, `max_output_bytes` bomb cap); **53** RFC/Node streams across qualities 0–11 and `lgwin` 10–24, **49** bomb-cap checks, **6** invalid headers, and **2,000** mutation fuzz inputs (`0` discrepancies vs Node `zlib`) (Phase 85, finding 91) | `make verify-brotli`, `make fuzz-brotli`, `make test` |
 | **`font-style: italic`** | `em`, `i`, `cite`, `dfn`, `var` and `address` are italic, and so is anything a page slants itself. A family that has a slanted face is asked for it; a family that has none is *sheared*, which is what CSS asks for and what a browser does — 0.25 px of run per px of height, the 14° an `oblique` with no angle means (Phase 78). The oracle is the shape of the ink rather than a font, because the machine has no italic face at all: at 40 px `'H'` leans 8 px from its bottom row to its top row slanted and 0 px upright. The advance does not change, so an italic line measures exactly as wide as the upright one | `make test`, suites `font_style_italic_reaches_the_painter`, `font_style_italic_slants_the_glyphs_it_draws`, `a_family_with_an_italic_face_is_not_sheared` |
 | **`font-weight` and the font's own tables** | A face's weight and slant are read from the file — `OS/2.usWeightClass`, `OS/2.fsSelection` bit 0, `head.macStyle` bit 1 — not guessed from the words in its subfamily name, and the weight a page asks for reaches the registry instead of being flattened to `bold`/`not` (Phase 87). Matching follows CSS Fonts 4 §5.2.1's search order rather than nearest distance, and `bolder`/`lighter` are relative to the parent. The oracle is a file that disagrees with itself: the vendored Ahem with its `OS/2` rewritten to 700 while its name still says "Regular", one table field changed per test. A family of two faces at 200 and 500 answers 350 with the 200 and 600 with the 700 — which no bool can express | `make test`, suites `a_face_weight_comes_from_the_font_not_its_name`, `font_weight_matching_follows_the_css_order`, `bolder_and_lighter_are_relative_to_the_parent` |
+| **`kern` pair kerning** | The font's own `kern` table is read — version 0, format 0, the horizontal pair list — and its adjustment is counted by `measure_text` and applied by `draw_text` and the canvas painter, so a line measures the width it draws (Phase 91). The oracle is the file, not the engine: the test parses DejaVu Sans's 2,727 pairs itself and requires the engine to report the same unit value scaled by the face's own `units_per_em` (2,048) — `AV` is −131 units, −6.396 px at 100 px. Kerning **opens** pairs as well as closes them (`AA` is +57 units), so nothing assumes it only tightens, and a face with no table is left alone: Ahem's `AV` at 100 px is exactly 200.000 px. Measuring and painting are compared in pixels: the engine's `AV` must be identical to the two glyphs placed by hand at the kerned positions and *not* to the unkerned ones | `make test`, suites `kerning_closes_the_pairs_the_table_names`, `a_face_without_a_kern_table_is_not_kerned`, `the_painter_closes_the_same_pairs_the_measurer_counted` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -68,7 +69,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 241 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 244 engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -744,7 +745,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 241 engine test suites
+# Run the 244 engine test suites
 make test
 ```
 
@@ -812,14 +813,14 @@ make test
 make test
 ```
 
-Output (241 suites; the first and last lines shown):
+Output (244 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 241 engine test suites passed successfully!
+All 244 engine test suites passed successfully!
 ```
 
 ```bash

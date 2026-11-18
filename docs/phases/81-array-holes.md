@@ -104,7 +104,7 @@ need BigInt, `Proxy` or typed arrays first.
   comparison made in the page. The same script text was run through this
   engine and through Node.js 22.22.3 before it was written down: the same
   lines, every time.
-- **`make js-conformance`** → **1129 / 1152** (was 1128), with 0 crashes and 0
+- **`make js-conformance`** → **1131 / 1152** (was 1130), with 0 crashes and 0
   timeouts. The case that flips is `arrays.dat`'s *delete leaves a hole*
   (`a.length, a[1], 1 in a` → `3 undefined false`), which was written for the
   standard long before the engine agreed with it. The rest of that file's

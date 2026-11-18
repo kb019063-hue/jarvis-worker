@@ -332,6 +332,16 @@ struct JsIntrinsics {
     JsObject* boolean_proto{nullptr};
     JsObject* symbol_proto{nullptr};
     JsObject* iterator_proto{nullptr};
+    /// One prototype for each kind of iterator object, between the iterator
+    /// and %IteratorPrototype%. `next` is a property of these, so a script can
+    /// replace it and every iterator of that kind takes the replacement; an
+    /// iterator object has nothing of its own but its state.
+    JsObject* array_iterator_proto{nullptr};
+    JsObject* map_iterator_proto{nullptr};
+    JsObject* set_iterator_proto{nullptr};
+    JsObject* string_iterator_proto{nullptr};
+    JsObject* regexp_string_iterator_proto{nullptr};
+    JsObject* dom_iterator_proto{nullptr};
     JsObject* regexp_proto{nullptr};
     JsObject* date_proto{nullptr};
     JsObject* map_proto{nullptr};
@@ -346,6 +356,12 @@ struct JsIntrinsics {
     /// are what js_iterates_as_builtin() compares the current method with.
     JsValue array_iterator_method;
     JsValue string_iterator_method;
+    /// The `next` those kinds' prototypes had when install() wrote it. A
+    /// replacement is script, and a loop that reads the elements directly
+    /// would never call it, so the direct read is only allowed while these
+    /// are still there.
+    JsValue array_iterator_next;
+    JsValue string_iterator_next;
 
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;

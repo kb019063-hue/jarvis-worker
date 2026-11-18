@@ -2911,7 +2911,7 @@ JsValue regexp_symbol_match_all(const JsValue& rx, const JsString& subject_strin
         }
         value = match;
         return true;
-    }, {matcher});
+    }, {matcher}, JsIntrinsics::get().regexp_string_iterator_proto);
 }
 
 /// Generic `RegExp.prototype[Symbol.search](string)` per ECMA-262 §22.2.6.11.

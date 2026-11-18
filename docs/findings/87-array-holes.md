@@ -59,7 +59,7 @@ stays true)") and in `ROADMAP.md` tier 1. A probe against Node.js found 15 of
 - `make test` → **235 / 235** suites (`array_holes_are_not_elements` asserts
   67 facts, all of them compared in the page; the same text run through
   Node.js 22.22.3 gives the same 28 lines).
-- `make js-conformance` → **1129 / 1152** (was 1128): `arrays.dat`'s *delete
+- `make js-conformance` → **1131 / 1152** (was 1130): `arrays.dat`'s *delete
   leaves a hole* now passes.
 - `make dom-conformance` 678 / 678, `make wpt` 9567 / 9824 with 0 unlisted,
   `make url-conformance` 1188 / 1188, `make xml-conformance` 1718 / 1718.

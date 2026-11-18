@@ -42,7 +42,7 @@ make bench-styles
 # 3 case(s); 0 failure(s).
 
 make -j2 test
-# All 221 engine test suites passed successfully! (including static_asserts on sizes and 3 new suites)
+# All 222 engine test suites passed successfully! (including static_asserts on sizes and 3 new suites)
 # Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 ```
 

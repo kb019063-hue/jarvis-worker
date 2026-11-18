@@ -282,10 +282,10 @@ def written(ref: str | None = None) -> tuple[set[int], set[int]]:
     "Taken" and "written" are two questions. A floor makes every number up to
     it taken, so that none of them is handed out again; it does not put a
     write-up of that number on `main`. `tools/ci/check_pr.py` asked the first
-    question and reported the answer as the second: after the floors rose to
-    66 and 72 it told #63 (Phase 62, finding 68) and #73 (Phase 58, finding
-    64), both open and both holding numbers no file has, that their numbers
-    were "on main already", and that they were not ready to merge.
+    question and reported the answer as the second: it told #63 (Phase 62,
+    finding 68) and #73 (Phase 58, finding 64), both open, both overtaken by
+    the floors and both holding numbers no file has, that their numbers were
+    "on main already", and that they were not ready to merge.
     """
     phases: set[int] = set()
     findings: set[int] = set()

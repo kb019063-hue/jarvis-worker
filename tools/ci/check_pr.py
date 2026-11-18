@@ -223,8 +223,8 @@ def on_main() -> Main:
     `docs/state.json` is taken, so that the allocator never hands it out
     again, whether or not a write-up of it exists. This file used to call all
     of them "on main already": #63 (Phase 62, finding 68) and #73 (Phase 58,
-    finding 64) were open with numbers no file had when the floors rose to 66
-    and 72, and were told "not ready" for a reason that was not true.
+    finding 64) were open, with numbers no file had, when the floors passed
+    them, and were told "not ready" for a reason that was not true.
     """
     result = subprocess.run(
         [sys.executable, str(NEXT_IDS), "--taken", "--ref", main_commit(), "--no-prs"],

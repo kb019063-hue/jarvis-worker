@@ -25,11 +25,13 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/net/Brotli.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
 #include <filesystem>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <climits>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
@@ -81,6 +83,7 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <thread>
 #include <chrono>
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -19228,6 +19231,594 @@ TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers) {
     ResourceLoader::clear_http_cache();
 }
 
+TEST(brotli_rfc7932_decoder_and_http_content_encoding) {
+    using namespace litebird;
+    ResourceLoader::clear_http_cache();
+    ResourceLoader::clear_http_connection_pool();
+
+    // 1. Direct RFC 7932 Brotli unit verification (empty, compressed, bomb caps, malformed)
+    static const uint8_t kEmptyWbits16[] = {0x06};
+    static const uint8_t kEmptyWbits24[] = {0x3b};
+    static const uint8_t kPayload1Raw[] = {
+        0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,
+        0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,
+        0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,
+        0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,
+        0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,
+        0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,
+        0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,
+        0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,
+        0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,
+        0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,
+        0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,
+        0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,
+        0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,
+        0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,
+        0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,
+        0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,
+        0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,
+        0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,
+        0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,
+        0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,0x6f,0x20,0x66,0x72,
+        0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,0x74,0x20,0x48,0x54,
+        0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,0x61,0x6c,0x69,0x76,
+        0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20,0x48,0x65,0x6c,0x6c,
+        0x6f,0x20,0x66,0x72,0x6f,0x6d,0x20,0x70,0x65,0x72,0x73,0x69,0x73,0x74,0x65,0x6e,
+        0x74,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x6b,0x65,0x65,0x70,0x2d,
+        0x61,0x6c,0x69,0x76,0x65,0x20,0x2b,0x20,0x42,0x72,0x6f,0x74,0x6c,0x69,0x21,0x20
+    };
+    static const uint8_t kPayload1Br[] = {
+        0x1b,0x9f,0x01,0xf8,0x45,0xdd,0x96,0xea,0x9e,0xcf,0x2f,0x0f,0xd5,0x64,0xa9,0x86,
+        0x85,0xe3,0x41,0x11,0xb1,0x05,0x51,0x04,0x18,0x0e,0xf5,0x10,0xcc,0x74,0x83,0x12,
+        0xc7,0xea,0x4a,0x1f,0xaa,0x61,0xd2,0xc2,0x03,0x8b,0x3c,0x36,0x2b,0x3f,0xa1,0xe8,
+        0x77,0xbf,0x4a,0x01
+    };
+    static const uint8_t kStackedGzipOfBr[] = {
+        0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0xe3,0x16,0x6a,0xf0,0x49,0xac,
+        0x4c,0x2d,0x4a,0x4d,0x51,0x48,0xaf,0xca,0x2c,0xd0,0x4e,0x2a,0x52,0x48,0xca,0x4f,
+        0xa9,0x54,0x48,0xce,0x48,0x4d,0xce,0x56,0x30,0x34,0x32,0x36,0x31,0x35,0x33,0xb7,
+        0xb0,0x34,0x60,0x06,0x00,0xf9,0xbe,0x5f,0xf0,0x29,0x00,0x00,0x00
+    };
+    static const uint8_t kStackedBrOfGzip[] = {
+        0x0b,0x1c,0x80,0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0xf3,0x49,0xac,
+        0x4c,0x2d,0x4a,0x4d,0x51,0x48,0x2a,0xd2,0x4e,0xaf,0xca,0x2c,0x50,0x48,0xca,0x4f,
+        0xa9,0x54,0x48,0xce,0x48,0x4d,0xce,0x56,0x30,0x34,0x32,0x36,0x31,0x35,0x33,0xb7,
+        0xb0,0x34,0x00,0x00,0xce,0x0a,0x09,0xd4,0x25,0x00,0x00,0x00,0x03
+    };
+
+    std::vector<uint8_t> out;
+    assert(Brotli::decompress(kEmptyWbits16, sizeof(kEmptyWbits16), out, 0) && out.empty());
+    assert(Brotli::decompress(kEmptyWbits24, sizeof(kEmptyWbits24), out, 16) && out.empty());
+    assert(!Brotli::decompress(nullptr, 0, out, 64));
+    assert(Brotli::decompress(kPayload1Br, sizeof(kPayload1Br), out, sizeof(kPayload1Raw)));
+    assert(out.size() == sizeof(kPayload1Raw));
+    assert(std::memcmp(out.data(), kPayload1Raw, sizeof(kPayload1Raw)) == 0);
+    assert(!Brotli::decompress(kPayload1Br, sizeof(kPayload1Br), out, sizeof(kPayload1Raw) - 1));
+    assert(!Brotli::decompress(kPayload1Br, sizeof(kPayload1Br) - 1, out, 4096));
+
+    // RFC 7932 §9.2: non-zero padding bits in the final byte of ISLAST must be refused;
+    // trailing bytes beyond the stream end stop at `bytes_consumed`.
+    static const uint8_t kNonZeroPadBit[] = {0x86};
+    assert(!Brotli::decompress(kNonZeroPadBit, sizeof(kNonZeroPadBit), out, 4096));
+    std::vector<uint8_t> with_trailing(kPayload1Br, kPayload1Br + sizeof(kPayload1Br));
+    with_trailing.push_back(0xab);
+    std::size_t consumed = 0;
+    assert(Brotli::decompress(with_trailing.data(), with_trailing.size(), out, 4096, &consumed));
+    assert(consumed == sizeof(kPayload1Br));
+
+    // 2. End-to-end HTTP/1.1 Content-Encoding: br, and stacked encodings
+    std::string seen_accept_encoding;
+    LoopbackHttpTestServer server([&](const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (auto it = req.headers.find("accept-encoding"); it != req.headers.end()) {
+            seen_accept_encoding = it->second;
+        }
+        if (req.path == "/br") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br"});
+            resp.body.assign(reinterpret_cast<const char*>(kPayload1Br), sizeof(kPayload1Br));
+            return;
+        }
+        if (req.path == "/br-gzip") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br, gzip"});
+            resp.body.assign(reinterpret_cast<const char*>(kStackedGzipOfBr), sizeof(kStackedGzipOfBr));
+            return;
+        }
+        if (req.path == "/gzip-br") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "gzip, br"});
+            resp.body.assign(reinterpret_cast<const char*>(kStackedBrOfGzip), sizeof(kStackedBrOfGzip));
+            return;
+        }
+        if (req.path == "/br-bad") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "br"});
+            resp.body = std::string("\xff\xff\xff", 3);
+            return;
+        }
+        if (req.path == "/unsupported") {
+            resp.status = 200;
+            resp.content_type = "text/plain";
+            resp.headers.push_back({"Content-Encoding", "zstd"});
+            resp.body = "raw";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+
+    ResourceResponse r_br = ResourceLoader::load_http(base + "/br");
+    assert(r_br.success && r_br.status_code == 200);
+    assert(seen_accept_encoding.find("br") != std::string::npos);
+    assert(seen_accept_encoding.find("gzip") != std::string::npos);
+    assert(seen_accept_encoding.find("deflate") != std::string::npos);
+    assert(r_br.body == std::string(reinterpret_cast<const char*>(kPayload1Raw), sizeof(kPayload1Raw)));
+
+    ResourceResponse r_br_gz = ResourceLoader::load_http(base + "/br-gzip");
+    assert(r_br_gz.success && r_br_gz.body == "Layered gzip+br body check 1234567890");
+
+    ResourceResponse r_gz_br = ResourceLoader::load_http(base + "/gzip-br");
+    assert(r_gz_br.success && r_gz_br.body == "Layered br+gzip body check 1234567890");
+
+    ResourceResponse r_bad = ResourceLoader::load_http(base + "/br-bad");
+    assert(!r_bad.success && r_bad.error_message.find("Brotli") != std::string::npos);
+
+    ResourceResponse r_unsup = ResourceLoader::load_http(base + "/unsupported");
+    assert(!r_unsup.success && r_unsup.error_message.find("zstd") != std::string::npos);
+
+    server.stop();
+    ResourceLoader::clear_http_connection_pool();
+    ResourceLoader::clear_http_cache();
+}
+
+TEST(http11_keep_alive_socket_pooling_and_tls_reuse) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+    ResourceLoader::clear_http_cache();
+    ResourceLoader::clear_http_connection_pool();
+    assert(ResourceLoader::http_connection_pool_size() == 0);
+
+    auto read_wire_request = [](int fd, std::string& method_out, std::string& path_out,
+                                std::unordered_map<std::string, std::string>& hdrs_out,
+                                std::string& body_out) -> bool {
+        hdrs_out.clear();
+        body_out.clear();
+        std::string raw;
+        char buf[4096];
+        std::size_t hdr_end = std::string::npos;
+        while ((hdr_end = raw.find("\r\n\r\n")) == std::string::npos) {
+            const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) return false;
+            raw.append(buf, static_cast<std::size_t>(n));
+        }
+        std::istringstream iss(raw.substr(0, hdr_end));
+        std::string line;
+        if (!std::getline(iss, line)) return false;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        {
+            std::istringstream rl(line);
+            rl >> method_out >> path_out;
+        }
+        std::size_t cl = 0;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string k = line.substr(0, colon);
+            for (char& ch : k) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            std::string v = line.substr(colon + 1);
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+            hdrs_out[k] = v;
+            if (k == "content-length") cl = static_cast<std::size_t>(std::strtoull(v.c_str(), nullptr, 10));
+        }
+        body_out = raw.substr(hdr_end + 4);
+        while (body_out.size() < cl) {
+            const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) return false;
+            body_out.append(buf, static_cast<std::size_t>(n));
+        }
+        return true;
+    };
+
+    auto send_wire = [](int fd, const std::string& wire) -> bool {
+        std::size_t off = 0;
+        while (off < wire.size()) {
+            const ssize_t w = ::send(fd, wire.data() + off, wire.size() - off, MSG_NOSIGNAL);
+            if (w <= 0) return false;
+            off += static_cast<std::size_t>(w);
+        }
+        return true;
+    };
+
+    auto open_listen = [](int& port_out) -> int {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(fd >= 0);
+        int opt = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        assert(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        assert(::listen(fd, 16) == 0);
+        socklen_t len = sizeof(addr);
+        assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port_out = ntohs(addr.sin_port);
+        return fd;
+    };
+
+    // 1. Multi-request persistent TCP socket reuse (CL + split chunked + 204 + HEAD + Connection: close)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> accepts{0};
+        std::atomic<int> reqs{0};
+        std::atomic<bool> saw_keep_alive{true};
+
+        std::thread srv([&]() {
+            for (int conn_idx = 0; conn_idx < 2; ++conn_idx) {
+                const int cfd = ::accept(lfd, nullptr, nullptr);
+                if (cfd < 0) break;
+                ++accepts;
+                timeval tv{3, 0};
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                while (true) {
+                    std::string method, path, body;
+                    std::unordered_map<std::string, std::string> hdrs;
+                    if (!read_wire_request(cfd, method, path, hdrs, body)) break;
+                    ++reqs;
+                    if (!hdrs.count("connection") || hdrs["connection"] != "keep-alive") {
+                        saw_keep_alive = false;
+                    }
+                    if (path == "/p1") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nalpha");
+                    } else if (path == "/chunked") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello");
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        send_wire(cfd, "\r\n7\r\n brotli\r\n0\r\nX-Trailer: ok\r\n\r\n");
+                    } else if (path == "/nocontent") {
+                        send_wire(cfd, "HTTP/1.1 204 No Content\r\n\r\n");
+                    } else if (path == "/headcheck") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n");
+                    } else if (path == "/close") {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 4\r\n\r\ndone");
+                        break;
+                    } else {
+                        send_wire(cfd, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nagain");
+                        break;
+                    }
+                }
+                ::close(cfd);
+            }
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse r1 = ResourceLoader::load_http(base + "/p1");
+        assert(r1.success && r1.body == "alpha");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        ResourceResponse r2 = ResourceLoader::load_http(base + "/chunked");
+        assert(r2.success && r2.body == "hello brotli");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        ResourceResponse r3 = ResourceLoader::load_http(base + "/nocontent");
+        assert(r3.success && r3.status_code == 204 && r3.body.empty());
+        assert(accepts.load() == 1);
+
+        ResourceResponse r4 = ResourceLoader::load_http(base + "/headcheck", "HEAD");
+        assert(r4.success && r4.status_code == 200 && r4.body.empty());
+        assert(accepts.load() == 1);
+
+        ResourceResponse r5 = ResourceLoader::load_http(base + "/close");
+        assert(r5.success && r5.body == "done");
+        assert(accepts.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        ResourceResponse r6 = ResourceLoader::load_http(base + "/again");
+        assert(r6.success && r6.body == "again");
+        assert(accepts.load() == 2);
+        srv.join();
+        assert(saw_keep_alive.load());
+        assert(reqs.load() == 6);
+        ResourceLoader::clear_http_connection_pool();
+    }
+
+    // 2. Keep-Alive: timeout/max honoring + HTTP/1.0 opt-in rules
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> accepts{0};
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=10, max=2\r\nContent-Length: 2\r\n\r\nk1");
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=10, max=2\r\nContent-Length: 2\r\n\r\nk2");
+            ::close(c1);
+
+            int c2 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c2, m, p, h, b));
+            send_wire(c2, "HTTP/1.1 200 OK\r\nKeep-Alive: timeout=0\r\nContent-Length: 2\r\n\r\nk3");
+            ::close(c2);
+
+            int c3 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c3, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c3, m, p, h, b));
+            send_wire(c3, "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nk4");
+            ::close(c3);
+
+            int c4 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c4, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ++accepts;
+            assert(read_wire_request(c4, m, p, h, b));
+            send_wire(c4, "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nk5");
+            assert(read_wire_request(c4, m, p, h, b));
+            send_wire(c4, "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nk6");
+            ::close(c4);
+
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        assert(ResourceLoader::load_http(base + "/1").body == "k1");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(accepts.load() == 1);
+
+        assert(ResourceLoader::load_http(base + "/2").body == "k2");
+        assert(accepts.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/3").body == "k3");
+        assert(accepts.load() == 2);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/4").body == "k4");
+        assert(accepts.load() == 3);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        assert(ResourceLoader::load_http(base + "/5").body == "k5");
+        assert(accepts.load() == 4);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+        assert(ResourceLoader::load_http(base + "/6").body == "k6");
+        assert(accepts.load() == 4);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+        srv.join();
+        ResourceLoader::clear_http_connection_pool();
+    }
+
+    // 3. Stale socket race retry (GET retries once, POST never retries)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> post_attempts{0};
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok1");
+            assert(read_wire_request(c1, m, p, h, b));
+            ::close(c1);
+
+            int c2 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            assert(read_wire_request(c2, m, p, h, b));
+            send_wire(c2, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok2");
+            assert(read_wire_request(c2, m, p, h, b));
+            assert(m == "POST");
+            ++post_attempts;
+            ::close(c2);
+
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        assert(ResourceLoader::load_http(base + "/seed").body == "ok1");
+        ResourceResponse retried_get = ResourceLoader::load_http(base + "/retry-get");
+        assert(retried_get.success && retried_get.body == "ok2");
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceResponse unsafe_post = ResourceLoader::load_http(base + "/no-retry", "POST", {}, "x=1");
+        assert(!unsafe_post.success && !unsafe_post.network_ok);
+        assert(post_attempts.load() == 1);
+        srv.join();
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+    }
+
+    // 4. Conflicting Content-Length rejection and concurrent per-key pool cap (<= 4)
+    {
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::thread srv([&]() {
+            timeval tv{3, 0};
+            int c1 = ::accept(lfd, nullptr, nullptr);
+            ::setsockopt(c1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string m, p, b;
+            std::unordered_map<std::string, std::string> h;
+            assert(read_wire_request(c1, m, p, h, b));
+            send_wire(c1, "HTTP/1.1 200 OK\r\nContent-Length: 2, 5\r\n\r\nab");
+            ::close(c1);
+
+            std::vector<int> conns;
+            for (int i = 0; i < 6; ++i) {
+                int c = ::accept(lfd, nullptr, nullptr);
+                assert(c >= 0);
+                ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                conns.push_back(c);
+                assert(read_wire_request(c, m, p, h, b));
+            }
+            for (int c : conns) {
+                send_wire(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            }
+            for (int c : conns) ::close(c);
+            ::close(lfd);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse bad_cl = ResourceLoader::load_http(base + "/badcl");
+        assert(!bad_cl.success && bad_cl.error_message.find("Content-Length") != std::string::npos);
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        std::vector<std::thread> clients;
+        std::atomic<int> ok_count{0};
+        for (int i = 0; i < 6; ++i) {
+            clients.emplace_back([&, i]() {
+                ResourceResponse r = ResourceLoader::load_http(base + "/c" + std::to_string(i));
+                if (r.success && r.body == "ok") ++ok_count;
+            });
+        }
+        for (auto& t : clients) t.join();
+        assert(ok_count.load() == 6);
+        assert(ResourceLoader::http_connection_pool_size() <= 4);
+        ResourceLoader::clear_http_connection_pool();
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+        srv.join();
+    }
+
+    // 5. Persistent HTTPS (SSL*) keep-alive reuse + Brotli + set_ca_bundle_for_testing pool clear
+    {
+        void* ssl_lib = ::dlopen("libssl.so.3", RTLD_LAZY | RTLD_LOCAL);
+        assert(ssl_lib != nullptr);
+        auto load_sym = [&](auto& fn, const char* sym) {
+            void* p = ::dlsym(ssl_lib, sym);
+            assert(p != nullptr);
+            std::memcpy(&fn, &p, sizeof(p));
+        };
+        const void* (*tls_server_method_fn)() = nullptr;
+        void* (*ctx_new_fn)(const void*) = nullptr;
+        void (*ctx_free_fn)(void*) = nullptr;
+        int (*ctx_use_cert_fn)(void*, const char*, int) = nullptr;
+        int (*ctx_use_key_fn)(void*, const char*, int) = nullptr;
+        void* (*ssl_new_fn)(void*) = nullptr;
+        void (*ssl_free_fn)(void*) = nullptr;
+        int (*ssl_set_fd_fn)(void*, int) = nullptr;
+        int (*ssl_accept_fn)(void*) = nullptr;
+        int (*ssl_read_fn)(void*, void*, int) = nullptr;
+        int (*ssl_write_fn)(void*, const void*, int) = nullptr;
+        int (*ssl_shutdown_fn)(void*) = nullptr;
+
+        load_sym(tls_server_method_fn, "TLS_server_method");
+        load_sym(ctx_new_fn, "SSL_CTX_new");
+        load_sym(ctx_free_fn, "SSL_CTX_free");
+        load_sym(ctx_use_cert_fn, "SSL_CTX_use_certificate_file");
+        load_sym(ctx_use_key_fn, "SSL_CTX_use_PrivateKey_file");
+        load_sym(ssl_new_fn, "SSL_new");
+        load_sym(ssl_free_fn, "SSL_free");
+        load_sym(ssl_set_fd_fn, "SSL_set_fd");
+        load_sym(ssl_accept_fn, "SSL_accept");
+        load_sym(ssl_read_fn, "SSL_read");
+        load_sym(ssl_write_fn, "SSL_write");
+        load_sym(ssl_shutdown_fn, "SSL_shutdown");
+
+        const fs::path cert_dir = fs::temp_directory_path() / "litebird_phase85_tls_test";
+        fs::create_directories(cert_dir);
+        const fs::path key_path = cert_dir / "srv.key";
+        const fs::path cert_path = cert_dir / "srv.crt";
+        const std::string cmd =
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes "
+            "-keyout \"" + key_path.string() + "\" -out \"" + cert_path.string() + "\" "
+            "-days 2 -subj \"/CN=127.0.0.1\" -addext \"subjectAltName=IP:127.0.0.1,DNS:localhost\" "
+            ">/dev/null 2>&1";
+        assert(std::system(cmd.c_str()) == 0);
+
+        void* sctx = ctx_new_fn(tls_server_method_fn());
+        assert(sctx != nullptr);
+        assert(ctx_use_cert_fn(sctx, cert_path.string().c_str(), 1) == 1);
+        assert(ctx_use_key_fn(sctx, key_path.string().c_str(), 1) == 1);
+
+        int port = 0;
+        const int lfd = open_listen(port);
+        std::atomic<int> tls_handshakes{0};
+        std::thread tls_srv([&]() {
+            const int cfd = ::accept(lfd, nullptr, nullptr);
+            assert(cfd >= 0);
+            timeval tv{3, 0};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            void* ssl = ssl_new_fn(sctx);
+            assert(ssl != nullptr);
+            assert(ssl_set_fd_fn(ssl, cfd) == 1);
+            assert(ssl_accept_fn(ssl) == 1);
+            ++tls_handshakes;
+
+            static const uint8_t kHelloBr[] = {
+                0x8b,0x10,0x80,0x48,0x65,0x6c,0x6c,0x6f,0x2c,0x20,0x4c,0x69,0x74,0x65,0x62,0x69,
+                0x72,0x64,0x20,0x48,0x54,0x54,0x50,0x2f,0x31,0x2e,0x31,0x20,0x2b,0x20,0x42,0x72,
+                0x6f,0x74,0x6c,0x69,0x21,0x03
+            };
+
+            for (int req_i = 0; req_i < 2; ++req_i) {
+                std::string raw;
+                char buf[4096];
+                while (raw.find("\r\n\r\n") == std::string::npos) {
+                    const int n = ssl_read_fn(ssl, buf, sizeof(buf));
+                    if (n <= 0) break;
+                    raw.append(buf, static_cast<std::size_t>(n));
+                }
+                std::string wire;
+                if (req_i == 0) {
+                    wire = "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: " +
+                           std::to_string(sizeof(kHelloBr)) + "\r\n\r\n" +
+                           std::string(reinterpret_cast<const char*>(kHelloBr), sizeof(kHelloBr));
+                } else {
+                    wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\ntls-ok-\r\n1\r\n2\r\n0\r\n\r\n";
+                }
+                assert(ssl_write_fn(ssl, wire.data(), static_cast<int>(wire.size())) == static_cast<int>(wire.size()));
+            }
+            char drain[64];
+            (void)ssl_read_fn(ssl, drain, sizeof(drain));
+            (void)ssl_shutdown_fn(ssl);
+            ssl_free_fn(ssl);
+            ::close(cfd);
+            ::close(lfd);
+        });
+
+        ResourceLoader::set_ca_bundle_for_testing(cert_path.string());
+        const std::string tls_base = "https://127.0.0.1:" + std::to_string(port);
+
+        ResourceResponse t1 = ResourceLoader::load_http(tls_base + "/hello.br");
+        assert(t1.success && t1.body == "Hello, Litebird HTTP/1.1 + Brotli!");
+        assert(tls_handshakes.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceResponse t2 = ResourceLoader::load_http(tls_base + "/chunk");
+        assert(t2.success && t2.body == "tls-ok-2");
+        assert(tls_handshakes.load() == 1);
+        assert(ResourceLoader::http_connection_pool_size() == 1);
+
+        ResourceLoader::set_ca_bundle_for_testing("");
+        assert(ResourceLoader::http_connection_pool_size() == 0);
+
+        tls_srv.join();
+        ctx_free_fn(sctx);
+        ::dlclose(ssl_lib);
+        fs::remove_all(cert_dir);
+    }
+
+    ResourceLoader::clear_http_connection_pool();
+    ResourceLoader::clear_http_cache();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -19530,6 +20121,10 @@ int main() {
     RUN_TEST(http_cache_rfc9111_freshness_etag_304_vary_and_invalidation);
     RUN_TEST(cors_preflight_options_max_age_authorization_and_mixed_content);
     RUN_TEST(fetch_headers_instances_cache_modes_credentials_and_exposed_headers);
+
+    // Phase 85: RFC 7932 Brotli Content-Encoding and HTTP/1.1 + TLS keep-alive socket pooling.
+    RUN_TEST(brotli_rfc7932_decoder_and_http_content_encoding);
+    RUN_TEST(http11_keep_alive_socket_pooling_and_tls_reuse);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

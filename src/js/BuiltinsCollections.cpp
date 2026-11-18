@@ -217,12 +217,12 @@ std::shared_ptr<CollectionData> data_of(const JsValue& value, ObjectClass klass,
 }
 
 JsValue make_collection(ObjectClass klass, JsObject* proto, const JsValue* derived = nullptr) {
-    JsObject* cell = derived && derived->is_object_like() ? derived->object_val.get()
-                                                          : Heap::default_heap().allocate_object();
+    JsObject* cell = (derived && derived->object_val) ? derived->object_val.get()
+                                                       : Heap::default_heap().allocate_object();
     // A derived constructor already received an object with new.target's
     // prototype. Keep it; a plain native construction starts at its intrinsic
     // prototype (or the one Reflect.construct supplied).
-    if (!derived) cell->prototype = proto;
+    if (!derived || !derived->object_val) cell->prototype = proto;
     cell->klass = klass;
     auto data = std::make_shared<CollectionData>();
     cell->internal = data;

@@ -51,3 +51,7 @@ exceptions and selected `protocol` exposure are incomplete. Frame validation,
 mask randomness, `bufferedAmount`, and full close/event behavior are also not
 claimed. The five-second bound covers header reception, not DNS or TCP connect.
 Those limitations mean this client is not a complete browser security boundary.
+
+Local `make asan-core` also passed all 235 suites, the conformance corpora
+and mutation fuzzers before integrating the direct-eval change from main.
+The combined tree registers 236 suites; CI verifies that combined tree.

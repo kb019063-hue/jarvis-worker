@@ -1,4 +1,6 @@
 #include "litebird/net/ResourceLoader.hpp"
+#include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/Storage.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/net/UrlParser.hpp"
@@ -7,12 +9,17 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <list>
 #include <mutex>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -403,7 +410,714 @@ bool cors_allows_response(
     return allowed_origin == "*" || allowed_origin == request_origin;
 }
 
+double now_epoch_ms() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
+
+bool is_potentially_trustworthy_url(const Url& u) {
+    if (u.scheme == "https" || u.scheme == "data" || u.scheme == "file") return true;
+    if (u.scheme != "http") return false;
+    const std::string h = ascii_lower(u.host);
+    if (h == "localhost" || h == "[::1]") return true;
+    if (h.size() > 10 && h.substr(h.size() - 10) == ".localhost") return true;
+    in_addr v4{};
+    if (::inet_pton(AF_INET, h.c_str(), &v4) == 1) {
+        return (ntohl(v4.s_addr) >> 24) == 127u;
+    }
+    return false;
+}
+
+std::vector<std::string> split_http_comma_tokens(std::string_view text, bool lowercase) {
+    std::vector<std::string> out;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        std::size_t start = i;
+        bool in_quotes = false;
+        while (i < text.size()) {
+            const char c = text[i];
+            if (c == '"') {
+                in_quotes = !in_quotes;
+            } else if (c == '\\' && in_quotes && i + 1 < text.size()) {
+                ++i;
+            } else if (c == ',' && !in_quotes) {
+                break;
+            }
+            ++i;
+        }
+        std::string item = trim_http_ws(text.substr(start, i - start));
+        if (!item.empty()) {
+            out.push_back(lowercase ? ascii_lower(item) : item);
+        }
+        if (i < text.size() && text[i] == ',') ++i;
+    }
+    return out;
+}
+
+bool is_cors_safelisted_method(std::string_view method) {
+    return method == "GET" || method == "HEAD" || method == "POST";
+}
+
+bool has_cors_unsafe_request_header_byte(std::string_view value) {
+    for (unsigned char c : value) {
+        if (c < 0x20 && c != 0x09) return true;
+        if (c == '"' || c == '(' || c == ')' || c == ':' || c == '<' || c == '>' ||
+            c == '?' || c == '@' || c == '[' || c == '\\' || c == ']' || c == '{' ||
+            c == '}' || c == 0x7f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_cors_safelisted_language_value(std::string_view value) {
+    for (unsigned char c : value) {
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                        (c >= 'a' && c <= 'z') || c == ' ' || c == '*' ||
+                        c == ',' || c == '-' || c == '.' || c == ';' || c == '=';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool is_cors_safelisted_request_header(std::string_view lower_name, std::string_view value) {
+    if (value.size() > 128) return false;
+    if (lower_name == "accept") {
+        return !has_cors_unsafe_request_header_byte(value);
+    }
+    if (lower_name == "accept-language" || lower_name == "content-language") {
+        return is_cors_safelisted_language_value(value);
+    }
+    if (lower_name == "content-type") {
+        if (has_cors_unsafe_request_header_byte(value)) return false;
+        const auto semi = value.find(';');
+        const std::string essence = ascii_lower(trim_http_ws(
+            semi == std::string_view::npos ? value : value.substr(0, semi)
+        ));
+        return essence == "application/x-www-form-urlencoded" ||
+               essence == "multipart/form-data" ||
+               essence == "text/plain";
+    }
+    return false;
+}
+
+std::vector<std::string> collect_cors_unsafe_request_headers(
+    const std::unordered_map<std::string, std::string>& caller_headers
+) {
+    std::vector<std::string> unsafe_names;
+    for (const auto& [name, val] : caller_headers) {
+        const std::string lower = ascii_lower(name);
+        if (!is_cors_safelisted_request_header(lower, val)) {
+            unsafe_names.push_back(lower);
+        }
+    }
+    std::sort(unsafe_names.begin(), unsafe_names.end());
+    unsafe_names.erase(std::unique(unsafe_names.begin(), unsafe_names.end()), unsafe_names.end());
+    return unsafe_names;
+}
+
+struct CorsPreflightEntry {
+    std::string key;
+    std::unordered_set<std::string> allowed_methods;
+    std::unordered_set<std::string> allowed_headers;
+    bool allow_any_method{false};
+    bool allow_any_header{false};
+    double expires_at_ms{0.0};
+};
+
+std::mutex g_preflight_mutex;
+std::unordered_map<std::string, CorsPreflightEntry> g_preflight_cache;
+constexpr std::size_t kMaxPreflightEntries = 256;
+
+bool preflight_entry_covers(
+    const CorsPreflightEntry& entry,
+    const std::string& method,
+    const std::vector<std::string>& unsafe_headers,
+    bool include_credentials
+) {
+    const bool method_ok = is_cors_safelisted_method(method) ||
+                           entry.allowed_methods.count(method) > 0 ||
+                           (!include_credentials && entry.allow_any_method);
+    if (!method_ok) return false;
+
+    for (const auto& h : unsafe_headers) {
+        if (entry.allowed_headers.count(h) > 0) continue;
+        if (!include_credentials && entry.allow_any_header && h != "authorization") continue;
+        return false;
+    }
+    return true;
+}
+
+bool ensure_cors_preflight(
+    const std::string& target_url,
+    const std::string& origin,
+    const std::string& method,
+    const std::vector<std::string>& unsafe_headers,
+    bool include_credentials,
+    std::string& error_out
+) {
+    if (origin.empty() || origin == "null") {
+        // An `"null"` origin can still preflight if the server replies `Access-Control-Allow-Origin: *`
+        // (when credentials are omitted), so keep going with `"null"`.
+    }
+    const std::string effective_origin = origin.empty() ? "null" : origin;
+    const std::string cache_key =
+        (include_credentials ? "1|" : "0|") + effective_origin + "|" + target_url;
+    const double now_ms = now_epoch_ms();
+
+    {
+        std::lock_guard<std::mutex> lock(g_preflight_mutex);
+        auto it = g_preflight_cache.find(cache_key);
+        if (it != g_preflight_cache.end()) {
+            if (it->second.expires_at_ms <= now_ms) {
+                g_preflight_cache.erase(it);
+            } else if (preflight_entry_covers(it->second, method, unsafe_headers, include_credentials)) {
+                return true;
+            }
+        }
+    }
+
+    std::unordered_map<std::string, std::string> preflight_headers;
+    preflight_headers["Origin"] = effective_origin;
+    preflight_headers["Access-Control-Request-Method"] = method;
+    if (!unsafe_headers.empty()) {
+        std::string joined;
+        for (std::size_t i = 0; i < unsafe_headers.size(); ++i) {
+            if (i > 0) joined.push_back(',');
+            joined += unsafe_headers[i];
+        }
+        preflight_headers["Access-Control-Request-Headers"] = std::move(joined);
+    }
+
+    // WHATWG Fetch §4.5: OPTIONS preflight excludes credentials and refuses redirects.
+    ResourceResponse preflight = ResourceLoader::load_http_single_hop(
+        target_url, "OPTIONS", preflight_headers, ""
+    );
+    if (!preflight.network_ok || preflight.status_code < 200 || preflight.status_code >= 300) {
+        error_out = "Blocked by CORS preflight policy: preflight OPTIONS response did not succeed";
+        return false;
+    }
+    if (!cors_allows_response(preflight, effective_origin, include_credentials)) {
+        error_out = "Blocked by CORS preflight policy: missing or mismatched Access-Control-Allow-Origin";
+        return false;
+    }
+
+    CorsPreflightEntry entry;
+    entry.key = cache_key;
+    if (auto it = preflight.headers.find("access-control-allow-methods"); it != preflight.headers.end()) {
+        for (const auto& token : split_http_comma_tokens(it->second, /*lowercase=*/false)) {
+            if (token == "*" && !include_credentials) entry.allow_any_method = true;
+            else entry.allowed_methods.insert(token);
+        }
+    }
+    if (auto it = preflight.headers.find("access-control-allow-headers"); it != preflight.headers.end()) {
+        for (const auto& token : split_http_comma_tokens(it->second, /*lowercase=*/true)) {
+            if (token == "*" && !include_credentials) entry.allow_any_header = true;
+            else entry.allowed_headers.insert(token);
+        }
+    }
+
+    if (!preflight_entry_covers(entry, method, unsafe_headers, include_credentials)) {
+        error_out = "Blocked by CORS preflight policy: method or request header not permitted";
+        return false;
+    }
+
+    double max_age_sec = 5.0; // WHATWG Fetch default preflight max-age when header is absent
+    if (auto it = preflight.headers.find("access-control-max-age"); it != preflight.headers.end()) {
+        const std::string raw = trim_http_ws(it->second);
+        long long parsed_sec = -1;
+        const auto res = std::from_chars(raw.data(), raw.data() + raw.size(), parsed_sec);
+        if (!raw.empty() && res.ec == std::errc{} && res.ptr == raw.data() + raw.size()) {
+            if (parsed_sec <= 0) max_age_sec = 0.0;
+            else max_age_sec = std::min<double>(static_cast<double>(parsed_sec), 86400.0);
+        } else {
+            max_age_sec = 0.0;
+        }
+    }
+
+    if (max_age_sec > 0.0) {
+        entry.expires_at_ms = now_ms + max_age_sec * 1000.0;
+        std::lock_guard<std::mutex> lock(g_preflight_mutex);
+        if (g_preflight_cache.size() >= kMaxPreflightEntries && !g_preflight_cache.count(cache_key)) {
+            g_preflight_cache.erase(g_preflight_cache.begin());
+        }
+        g_preflight_cache[cache_key] = std::move(entry);
+    }
+    return true;
+}
+
+struct CacheControlDirectives {
+    bool no_store{false};
+    bool no_cache{false};
+    bool must_revalidate{false};
+    bool immutable{false};
+    bool only_if_cached{false};
+    bool has_max_age{false};
+    double max_age_sec{0.0};
+    bool has_s_maxage{false};
+    double s_maxage_sec{0.0};
+};
+
+CacheControlDirectives parse_cache_control(std::string_view header_val) {
+    CacheControlDirectives cc;
+    for (const auto& item : split_http_comma_tokens(header_val, /*lowercase=*/false)) {
+        const auto eq = item.find('=');
+        const std::string name = ascii_lower(trim_http_ws(
+            eq == std::string::npos ? std::string_view(item) : std::string_view(item).substr(0, eq)
+        ));
+        std::string val = (eq == std::string::npos)
+                              ? std::string()
+                              : trim_http_ws(std::string_view(item).substr(eq + 1));
+        if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+            val = val.substr(1, val.size() - 2);
+        }
+
+        if (name == "no-store") cc.no_store = true;
+        else if (name == "no-cache") cc.no_cache = true;
+        else if (name == "must-revalidate") cc.must_revalidate = true;
+        else if (name == "immutable") cc.immutable = true;
+        else if (name == "only-if-cached") cc.only_if_cached = true;
+        else if (name == "max-age" && !val.empty()) {
+            long long sec = -1;
+            const auto r = std::from_chars(val.data(), val.data() + val.size(), sec);
+            if (r.ec == std::errc{} && r.ptr == val.data() + val.size() && sec >= 0) {
+                cc.has_max_age = true;
+                cc.max_age_sec = std::min<double>(static_cast<double>(sec), 315360000.0);
+            }
+        } else if (name == "s-maxage" && !val.empty()) {
+            long long sec = -1;
+            const auto r = std::from_chars(val.data(), val.data() + val.size(), sec);
+            if (r.ec == std::errc{} && r.ptr == val.data() + val.size() && sec >= 0) {
+                cc.has_s_maxage = true;
+                cc.s_maxage_sec = std::min<double>(static_cast<double>(sec), 315360000.0);
+            }
+        }
+    }
+    return cc;
+}
+
+std::string find_header_ci(
+    const std::unordered_map<std::string, std::string>& headers,
+    std::string_view lower_target
+) {
+    for (const auto& [k, v] : headers) {
+        if (ascii_lower(k) == lower_target) return v;
+    }
+    return {};
+}
+
+bool has_header_ci(
+    const std::unordered_map<std::string, std::string>& headers,
+    std::string_view lower_target
+) {
+    for (const auto& [k, _] : headers) {
+        if (ascii_lower(k) == lower_target) return true;
+    }
+    return false;
+}
+
+void ingest_response_cookies(const ResourceResponse& resp, const std::string& request_url) {
+    for (const auto& [hname, hval] : resp.header_list) {
+        if (hname == "set-cookie") {
+            CookieJar::default_jar().set_cookie_from_header(hval, request_url);
+        }
+    }
+}
+
+ResourceResponse strip_set_cookie_headers_copy(const ResourceResponse& src) {
+    ResourceResponse copy = src;
+    copy.headers.erase("set-cookie");
+    copy.headers.erase("set-cookie2");
+    copy.header_list.erase(
+        std::remove_if(copy.header_list.begin(), copy.header_list.end(), [](const auto& kv) {
+            return kv.first == "set-cookie" || kv.first == "set-cookie2";
+        }),
+        copy.header_list.end()
+    );
+    return copy;
+}
+
+struct HttpCacheEntry {
+    std::string partition;
+    std::string url;
+    ResourceResponse response;
+    std::string etag;
+    std::string last_modified;
+    std::vector<std::pair<std::string, std::string>> vary_pairs;
+    double stored_at_ms{0.0};
+    double response_date_ms{0.0};
+    bool has_response_date{false};
+    double age_header_sec{0.0};
+    bool has_explicit_freshness{false};
+    double freshness_lifetime_ms{0.0};
+    bool no_cache{false};
+    bool immutable{false};
+};
+
+constexpr std::size_t kMaxCacheEntries = 256;
+constexpr std::size_t kMaxCacheEntryBodyBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kMaxCacheTotalBodyBytes = 32u * 1024u * 1024u;
+
+std::mutex g_http_cache_mutex;
+std::list<HttpCacheEntry> g_http_cache_lru;
+std::size_t g_http_cache_total_bytes = 0;
+
+bool compute_cache_metadata(
+    const ResourceResponse& resp,
+    const std::unordered_map<std::string, std::string>& req_headers,
+    double stored_ms,
+    HttpCacheEntry& out
+) {
+    CacheControlDirectives cc;
+    if (auto it = resp.headers.find("cache-control"); it != resp.headers.end()) {
+        cc = parse_cache_control(it->second);
+    }
+    if (cc.no_store) return false;
+
+    bool pragma_no_cache = false;
+    if (auto it = resp.headers.find("pragma"); it != resp.headers.end()) {
+        if (ascii_lower(it->second).find("no-cache") != std::string::npos) {
+            pragma_no_cache = true;
+        }
+    }
+
+    out.vary_pairs.clear();
+    if (auto it = resp.headers.find("vary"); it != resp.headers.end()) {
+        for (const auto& vname : split_http_comma_tokens(it->second, /*lowercase=*/true)) {
+            if (vname == "*") return false;
+            out.vary_pairs.emplace_back(vname, find_header_ci(req_headers, vname));
+        }
+    }
+
+    out.etag.clear();
+    if (auto it = resp.headers.find("etag"); it != resp.headers.end()) {
+        out.etag = trim_http_ws(it->second);
+    }
+    out.last_modified.clear();
+    if (auto it = resp.headers.find("last-modified"); it != resp.headers.end()) {
+        out.last_modified = trim_http_ws(it->second);
+    }
+
+    out.stored_at_ms = stored_ms;
+    out.has_response_date = false;
+    out.response_date_ms = stored_ms;
+    if (auto it = resp.headers.find("date"); it != resp.headers.end()) {
+        const double d = js_parse_date_string(it->second);
+        if (!std::isnan(d)) {
+            out.has_response_date = true;
+            out.response_date_ms = d;
+        }
+    }
+
+    out.age_header_sec = 0.0;
+    if (auto it = resp.headers.find("age"); it != resp.headers.end()) {
+        const std::string raw = trim_http_ws(it->second);
+        long long sec = 0;
+        const auto r = std::from_chars(raw.data(), raw.data() + raw.size(), sec);
+        if (!raw.empty() && r.ec == std::errc{} && r.ptr == raw.data() + raw.size() && sec > 0) {
+            out.age_header_sec = static_cast<double>(sec);
+        }
+    }
+
+    out.no_cache = cc.no_cache || (!cc.has_max_age && pragma_no_cache);
+    out.immutable = cc.immutable;
+    out.has_explicit_freshness = false;
+    out.freshness_lifetime_ms = 0.0;
+
+    if (cc.has_max_age) {
+        out.has_explicit_freshness = true;
+        out.freshness_lifetime_ms = cc.max_age_sec * 1000.0;
+    } else if (auto exp_it = resp.headers.find("expires"); exp_it != resp.headers.end()) {
+        out.has_explicit_freshness = true;
+        const double exp_ms = js_parse_date_string(exp_it->second);
+        const double base_ms = out.has_response_date ? out.response_date_ms : stored_ms;
+        if (!std::isnan(exp_ms) && exp_ms > base_ms) {
+            out.freshness_lifetime_ms = exp_ms - base_ms;
+        } else {
+            out.freshness_lifetime_ms = 0.0;
+        }
+    } else if (cc.immutable) {
+        out.has_explicit_freshness = true;
+        out.freshness_lifetime_ms = 31536000.0 * 1000.0;
+    }
+
+    // Only store responses that declare explicit freshness or revalidation validators,
+    // so unannotated dynamic responses continue hitting the origin as expected.
+    if (!out.has_explicit_freshness && out.etag.empty() && out.last_modified.empty()) {
+        return false;
+    }
+
+    out.response = strip_set_cookie_headers_copy(resp);
+    out.response.from_cache = false;
+    out.response.revalidated = false;
+    return out.response.body.size() <= kMaxCacheEntryBodyBytes;
+}
+
+bool cache_entry_is_fresh(const HttpCacheEntry& entry, double now_ms, const CacheControlDirectives& req_cc) {
+    if (entry.no_cache || !entry.has_explicit_freshness) return false;
+    const double apparent_age_ms = entry.has_response_date
+                                       ? std::max(0.0, entry.stored_at_ms - entry.response_date_ms)
+                                       : 0.0;
+    const double initial_age_ms = std::max(apparent_age_ms, entry.age_header_sec * 1000.0);
+    const double current_age_ms = initial_age_ms + std::max(0.0, now_ms - entry.stored_at_ms);
+
+    if (req_cc.has_max_age && current_age_ms >= req_cc.max_age_sec * 1000.0) {
+        return false;
+    }
+    if (entry.immutable && !req_cc.has_max_age) {
+        return true;
+    }
+    return current_age_ms < entry.freshness_lifetime_ms;
+}
+
+bool vary_matches_request(
+    const HttpCacheEntry& entry,
+    const std::unordered_map<std::string, std::string>& req_headers
+) {
+    for (const auto& [vname, expected_val] : entry.vary_pairs) {
+        if (find_header_ci(req_headers, vname) != expected_val) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void store_http_cache_entry(HttpCacheEntry&& entry) {
+    std::lock_guard<std::mutex> lock(g_http_cache_mutex);
+    for (auto it = g_http_cache_lru.begin(); it != g_http_cache_lru.end(); ) {
+        if (it->partition == entry.partition && it->url == entry.url &&
+            it->vary_pairs == entry.vary_pairs) {
+            g_http_cache_total_bytes -= it->response.body.size();
+            it = g_http_cache_lru.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    while (!g_http_cache_lru.empty() &&
+           (g_http_cache_lru.size() >= kMaxCacheEntries ||
+            g_http_cache_total_bytes + entry.response.body.size() > kMaxCacheTotalBodyBytes)) {
+        g_http_cache_total_bytes -= g_http_cache_lru.back().response.body.size();
+        g_http_cache_lru.pop_back();
+    }
+    g_http_cache_total_bytes += entry.response.body.size();
+    g_http_cache_lru.push_front(std::move(entry));
+}
+
+void invalidate_http_cache_url(const std::string& target_url) {
+    std::lock_guard<std::mutex> lock(g_http_cache_mutex);
+    for (auto it = g_http_cache_lru.begin(); it != g_http_cache_lru.end(); ) {
+        if (it->url == target_url) {
+            g_http_cache_total_bytes -= it->response.body.size();
+            it = g_http_cache_lru.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+ResourceResponse merge_304_headers(const ResourceResponse& cached_200, const ResourceResponse& resp_304) {
+    ResourceResponse merged = cached_200;
+    std::unordered_set<std::string> updated_names;
+    for (const auto& [hname, _] : resp_304.header_list) {
+        if (hname == "set-cookie" || hname == "set-cookie2" ||
+            hname == "content-length" || hname == "content-encoding" ||
+            hname == "transfer-encoding") {
+            continue;
+        }
+        updated_names.insert(hname);
+    }
+
+    if (!updated_names.empty()) {
+        merged.header_list.erase(
+            std::remove_if(merged.header_list.begin(), merged.header_list.end(), [&](const auto& kv) {
+                return updated_names.count(kv.first) > 0;
+            }),
+            merged.header_list.end()
+        );
+        for (const auto& name : updated_names) {
+            merged.headers.erase(name);
+        }
+        for (const auto& [hname, hval] : resp_304.header_list) {
+            if (updated_names.count(hname) == 0) continue;
+            merged.header_list.emplace_back(hname, hval);
+            auto it = merged.headers.find(hname);
+            if (it != merged.headers.end()) it->second += ", " + hval;
+            else merged.headers[hname] = hval;
+            if (hname == "content-type") merged.content_type = hval;
+        }
+    }
+    return merged;
+}
+
+ResourceResponse execute_http_hop_with_cache(
+    const std::string& hop_address,
+    const std::string& method,
+    const std::unordered_map<std::string, std::string>& request_headers,
+    const std::string& body,
+    CacheMode cache_mode,
+    const std::string& cache_partition,
+    bool ingest_cookies,
+    const std::function<bool(const ResourceResponse&, std::string&)>& allow_response_fn
+) {
+    CacheControlDirectives req_cc;
+    if (const std::string raw_cc = find_header_ci(request_headers, "cache-control"); !raw_cc.empty()) {
+        req_cc = parse_cache_control(raw_cc);
+    }
+    const bool req_pragma_no_cache =
+        ascii_lower(find_header_ci(request_headers, "pragma")).find("no-cache") != std::string::npos;
+
+    const bool is_get = (method == "GET");
+    const bool bypass_read = (cache_mode == CacheMode::NoStore || cache_mode == CacheMode::Reload || req_cc.no_store);
+    const bool force_revalidate = (cache_mode == CacheMode::NoCache || req_cc.no_cache || req_pragma_no_cache ||
+                                   (req_cc.has_max_age && req_cc.max_age_sec == 0.0));
+
+    bool have_stale_candidate = false;
+    HttpCacheEntry stale_candidate;
+    const double lookup_ms = now_epoch_ms();
+
+    if (is_get && !bypass_read) {
+        std::lock_guard<std::mutex> lock(g_http_cache_mutex);
+        for (auto it = g_http_cache_lru.begin(); it != g_http_cache_lru.end(); ++it) {
+            if (it->partition != cache_partition || it->url != hop_address) continue;
+            if (!vary_matches_request(*it, request_headers)) continue;
+
+            if (cache_mode == CacheMode::ForceCache ||
+                (!force_revalidate && cache_entry_is_fresh(*it, lookup_ms, req_cc))) {
+                HttpCacheEntry hit_entry = *it;
+                g_http_cache_lru.splice(g_http_cache_lru.begin(), g_http_cache_lru, it);
+                ResourceResponse hit = std::move(hit_entry.response);
+                std::string deny_reason;
+                if (allow_response_fn && !allow_response_fn(hit, deny_reason)) {
+                    ResourceResponse denied;
+                    denied.error_message = deny_reason;
+                    return denied;
+                }
+                hit.from_cache = true;
+                hit.revalidated = false;
+                return hit;
+            }
+
+            stale_candidate = *it;
+            have_stale_candidate = true;
+            break;
+        }
+    }
+
+    if (is_get && req_cc.only_if_cached && !have_stale_candidate) {
+        ResourceResponse miss;
+        miss.status_code = 504;
+        miss.status_text = "Gateway Timeout";
+        miss.error_message = "Resource not in HTTP cache (only-if-cached)";
+        return miss;
+    }
+
+    std::unordered_map<std::string, std::string> wire_headers = request_headers;
+    const bool caller_supplied_validators =
+        has_header_ci(request_headers, "if-none-match") ||
+        has_header_ci(request_headers, "if-modified-since");
+    const bool sent_revalidation =
+        have_stale_candidate && !caller_supplied_validators &&
+        (!stale_candidate.etag.empty() || !stale_candidate.last_modified.empty());
+
+    if (sent_revalidation) {
+        if (!stale_candidate.etag.empty()) {
+            wire_headers["If-None-Match"] = stale_candidate.etag;
+        }
+        if (!stale_candidate.last_modified.empty()) {
+            wire_headers["If-Modified-Since"] = stale_candidate.last_modified;
+        }
+    }
+
+    ResourceResponse net_resp = ResourceLoader::load_http_single_hop(
+        hop_address, method, wire_headers, body
+    );
+    if (!net_resp.network_ok) {
+        return net_resp;
+    }
+
+    if (sent_revalidation && net_resp.status_code == 304) {
+        ResourceResponse merged = merge_304_headers(stale_candidate.response, net_resp);
+        std::string deny_reason;
+        if (allow_response_fn && !allow_response_fn(merged, deny_reason)) {
+            ResourceResponse denied;
+            denied.error_message = deny_reason;
+            return denied;
+        }
+        if (ingest_cookies) {
+            ingest_response_cookies(net_resp, hop_address);
+        }
+
+        const double refreshed_ms = now_epoch_ms();
+        HttpCacheEntry refreshed;
+        refreshed.partition = cache_partition;
+        refreshed.url = hop_address;
+        if (cache_mode != CacheMode::NoStore && !req_cc.no_store &&
+            compute_cache_metadata(merged, request_headers, refreshed_ms, refreshed)) {
+            store_http_cache_entry(std::move(refreshed));
+        } else {
+            invalidate_http_cache_url(hop_address);
+        }
+
+        merged.from_cache = true;
+        merged.revalidated = true;
+        return merged;
+    }
+
+    std::string deny_reason;
+    if (allow_response_fn && !allow_response_fn(net_resp, deny_reason)) {
+        ResourceResponse denied;
+        denied.error_message = deny_reason;
+        return denied;
+    }
+
+    if (ingest_cookies) {
+        ingest_response_cookies(net_resp, hop_address);
+    }
+
+    const std::string lower_method = ascii_lower(method);
+    const bool is_unsafe_method =
+        (lower_method == "post" || lower_method == "put" ||
+         lower_method == "delete" || lower_method == "patch");
+    if (is_unsafe_method && net_resp.status_code >= 200 && net_resp.status_code < 400) {
+        invalidate_http_cache_url(hop_address);
+    }
+
+    if (is_get && net_resp.status_code == 200 && cache_mode != CacheMode::NoStore && !req_cc.no_store) {
+        HttpCacheEntry new_entry;
+        new_entry.partition = cache_partition;
+        new_entry.url = hop_address;
+        if (compute_cache_metadata(net_resp, request_headers, now_epoch_ms(), new_entry)) {
+            store_http_cache_entry(std::move(new_entry));
+        }
+    }
+
+    return net_resp;
+}
+
 } // namespace
+
+void ResourceLoader::clear_http_cache() {
+    {
+        std::lock_guard<std::mutex> lock(g_http_cache_mutex);
+        g_http_cache_lru.clear();
+        g_http_cache_total_bytes = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_preflight_mutex);
+        g_preflight_cache.clear();
+    }
+}
+
+std::size_t ResourceLoader::http_cache_size() {
+    std::lock_guard<std::mutex> lock(g_http_cache_mutex);
+    return g_http_cache_lru.size();
+}
+
+std::size_t ResourceLoader::cors_preflight_cache_size() {
+    std::lock_guard<std::mutex> lock(g_preflight_mutex);
+    return g_preflight_cache.size();
+}
 
 void ResourceLoader::set_ca_bundle_for_testing(std::string ca_file_path) {
     std::lock_guard<std::mutex> lock(g_ca_mutex);
@@ -606,15 +1320,24 @@ ResourceResponse ResourceLoader::load_for_page(
         }
 
         const std::string doc_origin = document.origin();
+        const bool https_document = (document.scheme == "https");
         Url cur_url = target;
         std::string cur_method = method.empty() ? "GET" : method;
+        std::unordered_map<std::string, std::string> cur_caller_headers = headers;
         std::string cur_body = body;
         std::string effective_origin = doc_origin;
         bool tainted_cross_origin = false;
 
         for (int hop = 0; hop <= MaxRedirects; ++hop) {
+            if (https_document && !is_potentially_trustworthy_url(cur_url)) {
+                denied.error_message =
+                    "Blocked by mixed-content policy: insecure HTTP request from HTTPS document";
+                return denied;
+            }
+
             const std::string hop_origin = cur_url.origin();
-            const bool same_origin = (doc_origin != "null" && hop_origin == doc_origin && !tainted_cross_origin);
+            const bool same_origin =
+                (doc_origin != "null" && hop_origin == doc_origin && !tainted_cross_origin);
             if (!same_origin) {
                 tainted_cross_origin = true;
             }
@@ -624,31 +1347,71 @@ ResourceResponse ResourceLoader::load_for_page(
                 return denied;
             }
 
-            std::unordered_map<std::string, std::string> hop_headers = headers;
+            const bool send_credentials =
+                !context.omit_credentials && (same_origin || context.include_credentials);
+            const std::string hop_address = cur_url.href(true);
+
             if (!same_origin && context.mode == RequestMode::Cors) {
-                bool has_origin = false;
-                for (const auto& [hk, _] : hop_headers) {
-                    if (ascii_lower(hk) == "origin") {
-                        has_origin = true;
-                        break;
+                const std::vector<std::string> unsafe_headers =
+                    collect_cors_unsafe_request_headers(cur_caller_headers);
+                if (!is_cors_safelisted_method(cur_method) || !unsafe_headers.empty()) {
+                    if (!ensure_cors_preflight(
+                            hop_address,
+                            effective_origin,
+                            cur_method,
+                            unsafe_headers,
+                            send_credentials,
+                            denied.error_message)) {
+                        return denied;
                     }
                 }
-                if (!has_origin) {
-                    hop_headers["Origin"] = effective_origin;
+            }
+
+            std::unordered_map<std::string, std::string> hop_headers = cur_caller_headers;
+            if (!same_origin && context.mode == RequestMode::Cors &&
+                !has_header_ci(hop_headers, "origin")) {
+                hop_headers["Origin"] = effective_origin;
+            }
+            if (send_credentials && !has_header_ci(hop_headers, "cookie")) {
+                const std::string cookie_val = CookieJar::default_jar().get_cookie_header(
+                    hop_address,
+                    context.document_url,
+                    /*is_top_level_navigation=*/false,
+                    cur_method
+                );
+                if (!cookie_val.empty() && is_safe_header_value(cookie_val)) {
+                    hop_headers["Cookie"] = cookie_val;
                 }
             }
 
-            const std::string hop_address = cur_url.href(true);
-            ResourceResponse resp = load_http_single_hop(hop_address, cur_method, hop_headers, cur_body);
+            const std::string cache_partition =
+                std::string(send_credentials ? "page:cred|" : "page:anon|") +
+                ((!same_origin && context.mode == RequestMode::Cors)
+                     ? ("cors:" + effective_origin)
+                     : (same_origin ? "same" : "nocors"));
+
+            const auto check_cors = [&](const ResourceResponse& candidate, std::string& reason_out) -> bool {
+                if (!same_origin && context.mode == RequestMode::Cors) {
+                    if (!cors_allows_response(candidate, effective_origin, send_credentials)) {
+                        reason_out = "Blocked by CORS policy: missing or mismatched Access-Control-Allow-Origin";
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            ResourceResponse resp = execute_http_hop_with_cache(
+                hop_address,
+                cur_method,
+                hop_headers,
+                cur_body,
+                context.cache_mode,
+                cache_partition,
+                send_credentials,
+                check_cors
+            );
             if (!resp.network_ok) {
                 return resp;
-            }
-
-            if (!same_origin && context.mode == RequestMode::Cors) {
-                if (!cors_allows_response(resp, effective_origin, context.include_credentials)) {
-                    denied.error_message = "Blocked by CORS policy: missing or mismatched Access-Control-Allow-Origin";
-                    return denied;
-                }
             }
 
             if (is_redirect_status(resp.status_code)) {
@@ -670,11 +1433,27 @@ ResourceResponse ResourceLoader::load_for_page(
                     if (next_url.origin() != cur_url.origin()) {
                         effective_origin = "null";
                         tainted_cross_origin = true;
+                        for (auto it = cur_caller_headers.begin(); it != cur_caller_headers.end(); ) {
+                            if (ascii_lower(it->first) == "authorization") {
+                                it = cur_caller_headers.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
                     }
                     if (resp.status_code == 303 ||
                         ((resp.status_code == 301 || resp.status_code == 302) && ascii_lower(cur_method) == "post")) {
                         cur_method = "GET";
                         cur_body.clear();
+                        for (auto it = cur_caller_headers.begin(); it != cur_caller_headers.end(); ) {
+                            const std::string ln = ascii_lower(it->first);
+                            if (ln == "content-length" || ln == "content-type" || ln == "content-language" ||
+                                ln == "content-encoding" || ln == "content-location") {
+                                it = cur_caller_headers.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
                     }
                     cur_url = std::move(next_url);
                     continue;
@@ -777,12 +1556,36 @@ ResourceResponse ResourceLoader::load_http(
         return resp;
     }
 
+    const std::string initial_site_url = cur_url.href(true);
     std::string cur_method = method.empty() ? "GET" : method;
+    std::unordered_map<std::string, std::string> cur_caller_headers = headers;
     std::string cur_body = body;
 
     for (int hop = 0; hop <= MaxRedirects; ++hop) {
         const std::string hop_address = cur_url.href(true);
-        ResourceResponse resp = load_http_single_hop(hop_address, cur_method, headers, cur_body);
+        std::unordered_map<std::string, std::string> hop_headers = cur_caller_headers;
+        if (!has_header_ci(hop_headers, "cookie")) {
+            const std::string cookie_val = CookieJar::default_jar().get_cookie_header(
+                hop_address,
+                initial_site_url,
+                /*is_top_level_navigation=*/true,
+                cur_method
+            );
+            if (!cookie_val.empty() && is_safe_header_value(cookie_val)) {
+                hop_headers["Cookie"] = cookie_val;
+            }
+        }
+
+        ResourceResponse resp = execute_http_hop_with_cache(
+            hop_address,
+            cur_method,
+            hop_headers,
+            cur_body,
+            CacheMode::Default,
+            "nav:cred",
+            /*ingest_cookies=*/true,
+            nullptr
+        );
         if (!resp.network_ok) return resp;
 
         if (is_redirect_status(resp.status_code)) {
@@ -804,10 +1607,28 @@ ResourceResponse ResourceLoader::load_http(
                     err.error_message = "Redirect to non-HTTP(S) scheme refused";
                     return err;
                 }
+                if (next_url.origin() != cur_url.origin()) {
+                    for (auto it = cur_caller_headers.begin(); it != cur_caller_headers.end(); ) {
+                        if (ascii_lower(it->first) == "authorization") {
+                            it = cur_caller_headers.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                }
                 if (resp.status_code == 303 ||
                     ((resp.status_code == 301 || resp.status_code == 302) && ascii_lower(cur_method) == "post")) {
                     cur_method = "GET";
                     cur_body.clear();
+                    for (auto it = cur_caller_headers.begin(); it != cur_caller_headers.end(); ) {
+                        const std::string ln = ascii_lower(it->first);
+                        if (ln == "content-length" || ln == "content-type" || ln == "content-language" ||
+                            ln == "content-encoding" || ln == "content-location") {
+                            it = cur_caller_headers.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                 }
                 cur_url = std::move(next_url);
                 continue;
@@ -1234,7 +2055,15 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         }
     }
 
-    if (is_chunked) {
+    const bool bodyless_status =
+        (resp.status_code >= 100 && resp.status_code < 200) ||
+        resp.status_code == 204 ||
+        resp.status_code == 304 ||
+        ascii_lower(req_method) == "head";
+
+    if (bodyless_status) {
+        body_part.clear();
+    } else if (is_chunked) {
         std::string unchunked;
         if (!decode_chunked_body(body_part, unchunked, MaxHttpResponseBytes)) {
             resp.error_message = "Malformed or oversized HTTP chunked response body";
@@ -1255,12 +2084,12 @@ ResourceResponse ResourceLoader::load_http_single_hop(
             resp.error_message = "HTTP response exceeds 16 MiB size limit";
             return resp;
         }
-        if (ascii_lower(req_method) != "head" && body_part.size() > declared_size) {
+        if (body_part.size() > declared_size) {
             body_part.resize(declared_size);
         }
     }
 
-    if (ascii_lower(req_method) != "head" && !body_part.empty()) {
+    if (!bodyless_status && !body_part.empty()) {
         if (const auto ce = resp.headers.find("content-encoding"); ce != resp.headers.end()) {
             const std::string encoding = ascii_lower(trim_http_ws(ce->second));
             if (encoding == "gzip" || encoding == "x-gzip") {
@@ -1302,14 +2131,20 @@ ResourceResponse ResourceLoader::load_http_single_hop(
 void ResourceLoader::set_origin_root_for_testing(const std::string& origin, std::string directory_path) {
     Url u;
     const std::string key = Url::parse(origin, nullptr, u) ? u.origin() : origin;
-    std::lock_guard<std::mutex> lock(g_origin_map_mutex);
-    if (directory_path.empty()) g_origin_roots.erase(key);
-    else g_origin_roots[key] = std::move(directory_path);
+    {
+        std::lock_guard<std::mutex> lock(g_origin_map_mutex);
+        if (directory_path.empty()) g_origin_roots.erase(key);
+        else g_origin_roots[key] = std::move(directory_path);
+    }
+    clear_http_cache();
 }
 
 void ResourceLoader::clear_origin_roots_for_testing() {
-    std::lock_guard<std::mutex> lock(g_origin_map_mutex);
-    g_origin_roots.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_origin_map_mutex);
+        g_origin_roots.clear();
+    }
+    clear_http_cache();
 }
 
 } // namespace litebird

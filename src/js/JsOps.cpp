@@ -187,7 +187,8 @@ int js_uncaught_error_count() {
 }
 
 bool js_is_internal_unwind(const std::exception& ex) {
-    return dynamic_cast<const GeneratorAbortException*>(&ex) != nullptr;
+    return dynamic_cast<const GeneratorAbortException*>(&ex) != nullptr ||
+           dynamic_cast<const GeneratorReturnException*>(&ex) != nullptr;
 }
 
 JsValue js_call_guarded(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args) {

@@ -153,7 +153,7 @@ make test
 Nothing else moved:
 
 ```bash
-make js-conformance    # 1124 / 1150 — the same as before the change
+make js-conformance    # 1126 / 1152 — the same as `main`
 make wpt               # 9550 / 9744 — the same
 make url-conformance   # 1188 / 1188
 make xml-conformance   # 1718 / 1718

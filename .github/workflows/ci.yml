@@ -26,7 +26,15 @@ jobs:
       - name: Build
         run: make -j"$(nproc)"
       - name: Engine test suites
-        run: make test
+        # A failing run reports the lines that name the failure as workflow
+        # annotations, so that a red run can be read from the API when its log
+        # cannot be downloaded.
+        run: |
+          set -o pipefail
+          make test 2>&1 | tee /tmp/test.log || {
+            grep -nE 'Running test:|Assertion|FAILED|Aborted|Segmentation' /tmp/test.log | tail -n 12 | sed 's/^/::error::/'
+            exit 1
+          }
       - name: Sized-float index keeps placements fast
         # Full CLI parse + layout + dump of packed, mixed-side, and cleared
         # 1k/10k floats. The old repeated band sweep takes 5-12 seconds at

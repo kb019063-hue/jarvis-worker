@@ -43,15 +43,6 @@ void hash_color(std::size_t& h, const Color& c) {
     hash_combine(h, packed);
 }
 
-bool equal_transform(const TransformMatrix2D& a, const TransformMatrix2D& b) {
-    return a.a == b.a && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e && a.f == b.f;
-}
-
-bool equal_filter(const FilterFunction& a, const FilterFunction& b) {
-    return a.type == b.type && a.amount == b.amount && a.color == b.color &&
-           a.dx == b.dx && a.dy == b.dy && a.blur_radius == b.blur_radius;
-}
-
 bool ascii_iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -112,82 +103,6 @@ bool parse_timing_function(std::string_view val, TimingFunction& out) {
 
 } // namespace
 
-bool ComputedStyle::operator==(const ComputedStyle& other) const {
-    if (display != other.display || color != other.color ||
-        background_color != other.background_color || dark_color_scheme != other.dark_color_scheme ||
-        width != other.width || height != other.height ||
-        !(margin == other.margin) || !(padding == other.padding) ||
-        width_percent != other.width_percent || height_percent != other.height_percent ||
-        min_width_percent != other.min_width_percent || max_width_percent != other.max_width_percent ||
-        min_height_percent != other.min_height_percent || max_height_percent != other.max_height_percent ||
-        !(margin_percent == other.margin_percent) || !(padding_percent == other.padding_percent) ||
-        !(border_width == other.border_width) || border_color != other.border_color ||
-        border_radius != other.border_radius || border_radius_percent != other.border_radius_percent ||
-        !(box_shadow == other.box_shadow) ||
-        font_size != other.font_size || font_weight != other.font_weight ||
-        font_family != other.font_family ||
-        line_height != other.line_height || line_height_number != other.line_height_number ||
-        text_align != other.text_align || text_decoration != other.text_decoration ||
-        float_type != other.float_type || clear_type != other.clear_type || overflow != other.overflow ||
-        border_collapse != other.border_collapse ||
-        border_spacing_x != other.border_spacing_x || border_spacing_y != other.border_spacing_y ||
-        table_layout != other.table_layout || empty_cells != other.empty_cells ||
-        caption_side != other.caption_side ||
-        position != other.position ||
-        top != other.top || right != other.right || bottom != other.bottom || left != other.left ||
-        has_top != other.has_top || has_right != other.has_right ||
-        has_bottom != other.has_bottom || has_left != other.has_left ||
-        z_index != other.z_index || has_z_index != other.has_z_index ||
-        box_sizing != other.box_sizing ||
-        min_width != other.min_width || max_width != other.max_width ||
-        min_height != other.min_height || max_height != other.max_height ||
-        margin_top_auto != other.margin_top_auto || margin_bottom_auto != other.margin_bottom_auto ||
-        margin_left_auto != other.margin_left_auto || margin_right_auto != other.margin_right_auto ||
-        flex_direction != other.flex_direction || flex_wrap != other.flex_wrap ||
-        justify_content != other.justify_content || align_items != other.align_items ||
-        align_content != other.align_content ||
-        gap != other.gap || flex_grow != other.flex_grow ||
-        flex_shrink != other.flex_shrink || flex_basis != other.flex_basis ||
-        grid_column_gap != other.grid_column_gap || grid_row_gap != other.grid_row_gap ||
-        grid_auto_fit_columns != other.grid_auto_fit_columns ||
-        !(grid_auto_fit_def == other.grid_auto_fit_def) ||
-        opacity != other.opacity || animation_duration != other.animation_duration ||
-        animation_timing_function != other.animation_timing_function ||
-        animation_iteration_count != other.animation_iteration_count ||
-        transition_duration != other.transition_duration ||
-        transition_timing_function != other.transition_timing_function ||
-        transition_delay != other.transition_delay ||
-        has_transform != other.has_transform ||
-        grid_row_start != other.grid_row_start || grid_row_end != other.grid_row_end ||
-        grid_column_start != other.grid_column_start || grid_column_end != other.grid_column_end ||
-        containment != other.containment ||
-        animation_name != other.animation_name ||
-        transition_property != other.transition_property ||
-        transform_str != other.transform_str ||
-        transform_origin != other.transform_origin ||
-        grid_area_name != other.grid_area_name ||
-        grid_template_columns != other.grid_template_columns ||
-        grid_template_rows != other.grid_template_rows ||
-        grid_col_track_defs != other.grid_col_track_defs ||
-        grid_row_track_defs != other.grid_row_track_defs) {
-        return false;
-    }
-    if (!equal_transform(transform_matrix, other.transform_matrix)) {
-        return false;
-    }
-    if (filters.size() != other.filters.size()) return false;
-    for (std::size_t i = 0; i < filters.size(); ++i) {
-        if (!equal_filter(filters[i], other.filters[i])) return false;
-    }
-    if (backdrop_filters.size() != other.backdrop_filters.size()) return false;
-    for (std::size_t i = 0; i < backdrop_filters.size(); ++i) {
-        if (!equal_filter(backdrop_filters[i], other.backdrop_filters[i])) return false;
-    }
-    if (custom_properties != other.custom_properties) return false;
-    if (grid_named_areas != other.grid_named_areas) return false;
-    return true;
-}
-
 std::size_t ComputedStyle::hash() const {
     std::size_t h = static_cast<std::size_t>(display);
     hash_color(h, color);
@@ -218,6 +133,7 @@ std::size_t ComputedStyle::hash() const {
     }
     hash_combine(h, hash_float(font_size));
     hash_combine(h, static_cast<std::size_t>(font_weight));
+    hash_combine(h, static_cast<std::size_t>(font_style));
     if (!font_family.empty()) hash_combine(h, std::hash<std::string>{}(font_family));
     hash_combine(h, hash_float(line_height));
     hash_combine(h, hash_float(line_height_number));
@@ -405,6 +321,12 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.font_size = key->font_size;
     s.font_weight = key->font_weight;
     if (!key->font_family.empty()) s.font_family = key->font_family;
+    // And the slant, for the same reason and by the same argument: it inherits,
+    // and this is the style a text box is measured and drawn with. An `<em>`
+    // whose font-style stopped at the element would be upright in the box that
+    // lays it out and upright in the painter, however italic the computed style
+    // said it was.
+    s.font_style = key->font_style;
     s.line_height = key->line_height;
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
@@ -457,6 +379,13 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         }
         code {
             background-color: #f1f5f9;
+        }
+        /* HTML §Rendering: the elements whose text is italic. `cite`, `dfn`,
+           `var` and `address` are in the same row of that table as `em` and
+           `i`, and leaving them out is how `<cite>` ends up upright while the
+           `<em>` beside it is not. */
+        em, i, cite, dfn, var, address {
+            font-style: italic;
         }
         /* HTML §Rendering: the elements whose text is monospaced. Without
            this the engine had a `monospace` generic family it could resolve
@@ -1736,14 +1665,26 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return true;
     }
 
-    // font: family defaults plus weight, size and optional /line-height.
+    // font: weight, style, variant, size, optional /line-height, then the
+    // family list -- which is the one component CSS puts last and the one this
+    // used to drop on the floor: `font: 16px monospace` set a size and left the
+    // family empty, so the element was laid out in the default face however
+    // emphatically the shorthand had asked for something else.
     if (prop == "font") {
+        std::string family;
+        bool saw_size = false;
         for (const auto& token : split_tokens(trim(val))) {
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
             if (lowered == "bold" || lowered == "bolder") out.emplace_back("font-weight", "700");
             else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
-            else if (lowered == "italic" || lowered == "oblique" || lowered == "small-caps") continue;
+            // The shorthand used to throw this token away, so `font: italic
+            // 16px serif` set a size and a family and no slant at all -- the
+            // one property in the shorthand with no place to be kept. It is
+            // kept now, in the same longhand the expanded form sets.
+            else if (lowered == "italic") out.emplace_back("font-style", "italic");
+            else if (lowered == "oblique") out.emplace_back("font-style", "oblique");
+            else if (lowered == "small-caps") continue;
             else {
                 std::string size_part = token;
                 std::string lh_part;
@@ -1760,9 +1701,18 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
                      size_low.ends_with("vh") || size_low.ends_with("dvh") || size_low.ends_with("dvw"))) {
                     out.emplace_back("font-size", size_part);
                     if (!lh_part.empty()) out.emplace_back("line-height", lh_part);
+                    saw_size = true;
+                } else if (saw_size) {
+                    // Everything after the size is the family list. It is put
+                    // back together with single spaces, which is not the same
+                    // string that was written and is the same list: matching a
+                    // family ignores that spacing anyway.
+                    if (!family.empty()) family += ' ';
+                    family += token;
                 }
             }
         }
+        if (!family.empty()) out.emplace_back("font-family", family);
         return true;
     }
 
@@ -2217,6 +2167,14 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else {
             try { style.font_weight = std::stoi(val); } catch (...) {}
         }
+    } else if (prop == "font-style") {
+        // `oblique` is kept apart from `italic` because a face declares which
+        // it is, and `@font-face { font-style: oblique }` has to find the
+        // oblique face. When neither can be had the two are answered alike:
+        // both are synthesised by the same shear.
+        if (val_lower == "italic") style.font_style = FontStyle::Italic;
+        else if (val_lower.starts_with("oblique")) style.font_style = FontStyle::Oblique;
+        else style.font_style = FontStyle::Normal;
     } else if (prop == "font-family") {
         // Stored as written. `font-family` was on the list of known properties
         // for a long time and nothing ever read the value back — it is read
@@ -2860,6 +2818,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.dark_color_scheme = parent_style->dark_color_scheme;
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
+        style.font_style = parent_style->font_style;
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;

@@ -131,6 +131,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                     text_cmd.font_size = fs.font_size;
                     text_cmd.font_weight = fs.font_weight;
                     text_cmd.font_family = fs.font_family;
+                    text_cmd.font_italic = fs.font_style != FontStyle::Normal;
                     list.add(text_cmd);
                 }
 
@@ -169,6 +170,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                 cmd.font_size = s.font_size;
                 cmd.font_weight = s.font_weight;
                 cmd.font_family = s.font_family;
+                cmd.font_italic = s.font_style != FontStyle::Normal;
                 list.add(cmd);
             }
         } else if (!box->text.empty()) {
@@ -179,6 +181,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
             cmd.font_size = s.font_size;
             cmd.font_weight = s.font_weight;
             cmd.font_family = s.font_family;
+            cmd.font_italic = s.font_style != FontStyle::Normal;
             list.add(cmd);
         }
     }

@@ -27,6 +27,8 @@ struct FilterFunction {
     float dx{0.0f};
     float dy{0.0f};
     float blur_radius{0.0f};
+
+    bool operator==(const FilterFunction&) const = default;
 };
 
 class ImageFilter {

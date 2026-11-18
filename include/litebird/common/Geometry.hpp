@@ -80,6 +80,7 @@ public:
     float e{0.0f}, f{0.0f};
 
     constexpr TransformMatrix2D() = default;
+    constexpr bool operator==(const TransformMatrix2D&) const = default;
     constexpr TransformMatrix2D(float a_, float b_, float c_, float d_, float e_, float f_)
         : a(a_), b(b_), c(c_), d(d_), e(e_), f(f_) {}
 

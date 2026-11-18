@@ -949,8 +949,12 @@ void append_markup(const Node& root, bool with_root, bool xml, std::string& out)
                 out += '>';
                 return false;
             case NodeType::ProcessingInstruction: {
-                // The HTML standard's fragment serialization: no "?" at the
-                // end, because the HTML parser reads this back as a comment.
+                // No "?" before the ">". This was written when the HTML parser
+                // could not make one at all; since Phase 76 it can (`<?x y>` is
+                // an instruction, not a comment), and the text written here
+                // parses back to the same target and data — unless the data
+                // ends in "?", which the parser reads as the closing "?>" and
+                // drops. The same is true of any engine writing this form.
                 const auto& instruction = static_cast<const ProcessingInstruction&>(node);
                 out += "<?";
                 out += instruction.target();

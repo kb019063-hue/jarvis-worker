@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Parses random pages with Litebird and with parse5 and lists the pages whose trees differ.
 
-The corpus (`make conformance`) checks 1,792 inputs somebody wrote. This checks
+The corpus (`make conformance`) checks 1,973 inputs somebody wrote. This checks
 pages nobody wrote: a few dozen start tags, end tags, comments and pieces of
 text in random order, drawn from the elements the tree builder has rules of
 its own for (tables, lists, formatting elements, buttons, templates, SVG and

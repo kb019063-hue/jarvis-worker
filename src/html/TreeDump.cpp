@@ -124,10 +124,11 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
             case NodeType::DocumentType:
                 break;      // never a child; the document's doctype is written below
             case NodeType::ProcessingInstruction: {
-                // The form the html5lib tests have for one: `<?target data>`.
+                // The form the corpus has for one: `<?` then the target, a
+                // space, the data, and `?>` (resources/README.md).
                 const auto& instruction = static_cast<const ProcessingInstruction&>(node);
                 write_indent(os, depth);
-                os << "<?" << instruction.target() << " " << instruction.data() << ">\n";
+                os << "<?" << instruction.target() << " " << instruction.data() << "?>\n";
                 break;
             }
         }

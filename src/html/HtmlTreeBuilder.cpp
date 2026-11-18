@@ -883,9 +883,16 @@ void HtmlTreeBuilder::insert_text(const std::string& text) {
 
 void HtmlTreeBuilder::insert_comment_at(const HtmlToken& token, const std::shared_ptr<Node>& parent,
                                         const std::shared_ptr<Node>& before) {
-    auto comment = std::make_shared<Comment>(token.data);
-    if (before) parent->insert_before(comment, before);
-    else if (parent) parent->append_child(comment);
+    // A processing instruction is inserted where a comment would be: the tree
+    // construction rules send both through the same slot in every mode that
+    // has one, and only the node made here differs.
+    std::shared_ptr<Node> node;
+    if (token.type == HtmlTokenType::ProcessingInstruction)
+        node = std::make_shared<ProcessingInstruction>(token.name, token.data);
+    else
+        node = std::make_shared<Comment>(token.data);
+    if (before) parent->insert_before(node, before);
+    else if (parent) parent->append_child(node);
 }
 
 void HtmlTreeBuilder::insert_comment(const HtmlToken& token) {

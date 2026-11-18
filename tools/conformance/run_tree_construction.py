@@ -43,6 +43,7 @@ class Case:
     document: str
     fragment_context: str | None = None
     scripting: bool | None = None
+    description: str | None = None
 
 
 @dataclass
@@ -70,13 +71,17 @@ def parse_dat(path: Path) -> list[Case]:
         text = handle.read()
     cases: list[Case] = []
 
-    marker_re = re.compile(r"(?m)(?:\A|\n\n)#data\n")
+    # A case begins with `#data`, or since the corpus moved to
+    # web-platform-tests with a `#description` that says what it is about
+    # (`resources/README.md`). Splitting on `#data` alone silently drops every
+    # case that has one, which is 16 of the 1,973.
+    marker_re = re.compile(r"(?m)(?:\A|\n\n)(?:#description\n|#data\n)")
     starts = [m.start() for m in marker_re.finditer(text)]
-    if text.startswith("#data\n"):
+    if text.startswith("#data\n") or text.startswith("#description\n"):
         starts.insert(0, 0)
     starts = sorted(set(starts))
 
-    markers = ("#data", "#errors", "#new-errors", "#document",
+    markers = ("#description", "#data", "#errors", "#new-errors", "#document",
                "#document-fragment", "#script-on", "#script-off")
 
     for index, start in enumerate(starts):
@@ -105,6 +110,12 @@ def parse_dat(path: Path) -> list[Case]:
 
         data = "\n".join(sections["#data"])
         document_lines = sections.get("#document", [])
+        # The format ends a file with one newline; a file that ends with two
+        # leaves an empty last line that is not part of any tree
+        # (processing-instructions.dat does). No tree's last line is blank,
+        # because a text node is quoted.
+        while document_lines and not document_lines[-1].strip():
+            document_lines.pop()
 
         context = None
         if "#document-fragment" in sections:
@@ -118,10 +129,12 @@ def parse_dat(path: Path) -> list[Case]:
         elif "#script-on" in sections:
             scripting = True
 
+        description_lines = [line for line in sections.get("#description", []) if line.strip()]
         cases.append(Case(
             source=path.name,
             index=index,
             data=data,
+            description="\n".join(description_lines) if description_lines else None,
             document="\n".join(document_lines) + ("\n" if document_lines else ""),
             fragment_context=context,
             scripting=scripting,
@@ -169,6 +182,8 @@ def diff_block(result: Result, limit: int = 24) -> str:
     actual = result.actual.splitlines()
     out = [f"  case {result.case.source} #{result.case.index}",
            f"  data: {result.case.data!r}"]
+    if result.case.description:
+        out.append(f"  about: {result.case.description}")
     if result.case.fragment_context:
         out.append(f"  context: {result.case.fragment_context}")
     if result.returncode != 0:
@@ -239,8 +254,15 @@ def main() -> int:
                 print(diff_block(result))
                 print()
 
-    marker = "PASS" if passed == total else "FAIL"
-    print(f"\nDOM tree-construction conformance: {passed}/{total} ({rate:.1f}%)  [{marker} on {len(files)} files]")
+    if passed == total:
+        note = f"PASS on {len(files)} files"
+    else:
+        # Six cases need a script to run while the page is parsed, which is not
+        # what this runner does; naming the files that fail is more use than
+        # naming every file that ran.
+        failing_files = sum(1 for ok, count in per_file.values() if ok != count)
+        note = f"FAIL: {total - passed} case(s) in {failing_files} of {len(files)} files"
+    print(f"\nDOM tree-construction conformance: {passed}/{total} ({rate:.1f}%)  [{note}]")
 
     if args.json:
         Path(args.json).write_text(json.dumps({

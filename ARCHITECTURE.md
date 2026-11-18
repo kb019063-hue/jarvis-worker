@@ -484,7 +484,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    section 8 had it as a property called `#p`). Of 15,686 test262 tests on
    functions, classes and objects, 13,581 pass (`make test262`; 10,835 before
    Phase 44, 12,657 before Phase 88); of
-   the 47,967 in all of its `built-ins`, `language` and `annexB`, 28,672.
+   the 47,967 in all of its `built-ins`, `language` and `annexB`, 30,997.
 11. **A page can still be slow by being long.** Depth no longer ends the
    process (Phase 25): the parser stops nesting at 512, nothing that walks
    the DOM recurses, and layout stops when the stack is nearly used up, which

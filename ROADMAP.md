@@ -32,7 +32,7 @@ a row from Open tasks over anything here, take that row.
 WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
 1,967/1,973; `make wpt` 9,550/9,744 subtests across 190 files); JavaScript
 interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
-1,126/1,152 on its recorded corpus and 29,450/47,967 of test262; TrueType
+1,128/1,152 on its recorded corpus and 30,997/47,967 of test262; TrueType
 rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;
 a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
 time, certificate and hostname verified); `fetch()`, `XMLHttpRequest` and

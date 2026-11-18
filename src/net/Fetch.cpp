@@ -1,25 +1,119 @@
 #include "litebird/net/Fetch.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
-#include "litebird/js/EventLoop.hpp"
+
 #include <algorithm>
 #include <cctype>
+#include <string_view>
+#include <unordered_set>
 
 namespace litebird {
 
-static std::string to_lower_str(std::string_view s) {
+namespace {
+
+std::string to_lower_str(std::string_view s) {
     std::string res(s);
-    std::transform(res.begin(), res.end(), res.begin(), ::tolower);
+    for (char& c : res) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u >= 'A' && u <= 'Z') c = static_cast<char>(u + ('a' - 'A'));
+    }
     return res;
 }
 
+std::string trim_fetch_ows(std::string_view sv) {
+    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
+    while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t')) sv.remove_suffix(1);
+    return std::string(sv);
+}
+
+class HeadersExotic final : public JsExotic {
+public:
+    explicit HeadersExotic(std::shared_ptr<HeadersObject> h) : headers(std::move(h)) {}
+    std::shared_ptr<HeadersObject> headers;
+};
+
+bool is_forbidden_fetch_method(std::string_view method) {
+    const std::string lower = to_lower_str(method);
+    return lower == "connect" || lower == "trace" || lower == "track";
+}
+
+std::string normalize_fetch_method(std::string method) {
+    const std::string lower = to_lower_str(method);
+    if (lower == "delete") return "DELETE";
+    if (lower == "get") return "GET";
+    if (lower == "head") return "HEAD";
+    if (lower == "options") return "OPTIONS";
+    if (lower == "post") return "POST";
+    if (lower == "put") return "PUT";
+    return method;
+}
+
+std::unordered_map<std::string, std::string> filter_response_headers_for_script(
+    const ResourceResponse& resp,
+    RequestMode mode,
+    bool include_credentials
+) {
+    std::unordered_map<std::string, std::string> out;
+    if (!resp.cross_origin || mode != RequestMode::Cors) {
+        for (const auto& [k, v] : resp.headers) {
+            const std::string lower = to_lower_str(k);
+            if (lower == "set-cookie" || lower == "set-cookie2") continue;
+            out[lower] = v;
+        }
+        return out;
+    }
+
+    static const std::unordered_set<std::string> kCorsSafelistedResponseHeaders = {
+        "cache-control",
+        "content-language",
+        "content-length",
+        "content-type",
+        "expires",
+        "last-modified",
+        "pragma"
+    };
+
+    std::unordered_set<std::string> exposed;
+    bool expose_wildcard = false;
+    if (auto it = resp.headers.find("access-control-expose-headers"); it != resp.headers.end()) {
+        std::string_view rem(it->second);
+        while (!rem.empty()) {
+            const auto comma = rem.find(',');
+            const std::string token = to_lower_str(trim_fetch_ows(
+                comma == std::string_view::npos ? rem : rem.substr(0, comma)
+            ));
+            if (!token.empty()) {
+                if (token == "*" && !include_credentials) expose_wildcard = true;
+                else exposed.insert(token);
+            }
+            if (comma == std::string_view::npos) break;
+            rem.remove_prefix(comma + 1);
+        }
+    }
+
+    for (const auto& [k, v] : resp.headers) {
+        const std::string lower = to_lower_str(k);
+        if (lower == "set-cookie" || lower == "set-cookie2") continue;
+        if (expose_wildcard || kCorsSafelistedResponseHeaders.count(lower) > 0 || exposed.count(lower) > 0) {
+            out[lower] = v;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 void HeadersObject::set(std::string name, std::string val) {
-    map[to_lower_str(name)] = std::move(val);
+    const std::string key = to_lower_str(name);
+    if (key == "set-cookie" || key == "set-cookie2") return;
+    map[key] = std::move(val);
 }
 
 void HeadersObject::append(std::string name, std::string val) {
-    std::string key = to_lower_str(name);
+    const std::string key = to_lower_str(name);
+    if (key == "set-cookie" || key == "set-cookie2") return;
     auto it = map.find(key);
     if (it != map.end()) {
         it->second += ", " + val;
@@ -42,6 +136,50 @@ void HeadersObject::remove(std::string name) {
     map.erase(to_lower_str(name));
 }
 
+void HeadersObject::extract_headers_init(
+    const JsValue& init,
+    std::unordered_map<std::string, std::string>& out
+) {
+    if (init.type != JsType::Object) return;
+
+    if (init.object_val) {
+        if (auto* hex = dynamic_cast<HeadersExotic*>(init.object_val->exotic.get())) {
+            if (hex->headers) {
+                for (const auto& [k, v] : hex->headers->map) {
+                    out[k] = v;
+                }
+            }
+            return;
+        }
+        if (init.object_val->is_array) {
+            HeadersObject acc;
+            for (const JsValue& pair : init.object_val->array_elements) {
+                if (pair.type == JsType::Object && pair.object_val && pair.object_val->is_array &&
+                    pair.object_val->array_elements.size() >= 2) {
+                    acc.append(
+                        pair.object_val->array_elements[0].to_string(),
+                        pair.object_val->array_elements[1].to_string()
+                    );
+                }
+            }
+            for (const auto& [k, v] : acc.map) {
+                out[k] = v;
+            }
+            return;
+        }
+        for (const auto& [k, v] : init.object_val->properties) {
+            out[k] = v.to_string();
+        }
+        return;
+    }
+
+    if (init.properties) {
+        for (const auto& [k, v] : *init.properties) {
+            out[k] = v.to_string();
+        }
+    }
+}
+
 JsValue HeadersObject::create_js_instance(const std::unordered_map<std::string, std::string>& init) {
     auto self = std::make_shared<HeadersObject>();
     for (const auto& [k, v] : init) {
@@ -49,6 +187,9 @@ JsValue HeadersObject::create_js_instance(const std::unordered_map<std::string, 
     }
 
     JsValue inst = JsValue::make_object();
+    if (inst.object_val) {
+        inst.object_val->exotic = std::make_shared<HeadersExotic>(self);
+    }
 
     inst.set_property("get", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
         if (args.empty()) return JsValue::make_null();
@@ -91,6 +232,20 @@ JsValue HeadersObject::create_js_instance(const std::unordered_map<std::string, 
         return JsValue::make_array(arr);
     }));
 
+    inst.set_property("forEach", JsValue::make_native_function([self](const std::vector<JsValue>& args) {
+        if (args.empty() || !args[0].is_callable()) return JsValue::make_undefined();
+        JsValue cb = args[0];
+        JsValue this_arg = args.size() >= 2 ? args[1] : JsValue::make_undefined();
+        std::vector<std::pair<std::string, std::string>> sorted(self->map.begin(), self->map.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        for (const auto& [k, v] : sorted) {
+            cb.call_with_this(this_arg, {JsValue::make_string(v), JsValue::make_string(k)});
+        }
+        return JsValue::make_undefined();
+    }));
+
     return inst;
 }
 
@@ -98,18 +253,7 @@ JsValue HeadersObject::create_constructor() {
     return JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::unordered_map<std::string, std::string> init_map;
         if (!args.empty()) {
-            JsValue arg0 = args[0];
-            if (arg0.type == JsType::Object) {
-                if (arg0.object_val) {
-                    for (const auto& [k, v] : arg0.object_val->properties) {
-                        init_map[k] = v.to_string();
-                    }
-                } else if (arg0.properties) {
-                    for (const auto& [k, v] : *arg0.properties) {
-                        init_map[k] = v.to_string();
-                    }
-                }
-            }
+            HeadersObject::extract_headers_init(args[0], init_map);
         }
         return HeadersObject::create_js_instance(init_map);
     });
@@ -182,13 +326,7 @@ JsValue ResponseObject::create_constructor() {
             if (st_txt.type == JsType::String) status_text = st_txt.string_val.str();
 
             JsValue h = init.get_property("headers");
-            if (h.type == JsType::Object) {
-                if (h.object_val) {
-                    for (const auto& [k, v] : h.object_val->properties) headers[k] = v.to_string();
-                } else if (h.properties) {
-                    for (const auto& [k, v] : *h.properties) headers[k] = v.to_string();
-                }
-            }
+            HeadersObject::extract_headers_init(h, headers);
         }
 
         return ResponseObject::create_js_instance(body, status, status_text, headers, "");
@@ -222,10 +360,14 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
     if (args.size() > 1 && args[1].type == JsType::Object) {
         JsValue opts = args[1];
         JsValue m = opts.get_property("method");
-        if (m.is_truthy()) method = m.to_string();
+        if (m.type != JsType::Undefined && m.type != JsType::Null && m.is_truthy()) {
+            method = m.to_string();
+        }
 
         JsValue b = opts.get_property("body");
-        if (b.is_truthy()) req_body = b.to_string();
+        if (b.type != JsType::Undefined && b.type != JsType::Null) {
+            req_body = b.to_string();
+        }
 
         JsValue mode_val = opts.get_property("mode");
         if (mode_val.type == JsType::String) {
@@ -238,21 +380,38 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
         JsValue cred_val = opts.get_property("credentials");
         if (cred_val.type == JsType::String) {
             const std::string cred_str = cred_val.to_string();
-            if (cred_str == "include") req_context.include_credentials = true;
-            else if (cred_str == "omit") req_context.include_credentials = false;
+            if (cred_str == "include") {
+                req_context.include_credentials = true;
+                req_context.omit_credentials = false;
+            } else if (cred_str == "omit") {
+                req_context.include_credentials = false;
+                req_context.omit_credentials = true;
+            } else if (cred_str == "same-origin") {
+                req_context.include_credentials = false;
+                req_context.omit_credentials = false;
+            }
+        }
+
+        JsValue cache_val = opts.get_property("cache");
+        if (cache_val.type == JsType::String) {
+            const std::string cache_str = cache_val.to_string();
+            if (cache_str == "default") req_context.cache_mode = CacheMode::Default;
+            else if (cache_str == "no-store") req_context.cache_mode = CacheMode::NoStore;
+            else if (cache_str == "reload") req_context.cache_mode = CacheMode::Reload;
+            else if (cache_str == "no-cache") req_context.cache_mode = CacheMode::NoCache;
+            else if (cache_str == "force-cache") req_context.cache_mode = CacheMode::ForceCache;
         }
 
         signal_val = opts.get_property("signal");
 
         JsValue h = opts.get_property("headers");
-        if (h.type == JsType::Object) {
-            if (h.object_val) {
-                for (const auto& [k, v] : h.object_val->properties) req_headers[k] = v.to_string();
-            } else if (h.properties) {
-                for (const auto& [k, v] : *h.properties) req_headers[k] = v.to_string();
-            }
-        }
+        HeadersObject::extract_headers_init(h, req_headers);
     }
+
+    if (is_forbidden_fetch_method(method)) {
+        return Promise::make_rejected(JsValue::make_string("TypeError: Forbidden HTTP method: " + method));
+    }
+    method = normalize_fetch_method(std::move(method));
 
     if (signal_val.is_object() && signal_val.get_property("aborted").is_truthy()) {
         JsValue reason = signal_val.get_property("reason");
@@ -294,8 +453,11 @@ JsValue FetchAPI::fetch(const std::vector<JsValue>& args,
             std::string st = !resp.status_text.empty()
                                  ? resp.status_text
                                  : ((resp.status_code == 200) ? "OK" : ("Status " + std::to_string(resp.status_code)));
+            const auto visible_headers = filter_response_headers_for_script(
+                resp, req_context.mode, req_context.include_credentials
+            );
             JsValue res_obj = ResponseObject::create_js_instance(
-                resp.body, resp.status_code, st, resp.headers,
+                resp.body, resp.status_code, st, visible_headers,
                 resp.url.empty() ? url : resp.url
             );
             Promise::resolve(pdata, res_obj);

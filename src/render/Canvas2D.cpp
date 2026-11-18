@@ -527,18 +527,18 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     float ink_a = 0.0f;
     float ink_d = 0.0f;
 
-    std::size_t pos = 0;
-    uint32_t previous = 0;
-    while (pos < text.size()) {
-        const uint32_t cp = canvas_utf8_next(text, pos);
-        // The same pair adjustment `measureText` counted into `layout.advance`,
-        // applied before the second glyph is placed -- a canvas string would
-        // otherwise measure one width and draw another.
-        if (previous != 0) {
-            pen += FontRenderer::instance().kerning_px(previous, cp, size_px, parsed.weight, parsed.family, italic);
+    // The glyphs `measureText` counted into `layout.advance`: a canvas string
+    // that walked its codepoints here would draw a ligature's width worth of
+    // letters, and the ink would end where the measurement said it would not.
+    const std::vector<FontRenderer::ShapedGlyph> shaped =
+        FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic);
+    for (std::size_t si = 0; si < shaped.size(); ++si) {
+        // The same pair adjustment `measureText` counted, applied before the
+        // second glyph is placed.
+        if (si > 0) {
+            pen += FontRenderer::instance().kerning_px_shaped(shaped[si - 1], shaped[si], size_px);
         }
-        previous = cp;
-        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, parsed.weight, family_id, italic);
+        const GlyphBitmap& g = FontRenderer::instance().get_glyph_shaped(shaped[si], px_size, parsed.weight);
         const float pen_rel = pen - layout.pad_x;
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;
@@ -562,7 +562,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
                 }
             }
         }
-        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight, parsed.family, italic);
+        pen += shaped[si].advance;
         if (pen > static_cast<float>(kMaxTextBufferWidth)) break; // truncated by the buffer cap
     }
     if (std::isfinite(ink_l)) {

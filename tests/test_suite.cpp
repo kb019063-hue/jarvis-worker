@@ -17959,6 +17959,15 @@ TEST(private_names_are_identities_and_not_strings) {
         "|" + Object.keys(c).length + "|" + Object.getOwnPropertyNames(c).length
     )JS") == "41|7|undefined|false|0|0");
 
+    // A property a script itself names `#p` is an ordinary property, seen by
+    // every walk. It was hidden while a private field was stored under the same
+    // kind of name; now that a private member has a table of its own, the `#`
+    // prefix is not engine bookkeeping any more.
+    assert(text(R"JS(
+        var o = {}; o['#p'] = 1;
+        Object.keys(o).join() + "|" + Object.getOwnPropertyNames(o).join() + "|" + JSON.stringify(o)
+    )JS") == "#p|#p|{\"#p\":1}");
+
     // Reading or writing a private field on an object whose class did not make
     // it is a TypeError, not `undefined` and not a new field.
     text("class D { #x = 1; read() { return this.#x; } write(v) { this.#x = v; } }");

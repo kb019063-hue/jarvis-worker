@@ -124,14 +124,14 @@ build of the commit this phase started from:
 python3 tools/conformance/run_test262.py \
     --binary before=<build of the parent commit> --binary now=build/litebird
 before  12657 pass (80.7%)
-now     13581 pass (86.6%)
-924 pass in now and not in before; 0 pass in before and not in now
+now     13586 pass (86.6%)
+929 pass in now and not in before; 0 pass in before and not in now
 ```
 
 The three directories the private-name tests live in, on their own:
 `language/statements/class`, `language/expressions/class` and
-`language/expressions/in` go from **6,832 / 8,551 (79.9%)** to **7,739 / 8,551
-(90.5%)** — 907 tests, none lost.
+`language/expressions/in` go from **6,832 / 8,551 (79.9%)** to **7,740 / 8,551
+(90.5%)** — 908 tests, none lost.
 
 Node.js was the oracle for the behaviour, on a 21-case battery (inherited
 fields, shadowing, accessor order, the four refusal directions, static brands,

@@ -49,8 +49,8 @@ including the forward reference a method makes to a field written below it.
 
 ```
 make test                     # 235 suites: private_names_are_identities_and_not_strings
-make test262                  # before 12657 (80.7%) -> now 13581 (86.6%) of 15,686
-                              # 924 pass in now and not in before, 0 lost
+make test262                  # before 12657 (80.7%) -> now 13586 (86.6%) of 15,686
+                              # 929 pass in now and not in before, 0 lost
 ```
 
 and a 21-case battery run in Node.js 22 and in `build/litebird --run-js`, whose

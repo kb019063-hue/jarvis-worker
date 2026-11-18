@@ -279,9 +279,16 @@ bool parse_array_index(const std::string& name, size_t& out) {
 
 /// Keys that are engine bookkeeping rather than script-visible properties:
 /// symbols ("@@..."), internal slots ("%...") and the legacy "__name__" markers.
+///
+/// A `#` prefix used to be one of these, because a private field was stored as
+/// a property called `#p` and hiding it from enumeration was all that could be
+/// done for it. Private members have their own table since Phase 88, so a
+/// property a script itself names `#p` is an ordinary property again:
+/// `Object.keys`, `getOwnPropertyNames` and `JSON.stringify` all see it, as
+/// they do in every other engine.
 bool is_hidden_key(const std::string& key) {
     if (key.size() >= 2 && key[0] == '@' && key[1] == '@') return true;
-    if (!key.empty() && (key[0] == '%' || key[0] == '#')) return true;   // internal slots, #private names
+    if (!key.empty() && key[0] == '%') return true;      // internal slots
     return key.size() >= 5 && key[0] == '_' && key[1] == '_' &&
            key[key.size() - 1] == '_' && key[key.size() - 2] == '_';
 }

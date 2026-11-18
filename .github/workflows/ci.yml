@@ -192,10 +192,14 @@ jobs:
         # string_unicode.dat, 4 in finding 65 across construct.dat and
         # lexical.dat, and 25 in finding 61 with regexp_unicode.dat, on top
         # of finding 50/51/42/49).
+        # 1127 of 1152 on 18 November: Phases 65 and 68 added 40 cases, and
+        # 42 more pass than when the floor was last raised. It stayed at 1085
+        # meanwhile, where 42 cases could have stopped passing without this
+        # step saying so.
         # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1085
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1127
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a

@@ -69,6 +69,7 @@ void HtmlTreeBuilder::process_initial(const HtmlToken& token) {
             m_mode = Mode::BeforeHtml;
             process_token(token);
             return;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment_at(token, m_document, nullptr);
             return;
@@ -102,6 +103,7 @@ void HtmlTreeBuilder::process_before_html(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) return;
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment_at(token, m_document, nullptr);
             return;
@@ -144,6 +146,7 @@ void HtmlTreeBuilder::process_before_head(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) return;
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -181,6 +184,7 @@ void HtmlTreeBuilder::process_in_head(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { insert_character(token.data[0]); return; }
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -268,6 +272,7 @@ void HtmlTreeBuilder::process_in_head_noscript(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { send_to_in_head(token); return; }
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             send_to_in_head(token);
             return;
@@ -308,6 +313,7 @@ void HtmlTreeBuilder::process_after_head(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { insert_character(token.data[0]); return; }
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -412,6 +418,7 @@ void HtmlTreeBuilder::process_in_body(const HtmlToken& token) {
             if (!ws(c)) m_frameset_ok = false;
             return;
         }
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -877,6 +884,7 @@ void HtmlTreeBuilder::process_in_table(const HtmlToken& token) {
             }
             break;
         }
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -1061,6 +1069,7 @@ void HtmlTreeBuilder::process_in_column_group(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { insert_character(token.data[0]); return; }
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -1261,6 +1270,7 @@ void HtmlTreeBuilder::process_in_select(const HtmlToken& token) {
             reconstruct_formatting_elements();
             insert_character(token.data[0]);
             return;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -1362,6 +1372,7 @@ void HtmlTreeBuilder::process_in_select_in_table(const HtmlToken& token) {
 void HtmlTreeBuilder::process_in_template(const HtmlToken& token) {
     switch (token.type) {
         case HtmlTokenType::Character:
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
         case HtmlTokenType::Doctype:
             process_in_body(token);
@@ -1424,6 +1435,7 @@ void HtmlTreeBuilder::process_after_body(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { send_to_in_body(token); return; }
             break;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment: {
             std::shared_ptr<Node> parent =
                 m_open_elements.empty() ? std::static_pointer_cast<Node>(m_document)
@@ -1456,6 +1468,7 @@ void HtmlTreeBuilder::process_in_frameset(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { insert_character(token.data[0]); return; }
             return;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -1492,6 +1505,7 @@ void HtmlTreeBuilder::process_after_frameset(const HtmlToken& token) {
         case HtmlTokenType::Character:
             if (ws(token.data[0])) { insert_character(token.data[0]); return; }
             return;
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;
@@ -1512,6 +1526,7 @@ void HtmlTreeBuilder::process_after_frameset(const HtmlToken& token) {
 
 void HtmlTreeBuilder::process_after_after_body(const HtmlToken& token) {
     switch (token.type) {
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment_at(token, m_document, nullptr);
             return;
@@ -1535,6 +1550,7 @@ void HtmlTreeBuilder::process_after_after_body(const HtmlToken& token) {
 
 void HtmlTreeBuilder::process_after_after_frameset(const HtmlToken& token) {
     switch (token.type) {
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment_at(token, m_document, nullptr);
             return;
@@ -1567,6 +1583,7 @@ void HtmlTreeBuilder::process_foreign_content(const HtmlToken& token) {
             }
             return;
         }
+        case HtmlTokenType::ProcessingInstruction:
         case HtmlTokenType::Comment:
             insert_comment(token);
             return;

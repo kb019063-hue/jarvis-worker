@@ -13,10 +13,16 @@ of the file. For instance:
 
 Where [TEST] is the following format:
 
-Each test must begin with a string "\#data" followed by a newline (LF).
-All subsequent lines until a line that says "\#errors" are the test data
-and must be passed to the system being tested unchanged, except with the
-final newline (on the last line) removed.
+Each test \*may\* begin with a string "\#description" followed by a
+newline (LF). All subsequent lines until a line that says "\#data" are
+the test description and \*should\* be passed to the test harness to
+supplement the test's name.
+
+Each test must either begin with "\#description" (see above) or begin
+with a string "\#data" followed by a newline (LF). All subsequent lines
+until a line that says "\#errors" are the test data and must be passed
+to the system being tested unchanged, except with the final newline
+(on the last line) removed.
 
 Then there must be a line that says "\#errors". It must be followed by
 one line per parse error that a conformant checker would return. It
@@ -31,7 +37,7 @@ errors.
 
 Then there \*may\* be a line that says "\#document-fragment", which must
 be followed by a newline (LF), followed by a string of characters that
-indicates the context element, followed by a newline (LF). If the string 
+indicates the context element, followed by a newline (LF). If the string
 of characters starts with "svg ", the context element is in the SVG
 namespace and the substring after "svg " is the local name. If the
 string of characters starts with "math ", the context element is in the
@@ -67,9 +73,7 @@ per parent node that the node has before the root document node.
     double-quotes, another space an the system id in double-quotes, and
     then in any case "`>`".
 -   Processing instructions must be "`<?`", then the target, then a
-    space, then the data and then "`>`". (The HTML parser cannot emit
-    processing instructions, but scripts can, and the WebVTT to DOM
-    rules can emit them.)
+    space, then the data and then "`?>`".
 -   Template contents are represented by the string "content" with the
     children below it.
 
@@ -106,3 +110,19 @@ For example:
     |       "One"
     |     <p>
     |       "Two"
+
+Where this copy came from
+=========================
+
+Vendored from `web-platform-tests/wpt`, `html/syntax/parsing/resources/`, at
+commit `37cfee8549b687f1cb0bc8cf772a81ab86de657d` (2026-07-22). The tree
+construction tests moved there from `html5lib/html5lib-tests`; this copy is
+unmodified except for this section. They are the html5lib tests, MIT licence,
+see `../LICENSE`.
+
+The corpus is 62 files and 1,973 cases. `processing-instructions.dat` is new
+with the move: the HTML parser emits a `ProcessingInstruction` for
+`<?target data>` whose target is a name XML has not reserved, and a comment
+otherwise. The four cases in the older copy that expected a comment for
+`<?COMMENT?>` say `<?COMMENT ?>` here, which is the same change seen from the
+other side.

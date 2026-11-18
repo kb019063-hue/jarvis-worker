@@ -12,6 +12,7 @@ enum class HtmlTokenType {
     StartTag,
     EndTag,
     Comment,
+    ProcessingInstruction,
     Character,
     EndOfFile
 };
@@ -84,6 +85,8 @@ private:
     bool consume_tag(HtmlToken& token);
     void consume_comment(HtmlToken& token);
     void consume_bogus_comment(HtmlToken& token, std::string_view prefix);
+    enum class PiOutcome { NotAnInstruction, Emitted, Dropped };
+    PiOutcome consume_processing_instruction(HtmlToken& token);
     void consume_doctype(HtmlToken& token);
     void consume_cdata(HtmlToken& token);
     bool scan_text_run(HtmlToken& token);

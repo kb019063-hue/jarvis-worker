@@ -360,6 +360,61 @@ void HtmlTokenizer::consume_bogus_comment(HtmlToken& token, std::string_view pre
     token.data = std::move(data);
 }
 
+HtmlTokenizer::PiOutcome HtmlTokenizer::consume_processing_instruction(HtmlToken& token) {
+    // `<?target data>`: a processing instruction when the target is an XML
+    // name that XML has not reserved, and a bogus comment otherwise. The
+    // name is ASCII only -- a letter or `_` first, then letters, digits, `-`
+    // and `_` -- so `<?data.v1>`, `<?namespace:tag>` and `<?1st-place>` are
+    // comments, and so is anything whose target begins with `xml` in any
+    // case. tests/html5lib/tree-construction/processing-instructions.dat is
+    // the oracle for every branch of this.
+    const std::size_t at = m_cursor + 2;              // past "<?"
+    std::size_t name_end = at;
+    while (name_end < m_input.size()) {
+        const char c = m_input[name_end];
+        // Whitespace, `?` and `>` end the name. Anything else belongs to it,
+        // and a name that is not a name is not trimmed to its first good
+        // character: `<?a$>` is a comment, not an instruction named `a`.
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == '?' || c == '>') break;
+        ++name_end;
+    }
+    const std::string_view target = m_input.substr(at, name_end - at);
+    bool named = !target.empty() && (is_ascii_alpha(target[0]) || target[0] == '_');
+    for (std::size_t i = 1; named && i < target.size(); ++i) {
+        const char c = target[i];
+        if (!(is_ascii_alnum(c) || c == '-' || c == '_')) named = false;
+    }
+    if (named) {
+        std::string lowered(target);
+        for (char& c : lowered) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lowered.rfind("xml", 0) == 0) named = false;
+    }
+    if (!named) return PiOutcome::NotAnInstruction;
+
+    const std::size_t close = m_input.find('>', name_end);
+    if (close == std::string_view::npos) {
+        // Unterminated at EOF: nothing is emitted, and nothing is a comment
+        // either (`<body><?start` leaves the body as it was).
+        m_cursor = m_input.size();
+        return PiOutcome::Dropped;
+    }
+    std::size_t data_at = name_end;
+    while (data_at < close) {
+        const char c = m_input[data_at];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\f' && c != '\r') break;
+        ++data_at;
+    }
+    // The `?` of the closing `?>` is punctuation, not data; a `?` that is
+    // followed by anything else is data (`<?hey?there>` has the data
+    // `?there`).
+    const std::size_t data_end = (close > data_at && m_input[close - 1] == '?') ? close - 1 : close;
+    token.type = HtmlTokenType::ProcessingInstruction;
+    token.name = std::string(target);
+    token.data = std::string(m_input.substr(data_at, data_end - data_at));
+    m_cursor = close + 1;
+    return PiOutcome::Emitted;
+}
+
 void HtmlTokenizer::consume_doctype(HtmlToken& token) {
     // "<!DOCTYPE" already consumed.
     token.type = HtmlTokenType::Doctype;
@@ -812,6 +867,15 @@ HtmlToken HtmlTokenizer::next_token() {
     }
 
     if (next == '?') {
+        if (eof(2)) {                       // "<?" and then the input ends
+            m_cursor = m_input.size();
+            return next_token();
+        }
+        switch (consume_processing_instruction(token)) {
+            case PiOutcome::Emitted: return token;
+            case PiOutcome::Dropped: return next_token();   // unterminated: no token
+            case PiOutcome::NotAnInstruction: break;
+        }
         advance();  // '<'
         consume_bogus_comment(token, "");
         return token;

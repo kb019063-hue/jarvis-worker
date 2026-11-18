@@ -23,15 +23,19 @@ scoreboard"). Phase 28 wrote the XML parser the DOM lacked, against the W3C's
 suite and two other parsers, and brought in the tests browsers share (see
 "XML"). Phase 49 implemented customizable `<select>` content and
 `<selectedcontent>` cloning, taking the html5lib tree-construction suite from
-99.4% to **100.0% (`1792 / 1792`)**.
+99.4% to **100.0% (`1792 / 1792`)** on the copy the repository held. Phase 76
+vendored the copy web-platform-tests actually publishes — 62 files, **1,973
+cases**, with `#description` sections and a `processing-instructions.dat` the
+old copy never had — and made the parser emit the processing instruction the
+standard now makes, which is 1,967 of the 1,973.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
+| **DOM tree-construction conformance** | **1967 / 1973 (99.7%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. The six that fail are in `scripted_*.dat`, where a script must edit the document while the page is parsed |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **1126 / 1152 (97.7%)**; of the 26 that fail, eight were recorded in Phase 34 for what classes still lack and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9550 / 9744 subtests** across 190 files; the 194 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
@@ -169,7 +173,7 @@ iterates; the order in which the protocol reads and calls; closing an
 iterator that is left early; and the plain cases, which must not change. 65
 of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
-Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
+1,967 of the 1,973 cases of the html5lib tree-construction suite pass (**1967 / 1973**), the six failures being cases whose script must run while the page is parsed;
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
 inspects any subset. The final 11 cases (fixed in Phase 49) were all `<select>`:
 treating `<select>` as a default scope boundary, keeping arbitrary HTML/SVG/MathML
@@ -334,7 +338,7 @@ and what is still open.
 
 ### Pages nobody wrote
 
-The corpus is 1,792 inputs somebody thought of. `make diff-trees`
+The corpus is 1,973 inputs somebody thought of. `make diff-trees`
 (`tools/conformance/diff_trees.py`) makes pages nobody did, a few dozen tags
 in random order and most of them misnested, and compares the tree Litebird
 builds with the one parse5 builds, an independent parser written from the
@@ -436,17 +440,18 @@ Ladybird use as their parser baseline, so the number is comparable across
 engines rather than self-referential. It is vendored under
 `tests/html5lib/tree-construction/` (BSD-licensed, see the LICENSE there).
 
-The vendored copy is the last one html5lib-tests published: in June 2026 its
-tree-construction tests moved into web-platform-tests, and that copy has
-grown to 1,973 cases since. Litebird passed 1,868 of them before Phase 49
-implemented the `<select>` / `<selectedcontent>` rules (leaving 88 that need
-processing instructions (`<?x?>` is a node of its own in the standard now, and a
-comment here) and 6 that need a script to run while the page is being parsed).
-That copy is not vendored yet, so `make conformance` and CI still score the
-1,792.
+In June 2026 the tree-construction tests moved out of html5lib-tests into
+web-platform-tests. Phase 76 vendored that copy — 62 files, 1,973 cases,
+`#description` sections and all — at
+`web-platform-tests/wpt@37cfee8549b687f1cb0bc8cf772a81ab86de657d`
+(`html/syntax/parsing/resources/`). The 181 cases the old copy did not have
+are 88 processing instructions, 6 that need a script to run while the page is
+parsed, and 87 others. The first group needed engine work: `<?x?>` is a node
+of its own in the standard now, and was a comment here. The six remain, and
+`make conformance` scores 1,967 of 1,973.
 
 > **Honest scope:** 100.0% on the vendored parser conformance corpus means the DOM this engine builds
-> matches a real browser's across those 1,792 cases. It does **not** mean it renders real pages:
+> matches a real browser's across 1,967 of those 1,973 cases. It does **not** mean it renders real pages:
 > floats and tables lay out with spans and collapsed borders (Phases 16 and 29),
 > percentages resolve (Phase 18) and `overflow` clips (Phase 18), but there is
 > no bidi, external stylesheets and scripts are not loaded, and the

@@ -94,6 +94,11 @@ jobs:
         # not written for it. These are the cases it is trusted for, and the
         # claim protocol is only as good as they are.
         run: python3 tools/next_ids.py --self-test
+      - name: check_pr reads a claim the way AGENTS.md writes one
+        # The lines a pull request opens with are read by the tool that says
+        # "ready" before a merge. These are the forms it is trusted for, and
+        # it asks GitHub nothing here.
+        run: python3 tools/ci/check_pr.py --self-test
       - name: The documents keep their shape and stay under their budgets
         # ARCHITECTURE.md is 84% phase write-ups and AUDIT.md is 53 resolved
         # findings of 61. Both are frozen as append targets; new write-ups go

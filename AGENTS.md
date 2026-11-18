@@ -66,11 +66,12 @@ scoreboard — is not a phase and takes no phase or finding number.
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
    documents, `docs/`, `docs/state.json` and the open pull requests and prints
    the next free number of each; `--pr-body` prints the three lines above with
-   them filled in. Ask it from a tree that has today's `main`, also when you
-   renumber: `git fetch origin main && python3 tools/next_ids.py --ref
-   FETCH_HEAD` (the last row of the table below says why). (They used to be read out of ARCHITECTURE.md and AUDIT.md —
-   see the notice at the top.) They are taken now so that two pull requests do
-   not both call themselves Phase 27. A change that is not engine work —
+   them filled in. Ask it of today's `main`, also when you renumber (the
+   last row of the table below says why):
+   `git fetch origin main && python3 tools/next_ids.py --ref FETCH_HEAD`.
+   (They used to be read out of ARCHITECTURE.md and AUDIT.md — see the notice
+   at the top.) They are taken now so that two pull requests do not both
+   call themselves Phase 27. A change that is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
 3. **One task at a time, inside its files.** If the work turns out to need a

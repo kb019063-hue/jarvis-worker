@@ -681,7 +681,7 @@ twice.
   fire once the document's scripts have run.
 - **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
   `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
-  `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
+  `WebSocket` (limited `ws://` support; `wss://` fails closed, no TLS), `Worker` (each worker is a thread with its own
   interpreter and event loop; `Worker`, `Window`, and same-agent
   `MessagePort` messages use a neutral structured-clone packet for primitives,
   ordinary objects, and arrays), `canvas.getContext("2d")`, and the DOM:
@@ -1496,3 +1496,15 @@ seven cases; the pinned test262 delegation/yield differential gains 178 passing
 cases with no newly failing cases. Async request queuing and promise-job timing
 remain incomplete; see [Phase 77](docs/phases/77-async-generator-yield-star.md)
 and [finding 83](docs/findings/83-async-generator-delegation.md).
+
+### WebSocket handshake security (Phase 83)
+
+`wss://` no longer sends a plaintext handshake: this implementation has no
+WebSocket TLS transport and fails the connection instead. For `ws://`, URL
+and protocol input cannot inject HTTP headers; the response must be an HTTP
+101 upgrade with the correct named accept header, and selected subprotocols
+must have been offered. The RFC-based loopback tests run in `make test`.
+The client still lacks browser Origin/mixed-content policy, TLS, full API
+validation and frame compliance; do not use it as a secure browser boundary.
+See [Phase 83](docs/phases/83-websocket-handshake-security.md) and
+[finding 89](docs/findings/89-websocket-handshake-security.md).

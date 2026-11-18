@@ -588,3 +588,4 @@ the top of `AGENTS.md`).
 - **Phase 60** — [Phase 60 Architecture: Unicode 17.0 String Normalization, Full & Locale Case Mapping, and CLDR 48 UCA Collation (Finding 66)](docs/phases/60-architecture-unicode-17-0-string-normalization-full.md)
 - **Phase 63** — [Phase 63 Architecture: Iteration Asks the Value for Its Iterator](docs/phases/63-architecture-iteration-asks-the-value-for-its-iterator.md)
 - **Phase 77** — [Async-generator delegation and return resumption](docs/phases/77-async-generator-yield-star.md)
+- **Phase 83** — [WebSocket handshake security](docs/phases/83-websocket-handshake-security.md)

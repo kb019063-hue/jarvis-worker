@@ -424,20 +424,10 @@ void setup_document(Iface& I) {
     });
     I.alias("plugins", "embeds");
     I.node_getter(doc, "styleSheets", [](Realm& r, Node& self) {
-        NodeVector sheets;
-        for_each_descendant(self, [&](Node& node) {
-            if (is_html_element(node, "style")) sheets.push_back(node.shared_from_this());
-            return true;
-        });
-        std::vector<JsValue> out;
-        for (const auto& node : sheets) {
-            JsValue sheet = JsValue::make_object();
-            sheet.set_property("ownerNode", wrap(r, node));
-            sheet.set_property("disabled", boolean(false));
-            sheet.set_property("type", str("text/css"));
-            out.push_back(sheet);
-        }
-        return JsValue::make_array(out);
+        return document_style_sheets(r, static_cast<Document&>(self));
+    });
+    I.node_getter(doc, "fonts", [](Realm& r, Node& self) {
+        return cached(wrap(r, self.shared_from_this()), "fonts", [&]() { return document_fonts(r); });
     });
 
     // --- Creating nodes -----------------------------------------------------------

@@ -452,6 +452,14 @@ public:
     }
 };
 
+/// `style.sheet`: the CSSStyleSheet of a <style> element, the same object
+/// every time, or null when the element is not in a document.
+JsValue style_sheet(Realm& realm, Element& element);
+/// `document.styleSheets`: the sheets of the document's <style> elements.
+JsValue document_style_sheets(Realm& realm, Document& document);
+/// `document.fonts`: the FontFaceSet, whose `ready` is already resolved.
+JsValue document_fonts(Realm& realm);
+
 /// `element.classList` and friends: a DOMTokenList over `attribute`.
 JsValue make_token_list(Realm& realm, Element& element, const std::string& attribute,
                         std::vector<std::string> supported = {});

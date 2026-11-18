@@ -518,13 +518,21 @@ def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
         lines.append((False, f"no CI run on {head} or on the 30 commits before it"))
     elif e.ran_state != "passed":
         lines.append((False, f"no CI run on {head}; the last one, on {e.ran_on[:7]}, {e.ran_state}"))
-    elif not all_of(DOCUMENT, e.since):
-        code = None if e.since is None else [f for f in e.since if not DOCUMENT.search(f)]
-        lines.append((False, f"no CI run on {head}; since the last one, on {e.ran_on[:7]}, these changed: {some(code)}"))
-    else:
+    elif all_of(DOCUMENT, e.since):
         quick = True
         lines.append((True, f"CI passed on {e.ran_on[:7]}, and since then only documents changed "
                             f"({some(e.since)}). Say so in the pull request"))
+    elif quick_only and e.since is not None and not set(e.since) & {f for f in e.pr_files if not DOCUMENT.search(f)}:
+        # `main` was merged into the branch since the run, which brought in
+        # whatever `main` had. What had to pass on a runner is this pull
+        # request's own copy of the checks, and that is as it was then.
+        quick = True
+        own = [f for f in e.pr_files if not DOCUMENT.search(f)]
+        lines.append((True, f"CI passed on {e.ran_on[:7]}; since then main was merged in, and the checks this pull "
+                            f"request changes ({some(own)}) are as they were. Say so in the pull request"))
+    else:
+        code = None if e.since is None else [f for f in e.since if not DOCUMENT.search(f)]
+        lines.append((False, f"no CI run on {head}; since the last one, on {e.ran_on[:7]}, these changed: {some(code)}"))
 
     return lines, quick and all(ok for ok, _text in lines)
 
@@ -808,6 +816,15 @@ def self_test() -> int:
          verdict(**no_run, since=["AGENTS.md", "tools/ci/check_pr.py"]), ([True, False], False)),
         ("...the run before it failed: not ready",
          verdict(**no_run, ran_state="failed", since=["AGENTS.md"]), ([True, False], False)),
+        ("a pull request that changes a check, after merging main with [skip ci] to settle a conflict in a document: "
+         "its own checks are as CI saw them",
+         verdict(**no_run, pr_files=["AGENTS.md", "tools/ci/check_pr.py"],
+                 since=["AGENTS.md", "src/js/JsEval.cpp", "tests/test_suite.cpp"]), ([True, True], True)),
+        ("...but not when its checks changed since that run",
+         verdict(**no_run, pr_files=["AGENTS.md", "tools/ci/check_pr.py"],
+                 since=["AGENTS.md", "src/js/JsEval.cpp", "tools/ci/check_pr.py"]), ([True, False], False)),
+        ("...and an engine change that merged main with [skip ci] needs its run",
+         verdict(**no_run, since=["AGENTS.md", "src/js/JsEval.cpp"]), ([True, False], False)),
         ("CI still running on an engine change: not ready",
          verdict(head_state="running", head_bad=["Build: in_progress"]), ([True, False], False)),
     ]

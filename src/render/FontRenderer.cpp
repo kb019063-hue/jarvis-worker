@@ -985,7 +985,10 @@ FontRenderer::FaceEntry FontRenderer::describe(const std::string& path) {
     e.family = names.family;
     e.key = family_key(names.family);
     e.subfamily = names.subfamily;
-    weight_and_slant(names.subfamily, e.weight, e.italic);
+    int weight = 400;
+    weight_and_slant(names.subfamily, weight, e.italic);
+    e.weight_min = weight;
+    e.weight_max = weight;
     return e;
 }
 
@@ -1059,21 +1062,134 @@ int FontRenderer::register_font_file(const std::string& path) {
     return id;
 }
 
+int FontRenderer::register_webfont(std::string family, std::vector<WebfontFetcher> sources,
+                                   int weight_min, int weight_max, bool italic) {
+    const std::string key = family_key(family);
+    if (key.empty() || sources.empty()) return kNoFamily;
+
+    if (weight_min > weight_max) std::swap(weight_min, weight_max);
+
+    FaceEntry entry;
+    // No path: the bytes are not on disk, they are wherever the URL points.
+    // The family is the one the page declared, so the name inside the file is
+    // never asked for -- a page may serve "Body Text" from a file that calls
+    // itself something else entirely, and the page's name is the one CSS means.
+    entry.family = std::move(family);
+    entry.key = key;
+    entry.weight_min = weight_min;
+    entry.weight_max = weight_max;
+    entry.italic = italic;
+    entry.webfont = true;
+    entry.sources = std::move(sources);
+
+    const std::size_t index = m_face_entries.size();
+    m_face_entries.push_back(std::move(entry));
+
+    auto known = m_family_by_key.find(key);
+    if (known == m_family_by_key.end()) {
+        const int id = static_cast<int>(m_families.size());
+        Family f;
+        f.name = m_face_entries[index].family;
+        f.key = key;
+        f.faces.push_back(index);
+        m_family_names.push_back(f.name);   // read before `f` is moved from
+        m_families.push_back(std::move(f));
+        m_family_by_key.emplace(key, id);
+    } else {
+        // Put the webfont ahead of whatever this host already had under the
+        // name: a `@font-face` family is the answer for that name, and a
+        // system family of the same name is only what it falls back to.
+        // `pick_face` would otherwise be free to choose either.
+        m_families[known->second].faces.insert(m_families[known->second].faces.begin(), index);
+    }
+
+    // A new family, or a family that gained a face, changes what every list
+    // mentioning it resolves to.
+    m_resolved.clear();
+    return m_family_by_key[key];
+}
+
+std::string FontRenderer::face_path(std::string_view css_family_list) const {
+    const int id = family_id_for(css_family_list);
+    if (id < 0 || static_cast<std::size_t>(id) >= m_families.size()) return {};
+    const Family& family = m_families[static_cast<std::size_t>(id)];
+    const std::size_t index = pick_face(family, 400, false);
+    if (index == static_cast<std::size_t>(-1)) return {};
+    // A webfont has no path: its bytes were never on this disk. `local()` is
+    // asking for a font the host already has, so a webfont is the one thing it
+    // cannot be answered with.
+    const FaceEntry& e = m_face_entries[index];
+    return e.webfont ? std::string() : e.path;
+}
+
+void FontRenderer::clear_webfonts() {
+    // Whether there is anything to do, asked *before* anything is moved.
+    // "Nothing to do" is the common case -- most documents declare no webfonts
+    // -- and a check made after the moves below would be too late: the entries
+    // are moved into `kept`, and a `kept` that is then discarded on an early
+    // return leaves every face on the host with an empty path. The registry
+    // still looked whole, and could no longer load a single system font.
+    std::size_t survivors = 0;
+    for (const FaceEntry& e : m_face_entries) {
+        if (!e.webfont) ++survivors;
+    }
+    if (survivors == m_face_entries.size()) return;
+
+    // Which face indices survive, and where they end up.
+    std::vector<std::size_t> remap(m_face_entries.size(), static_cast<std::size_t>(-1));
+    std::vector<FaceEntry> kept;
+    kept.reserve(survivors);
+    for (std::size_t i = 0; i < m_face_entries.size(); ++i) {
+        if (m_face_entries[i].webfont) continue;
+        remap[i] = kept.size();
+        kept.push_back(std::move(m_face_entries[i]));
+    }
+
+    for (Family& f : m_families) {
+        std::vector<std::size_t> faces;
+        faces.reserve(f.faces.size());
+        for (const std::size_t index : f.faces) {
+            if (remap[index] != static_cast<std::size_t>(-1)) faces.push_back(remap[index]);
+        }
+        f.faces = std::move(faces);
+    }
+
+    // Faces already parsed are held by index into `m_family_faces`, and a
+    // webfont's bytes live only in the face that parsed them -- so a loaded
+    // webfont has to be dropped, and with it the index that finds it. The
+    // glyph cache is deliberately left alone: a `GlyphBitmap` is a value, not
+    // a view into the face that made it.
+    m_family_faces.clear();
+    m_family_face_index.clear();
+    m_face_entries = std::move(kept);
+    m_resolved.clear();
+}
+
 std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold) const {
     if (family.faces.empty()) return static_cast<std::size_t>(-1);
     const int wanted = bold ? std::max(weight, 600) : weight;
     std::size_t best = family.faces.front();
     int best_distance = std::numeric_limits<int>::max();
+    bool best_is_webfont = false;
     for (const std::size_t index : family.faces) {
         const FaceEntry& e = m_face_entries[index];
         // A slanted face answers only when the slant was asked for, and vice
         // versa: `font-style` is not implemented, so nothing asks for italic,
         // and an italic face must not be handed out by accident.
         if (e.italic != bold && e.italic) continue;
-        const int distance = std::abs(e.weight - wanted);
-        if (distance < best_distance) {
+        // Distance to the range this face declared, not to one number: a
+        // webfont serving `100 400` is an exact answer for anything in it.
+        const int distance = wanted < e.weight_min   ? e.weight_min - wanted
+                             : wanted > e.weight_max ? wanted - e.weight_max
+                                                     : 0;
+        // A webfont outranks a host family it shares a name with, so it wins
+        // ties outright -- and, having won, it is not displaced by a host face
+        // that happens to be nearer the weight asked for.
+        const bool better = distance < best_distance || (distance == best_distance && e.webfont && !best_is_webfont);
+        if (better) {
             best_distance = distance;
             best = index;
+            best_is_webfont = e.webfont;
         }
     }
     return best;
@@ -1103,7 +1219,26 @@ const TrueTypeFont* FontRenderer::family_face(int family_id, int weight, bool bo
         m_family_face_index.clear();
     }
     TrueTypeFont face;
-    if (!face.load_file(m_face_entries[index].path)) return nullptr;
+    const FaceEntry& chosen = m_face_entries[index];
+    if (chosen.webfont) {
+        // Try the rule's sources in order and keep the first that parses. A
+        // source that returns nothing, or bytes that are not a font this can
+        // read, is not the end -- it is what moves on to the next one, which
+        // is the entire point of `src: url(a.woff), url(a.ttf)`.
+        bool loaded = false;
+        for (const WebfontFetcher& fetch : chosen.sources) {
+            if (!fetch) continue;
+            std::vector<std::uint8_t> bytes = fetch();
+            if (bytes.empty()) continue;
+            if (face.load_memory(std::move(bytes))) {
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded) return nullptr;
+    } else if (!face.load_file(chosen.path)) {
+        return nullptr;
+    }
     m_family_faces.push_back(std::move(face));
     const std::size_t slot = m_family_faces.size() - 1;
     m_family_face_index.emplace(key, slot);
@@ -1144,6 +1279,15 @@ int FontRenderer::family_id_for(std::string_view css_family_list) const {
         } else {
             const auto it = m_family_by_key.find(key);
             if (it != m_family_by_key.end()) found = it->second;
+        }
+        // A family that has no face behind it is not a family a page can have,
+        // however well its name matched. `clear_webfonts` leaves such an entry
+        // behind -- it drops the faces and keeps the name, because renumbering
+        // families would invalidate every id already handed out -- so the
+        // question is asked here, where the answer is cheap.
+        if (found != kNoFamily && static_cast<std::size_t>(found) < m_families.size() &&
+            m_families[static_cast<std::size_t>(found)].faces.empty()) {
+            found = kNoFamily;
         }
         // `cursive` and `fantasy` fall through to here: this host has nothing
         // by those names, and the default is a better answer than a guess,

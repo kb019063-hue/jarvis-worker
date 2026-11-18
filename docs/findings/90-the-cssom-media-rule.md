@@ -47,11 +47,11 @@ Phase 72 named this hole and did not close it
   `insertRule('@media print { a {} }')` is a `SyntaxError`; it now asserts
   that the block goes in at the index it was given and comes back out with
   `deleteRule`, because that is what the engine does.
-- **`README.md`** — 235 suites → 236.
+- **`README.md`** — 238 suites → 239.
 
 ## 3. How it is verified
 
-- `make test` → **236 / 236** suites, including
+- `make test` → **239 / 239** suites, including
   `cssom_media_rules_and_the_cascade_inside_them`.
 - The query is asked the way `matchMedia` asks it: the same page's
   `screen and (min-width: 600px)` block applies (green) in a 1024×768 window

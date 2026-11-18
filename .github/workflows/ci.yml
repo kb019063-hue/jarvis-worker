@@ -16,6 +16,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: The published numbers are still true
+        # README.md said 1124 / 1150 (97.6%) while the two integers divide to
+        # 97.7, and ROADMAP.md's baseline quoted a corpus two phases old. This
+        # derives what can be derived — the arithmetic, the two corpus totals,
+        # the suite count — instead of trusting a sentence. Seconds, not
+        # minutes: it runs before the build so a wrong number fails first.
+        run: make check-numbers
       - name: Build
         run: make -j"$(nproc)"
       - name: Engine test suites

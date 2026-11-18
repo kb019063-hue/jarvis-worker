@@ -71,6 +71,11 @@ PRESENT_TENSE = 120
 PERCENT = re.compile(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)\s*\((\d+(?:\.\d+)?)%\)")
 FRACTION = re.compile(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)")
 SUITE_CLAIM = re.compile(r"(\d[\d,]*)(?:\s*/\s*(\d[\d,]*))?\s+suites\b")
+# "217 engine suites" and "All 217 engine test suites passed": the command
+# list and the sample output say the count in the present tense too, and the
+# first of them is what the general pattern above misses — a word stands
+# between the number and the noun.
+SUITE_CLAIM_ANYWHERE = re.compile(r"(\d[\d,]*)\s+engine(?:\s+test)?\s+suites\b")
 RUN_TEST = re.compile(r"^    RUN_TEST\(", re.MULTILINE)
 
 
@@ -138,17 +143,27 @@ def check_denominators(problems: list[str]) -> list[tuple[Path, int, int]]:
 
 def check_suite_count(problems: list[str]) -> int:
     registered = len(RUN_TEST.findall(read(SUITE_SOURCE)))
-    for number, line in enumerate(read(README).split("\n")[:PRESENT_TENSE], start=1):
+    lines = read(README).split("\n")
+    reported: set[int] = set()
+
+    def report(number: int, text: str, digits: str) -> None:
+        if number in reported:
+            return
+        reported.add(number)
+        if int(digits.replace(",", "")) != registered:
+            problems.append(
+                f"README.md:{number}: {text.strip()};"
+                f" tests/test_suite.cpp registers {registered}"
+            )
+
+    for number, line in enumerate(lines[:PRESENT_TENSE], start=1):
         for match in SUITE_CLAIM.finditer(line):
             for group in (match.group(1), match.group(2)):
-                if group is None:
-                    continue
-                claimed = int(group.replace(",", ""))
-                if claimed != registered:
-                    problems.append(
-                        f"README.md:{number}: {match.group(0).strip()};"
-                        f" tests/test_suite.cpp registers {registered}"
-                    )
+                if group is not None:
+                    report(number, match.group(0), group)
+    for number, line in enumerate(lines, start=1):
+        for match in SUITE_CLAIM_ANYWHERE.finditer(line):
+            report(number, match.group(0), match.group(1))
     return registered
 
 

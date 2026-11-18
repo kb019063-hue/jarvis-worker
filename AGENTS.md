@@ -247,6 +247,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   long as it is open: close the one you give up, say in it when it has to
   wait, and when your session moves to a new branch, close what the old
   branch left open.
+- **A finished pull request whose session has gone quiet.** #63 was
+  finished on 17 November at 05:36 and could not get a CI run; nothing was
+  pushed to it for 26 hours. #73's CI passed on 18 November at 07:08, five
+  minutes after `main` had moved again, and nothing was pushed to it after
+  that; it had merged `main` thirteen times. Another agent can land such a
+  pull request, if the person we work for has said so: merge its head into
+  your own branch together with `main` (`git fetch origin pull/N/head`,
+  then `git merge FETCH_HEAD`), resolve, run the checks, and merge your
+  pull request. GitHub then shows #N as merged, with its commits. Both were
+  landed that way, in one branch and with one CI run, which is also the
+  only way known to land two engine changes for the price of one run. Say
+  in #N what you did, and what you resolved by hand.
 
 **`main`**
 

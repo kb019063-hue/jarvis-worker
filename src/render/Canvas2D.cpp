@@ -491,11 +491,14 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
         parsed = ParsedCanvasFont{};
     }
     const float size_px = std::max(0.0f, parsed.size_px);
-    const auto metrics = FontRenderer::instance().em_ascent_descent(size_px, parsed.weight, parsed.family);
+    // `ctx.font = "italic 16px serif"` -- the canvas font grammar has had a
+    // slant in it all along; this is the first thing to use it.
+    const bool italic = parsed.style == "italic" || parsed.style == "oblique";
+    const auto metrics = FontRenderer::instance().em_ascent_descent(size_px, parsed.weight, parsed.family, italic);
     layout.ascent = metrics.first;
     layout.descent = metrics.second;
 
-    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight, parsed.family);
+    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight, parsed.family, italic);
     const float condensable = (max_width > 0.0f && layout.advance > max_width && layout.advance > 0.0f)
                                   ? std::clamp(max_width / layout.advance, 0.02f, 1.0f)
                                   : 1.0f;
@@ -527,7 +530,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     std::size_t pos = 0;
     while (pos < text.size()) {
         const uint32_t cp = canvas_utf8_next(text, pos);
-        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold, family_id);
+        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold, family_id, italic);
         const float pen_rel = pen - layout.pad_x;
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;
@@ -551,7 +554,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
                 }
             }
         }
-        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight, parsed.family);
+        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight, parsed.family, italic);
         if (pen > static_cast<float>(kMaxTextBufferWidth)) break; // truncated by the buffer cap
     }
     if (std::isfinite(ink_l)) {

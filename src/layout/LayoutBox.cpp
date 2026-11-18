@@ -969,7 +969,8 @@ void LayoutBox::layout_text(float containing_width) {
     lines.clear();
     const ComputedStyle& s = *style;
     FontRenderer& font_renderer = FontRenderer::instance();
-    const float space_advance = font_renderer.measure_text(" ", s.font_size, s.font_weight, s.font_family);
+    const bool italic = s.font_style != FontStyle::Normal;
+    const float space_advance = font_renderer.measure_text(" ", s.font_size, s.font_weight, s.font_family, italic);
     float line_h = s.font_size * 1.25f;
 
     if (containing_width <= 0.0f) containing_width = 800.0f;
@@ -982,7 +983,7 @@ void LayoutBox::layout_text(float containing_width) {
     float max_w = 0.0f;
 
     while (ss >> word) {
-        const float word_w = font_renderer.measure_text(word, s.font_size, s.font_weight, s.font_family);
+        const float word_w = font_renderer.measure_text(word, s.font_size, s.font_weight, s.font_family, italic);
         const float space_w = current_line.empty() ? 0.0f : space_advance;
 
         if (!current_line.empty() && (current_w + space_w + word_w) > containing_width) {
@@ -1007,7 +1008,7 @@ void LayoutBox::layout_text(float containing_width) {
 
     if (lines.empty()) {
         lines.push_back(text);
-        max_w = font_renderer.measure_text(text, s.font_size, s.font_weight, s.font_family);
+        max_w = font_renderer.measure_text(text, s.font_size, s.font_weight, s.font_family, italic);
     }
 
     dimensions.content.width = max_w;
@@ -1041,7 +1042,8 @@ static void collect_items(
         const ComputedStyle& es = *effective_style;
         FontRenderer& font_renderer = FontRenderer::instance();
         const float space_w = font_renderer.measure_text(" ", es.font_size, es.font_weight,
-                                                         es.font_family);
+                                                         es.font_family,
+                                                         es.font_style != FontStyle::Normal);
         float line_h = es.effective_line_height();
 
         size_t i = 0;
@@ -1071,7 +1073,8 @@ static void collect_items(
                 InlineItem item;
                 item.type = InlineItem::Type::Text;
                 item.width = font_renderer.measure_text(word, es.font_size, es.font_weight,
-                                                        es.font_family);
+                                                        es.font_family,
+                                                        es.font_style != FontStyle::Normal);
                 item.text = std::move(word);
                 item.height = line_h;
                 item.style = effective_style;

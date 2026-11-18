@@ -146,6 +146,65 @@ void flatten_quad_bezier(
     flatten_quad_bezier(midx, midy, q1x, q1y, x1, y1, depth + 1, pts);
 }
 
+/// How far a synthesised oblique leans: 0.25 px of horizontal run per px of
+/// height above the baseline, which is tan(14 degrees) -- the angle CSS Fonts 4
+/// gives an `oblique` that names none, and the one Chrome skews by.
+constexpr float kSyntheticObliqueSkew = 0.25f;
+
+/// Leans a rasterized glyph as if it had come from an italic face.
+///
+/// A host with no italic face is the normal case, not the exception -- the
+/// machine this was written on has six DejaVu files and not one of them is
+/// slanted -- and CSS says a browser that cannot find a slanted face skews an
+/// upright one rather than leave the text upright. So the shear happens on the
+/// bitmap, per row: every row is the glyph at one height above the baseline,
+/// which is exactly the line a shear moves along.
+///
+/// Rows above the baseline move right and rows below it -- a descender -- move
+/// left, so the result is given room on both sides and its bearing moves with
+/// it. Getting that wrong is not cosmetic: clip the descender's overhang and
+/// the tail of every `g` is cut off.
+void apply_synthetic_oblique(GlyphBitmap& bmp) {
+    if (bmp.width <= 0 || bmp.height <= 0) return;
+    if (bmp.coverage.size() < static_cast<std::size_t>(bmp.width) * static_cast<std::size_t>(bmp.height)) {
+        return;
+    }
+
+    const auto shift_of_row = [&bmp](int row) {
+        // `bearing_y` is how far the top row is above the baseline, so row `r`
+        // is `bearing_y - r` px above it, and leans right by that much times
+        // the skew.
+        const float above_baseline = static_cast<float>(bmp.bearing_y - row);
+        return static_cast<int>(std::lround(kSyntheticObliqueSkew * above_baseline));
+    };
+
+    int min_shift = 0;
+    int max_shift = 0;
+    for (int r = 0; r < bmp.height; ++r) {
+        const int shift = shift_of_row(r);
+        min_shift = std::min(min_shift, shift);
+        max_shift = std::max(max_shift, shift);
+    }
+
+    const int new_width = bmp.width + (max_shift - min_shift);
+    std::vector<uint8_t> sheared(static_cast<std::size_t>(new_width) * static_cast<std::size_t>(bmp.height), 0);
+    for (int r = 0; r < bmp.height; ++r) {
+        const int offset = shift_of_row(r) - min_shift;
+        for (int c = 0; c < bmp.width; ++c) {
+            const uint8_t coverage = bmp.coverage[static_cast<std::size_t>(r) * static_cast<std::size_t>(bmp.width) +
+                                                  static_cast<std::size_t>(c)];
+            if (coverage != 0) {
+                sheared[static_cast<std::size_t>(r) * static_cast<std::size_t>(new_width) +
+                        static_cast<std::size_t>(c + offset)] = coverage;
+            }
+        }
+    }
+
+    bmp.bearing_x += min_shift;
+    bmp.width = new_width;
+    bmp.coverage = std::move(sheared);
+}
+
 GlyphBitmap rasterize_fallback_8x8(uint32_t cp, int pixel_size, bool bold) {
     GlyphBitmap bmp;
     const int px = std::clamp(pixel_size, 6, 128);
@@ -1113,7 +1172,12 @@ std::string FontRenderer::face_path(std::string_view css_family_list) const {
     const int id = family_id_for(css_family_list);
     if (id < 0 || static_cast<std::size_t>(id) >= m_families.size()) return {};
     const Family& family = m_families[static_cast<std::size_t>(id)];
-    const std::size_t index = pick_face(family, 400, false);
+    // Upright, regular: `local()` names a family, and the question `@font-face`
+    // asks of it is "is this font on the host", not "is this the slant the
+    // rule declared". A rule that declares italic and is answered from
+    // `local()` gets the upright file, which is then sheared like any other
+    // upright that has to stand in for an italic.
+    const std::size_t index = pick_face(family, 400, false, /*italic=*/false);
     if (index == static_cast<std::size_t>(-1)) return {};
     // A webfont has no path: its bytes were never on this disk. `local()` is
     // asking for a font the host already has, so a webfont is the one thing it
@@ -1165,18 +1229,34 @@ void FontRenderer::clear_webfonts() {
     m_resolved.clear();
 }
 
-std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold) const {
+std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold, bool italic) const {
     if (family.faces.empty()) return static_cast<std::size_t>(-1);
+
+    // Whether this family has any slanted face at all, decided once for the
+    // family rather than once per face: it is the question that decides
+    // whether an upright face may answer a slanted request. A family with no
+    // italic is not a dead end -- a browser slants what it has rather than
+    // leave the text upright -- so the answer changes eligibility, not success.
+    bool family_has_slant = false;
+    for (const std::size_t index : family.faces) {
+        if (m_face_entries[index].italic) {
+            family_has_slant = true;
+            break;
+        }
+    }
+
     const int wanted = bold ? std::max(weight, 600) : weight;
-    std::size_t best = family.faces.front();
+    std::size_t best = static_cast<std::size_t>(-1);
     int best_distance = std::numeric_limits<int>::max();
     bool best_is_webfont = false;
     for (const std::size_t index : family.faces) {
         const FaceEntry& e = m_face_entries[index];
-        // A slanted face answers only when the slant was asked for, and vice
-        // versa: `font-style` is not implemented, so nothing asks for italic,
-        // and an italic face must not be handed out by accident.
-        if (e.italic != bold && e.italic) continue;
+        // A slanted face answers only a slanted request: `font-style: normal`
+        // inside an italic paragraph must not land on the italic face. And an
+        // upright face answers a slanted request only when the family has no
+        // slanted one to offer -- then the caller shears it.
+        if (e.italic && !italic) continue;
+        if (!e.italic && italic && family_has_slant) continue;
         // Distance to the range this face declared, not to one number: a
         // webfont serving `100 400` is an exact answer for anything in it.
         const int distance = wanted < e.weight_min   ? e.weight_min - wanted
@@ -1192,21 +1272,37 @@ std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold)
             best_is_webfont = e.webfont;
         }
     }
+    // Nothing answered the slant. That happens when the family's only faces
+    // are slanted and upright was asked for -- a family with one italic file
+    // and no regular one, which real pages do ship. The family the element
+    // named is still the right family, so its first face is a better answer
+    // than dropping to the default: the wrong slant is a smaller error than
+    // the wrong typeface.
+    if (best == static_cast<std::size_t>(-1)) best = family.faces.front();
     return best;
 }
 
-const TrueTypeFont* FontRenderer::family_face(int family_id, int weight, bool bold) const {
+const TrueTypeFont* FontRenderer::family_face(int family_id, int weight, bool bold, bool italic,
+                                              bool* synthetic_oblique) const {
+    if (synthetic_oblique) *synthetic_oblique = false;
     if (family_id < 0 || static_cast<std::size_t>(family_id) >= m_families.size()) {
         return nullptr;
     }
     const Family& family = m_families[static_cast<std::size_t>(family_id)];
-    const std::size_t index = pick_face(family, weight, bold);
+    const std::size_t index = pick_face(family, weight, bold, italic);
     if (index == static_cast<std::size_t>(-1)) return nullptr;
+
+    // The slant was asked for and the face that answered does not have one of
+    // its own: the caller is to shear it. Reported only on the paths that
+    // return a face, so a caller cannot mistake "nothing loaded" for "shear
+    // nothing".
+    const bool answered_upright = italic && !m_face_entries[index].italic;
 
     const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 32) |
                          static_cast<uint64_t>(static_cast<uint32_t>(index));
     const auto seen = m_family_face_index.find(key);
     if (seen != m_family_face_index.end()) {
+        if (synthetic_oblique) *synthetic_oblique = answered_upright;
         return &m_family_faces[seen->second];
     }
     if (m_family_faces.size() >= kMaxLoadedFamilyFaces) {
@@ -1242,6 +1338,7 @@ const TrueTypeFont* FontRenderer::family_face(int family_id, int weight, bool bo
     m_family_faces.push_back(std::move(face));
     const std::size_t slot = m_family_faces.size() - 1;
     m_family_face_index.emplace(key, slot);
+    if (synthetic_oblique) *synthetic_oblique = answered_upright;
     return &m_family_faces[slot];
 }
 
@@ -1322,7 +1419,9 @@ void FontRenderer::set_fallbacks(std::vector<std::string> paths) {
     m_cache.clear();
 }
 
-const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int family_id) const {
+const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int family_id,
+                                           bool italic, bool* synthetic_oblique) const {
+    if (synthetic_oblique) *synthetic_oblique = false;
     const TrueTypeFont* primary = (bold && m_bold.is_loaded())
                                       ? &m_bold
                                       : (m_regular.is_loaded() ? &m_regular : nullptr);
@@ -1330,15 +1429,30 @@ const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int fa
     // The element named a family, and the family has the glyph. This is the
     // whole of `font-family`: before it, the primary answered for every element
     // on the page and a `<pre>` was drawn in the same face as a heading.
-    if (const TrueTypeFont* named = family_face(family_id, bold ? 700 : 400, bold)) {
-        if (named->has_glyph(codepoint)) return named;
+    bool named_upright = false;
+    if (const TrueTypeFont* named = family_face(family_id, bold ? 700 : 400, bold, italic, &named_upright)) {
+        if (named->has_glyph(codepoint)) {
+            if (synthetic_oblique) *synthetic_oblique = named_upright;
+            return named;
+        }
     }
 
-    if (primary && primary->has_glyph(codepoint)) return primary;
+    // Past here the faces are the host's own regular and bold primaries and
+    // whatever discovery found; none of them is the element's italic, so a
+    // slant that was asked for is one this has to make. One slanted word in
+    // the middle of an italic sentence reads as a mistake, so the whole run is
+    // sheared rather than only the part the family covered.
+    if (primary && primary->has_glyph(codepoint)) {
+        if (synthetic_oblique) *synthetic_oblique = italic;
+        return primary;
+    }
 
     // Already loaded as a result of an earlier miss.
     for (const TrueTypeFont& face : m_fallbacks) {
-        if (face.has_glyph(codepoint)) return &face;
+        if (face.has_glyph(codepoint)) {
+            if (synthetic_oblique) *synthetic_oblique = italic;
+            return &face;
+        }
     }
 
     // Not covered by anything loaded yet. Load more of what discovery found,
@@ -1352,20 +1466,26 @@ const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int fa
         TrueTypeFont face;
         if (!face.load_file(path)) continue;
         m_fallbacks.push_back(std::move(face));
-        if (m_fallbacks.back().has_glyph(codepoint)) return &m_fallbacks.back();
+        if (m_fallbacks.back().has_glyph(codepoint)) {
+            if (synthetic_oblique) *synthetic_oblique = italic;
+            return &m_fallbacks.back();
+        }
     }
 
     // No face covers it. The primary draws its `.notdef` (or nothing), which
-    // is what happened to every such codepoint before fallback existed.
+    // is what happened to every such codepoint before fallback existed. A
+    // `.notdef` box is as slanted as the rest of the line has to be.
+    if (synthetic_oblique) *synthetic_oblique = italic;
     return primary;
 }
 
 std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int font_weight,
-                                                        std::string_view css_family) const {
+                                                        std::string_view css_family,
+                                                        bool italic) const {
     if (!(font_size > 0.0f)) return {0.0f, 0.0f};
     const bool want_bold = font_weight >= 600;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    const TrueTypeFont* font = family_face(family_id, font_weight, want_bold);
+    const TrueTypeFont* font = family_face(family_id, font_weight, want_bold, italic);
     if (!font) {
         font = (want_bold && m_bold.is_loaded())
                    ? &m_bold
@@ -1379,40 +1499,47 @@ std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int fon
 }
 
 float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight,
-                                     std::string_view css_family) const {
+                                     std::string_view css_family, bool italic) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    return advance_in_family(codepoint, font_size, font_weight >= 600, family_id);
+    return advance_in_family(codepoint, font_size, font_weight >= 600, family_id, italic);
 }
 
 float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
-                                      int family_id) const {
-    const TrueTypeFont* font = face_for(codepoint, want_bold, family_id);
+                                      int family_id, bool italic) const {
+    // The slant reaches `face_for` because it can change which face answers,
+    // and an italic face has advances of its own. A synthesised oblique does
+    // not: shear moves the ink, not the pen.
+    const TrueTypeFont* font = face_for(codepoint, want_bold, family_id, italic);
     if (font) return font->glyph_advance(codepoint, font_size);
     return std::max(1.0f, font_size * 0.55f);
 }
 
 float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight,
-                                 std::string_view css_family) {
+                                 std::string_view css_family, bool italic) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     float total = 0.0f;
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        total += advance_in_family(cp, font_size, font_weight >= 600, family_id);
+        total += advance_in_family(cp, font_size, font_weight >= 600, family_id, italic);
     }
     return total;
 }
 
 const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, bool bold,
-                                           int family_id) {
+                                           int family_id, bool italic) {
     const int px = std::clamp(pixel_size, 6, 160);
     // The family is part of the key. Without it the cache would answer with a
     // glyph rasterized from one family for an element that asked for another,
     // which is the bug that makes `font-family` look like it works in the
-    // first line of a paragraph and not in the rest.
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 41) |
-                         (static_cast<uint64_t>(bold ? 1u : 0u) << 40) |
+    // first line of a paragraph and not in the rest. The slant is part of it
+    // for the same reason: a sheared bitmap and an upright one are two
+    // pictures of one glyph, and whichever was drawn first would otherwise
+    // answer for both.
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 42) |
+                         (static_cast<uint64_t>(bold ? 1u : 0u) << 41) |
+                         (static_cast<uint64_t>(italic ? 1u : 0u) << 40) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(px)) << 32) |
                          static_cast<uint64_t>(codepoint);
     auto it = m_cache.find(key);
@@ -1423,12 +1550,14 @@ const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, b
     }
 
     GlyphBitmap bmp;
-    const TrueTypeFont* face = face_for(codepoint, bold, family_id);
+    bool shear = false;
+    const TrueTypeFont* face = face_for(codepoint, bold, family_id, italic, &shear);
     if (face) {
         bmp = face->rasterize_glyph(codepoint, px);
     } else {
         bmp = rasterize_fallback_8x8(codepoint, px, bold);
     }
+    if (shear) apply_synthetic_oblique(bmp);
 
     auto [ins, _] = m_cache.emplace(key, std::move(bmp));
     return ins->second;
@@ -1441,7 +1570,8 @@ void FontRenderer::draw_text(
     float font_size,
     int font_weight,
     const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
-    std::string_view css_family
+    std::string_view css_family,
+    bool italic
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
@@ -1449,9 +1579,16 @@ void FontRenderer::draw_text(
     const bool bold = font_weight >= 600;
     const bool synthetic_bold = bold && !m_bold.is_loaded() && m_regular.is_loaded();
 
-    const TrueTypeFont* font = (bold && m_bold.is_loaded())
-                                   ? &m_bold
-                                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    // The baseline comes from the face the element asked for, which is the
+    // face the line builder measured with. It used to come from the primary
+    // whatever the family was, so text in a named family sat a little higher
+    // or lower than the box that had been laid out around it.
+    const TrueTypeFont* font = family_face(family_id, font_weight, bold, italic);
+    if (!font) {
+        font = (bold && m_bold.is_loaded())
+                   ? &m_bold
+                   : (m_regular.is_loaded() ? &m_regular : nullptr);
+    }
     // Position baseline comfortably inside the `1.25 * font_size` CSS line box.
     float baseline_offset = font_size * 0.92f;
     if (font) {
@@ -1468,7 +1605,7 @@ void FontRenderer::draw_text(
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        const GlyphBitmap& g = get_glyph(cp, px_size, bold, family_id);
+        const GlyphBitmap& g = get_glyph(cp, px_size, bold, family_id, italic);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;
             const int gy0 = baseline_y - g.bearing_y;
@@ -1484,7 +1621,12 @@ void FontRenderer::draw_text(
                 }
             }
         }
-        pen_x += (font ? font->glyph_advance(cp, font_size) : g.advance);
+        // The pen advances by the face this codepoint came from -- the same
+        // call layout measured it with -- and not by the primary. Advancing
+        // with the primary is how a `<pre>` measured monospace and drew
+        // proportional: every glyph in the right order, packed to the width of
+        // a font nobody asked for.
+        pen_x += advance_in_family(cp, font_size, bold, family_id, italic);
     }
 }
 

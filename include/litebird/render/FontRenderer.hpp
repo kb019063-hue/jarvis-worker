@@ -139,7 +139,13 @@ public:
     /// `family_id` is a family resolved by `family_id_for`; `kDefaultFamily`
     /// means "the element asked for nothing in particular", which is every
     /// call site that has not been taught about `font-family` yet.
-    const TrueTypeFont* face_for(uint32_t codepoint, bool bold, int family_id = kDefaultFamily) const;
+    /// `synthetic_oblique`, when given, is set when the face returned is
+    /// upright but a slant was asked for and none could be had: see
+    /// `family_face`. A fallback face that supplies a rare codepoint is upright
+    /// however the line was set, but only the named family's slant is the
+    /// element's business.
+    const TrueTypeFont* face_for(uint32_t codepoint, bool bold, int family_id = kDefaultFamily,
+                                 bool italic = false, bool* synthetic_oblique = nullptr) const;
 
     // --- families -----------------------------------------------------------
     //
@@ -264,8 +270,17 @@ public:
     /// `css_family` is the element's `font-family` list, resolved here and the
     /// answer cached, so a caller can hand over the string it already has
     /// rather than keep an id of its own.
+    ///
+    /// `italic` is the element's `font-style: italic` or `oblique`, which is
+    /// *not* only a drawing matter: an italic or oblique face has its own
+    /// advances, and they are usually narrower than the upright ones. Measuring
+    /// upright and drawing slanted would put the last word of every italic line
+    /// past the edge of the box layout gave it. When no slanted face can be
+    /// had the advance is the upright face's, which is what a synthesised
+    /// oblique is — a shear changes where the ink goes, not how far the pen
+    /// travels.
     float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400,
-                       std::string_view css_family = {});
+                       std::string_view css_family = {}, bool italic = false);
 
     /// Scaled em metrics for `font_size` px: the ascent above the baseline and
     /// the descent below it (positive). Uses the bold font when one is loaded
@@ -278,15 +293,20 @@ public:
     /// whichever fallback face happened to supply a rare codepoint inside the
     /// line — CSS asks for one line box per line, from one font.
     std::pair<float, float> em_ascent_descent(float font_size, int font_weight = 400,
-                                              std::string_view css_family = {}) const;
+                                              std::string_view css_family = {},
+                                              bool italic = false) const;
 
     /// Horizontal advance of one codepoint at `font_size` px (exact size, not
     /// rounded to a whole pixel size). Sums to `measure_text` for a string.
     float glyph_advance_px(uint32_t codepoint, float font_size, int font_weight = 400,
-                           std::string_view css_family = {}) const;
+                           std::string_view css_family = {}, bool italic = false) const;
 
     /// Draws anti-aliased UTF-8 text whose line-box top is `(top_x, top_y)`.
     /// Calls `emit_pixel(px, py, coverage)` for every covered pixel (`coverage` in 1..255).
+    ///
+    /// The pen advances by the advance of the face the glyph came from, not by
+    /// the primary face's: those are the numbers layout measured with, and a
+    /// run of monospace text drawn at proportional advances overlaps itself.
     void draw_text(
         float top_x,
         float top_y,
@@ -294,14 +314,20 @@ public:
         float font_size,
         int font_weight,
         const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
-        std::string_view css_family = {}
+        std::string_view css_family = {},
+        bool italic = false
     );
 
-    /// The rasterized glyph, cached by (family, size, bold, codepoint). Takes a
-    /// resolved `family_id` and not a list, because it is the one call here that
-    /// runs per glyph of every line of every page.
+    /// The rasterized glyph, cached by (family, size, bold, italic, codepoint).
+    /// Takes a resolved `family_id` and not a list, because it is the one call
+    /// here that runs per glyph of every line of every page.
+    ///
+    /// `italic` reaches the cache key because a synthesised oblique is a
+    /// *different bitmap* of the same glyph: keyed without it, whichever of the
+    /// two was rasterized first would answer for both, and half the page would
+    /// come out slanted.
     const GlyphBitmap& get_glyph(uint32_t codepoint, int pixel_size, bool bold,
-                                 int family_id = kDefaultFamily);
+                                 int family_id = kDefaultFamily, bool italic = false);
 
 private:
     FontRenderer();
@@ -362,18 +388,31 @@ private:
 
     static FaceEntry describe(const std::string& path);   ///< empty when the file says no name
 
-    /// Which of a family's faces best answers `weight` and `bold`.
-    std::size_t pick_face(const Family&, int weight, bool bold) const;
+    /// Which of a family's faces best answers `weight`, `bold` and `italic`.
+    ///
+    /// A slanted face is only eligible when the slant was asked for, and an
+    /// upright one is passed over for it when the family has both — but a
+    /// family that has *only* upright faces still answers, because a browser
+    /// does not drop to another family when the italic is missing: it slants
+    /// what it has. That is the second half of this function's job, and the
+    /// reason it returns an index rather than a face.
+    std::size_t pick_face(const Family&, int weight, bool bold, bool italic) const;
 
     /// The loaded face of `family_id` at `weight`, parsing it if this is the
     /// first time it has been asked for. Null when the family has no face that
     /// could be loaded.
-    const TrueTypeFont* family_face(int family_id, int weight, bool bold) const;
+    ///
+    /// `synthetic_oblique`, when given, is set to true when the slant was
+    /// asked for and the face that answered is upright: the caller is to shear
+    /// it. Reported rather than assumed, because "the family had no italic" and
+    /// "the family's italic is the one we got" both answer with a face.
+    const TrueTypeFont* family_face(int family_id, int weight, bool bold, bool italic = false,
+                                    bool* synthetic_oblique = nullptr) const;
 
     /// `glyph_advance_px` for a family already resolved, so that `measure_text`
     /// resolves once for the whole string and not once per codepoint.
     float advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
-                            int family_id) const;
+                            int family_id, bool italic = false) const;
 
     std::vector<FaceEntry> m_face_entries;
     std::vector<Family> m_families;

@@ -138,6 +138,20 @@ enum class BoxSizing : uint8_t {
     BorderBox
 };
 
+/// CSS `font-style`.
+///
+/// `Oblique` is kept apart from `Italic` even though the renderer treats them
+/// alike, because they are different questions to a font: a face declares
+/// itself one or the other, and `@font-face { font-style: oblique }` must find
+/// the oblique face and not the italic one. They are answered alike by the
+/// *fallback* path only -- neither can be had, so both are synthesised by the
+/// same shear.
+enum class FontStyle : uint8_t {
+    Normal,
+    Italic,
+    Oblique
+};
+
 enum class TextAlign : uint8_t {
     Left,
     Center,
@@ -212,6 +226,11 @@ struct ComputedStyle {
     BoxShadow box_shadow;
     float font_size{16.0f};
     int font_weight{400};
+    /// `font-style`. Inherited, like every other font property — which is why
+    /// leaving it out of `inherited_only_style` would make `<em>` upright for
+    /// exactly one line of text and slanted in the next. Ask Phase 74's
+    /// `font-family` how that goes.
+    FontStyle font_style{FontStyle::Normal};
     /// The `font-family` list exactly as it was written — quotes, commas and
     /// all. It is not resolved here: which file on the host answers to a name
     /// is the font layer's business, and layout is where it is asked, once per

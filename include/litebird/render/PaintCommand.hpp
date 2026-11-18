@@ -46,6 +46,10 @@ struct DrawTextCommand {
     /// the style rather than resolved here, so that painting measures and
     /// draws with exactly the face layout measured with.
     std::string font_family;
+    /// `font-style: italic` or `oblique`, carried the same way and for the same
+    /// reason: the painter has to draw the face layout measured with, and a
+    /// synthesised oblique is a different bitmap of the same glyph.
+    bool font_italic{false};
 };
 
 struct DrawImageCommand {

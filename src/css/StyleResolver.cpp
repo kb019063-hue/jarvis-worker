@@ -125,7 +125,7 @@ bool ComputedStyle::operator==(const ComputedStyle& other) const {
         border_radius != other.border_radius || border_radius_percent != other.border_radius_percent ||
         !(box_shadow == other.box_shadow) ||
         font_size != other.font_size || font_weight != other.font_weight ||
-        font_family != other.font_family ||
+        font_style != other.font_style || font_family != other.font_family ||
         line_height != other.line_height || line_height_number != other.line_height_number ||
         text_align != other.text_align || text_decoration != other.text_decoration ||
         float_type != other.float_type || clear_type != other.clear_type || overflow != other.overflow ||
@@ -218,6 +218,7 @@ std::size_t ComputedStyle::hash() const {
     }
     hash_combine(h, hash_float(font_size));
     hash_combine(h, static_cast<std::size_t>(font_weight));
+    hash_combine(h, static_cast<std::size_t>(font_style));
     if (!font_family.empty()) hash_combine(h, std::hash<std::string>{}(font_family));
     hash_combine(h, hash_float(line_height));
     hash_combine(h, hash_float(line_height_number));
@@ -405,6 +406,12 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.font_size = key->font_size;
     s.font_weight = key->font_weight;
     if (!key->font_family.empty()) s.font_family = key->font_family;
+    // And the slant, for the same reason and by the same argument: it inherits,
+    // and this is the style a text box is measured and drawn with. An `<em>`
+    // whose font-style stopped at the element would be upright in the box that
+    // lays it out and upright in the painter, however italic the computed style
+    // said it was.
+    s.font_style = key->font_style;
     s.line_height = key->line_height;
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
@@ -457,6 +464,13 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         }
         code {
             background-color: #f1f5f9;
+        }
+        /* HTML §Rendering: the elements whose text is italic. `cite`, `dfn`,
+           `var` and `address` are in the same row of that table as `em` and
+           `i`, and leaving them out is how `<cite>` ends up upright while the
+           `<em>` beside it is not. */
+        em, i, cite, dfn, var, address {
+            font-style: italic;
         }
         /* HTML §Rendering: the elements whose text is monospaced. Without
            this the engine had a `monospace` generic family it could resolve
@@ -1736,14 +1750,26 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return true;
     }
 
-    // font: family defaults plus weight, size and optional /line-height.
+    // font: weight, style, variant, size, optional /line-height, then the
+    // family list -- which is the one component CSS puts last and the one this
+    // used to drop on the floor: `font: 16px monospace` set a size and left the
+    // family empty, so the element was laid out in the default face however
+    // emphatically the shorthand had asked for something else.
     if (prop == "font") {
+        std::string family;
+        bool saw_size = false;
         for (const auto& token : split_tokens(trim(val))) {
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
             if (lowered == "bold" || lowered == "bolder") out.emplace_back("font-weight", "700");
             else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
-            else if (lowered == "italic" || lowered == "oblique" || lowered == "small-caps") continue;
+            // The shorthand used to throw this token away, so `font: italic
+            // 16px serif` set a size and a family and no slant at all -- the
+            // one property in the shorthand with no place to be kept. It is
+            // kept now, in the same longhand the expanded form sets.
+            else if (lowered == "italic") out.emplace_back("font-style", "italic");
+            else if (lowered == "oblique") out.emplace_back("font-style", "oblique");
+            else if (lowered == "small-caps") continue;
             else {
                 std::string size_part = token;
                 std::string lh_part;
@@ -1760,9 +1786,18 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
                      size_low.ends_with("vh") || size_low.ends_with("dvh") || size_low.ends_with("dvw"))) {
                     out.emplace_back("font-size", size_part);
                     if (!lh_part.empty()) out.emplace_back("line-height", lh_part);
+                    saw_size = true;
+                } else if (saw_size) {
+                    // Everything after the size is the family list. It is put
+                    // back together with single spaces, which is not the same
+                    // string that was written and is the same list: matching a
+                    // family ignores that spacing anyway.
+                    if (!family.empty()) family += ' ';
+                    family += token;
                 }
             }
         }
+        if (!family.empty()) out.emplace_back("font-family", family);
         return true;
     }
 
@@ -2217,6 +2252,14 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else {
             try { style.font_weight = std::stoi(val); } catch (...) {}
         }
+    } else if (prop == "font-style") {
+        // `oblique` is kept apart from `italic` because a face declares which
+        // it is, and `@font-face { font-style: oblique }` has to find the
+        // oblique face. When neither can be had the two are answered alike:
+        // both are synthesised by the same shear.
+        if (val_lower == "italic") style.font_style = FontStyle::Italic;
+        else if (val_lower.starts_with("oblique")) style.font_style = FontStyle::Oblique;
+        else style.font_style = FontStyle::Normal;
     } else if (prop == "font-family") {
         // Stored as written. `font-family` was on the list of known properties
         // for a long time and nothing ever read the value back — it is read
@@ -2860,6 +2903,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.dark_color_scheme = parent_style->dark_color_scheme;
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
+        style.font_style = parent_style->font_style;
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;

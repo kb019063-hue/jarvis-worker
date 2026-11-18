@@ -360,158 +360,31 @@ bool JsValue::current_is_construct() {
 }
 
 // ---------------------------------------------------------------------------
-// Constructions in place
+// The object a constructor builds on
 // ---------------------------------------------------------------------------
 //
-// construct(args, this) with a `this` that is a platform object already asks
-// the constructor to make that very object what it constructs: this is how an
-// element that exists is upgraded to a custom element. The constructor of the
-// element's interface is what does it, and it is reached in one of two ways,
-// neither of which says by itself which object is meant:
+// A native constructor reached from a class does not always get the object the
+// class's `this` is: `super(...)` hands on the object `new` made, and
+// `Reflect.construct(HTMLElement, [], new.target)` hands on nothing at all,
+// and neither says by itself whether the caller has an object already. So the
+// interface asks for it (current_derived_this), and the answer is made here
+// from the call context, once per call: the object the class's constructor was
+// given, or — when there is none to give, as under construct_for() — a new one
+// with the prototype of new.target.
 //
-//  - through `super(...)` from a class, with the `this` that class's
-//    constructor was given. That is the element when the class is the one
-//    being constructed, and a new object when the class was itself reached
-//    with Reflect.construct, from a subclass compiled for older browsers;
-//  - through `Reflect.construct(HTMLElement, [], new.target)` from a
-//    constructor compiled that way, with no object at all.
-//
-// What ties either to the construction it is part of is new.target. So a
-// construction in place is noted here for as long as it runs, under the
-// function `new` is being applied to, and the interface that asks for the
-// object it is to build on (current_derived_this) is given that one, once.
-// This is the HTML standard's "construction stack": there each definition has
-// one, and a definition is found by its constructor, which is new.target.
-
-namespace {
-
-struct InPlaceConstruction {
-    const void* new_target;     // identity of the function being constructed
-    JsValue object;             // what it is constructed on
-    bool handed_out{false};     // the standard's "already constructed" marker
-};
-
-// One list for each agent, not for each thread. The body of a generator, and
-// of an async function that awaits, runs on a thread of its own, in step with
-// whoever resumed it (JsInterpreter::spawn_frame); what it constructs there is
-// part of the construction that is running, and has to find it here. Within
-// an agent one thread runs at a time, and a thread hands over to the next
-// under the frame's lock, so a list needs no lock of its own. The table of
-// lists does: a worker is an agent on another thread.
-struct InPlaceLists {
-    std::mutex mutex;
-    std::unordered_map<uint32_t, std::vector<InPlaceConstruction>> by_agent;
-    // Constructions in place that are running, in all agents. Nearly always
-    // none, and then nobody has to take the lock to find that out.
-    std::atomic<size_t> running{0};
-};
-
-InPlaceLists& in_place_lists() {
-    // Never destroyed: an entry holds a handle into the heap, which is gone
-    // by the time statics are.
-    static InPlaceLists* const lists = new InPlaceLists;
-    return *lists;
-}
-
-/// The list of this thread's agent. Null when `create` is false and nothing
-/// is being constructed in place in it.
-std::vector<InPlaceConstruction>* in_place_list(bool create) {
-    InPlaceLists& lists = in_place_lists();
-    if (!create && lists.running.load(std::memory_order_acquire) == 0) return nullptr;
-    const uint32_t agent = Heap::current_agent();
-    std::lock_guard<std::mutex> lock(lists.mutex);
-    // A rehash moves no element: the pointer stays good while other agents
-    // add lists of their own.
-    if (create) return &lists.by_agent[agent];
-    const auto found = lists.by_agent.find(agent);
-    return found == lists.by_agent.end() || found->second.empty() ? nullptr : &found->second;
-}
-
-struct InPlaceScope {
-    std::vector<InPlaceConstruction>* list{nullptr};
-    InPlaceScope(const JsValue& callee, const JsValue* this_val, const JsValue* new_target) {
-        if (!this_val || this_val->type != JsType::Object || !this_val->object_val ||
-            !this_val->object_val->dom_node) {
-            return;
-        }
-        std::vector<InPlaceConstruction>* found = in_place_list(true);
-        // `super(...)` constructs the parent on the same object with the same
-        // new.target: it is one construction, noted once.
-        if (!found->empty() && found->back().object.object_val.get() == this_val->object_val.get()) return;
-        found->push_back({(new_target ? *new_target : callee).identity(), *this_val});
-        in_place_lists().running.fetch_add(1, std::memory_order_release);
-        list = found;
-    }
-    ~InPlaceScope() {
-        if (!list) return;
-        // Constructions nest, also across the threads of an agent: a frame
-        // is never suspended inside a call it made, so the last one noted is
-        // the first to end.
-        assert(!list->empty());
-        list->pop_back();
-        in_place_lists().running.fetch_sub(1, std::memory_order_release);
-    }
-    InPlaceScope(const InPlaceScope&) = delete;
-    InPlaceScope& operator=(const InPlaceScope&) = delete;
-};
-
-/// Is `callee` the constructor of the interface the element `object` belongs
-/// to: HTMLElement for an element with a name of its own, the interface of
-/// its tag for a customized built-in? No other constructor has any business
-/// with an element that is under construction; `Reflect.construct(Event, [],
-/// new.target)` in the constructor of a custom element makes an event.
-bool is_interface_of(const JsValue& callee, const JsValue& object) {
-    const Node* node = object.object_val ? object.object_val->dom_node.get() : nullptr;
-    if (!node || !node->is_element()) return false;
-    const auto& element = static_cast<const Element&>(*node);
-    if (element.is_foreign()) return false;
-    const dom::Realm* realm = dom::realm_if_any(*node);
-    if (!realm || !realm->alive) return false;
-    // Looked up, not made: a constructor the realm never built is not the
-    // one that is asking.
-    const auto found = realm->ctors.find(dom::html_interface_for_tag(element.tag_name()));
-    return found != realm->ctors.end() && found->second.identity() == callee.identity();
-}
-
-}  // namespace
+// The element an upgrade builds is not that object: the definition owns it, in
+// its construction stack (DomObserverBindings.cpp), and the interface hands it
+// back with hand_back_constructed_object() so that `super(...)` makes it
+// `this`.
 
 const JsValue* JsValue::current_derived_this() {
     CallContext& context = t_call_context;
     if (context.derived_asked) return context.derived_this;
     context.derived_asked = true;
-    const JsValue* new_target = context.new_target;
-    JsValue* slot = context.derived_slot;
-    // Is the function `new` is applied to being constructed in place right
-    // now, on an element of the interface that asks? Then that element is
-    // the object, whatever this call was given, and only once: a constructor
-    // that reaches its interface a second time, or makes another instance of
-    // its own class while it runs, is refused, as the standard has it.
-    std::vector<InPlaceConstruction>* in_place = new_target && slot && context.callee ? in_place_list(false) : nullptr;
-    if (in_place) {
-        for (auto entry = in_place->rbegin(); entry != in_place->rend(); ++entry) {
-            if (entry->new_target != new_target->identity()) continue;
-            if (!is_interface_of(*context.callee, entry->object)) {
-                // Another interface than the element's is not given the
-                // element, also when `super(...)` came with it (a class that
-                // extends Event, or HTMLElement where the definition is for
-                // a button, given to customElements.define): it builds on an
-                // object of its own, as it would with no upgrade going on.
-                if (context.derived_this && context.derived_this->object_val.get() == entry->object.object_val.get()) {
-                    context.derived_this = nullptr;
-                }
-                break;
-            }
-            if (entry->handed_out) js_throw_type_error("This instance is already constructed");
-            entry->handed_out = true;
-            if (!context.derived_this || context.derived_this->object_val.get() != entry->object.object_val.get()) {
-                *slot = entry->object;
-                context.derived_this = slot;
-            }
-            return context.derived_this;
-        }
-    }
     // super(...): the object the subclass's constructor was given.
     if (context.derived_this) return context.derived_this;
+    const JsValue* new_target = context.new_target;
+    JsValue* slot = context.derived_slot;
     if (!slot || !new_target) return nullptr;
     // construct_for(), or an interface that may not have the object
     // super(...) came with: the object is made now, with the
@@ -531,6 +404,11 @@ const JsValue* JsValue::current_derived_this() {
     slot->object_val->prototype = target;
     context.derived_this = slot;
     return slot;
+}
+
+void JsValue::hand_back_constructed_object(const JsValue& object) {
+    CallContext& context = t_call_context;
+    if (context.derived_slot) *context.derived_slot = object;
 }
 
 const JsValue* JsValue::current_new_target() {
@@ -650,7 +528,6 @@ JsValue JsValue::construct(const std::vector<JsValue>& args, const JsValue* this
     static const JsValue undefined_this;
     if (stack_is_exhausted()) throw JsStackOverflow();
     const NativeFn& fn = native_function();
-    InPlaceScope in_place(*this, this_val, new_target);
     if (fn) {
         CallContextScope scope(this_val ? *this_val : undefined_this, true, this);
         t_call_context.new_target = new_target;

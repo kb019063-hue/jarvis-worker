@@ -23,8 +23,15 @@ enum class CustomElementState : uint8_t {
     Uncustomized,
     /// Its constructor has run: it is an instance of the definition's class.
     Custom,
-    /// Its constructor threw. It stays a plain element.
-    Failed
+    /// Its constructor threw while `document.createElement` was making it: it
+    /// stays a plain element, and the DOM standard hands the caller an
+    /// HTMLUnknownElement in its place (see create_object).
+    Failed,
+    /// Its upgrade failed: the constructor threw, never reached the element, or
+    /// returned something else. The element keeps its own interface (an
+    /// `HTMLElement`, or the built-in it extends) and is never `:defined`, and
+    /// it is not offered to a definition again.
+    FailedUpgrade
 };
 
 /// Namespace of an element, per the WHATWG DOM standard.

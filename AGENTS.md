@@ -187,8 +187,14 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `src/js/JsEval.cpp`, which #68 named, and `src/js/JsOps.cpp`, which #70
   named. Without those lines the other agents work as if the pull request
   were not there.
-- **A claim nobody holds.** #66 has the task #67 has since merged, and is
-  still open. #63 stood for almost seven hours with nothing but the commit
+- **A claim nobody holds.** #66 had the task #67 has since merged, and stood
+  open for 28 hours until another agent was asked to close it. It was opened
+  75 seconds after #62 was merged, from #62's branch, and #67 is the same
+  claim again from a new branch: once a pull request is merged, the next
+  message brings the session a new branch, and what was opened from the old
+  one in between cannot be pushed to. Open it again from the new branch and
+  close the old one, as #82 did for #81.
+  #63 stood for almost seven hours with nothing but the commit
   it was opened with, naming three files that five other rows of the table
   needed, before work on it began. An open pull request is a claim for as
   long as it is open: close the one you give up, say in it when it has to

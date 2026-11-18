@@ -42,11 +42,11 @@ their top level, so the harness reported one `(harness)` row for each and ran
 
 ## 3. How it is verified
 
-- `make test` → **211 / 211** suites (`cssom_sheets_rules_insert_amounts_and_fonts`
+- `make test` → **219 / 219** suites (`cssom_sheets_rules_insert_amounts_and_fonts`
   asserts 60 facts, all of them compared in the page).
 - `make wpt` → **9567 / 9824** in 190 files, 0 unlisted failures (was
   9550 / 9744).
-- `make dom-conformance` 669 / 669, `make js-conformance` 1124 / 1150,
+- `make dom-conformance` 678 / 678, `make js-conformance` 1126 / 1152,
   `make url-conformance` 1188 / 1188, `make xml-conformance` 1718 / 1718.
 
 ## 4. What is still open

@@ -191,3 +191,49 @@ var u = new Uint8Array([1, 2, 300]); console.log(u.length, u[2], u instanceof Ui
 var p = new Proxy({}, { get: function(t, k){ return k in t ? t[k] : "dflt:" + String(k); } }); p.a = 1; console.log(p.a, p.b, Reflect.ownKeys({x: 1, y: 2}).join(), Reflect.has({x: 1}, "x"))
 #expect
 1 dflt:b x,y true
+
+#name Map iterators survive compaction, clear, and completion
+#code
+var map = new Map();
+for (var i = 0; i < 80; ++i) map.set('k' + i, i);
+var first = map.entries(), second = map.entries();
+var first0 = first.next().value.join(':');
+var second0 = second.next().value.join(':');
+var second1 = second.next().value.join(':');
+for (var i = 1; i <= 40; ++i) map.delete('k' + i);
+map.set('tail', 80);
+var afterFirst = [], afterSecond = [];
+for (var pair of first) afterFirst.push(pair.join(':'));
+for (var pair of second) afterSecond.push(pair.join(':'));
+var cleared = map.entries();
+map.clear();
+map.set('fresh', 81);
+var fresh = cleared.next().value.join(':');
+var done = cleared.next().done;
+map.set('later', 82);
+console.log([first0, second0, second1, afterFirst.length, afterFirst[0], afterFirst[afterFirst.length - 1], afterSecond.length, afterSecond[0], afterSecond[afterSecond.length - 1], fresh, done, cleared.next().done].join('|'));
+#expect
+k0:0|k0:0|k1:1|40|k41:41|tail:80|40|k41:41|tail:80|fresh:81|true|true
+
+#name Set iterators survive compaction, clear, and completion
+#code
+var set = new Set();
+for (var i = 0; i < 80; ++i) set.add('k' + i);
+var first = set.values(), second = set.values();
+var first0 = first.next().value;
+var second0 = second.next().value;
+var second1 = second.next().value;
+for (var i = 1; i <= 40; ++i) set.delete('k' + i);
+set.add('tail');
+var afterFirst = [], afterSecond = [];
+for (var value of first) afterFirst.push(value);
+for (var value of second) afterSecond.push(value);
+var cleared = set.values();
+set.clear();
+set.add('fresh');
+var fresh = cleared.next().value;
+var done = cleared.next().done;
+set.add('later');
+console.log([first0, second0, second1, afterFirst.length, afterFirst[0], afterFirst[afterFirst.length - 1], afterSecond.length, afterSecond[0], afterSecond[afterSecond.length - 1], fresh, done, cleared.next().done].join('|'));
+#expect
+k0|k0|k1|40|k41|tail|40|k41|tail|fresh|true|true

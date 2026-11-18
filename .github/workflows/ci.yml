@@ -25,6 +25,15 @@ jobs:
         # 1k/10k floats. The old repeated band sweep takes 5-12 seconds at
         # 10k locally; indexed placement takes ~0.1 seconds.
         run: make bench-floats
+      - name: Map and Set iterators preserve cursor semantics
+        # Node-recorded Map/Set cases retain two live cursors through
+        # compaction, insertion, clear, and a terminal next() result.
+        run: make verify-collection-iterators
+      - name: Map and Set completed iterators stay flat without gc
+        # Two equal 8,192-loop batches run in one VM process. The later batch
+        # may take at most 2.25 times the earlier one plus 40 ms; a cursor
+        # registry that rescans every old iterator grows far beyond that.
+        run: make bench-collections
       - name: Smoke-test the CLI
         run: ./build/litebird examples/hello.html --dump-dom-webplatform
       - name: CSS whitespace stays linear and keeps the same paint

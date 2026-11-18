@@ -40,6 +40,14 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         code {
             background-color: #f1f5f9;
         }
+        /* HTML §Rendering: the elements whose text is monospaced. Without
+           this the engine had a `monospace` generic family it could resolve
+           and no element that ever asked for it, so `<pre>` -- the element
+           whose whole purpose is that its columns line up -- was laid out
+           proportional. */
+        pre, xmp, plaintext, listing, code, kbd, samp, tt {
+            font-family: monospace;
+        }
         body {
             margin: 8px;
             color: #222222;

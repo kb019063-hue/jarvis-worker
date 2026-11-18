@@ -505,6 +505,18 @@ void CssParser::parse_stylesheet_blocks(StyleSheet& sheet) {
                 continue;
             }
 
+            if (at_keyword == "font-face") {
+                consume_whitespace_and_comments();
+                FontFaceRule face = parse_font_face();
+                // A rule inside an `@media` that does not match, or a `@layer`
+                // that is not in the layer order, declares nothing -- the same
+                // gate every other rule here goes through.
+                if (emit_rules && !face.family.empty() && !face.sources.empty()) {
+                    sheet.font_faces.push_back(std::move(face));
+                }
+                continue;
+            }
+
             if (at_keyword == "media") {
                 consume_whitespace_and_comments();
                 std::string media_query_str = read_prelude_before_brace_or_semicolon();
@@ -1191,6 +1203,209 @@ MediaQuery CssParser::parse_media_query(std::string_view str) {
         list.alternatives.push_back(parse_single_media_query(part));
     }
     return list;
+}
+
+namespace {
+
+/// Reads `fn(...)` at the start of `text`, skipping leading spaces.
+///
+/// `consumed` is how far to advance to get past the closing `)` -- the caller
+/// is walking a whole source item, because `url(x) format("woff")` and
+/// `format("woff") url(x)` are both written. `ok` is false when `text` does
+/// not start with that function at all.
+struct Function {
+    std::string argument;     ///< the text between the parens, quotes removed
+    std::size_t consumed{0};
+    bool ok{false};
+};
+
+Function read_function(std::string_view text, std::string_view fn) {
+    Function f;
+    std::size_t i = 0;
+    while (i < text.size() && css_is_space(text[i])) ++i;
+    if (text.size() - i < fn.size() + 2) return f;
+    if (!text.substr(i).starts_with(fn)) return f;
+    i += fn.size();
+    while (i < text.size() && css_is_space(text[i])) ++i;
+    if (i >= text.size() || text[i] != '(') return f;
+    ++i;
+
+    std::string out;
+    char quote = '\0';
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < text.size()) {
+                out += text[++i];
+            } else if (c == quote) {
+                quote = '\0';
+            } else {
+                out += c;
+            }
+            continue;
+        }
+        if (c == '\'' || c == '"') { quote = c; continue; }
+        if (c == ')') { ++i; break; }
+        if (css_is_space(c) && out.empty()) continue;   // url( "x.ttf" )
+        out += c;
+    }
+    if (quote) return f;                                 // an argument that never closed
+    f.argument = std::string(css_trim_view(out));
+    f.consumed = i;
+    f.ok = true;
+    return f;
+}
+
+/// A `font-family` descriptor value with its quotes taken off. The descriptor
+/// names *one* family, so an unquoted `My Font` is two words of one name and
+/// not a two-entry list; consecutive spaces collapse to one, as they do in the
+/// property. Case is left as written, because nothing here compares -- the
+/// registry lower-cases both sides when it matches.
+std::string font_face_family_name(std::string_view value) {
+    std::string out;
+    char quote = '\0';
+    bool pending_space = false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < value.size()) {
+                out += value[++i];
+            } else if (c == quote) {
+                quote = '\0';
+            } else {
+                out += c;
+            }
+            continue;
+        }
+        if (c == '\'' || c == '"') { quote = c; continue; }
+        if (css_is_space(c)) { pending_space = !out.empty(); continue; }
+        if (pending_space) { out += ' '; pending_space = false; }
+        out += c;
+    }
+    return std::string(css_trim_view(out));
+}
+
+/// A `font-weight` descriptor: `normal`, `bold`, one number, or a range of
+/// two. Anything else is `normal`, which is what CSS says an unparseable
+/// descriptor becomes rather than what makes the rule invalid.
+void parse_font_face_weight(std::string_view value, int& min_out, int& max_out) {
+    min_out = 400;
+    max_out = 400;
+    std::vector<std::string> words;
+    std::string word;
+    for (const char c : css_trim_view(value)) {
+        if (css_is_space(c)) {
+            if (!word.empty()) words.push_back(word);
+            word.clear();
+        } else {
+            word += c;
+        }
+    }
+    if (!word.empty()) words.push_back(word);
+    if (words.empty()) return;
+
+    const auto number = [](const std::string& s, int& out) {
+        if (s.empty() || s.size() > 4) return false;   // 1..1000, and no sign
+        for (const char c : s) {
+            if (c < '0' || c > '9') return false;
+        }
+        out = std::stoi(s);
+        return true;
+    };
+
+    int first = 0;
+    if (!number(words[0], first)) {
+        if (words[0] == "bold") min_out = max_out = 700;
+        return;
+    }
+    if (words.size() >= 2) {
+        // `font-weight: 100 400` is a range. The ends may be written in either
+        // order by a hand that mistyped, and sorting costs nothing.
+        int second = 0;
+        if (number(words[1], second)) {
+            min_out = std::min(first, second);
+            max_out = std::max(first, second);
+        }
+        return;
+    }
+    min_out = max_out = std::clamp(first, 1, 1000);
+}
+
+std::vector<FontFaceSrc> parse_font_face_src(std::string_view value) {
+    std::vector<FontFaceSrc> out;
+    for (const std::string_view part : split_top_level(value, ',')) {
+        const std::string_view item = css_trim_view(part);
+        if (item.empty()) continue;
+
+        FontFaceSrc src;
+        std::size_t at = 0;
+        while (at < item.size()) {
+            if (const Function f = read_function(item.substr(at), "url"); f.ok) {
+                src.url = f.argument;
+                at += f.consumed;
+                continue;
+            }
+            if (const Function f = read_function(item.substr(at), "local"); f.ok) {
+                src.local = f.argument;
+                at += f.consumed;
+                continue;
+            }
+            if (const Function f = read_function(item.substr(at), "format"); f.ok) {
+                src.format = ascii_lower(f.argument);   // the file-scope helper at the top
+                at += f.consumed;
+                continue;
+            }
+            ++at;
+        }
+
+        if (!src.url.empty() || !src.local.empty()) {
+            out.push_back(std::move(src));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+FontFaceRule CssParser::parse_font_face() {
+    FontFaceRule face;
+    consume_whitespace_and_comments();
+    if (!match('{')) {
+        // `@font-face` with no block: skip to the next `;` or `}` so the rest
+        // of the sheet is still read.
+        while (m_cursor < m_css.size() && peek() != ';' && peek() != '}') advance();
+        if (peek() == ';') advance();
+        return face;
+    }
+
+    while (m_cursor < m_css.size()) {
+        consume_whitespace_and_comments();
+        if (m_cursor >= m_css.size() || peek() == '}') {
+            if (peek() == '}') advance();
+            break;
+        }
+        if (peek() == ';') { advance(); continue; }
+
+        const Declaration decl = parse_declaration();
+        if (decl.property.empty()) continue;
+        const std::string value = std::string(css_trim_view(decl.value));
+
+        if (decl.property == "font-family") {
+            face.family = font_face_family_name(value);
+        } else if (decl.property == "src") {
+            face.sources = parse_font_face_src(value);
+        } else if (decl.property == "font-weight") {
+            parse_font_face_weight(value, face.weight_min, face.weight_max);
+        } else if (decl.property == "font-style") {
+            // `oblique` is accepted and treated as italic: the engine has no
+            // slant of its own to synthesise, so asking for one is asking for
+            // the italic face, and handing out an upright one is worse.
+            const std::string v = value.substr(0, 6);
+            face.italic = (v == "italic") || value.starts_with("oblique");
+        }
+    }
+
+    return face;
 }
 
 KeyframesRule CssParser::parse_keyframes() {

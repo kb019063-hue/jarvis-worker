@@ -1171,6 +1171,40 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
         return std::string(relative_url);
     }
 
+    // An absolute URL is returned as it stands, whatever its scheme.
+    //
+    // The normalization below splits a URL on `/` and drops empty segments,
+    // which is right for a path of segments and wrong for an opaque one:
+    // `data:font/ttf;base64,HAAD//wMg...` is one string, and its `//` is two
+    // characters of base64 and not an empty path segment. It was being
+    // collapsed to `/`, so every data: URL whose payload happened to contain
+    // the pair came back a few bytes shorter and decoded to something that
+    // was not the thing it encoded -- a font that would not parse, an image
+    // that would not decode. Which is to say: not an edge case, since a
+    // base64 payload of any length contains `//` about once in every 64
+    // characters by the time it is a few hundred long.
+    //
+    // The same was true of `mailto:`, `javascript:` and every other scheme
+    // without a hierarchical path. Only `http`, `https` and `file` were
+    // spared, because they were the three this function knew about.
+    {
+        // The scheme ends at the first `:`, `/`, `?` or `#` -- a colon that
+        // comes after a slash is a colon in a path and not a scheme, so
+        // "./a:b/c" stays relative and is resolved against the base.
+        const auto end = relative_url.find_first_of(":/?#");
+        const auto colon = relative_url.find(':');
+        if (colon != std::string_view::npos && colon != 0 && colon == end) {
+            bool scheme = std::isalpha(static_cast<unsigned char>(relative_url[0])) != 0;
+            for (std::size_t i = 1; scheme && i < colon; ++i) {
+                const char c = relative_url[i];
+                scheme = std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '+' ||
+                         c == '-' || c == '.';
+            }
+            // A lone `/` before the colon is not a scheme: "./a:b" is relative.
+            if (scheme) return std::string(relative_url);
+        }
+    }
+
     if (relative_url.front() == '/') {
         size_t scheme_len = 0;
         if (base_url.rfind("http://", 0) == 0) scheme_len = 7;

@@ -6,9 +6,12 @@
 #include "litebird/dom/Element.hpp"
 #include "litebird/css/StyleSheet.hpp"
 #include "litebird/render/ImageFilter.hpp"
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace litebird {
 
@@ -22,7 +25,7 @@ enum class Containment : uint8_t {
     Content = Layout | Paint | Style
 };
 
-enum class Display {
+enum class Display : uint8_t {
     Inline,
     Block,
     Flex,
@@ -37,7 +40,7 @@ enum class Display {
 };
 
 /// CSS `overflow` values (only "does this establish a BFC" matters to layout).
-enum class Overflow {
+enum class Overflow : uint8_t {
     Visible,
     Hidden,
     Auto,
@@ -46,58 +49,58 @@ enum class Overflow {
 
 /// `border-collapse` (CSS 2.1 17.6). Collapsed tables share borders between
 /// adjacent cells instead of giving each cell its own.
-enum class BorderCollapse {
+enum class BorderCollapse : uint8_t {
     Separate,
     Collapse
 };
 
 /// CSS `table-layout` (CSS 2.1 17.5.2).
-enum class TableLayout {
+enum class TableLayout : uint8_t {
     Auto,
     Fixed
 };
 
 /// CSS `empty-cells` (CSS 2.1 17.5.1.2).
-enum class EmptyCells {
+enum class EmptyCells : uint8_t {
     Show,
     Hide
 };
 
 /// CSS `caption-side` (CSS 2.1 17.4.1, `top` and `bottom` only).
-enum class CaptionSide {
+enum class CaptionSide : uint8_t {
     Top,
     Bottom
 };
 
 /// CSS `float` values.
-enum class FloatType {
+enum class FloatType : uint8_t {
     None,
     Left,
     Right
 };
 
 /// CSS `clear` values.
-enum class ClearType {
+enum class ClearType : uint8_t {
     None,
     Left,
     Right,
     Both
 };
 
-enum class FlexDirection {
+enum class FlexDirection : uint8_t {
     Row,
     Column,
     RowReverse,
     ColumnReverse
 };
 
-enum class FlexWrap {
+enum class FlexWrap : uint8_t {
     NoWrap,
     Wrap,
     WrapReverse
 };
 
-enum class JustifyContent {
+enum class JustifyContent : uint8_t {
     FlexStart,
     FlexEnd,
     Center,
@@ -106,14 +109,14 @@ enum class JustifyContent {
     SpaceEvenly
 };
 
-enum class AlignItems {
+enum class AlignItems : uint8_t {
     Stretch,
     FlexStart,
     FlexEnd,
     Center
 };
 
-enum class AlignContent {
+enum class AlignContent : uint8_t {
     Stretch,
     FlexStart,
     FlexEnd,
@@ -123,16 +126,51 @@ enum class AlignContent {
     SpaceEvenly
 };
 
-enum class Position {
+enum class Position : uint8_t {
     Static,
     Relative,
     Absolute,
     Fixed
 };
 
-enum class BoxSizing {
+enum class BoxSizing : uint8_t {
     ContentBox,
     BorderBox
+};
+
+enum class TextAlign : uint8_t {
+    Left,
+    Center,
+    Right,
+    Justify,
+    Start,
+    End
+};
+
+enum class TextDecoration : uint8_t {
+    None = 0,
+    Underline = 1 << 0,
+    LineThrough = 1 << 1,
+    Overline = 1 << 2
+};
+
+inline TextDecoration operator|(TextDecoration a, TextDecoration b) {
+    return static_cast<TextDecoration>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+
+inline TextDecoration& operator|=(TextDecoration& a, TextDecoration b) {
+    a = a | b;
+    return a;
+}
+
+enum class TimingFunction : uint8_t {
+    Ease = 0,
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    StepStart,
+    StepEnd
 };
 
 struct BoxShadow {
@@ -141,6 +179,8 @@ struct BoxShadow {
     float blur{0.0f};
     Color color{Color::transparent()};
     bool has_shadow{false};
+
+    bool operator==(const BoxShadow& other) const = default;
 };
 
 struct ComputedStyle {
@@ -185,14 +225,37 @@ struct ComputedStyle {
     // length or percentage is inherited as a length.
     float line_height{-1.0f};
     float line_height_number{-1.0f};
-    std::string text_align{"left"};
-    std::string text_decoration{"none"}; // "none", "underline"
+    TextAlign text_align{TextAlign::Left};
+    TextDecoration text_decoration{TextDecoration::None};
+
+    bool has_underline() const {
+        return (static_cast<uint8_t>(text_decoration) & static_cast<uint8_t>(TextDecoration::Underline)) != 0;
+    }
+    bool has_line_through() const {
+        return (static_cast<uint8_t>(text_decoration) & static_cast<uint8_t>(TextDecoration::LineThrough)) != 0;
+    }
+    bool has_overline() const {
+        return (static_cast<uint8_t>(text_decoration) & static_cast<uint8_t>(TextDecoration::Overline)) != 0;
+    }
+    bool has_text_decoration() const {
+        return text_decoration != TextDecoration::None;
+    }
 
     // The line height layout should use for this element.
     float effective_line_height() const {
         if (line_height_number >= 0.0f) return line_height_number * font_size;
         if (line_height >= 0.0f) return line_height;
         return font_size * 1.25f;
+    }
+
+    bool has_percent_lengths() const {
+        return width_percent >= 0.0f || height_percent >= 0.0f ||
+               min_width_percent >= 0.0f || max_width_percent >= 0.0f ||
+               min_height_percent >= 0.0f || max_height_percent >= 0.0f ||
+               margin_percent.top >= 0.0f || margin_percent.right >= 0.0f ||
+               margin_percent.bottom >= 0.0f || margin_percent.left >= 0.0f ||
+               padding_percent.top >= 0.0f || padding_percent.right >= 0.0f ||
+               padding_percent.bottom >= 0.0f || padding_percent.left >= 0.0f;
     }
 
     // Floats and clearance (CSS 2.1, sections 9.5 and 9.5.2)
@@ -256,6 +319,8 @@ struct ComputedStyle {
         float max_fr{0.0f}; // if > 0, fractional track
         bool is_auto_fit{false};
         bool is_auto_fill{false};
+
+        bool operator==(const GridTrackDef& other) const = default;
     };
 
     std::vector<GridTrackDef> grid_col_track_defs;
@@ -267,18 +332,18 @@ struct ComputedStyle {
     float opacity{1.0f};
     std::string animation_name;
     float animation_duration{0.0f}; // in seconds
-    std::string animation_timing_function{"ease"};
+    TimingFunction animation_timing_function{TimingFunction::Ease};
     float animation_iteration_count{1.0f}; // -1 for infinite
     std::string transition_property;
     float transition_duration{0.0f};
-    std::string transition_timing_function{"ease"};
+    TimingFunction transition_timing_function{TimingFunction::Ease};
     float transition_delay{0.0f};
 
     // 2D Transforms
     bool has_transform{false};
     TransformMatrix2D transform_matrix{TransformMatrix2D::identity()};
     std::string transform_str;
-    std::string transform_origin{"50% 50%"};
+    std::string transform_origin; // empty means default "50% 50%"
 
     // CSS Custom Properties (Variables)
     std::unordered_map<std::string, std::string> custom_properties;
@@ -293,6 +358,8 @@ struct ComputedStyle {
         int row_end{2};
         int col_start{1};
         int col_end{2};
+
+        bool operator==(const GridAreaRect& other) const = default;
     };
     std::unordered_map<std::string, GridAreaRect> grid_named_areas;
     std::string grid_area_name;
@@ -332,6 +399,34 @@ struct ComputedStyle {
 
     bool is_positioned() const { return position != Position::Static; }
     bool is_out_of_flow() const { return position == Position::Absolute || position == Position::Fixed; }
+
+    bool operator==(const ComputedStyle& other) const;
+    std::size_t hash() const;
+};
+
+using SharedComputedStyle = std::shared_ptr<const ComputedStyle>;
+
+/// Process-lifetime canonical empty/default ComputedStyle shared across empty
+/// boxes, fragments, and unstyled text nodes.
+const SharedComputedStyle& default_computed_style();
+
+/// Deduplicates identical ComputedStyle objects during layout tree construction
+/// and inline formatting so repeated elements and fragments share one immutable
+/// style instance instead of copying the full struct per box and word.
+class ComputedStylePool {
+public:
+    ComputedStylePool();
+
+    SharedComputedStyle intern(ComputedStyle&& style);
+    SharedComputedStyle intern(const ComputedStyle& style);
+    SharedComputedStyle inherited_only(const SharedComputedStyle& parent, Display display = Display::Inline);
+
+    std::size_t unique_count() const;
+
+private:
+    std::unordered_map<std::size_t, std::vector<SharedComputedStyle>> m_buckets;
+    std::unordered_map<const ComputedStyle*, SharedComputedStyle> m_inherited_inline_cache;
+    std::unordered_map<const ComputedStyle*, SharedComputedStyle> m_inherited_block_cache;
 };
 
 class StyleResolver {

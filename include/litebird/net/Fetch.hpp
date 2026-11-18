@@ -2,9 +2,9 @@
 
 #include "litebird/js/JsValue.hpp"
 #include "litebird/net/ResourceLoader.hpp"
+#include <memory>
 #include <string>
 #include <unordered_map>
-#include <memory>
 
 namespace litebird {
 
@@ -18,6 +18,10 @@ public:
     std::string get(std::string name) const;
     void remove(std::string name);
 
+    static void extract_headers_init(
+        const JsValue& init,
+        std::unordered_map<std::string, std::string>& out
+    );
     static JsValue create_js_instance(const std::unordered_map<std::string, std::string>& init = {});
     static JsValue create_constructor();
 };

@@ -20,7 +20,7 @@ reading their value. See [Phase 77](../phases/77-async-generator-yield-star.md).
 `python3 tools/conformance/verify_async_generator.py` compares seven cases
 with Node (7/7); CI runs it. The pinned test262 differential for async
 generators, generators, and yield is 1210 → 1388 of 1614, with 178 newly
-passing and none newly failing. `make test` passes 223 suites.
+passing and none newly failing. `make test` passes 226 suites on the merged tree.
 
 ## Still open
 

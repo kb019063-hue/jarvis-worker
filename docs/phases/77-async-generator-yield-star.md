@@ -29,7 +29,8 @@ without reading its value first, as required by GeneratorYield.
   (Node v22.22.3). The CI oracle covers delegation, sync fallback, return
   through finally, caught rejected yield, raw result identity/lazy access,
   and non-callable methods and primitive sync step results.
-- `make test`: **223 suites passed**, plus 114 cross-origin/channel checks.
+- `make test`: **223 suites passed** on `631589c`; after merging `d3d6747`,
+  **226 suites passed**, plus 114 cross-origin/channel checks.
 - `python3 tools/conformance/run_js_conformance.py --quiet`: **1128/1152**;
   same merged-main build without these changes **1127/1152**. The single
   newly passing case is async `yield*` in `iteration.dat`; no new failures.

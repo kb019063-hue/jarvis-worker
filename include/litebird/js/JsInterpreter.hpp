@@ -194,6 +194,8 @@ public:
         return AssignResult::Ok;
     }
 
+    /// Function and global environments are variable environments. Lexical
+    /// block, catch and loop environments deliberately are not.
     void mark_var_scope() { m_is_var_scope = true; }
     std::shared_ptr<JsEnvironment> var_scope() {
         auto scope = shared_from_this();
@@ -371,6 +373,9 @@ public:
     struct EvalFrame {
         const JsEnvironment* environment{nullptr};
         bool direct{false};
+        // Grammar permissions captured at the syntactic direct-eval call.
+        bool allow_super_property{false};
+        bool allow_super_call{false};
     };
     static std::vector<EvalFrame>& eval_call_stack();
 

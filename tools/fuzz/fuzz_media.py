@@ -71,6 +71,40 @@ def minimal_webp_seeds(tmpdir: str) -> list[bytes]:
                            check=True, capture_output=True)
             with open(p, "rb") as f:
                 seeds.append(f.read())
+        # Lossy seeds: the VP8 key-frame bitstream has far more header state to
+        # corrupt than VP8L (segmentation, per-macroblock modes, token
+        # partitions, the loop filter), so it gets seeds of its own.
+        for idx, (args, extra) in enumerate([
+            (["-size", "16x16", "plasma:fuchsia-aqua", "-seed", "7"], ["-quality", "92"]),
+            (["-size", "32x24", "gradient:red-blue"], ["-quality", "50"]),
+            (["-size", "17x13", "plasma:orange-navy", "-seed", "3"],
+             ["-quality", "75", "-define", "webp:partitions=2"]),
+            (["-size", "24x20", "plasma:lime-purple", "-seed", "4"],
+             ["-quality", "30", "-define", "webp:filter-type=1"]),
+            (["-size", "24x20", "plasma:maroon-teal", "-seed", "5"],
+             ["-quality", "40", "-define", "webp:filter-strength=100"]),
+            (["-size", "20x16", "gradient:green-yellow", "-alpha", "set", "-channel", "A",
+              "-evaluate", "set", "50%"], ["-quality", "70"]),
+            (["-size", "20x16", "gradient:green-yellow", "-alpha", "set", "-channel", "A",
+              "-evaluate", "set", "50%"], ["-quality", "70", "-define", "webp:alpha-compression=0"]),
+        ]):
+            p = os.path.join(tmpdir, f"seed_lossy{idx}.webp")
+            subprocess.run([convert_bin] + args + extra + [p], check=True, capture_output=True)
+            with open(p, "rb") as f:
+                seeds.append(f.read())
+    # A hand-built `VP8X` + `ALPH` + `VP8 ` container: the alpha header byte is
+    # the only thing between the fuzzer and the plane decoder.
+    vp8_payload = b"\x30\x01\x00\x9d\x01\x2a\x00\x00"
+    vp8x = bytes([0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    for hdr, plane in [(0x00, bytes(1)), (0x01, b"\x07"), (0x04, bytes(1)), (0x0C, bytes(1)),
+                       (0x10, bytes(1)), (0x40, bytes(1)), (0x03, b"\x00")]:
+        body = bytearray(b"RIFF\0\0\0\0WEBP")
+        for fourcc, payload in ((b"VP8X", vp8x), (b"ALPH", bytes([hdr]) + plane), (b"VP8 ", vp8_payload)):
+            body += fourcc + len(payload).to_bytes(4, "little") + payload
+            if len(payload) & 1:
+                body += b"\0"
+        body[4:8] = (len(body) - 8).to_bytes(4, "little")
+        seeds.append(bytes(body))
     return seeds
 
 

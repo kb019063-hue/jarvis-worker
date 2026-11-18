@@ -1,0 +1,27 @@
+{
+  "_what_this_is": [
+    "The durable floors for the two counters tools/next_ids.py allocates.",
+    "That tool takes max(every phase or finding number it finds in the",
+    "documents, in docs/, and in the open pull requests; these floors) + 1.",
+    "The floors exist so a number claimed by a pull request that was later",
+    "closed without merging is never handed out a second time. Nothing writes",
+    "this file automatically: bump a floor by hand, in the commit that retires",
+    "the numbers below it, when no document or pull request mentions it any more."
+  ],
+  "phase_floor": 68,
+  "finding_floor": 74,
+  "history": [
+    {
+      "date": "2026-11-17",
+      "what": "Phase 68 and finding 74 documented bounded Map/Set iterator cursor cleanup. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
+    {
+      "date": "2026-11-17",
+      "what": "Phase 66 and finding 72 documented ES-module workers and structured-clone message packets. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
+    {
+      "date": "2026-11-17",
+      "what": "tools/next_ids.py added, so an agent no longer reads ARCHITECTURE.md and AUDIT.md to work out two integers. New phase write-ups and findings move to docs/phases/ and docs/findings/; the two documents are frozen as append targets."
+    }
+  ]
+}

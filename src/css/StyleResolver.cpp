@@ -40,6 +40,14 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         code {
             background-color: #f1f5f9;
         }
+        /* HTML §Rendering: the elements whose text is monospaced. Without
+           this the engine had a `monospace` generic family it could resolve
+           and no element that ever asked for it, so `<pre>` -- the element
+           whose whole purpose is that its columns line up -- was laid out
+           proportional. */
+        pre, xmp, plaintext, listing, code, kbd, samp, tt {
+            font-family: monospace;
+        }
         body {
             margin: 8px;
             color: #222222;
@@ -1791,6 +1799,11 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else {
             try { style.font_weight = std::stoi(val); } catch (...) {}
         }
+    } else if (prop == "font-family") {
+        // Stored as written. `font-family` was on the list of known properties
+        // for a long time and nothing ever read the value back — it is read
+        // now, by FontRenderer, at the point a string is measured and drawn.
+        style.font_family = val;
     } else if (prop == "text-align") {
         style.text_align = val;
     } else if (prop == "text-decoration") {
@@ -2429,6 +2442,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.dark_color_scheme = parent_style->dark_color_scheme;
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
+        style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
         style.custom_properties = parent_style->custom_properties;
         // empty-cells and caption-side inherit per CSS 2.1 17.5.1.2 and 17.4.1.

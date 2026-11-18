@@ -29,7 +29,7 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1020 / 1034 (98.6%)**; nine of the 14 that fail were recorded in Phases 34 and 43 for what classes and `eval` still lack | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1127 / 1152 (97.8%)**; of the 25 that fail, eight were recorded in Phase 34 for what classes still lack and 12 in Phase 63 for the places that still do not ask a value for its iterator (`yield*` in an async generator was the thirteenth, fixed in Phase 76) | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -37,12 +37,16 @@ suite and two other parsers, and brought in the tests browsers share (see
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 204 suites + 80 cross-origin checks, all passing | `make test` |
+| Engine unit tests | 217 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
+| **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
+| **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
+| **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
-| Worker MIME/module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, `{type:"module"}` refusal, `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
+| Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
-| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 17 lossless WebP images bit-exact vs libwebp (plus refusals), 5 SVG suites; 2,400+ mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
+| Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 5 SVG suites; 2,400 mutated fuzz cases (0 findings) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -55,12 +59,13 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 204 engine suites + 80 cross-origin Window/Location checks
+make test            # 217 engine suites + 114 cross-origin Window/Location/channel checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
 python3 tools/bench/bench_sized_floats.py build/litebird --out build/floats-after --sizes 1000 3000 10000
 # Compare against the pre-change binary as described in ARCHITECTURE.md Phase 48.
+make bench-collections # Map/Set completed-iterator growth guard, two 8,192-loop batches without gc()
 make verify-color    # CSS Color 4/5 15-space rational oracle, §13.2 gamut map, and WPT vectors
 make fuzz-color      # adversarial grammar & mutation fuzzing for CSS Color 4/5
 make verify-media    # JPEG vs libjpeg, GIF vs ImageMagick -coalesce, lossless WebP vs libwebp, and SVG conformance
@@ -74,15 +79,16 @@ make bench-attributes # attribute-list end removals: expected DOM checksums, eac
 make bench-tokenizer-attributes # the HTML tokenizer at 50,000 attributes: expected trees, each under 1 s
 make bench-surrogates # six surrogate-pair scripts (including reads and substring slices between halves): results face Node, each under 1 s
 make verify-promise-iterators # 34 async cases: each iterator must be closed promptly on a thrown resolve/then
+make verify-collection-iterators # Map/Set compaction, clear, insertion-order, and done-latch cases from Node
 make security-fetch  # page fetch() cannot read arbitrary local files; file: documents keep local access
-make security-worker # Worker MIME/module policy, EventTarget dispatch, importScripts boundary, and 60x startup/exit stability
+make security-worker # Worker MIME/static-module policy, EventTarget dispatch, classic importScripts boundary, and 60x startup/exit stability
 make diff-strings    # 50,580 string results compared with Node's; fails if any differ (ceiling: 0)
 make diff-trees      # 6,000 random pages and fragments parsed here and by parse5; fails if a tree differs
 ```
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 1,034 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,152 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -95,7 +101,8 @@ Read the number for what it is:
   strings, arrays, regular expressions, dates, JSON), not every clause of the
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  27,872 pass (58.1%; 26,012 / 54.2% before Phase 44); of the 15,686
+  29,450 pass (61.4%; 27,872 / 58.1% before Phase 55, 26,012 / 54.2% before
+  Phase 44); of the 15,686
   on functions, classes and objects, 12,359 pass (78.8%; 12,316 / 78.5%
   before Phase 59, 10,835 / 69.1% before Phase 44). `make test262` runs the
   latter. It is used for what a change moved between two builds, not as a
@@ -104,14 +111,24 @@ Read the number for what it is:
   100.0% in `language/{identifiers,keywords,future-reserved-words,reserved-words}`;
   Phase 43: 43 more in the whole suite and none fewer; Phase 59: 43 more in
   those 21 directories and 49 more across 13 TDZ/scope directories, none
-  fewer).
-- **Five of the 14 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other nine were
+  fewer; Phase 63: 10 more in the whole suite and 4 fewer, each of the four
+  a row of the task table; Phase 76: 366 more in the async-generator, yield,
+  generators, class, for-await-of, async-function and async-generator built-in
+  directories this change can move, none fewer).
+- **Five of the 25 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 20 were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). One is in `construct.dat`:
-  `eval` inside a function, which sees nothing of the function (Phase 43,
-  section 8; `this` before `super()` was fixed in Phase 59).
+  things; ARCHITECTURE.md, Phase 34, section 9). Twelve are in
+  `iteration.dat`: the places that still read an array without asking it
+  for its iterator (array destructuring, `Array.from`), and what the built-in
+  iterators themselves get wrong (Phase 63, section 6; the thirteenth, `yield*`
+  in an async generator, was fixed in Phase 76). Each of the 20 belongs to a
+  row of the task table in
+  `AGENTS.md`. `construct.dat` had one until Phase 65: `eval` inside a
+  function saw nothing of the function, and now runs in its caller's scope
+  ([`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
+  `this` before `super()` was fixed in Phase 59).
 - **It measures the language, not the DOM.** The bindings a page script calls
   (`document`, elements, events) are a much thinner layer; see "Known gaps" in
   `ARCHITECTURE.md`.
@@ -146,6 +163,13 @@ makes: `new.target` in a parent's constructor and under `Reflect.construct`, an
 object a parent's constructor returns, when `this` is bound (including TDZ
 checks before `super()`), and three more programs as Babel and TypeScript
 compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
+
+78 cases (`iteration.dat`, Phase 63) are about who decides how a value is
+iterated: an iterator a script put on an array, on a subclass of `Array`, on
+`Array.prototype` or on `String.prototype`, through each construct that
+iterates; the order in which the protocol reads and calls; closing an
+iterator that is left early; and the plain cases, which must not change. 66
+of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
@@ -585,10 +609,10 @@ Litebird implements the complete modern browser rendering pipeline:
   - Geometric & path primitives: `fillRect`, `clearRect`, `strokeRect`, `rect`, `roundRect`, `arc`, `ellipse`, `arcTo`, `quadraticCurveTo`, `bezierCurveTo`, `isPointInPath`.
   - Text (Phase 46): `fillText`, `strokeText`, `measureText` with `font` (CSS font shorthand subset — style, variant, weight, size in px/pt/em/rem/% with an optional `/line-height`, and a family list that is parsed and reflected but rasterised with the engine's system font), `textAlign`, `textBaseline`, `maxWidth` horizontal condensing, solid or gradient paint, CTM-aware sampling with AA coverage, `clip()` and `globalAlpha` support, and the save/restore text state.
   - Inverse-CTM linear/radial gradients (`Pad`/`Reflect`/`Repeat`), `createImageData`/`getImageData`/`putImageData`, CTM-aware `drawImage`, and JS property accessors via `JsValue::define_accessor`.
-- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `ImageDecoder`):**
+- **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `Vp8Decoder`, `ImageDecoder`):**
   - Standalone ITU-T T.81 Baseline/Extended/Progressive JPEG decoder (`JpegDecoder`: 4:4:4/4:2:2/4:2:0/4:4:0, Grayscale/YCbCr/RGB/CMYK/YCCK, restart markers, multi-scan progressive refinement).
   - Standalone GIF87a/GIF89a single-frame & animated multi-frame decoder (`GifDecoder`: 2..8-bit LZW, GCT/LCT, 4-pass interlacing, transparency, all 4 disposal methods, loop count).
-  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms; lossy `VP8` and animated files are reported by status, not drawn).
+  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms) and, since Phase 57, a standalone lossy decoder (`Vp8Decoder`: a VP8 key frame — boolean coder, token partitions, 16x16/8x8/4x4 intra prediction, IDCT and Walsh–Hadamard, the whole-frame loop filter, fancy chroma upsampling — with the `ALPH` plane in both compression methods and all three spatial filters). Animated WebP and AVIF are reported by status, not drawn.
   - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, BMP, JPEG, GIF and WebP.
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
@@ -642,11 +666,13 @@ twice.
 - **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
   `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
   `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
-  interpreter and event loop; messages are copied as JSON),
-  `canvas.getContext("2d")`, and the DOM: section 1, "The DOM a script
-  sees".
-- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`,
-  modules (`import`/`export`), `with`, holes in arrays, `Intl`. See "Known
+  interpreter and event loop; `Worker`, `Window`, and same-agent
+  `MessagePort` messages use a neutral structured-clone packet for primitives,
+  ordinary objects, and arrays), `canvas.getContext("2d")`, and the DOM:
+  section 1, "The DOM a script sees".
+- **What is not there:** BigInt, `Proxy`, typed arrays and `ArrayBuffer`, a
+  general ES-module language runtime (only module workers have the documented
+  static import/export subset), `with`, holes in arrays, `Intl`. See "Known
   gaps" in `ARCHITECTURE.md` for the limits of what is there.
 - **Bytecode VM:** an earlier experiment, kept for `--dump-bytecode`. It
   covers a small subset of the language and scripts do not run on it.
@@ -702,7 +728,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 201 engine test suites
+# Run the 217 engine test suites
 make test
 ```
 
@@ -757,6 +783,7 @@ make test
 | `--run-script <file>` | Load the page, run the file as one more script, then the page's load events and timers. Nothing is drawn. Exits 1 if anything was left uncaught |
 | `--url=<URL>` | The address the page is said to come from (`location.href`); by default the `file:` URL of the file (or the fetched `http:`/`https:` URL) |
 | `--virtual-time-budget=<ms>` | How much timer time a page gets to settle before it is rendered (default 16, one frame) |
+| `--wall-limit=<seconds>` | How much real time the page's callbacks get once it has loaded (default 10). When that limit ends a run with callbacks still due, one line on standard error says so; a test runner with a timeout of its own passes it here (`run_wpt.py` does) |
 | `--xml-canonical <file>` | Read the file as XML and print its canonical form, the one the XML conformance suite compares. Exits 0 for a well-formed document, 1 for one that is not (the reason on standard error), 3 for an encoding this build cannot read |
 | `--xml-events <file>` | Read the file as XML and print what the parser reports, one line an event (`tools/fuzz/diff_xml.py` compares these with Expat and libxml2). The same exit statuses |
 | `--repl` | Launch the interactive JavaScript & DOM REPL |
@@ -769,14 +796,14 @@ make test
 make test
 ```
 
-Output (195 suites; the first and last lines shown):
+Output (217 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 195 engine test suites passed successfully!
+All 217 engine test suites passed successfully!
 ```
 
 ```bash
@@ -892,7 +919,7 @@ parser/evaluator across scripts, functions, async/generator bodies, blocks,
 try { typeof z; } catch (e) { console.log(e.name); } let z = 1;'
 # ReferenceError
 # ReferenceError
-make test            # 201 / 201 unit suites
+make test            # 203 / 203 unit suites
 make js-conformance  # 1003 / 1017 (construct.dat 49/50, lexical.dat 41/41)
 make test262         # 12,359 / 15,686 (+43, 0 regressions)
 ```
@@ -922,7 +949,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 195/195 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 217/217 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -947,8 +974,8 @@ checked with Node. The old binary passes 30/34, with timeouts. The full JS
 score is now 925/939 after merging Phase 44's identifiers (911/925 before
 that merge); `make test` passes 170 suites (163 on the original base). A page
 outside the corpus, through `tools/conformance/compare_with_jsdom.py`, prints
-`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator is still
-ignored by `js_iterate`'s array fast path, and subclassed Promises still
+`4 lines, 4 the same` after the fix, versus 0 before. A custom array iterator was still
+ignored by `js_iterate`'s array fast path (until Phase 63, below), and subclassed Promises still
 make base promises: see `AUDIT.md`, finding 51, and `ARCHITECTURE.md`, Phase 45.
 The full release and sanitizer chain passed on the base tree, again after
 merging main's frames/table work, and again with Phase 44's Unicode identifiers:
@@ -1080,8 +1107,8 @@ GIF87a/GIF89a (`GifDecoder`), and upgrades `CanvasRenderingContext2D` and
 gradients, full SVG path/elliptical-arc grammar, `<defs>`/`<use>`/`<symbol>`/
 `<clipPath>`, inline `style`, and opacity. `make verify-media` verifies 21 JPEG
 variants pixel-by-pixel against `libjpeg` (52–99 dB PSNR), 9 GIF variants
-bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, 30 lossless WebP
-checks (added in Phase 54) and 5 SVG feature suites; `make fuzz-media` runs
+bit-for-bit (`max_diff = 0`) against ImageMagick `-coalesce`, 53 WebP checks
+(27 lossless in Phase 54, 26 lossy in Phase 57) and 5 SVG feature suites; `make fuzz-media` runs
 2,400 mutated JPEG/GIF/WebP/SVG inputs through `build/media_check`. Details and remaining gaps are in `ARCHITECTURE.md`,
 Phase 38, and `AUDIT.md`, finding 43.
 
@@ -1112,7 +1139,7 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 974 / 989; construct.dat 47 / 49
+make js-conformance      # 1124 / 1150; construct.dat 50 / 50
 make dom-conformance     # 669 / 669; compiled.dat 25 / 25
 ```
 
@@ -1120,11 +1147,85 @@ What is still missing: an upgrade still runs the constructor on the element
 itself, where the standard hands the element over when the constructor asks
 for it (a constructor written as a function can tell, and one that never
 reaches `HTMLElement` is accepted); `this` can be used before `super()` has
-run; `eval` inside a function sees nothing of the function; and a private
-name is a property that `obj['#p']` reads. Those and what else was found on the way
+run; and a private name is a property that `obj['#p']` reads. Those and what
+else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
 what.
+
+### Iteration asks the value for its iterator (Phase 63)
+
+`for…of`, spread, `yield*`, `Array.from`, `new Map`, `new Set`,
+`Object.fromEntries` and the `Promise` combinators read an array's elements
+and a string's characters without asking for `Symbol.iterator`. An iterator
+that a script put on an array, on a subclass of `Array` or on
+`Array.prototype` was never called, and neither was one on
+`String.prototype`. Now the value is asked, once, and the loop is the
+language's: `next` is read once, `done` before `value`, and leaving early
+calls `return()` and checks what it is and what it gives back. A plain array
+or string is still read directly, after a check that runs no script
+(it takes between 0.94 and 1.06 of the time `main` takes, measured twice,
+where a second copy of `main`'s binary takes between 0.95 and 1.03).
+
+Three smaller things around it are right now too. An object that has `next`
+and no `Symbol.iterator` is not iterable: spreading an async generator used
+to hang, and throws. A property *named* `Symbol.iterator` is not the method.
+A number is asked through its prototype instead of being refused.
+
+```bash
+./build/litebird --run-js 'class Rows extends Array { *[Symbol.iterator]() { for (var i = this.length; i--; ) yield this[i]; } }
+var r = new Rows(); r.push("a", "b", "c");
+var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; };
+console.log([...r].join(), Array.from(r).join(), [...own].join(), Math.max(...own))'
+# c,b,a c,b,a 9,8 9        (before: a,b,c a,b,c 1,2 2)
+make js-conformance      # 1124 / 1150; iteration.dat 65 / 78
+```
+
+What got worse, in three cases a test suite meets and a page hardly will:
+with the iterator deleted from `Array.prototype`, `Array.from([1, 2])` throws
+where it should read the array by index; a class without a constructor calls
+a replaced `Array.prototype[Symbol.iterator]` when it is constructed, because
+its default constructor is written with a spread; and `yield*` in an async
+generator, which never asked for `Symbol.asyncIterator`, lost the one shape
+of iterable it handled by accident. Still as it was: array destructuring
+does not ask the array, and the `Map` and `Set` constructors do not call
+`set` and `add`. All of it is in the 13 failing cases of `iteration.dat` and
+in rows of the task table in `AGENTS.md`; `ARCHITECTURE.md`, Phase 63, has
+the design, and `AUDIT.md`, finding 69, says what found what.
+
+### `eval` runs in the scope that called it (Phase 65)
+
+`eval` was `run(source)`: parse the text, run it against the global
+environment. That is the *indirect* eval — what `(0, eval)(x)` and
+`window.eval(x)` do — applied to every call, so a function could not read its
+own `var` through it, `eval('this')` was the global object, `eval('super()')`
+in a derived constructor was a `SyntaxError`, and `eval('var x = 1')` planted
+`x` on `window`. Now a call written `eval(...)` whose identifier resolves to
+the global `eval` is direct: it runs in the calling function's environment,
+shares its `this`, `arguments`, `new.target`, `super` and strictness, its
+`let`/`const`/`class` stay inside the eval, and its sloppy `var`s belong to
+the function. `(0, eval)`, an alias and a shadowed `eval` are ordinary calls
+and stay global.
+
+The bindings a function normally hoists only for names its *body* mentions —
+`arguments`, `%fn`, `%new.target`, `%home` — are now hoisted for any function
+that calls `eval`, from the parser: the text is a string, and what it names is
+not known until it runs.
+
+```bash
+./build/litebird --run-js 'function f() { var local = 5; return eval("local + 1"); }
+function g(a, b) { return eval("arguments.length"); }
+class A { constructor() { this.a = 1; } }
+class B extends A { constructor() { eval("super()"); this.b = this.a + 1; } }
+console.log(f(), g(7, 8), new B().b)'
+# 6 2 2        (before: Uncaught ReferenceError: local is not defined)
+make js-conformance      # 1124 / 1150; eval.dat 38 / 38
+```
+
+The design and what it costs are in
+[`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
+[`docs/findings/71-direct-eval-scope.md`](docs/findings/71-direct-eval-scope.md)
+says what was found, and `AGENTS.md` no longer carries the row.
 
 ### The encodings pages are written in (Phase 47)
 
@@ -1171,34 +1272,86 @@ decoded with the same reader that decodes the image, plus meta prefix codes and
 a colour cache.
 
 ```bash
-make verify-media   # 63 checks: JPEG, GIF, WebP (bit-exact) and SVG
+make verify-media   # 88 checks: JPEG, GIF, lossless and lossy WebP (bit-exact) and SVG
 make fuzz-media     # 2,400 mutation cases across four formats
 ./build/media_check --decode-webp in.webp out.ppm [out.rgba]
-./build/media_check --probe-webp  in.webp     # "ok", "lossy VP8 is not supported", ...
+./build/media_check --probe-webp  in.webp     # "ok", "animated WebP is not supported", ...
 ```
 
-The lossy `VP8` codec (a VP8 video keyframe) and animated WebP are refused with
-a status rather than approximated, and AVIF is still open: `AUDIT.md`, finding
-60, says what was found and `ARCHITECTURE.md`, Phase 54, how it is built.
+### Lossy WebP (Phase 57)
 
-### Cross-origin `Window` and `Location` reflection (Phase 56)
+The other half of the format — the one libwebp writes by default — is a VP8
+video key frame, decoded by `Vp8Decoder`: the boolean (arithmetic) coder, the
+mode and residual partitions, 16x16/8x8/4x4 intra prediction, the 4x4 IDCT and
+the Walsh–Hadamard transform for Y2, the loop filter over the whole frame, and
+fancy chroma upsampling with libwebp's fixed-point BT.601 matrix. The `VP8X`
+container and its `ALPH` plane (both compression methods, all three spatial
+filters) come with it, so a lossy WebP with transparency also decodes. The
+pixels are not "close": 11 generated streams from 1x1 to 129x97, four
+qualities and odd sizes decode exactly as libwebp does, and the checks reach the
+parts a smooth image never exercises — the loop filter (off and on, strength 0
+and 100, simple, sharpness 7), the token partitions, segmentation, and the alpha
+plane rebuilt by hand from all three filters.
 
-A script embedded in one origin could already not read a cross-origin frame
-(`SecurityError` on non-safelisted names, since Phase 42), but everything that
-*describes* the frame's window answered the ordinary way: `Object.keys`,
-`Reflect.ownKeys` and `for…in` enumerated it, `getOwnPropertyDescriptor`
-described ordinary storage, `Object.defineProperty` wrote into it,
-`Object.freeze` flipped its cell, and `location` handed over the child's
-address (`href`, `pathname`, …). Phase 56 makes the reflection surface follow
-the cross-origin table of the HTML Standard instead: the window reports
-exactly its child-frame indices and the exposed names (`window`, `self`,
-`location`, `close`, `closed`, `focus`, `blur`, `frames`, `length`, `top`,
-`opener`, `parent`, `postMessage`, then `then`), `Location` exposes only
-`href` (writable, not readable cross-origin) and `replace()`, both refuse
-define/delete/integrity changes with `SecurityError`/`TypeError`, and
-`getPrototypeOf` answers `null`. Same-origin pages are untouched. The design
-and what is still open are in `ARCHITECTURE.md`, Phase 56, and `AUDIT.md`,
-finding 62.
+```bash
+./build/media_check --decode-vp8  frame.vp8   out.ppm [out.rgba]   # a bare `VP8 ` payload
+./build/media_check --fuzz-vp8    frame.vp8
+./build/media_check --decode-webp translucent.webp out.ppm out.rgba
+```
+
+Animated WebP (`ANMF` compositing) and AVIF are refused with a status rather
+than approximated: [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md)
+says what was found and
+[`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
+how it is built.
+
+### Cross-origin `Window` / `Location`, navigation, module workers and message ports (Phases 56, 61 & 66)
+
+A script embedded in one origin cannot read a cross-origin frame (`SecurityError`
+on non-safelisted names), and Phase 56 made its *reflection* surface follow the
+cross-origin table of the HTML Standard: the window reports exactly its
+child-frame indices and exposed names (`window`, `self`, `location`, `close`,
+`closed`, `focus`, `blur`, `frames`, `length`, `top`, `opener`, `parent`,
+`postMessage`, then `then`), while `Location` exposes only `href` (writable,
+not readable cross-origin) and `replace()`. Define/delete/integrity changes
+refuse with `SecurityError`/`TypeError`, and `getPrototypeOf` answers `null`.
+Same-origin pages are untouched.
+
+Phase 61 makes the writable entries do useful work: setting `child.location`
+or `child.location.href`, and calling `child.location.replace(url)`, schedules
+a real nested-frame document navigation without changing the iframe's `src`
+markup. The child keeps its `WindowProxy` identity, but receives a new
+Document; the existing iframe loader continues to apply sandbox, MIME,
+origin-root and load-order rules.
+
+Phase 66 also lets `{ type: "module" }` workers load a MIME-checked,
+CORS-aware static module graph. The supported subset has side-effect,
+default/named/namespace imports; simple declaration/default/named exports; and
+named re-exports. Modules execute in dependency order inside strict,
+module-local wrappers; classic `importScripts()` is not exposed there.
+
+`new MessageChannel()` creates two stable `MessagePort` EventTargets.
+`postMessage()` queues FIFO `message` events, `onmessage` starts a port,
+`start()` releases messages accumulated after `addEventListener`, and `close()`
+drops later messages. Worker, Window, and same-agent port delivery now writes a
+neutral structured-clone graph before scheduling: `undefined`, `NaN`,
+infinities, `-0`, strings, ordinary objects, arrays, aliases, and cycles retain
+their supported value semantics without retaining a sender-realm `JsValue`.
+Functions, symbols, DOM/host/exotic values, and non-empty transfer lists throw
+`DataCloneError`; an empty transfer list is a no-op. Ports themselves are still
+not transferable or cross-agent.
+
+`tests/cross_origin_windows.cpp`, run by `make test`, now has **114 checks**:
+reflection security, three cross-origin navigation entry points, direct
+navigation over both `src` and `srcdoc`, proxy identity, unchanged markup and
+continued cross-origin read refusal, plus asynchronous FIFO channel delivery,
+GC-safe cloned graphs, ordinary EventTarget target/receiver behavior, delayed
+start and close-before/after-delivery behavior. The design and remaining limits
+are in
+[`docs/phases/61-child-location-navigation-and-message-channel.md`](docs/phases/61-child-location-navigation-and-message-channel.md),
+[`docs/phases/66-es-module-workers-and-structured-clone.md`](docs/phases/66-es-module-workers-and-structured-clone.md),
+[`docs/findings/67-child-location-navigation-and-message-ports.md`](docs/findings/67-child-location-navigation-and-message-ports.md),
+and [`docs/findings/72-es-module-workers-and-structured-clone.md`](docs/findings/72-es-module-workers-and-structured-clone.md).
 
 ### String Unicode 17.0 normalization, full/locale case mapping, and CLDR 48 UCA collation (Phase 60)
 
@@ -1225,3 +1378,49 @@ Unicode/locale suites rise to **152 / 156 (97.4%)** (`Intl.Collator` and
 locale-specific CLDR tailorings remain open). See `ARCHITECTURE.md`, Phase 60,
 and `AUDIT.md`, finding 66.
 
+### `yield*` in an async generator asks for the async iterator (Phase 76)
+
+An async generator's `yield*` ran the *sync* protocol whatever iterator the
+delegate had, so delegating to another async generator — `yield* inner()` —
+threw `… is not iterable`, and delegating to anything at all settled the
+delegate's steps in the wrong order: the value of a step crossed with no
+await at the wrong point and a direct `yield` of a rejected promise settled
+the consumer's promise with the raw promise instead of rejecting the body.
+
+An `yield*` now asks for `Symbol.asyncIterator` first, falls back to the sync
+method wrapped in the spec's `CreateAsyncFromSyncIterator` when the value has
+no async one (a sync iterator's `next` is read once, each result awaited, and
+a rejected yielded value closes the sync iterator before the rejection
+reaches the consumer), and hands `next`, `throw` and `return` on with the
+yield point's completion: a rejection crosses as the delegate's `throw`, an
+early `.return(value)` goes through the delegate's `return` — which may yield
+again (the consumer sees `{ value, done: false }`) instead of closing the
+generator — and a direct `yield` awaits its operand, so a rejected promise is
+raised at the `yield` point where the body's own `try`/`catch` can take it.
+A step's *value* is never adopted: a thenable a delegate yields is passed to
+the consumer untouched, as in the other engines.
+
+```bash
+./build/litebird --run-js 'async function* inner() { yield Promise.resolve("settled"); var v = yield* (async function* g() { return Promise.resolve("done-settled"); })(); console.log("yield* returned", v); } \
+(async () => { var g = inner(); console.log("yielded", (await g.next()).value); await g.next(); })()'
+# yielded settled
+# yield* returned done-settled
+make test262                     # +366 across the twelve async-generator, yield, generators, class, for-await-of and async-function directories this can move, none fewer
+make js-conformance              # 1127 / 1152; iteration.dat 66 / 78 — the async yield* case now passes
+```
+
+What is still open around it: the two `yield-*-then-getter-ticks` cases in
+test262 still fail, because the engine's blocking `eval_await` resolves a
+thenable in-line instead of through the spec's promise jobs, so the getters
+and the ticks interleave in a different order than the spec's queue; the two
+`yield-thenable-create-resolving-functions-*` cases fail because the built-in
+promise resolving functions are constructible here — the same root as the
+open task row on which built-ins are constructors; the
+`yield-star-async-from-sync-iterator-inaccessible.js` case fails because the
+engine has no `%AsyncGeneratorFunction%` global, so
+`async function*(){}.constructor` is `Function` rather than the intrinsic
+whose `.prototype.prototype` is `%AsyncIteratorPrototype%` — the same root as
+the open task row on async and generator functions and their prototypes; and
+`yield-identifier-spread-non-strict` is about spread identity, not delegation.
+See [`docs/phases/76-async-generator-yield-star-asynciterator.md`](docs/phases/76-async-generator-yield-star-asynciterator.md)
+and [`docs/findings/82-yield-star-did-not-ask-for-symbol-asynciterator.md`](docs/findings/82-yield-star-did-not-ask-for-symbol-asynciterator.md).

@@ -36,7 +36,7 @@ SRCS = src/common/Color.cpp \
        src/render/FontRenderer.cpp \
        src/render/JpegDecoder.cpp \
        src/render/GifDecoder.cpp \
-       src/render/WebPDecoder.cpp \
+       src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -129,8 +129,11 @@ URL_FLOOR ?= 1188
 # scores: a sanitizer build's stack frames are too large for one deep-recursion
 # case that the normal build passes. With Phases 37, 43, 44, 45, 55, 59, and 60
 # together, 1019 of 1034 pass under ASan and 1020 in Release (which is what
-# the CI floor requires). Leave one case of runner headroom.
-JS_ASAN_FLOOR ?= 1018
+# the CI floor requires). Leave one case of runner headroom. Phase 63 added
+# iteration.dat: 65 of its 78 cases pass, under ASan as in Release. Phase 65
+# added eval.dat (37 cases, all passing) and fixed two cases construct.dat
+# recorded as failing, so 1122 of 1149 pass under ASan and 1123 in Release.
+JS_ASAN_FLOOR ?= 1121
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -153,7 +156,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -197,6 +200,11 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 bench-floats: $(TARGET)
 	@python3 tools/bench/bench_sized_floats.py $(TARGET) --out $(BUILD_DIR)/bench-floats --sizes 1000 10000 --max-seconds 4
 
+## Completed Map/Set iterators must not make a later equal batch slower. The
+## runner has its own checksums and makes both batches in one process, without gc().
+bench-collections: $(TARGET)
+	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
+
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
 
@@ -213,6 +221,11 @@ js-conformance: $(TARGET)
 ## resolve(), overran the iterator or timed out. All 34 cases must pass.
 verify-promise-iterators: $(TARGET)
 	@$(JS_CONFORMANCE) --filter async --quiet --timeout 3 --min-pass 34
+
+## Map/Set compaction, clear, insertion order, and done-latching are recorded
+## against Node. The two other cases in this file require absent Uint8Array and Proxy.
+verify-collection-iterators: $(TARGET)
+	@$(JS_CONFORMANCE) --filter collections-iterators --quiet --min-pass 32
 
 ## DOM scoreboard (tests/dom-conformance; expectations recorded from jsdom).
 ## Running it needs nothing but the binary. Checking or recording the
@@ -412,8 +425,8 @@ bench-surrogates: $(TARGET)
 security-fetch: $(TARGET)
 	@python3 tools/security/check_fetch_origin.py
 
-## Worker script MIME/module policy, EventTarget error/message dispatch,
-## importScripts boundary checks, and 60x concurrent startup/exit stress runs.
+## Worker script MIME/static-module policy, EventTarget error/message dispatch,
+## classic importScripts boundary checks, and 60x concurrent startup/exit stress runs.
 security-worker: $(TARGET)
 	@python3 tools/security/verify_worker_policy.py --binary $(TARGET) --stress-runs 60
 
@@ -444,4 +457,4 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, clean"

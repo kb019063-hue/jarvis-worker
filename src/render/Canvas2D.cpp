@@ -491,11 +491,11 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
         parsed = ParsedCanvasFont{};
     }
     const float size_px = std::max(0.0f, parsed.size_px);
-    const auto metrics = FontRenderer::instance().em_ascent_descent(size_px, parsed.weight);
+    const auto metrics = FontRenderer::instance().em_ascent_descent(size_px, parsed.weight, parsed.family);
     layout.ascent = metrics.first;
     layout.descent = metrics.second;
 
-    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight);
+    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight, parsed.family);
     const float condensable = (max_width > 0.0f && layout.advance > max_width && layout.advance > 0.0f)
                                   ? std::clamp(max_width / layout.advance, 0.02f, 1.0f)
                                   : 1.0f;
@@ -515,6 +515,9 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
 
     const int px_size = std::clamp(static_cast<int>(std::lround(size_px)), 4, 160);
     const bool bold = parsed.weight >= 600;
+    // Resolved once for the whole run: `get_glyph` wants an id because it runs
+    // per glyph, and `family_id_for` would answer the same thing every time.
+    const int family_id = FontRenderer::instance().family_id_for(parsed.family);
     float pen = layout.pad_x;
     float ink_l = std::numeric_limits<float>::infinity();
     float ink_r = -std::numeric_limits<float>::infinity();
@@ -524,7 +527,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     std::size_t pos = 0;
     while (pos < text.size()) {
         const uint32_t cp = canvas_utf8_next(text, pos);
-        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold);
+        const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, bold, family_id);
         const float pen_rel = pen - layout.pad_x;
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;
@@ -548,7 +551,7 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
                 }
             }
         }
-        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight);
+        pen += FontRenderer::instance().glyph_advance_px(cp, size_px, parsed.weight, parsed.family);
         if (pen > static_cast<float>(kMaxTextBufferWidth)) break; // truncated by the buffer cap
     }
     if (std::isfinite(ink_l)) {

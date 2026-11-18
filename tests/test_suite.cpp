@@ -606,6 +606,583 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     assert(found_rounded_rect);
 }
 
+TEST(per_glyph_font_fallback) {
+    using namespace litebird;
+
+    // A face is asked only for the codepoints it covers. Before this, the one
+    // loaded face was asked for everything, and a codepoint outside its cmap
+    // rasterized to an empty bitmap: the glyph was not drawn wrong, it was not
+    // drawn at all.
+    //
+    // The faces are Ahem (a 278-codepoint web-platform-tests font, vendored)
+    // and the host's DejaVuSans, which is what the renderer picks as primary.
+    // Their coverage was measured by dumping both cmaps, not assumed:
+    //
+    //     'A'   U+0041   in both       -> must come from the primary
+    //     'Ā'   U+0100   DejaVu only   -> must come from the primary
+    //     '一'  U+4E00   Ahem only     -> must come from the fallback
+    //
+    // Ahem covers 20 codepoints DejaVu does not — U+3000, U+4E00 and other
+    // CJK it carries for the tests — and that is what makes the last case a
+    // test of the chain rather than of either face alone.
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;   // no system .ttf on this host
+
+    TrueTypeFont ahem_face;
+    const std::string ahem = "tests/wpt/fonts/Ahem.ttf";
+    if (!ahem_face.load_file(ahem)) return;   // the vendored font is missing
+    assert(ahem_face.has_glyph(0x0041));
+    assert(ahem_face.has_glyph(0x4E00));
+    assert(!ahem_face.has_glyph(0x0100));
+
+    const std::vector<std::string> saved_paths = fr.fallback_paths();
+
+    const TrueTypeFont* primary = fr.face_for(0x0041, false);
+    assert(primary != nullptr);
+    if (primary->has_glyph(0x4E00)) {
+        // This host's primary already covers CJK, so there is no gap for a
+        // fallback to fill and nothing here would be proved either way.
+        return;
+    }
+
+    fr.set_fallbacks({ahem});
+
+    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, false);
+    const TrueTypeFont* for_macron = fr.face_for(0x0100, false);
+    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, false);
+
+    assert(for_ascii != nullptr && for_macron != nullptr && for_cjk != nullptr);
+    // Fallback fills gaps; it does not take the face over.
+    assert(for_ascii == primary);
+    assert(for_macron == primary);          // Ahem does not have 'Ā'
+    assert(for_cjk != primary);             // only Ahem has '一'
+    assert(for_cjk->has_glyph(0x4E00));
+
+    // The rasterizer and the measurer agree, which is what layout asks for.
+    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, false);
+    assert(cjk.width > 0 && cjk.height > 0);
+    assert(!cjk.coverage.empty());
+    assert(fr.measure_text("\xE4\xB8\x80", 16.0f) > 0.0f);   // "一"
+
+    // Discovery walks the system directories, and a vendored test font under
+    // the repository is not one of them.
+    for (const std::string& p : saved_paths) {
+        assert(p != ahem);
+        assert(p.size() > 4 && p.compare(p.size() - 4, 4, ".ttf") == 0);
+    }
+
+    fr.set_fallbacks(saved_paths);   // leave the renderer as the next suite expects it
+}
+
+TEST(font_family_selects_a_face) {
+    using namespace litebird;
+
+    // `font-family` was parsed, kept, and never read. Every element on the
+    // page was drawn in the one face the renderer happened to have loaded, so
+    // `pre { font-family: monospace }` was a fact about the stylesheet and not
+    // about what came out.
+    //
+    // The oracle is Ahem, vendored under tests/wpt/fonts for the WPT corpus.
+    // Every glyph in it is exactly 1em wide -- its advance is 1000 of its 1000
+    // units per em, for all 278 of its codepoints -- so a run of n characters
+    // measures n * font_size in Ahem and in essentially nothing else. That
+    // makes this an absolute test rather than a comparison: four characters at
+    // 16 px is 64.0 px, or the family was not selected.
+    FontRenderer& fr = FontRenderer::instance();
+
+    // The returned id, and not a lookup by name afterwards: looking "Ahem" up
+    // returns 0 on a host with no other font, and 0 used to read as "no
+    // family", which left such a family unselectable by name.
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;   // the vendored font is absent
+
+    // What this host actually has. Printed because the assertions below turn on
+    // it, and a test that passes for a reason nobody can see is not much of a
+    // test: the shared runner may hold different faces than a laptop does.
+    std::printf("      [font-family] truetype=%s families=%zu",
+                fr.has_truetype_font() ? "yes" : "no", fr.family_names().size());
+    for (std::size_t i = 0; i < fr.family_names().size() && i < 6; ++i)
+        std::printf(" [%d]%s", static_cast<int>(i), fr.family_names()[i].c_str());
+    std::printf("\n      [font-family] generic serif=%d sans=%d mono=%d default=%d\n",
+                fr.generic_family_id("serif"), fr.generic_family_id("sans-serif"),
+                fr.generic_family_id("monospace"), fr.default_family_id());
+    // Flushed because the whole point of printing this is to be there when an
+    // assertion below fails: stdout is block-buffered when it is not a
+    // terminal, and abort() does not flush it. Without this the diagnostics
+    // vanish into the same void as the failing run they explain.
+    std::fflush(stdout);
+
+    // Every family the registry knows is reachable by its own name -- family 0
+    // included. It did not used to be: `kDefaultFamily` was 0, so the first
+    // family found resolved to the value that means "nothing was named" and
+    // `family_face` refused it, and on a host with no system fonts that is the
+    // one a test registers by hand. `font-family: Ahem` drew the default.
+    for (std::size_t i = 0; i < fr.family_names().size(); ++i) {
+        assert(fr.family_id_for(fr.family_names()[i]) == static_cast<int>(i));
+        assert(fr.family_id_for(fr.family_names()[i]) != FontRenderer::kDefaultFamily);
+    }
+
+    // --- the oracle -------------------------------------------------------
+    const float four_in_ahem = fr.measure_text("XXXX", 16.0f, 400, "Ahem");
+    std::printf("      [font-family] 'XXXX' at 16px: ahem=%.2f default=%.2f\n",
+                four_in_ahem, fr.measure_text("XXXX", 16.0f, 400));
+    assert(std::fabs(four_in_ahem - 64.0f) < 0.5f);
+    assert(fr.measure_text("iiii", 16.0f, 400, "Ahem") > 63.5f);   // every glyph, not just 'X'
+    // The family was selected because it was named: unnamed, the same string
+    // measures differently.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400) - four_in_ahem) > 1.0f);
+
+    // --- matching ---------------------------------------------------------
+    // Case, quoting and repeated spaces are all irrelevant, as CSS says.
+    assert(fr.family_id_for("AHEM") == ahem);
+    assert(fr.family_id_for("  ahem  ") == ahem);
+    assert(fr.family_id_for("\"Ahem\"") == ahem);
+
+    // A list is tried left to right, and a family nobody has is skipped rather
+    // than ending the search.
+    assert(fr.family_id_for("No Such Font At All, Ahem") == ahem);
+    // A comma inside quotes separates words and not entries.
+    assert(fr.family_id_for("'Font, Inc', Ahem") == ahem);
+
+    // --- the first entry that can be had wins -----------------------------
+    // This is the bug the test is really here for. `kDefaultFamily` was 0,
+    // which is also the id of the first family found; used as the "not chosen
+    // yet" marker it meant a generic could never be assigned, and the list
+    // fell through to the next entry. Both regimes are asserted, because
+    // which one applies is a fact about the host:
+    for (const char* generic : {"sans-serif", "serif", "monospace"}) {
+        if (fr.generic_family_id(generic) != FontRenderer::kNoFamily) {
+            // This host has such a face, so the list stops there.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") != ahem);
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") ==
+                   fr.family_id_for(generic));
+        } else {
+            // It has none, so CSS's own rule is to keep looking, and Ahem is
+            // what is left. Falling through is correct here and wrong above.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") == ahem);
+        }
+    }
+
+    // --- the glyph cache is keyed by family -------------------------------
+    // Without that, a line drawn in one family hands its rasterized glyphs to
+    // the next line drawn in another, which is a bug that appears as the first
+    // line of a paragraph being right and the rest wrong.
+    if (fr.has_truetype_font()) {
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        assert(from_ahem.width != from_default.width);
+    }
+
+    // --- generic families, when the host has them -------------------------
+    const int mono = fr.generic_family_id("monospace");
+    if (mono != FontRenderer::kNoFamily) {
+        // A monospace face advances every glyph the same amount; 'i' and 'W'
+        // are the pair that differ most in a proportional face.
+        const float narrow = fr.measure_text("iiii", 16.0f, 400, "monospace");
+        const float wide = fr.measure_text("WWWW", 16.0f, 400, "monospace");
+        assert(std::fabs(narrow - wide) < 0.5f);
+        // ...and the default is only asserted proportional when it is a
+        // different family. "The default" is not a claim about a font, it is a
+        // claim about whichever file this host had: where the only face is
+        // monospace the default *is* monospace, and 'i' and 'W' advance the
+        // same. Asserting otherwise would be a fact about the machine rather
+        // than about the code, and it is exactly what failed on a host whose
+        // primary face was a mono one.
+        if (fr.has_truetype_font() && mono != fr.default_family_id()) {
+            assert(std::fabs(fr.measure_text("iiii", 16.0f, 400) -
+                             fr.measure_text("WWWW", 16.0f, 400)) > 1.0f);
+        }
+    }
+    const int serif = fr.generic_family_id("serif");
+    const int sans = fr.generic_family_id("sans-serif");
+    if (serif != FontRenderer::kNoFamily && sans != FontRenderer::kNoFamily &&
+        serif != sans) {
+        // Two generics that resolve to two different faces must not measure
+        // the same. Asked of several strings and not one, because
+        // metric-compatible families exist by design -- Liberation Serif and
+        // Liberation Sans are cut to Times and Arial's widths -- and a single
+        // string is a claim about a typeface rather than about the code.
+        bool differs = false;
+        for (const char* s : {"WWWW", "iiii", "ll1i", "Hello, world"}) {
+            const float a = fr.measure_text(s, 16.0f, 400, "serif");
+            const float b = fr.measure_text(s, 16.0f, 400, "sans-serif");
+            std::printf("      [font-family] %-14s serif=%8.2f sans=%8.2f\n", s, a, b);
+            if (std::fabs(a - b) > 0.5f) differs = true;
+        }
+        std::fflush(stdout);
+        assert(differs);
+    }
+
+    // Nothing that cannot be named is served: an unresolvable family falls
+    // back rather than failing, which is what CSS asks for.
+    assert(fr.family_id_for("cursive") == FontRenderer::kDefaultFamily ||
+           fr.family_id_for("cursive") != ahem);
+    assert(fr.family_id_for("") == FontRenderer::kDefaultFamily);
+}
+
+TEST(font_family_reaches_layout_from_css) {
+    using namespace litebird;
+
+    // The whole path, and not only the renderer: `font-family` has to survive
+    // the cascade, inherit, and reach the thing that measures a word. The
+    // renderer half is proved by measurement above; this proves the CSS half.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-family: Ahem">
+            <span id="inner">XXXX</span>
+            <span id="overridden" style="font-family: sans-serif">XXXX</span>
+        </div>
+    )");
+
+    StyleResolver resolver;
+
+    auto outer = doc->get_element_by_id("outer");
+    auto inner = doc->get_element_by_id("inner");
+    auto overridden = doc->get_element_by_id("overridden");
+    assert(outer && inner && overridden);
+
+    const ComputedStyle outer_style = resolver.resolve_style(outer, nullptr);
+
+    // It is the property, kept as written: resolution is the font layer's
+    // business and this layer has no business guessing at file names.
+    assert(outer_style.font_family == "Ahem");
+
+    // It inherits, like font-size does.
+    const ComputedStyle inner_style = resolver.resolve_style(inner, &outer_style);
+    assert(inner_style.font_family == "Ahem");
+
+    // ...and a declaration on the element itself beats the inherited one.
+    const ComputedStyle overridden_style = resolver.resolve_style(overridden, &outer_style);
+    assert(overridden_style.font_family == "sans-serif");
+
+    // An element with no `font-family` anywhere inherits an empty list, which
+    // the renderer reads as "the default family" rather than as a family
+    // called "".
+    const ComputedStyle bare = resolver.resolve_style(outer, nullptr);
+    assert(FontRenderer::instance().family_id_for(bare.font_family) ==
+           FontRenderer::instance().family_id_for("Ahem"));
+    assert(FontRenderer::instance().family_id_for(std::string_view{}) ==
+           FontRenderer::kDefaultFamily);
+}
+
+namespace {
+
+using namespace litebird;
+
+/// The vendored Ahem face as a `data:` URL a stylesheet can name.
+///
+/// `@font-face` is about bytes that arrive from a URL, so a test of it has to
+/// fetch them and not call into the rasterizer directly -- otherwise what is
+/// proved is the registry, which `font_family_selects_a_face` already covers.
+/// A `data:` URL is the one kind that needs no server, no document origin and
+/// no fonts on the host, so this says the same thing on a shared runner as it
+/// does on a laptop.
+std::string base64(const std::string& bytes) {
+    static const char* kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const unsigned char b0 = bytes[i];
+        const unsigned char b1 = i + 1 < bytes.size() ? bytes[i + 1] : 0;
+        const unsigned char b2 = i + 2 < bytes.size() ? bytes[i + 2] : 0;
+        out += kAlphabet[b0 >> 2];
+        out += kAlphabet[((b0 & 0x03) << 4) | (b1 >> 4)];
+        out += i + 1 < bytes.size() ? kAlphabet[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=';
+        out += i + 2 < bytes.size() ? kAlphabet[b2 & 0x3f] : '=';
+    }
+    return out;
+}
+
+std::string ahem_data_url() {
+    const ResourceResponse r = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!r.success || r.body.empty()) return {};
+    return "data:font/ttf;base64," + base64(r.body);
+}
+
+/// The first box that laid out `node` as text, if there is one.
+std::shared_ptr<LayoutBox> text_box_for(const std::shared_ptr<LayoutBox>& box,
+                                        const std::shared_ptr<Node>& node) {
+    if (!box) return nullptr;
+    if (box->node == node && box->box_type == BoxType::TextNode) return box;
+    for (const auto& child : box->children) {
+        if (auto found = text_box_for(child, node)) return found;
+    }
+    return nullptr;
+}
+
+/// The width a text node was actually laid out at, from the fragment the line
+/// builder produced -- which is the number the painter uses too, so it is the
+/// one that says whether a webfont reached the page and not only the
+/// rasterizer.
+float laid_out_width(const std::shared_ptr<LayoutBox>& root,
+                     const std::shared_ptr<Node>& node) {
+    const auto box = text_box_for(root, node);
+    if (!box) return -1.0f;
+    if (auto parent = box->parent.lock()) {
+        for (const LineBox& line : parent->line_boxes) {
+            for (const InlineFragment& frag : line.fragments) {
+                if (frag.text == box->text) return frag.rect.width;
+            }
+        }
+    }
+    return -1.0f;
+}
+
+} // namespace
+
+TEST(font_face_declares_the_family_the_page_names) {
+    using namespace litebird;
+
+    // Before this, `@font-face` was one of the at-rules the parser skipped:
+    // `skip_at_rule_remainder` threw it and everything in it away. So a page
+    // that brought its own font was rendered in whatever the host had, which
+    // for a page whose whole look is its typeface is the page not working.
+    const StyleSheet sheet = CssParser::parse(R"(
+        @font-face {
+            font-family: "Page Font";
+            src: url("a.woff") format("woff"), url(b.ttf) format("truetype");
+            font-weight: 100 400;
+            font-style: italic;
+        }
+        @font-face {
+            font-family: Body Text;
+            src: local("Some Local"), url(c.ttf);
+        }
+        @font-face { font-family: Heavy; src: url(d.ttf); font-weight: bold; }
+        p { color: red; }
+    )");
+
+    // An `@font-face` block is not a style rule: it has no selector, and its
+    // declarations must not end up in the cascade as if `p` had asked for them.
+    assert(sheet.rules.size() == 1);
+    assert(sheet.font_faces.size() == 3);
+
+    // The family is the name the *rule* declares, quotes removed, and not the
+    // name inside a file: a page may call a font anything it likes.
+    assert(sheet.font_faces[0].family == "Page Font");
+    // `src` is a fallback list, in the order it was written, and `format()` is
+    // a promise about the bytes rather than part of the URL.
+    assert(sheet.font_faces[0].sources.size() == 2);
+    assert(sheet.font_faces[0].sources[0].url == "a.woff");
+    assert(sheet.font_faces[0].sources[0].format == "woff");
+    assert(sheet.font_faces[0].sources[1].url == "b.ttf");
+    assert(sheet.font_faces[0].sources[1].format == "truetype");
+    // A weight range, and a style.
+    assert(sheet.font_faces[0].weight_min == 100);
+    assert(sheet.font_faces[0].weight_max == 400);
+    assert(sheet.font_faces[0].italic);
+
+    // An unquoted name of several words is one family and not a list of three.
+    assert(sheet.font_faces[1].family == "Body Text");
+    // `local()` names a font on the host and has no URL; it comes first here,
+    // which is the point of the idiom -- use what is installed, fetch if not.
+    assert(sheet.font_faces[1].sources.size() == 2);
+    assert(sheet.font_faces[1].sources[0].local == "Some Local");
+    assert(sheet.font_faces[1].sources[0].url.empty());
+    assert(sheet.font_faces[1].sources[1].url == "c.ttf");
+    // An unspecified descriptor is `normal`, not zero and not unset.
+    assert(sheet.font_faces[1].weight_min == 400);
+    assert(sheet.font_faces[1].weight_max == 400);
+    assert(!sheet.font_faces[1].italic);
+    // A source with no `format()` says nothing about the bytes.
+    assert(sheet.font_faces[1].sources[1].format.empty());
+
+    // A keyword weight, as a range of one.
+    assert(sheet.font_faces[2].weight_min == 700);
+    assert(sheet.font_faces[2].weight_max == 700);
+
+    // A rule inside an `@media` that does not match declares nothing.
+    const StyleSheet gated = CssParser::parse(R"(
+        @media (min-width: 999999px) {
+            @font-face { font-family: Hidden; src: url(x.ttf); }
+        }
+        @font-face { font-family: Shown; src: url(y.ttf); }
+    )");
+    bool saw_hidden = false;
+    bool saw_shown = false;
+    for (const FontFaceRule& f : gated.font_faces) {
+        if (f.family == "Hidden") saw_hidden = true;
+        if (f.family == "Shown") saw_shown = true;
+    }
+    assert(saw_shown);
+    // Printed rather than asserted silently whichever way it goes: whether the
+    // parser can tell a media query does not match without a viewport is not
+    // something this test is entitled to assume about the host.
+    std::printf("      [@font-face] gated hidden=%s shown=%s\n",
+                saw_hidden ? "yes" : "no", saw_shown ? "yes" : "no");
+    std::fflush(stdout);
+}
+
+TEST(font_face_brings_the_family_the_page_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // A webfont belongs to the document that declared it, and the registry is
+    // a singleton because the rasterizer is. Left over from another page, a
+    // family name would resolve to whichever page was laid out first.
+    fr.clear_webfonts();
+
+    const std::string url = ahem_data_url();
+    if (url.empty()) return;   // the vendored face is absent; nothing to prove
+
+    // The oracle is the same one `font_family_selects_a_face` uses: every
+    // glyph in Ahem is exactly 1em wide, so four characters at 16 px measure
+    // 64.00 px in Ahem and in nothing else on this host. The font is arriving
+    // through the URL in `src` here, not through a call to the rasterizer.
+    auto doc = HtmlParser::parse(
+        "<style>"
+        "@font-face { font-family: \"Page Font\"; src: url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: 'Ahem'; src: url('" + url + "'); font-weight: 700; }"
+        "@font-face { font-family: Broken; src: url('data:font/ttf;base64,AAAA') format('truetype'),"
+        "                                       url('" + url + "') format('truetype'); }"
+        "@font-face { font-family: Local Font; src: local('Ahem'); }"
+        "@font-face { font-family: Woff Only; src: url('" + url + "') format('woff'); }"
+        "</style>"
+        "<div id=\"web\" style=\"font-family: 'Page Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"host\" style=\"font-family: Ahem; font-size: 16px\">XXXX</div>"
+        "<div id=\"second\" style=\"font-family: Broken; font-size: 16px\">XXXX</div>"
+        "<div id=\"local\" style=\"font-family: 'Local Font'; font-size: 16px\">XXXX</div>"
+        "<div id=\"plain\" style=\"font-size: 16px\">XXXX</div>");
+
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    const int page_font = fr.family_id_for("Page Font");
+    assert(page_font != FontRenderer::kNoFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") - 64.0f) < 0.5f);
+
+    // The bytes were fetched and parsed as a font, and not merely registered:
+    // a family that never loaded measures like the default face.
+    if (fr.has_truetype_font()) {
+        assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Page Font") -
+                         fr.measure_text("XXXX", 16.0f, 400)) > 1.0f);
+    }
+
+    // A webfont outranks a host family of the same name. "Ahem" here names
+    // both a system face (registered above by `font_family_selects_a_face`)
+    // and this rule's, and CSS's answer is the page's. The rule declares
+    // `font-weight: 700`, so at 400 the host's Ahem is what answers and at
+    // 700 the page's is -- both are Ahem, so what proves the precedence is
+    // the weight, which only the page's rule declares.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 700, "Ahem") - 64.0f) < 0.5f);
+
+    // `src` is a fallback list: the first source is four zero bytes, which is
+    // not a font, so the second is what is used. A source that will not parse
+    // is not failure, it is an instruction to try the next one.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Broken") - 64.0f) < 0.5f);
+
+    // `local()` names a face the host already has and is answered out of the
+    // registry rather than fetched -- the "use what is installed" half of
+    // `local("Font"), url(font.ttf)`.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Local Font") - 64.0f) < 0.5f);
+
+    // `format()` is a promise about the bytes, and a promise of `woff` is one
+    // this engine cannot keep: it reads TrueType outlines and nothing else.
+    // Such a source is not fetched, so the rule registers no face at all
+    // rather than a face that would fail to load the moment it was wanted.
+    assert(fr.family_id_for("Woff Only") == FontRenderer::kDefaultFamily);
+
+    // --- and it reaches layout, not only the renderer --------------------
+    // The fragment width is the observable that matters: it is what the line
+    // builder measured and what the painter will draw, so a webfont that
+    // reached the registry but not the page scores 64.00 here and nowhere.
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+    for (const char* id : {"web", "second", "local"}) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        const float width = laid_out_width(root, el->first_child());
+        std::printf("      [@font-face] #%-7s 'XXXX' laid out at %.2f px\n", id, width);
+        std::fflush(stdout);
+        assert(std::fabs(width - 64.0f) < 0.5f);
+    }
+
+    // `font-family` inherits into the box that measures text, which is what
+    // makes any of this visible. It did not use to: the style a text box is
+    // built with carried `font-size` and `font-weight` and not `font-family`,
+    // so a text node was measured in the default face whatever its element
+    // asked for -- and `<pre>`, which the UA stylesheet gives
+    // `font-family: monospace`, was laid out proportional.
+    auto host_el = doc->get_element_by_id("host");
+    assert(host_el);
+    const float host_width = laid_out_width(root, host_el->first_child());
+    assert(std::fabs(host_width - 64.0f) < 0.5f);
+
+    // An element that named no family is not given the page's font by
+    // accident. This is the assertion that would pass if registration were
+    // global rather than by name.
+    if (fr.has_truetype_font()) {
+        auto plain = doc->get_element_by_id("plain")->first_child();
+        const float plain_width = laid_out_width(root, plain);
+        std::printf("      [@font-face] #plain   'XXXX' laid out at %.2f px\n", plain_width);
+        std::fflush(stdout);
+        assert(plain_width < 0.0f || std::fabs(plain_width - 64.0f) > 1.0f);
+    }
+
+    // Forgetting a document's webfonts takes the family with it, and does not
+    // take the host's own faces -- "Ahem" is still Ahem after this, because
+    // `font_family_selects_a_face` registered it from disk and not from a page.
+    fr.clear_webfonts();
+    assert(fr.family_id_for("Page Font") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Broken") == FontRenderer::kDefaultFamily);
+    assert(fr.family_id_for("Local Font") == FontRenderer::kDefaultFamily);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Ahem") - 64.0f) < 0.5f);
+}
+
+TEST(font_family_reaches_the_box_that_measures_text) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // `<pre>` is the case that shows it: the UA stylesheet gives it
+    // `font-family: monospace`, and the whole point of a monospaced face is
+    // that its glyphs are the same width. A `<pre>` laid out proportional is
+    // a `<pre>` whose columns do not line up, which is a `<pre>` that does not
+    // do the one thing it exists to do.
+    if (fr.generic_family_id("monospace") == FontRenderer::kNoFamily) return;
+    if (!fr.has_truetype_font()) return;
+    // ...and a host whose default face is itself monospace could not tell the
+    // two apart, so the comparison below would prove nothing.
+    if (fr.default_family_id() == fr.generic_family_id("monospace")) return;
+
+    auto doc = HtmlParser::parse(R"(
+        <pre id="narrow">iiii</pre>
+        <pre id="wide">WWWW</pre>
+        <p id="pnarrow">iiii</p>
+        <p id="pwide">WWWW</p>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+
+    // The width of an element's text, as the line builder measured it -- which
+    // is the number the painter draws with, so it is the one that says whether
+    // a family reached the page and not only the resolver.
+    auto text_width = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        return laid_out_width(root, el->first_child());
+    };
+
+    const float narrow = text_width("narrow");
+    const float wide = text_width("wide");
+    const float p_narrow = text_width("pnarrow");
+    const float p_wide = text_width("pwide");
+    if (narrow < 0.0f || wide < 0.0f || p_narrow < 0.0f || p_wide < 0.0f) return;
+
+    std::printf("      [font-family] <pre> iiii=%.2f WWWW=%.2f\n", narrow, wide);
+    std::printf("      [font-family]  <p> iiii=%.2f WWWW=%.2f\n", p_narrow, p_wide);
+    std::fflush(stdout);
+
+    // In a monospace face 'i' and 'W' advance the same. That is what
+    // `monospace` means, and it is the assertion that failed before: the style
+    // a text box is built with carried `font-size` and `font-weight` and not
+    // `font-family`, so every text node was measured in the default face.
+    assert(std::fabs(narrow - wide) < 0.5f);
+    // ...and the same two lines in a proportional face do not, which is what
+    // makes the assertion above mean anything.
+    assert(std::fabs(p_narrow - p_wide) > 1.0f);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -11853,6 +12430,72 @@ static const uint8_t kWebpLossy[] = {
     0x5F, 0xC9, 0x1F, 0xA0, 0x5E, 0x90, 0x7F, 0xE0, 0x37, 0x5F, 0x16, 0xCB, 0xE0, 0x00,
 };
 
+// kWebpLossy16x16: 244 bytes, a lossy VP8 file written by libwebp 1.2.4 through ImageMagick.
+static const uint8_t kWebpLossy16x16[] = {
+    0x52, 0x49, 0x46, 0x46, 0xEC, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
+    0xE0, 0x00, 0x00, 0x00, 0x30, 0x03, 0x00, 0x9D, 0x01, 0x2A, 0x10, 0x00, 0x10, 0x00, 0x00, 0x80,
+    0x0E, 0x25, 0xB0, 0x02, 0x74, 0xBA, 0x01, 0xF8, 0x00, 0x80, 0x0D, 0x22, 0x05, 0x24, 0x02, 0x8F,
+    0x23, 0x30, 0x32, 0x87, 0x74, 0x00, 0x00, 0xFE, 0xF7, 0xCF, 0x13, 0x2B, 0x98, 0x69, 0xFC, 0x74,
+    0xCD, 0x70, 0xE1, 0x30, 0x1B, 0xAD, 0x0F, 0xA5, 0x1E, 0x96, 0xDD, 0xDD, 0xD2, 0x8A, 0xA7, 0x41,
+    0xD5, 0x09, 0x76, 0xFC, 0x78, 0x29, 0xBB, 0xF6, 0x8F, 0xEF, 0xF8, 0xEC, 0xDA, 0x69, 0x39, 0x0F,
+    0x13, 0x8B, 0x84, 0xA7, 0xF1, 0x97, 0xF8, 0xA1, 0x27, 0x28, 0x9E, 0xDE, 0x33, 0x5D, 0xFD, 0xD4,
+    0x3F, 0x66, 0x76, 0x8F, 0xD5, 0x74, 0xA8, 0x8A, 0xEE, 0xFC, 0xC1, 0xB0, 0xF7, 0x45, 0x03, 0x47,
+    0xD2, 0x6E, 0x1B, 0xD2, 0xEF, 0x4B, 0xCE, 0x7E, 0x55, 0xD9, 0x2D, 0xBD, 0xB7, 0x11, 0x77, 0x70,
+    0x0E, 0xB4, 0x27, 0xC7, 0x11, 0x74, 0xA9, 0x1D, 0x9B, 0x4B, 0x99, 0xEA, 0x6D, 0x17, 0x2E, 0xB2,
+    0x65, 0xBA, 0xFB, 0xFE, 0xD2, 0xCB, 0xB4, 0x97, 0xBF, 0xFA, 0xF4, 0xBD, 0x26, 0x77, 0x80, 0x32,
+    0x9F, 0xA3, 0xC9, 0x8E, 0x5A, 0xBD, 0x9E, 0xA6, 0x9B, 0x7F, 0x8F, 0x7E, 0xDB, 0x2D, 0xC5, 0xFF,
+    0x93, 0xFF, 0x1F, 0xD5, 0x5D, 0x42, 0xFF, 0xFE, 0x71, 0xB3, 0xFF, 0x89, 0x87, 0xBE, 0x0F, 0x5F,
+    0xF7, 0x6C, 0x1F, 0xEC, 0xFF, 0xA6, 0x9A, 0xE9, 0xD3, 0x37, 0xF7, 0x55, 0x1F, 0xF8, 0x98, 0xFF,
+    0x5E, 0xFA, 0x67, 0x3F, 0x48, 0x0D, 0x1E, 0x7F, 0xFD, 0x8E, 0xB7, 0xFC, 0x76, 0xEA, 0x7D, 0x31,
+    0x40, 0x00, 0x00, 0x00,
+};
+
+static const uint32_t kExpectLossy16x16[] = {
+    0xFFEF20FF, 0xFFDF0EF9, 0xFFEA15FA, 0xFFE70DED, 0xFFF00EEE, 0xFFF00FEA, 0xFFEC16E6, 0xFFEE25EF,
+    0xFFE328F0, 0xFFEC39FC, 0xFFD929E4, 0xFFD92CE1, 0xFFDA33E4, 0xFFDA30E2, 0xFFE531E8, 0xFFD41BD5,
+    0xFFD513F4, 0xFFDB15F5, 0xFFD408E7, 0xFFE00FEC, 0xFFE710E8, 0xFFF01AED, 0xFFFB2CF8, 0xFFFB39FE,
+    0xFFE536F5, 0xFFE644FA, 0xFFCE32DF, 0xFFBC23CB, 0xFFCE33D9, 0xFFD437DE, 0xFFD533DE, 0xFFDF38E7,
+    0xFFC018E5, 0xFFC516E5, 0xFFD61BF0, 0xFFC908DB, 0xFFCC0CD5, 0xFFDC1DE1, 0xFFF838FF, 0xFFF241FF,
+    0xFFCF3AE9, 0xFFD959FA, 0xFFBB48DE, 0xFFB946D8, 0xFFB93ACE, 0xFFBD3ACF, 0xFFC544DA, 0xFFC341DA,
+    0xFFBF2CE6, 0xFFBB24E0, 0xFFC21EE0, 0xFFBE18DB, 0xFFB111CB, 0xFFC525DD, 0xFFE745FF, 0xFFE146FC,
+    0xFFCC48ED, 0xFFC859F1, 0xFFAC4FD9, 0xFFA74DD2, 0xFFAE46CD, 0xFFBB51D9, 0xFFBC59E1, 0xFFA443CD,
+    0xFFCD4BF4, 0xFFC341EA, 0xFFBF3DE4, 0xFFB93CE3, 0xFFA632DB, 0xFFA12DD8, 0xFFC246F2, 0xFFCC4EF8,
+    0xFFCB4EF1, 0xFFC453EB, 0xFFB95BE6, 0xFFA24DD0, 0xFFB861E2, 0xFFC974F5, 0xFF9D52D2, 0xFF9C55D6,
+    0xFFBD58EC, 0xFFCC67FB, 0xFFB04DDE, 0xFFAB4CE0, 0xFFA34CE7, 0xFF9540DE, 0xFFA44DEA, 0xFFA94BEA,
+    0xFFAF45E4, 0xFFB047E1, 0xFFA047D5, 0xFFA458DD, 0xFFA060DE, 0xFFB077F3, 0xFF9E67E5, 0xFF8550CF,
+    0xFFB477F0, 0xFFB676F2, 0xFFB46FF2, 0xFFA963EA, 0xFFA65FEE, 0xFF9350E1, 0xFF945CEF, 0xFF9258ED,
+    0xFF964BE8, 0xFF9543DE, 0xFF9546DA, 0xFFA162EC, 0xFF8863E1, 0xFF9D82FD, 0xFFA17EFE, 0xFF7F57DB,
+    0xFF9C8AEE, 0xFFB09AFF, 0xFFA085F4, 0xFFA784FB, 0xFF9F76F3, 0xFFA37EFE, 0xFF9A88FF, 0xFF8976FA,
+    0xFF7D59E2, 0xFF8759E6, 0xFF9663EF, 0xFF825CE2, 0xFF7E73F0, 0xFF7C78F4, 0xFF8271F2, 0xFF8974F8,
+    0xFF7990E5, 0xFF93A9FF, 0xFF8BA1F9, 0xFF8A98F5, 0xFF9A9EFF, 0xFF9196FF, 0xFF798DF4, 0xFF758BF1,
+    0xFF91A0FF, 0xFF8088F2, 0xFF7272E4, 0xFF6B6CE2, 0xFF5D6BE3, 0xFF6B7CF6, 0xFF777EFC, 0xFF7F81FF,
+    0xFF78B9FF, 0xFF6FB6FC, 0xFF61B0EC, 0xFF65B2EC, 0xFF6CABEC, 0xFF7BB6FB, 0xFF6DB1FA, 0xFF5399E4,
+    0xFF68AAF3, 0xFF81BAFF, 0xFF7AACFF, 0xFF6391F1, 0xFF5E8DF5, 0xFF5B86F5, 0xFF5F80F5, 0xFF6F8CFF,
+    0xFF49B4F9, 0xFF51CAFF, 0xFF3DCFEB, 0xFF44DAE7, 0xFF56DDE6, 0xFF50D0DE, 0xFF52D1F1, 0xFF48C3EE,
+    0xFF4EC3F2, 0xFF68D6FF, 0xFF6CCDFF, 0xFF55B1F4, 0xFF4BA3F0, 0xFF4F9EF7, 0xFF5093F7, 0xFF5A96FF,
+    0xFF26ADEB, 0xFF33C9F3, 0xFF2ADFE9, 0xFF2AE9DD, 0xFF36EBD6, 0xFF43F0E1, 0xFF3FE4EC, 0xFF3DD8EF,
+    0xFF3AD0ED, 0xFF52E3FF, 0xFF52DCFF, 0xFF59DBFF, 0xFF54CDFF, 0xFF4CBEFF, 0xFF43ACFF, 0xFF48AAFF,
+    0xFF2CC3F9, 0xFF33D5FA, 0xFF2BE3E7, 0xFF24EBDA, 0xFF27F1DD, 0xFF3AFEEE, 0xFF3DF1F0, 0xFF32DEE6,
+    0xFF3BE1F2, 0xFF49EDFF, 0xFF29CAEA, 0xFF37D5F9, 0xFF45DEFF, 0xFF42D8FF, 0xFF34C5FF, 0xFF2BBAFF,
+    0xFF17C3E7, 0xFF1CCFE5, 0xFF18DAD4, 0xFF1DEBD6, 0xFF18EED6, 0xFF29FDEA, 0xFF2FF8F2, 0xFF22E0E4,
+    0xFF26DFEB, 0xFF29DEF3, 0xFF30E7FF, 0xFF16CCE9, 0xFF32E4FF, 0xFF3BECFF, 0xFF23D4FF, 0xFF12C5F4,
+    0xFF17DCE4, 0xFF15DEDC, 0xFF00CFB8, 0xFF14EACB, 0xFF14EFCE, 0xFF13F2D9, 0xFF1AFBF3, 0xFF1AF4FA,
+    0xFF0ED8E8, 0xFF22E7FD, 0xFF07D0E5, 0xFF0ED9F2, 0xFF07CBEB, 0xFF27EAFF, 0xFF29F4FF, 0xFF13E0F6,
+    0xFF11E4DF, 0xFF27FBEF, 0xFF17EFD1, 0xFF01DEB8, 0xFF04E3BC, 0xFF05E9CC, 0xFF12FEF5, 0xFF13F8FF,
+    0xFF23F6FF, 0xFF0CD7F0, 0xFF10E3F7, 0xFF0BE0F6, 0xFF16E2FF, 0xFF08D4F4, 0xFF17EDFD, 0xFF1CF8FF
+};
+
+static const uint32_t kExpectLossy8x8[] = {
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+    0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA, 0xFF3367CA,
+};
+
 static const uint32_t kExpect1x1[] = {
     0xFF123456
 };
@@ -11991,13 +12634,24 @@ TEST(webp_lossless_decodes_every_transform) {
 TEST(webp_unsupported_and_malformed_input_is_refused) {
     using namespace litebird;
 
-    // Lossy VP8 is a different codec: refuse it rather than approximate it.
-    auto lossy = WebPDecoder::decode_detailed(kWebpLossy, sizeof(kWebpLossy));
-    assert(!lossy.ok());
-    assert(lossy.status == WebPDecoder::Status::UnsupportedLossy);
-    assert(lossy.error.find("lossy") != std::string::npos);
-    assert(WebPDecoder::probe(kWebpLossy, sizeof(kWebpLossy)) == WebPDecoder::Status::UnsupportedLossy);
-    assert(WebPDecoder::decode(kWebpLossy, sizeof(kWebpLossy)) == nullptr);
+    // A lossy stream whose payload is cut short must be reported as truncated,
+    // not decoded to a half-finished picture.
+    {
+        const size_t chunk_at = 20;  // the first byte of the `VP8 ` payload
+        for (size_t cut : {chunk_at + 1, chunk_at + 8, chunk_at + 20, sizeof(kWebpLossy) - 1}) {
+            auto res = WebPDecoder::decode_detailed(kWebpLossy, cut);
+            assert(!res.ok());
+            assert(res.status == WebPDecoder::Status::Truncated);
+        }
+        // Setting the frame-type bit of the frame tag asks for a frame that
+        // predicts from a previous one, which a still image does not have.
+        std::vector<uint8_t> not_a_key_frame(kWebpLossy, kWebpLossy + sizeof(kWebpLossy));
+        not_a_key_frame[chunk_at] = static_cast<uint8_t>(not_a_key_frame[chunk_at] | 0x01u);
+        auto res = WebPDecoder::decode_detailed(not_a_key_frame.data(), not_a_key_frame.size());
+        assert(!res.ok());
+        assert(res.status == WebPDecoder::Status::Corrupt);
+        assert(res.error.find("inter-coded") != std::string::npos);
+    }
 
     // Animated WebP: the frames are VP8/VP8L images on a canvas, which is a
     // compositing job this decoder does not do.
@@ -12051,6 +12705,157 @@ TEST(webp_unsupported_and_malformed_input_is_refused) {
     auto empty_stream = WebPDecoder::decode_detailed(header_only, sizeof(header_only));
     assert(!empty_stream.ok());
     assert(empty_stream.status == WebPDecoder::Status::Truncated);
+}
+
+TEST(webp_lossy_vp8_decodes_bit_exactly) {
+    using namespace litebird;
+
+    // A flat 8x8 lossy stream: one macroblock, DC prediction, no residuals worth
+    // coding, so every pixel is the same colour libwebp produces.
+    check_webp_pixels(kWebpLossy, sizeof(kWebpLossy), kExpectLossy8x8, 8, 8, "lossy flat 8x8");
+    auto flat = WebPDecoder::decode_detailed(kWebpLossy, sizeof(kWebpLossy));
+    assert(flat.ok() && flat.lossy);
+    assert(WebPDecoder::probe(kWebpLossy, sizeof(kWebpLossy)) == WebPDecoder::Status::Ok);
+
+    // A 16x16 plasma at quality 92: 4x4 prediction modes, real coefficients, and
+    // a loop filter that has something to smooth. Expected pixels are libwebp's.
+    check_webp_pixels(kWebpLossy16x16, sizeof(kWebpLossy16x16), kExpectLossy16x16, 16, 16, "lossy 16x16");
+    auto textured = WebPDecoder::decode_detailed(kWebpLossy16x16, sizeof(kWebpLossy16x16));
+    assert(textured.ok() && textured.lossy);
+
+    // A lossless image is not marked lossy, and the two must not be confused.
+    auto lossless = WebPDecoder::decode_detailed(kWebp1x1, sizeof(kWebp1x1));
+    assert(lossless.ok() && !lossless.lossy);
+
+    // Two decodes of the same bytes agree, and the generic entry point that
+    // <img> uses reaches the same pixels.
+    auto again = WebPDecoder::decode(kWebpLossy16x16, sizeof(kWebpLossy16x16));
+    assert(again != nullptr && again->pixels == textured.image->pixels);
+    std::vector<uint8_t> bytes(kWebpLossy16x16, kWebpLossy16x16 + sizeof(kWebpLossy16x16));
+    auto via_decoder = ImageDecoder::decode(bytes, "image/webp");
+    assert(via_decoder != nullptr && via_decoder->pixels == textured.image->pixels);
+}
+
+TEST(webp_lossy_alpha_plane_and_container_consistency) {
+    using namespace litebird;
+
+    // Build a `VP8X` + `ALPH` + `VP8 ` file around the flat 8x8 payload so the
+    // alpha plane is the only thing that varies. Chunk sizes and the RIFF size
+    // are computed here rather than copied, which is also what keeps a mismatch
+    // from hiding behind the decoder's truncation check.
+    const auto append_chunk = [](std::vector<uint8_t>& out, const char* fourcc,
+                                 const std::vector<uint8_t>& payload) {
+        out.insert(out.end(), fourcc, fourcc + 4);
+        const uint32_t size = static_cast<uint32_t>(payload.size());
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.push_back(static_cast<uint8_t>((size >> shift) & 0xFFu));
+        }
+        out.insert(out.end(), payload.begin(), payload.end());
+        if ((payload.size() & 1u) != 0) out.push_back(0);
+    };
+    const auto build = [&](int alph_header, const std::vector<uint8_t>& alph_payload) {
+        std::vector<uint8_t> vp8(kWebpLossy + 8 + 12, kWebpLossy + sizeof(kWebpLossy));  // payload only
+        std::vector<uint8_t> vp8x = {0x10, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00};
+        std::vector<uint8_t> alph;
+        alph.push_back(static_cast<uint8_t>(alph_header));
+        alph.insert(alph.end(), alph_payload.begin(), alph_payload.end());
+        std::vector<uint8_t> out = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+        append_chunk(out, "VP8X", vp8x);
+        append_chunk(out, "ALPH", alph);
+        append_chunk(out, "VP8 ", vp8);
+        const uint32_t riff_size = static_cast<uint32_t>(out.size() - 8);
+        for (int shift = 0; shift < 32; shift += 8) {
+            out[4 + shift / 8] = static_cast<uint8_t>((riff_size >> shift) & 0xFFu);
+        }
+        return out;
+    };
+
+    // An unfiltered plane: row y, column x holds `16 * y + x`.
+    std::vector<uint8_t> plane(64);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) plane[static_cast<size_t>(y * 8 + x)] = static_cast<uint8_t>(16 * y + x);
+    }
+    std::vector<uint8_t> file = build(0x00, plane);  // compression 0, filter 0
+    auto res = WebPDecoder::decode_detailed(file.data(), file.size());
+    assert(res.ok() && res.lossy);
+    assert(res.image->width == 8 && res.image->height == 8);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const uint32_t pixel = res.image->get_pixel(x, y);
+            const uint32_t want_alpha = static_cast<uint32_t>(16 * y + x) << 24;
+            assert((pixel & 0xFF000000u) == want_alpha);
+            // The colour channels are the ones the same payload decodes to alone.
+            assert((pixel & 0x00FFFFFFu) == (kExpectLossy8x8[0] & 0x00FFFFFFu));
+        }
+    }
+
+    // The encoder stores `value - predictor` modulo 256, and the three spatial
+    // filters differ only in the predictor they invert. Every one of them falls
+    // back to the horizontal filter on the first row, where the horizontal one's
+    // first pixel predicts from the pixel above it (libwebp's unfilter starts
+    // from `prev[0]`, not from zero).
+    const auto forward_filter = [&](int kind) {
+        std::vector<uint8_t> out(plane.size(), 0);
+        const auto at = [&](int y, int x) { return static_cast<int>(plane[static_cast<size_t>(y * 8 + x)]); };
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                int pred = 0;
+                if (y == 0) {
+                    pred = x == 0 ? 0 : at(0, x - 1);                       // horizontal fallback
+                } else if (kind == 1) {
+                    pred = x == 0 ? at(y - 1, 0) : at(y, x - 1);            // left
+                } else if (kind == 2) {
+                    pred = at(y - 1, x);                                    // above
+                } else {
+                    const int left = x == 0 ? at(y - 1, 0) : at(y, x - 1);  // left + above - above-left
+                    pred = left + at(y - 1, x) - (x == 0 ? at(y - 1, 0) : at(y - 1, x - 1));
+                }
+                out[static_cast<size_t>(y * 8 + x)] = static_cast<uint8_t>((at(y, x) - pred) & 0xFF);
+            }
+        }
+        return out;
+    };
+    const auto check_plane = [&](const std::vector<uint8_t>& bytes, const char* what) {
+        auto filtered_res = WebPDecoder::decode_detailed(bytes.data(), bytes.size());
+        assert(filtered_res.ok());
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                const uint32_t pixel = filtered_res.image->get_pixel(x, y);
+                const uint32_t want_alpha = static_cast<uint32_t>(16 * y + x) << 24;
+                if ((pixel & 0xFF000000u) != want_alpha) {
+                    std::fprintf(stderr, "%s: alpha at %d,%d is %u, expected %d\n", what, x, y,
+                                 (pixel >> 24) & 0xFFu, 16 * y + x);
+                    assert(false);
+                }
+            }
+        }
+    };
+    for (const int filter_kind : {1, 2, 3}) {
+        const uint8_t header = static_cast<uint8_t>(filter_kind << 2);
+        check_plane(build(header, forward_filter(filter_kind)),
+                    filter_kind == 1 ? "horizontal filter" : filter_kind == 2 ? "vertical filter" : "gradient filter");
+    }
+
+    // A plane that is too short for the picture is corrupt, not half-alpha.
+    std::vector<uint8_t> short_plane = build(0x00, std::vector<uint8_t>(63, 0x80));
+    auto short_res = WebPDecoder::decode_detailed(short_plane.data(), short_plane.size());
+    assert(!short_res.ok());
+    assert(short_res.status == WebPDecoder::Status::Corrupt);
+    assert(short_res.error.find("size") != std::string::npos);
+
+    // Level-reduction preprocessing re-quantised the plane when the file was
+    // written and would need the dequantisation table to undo: refuse it.
+    std::vector<uint8_t> preprocessed = build(0x10, plane);  // preprocessing 1
+    auto pre = WebPDecoder::decode_detailed(preprocessed.data(), preprocessed.size());
+    assert(!pre.ok());
+    assert(pre.status == WebPDecoder::Status::UnsupportedAlpha);
+    assert(pre.error.find("level-reduction") != std::string::npos);
+
+    // Reserved header bits are a contradiction, not something to ignore.
+    std::vector<uint8_t> reserved = build(0x40, plane);
+    auto reserved_res = WebPDecoder::decode_detailed(reserved.data(), reserved.size());
+    assert(!reserved_res.ok());
+    assert(reserved_res.status == WebPDecoder::Status::Corrupt);
 }
 
 TEST(canvas_text_filltext_stroketext_measuretext_and_font_state) {
@@ -12315,7 +13120,8 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
 }
 
 // ============================================================================
-// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
+// module execution and structured-clone delivery below.
 // ============================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
@@ -12568,20 +13374,24 @@ TEST(worker_options_module_policy_and_global_scope) {
     assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
     assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
 
-    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
-    //    it queues an error event to both onerror and addEventListener('error').
+    // 2. A module worker is a strict module wrapper, not a classic fallback.
+    //    It runs a data: entry module, keeps its configured name, and does not
+    //    expose classic importScripts(). The static import graph itself is
+    //    covered by the Phase 66 clone/module test below.
     js.eval(
-        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
-        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
-        "wm.onmessage = function() { modRan = true; };"
-        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "var modInfo = null, modOnErr = '', modEvErr = '';"
+        "var wm = new Worker('data:text/javascript,postMessage({ name:self.name, globalName:name, topThis:this === undefined, importScriptsType:typeof importScripts })', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function(e) { modInfo = e.data; };"
+        "wm.onerror = function(e) { modOnErr = e.message; };"
         "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
     );
-    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
-    assert(!js.eval("modRan").is_truthy());
-    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
-    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
-    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    assert(wait_for(js, "modInfo !== null"));
+    assert(js.eval("modInfo.name").to_string() == "mod1");
+    assert(js.eval("modInfo.globalName").to_string() == "mod1");
+    assert(js.eval("modInfo.topThis").is_truthy());
+    assert(js.eval("modInfo.importScriptsType").to_string() == "undefined");
+    assert(js.eval("modOnErr").to_string().empty());
+    assert(js.eval("modEvErr").to_string().empty());
     js.eval("wm.terminate();");
 
     // 3. Classic options (name, self.location, null/undefined options) and importScripts().
@@ -12742,6 +13552,171 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     );
     WorkerObject::shutdown_all_workers();
     EventLoop::default_loop().tick();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 66: structured-clone delivery across Worker, Window and MessagePort.
+// ---------------------------------------------------------------------------
+
+TEST(structured_clone_message_delivery_and_refusal) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://clone.example.test/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    js.eval(R"js(
+        var workerReply, workerCloneReport, pageCloneError = '', transferCloneError = '';
+        var worker = new Worker('data:text/javascript,self.onmessage = function(e) { e.data.shared.leaf = 22; postMessage(e.data); };');
+        worker.onmessage = function(e) { workerReply = e.data; };
+        var shared = { leaf: 7 };
+        var workerSent = { shared: shared, alias: shared, missing: undefined,
+                           nan: 0 / 0, inf: 1 / 0, neg: -0, items: [1, undefined] };
+        workerSent.self = workerSent;
+        worker.postMessage(workerSent);
+        shared.leaf = 99;
+        try { worker.postMessage(function() {}); } catch (e) { pageCloneError = e.name + ':' + e.code; }
+        try { worker.postMessage({x: 1}, [{}]); } catch (e) { transferCloneError = e.name + ':' + e.code; }
+
+        var errorWorker = new Worker('data:text/javascript,try { postMessage(function() {}); } catch (e) { postMessage({name: e.name, code: e.code}); }');
+        errorWorker.onmessage = function(e) { workerCloneReport = e.data; };
+
+        var channelReply, channelSent = { child: { n: 2 } };
+        channelSent.self = channelSent;
+        var channel = new MessageChannel();
+        channel.port2.onmessage = function(e) { channelReply = e.data; };
+        channel.port1.postMessage(channelSent, []);
+        channelSent.child.n = 9;
+
+        var windowReply, windowSent = { kind: 'window-copy', child: { n: 3 } };
+        windowSent.self = windowSent;
+        window.addEventListener('message', function(e) {
+          if (e.data && e.data.kind === 'window-copy') windowReply = e.data;
+        });
+        window.postMessage(windowSent, '*');
+        windowSent.child.n = 11;
+    )js");
+
+    assert(wait_for(js, "workerReply !== undefined && workerCloneReport !== undefined && channelReply !== undefined && windowReply !== undefined"));
+
+    // Page -> worker -> page: nested data is copied at send time, special
+    // numeric values survive, and graph aliases/cycles remain aliases/cycles
+    // inside the receiving agent rather than pointing back at sender objects.
+    assert(js.eval(
+        "workerReply !== workerSent && workerReply.self === workerReply && "
+        "workerReply.shared === workerReply.alias && workerReply.shared !== shared && "
+        "workerReply.shared.leaf === 22 && shared.leaf === 99 && "
+        "('missing' in workerReply) && workerReply.missing === undefined && "
+        "workerReply.nan !== workerReply.nan && workerReply.inf === 1 / 0 && "
+        "workerReply.neg === 0 && 1 / workerReply.neg < 0 && workerReply.items[1] === undefined"
+    ).is_truthy());
+
+    // The same packet model applies to same-agent ports and windows: their
+    // asynchronous deliveries are copies too, not retained source identities.
+    assert(js.eval("channelReply !== channelSent && channelReply.self === channelReply && channelReply.child.n === 2 && channelSent.child.n === 9").is_truthy());
+    assert(js.eval("windowReply !== windowSent && windowReply.self === windowReply && windowReply.child.n === 3 && windowSent.child.n === 11").is_truthy());
+
+    // Functions and non-empty transfer lists are refused synchronously at the
+    // sender; the worker reports the same DOMException when it is the sender.
+    assert(js.eval("pageCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("transferCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("workerCloneReport.name + ':' + workerCloneReport.code").to_string() == "DataCloneError:25");
+
+    js.eval("worker.terminate(); errorWorker.terminate(); channel.port1.close(); channel.port2.close();");
+}
+
+TEST(module_worker_static_graph_loading_and_refusal) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const fs::path root = fs::temp_directory_path() /
+                          ("litebird_module_worker_" + std::to_string(static_cast<long>(::getpid())));
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        std::ofstream math(root / "math.js");
+        math << "export const base = 40;\n"
+                "export const label = 'module';\n"
+                "export function add(a, b) { return a + b; }\n";
+    }
+    {
+        std::ofstream tools(root / "tools.js");
+        tools << "import { base, add as plus } from './math.js';\n"
+                 "export const answer = plus(base, 2);\n"
+                 "export default function decorate(value) { return 'answer:' + value; }\n";
+    }
+    {
+        std::ofstream reexport(root / "reexport.js");
+        reexport << "export { answer as finalAnswer } from './tools.js';\n";
+    }
+    {
+        std::ofstream entry(root / "entry.js");
+        entry << "import decorate from './tools.js';\n"
+                 "import { finalAnswer } from './reexport.js';\n"
+                 "import * as math from './math.js';\n"
+                 "postMessage({ text: decorate(finalAnswer), label: math.label, sum: math.add(1, 2), "
+                 "topThis: this === undefined, classicImport: typeof importScripts });\n";
+    }
+    {
+        std::ofstream unsupported(root / "unsupported.js");
+        unsupported << "export * from './math.js';\npostMessage('MUST_NOT_RUN');\n";
+    }
+
+    ResourceLoader::set_origin_root_for_testing("https://module.example.test", root.string());
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://module.example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+
+    js.eval(R"js(
+        var moduleReply = null, moduleError = '', unsupportedReply = '', unsupportedError = '';
+        var moduleWorker = new Worker('/entry.js', { type: 'module', name: 'graph-worker' });
+        moduleWorker.onmessage = function(e) { moduleReply = e.data; };
+        moduleWorker.onerror = function(e) { moduleError = e.message; };
+        var unsupportedWorker = new Worker('/unsupported.js', { type: 'module' });
+        unsupportedWorker.onmessage = function(e) { unsupportedReply = e.data; };
+        unsupportedWorker.onerror = function(e) { unsupportedError = e.message; };
+    )js");
+
+    assert(wait_for(js, "moduleReply !== null && unsupportedError !== ''"));
+    assert(js.eval("moduleError").to_string().empty());
+    assert(js.eval("moduleReply.text").to_string() == "answer:42");
+    assert(js.eval("moduleReply.label").to_string() == "module");
+    assert(js.eval("moduleReply.sum").to_number() == 3.0);
+    assert(js.eval("moduleReply.topThis").is_truthy());
+    assert(js.eval("moduleReply.classicImport").to_string() == "undefined");
+    assert(js.eval("unsupportedReply").to_string().empty());
+    assert(js.eval("unsupportedError").to_string().find("export *") != std::string::npos);
+
+    js.eval("moduleWorker.terminate(); unsupportedWorker.terminate();");
+    WorkerObject::shutdown_all_workers();
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -15349,6 +16324,99 @@ TEST(js_derived_this_temporal_dead_zone) {
            "25 ret:ReferenceError 3 99 alt:ReferenceError true true");
 }
 
+TEST(js_direct_eval_runs_in_the_callers_scope) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var log = [];
+
+        // The caller's bindings are visible to a direct eval, and its own
+        // lexical ones stay inside it.
+        function visible() { var local = 5; let outer = 'o'; { let inner = 'i'; return eval('local + outer + inner'); } }
+        log.push(visible());
+        function hides() { var x = 1; eval('let x = 2'); return x; }
+        log.push(hides());
+        function leaks() { eval('let y = 1'); return typeof y; }
+        log.push(leaks());
+
+        // A sloppy eval's `var` belongs to the function that called it; a
+        // strict one's stays inside the eval. Function declarations follow
+        // the same split.
+        function sloppyVar() { eval('var made = 42'); return made; }
+        log.push(sloppyVar(), typeof made);
+        function strictVar() { 'use strict'; eval('var other = 42'); return typeof other; }
+        log.push(strictVar());
+        function strictText() { eval('"use strict"; var third = 1'); return typeof third; }
+        log.push(strictText());
+        function sloppyFn() { eval('function inner() { return 7; }'); return inner(); }
+        log.push(sloppyFn(), typeof inner);
+        function strictFn() { 'use strict'; eval('function hidden() { return 1; }'); return typeof hidden; }
+        log.push(strictFn());
+
+        // this, arguments, new.target and super come from the function the
+        // text is written in.
+        var holder = { tag: 'holder', run: function () { return eval('this.tag'); } };
+        log.push(holder.run());
+        function strictThis() { 'use strict'; return eval('this') === undefined; }
+        log.push(strictThis());
+        function args(a, b) { return eval('arguments.length + ":" + arguments[1]'); }
+        log.push(args(7, 8));
+        function arrowArgs() { var g = () => eval('arguments.length'); return g(); }
+        log.push(arrowArgs(1, 2, 3));
+        function NewTarget() { this.made = eval('new.target === NewTarget'); }
+        log.push(new NewTarget().made, NewTarget() === undefined);
+
+        class Base { constructor() { this.a = 1; } m() { return 'Base'; } }
+        class Derived extends Base {
+            constructor() { eval('super()'); this.b = this.a + 1; }
+            m() { return eval('super.m()') + '!'; }
+        }
+        var derived = new Derived();
+        log.push(derived.a, derived.b, derived instanceof Base, derived.m());
+        function noSuper() { return eval('super.m()'); }
+        try { noSuper(); log.push('no super error'); } catch (e) { log.push(e.name); }
+
+        // Indirect eval is global code, whichever way it is reached.
+        function indirect() { var local = 5; return (0, eval)('typeof local'); }
+        log.push(indirect());
+        function alias() { var local = 5; var e = eval; return e('typeof local'); }
+        log.push(alias());
+        function shadowed() { var local = 5; function eval() { return typeof local; } return eval('x'); }
+        log.push(shadowed());
+        function strictIndirect() { 'use strict'; return (0, eval)('this === undefined'); }
+        log.push(strictIndirect(), (0, eval)('this === globalThis'));
+
+        // The rest of what eval does to its caller.
+        function completion() { return eval('1; 2; 3'); }
+        log.push(completion(), eval('var x = 9;'), eval(42));
+        function twice() { return [eval('var n = 1; n'), eval('n + 1')].join(','); }
+        log.push(twice());
+        function syntaxError() { try { eval('var = ;'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(syntaxError());
+        function nested() { return eval('let a = 1; eval("a + 1")'); }
+        log.push(nested());
+        function strictAssign() { 'use strict'; try { eval('undeclaredName = 1'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(strictAssign());
+        function loopBindings() { var out = []; for (let i = 0; i < 3; i++) out.push(eval('i')); return out.join(','); }
+        log.push(loopBindings());
+        function closure() { var captured = 'c'; function inner() { return eval('captured'); } return inner(); }
+        log.push(closure());
+        log.push(typeof eval, eval.length, eval.name);
+
+        var summary = log.join(' ');
+    )js");
+    // Every value here is what Node prints for this same script; the corpus in
+    // tests/js-conformance/eval.dat covers the same ground case by case, and
+    // `--reference "node -e"` re-runs it. Note `sloppyFn`'s second value: the
+    // function declaration went into the calling function's scope, so it is
+    // there inside it and gone once it returns.
+    assert(js.global_env()->get("summary").to_string() ==
+           "5oi 1 undefined 42 undefined undefined undefined 7 undefined undefined "
+           "holder true 2:8 3 true true 1 2 true Base! SyntaxError undefined undefined "
+           "number false true 3  42 1,2 SyntaxError 2 ReferenceError "
+           "0,1,2 c function 1 eval");
+}
+
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -15490,6 +16558,246 @@ TEST(js_temporal_dead_zone_in_control_flow_and_patterns) {
            "param:ReferenceError paramSelf:ReferenceError");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 63: iteration asks the value for its iterator (finding 69)
+// ---------------------------------------------------------------------------
+
+TEST(js_iteration_asks_the_value_for_its_iterator) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    // js_iterate() and its neighbours ask the current realm which functions
+    // it installed. Inside eval() that is the interpreter's realm; the direct
+    // calls below have to say so themselves.
+    JsIntrinsics* previous_realm = &JsIntrinsics::get();
+    JsIntrinsics::set_current(&js.intrinsics());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous_realm};
+
+    auto numbers = [](const std::vector<JsValue>& values) {
+        std::string out;
+        for (const JsValue& value : values) out += (out.empty() ? "" : ",") + value.to_string();
+        return out;
+    };
+    auto visited = [&](const JsValue& iterable, size_t stop_after = 1000) {
+        std::vector<JsValue> seen;
+        js_iterate(iterable, [&](const JsValue& item) {
+            seen.push_back(item);
+            return seen.size() < stop_after;
+        });
+        return numbers(seen);
+    };
+    auto throws_type_error = [&](const std::function<void()>& body) {
+        try {
+            body();
+        } catch (const JsThrow& thrown) {
+            return thrown.value.get_property("name").to_string() == "TypeError";
+        }
+        return false;
+    };
+
+    // The plain case: an array and a string are read directly, and finding
+    // that out runs nothing.
+    JsValue plain = js.eval("var plain = [1, 2, 3]; plain");
+    assert(js_iterates_as_builtin(plain));
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    assert(js_iterates_as_builtin(js.eval("[]")));
+    assert(!js_iterates_as_builtin(js.eval("({ length: 1, 0: 'a' })")));
+    assert(!js_iterates_as_builtin(js.eval("new Map()")));
+    assert(!js_iterates_as_builtin(js.eval("new String('wrapped')")));
+    assert(!js_iterates_as_builtin(JsValue::make_number(5)));
+    assert(!js_iterates_as_builtin(JsValue::make_undefined()));
+    assert(numbers(js_iterable_to_vector(plain)) == "1,2,3");
+    assert(visited(plain) == "1,2,3");
+    assert(visited(plain, 2) == "1,2");
+    assert(visited(JsValue::make_string("a\xF0\x9F\x98\x80z")) == "a,\xF0\x9F\x98\x80,z");
+    JsValue method;
+    assert(js_iterator_method(plain, method) && method.is_function());
+    assert(method.identity() == js.intrinsics().array_iterator_method.identity());
+
+    // An array that was given an iterator is asked for it. Until Phase 63
+    // every one of these read the elements: 1,2.
+    JsValue own = js.eval("var own = [1, 2]; own[Symbol.iterator] = function* () { yield 9; yield 8; yield 7; }; own");
+    assert(!js_iterates_as_builtin(own));
+    assert(numbers(js_iterable_to_vector(own)) == "9,8,7");
+    assert(visited(own) == "9,8,7");
+    assert(text("var seen = []; for (var x of own) seen.push(x); seen.join()") == "9,8,7");
+    assert(text("[...own].join() + '|' + Math.max(...own) + '|' + Array.from(own).join() + '|' + new Set(own).size") ==
+           "9,8,7|9|9,8,7|3");
+    assert(text("function* gen() { yield* own; } [...gen()].join()") == "9,8,7");
+    assert(text("var entries = [['a', 1]]; entries[Symbol.iterator] = function* () { yield ['z', 26]; };"
+                "JSON.stringify(Object.fromEntries(entries)) + [...new Map(entries).keys()].join()") == "{\"z\":26}z");
+    // The array that asked is `this`, and another array's iterator may be what it hands out.
+    assert(text("var a = [1]; var self; a[Symbol.iterator] = function () { self = this; return [5, 6][Symbol.iterator](); };"
+                "[...a].join() + ':' + (self === a)") == "5,6:true");
+    // Other arrays are not affected by it.
+    assert(js_iterates_as_builtin(plain));
+
+    // The same method put back, a getter that hands it out, a subclass
+    // without one: the long way round to the elements. The getter is read
+    // once for each iteration and never by the question that runs no script.
+    JsValue same = js.eval("var same = [4, 5]; same[Symbol.iterator] = Array.prototype[Symbol.iterator]; same");
+    assert(!js_iterates_as_builtin(same));
+    assert(visited(same) == "4,5");
+    JsValue lazy = js.eval("var reads = 0; var lazy = [6, 7];"
+                           "Object.defineProperty(lazy, Symbol.iterator, { get: function () { reads++; return Array.prototype[Symbol.iterator]; } }); lazy");
+    assert(!js_iterates_as_builtin(lazy));
+    assert(text("reads") == "0");
+    assert(visited(lazy) == "6,7");
+    assert(numbers(js_iterable_to_vector(lazy)) == "6,7");
+    assert(text("reads") == "2");
+    assert(text("class Plain extends Array {} var sub = new Plain(); sub.push(1, 2, 3); [...sub].join()") == "1,2,3");
+    assert(text("Object.getPrototypeOf(sub) === Plain.prototype") == "true");
+    assert(!js_iterates_as_builtin(js.eval("sub")));
+    assert(text("class Odd extends Array { *[Symbol.iterator]() { yield 'x'; yield this.length; } }"
+                "var odd = new Odd(3); [...odd].join() + '|' + Array.from(odd).join()") == "x,3|x,3");
+
+    // On the prototype: every array has it, and the plain case comes back
+    // when it does.
+    js.eval("var original = Array.prototype[Symbol.iterator];"
+            "Array.prototype[Symbol.iterator] = function* () { yield 'p'; yield this.length; };");
+    assert(!js_iterates_as_builtin(plain));
+    assert(visited(plain) == "p,3");
+    assert(numbers(js_iterable_to_vector(plain)) == "p,3");
+    assert(text("[...[1, 2]].join() + '|' + new Set([4, 4, 4]).size") == "p,2|2");
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain));
+    assert(text("[...[1, 2]].join()") == "1,2");
+
+    // Without one an array is not iterable, and a value that is not a
+    // function there is a TypeError as well.
+    js.eval("delete Array.prototype[Symbol.iterator];");
+    assert(!js_iterates_as_builtin(plain));
+    assert(!js_iterator_method(plain, method) && method.is_undefined());
+    assert(throws_type_error([&] { visited(plain); }));
+    assert(throws_type_error([&] { js_iterable_to_vector(plain); }));
+    assert(text("try { [...[1]]; 'no error' } catch (e) { e.name + ': ' + e.message }") ==
+           "TypeError: [object Array] is not iterable");
+    js.eval("Array.prototype[Symbol.iterator] = 5;");
+    assert(throws_type_error([&] { js_iterator_method(plain, method); }));
+    assert(throws_type_error([&] { visited(plain); }));
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js_iterates_as_builtin(plain) && visited(plain) == "1,2,3");
+
+    // Strings, and the primitives that have no iterator until a script
+    // gives their prototype one.
+    js.eval("var stringOriginal = String.prototype[Symbol.iterator];"
+            "String.prototype[Symbol.iterator] = function* () { yield 'z'; yield this.length; };");
+    assert(!js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(visited(JsValue::make_string("ab")) == "z,2");
+    assert(text("[...'ab'].join() + '|' + Array.from('abc').join() + '|' + new Set('aab').size") == "z,2|z,3|2");
+    js.eval("String.prototype[Symbol.iterator] = stringOriginal;");
+    assert(js_iterates_as_builtin(JsValue::make_string("ab")));
+    assert(text("[...'ab'].join()") == "a,b");
+    assert(!js_iterator_method(JsValue::make_number(3), method));
+    assert(throws_type_error([&] { visited(JsValue::make_number(3)); }));
+    assert(!js_iterator_method(JsValue::make_undefined(), method));
+    assert(!js_iterator_method(JsValue::make_null(), method));
+    js.eval("Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };");
+    assert(js_iterator_method(JsValue::make_number(3), method));
+    assert(visited(JsValue::make_number(3)) == "0,1,2");
+    assert(text("[...3].join() + '|' + new Set(4).size") == "0,1,2|4");
+    js.eval("delete Number.prototype[Symbol.iterator];");
+
+    // What is not an iterator: an object that only has next(), and a property
+    // whose name is the text 'Symbol.iterator'. Both were iterated before.
+    assert(throws_type_error([&] { visited(js.eval("({ next: function () { return { done: true }; } })")); }));
+    assert(throws_type_error([&] { visited(js.eval("({ 'Symbol.iterator': function* () { yield 1; } })")); }));
+    assert(text("async function* ag() { yield 1; } try { [...ag()]; 'no error' } catch (e) { e.name }") == "TypeError");
+
+    // A loop that stops early closes the iterator, once; return() has to be
+    // callable and to give back an object. A loop that an error ends closes
+    // it too, and the error is the one that is seen.
+    js.eval(R"(
+        var closed = 0;
+        function endless(ret) {
+            var o = {};
+            o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; };
+            return o;
+        }
+        var counting = endless(function () { closed++; return {}; });
+    )");
+    assert(visited(js.eval("counting"), 2) == "1,1");
+    assert(text("closed") == "1");
+    assert(throws_type_error([&] { visited(js.eval("endless(function () { return 5; })"), 1); }));
+    assert(throws_type_error([&] { visited(js.eval("endless(7)"), 1); }));
+    assert(visited(js.eval("endless(undefined)"), 1) == "1");
+    assert(visited(js.eval("endless(null)"), 1) == "1");
+    bool body_error_seen = false;
+    try {
+        js_iterate(js.eval("endless(function () { closed++; throw new Error('from return'); })"), [](const JsValue&) -> bool {
+            js_throw_error(JsErrorKind::RangeError, "from the body");
+        });
+    } catch (const JsThrow& thrown) {
+        body_error_seen = thrown.value.get_property("message").to_string() == "from the body";
+    }
+    assert(body_error_seen);
+    assert(text("closed") == "2");
+    // An iterator that fails itself is not closed.
+    assert(text("var o = {}; o[Symbol.iterator] = function () { return { next: function () { throw new Error('next'); },"
+                "return: function () { closed += 100; return {}; } }; };"
+                "try { for (var x of o) {} } catch (e) { e.message + closed }") == "next2");
+
+    // An array that changes under the loop is read as the array iterator
+    // reads it: by index, against the length it has now.
+    assert(text("var grow = [1, 2, 3]; var got = []; for (var x of grow) { got.push(x); if (x === 1) grow.push(4); } got.join()") ==
+           "1,2,3,4");
+    assert(text("var shrink = [1, 2, 3, 4]; got = []; for (var x of shrink) { got.push(x); shrink.shift(); } got.join()") == "1,3");
+    // Given an iterator in the middle of a loop, the loop that is running is
+    // not changed and the next one is.
+    assert(text("var late = [1, 2]; got = []; for (var x of late) { got.push(x); late[Symbol.iterator] = function* () { yield 'late'; }; }"
+                "got.concat([...late]).join()") == "1,2,late");
+
+    // The functions the realm compares with outlive a collection, replaced
+    // on the prototype or not.
+    js.eval("Array.prototype[Symbol.iterator] = function* () { yield 'gone'; };");
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    js.eval("Array.prototype[Symbol.iterator] = original;");
+    assert(js.intrinsics().array_iterator_method.is_function());
+    assert(js_iterates_as_builtin(plain));
+    assert(text("gc(); [...plain, ...'ab'].join()") == "1,2,3,a,b");
+}
+
+TEST(js_iteration_of_another_realms_array) {
+    using namespace litebird;
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://iteration.example.test/root.html");
+    JsInterpreter js(doc);
+    js.load_page(R"html(<!doctype html><html><body>
+      <iframe id="child" srcdoc="<script>var theirs = [1, 2, 3]; var custom = [1, 2]; custom[Symbol.iterator] = function* () { yield 'c'; };</script>"></iframe>
+    </body></html>)html", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    // An array made in the frame has the frame's Array.prototype. Read from
+    // this realm it is not the plain case (its iterator is not the function
+    // this realm installed), so it is asked, and the answer is its elements.
+    assert(text("var cw = document.getElementById('child').contentWindow; cw.theirs instanceof cw.Array && !(cw.theirs instanceof Array)") == "true");
+    assert(text("[...cw.theirs].join() + '|' + Array.from(cw.theirs).join() + '|' + new Set(cw.theirs).size") == "1,2,3|1,2,3|3");
+    assert(text("var got = []; for (var x of cw.theirs) got.push(x); got.join()") == "1,2,3");
+    assert(text("[...cw.custom].join()") == "c");
+    {
+        JsIntrinsics* previous = &JsIntrinsics::get();
+        JsIntrinsics::set_current(&js.intrinsics());
+        struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous};
+        assert(js_iterates_as_builtin(js.eval("[1]")));
+        assert(!js_iterates_as_builtin(js.eval("cw.theirs")));
+    }
+
+    // Each realm has an iterator of its own to replace: the frame's arrays
+    // follow the frame's prototype, and this realm's arrays do not.
+    js.eval("cw.Array.prototype[Symbol.iterator] = function* () { yield 'frame'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|7,8");
+    js.eval("var mine = Array.prototype[Symbol.iterator]; Array.prototype[Symbol.iterator] = function* () { yield 'top'; };");
+    assert(text("[...cw.theirs].join() + '|' + [...[7, 8]].join()") == "frame|top");
+    js.eval("Array.prototype[Symbol.iterator] = mine;");
+    assert(text("[...[7, 8]].join()") == "7,8");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -15507,6 +16815,11 @@ int main() {
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
     RUN_TEST(inline_formatting_context);
+    RUN_TEST(font_family_selects_a_face);
+    RUN_TEST(font_family_reaches_layout_from_css);
+    RUN_TEST(font_face_declares_the_family_the_page_names);
+    RUN_TEST(font_face_brings_the_family_the_page_names);
+    RUN_TEST(font_family_reaches_the_box_that_measures_text);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -15678,6 +16991,9 @@ int main() {
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
     RUN_TEST(webp_lossless_decodes_every_transform);
     RUN_TEST(webp_unsupported_and_malformed_input_is_refused);
+    // Phase 57: lossy WebP, bit-exact against libwebp.
+    RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
+    RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
@@ -15687,6 +17003,10 @@ int main() {
     RUN_TEST(worker_options_module_policy_and_global_scope);
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
+
+    // Phase 66: module-worker graph loading and structured-clone message packets.
+    RUN_TEST(structured_clone_message_delivery_and_refusal);
+    RUN_TEST(module_worker_static_graph_loading_and_refusal);
 
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
@@ -15735,6 +17055,17 @@ int main() {
     RUN_TEST(string_unicode17_normalization_tables_and_api);
     RUN_TEST(string_unicode17_full_and_locale_case_mapping);
     RUN_TEST(string_cldr48_uca_collation_and_ecma402_validation);
+
+    // Phase 65: a direct eval runs in the caller's scope.
+    RUN_TEST(js_direct_eval_runs_in_the_callers_scope);
+
+    // Phase 63: iteration asks the value for its iterator.
+    RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
+    RUN_TEST(js_iteration_of_another_realms_array);
+
+    // Per-glyph font fallback: a codepoint the primary face does not cover is
+    // drawn from another face instead of painting nothing.
+    RUN_TEST(per_glyph_font_fallback);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

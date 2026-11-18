@@ -31,6 +31,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "litebird/css/Calc.hpp"
+
 namespace litebird {
 
 // Replaces C-style CSS comments with a single space, respecting strings.
@@ -676,6 +678,9 @@ inline bool grid_parse_intrinsic_or_fixed(std::string_view token, GridTrackSize&
 }
 
 // The first argument of repeat(): an integer >= 1, "auto-fill" or "auto-fit".
+// Defined further down; needed by the repeat-count parser above it.
+inline std::string grid_calc_family(const std::string& w);
+
 inline bool grid_parse_repeat_count(std::string_view part, std::string& canonical, bool& is_auto) {
     const std::string t = grid_collapse_ws(part);
     const std::string lower = grid_lower(t);
@@ -687,12 +692,24 @@ inline bool grid_parse_repeat_count(std::string_view part, std::string& canonica
     is_auto = false;
     double number = 0;
     std::size_t end = 0;
-    if (!grid_css_number(t, number, end) || end != t.size()) return false;
-    if (number != std::floor(number) || number < 1) return false;
-    std::string num(t);
-    if (!num.empty() && num.front() == '+') num.erase(num.begin());
-    canonical = num;
-    return true;
+    if (grid_css_number(t, number, end) && end == t.size()) {
+        if (number != std::floor(number) || number < 1) return false;
+        std::string num(t);
+        if (!num.empty() && num.front() == '+') num.erase(num.begin());
+        canonical = num;
+        return true;
+    }
+    // A calc() (or min()/max()/clamp()) whose type is a number is a repeat
+    // count; at computed-value time it resolves and clamps (Values 4, range
+    // checking). Kept as written at specified-value time.
+    if (!grid_calc_family(t).empty()) {
+        CalcNode ast;
+        if (calc_parse(t, ast) && calc_classify(ast) == 0) {
+            canonical = canonicalize_calc(t);
+            return true;
+        }
+    }
+    return false;
 }
 
 struct GridSequence {
@@ -1028,9 +1045,12 @@ inline bool grid_track_px(const std::string& token, double basis_px, double& px)
 // tracks collapse to 0px) — at least one repetition is kept — and merges
 // adjacent line names across the repetition boundary. `basis_px` < 0 means
 // the available space is not definite; an auto-repeat is then left alone.
+// `ctx` carries what a typed calc() in a repeat count may need (font sizes,
+// the query container's inline size, sibling-index()); it is optional.
 template <typename EvalCalc>
 inline bool grid_resolved_track_list(const std::string& value, double em, double rem, double basis_px, bool is_grid,
-                                     const EvalCalc& eval_calc, std::string& out) {
+                                     const EvalCalc& eval_calc, std::string& out,
+                                     const CalcContext* ctx = nullptr) {
     std::string text = value;
     grid_resolve_calc_in_place(text, basis_px, /*clamp_negative*/ true, eval_calc);
     grid_resolve_units_in_place(text, em, rem, basis_px);
@@ -1067,9 +1087,20 @@ inline bool grid_resolved_track_list(const std::string& value, double em, double
         }
         if (!count_is_auto) {
             long n = 1;
+            bool count_ok = true;
             try {
                 n = std::stol(count_text);
             } catch (...) {
+                // A repeat count that is a calc() with math functions:
+                // evaluate it like any other calculation (Values 4/5).
+                double value = 0.0;
+                if (ctx && calc_eval_number(args[0], *ctx, value)) {
+                    n = static_cast<long>(std::llround(value));
+                } else {
+                    count_ok = false;
+                }
+            }
+            if (!count_ok) {
                 expanded.push_back(token);
                 continue;
             }
@@ -1404,7 +1435,7 @@ inline bool grid_line_token(std::string_view token, std::string& out) {
                 // A static calc stays a calc in the specified value; it is
                 // resolved at computed-value time.
                 out_word.kind = IntegerKind::CalcStatic;
-                out_word.emission = grid_normalize_function(s);
+                out_word.emission = canonicalize_calc(s);
                 return true;
             }
             // min()/max()/clamp() of constants folds into a plain calc().
@@ -1414,7 +1445,7 @@ inline bool grid_line_token(std::string_view token, std::string& out) {
             return true;
         }
         out_word.kind = IntegerKind::CalcRaw;
-        out_word.emission = grid_normalize_function(s);
+        out_word.emission = canonicalize_calc(s);
         return true;
     };
     const auto ident = [](const std::string& s) { return grid_custom_ident(s); };
@@ -1508,8 +1539,10 @@ inline bool grid_line_token(std::string_view token, std::string& out) {
 // resolved against what layout knows): a static calc() folds to the integer
 // it rounds to, and a span count is clamped to at least one. False when the
 // value is not one line or carries a calc that is not static, in which case
-// it is kept as written.
-inline bool grid_line_computed(std::string_view canonical, std::string& out) {
+// it is kept as written. `ctx` carries what math functions may need (font
+// sizes, the query container's inline size, sibling-index()); without it no
+// calculation that mentions units or tree-counting functions resolves.
+inline bool grid_line_computed(std::string_view canonical, std::string& out, const CalcContext* ctx = nullptr) {
     std::vector<std::string> words;
     if (!grid_lex(std::string(canonical), words)) return false;
     std::size_t span_at = std::string::npos;
@@ -1525,7 +1558,13 @@ inline bool grid_line_computed(std::string_view canonical, std::string& out) {
         if (i == span_at) continue;
         if (grid_calc_family(words[i]).empty()) continue;
         double stat = 0;
-        if (!grid_static_number(words[i], stat)) return false; // not static: keep as written
+        bool static_ok = false;
+        if (ctx) {
+            static_ok = calc_eval_number(words[i], *ctx, stat);
+        } else {
+            static_ok = grid_static_number(words[i], stat);
+        }
+        if (!static_ok) return false; // not static: keep as written
         double rounded = std::llround(stat);
         if (span && rounded < 1) rounded = 1;
         if (!span && rounded == 0) return false;

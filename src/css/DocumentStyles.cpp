@@ -5,6 +5,7 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/net/UrlParser.hpp"
+#include "litebird/render/FontRenderer.hpp"
 
 #include <cctype>
 #include <unordered_set>
@@ -87,6 +88,80 @@ std::string sniff_css_at_charset(std::string_view bytes) {
         canon = "UTF-8";
     }
     return canon;
+}
+
+/// How many `@font-face` rules one document may register. A page that declares
+/// more is not refused its fonts one by one; the cap is what stops a hostile
+/// sheet from filling the registry, and the number is far above what a real
+/// page uses (a handful of weights of one or two families).
+constexpr std::size_t kMaxFontFacesPerDocument = 64;
+
+/// Whether the engine can read the format a source claims. A `format()` hint
+/// is a promise about the bytes, and a promise of `woff` or `woff2` is a
+/// promise this engine cannot keep -- it reads TrueType `glyf` outlines and
+/// nothing else -- so such a source is skipped rather than fetched for the
+/// parser to reject. A source that claims nothing is fetched and judged by
+/// what it actually is, which is the common case.
+bool font_format_is_readable(const std::string& format) {
+    return format.empty() || format == "truetype" || format == "opentype" ||
+           format == "collection" || format == "ttf" || format == "otf";
+}
+
+/// Registers a document's `@font-face` rules with the rasterizer.
+///
+/// Nothing is fetched here. Each source becomes a closure that knows its URL
+/// and the origin policy to fetch it under, and the rasterizer calls the
+/// closures only when a face is first wanted -- a sheet that declares twenty
+/// families has usually drawn in one of them by the time layout is over, and a
+/// webfont is a network round trip.
+void register_font_faces(const StyleSheet& sheet, const std::string& base_url,
+                         const ResourceRequestContext& ctx, std::size_t& count) {
+    FontRenderer& fr = FontRenderer::instance();
+    for (const FontFaceRule& rule : sheet.font_faces) {
+        if (count >= kMaxFontFacesPerDocument) return;
+        if (rule.sources.empty()) continue;
+
+        std::vector<FontRenderer::WebfontFetcher> sources;
+        for (const FontFaceSrc& src : rule.sources) {
+            if (!font_format_is_readable(src.format)) continue;
+
+            if (!src.local.empty()) {
+                // A font already on the host: `local()` is answered out of the
+                // registry, and a name with no face behind it is simply a
+                // source that was not available, not an error.
+                const std::string path = fr.face_path(src.local);
+                if (path.empty()) continue;
+                sources.push_back([path]() -> std::vector<std::uint8_t> {
+                    const ResourceResponse r = ResourceLoader::load_file(path);
+                    if (!r.success) return {};
+                    return std::vector<std::uint8_t>(r.body.begin(), r.body.end());
+                });
+                continue;
+            }
+
+            const std::string url = ResourceLoader::resolve_url(base_url, src.url);
+            if (url.empty()) continue;
+
+            ResourceRequestContext font_ctx = ctx;
+            // CSS Fonts asks for fonts in CORS mode even where an image would
+            // not be: a font is read by the page that fetched it, its bytes
+            // end up in a texture the document can sample, so a cross-origin
+            // font has to say so. Nothing is loosened -- a sheet that already
+            // asked for stricter handling keeps it.
+            if (font_ctx.mode == RequestMode::NoCors) font_ctx.mode = RequestMode::Cors;
+
+            sources.push_back([url, font_ctx]() -> std::vector<std::uint8_t> {
+                const ResourceResponse r = ResourceLoader::load_for_page(url, font_ctx);
+                if (!r.success) return {};
+                return std::vector<std::uint8_t>(r.body.begin(), r.body.end());
+            });
+        }
+
+        if (sources.empty()) continue;
+        fr.register_webfont(rule.family, std::move(sources), rule.weight_min,
+                            rule.weight_max, rule.italic);
+        ++count;
+    }
 }
 
 bool load_css_resource(
@@ -350,6 +425,7 @@ StyleResolver DocumentStyles::build_resolver(
 
     const ResourceRequestContext base_ctx = request_context(doc, RequestMode::NoCors, false);
     std::size_t sheet_count = 0;
+    std::size_t font_face_count = 0;
     static constexpr std::size_t kMaxTotalSheets = 256;
 
     for_each_descendant(doc, [&](const Node& node) {
@@ -378,7 +454,9 @@ StyleResolver DocumentStyles::build_resolver(
                         if (!wrapped_media.empty()) {
                             expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
                         }
-                        resolver.add_stylesheet(CssParser::parse(expanded));
+                        const StyleSheet parsed = CssParser::parse(expanded);
+                        resolver.add_stylesheet(parsed);
+                        register_font_faces(parsed, final_url, base_ctx, font_face_count);
                         ++sheet_count;
                     }
                 }
@@ -404,7 +482,9 @@ StyleResolver DocumentStyles::build_resolver(
             if (!wrapped_media.empty()) {
                 expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
             }
-            resolver.add_stylesheet(CssParser::parse(expanded));
+            const StyleSheet parsed = CssParser::parse(expanded);
+            resolver.add_stylesheet(parsed);
+            register_font_faces(parsed, base_ctx.base_url, base_ctx, font_face_count);
             ++sheet_count;
             return true;
         }
@@ -440,7 +520,9 @@ StyleResolver DocumentStyles::build_resolver(
                 if (!wrapped_media.empty()) {
                     expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
                 }
-                resolver.add_stylesheet(CssParser::parse(expanded));
+                const StyleSheet parsed = CssParser::parse(expanded);
+                resolver.add_stylesheet(parsed);
+                register_font_faces(parsed, final_url, link_ctx, font_face_count);
                 ++sheet_count;
             }
             return true;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "litebird/js/JsValue.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include <atomic>
 #include <condition_variable>
@@ -36,7 +36,9 @@ public:
     ~WorkerObject();
 
     void start();
-    void post_message(const std::string& serialized_json);
+    /// The packet contains no source-agent JsValues, so it is safe to enqueue
+    /// across the page/worker thread boundary.
+    void post_message(std::shared_ptr<JsStructuredClone> message);
     void terminate();
 
     bool is_running() const { return m_running.load(std::memory_order_acquire); }
@@ -78,7 +80,7 @@ private:
                              const std::string& filename,
                              int lineno,
                              int colno);
-    void dispatch_page_message(const std::string& serialized_json);
+    void dispatch_page_message(const std::shared_ptr<JsStructuredClone>& message);
     void dispatch_page_custom_event(const std::string& type, const JsValue& event);
     void release_owner_js();
     void register_child(const std::shared_ptr<WorkerObject>& child);
@@ -96,7 +98,7 @@ private:
 
     std::mutex m_queue_mutex;
     std::condition_variable m_cv;
-    std::queue<std::string> m_incoming_messages;
+    std::queue<std::shared_ptr<JsStructuredClone>> m_incoming_messages;
     bool m_owner_task_pending{false};
 
     std::mutex m_children_mutex;

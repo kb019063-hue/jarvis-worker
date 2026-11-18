@@ -187,7 +187,8 @@ int js_uncaught_error_count() {
 }
 
 bool js_is_internal_unwind(const std::exception& ex) {
-    return dynamic_cast<const GeneratorAbortException*>(&ex) != nullptr;
+    return dynamic_cast<const GeneratorAbortException*>(&ex) != nullptr ||
+           dynamic_cast<const GeneratorReturnException*>(&ex) != nullptr;
 }
 
 JsValue js_call_guarded(const JsValue& fn, const JsValue& this_val, const std::vector<JsValue>& args) {
@@ -898,8 +899,11 @@ size_t js_string_length(std::string_view s) {
 namespace {
 std::mutex g_symbol_mutex;
 std::unordered_map<std::string, std::string>& symbol_registry() {
-    static std::unordered_map<std::string, std::string> registry;
-    return registry;
+    // Workers can still be unwinding at process exit. Keep the registry alive
+    // like Heap::default_heap() rather than relying on static-destruction order
+    // between an atexit worker join and an unordered_map destructor.
+    static auto* registry = new std::unordered_map<std::string, std::string>();
+    return *registry;
 }
 std::atomic<uint64_t> g_symbol_counter{0};
 }
@@ -927,88 +931,395 @@ bool js_symbol_from_key(const std::string& key, JsValue& out) {
 }
 
 // ---------------------------------------------------------------------------
+// Structured clone packets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A message should fail rather than turn an accidental graph into unbounded
+// native memory. This counts every primitive and object node in the neutral
+// packet, not just the objects a script allocated.
+constexpr std::size_t kMaxStructuredCloneNodes = 1'000'000;
+
+bool array_element_key(std::string_view key, std::size_t length) {
+    if (key.empty() || key.size() > 20) return false;
+    if (key.size() > 1 && key.front() == '0') return false;
+    std::size_t index = 0;
+    for (char c : key) {
+        if (c < '0' || c > '9') return false;
+        const std::size_t digit = static_cast<std::size_t>(c - '0');
+        if (index > (std::numeric_limits<std::size_t>::max() - digit) / 10) return false;
+        index = index * 10 + digit;
+    }
+    return index < length;
+}
+
+const char* unsupported_clone_kind(const JsValue& value) {
+    if (value.is_function()) return "function";
+    if (value.is_symbol()) return "symbol";
+    if (value.dom_node_value()) return "DOM node";
+    if (value.type != JsType::Object || !value.object_val) return "value";
+    const JsObject* cell = value.object_val;
+    if (cell->exotic) return "host object";
+    switch (cell->klass) {
+        case ObjectClass::Date: return "Date";
+        case ObjectClass::RegExp: return "RegExp";
+        case ObjectClass::Map: return "Map";
+        case ObjectClass::Set: return "Set";
+        case ObjectClass::WeakMap: return "WeakMap";
+        case ObjectClass::WeakSet: return "WeakSet";
+        case ObjectClass::Error: return "Error";
+        case ObjectClass::Promise: return "Promise";
+        case ObjectClass::Generator: return "Generator";
+        case ObjectClass::Iterator: return "iterator";
+        default: return "object";
+    }
+}
+
+class StructuredCloneWriter {
+public:
+    StructuredCloneWriter(JsStructuredClone& out, std::string& error)
+        : m_out(out), m_error(error) {}
+
+    bool write(const JsValue& value, std::size_t& index) {
+        js_check_stack();
+        switch (value.type) {
+            case JsType::Undefined: return append_primitive(JsStructuredClone::Kind::Undefined, value, index);
+            case JsType::Null: return append_primitive(JsStructuredClone::Kind::Null, value, index);
+            case JsType::Boolean: return append_primitive(JsStructuredClone::Kind::Boolean, value, index);
+            case JsType::Number: return append_primitive(JsStructuredClone::Kind::Number, value, index);
+            case JsType::String: return append_primitive(JsStructuredClone::Kind::String, value, index);
+            case JsType::Symbol:
+            case JsType::Function:
+            case JsType::NativeFunction:
+                return unsupported(value);
+            case JsType::Object:
+                return write_object(value, index);
+        }
+        return unsupported(value);
+    }
+
+private:
+    bool reserve_node(std::size_t& index) {
+        if (m_out.nodes.size() >= kMaxStructuredCloneNodes) {
+            m_error = "The message graph exceeds the 1000000-node structured-clone limit.";
+            return false;
+        }
+        index = m_out.nodes.size();
+        m_out.nodes.emplace_back();
+        return true;
+    }
+
+    bool append_primitive(JsStructuredClone::Kind kind, const JsValue& value, std::size_t& index) {
+        if (!reserve_node(index)) return false;
+        auto& node = m_out.nodes[index];
+        node.kind = kind;
+        if (kind == JsStructuredClone::Kind::Boolean) node.boolean = value.bool_val;
+        if (kind == JsStructuredClone::Kind::Number) node.number = value.number_val;
+        if (kind == JsStructuredClone::Kind::String) node.string = value.string_val.str();
+        return true;
+    }
+
+    bool unsupported(const JsValue& value) {
+        m_error = std::string("A ") + unsupported_clone_kind(value) + " could not be cloned.";
+        return false;
+    }
+
+    bool write_object(const JsValue& value, std::size_t& index) {
+        JsObject* cell = value.object_val;
+        if (!cell) return unsupported(value);
+        if (const auto found = m_seen.find(value.identity()); found != m_seen.end()) {
+            index = found->second;
+            return true;
+        }
+
+        // Only ordinary data objects and arrays are safe to materialize in a
+        // different agent. A DOM wrapper, an exotic, or a native internal
+        // payload would otherwise retain source-agent state behind the packet.
+        const bool array = cell->is_array;
+        if ((!array && cell->klass != ObjectClass::Plain) || cell->exotic || cell->dom_node ||
+            cell->internal || cell->trace_extra || cell->lookup_fallback || cell->assign_hook) {
+            return unsupported(value);
+        }
+
+        if (!reserve_node(index)) return false;
+        m_seen.emplace(value.identity(), index);
+        m_out.nodes[index].kind = array ? JsStructuredClone::Kind::Array : JsStructuredClone::Kind::Object;
+
+        if (array) {
+            m_out.nodes[index].elements.reserve(cell->array_elements.size());
+            for (const JsValue& element : cell->array_elements) {
+                std::size_t child = 0;
+                if (!write(element, child)) return false;
+                m_out.nodes[index].elements.push_back(child);
+            }
+        }
+
+        // Structured cloning observes enumerable own string properties. It
+        // does not carry descriptors or a custom prototype; getters run while
+        // the sender is serializing, as they do for the web algorithm.
+        for (const std::string& key : value.own_keys(/*include_non_enumerable=*/false)) {
+            if (array && array_element_key(key, cell->array_elements.size())) continue;
+            const JsValue property = value.get_property(key);
+            std::size_t child = 0;
+            if (!write(property, child)) return false;
+            m_out.nodes[index].properties.emplace_back(key, child);
+        }
+        return true;
+    }
+
+    JsStructuredClone& m_out;
+    std::string& m_error;
+    std::unordered_map<const void*, std::size_t> m_seen;
+};
+
+bool clone_index_valid(const JsStructuredClone& clone, std::size_t index) {
+    return index < clone.nodes.size();
+}
+
+} // namespace
+
+bool js_write_structured_clone(const JsValue& value, JsStructuredClone& out, std::string& error) {
+    out.nodes.clear();
+    out.root = 0;
+    error.clear();
+    StructuredCloneWriter writer(out, error);
+    if (!writer.write(value, out.root)) {
+        out.nodes.clear();
+        out.root = 0;
+        return false;
+    }
+    return true;
+}
+
+JsValue js_read_structured_clone(const JsStructuredClone& clone) {
+    if (clone.nodes.empty() || !clone_index_valid(clone, clone.root)) return JsValue::make_undefined();
+
+    std::vector<JsValue> values(clone.nodes.size());
+    for (std::size_t i = 0; i < clone.nodes.size(); ++i) {
+        const auto& node = clone.nodes[i];
+        switch (node.kind) {
+            case JsStructuredClone::Kind::Undefined: values[i] = JsValue::make_undefined(); break;
+            case JsStructuredClone::Kind::Null: values[i] = JsValue::make_null(); break;
+            case JsStructuredClone::Kind::Boolean: values[i] = JsValue::make_boolean(node.boolean); break;
+            case JsStructuredClone::Kind::Number: values[i] = JsValue::make_number(node.number); break;
+            case JsStructuredClone::Kind::String: values[i] = JsValue::make_string(node.string); break;
+            case JsStructuredClone::Kind::Object: values[i] = JsValue::make_object(); break;
+            case JsStructuredClone::Kind::Array: values[i] = JsValue::make_array(); break;
+        }
+    }
+
+    for (std::size_t i = 0; i < clone.nodes.size(); ++i) {
+        const auto& node = clone.nodes[i];
+        if (node.kind != JsStructuredClone::Kind::Object && node.kind != JsStructuredClone::Kind::Array) continue;
+        JsObject* destination = values[i].object_val;
+        if (!destination) return JsValue::make_undefined();
+        if (node.kind == JsStructuredClone::Kind::Array) {
+            for (std::size_t child : node.elements) {
+                if (!clone_index_valid(clone, child)) return JsValue::make_undefined();
+                destination->array_elements.push_back(values[child]);
+            }
+        }
+        for (const auto& [key, child] : node.properties) {
+            if (!clone_index_valid(clone, child)) return JsValue::make_undefined();
+            // Defining, rather than assigning, prevents a cloned "__proto__"
+            // key or an inherited setter from changing the new object's shape.
+            values[i].define_property(key, values[child], PropertyMap::Default);
+        }
+    }
+    return values[clone.root];
+}
+
+// ---------------------------------------------------------------------------
 // Iteration
 // ---------------------------------------------------------------------------
 
-void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit) {
-    if (iterable.is_array()) {
-        // Index-based so that an array growing during iteration is still safe.
-        for (size_t i = 0; i < iterable.object_val->array_elements.size(); ++i) {
-            JsValue item = iterable.object_val->array_elements[i];
-            if (!visit(item)) return;
-        }
-        return;
-    }
-    if (iterable.type == JsType::String) {
-        // Strings iterate by code point, not by UTF-16 code unit. The text is
-        // well-formed UTF-8, so a code point is one sequence of bytes. The
-        // handle is held here because `visit` runs script, which may drop the
-        // last other reference to the text.
-        const JsString text = iterable.string_val;
-        const std::string_view s = text.view();
-        size_t i = 0;
-        while (i < s.size()) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
-            if (i + len > s.size()) len = s.size() - i;
-            JsValue item = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
-            if (!visit(item)) return;
-            i += len;
-        }
-        return;
-    }
+namespace {
 
-    JsValue iterator;
-    if (iterable.is_object_like()) {
-        JsValue method = iterable.get_property(kIteratorKey);
-        if (!method.is_function()) method = iterable.get_property("Symbol.iterator");
-        if (method.is_function()) {
-            iterator = method.call_with_this(iterable, {});
-        } else if (iterable.get_property("next").is_function()) {
-            iterator = iterable;        // a bare iterator object
-        }
-    }
-    if (!iterator.is_object_like()) {
-        js_throw_type_error(js_describe_thrown(iterable) + " is not iterable");
-    }
+/// The property key of `Symbol.iterator`, as the std::string that property
+/// lookups take. Made on first use, not when the program is loaded, so that
+/// it is there whatever asks first.
+const std::string& iterator_name() {
+    static const std::string name = kIteratorKey;
+    return name;
+}
 
+/// An array's elements, in order. Read by index each time round, because
+/// `visit` runs script and the array may grow or shrink under it; the array
+/// iterator reads it the same way.
+void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
+    for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
+        JsValue item = array.object_val->array_elements[i];
+        if (!visit(item)) return;
+    }
+}
+
+/// A string's code points, in order, which is what the string iterator
+/// yields. The text is well-formed UTF-8, so a code point is one sequence of
+/// bytes. The handle is held here because `visit` runs script, which may drop
+/// the last other reference to the text.
+void visit_code_points(const JsValue& string, const std::function<bool(const JsValue&)>& visit) {
+    const JsString text = string.string_val;
+    const std::string_view s = text.view();
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+        if (i + len > s.size()) len = s.size() - i;
+        JsValue item = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
+        if (!visit(item)) return;
+        i += len;
+    }
+}
+
+/// IteratorClose (ECMA-262 7.4.11) for a loop that stops early and has no
+/// error of its own: what `return` is and what it gives back are checked, and
+/// what it throws is thrown.
+void close_iterator(const JsValue& iterator) {
+    JsValue method = iterator.get_property("return");
+    if (method.is_nullish()) return;
+    if (!method.is_function()) js_throw_type_error(js_describe_thrown(method) + " is not a function");
+    JsValue result = method.call_with_this(iterator, {});
+    if (!result.is_object_like()) {
+        js_throw_type_error("Iterator result " + js_describe_thrown(result) + " is not an object");
+    }
+}
+
+/// The same for a loop that an error is ending. That error is the one the
+/// script sees: whatever `return` is, does or throws is dropped.
+void close_iterator_quietly(const JsValue& iterator) {
+    try {
+        JsValue method = iterator.get_property("return");
+        if (method.is_function()) method.call_with_this(iterator, {});
+    } catch (...) {
+    }
+}
+
+/// GetIterator and the loop over IteratorStep (ECMA-262 7.4.3, 7.4.8), with
+/// the method already looked up. `next` is read once. An iterator is closed
+/// when the loop leaves it unfinished, and not when it failed itself: an
+/// error out of next(), `done` or `value` leaves `return` alone.
+void iterate_with(const JsValue& iterable, const JsValue& method, const std::function<bool(const JsValue&)>& visit) {
+    JsValue iterator = method.call_with_this(iterable, {});
+    if (!iterator.is_object_like()) js_throw_type_error("Result of the Symbol.iterator method is not an object");
     JsValue next = iterator.get_property("next");
-    if (!next.is_function()) js_throw_type_error("iterator.next is not a function");
-
-    auto close = [&]() {
-        JsValue ret = iterator.get_property("return");
-        if (ret.is_function()) ret.call_with_this(iterator, {});
-    };
 
     while (true) {
-        JsValue step = next.call_with_this(iterator, {});
-        if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
+        JsValue step = js_call(next, iterator, {});
+        if (!step.is_object_like()) {
+            js_throw_type_error("Iterator result " + js_describe_thrown(step) + " is not an object");
+        }
         if (step.get_property("done").is_truthy()) return;
         JsValue value = step.get_property("value");
         bool keep_going;
         try {
             keep_going = visit(value);
         } catch (...) {
-            try { close(); } catch (...) {}
+            close_iterator_quietly(iterator);
             throw;
         }
         if (!keep_going) {
-            close();
+            close_iterator(iterator);
             return;
         }
     }
 }
 
-std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
-    if (iterable.is_array()) {
-        return std::vector<JsValue>(iterable.object_val->array_elements.begin(),
-                                    iterable.object_val->array_elements.end());
+/// Whether `proto` still holds, as a plain data property, the method the
+/// realm installed under @@iterator.
+bool holds_installed_method(const JsObject* proto, const JsValue& installed) {
+    if (proto->exotic || proto->has_legacy_getters || !installed.is_function()) return false;
+    auto it = proto->properties.find(iterator_name());
+    return it != proto->properties.end() && !(it->flags & PropertyMap::Accessor) &&
+           it->second.is_function() && it->second.identity() == installed.identity();
+}
+
+/// The second question, for a value the first one could not answer without
+/// running script: `method` is what the lookup found for it.
+bool method_is_installed(const JsValue& value, const JsValue& method) {
+    if (!method.is_function()) return false;
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (value.is_array()) return method.identity() == realm.array_iterator_method.identity();
+    if (value.type == JsType::String) return method.identity() == realm.string_iterator_method.identity();
+    return false;
+}
+
+[[noreturn]] void throw_not_iterable(const JsValue& value) {
+    js_throw_type_error(js_describe_thrown(value) + " is not iterable");
+}
+
+} // namespace
+
+bool js_iterator_method(const JsValue& value, JsValue& method) {
+    method = value.is_nullish() ? JsValue::make_undefined() : value.get_property(iterator_name());
+    if (method.is_nullish()) return false;
+    if (!method.is_function()) throw_not_iterable(value);
+    return true;
+}
+
+bool js_iterates_as_builtin(const JsValue& value) {
+    // An iterator made by either installed method reads the value the way
+    // visit_elements() and visit_code_points() do, and its next() is its own
+    // property: nothing a script can reach stands between the method and the
+    // elements. Should those iterators ever take `next` from a prototype they
+    // share, as the language has it, that function has to be compared here too.
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (value.type == JsType::String) {
+        // A primitive has no properties of its own: the lookup starts at the prototype.
+        return holds_installed_method(realm.string_proto, realm.string_iterator_method);
     }
+    if (!value.is_array()) return false;
+    // The lookup an array's `Symbol.iterator` would take, step by step, given
+    // up at the first thing that is not the plain case: a host object, a
+    // property of the array's own by that name (found without running it), or
+    // a prototype that is not this realm's Array.prototype (a subclass, an
+    // array of another realm, one whose prototype was set).
+    const JsObject* cell = value.object_val.get();
+    if (cell->exotic || cell->has_legacy_getters || cell->prototype != realm.array_proto) return false;
+    if (!cell->properties.empty() && cell->properties.find(iterator_name()) != cell->properties.end()) return false;
+    return holds_installed_method(realm.array_proto, realm.array_iterator_method);
+}
+
+void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit) {
+    const bool is_string = iterable.type == JsType::String;
+    if (js_iterates_as_builtin(iterable)) {
+        if (is_string) visit_code_points(iterable, visit);
+        else visit_elements(iterable, visit);
+        return;
+    }
+    JsValue method;
+    if (!js_iterator_method(iterable, method)) throw_not_iterable(iterable);
+    if (method_is_installed(iterable, method)) {
+        // The long way round to the same answer: a subclass, a getter that
+        // hands out the installed method, the method assigned back.
+        if (is_string) visit_code_points(iterable, visit);
+        else visit_elements(iterable, visit);
+        return;
+    }
+    iterate_with(iterable, method, visit);
+}
+
+std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
     std::vector<JsValue> out;
-    js_iterate(iterable, [&](const JsValue& v) {
+    auto collect = [&](const JsValue& v) {
         out.push_back(v);
         return true;
-    });
+    };
+    const bool is_string = iterable.type == JsType::String;
+    bool direct = js_iterates_as_builtin(iterable);
+    JsValue method;
+    if (!direct) {
+        if (!js_iterator_method(iterable, method)) throw_not_iterable(iterable);
+        direct = method_is_installed(iterable, method);
+    }
+    if (!direct) {
+        iterate_with(iterable, method, collect);
+    } else if (is_string) {
+        visit_code_points(iterable, collect);
+    } else {
+        // Nothing runs between the first element and the last: one copy.
+        out.assign(iterable.object_val->array_elements.begin(), iterable.object_val->array_elements.end());
+    }
     return out;
 }
 
@@ -1120,6 +1431,8 @@ JsIntrinsics::JsIntrinsics() {
     heap.add_root_provider(this, [this](std::vector<JsValue*>& roots) {
         for (auto& value : m_roots) roots.push_back(&value);
         for (auto& entry : globals) roots.push_back(&entry.second);
+        roots.push_back(&array_iterator_method);
+        roots.push_back(&string_iterator_method);
     });
 }
 
@@ -1159,6 +1472,9 @@ void JsIntrinsics::install() {
     install_error_builtins(*this);
     install_array_builtins(*this);
     install_string_builtins(*this);
+    // What js_iterate() compares with: see js_iterates_as_builtin().
+    array_iterator_method = js_object_value(array_proto).get_property(kIteratorKey);
+    string_iterator_method = js_object_value(string_proto).get_property(kIteratorKey);
     install_number_builtins(*this);
     install_collection_builtins(*this);
     install_regexp_builtins(*this);

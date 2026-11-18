@@ -29,18 +29,77 @@ a row from Open tasks over anything here, take that row.
 
 ## Where Litebird stands today (the honest baseline)
 
-WPT-grade HTML/DOM/XML parsing for the covered corpora; JavaScript interpreted
-on a tree-walking evaluator (plus a half-finished bytecode VM), 974/989 on its
-recorded corpus; layout with an 8×8 bitmap font; a terminal/ANSI renderer;
-`http://` only — no TLS at all; XHR for `data:` URLs only; no typed arrays,
-`Proxy`, BigInt or ES modules; pixels are **unmeasured** by any scoreboard.
+WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
+1,792/1,792; `make wpt` 9,538/9,744 subtests across 190 files); JavaScript
+interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
+1,020/1,034 on its recorded corpus and 27,872/47,967 of test262; TrueType
+rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;
+a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
+time, certificate and hostname verified); `fetch()`, `XMLHttpRequest` and
+WebSocket over HTTP/HTTPS with CORS; no typed arrays, `Proxy`, BigInt or ES
+modules; pixels are **unmeasured** by any scoreboard.
 The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
+
+*(This baseline was allowed to go stale once: it still said "no TLS at all"
+and "XHR for `data:` URLs only" after both had landed. Re-read it against the
+code before trusting it.)*
+
+## What "usable" means — three tiers
+
+The waves below say what a Chromium-class engine needs. They do not say which
+of it stands between Litebird and something a person could actually browse
+with. This does. **Tier 1 is the difference between an engine and a browser.**
+
+### Tier 1 — a browser someone could use
+
+| # | What | Row | Why it is here |
+| :--- | :--- | :--- | :--- |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)**, **`font-family` selection done (Phase 67)** and **`@font-face` done (Phase 74):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it; a page may also bring its own typeface, fetched from the `src` list the first time it is wanted. `pre { font-family: monospace }` now measures differently from a heading in the default face, which it did not before — and did not after Phase 67 either, because the style a text box is built with did not carry `font-family` (Phase 74 fixed that too). Still open: no WOFF/WOFF2, no `unicode-range`, no italic face, no shaping, no bidi. |
+| 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
+| 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
+| 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |
+| 5 | **Automatic GC** | 11 | Collection runs only on `gc()`. A long-running page grows. |
+| 6 | **Typed arrays + ES modules** | 8 | `ArrayBuffer` is **not exposed to script**. Blocks `fetch()` bodies, WebSocket binary frames, Canvas `ImageData`. |
+| 7 | **HTTP/1.1 complete + cache** | 21, 35 | Redirects, `Set-Cookie` → jar, chunked, gzip, ETag/`Cache-Control`. |
+| 8 | **Render conformance** | 38 | **Nothing measures a pixel.** Every layout and font claim on this page is unverified. |
+
+### Tier 2 — real pages work
+
+Multicol and fragmentation (18); `overflow: auto` and `position: sticky` (19);
+Selectors L4 `:has()` and container queries (14, 15); `Proxy`, BigInt, `Intl`
+(9, 10); finish the bytecode VM — the tree-walker is **50–100× slower than
+V8** on loops and calls (7); `getComputedStyle`, `sheet.cssRules`,
+`document.write`; `TextDecoder`/`TextEncoder` (24); extend WPT to `html/`,
+`url/`, `fetch/` and the rest of `css-*` (37).
+
+### Tier 3 — Chromium-class
+
+Multi-process isolation and a renderer sandbox (33) — untrusted input is
+parsed in-process today; accessibility, which is *"approximately zero"* (34);
+`<video>`/`<audio>` (36); performance engineering (35); Shadow DOM complete
+(30); Selection and `contenteditable` (31).
+
+### How fast this goes — and where it stops going fast
+
+Every phase so far has been spec-conformance work against an oracle that
+already existed: WPT, html5lib, the W3C XML suite, test262, the CSS Color
+rational oracle. That is the shape of problem the agents are fastest at.
+
+Count the oracles in Tier 1. Typed arrays has test262. Shaping has WPT
+`css-text`, partly. **A windowed shell has none. Automatic GC has almost
+none. An HTTP cache has none.** Three of the eight items that make it a
+browser are the ones with nothing to check the answer against — and that is
+where the speed goes.
+
+Tier 1 is roughly 15–25 phases of work. At the rate phases have been landing
+that is arithmetically a few days and realistically two to four weeks,
+because the last third of it has no oracle to converge on.
 
 ## Wave 1 — The browser can actually see (rendering & text)
 
 | # | Phase | Size |
 | :--- | :--- | :--- |
-| 1 | **Fonts and shaping** — system font loading, `@font-face` web fonts, real metrics, complex-script shaping (adopt HarfBuzz-class shaping), bidi/RTL text, OpenType basics. The single biggest visual gap. | XL |
+| 1 | **Fonts and shaping** — system font loading, `@font-face` web fonts, real metrics, complex-script shaping (adopt HarfBuzz-class shaping), bidi/RTL text, OpenType basics. The single biggest visual gap. (**Per-glyph fallback across the discovered system faces landed in Phase 64** — a codepoint the primary face lacks no longer paints nothing. `@font-face`, shaping and bidi remain open.) | XL |
 | 2 | **Rasterizer upgrade** — anti-aliased, scaled glyphs replace the 8×8 bitmap; image resampling; transforms at raster time. | L |
 | 3 | **Windowed shell** — a real window with keyboard/mouse/touch, focus, scrolling, cursor; terminal renderer kept as a fallback. | L |
 | 4 | **Image codecs** — PNG, GIF (animated), WebP (JPEG optional, AVIF later). Today: BMP/PPM only. Oracle: WPT `image/`. | M–L |
@@ -53,7 +112,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
 | 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, and array-hole semantics. (Iterative heap-stack RegExp bytecode VM landed in Phase 37; complete RegExp flags `d`/`u`/`v`, ES2025 modifiers `(?ims-ims:...)`, duplicate named capturing groups, `RegExp.escape()`, and `Symbol.{match,matchAll,replace,search,split,species}` landed in Phase 55.) | M |
-| 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
+| 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. (Async-generator `yield*` delegation — the async protocol, `CreateAsyncFromSyncIterator` fallback, `.return()` through the delegate, and direct-yield operand adoption — landed in Phase 76.) | M |
 | 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): `DateTimeFormat`/`NumberFormat`/`Segmenter`/`Intl.Collator` and locale-specific collation tailorings. (Unicode 17.0 RegExp property escapes — General_Category, Binary Properties, Script, Script_Extensions, Properties of Strings — and Unicode/legacy RegExp case folding landed in Phase 55; Unicode 17.0 `String.prototype.normalize()`, full + locale-sensitive `tr`/`az`/`lt`/`el` case mapping, CLDR 48 / UCA 17.0 root `localeCompare()` with ECMA-402 validation landed in Phase 60, taking `make diff-strings` to **50,580 / 50,580 = 0 diffs**.) | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
 
@@ -63,7 +122,7 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | :--- | :--- | :--- |
 | 12 | **Two known-wrong layout bugs** — block-in-inline is split correctly (Phase 36); sized floats are placed by a band-edge sweep, landing on the exact bottom edge of the float in the way (10,000 sized floats in seconds; nothing escapes the box). **Done.** | M |
 | 12a | **Sized-float performance** — index nonempty bands for placement without re-sorting every prior band per float; preserve the already-correct exact-edge placement (Phase 48). **Done**; bands spanning many distinct intervals still require updating those intervals. | S |
-| 13 | **Flexbox/Grid gap closure** vs WPT `css/flex` and `css/grid`. | M–L |
+| 13 | **Flexbox/Grid** — **parsing done; layout implemented but unmeasured.** `layout_flex` (`src/layout/LayoutBox.cpp:459`) and `layout_grid` (`:707`–`928`) are in the box tree, not only the parser: `flex-direction`, `flex-wrap`, `flex-grow`, line breaking and shrink-to-fit; grid track sizing. But all **87** vendored WPT files (27 `css-flexbox`, 60 `css-grid`) are under **`parsing/`** — they check that a declaration computes and serialises, not where a box lands. The layout has no oracle. See *Known gaps* 7 and row 38. | M–L |
 | 14 | **Selectors level 4** — `:has()`, `:focus-visible`, `@container`, CSS nesting, `::part`. (`:is()`, `:where()`, `:not()` selector lists, combinators `>`/`+`/`~`, `@layer`, and `@supports` landed in Phase 37.) | M–L |
 | 15 | **Container queries** — `@container` evaluation inside the cascade. (Media Queries Level 4 range syntax and boolean operators landed in Phase 37.) | S–M |
 | 16 | **CSS Color 4/5** — `oklch`/`lab`, `color-mix()`, relative-colour syntax. **Done (Phase 50)**: unified `CssColor` engine covering all 15 CSS Color 4 spaces (`srgb`, `srgb-linear`, `display-p3`, `display-p3-linear`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `xyz-d50`, `xyz-d65`, `lab`, `lch`, `oklab`, `oklch`, `hsl`, `hwb`), exact §17 matrices & Bradford D65↔D50 adaptation, §13.2 OKLCH chroma-reduction gamut mapping, `color-mix()` (1..N args, all hue modifiers, missing-component carry-forward), relative color syntax (`from ...`), `light-dark()` + `color-scheme` inheritance, and CSS Values 4 math (`calc`/`min`/`max`/`clamp`/trig/constants) wired through `StyleResolver`, `DomStyleBindings`, and `SvgRenderer` (`make verify-color`, `make fuzz-color`, 4,860/4,860 upstream WPT `color-computed-*.html`). Open: wide-gamut (>8-bit sRGB) raster buffer, `@color-profile`, `contrast-color()`. | M |
@@ -77,11 +136,11 @@ The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 21 | **HTTP/1.1 complete** — redirects, `Set-Cookie` → jar (exists — wire it), auth, chunked, gzip/br decode. | M |
-| 22 | **HTTPS** — TLS with certificate validation (adopt a stack or platform APIs). This phase *is* the project, not a detail. | L–XL |
+| 22 | **HTTPS** — **Done.** `src/net/ResourceLoader.cpp` loads OpenSSL at run time with `dlopen`/`dlsym`, so nothing links `-lssl` and the engine builds without it; then `SSL_CTX_set_default_verify_paths` (system CA store), `SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER)`, `SSL_set1_host` (RFC 6125 hostname check) and `SSL_get_verify_result`, so a certificate that does not verify closes the connection. Port 443 by scheme. Open: no OCSP/CRL revocation, no pinning, no TLS 1.3 resumption, and the failure path is untested — there is no `https://` fixture anywhere in `tests/`. | L–XL |
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. **Decoding done (Phase 47)**: 40 encodings and 228 labels from `whatwg/encoding`, `<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR and subresources (WPT 7,968/8,009 across 103 files, the XML suite 1,718/1,718). Open: `TextDecoder`/`TextEncoder` in script, encoders, and streaming. | M |
 | 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
-| 25a | **Cross-origin `Window`/`Location` reflection** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal. **Done (Phase 56)**. | M |
+| 25a | **Cross-origin `Window`/`Location` reflection, child navigation and message ports** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal; permitted non-fragment child navigation; same-agent `MessageChannel`/`MessagePort`. **Done (Phases 56 & 61)**. Transfer lists, structured cloning, cross-agent ports and process isolation remain open. | M |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
 

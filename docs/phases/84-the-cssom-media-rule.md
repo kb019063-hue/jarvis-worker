@@ -99,7 +99,7 @@ the media rule.
 
 ## 3. How it is verified
 
-- `make test` → **241 / 241** suites. The new one is
+- `make test` → **242 / 242** suites. The new one is
   `cssom_media_rules_and_the_cascade_inside_them`: 62 assertions, all compared
   inside the page, over a sheet with six top-level rules of which four are
   `@media` blocks — the brand, `type`, `parentRule`, `parentStyleSheet` and
@@ -122,7 +122,7 @@ the media rule.
   **1967 / 1973**, `make diff-trees` **0** different trees in 4,500 random
   pages, `make diff-xml` **0** differing documents, `make deep` **1332 runs
   over 465 pages, 0 failed**: all unchanged.
-- `make asan` → the 241 suites under AddressSanitizer and
+- `make asan` → the 242 suites under AddressSanitizer and
   UndefinedBehaviorSanitizer, 0 reports.
 
 ## 4. What is still open

@@ -69,6 +69,7 @@
 extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #endif
 
+#include <poll.h>
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -4061,6 +4062,109 @@ TEST(websocket_rfc6455_client_and_handshake) {
     assert(received_from_client == "ping-from-client");
     assert(js.global_env()->get("wsReply").to_string() == "pong-from-server");
     assert(js.global_env()->get("wsClosed").is_truthy() == true);
+}
+
+// RFC 6455 sections 4.1/4.2.2: an upgrade is not established merely
+// because the response contains the digits 101 or echoes the accept key.
+TEST(websocket_handshake_security_and_secure_transport) {
+    using namespace litebird;
+    auto check = [](const std::string& scheme, const std::string& path, const std::string& protocols,
+                    int response_kind, bool expect_connection, bool expect_open) {
+        int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(listener >= 0);
+        int opt = 1;
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        assert(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        assert(::listen(listener, 1) == 0);
+        socklen_t len = sizeof(addr);
+        assert(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        std::atomic<bool> connected{false}, release{false};
+        std::string request;
+        std::thread server([&] {
+            pollfd fd{listener, POLLIN, 0};
+            if (::poll(&fd, 1, 700) <= 0) return;
+            int client = ::accept(listener, nullptr, nullptr);
+            if (client < 0) return;
+            connected = true;
+            timeval timeout{2, 0};
+            ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            char c;
+            while (request.size() < 16384 && ::recv(client, &c, 1, 0) == 1) {
+                request += c;
+                if (request.size() >= 4 && request.compare(request.size()-4, 4, "\r\n\r\n") == 0) break;
+            }
+            const std::string header = "Sec-WebSocket-Key: ";
+            size_t k = request.find(header);
+            std::string key = k == std::string::npos ? "" : request.substr(k + header.size(), request.find("\r\n", k) - k - header.size());
+            std::string accept = WebSocketObject::calculate_accept_key(key);
+            std::string status = response_kind == 1 ? "HTTP/1.1 200 OK\r\nX-Fake: 101 Switching Protocols\r\n" : "HTTP/1.1 101 Switching Protocols\r\n";
+            std::string upgrade = response_kind == 2 ? "Upgrade: h2c\r\n" : "UpGrAdE: WebSocket\r\n";
+            std::string connection = response_kind == 3 ? "Connection: keep-alive\r\n" : "Connection: keep-alive, Upgrade\r\n";
+            std::string accept_header = response_kind == 4 ? "X-Accept: " + accept + "\r\n" : "Sec-WebSocket-Accept: " + accept + "\r\n";
+            if (response_kind == 5) accept_header += "Sec-WebSocket-Accept: " + accept + "\r\n";
+            std::string protocol = response_kind == 6 ? "Sec-WebSocket-Protocol: unknown\r\n" :
+                                   response_kind == 7 ? "Sec-WebSocket-Protocol: chat\r\n" : "";
+            std::string response = status + upgrade + connection + accept_header + protocol;
+            if (response_kind == 8) response += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            if (response_kind == 9) response += "X-Large: " + std::string(65536, 'a') + "\r\n";
+            response += "\r\n";
+            ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!release && std::chrono::steady_clock::now() < until)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        });
+        auto ws = std::make_shared<WebSocketObject>(scheme + "://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + path, protocols);
+        ws->connect();
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() == WebSocketReadyState::Connecting && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const bool opened = ws->ready_state() == WebSocketReadyState::Open;
+        const bool closed = ws->ready_state() == WebSocketReadyState::Closed;
+        if (opened) ws->close();
+        release = true;
+        server.join();
+        ::close(listener);
+        ws.reset();
+        assert(connected == expect_connection);
+        assert(opened == expect_open);
+        assert(expect_open || closed);
+        if (expect_connection) assert(request.rfind("GET /chat?x=1 HTTP/1.1\r\n", 0) == 0);
+    };
+    check("ws", "/chat?x=1", "", 0, true, true);
+    for (int kind = 1; kind <= 6; ++kind) check("ws", "/chat?x=1", "", kind, true, false);
+    check("ws", "/chat?x=1", "", 8, true, false);
+    check("ws", "/chat?x=1", "", 9, true, false);
+    check("ws", "/chat?x=1", "chat, other", 7, true, true);
+    check("ws", "/chat?x=1", "chat", 0, true, false);
+    check("ws", "/chat?x=1", "chat", 6, true, false);
+    check("wss", "/chat?x=1", "", 0, false, false);
+    check("ws", "/chat?x=1\r\nInjected: yes", "", 0, false, false);
+    check("ws", "/chat?x=1", "chat\r\nInjected: yes", 0, false, false);
+    check("ws", "/chat?x=1", "chat,chat", 0, false, false);
+    check("http", "/chat?x=1", "", 0, false, false);
+
+    // Even an immediate fail-closed result is delivered asynchronously to
+    // handlers installed by the caller after the constructor returns.
+    JsInterpreter js(nullptr);
+    js.eval(R"(
+        var wsEvents = [];
+        var secureWs = new WebSocket('wss://127.0.0.1:1/');
+        secureWs.onerror = function(e) { wsEvents.push(e.type); };
+        secureWs.addEventListener('error', function(e) { wsEvents.push('listener:' + e.type); });
+        secureWs.onclose = function(e) { wsEvents.push(e.type + ':' + e.code + ':' + e.wasClean); };
+    )");
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (js.eval("wsEvents.length").to_number() < 3 && std::chrono::steady_clock::now() < until) {
+        EventLoop::default_loop().tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(js.eval("wsEvents.join(',')").to_string() == "error,listener:error,close:1006:false");
 }
 
 TEST(mutation_observer_api) {
@@ -19882,6 +19986,7 @@ int main() {
     RUN_TEST(web_workers_and_concurrent_execution);
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
+    RUN_TEST(websocket_handshake_security_and_secure_transport);
     RUN_TEST(mutation_observer_api);
     RUN_TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts);
     RUN_TEST(custom_elements_api);

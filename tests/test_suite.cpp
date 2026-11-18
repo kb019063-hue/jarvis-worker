@@ -638,7 +638,7 @@ TEST(per_glyph_font_fallback) {
 
     const std::vector<std::string> saved_paths = fr.fallback_paths();
 
-    const TrueTypeFont* primary = fr.face_for(0x0041, false);
+    const TrueTypeFont* primary = fr.face_for(0x0041, 400);
     assert(primary != nullptr);
     if (primary->has_glyph(0x4E00)) {
         // This host's primary already covers CJK, so there is no gap for a
@@ -648,9 +648,9 @@ TEST(per_glyph_font_fallback) {
 
     fr.set_fallbacks({ahem});
 
-    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, false);
-    const TrueTypeFont* for_macron = fr.face_for(0x0100, false);
-    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, false);
+    const TrueTypeFont* for_ascii  = fr.face_for(0x0041, 400);
+    const TrueTypeFont* for_macron = fr.face_for(0x0100, 400);
+    const TrueTypeFont* for_cjk    = fr.face_for(0x4E00, 400);
 
     assert(for_ascii != nullptr && for_macron != nullptr && for_cjk != nullptr);
     // Fallback fills gaps; it does not take the face over.
@@ -660,7 +660,7 @@ TEST(per_glyph_font_fallback) {
     assert(for_cjk->has_glyph(0x4E00));
 
     // The rasterizer and the measurer agree, which is what layout asks for.
-    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, false);
+    const GlyphBitmap& cjk = fr.get_glyph(0x4E00, 16, 400);
     assert(cjk.width > 0 && cjk.height > 0);
     assert(!cjk.coverage.empty());
     assert(fr.measure_text("\xE4\xB8\x80", 16.0f) > 0.0f);   // "一"
@@ -769,8 +769,8 @@ TEST(font_family_selects_a_face) {
     // the next line drawn in another, which is a bug that appears as the first
     // line of a paragraph being right and the rest wrong.
     if (fr.has_truetype_font()) {
-        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
-        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, 400, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, 400, FontRenderer::kDefaultFamily);
         assert(from_ahem.width != from_default.width);
     }
 
@@ -1374,17 +1374,17 @@ TEST(a_family_with_an_italic_face_is_not_sheared) {
     assert(upright_only != FontRenderer::kNoFamily);
 
     bool sheared = true;
-    const TrueTypeFont* italic_face = fr.face_for('X', false, slanty, /*italic=*/true, &sheared);
+    const TrueTypeFont* italic_face = fr.face_for('X', 400, slanty, /*italic=*/true, &sheared);
     assert(italic_face);
     assert(!sheared);   // the family's own italic answered: nothing to synthesise
 
     sheared = true;
-    const TrueTypeFont* upright_face = fr.face_for('X', false, slanty, /*italic=*/false, &sheared);
+    const TrueTypeFont* upright_face = fr.face_for('X', 400, slanty, /*italic=*/false, &sheared);
     assert(upright_face);
     assert(!sheared);   // an upright request has nothing to shear
 
     sheared = false;
-    const TrueTypeFont* stand_in = fr.face_for('X', false, upright_only, /*italic=*/true, &sheared);
+    const TrueTypeFont* stand_in = fr.face_for('X', 400, upright_only, /*italic=*/true, &sheared);
     assert(stand_in);
     // No italic on this host: the upright face answers and the caller is told
     // to shear it. Reporting this rather than assuming it is what keeps
@@ -1448,7 +1448,7 @@ TEST(text_is_drawn_at_the_advances_it_was_measured_at) {
     // '一' U+4E00 is Ahem's and not DejaVu's or DejaVu Sans Mono's, which is
     // what makes it the one codepoint that forces the fallback chain.
     if (mono_face.has_glyph(0x4E00) || !ahem_face.has_glyph(0x4E00)) return;
-    if (const TrueTypeFont* primary = fr.face_for(0x0041, false)) {
+    if (const TrueTypeFont* primary = fr.face_for(0x0041, 400)) {
         if (primary->has_glyph(0x4E00)) return;   // this host's primary covers CJK
     }
 
@@ -1472,6 +1472,278 @@ TEST(text_is_drawn_at_the_advances_it_was_measured_at) {
     // space measured for it and sitting in a gap.
     assert(wide_rightmost - 20 >= 29);
     assert(wide_rightmost - 20 <= 34);
+}
+
+TEST(a_face_weight_comes_from_the_font_not_its_name) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const ResourceResponse ahem = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!ahem.success || ahem.body.empty()) return;
+
+    // A file's weight is a number in its `OS/2` table, and its slant is a bit
+    // in `OS/2` or in `head`. Both used to be guessed from the subfamily name:
+    // "Bold" means 700, "Italic" means slanted, everything else is a regular
+    // face. That guess is right for the fonts on this machine and wrong for a
+    // foundry that writes "Halbfett", and there is no reason to guess when the
+    // file answers.
+    //
+    // Nowhere on this host is there a face where the name and the table
+    // disagree -- every DejaVu file agrees with itself -- so the disagreement
+    // is made here: the vendored Ahem, whose subfamily says "Regular" (it says
+    // so in a name table nobody touches), with its `OS/2` rewritten.
+    const auto table_offset = [](const std::string& font, const char* tag) -> std::size_t {
+        if (font.size() < 12) return 0;
+        const auto u16 = [&font](std::size_t o) {
+            return (static_cast<unsigned>(static_cast<unsigned char>(font[o])) << 8) |
+                   static_cast<unsigned>(static_cast<unsigned char>(font[o + 1]));
+        };
+        const auto u32 = [&font](std::size_t o) {
+            return (static_cast<std::size_t>(static_cast<unsigned char>(font[o])) << 24) |
+                   (static_cast<std::size_t>(static_cast<unsigned char>(font[o + 1])) << 16) |
+                   (static_cast<std::size_t>(static_cast<unsigned char>(font[o + 2])) << 8) |
+                   static_cast<std::size_t>(static_cast<unsigned char>(font[o + 3]));
+        };
+        const unsigned count = u16(4);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::size_t record = 12 + 16 * static_cast<std::size_t>(i);
+            if (record + 16 > font.size()) return 0;
+            if (font.compare(record, 4, tag) == 0) return u32(record + 8);
+        }
+        return 0;
+    };
+
+    const int family = fr.family_id_for("Ahem");   // whichever test registered it
+    // The control: the unpatched file says 400 and upright, and the name says
+    // the same, so nothing below depends on which of the two was read.
+    bool saw_upright_400 = false;
+    bool saw_slant_before = false;
+    for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+        if (f.weight_min == 400 && f.weight_max == 400 && !f.italic) saw_upright_400 = true;
+        if (f.italic) saw_slant_before = true;
+    }
+    std::printf("      [weight] Ahem before patching: 400/upright=%s italic=%s\n",
+                saw_upright_400 ? "yes" : "no", saw_slant_before ? "yes" : "no");
+    std::fflush(stdout);
+    assert(saw_upright_400);
+    assert(!saw_slant_before);
+
+    // Three artefacts, because three separate fields say what a face is and
+    // each can be wrong on its own: `OS/2.usWeightClass`, `OS/2.fsSelection`
+    // bit 0, and `head.macStyle` bit 1. Every one of them was ignored before
+    // this phase, so every one of them gets a file that sets it and nothing
+    // else -- the name table is never touched, and still says "Regular".
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::filesystem::path heavy_path = dir / "litebird_phase81_weight_700.ttf";
+    const std::filesystem::path os2_italic_path = dir / "litebird_phase81_os2_italic.ttf";
+    const std::filesystem::path head_italic_path = dir / "litebird_phase81_head_italic.ttf";
+
+    const auto write_file = [](const std::filesystem::path& path, const std::string& bytes) {
+        std::ofstream out(path, std::ios::binary);
+        assert(out);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return out.good();
+    };
+
+    // 700, which is not what the subfamily says.
+    std::string heavy = ahem.body;
+    const std::size_t heavy_os2 = table_offset(heavy, "OS/2");
+    assert(heavy_os2 != 0 && heavy_os2 + 64 <= heavy.size());
+    heavy[heavy_os2 + 4] = static_cast<char>(700 >> 8);
+    heavy[heavy_os2 + 5] = static_cast<char>(700 & 0xFF);
+    assert(write_file(heavy_path, heavy));
+
+    // `OS/2.fsSelection` bit 0, the bit nearly every modern font uses.
+    std::string os2_italic = ahem.body;
+    const std::size_t italic_os2 = table_offset(os2_italic, "OS/2");
+    assert(italic_os2 != 0 && italic_os2 + 64 <= os2_italic.size());
+    os2_italic[italic_os2 + 63] = static_cast<char>(static_cast<unsigned char>(os2_italic[italic_os2 + 63]) | 0x01);
+    assert(write_file(os2_italic_path, os2_italic));
+
+    // `head.macStyle` bit 1, which older fonts use instead.
+    std::string head_italic = ahem.body;
+    const std::size_t italic_head = table_offset(head_italic, "head");
+    assert(italic_head != 0 && italic_head + 46 <= head_italic.size());
+    head_italic[italic_head + 45] = static_cast<char>(static_cast<unsigned char>(head_italic[italic_head + 45]) | 0x02);
+    assert(write_file(head_italic_path, head_italic));
+
+    const int heavy_id = fr.register_font_file(heavy_path.string());
+    assert(heavy_id != FontRenderer::kNoFamily);
+    // Both files call themselves "Ahem" -- the name table was not touched --
+    // so they joined the family the host face is in, which is what makes the
+    // facts below a mix of everything registered under that name.
+    assert(heavy_id == family || family == FontRenderer::kDefaultFamily);
+
+    const auto count_italic_faces = [&fr]() {
+        int slanted = 0;
+        for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+            if (f.italic) ++slanted;
+        }
+        return slanted;
+    };
+    const auto has_weight = [&fr](int weight) {
+        for (const FontRenderer::FaceFacts& f : fr.family_face_facts("Ahem")) {
+            if (f.weight_min == weight && f.weight_max == weight && !f.italic) return true;
+        }
+        return false;
+    };
+
+    // The name says "Regular" and the table says 700: the table won.
+    assert(has_weight(700));
+    assert(count_italic_faces() == 0);
+
+    // `OS/2.fsSelection`, then `head.macStyle`. Neither file says "Italic"
+    // anywhere, and each adds exactly one slanted face -- which is the only
+    // way to tell which of the two bits was read.
+    assert(fr.register_font_file(os2_italic_path.string()) != FontRenderer::kNoFamily);
+    const int after_os2 = count_italic_faces();
+    assert(fr.register_font_file(head_italic_path.string()) != FontRenderer::kNoFamily);
+    const int after_head = count_italic_faces();
+    std::printf("      [weight] italic faces: by-os2=%d by-head=%d\n", after_os2, after_head);
+    std::fflush(stdout);
+    assert(after_os2 == 1);
+    assert(after_head == 2);
+
+    // ...and the slant is not merely recorded, it is chosen: an italic request
+    // in this family now finds a face that is already slanted, so there is
+    // nothing for the caller to shear.
+    bool sheared = true;
+    const TrueTypeFont* picked = fr.face_for('X', 400, family, /*italic=*/true, &sheared);
+    assert(picked);
+    assert(!sheared);
+}
+
+TEST(font_weight_matching_follows_the_css_order) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+    fr.clear_webfonts();
+
+    // Two faces of one family, far apart in weight and easy to tell apart by
+    // measurement: the vendored Ahem at 500, where four characters at 16 px
+    // measure 64.00, and the host's sans at 700.
+    const std::string sans_path = fr.face_path("sans-serif");
+    if (sans_path.empty()) return;
+    const ResourceResponse sans = ResourceLoader::load_file(sans_path);
+    const ResourceResponse ahem = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!sans.success || sans.body.empty() || !ahem.success || ahem.body.empty()) return;
+
+    const std::vector<std::uint8_t> sans_bytes(sans.body.begin(), sans.body.end());
+    const std::vector<std::uint8_t> ahem_bytes(ahem.body.begin(), ahem.body.end());
+    // Registered 700 first and 500 second, which puts the 500 at the front of
+    // the family's list -- so a tie that is broken by "whichever came first"
+    // picks the Ahem face, and a tie broken by the spec picks the sans.
+    fr.register_webfont("Weights", {[sans_bytes]() { return sans_bytes; }}, 700, 700);
+    fr.register_webfont("Weights", {[ahem_bytes]() { return ahem_bytes; }}, 500, 500);
+
+    const float at_500 = fr.measure_text("XXXX", 16.0f, 500, "Weights");
+    const float at_700 = fr.measure_text("XXXX", 16.0f, 700, "Weights");
+    assert(std::fabs(at_500 - 64.0f) < 0.5f);          // the Ahem face
+    assert(std::fabs(at_700 - at_500) > 1.0f);         // ...and it is not this one
+    const float at_600 = fr.measure_text("XXXX", 16.0f, 600, "Weights");
+    const float at_400 = fr.measure_text("XXXX", 16.0f, 400, "Weights");
+    std::printf("      [weights] 400=%.2f 500=%.2f 600=%.2f 700=%.2f\n",
+                at_400, at_500, at_600, at_700);
+    std::fflush(stdout);
+
+    // CSS Fonts 4 §5.2.1 does not ask for the nearest weight. Above 500 it
+    // looks upward first, so 600 is answered by 700 -- the distance rule sees
+    // 600 as a tie between 500 and 700 and takes whichever was registered
+    // first, which is the Ahem face.
+    assert(std::fabs(at_600 - at_700) < 0.5f);
+    // In the 400..500 band it looks upward first too, so 400 is answered by the
+    // 500 face rather than by nothing.
+    assert(std::fabs(at_400 - at_500) < 0.5f);
+
+    // And the weight a page asks for is the weight the registry is asked at.
+    // It used to arrive as a bool -- `bold = weight >= 600` -- so the only
+    // questions ever put to a family were 400 and 700, and a family with a 200
+    // face could not be asked for it. Here 350 must reach the 200 face: below
+    // 400 the search steps down first. Flattened to 400 it would land on the
+    // 500 face instead, and the two are different fonts.
+    fr.register_webfont("WeightFloor", {[ahem_bytes]() { return ahem_bytes; }}, 500, 500);
+    fr.register_webfont("WeightFloor", {[sans_bytes]() { return sans_bytes; }}, 200, 200);
+    const float floor_350 = fr.measure_text("XXXX", 16.0f, 350, "WeightFloor");
+    const float floor_500 = fr.measure_text("XXXX", 16.0f, 500, "WeightFloor");
+    std::printf("      [weights] 350=%.2f (500 face would be %.2f)\n", floor_350, floor_500);
+    std::fflush(stdout);
+    assert(std::fabs(floor_500 - 64.0f) < 0.5f);        // the Ahem face is the 500 one
+    assert(std::fabs(floor_350 - floor_500) > 1.0f);    // ...and 350 is not answered by it
+    assert(std::fabs(floor_350 - at_700) < 0.5f);       // it is the other font
+
+    fr.clear_webfonts();
+}
+
+TEST(bolder_and_lighter_are_relative_to_the_parent) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(R"(
+        <body>
+            <div id="bold" style="font-weight: 700">
+                <span id="b-from-bold" style="font-weight: bolder">x</span>
+                <span id="l-from-bold" style="font-weight: lighter">x</span>
+                <span id="shorthand" style="font: bolder 16px monospace">x</span>
+            </div>
+            <div id="light" style="font-weight: 300">
+                <span id="b-from-light" style="font-weight: bolder">x</span>
+            </div>
+            <div id="plain" style="font-weight: 400">
+                <span id="b-from-plain" style="font-weight: bolder">y</span>
+                <span id="l-from-plain" style="font-weight: lighter">y</span>
+            </div>
+            <div id="heavy" style="font-weight: 900">
+                <span id="b-from-heavy" style="font-weight: bolder">x</span>
+                <span id="l-from-heavy" style="font-weight: lighter">x</span>
+            </div>
+            <p id="big" style="font-weight: 5000">x</p>
+            <p id="small" style="font-weight: -5">x</p>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    // The span's own weight, resolved against its parent's: `bolder` is a
+    // question about the parent, so the parent has to be resolved first.
+    auto weight_of = [&](const char* id) {
+        const auto el = doc->get_element_by_id(id);
+        assert(el);
+        const auto parent = std::dynamic_pointer_cast<Element>(el->parent());
+        assert(parent);
+        const ComputedStyle parent_style = resolver.resolve_style(parent, nullptr);
+        return resolver.resolve_style(el, &parent_style).font_weight;
+    };
+
+    // CSS Fonts 4 §5.2.2's table, not `+100`: from 700, `bolder` is 900 and
+    // `lighter` is 400. Both used to be synonyms for `bold` and `normal`, so
+    // this table said 700 and 400 whatever the parent was.
+    const int b_from_bold = weight_of("b-from-bold");
+    const int l_from_bold = weight_of("l-from-bold");
+    const int b_from_light = weight_of("b-from-light");
+    const int b_from_plain = weight_of("b-from-plain");
+    const int l_from_plain = weight_of("l-from-plain");
+    const int b_from_heavy = weight_of("b-from-heavy");
+    const int l_from_heavy = weight_of("l-from-heavy");
+    const int shorthand = weight_of("shorthand");
+    std::printf("      [weights] 700+bolder=%d 700+lighter=%d 300+bolder=%d 400+bolder=%d "
+                "400+lighter=%d 900+bolder=%d 900+lighter=%d shorthand=%d\n",
+                b_from_bold, l_from_bold, b_from_light, b_from_plain,
+                l_from_plain, b_from_heavy, l_from_heavy, shorthand);
+    std::fflush(stdout);
+
+    assert(b_from_bold == 900);
+    assert(l_from_bold == 400);
+    assert(b_from_light == 400);   // +100 would say 400 too, but by accident
+    assert(b_from_plain == 700);
+    assert(l_from_plain == 100);
+    assert(b_from_heavy == 900);   // nothing bolder than boldest
+    assert(l_from_heavy == 700);
+    // The shorthand passes the keyword through rather than resolving it to a
+    // number it cannot know: the parent's weight is not its business.
+    assert(shorthand == 900);
+
+    // A number outside the scale is clamped to it, not taken as written.
+    assert(resolver.resolve_style(doc->get_element_by_id("big"), nullptr).font_weight == 1000);
+    assert(resolver.resolve_style(doc->get_element_by_id("small"), nullptr).font_weight == 1);
 }
 
 TEST(inline_formatting_context) {
@@ -18927,6 +19199,9 @@ int main() {
     RUN_TEST(font_style_italic_slants_the_glyphs_it_draws);
     RUN_TEST(a_family_with_an_italic_face_is_not_sheared);
     RUN_TEST(text_is_drawn_at_the_advances_it_was_measured_at);
+    RUN_TEST(a_face_weight_comes_from_the_font_not_its_name);
+    RUN_TEST(font_weight_matching_follows_the_css_order);
+    RUN_TEST(bolder_and_lighter_are_relative_to_the_parent);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

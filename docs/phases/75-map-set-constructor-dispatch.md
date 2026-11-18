@@ -27,22 +27,25 @@ could not make the source iterator's `return()` run.
 `JsValue::current_derived_this()`. A call reached through `super(...)` keeps
 that object's already-selected `new.target.prototype`; a call through
 `Reflect.construct(Map, iterable, NewTarget)` has the same object made by the
-construction helper before any user code runs. A direct `new Map` or `new Set`
-still allocates a normal object at its intrinsic prototype.
+construction helper before the adder or source iterator is observed (and with
+the one `NewTarget.prototype` read that construction requires). A direct
+`new Map` or `new Set` still allocates a normal object at its intrinsic
+prototype.
 
 With the receiver in hand, each constructor now follows the observable order:
 
-1. if the iterable is `null` or `undefined`, return it without looking up an
-   adder;
+1. if the iterable is `null` or `undefined`, return the empty collection
+   without looking up an adder;
 2. read `map.set` or `set.add` exactly once and require that it is callable;
 3. obtain and consume the source iterator;
 4. call the saved method with the constructed collection as `this` for every
    entry/value.
 
-The existing `js_iterate()` protocol owns abrupt completion. A thrown getter,
-entry read, or adder call escapes its visitor, so its IteratorClose path calls
-the source iterator's `return()` while retaining the original thrown error.
-No collection-specific close loop was added.
+The getter is read before iterator acquisition, so an error from it has no
+iterator to close. Once the iterator has been acquired, an entry read or adder
+call that throws escapes the `js_iterate()` visitor; its existing IteratorClose
+path calls the source iterator's `return()` while retaining the original
+thrown error. No collection-specific close loop was added.
 
 ## 3. How it was verified
 
@@ -69,8 +72,10 @@ ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_js_conformance.py \
   --binary build-asan/litebird --quiet --timeout 60 --min-pass 1121
 # JS conformance, full corpus: 1126/1152 (97.7%)  [29 files, 0 crashes, 0 timeouts]
 
+git worktree add --detach /tmp/jarvis-worker-phase75-baseline a9e297a6d5ada62febf30377c760d2976428ae9d
+make -C /tmp/jarvis-worker-phase75-baseline -j2 all
 python3 tools/conformance/run_test262.py \
-  --binary before=/tmp/litebird-main --binary now=build/litebird --timeout 12
+  --binary before=/tmp/jarvis-worker-phase75-baseline/build/litebird --binary now=build/litebird --timeout 12
 # test262 at 2e58f87d8350: 15686 tests run, 14 skipped (modules)
 # before 12422 pass; now 12422 pass
 # 0 pass in now and not in before; 0 pass in before and not in now

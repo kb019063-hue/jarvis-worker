@@ -4,6 +4,7 @@
     python3 tools/ci/check_pr.py             # the claims, the numbers taken, the next free pair
     python3 tools/ci/check_pr.py claim N     # after opening #N: are its numbers and its files free
     python3 tools/ci/check_pr.py merge N     # before `gh pr merge N --merge`
+    python3 tools/ci/check_pr.py --self-test # how a claim is read, on fixed texts; no network
 
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
@@ -69,6 +70,9 @@ NO_NUMBERS_RE = re.compile(
     r"no phase,? (?:no|or) finding|takes no phase|is not a phase|not a phase and takes no",
     re.IGNORECASE,
 )
+# What a file name in a `Files:` line can be followed by: the closing backtick,
+# and the full stop, semicolon or colon of the sentence around it.
+FILE_NAME_END_RE = re.compile(r"[`.;:\s]+$")
 REPO = "repos/{owner}/{repo}"      # `gh api` fills the two in from the clone
 
 
@@ -118,11 +122,18 @@ def claim_of(pr: dict) -> dict:
         if line.startswith("Files:"):
             has_files_line = collecting = True
             line = line[len("Files:"):]
-        elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)):
+        elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)
+                             or NO_NUMBERS_RE.search(line)):
+            # The third line of a claim ends the list whichever of its two forms
+            # it has. `No phase, no finding: ...` used to be read on as more
+            # files, so two pull requests without numbers shared one called
+            # "No phase", and the later was told to stay out of it.
             collecting = False
         if collecting:
             for part in re.sub(r"\([^)]*\)", "", line).split(","):
-                part = part.strip().strip("`").strip()
+                # "`docs/x.md`." at the end of a sentence is docs/x.md; a name
+                # may begin with a full stop (.github/...), so only the end.
+                part = FILE_NAME_END_RE.sub("", part.strip().lstrip("`").strip())
                 if part:
                     named.add(part)
     changed = {entry["path"] for entry in pr.get("files") or []}
@@ -413,10 +424,56 @@ def check_merge(number: int) -> int:
     return 1 if report.failed else 0
 
 
+def self_test() -> int:
+    """The cases the reading of a claim is trusted for. Needs no network."""
+    def claim(body: str, title: str = "WIP: a change", changed: tuple[str, ...] = ()) -> dict:
+        return claim_of({"number": 1, "title": title, "body": body,
+                         "files": [{"path": path} for path in changed]})
+
+    numbered = claim("Task: a row\nFiles: `src/a.cpp` (new), `include/a.hpp`,\n`tests/test_suite.cpp`\nPhase 5, finding 7\n\ntext, `not/a/file.cpp`")
+    plain = claim("Task: not a row of the table.\nFiles: `ROADMAP.md`\nNo phase, no finding: documents only; no C++ changed.\n\ntext")
+    other = claim("Task: something else.\nFiles: `docs/README.md`\nNo phase, no finding: tooling, nothing that moves a scoreboard.\n")
+    sentence = claim("Task: a row\nFiles: `src/a.cpp`, `.github/workflows/ci.yml`, `docs/findings/64-lists.md`.\nPhase 5, finding 7\n")
+    silent = claim("## What\n\nA change, described.", title="Phase 56: a title that says a number")
+    folder = claim("Task: a row\nFiles: `tests/dom-conformance/`\nPhase 5, finding 7\n")
+    inside = claim("Task: a row\nFiles: `src/b.cpp`\nPhase 6, finding 8\n", changed=("tests/dom-conformance/everyday.dat",))
+
+    cases = [
+        ("the three lines: the numbers", (numbered["phase"], numbered["finding"]), (5, 7)),
+        ("the three lines: the files, over two lines, without what is in brackets",
+         numbered["files"], {"src/a.cpp", "include/a.hpp", "tests/test_suite.cpp"}),
+        ("the three lines are a claim", numbered["has_claim_lines"], True),
+        ("`No phase, no finding` is the third line of a claim, and a claim", plain["has_claim_lines"], True),
+        ("`No phase, no finding` takes no number", (plain["phase"], plain["finding"]), (None, None)),
+        ("`No phase, no finding` ends the list of files: its words are not files", plain["files"], {"ROADMAP.md"}),
+        ("two pull requests without numbers share no file", same_files(plain["files"], other["files"]), []),
+        ("a name at the end of a sentence loses the full stop, one that begins with a full stop keeps it",
+         sentence["files"], {"src/a.cpp", ".github/workflows/ci.yml", "docs/findings/64-lists.md"}),
+        ("no claim lines is no claim", silent["has_claim_lines"], False),
+        ("no claim lines: the number in the title is still a number in use", silent["phase"], 56),
+        ("a name that ends in / is every file under it",
+         same_files(folder["files"], inside["files"]), ["tests/dom-conformance/everyday.dat"]),
+        ("the files every pull request changes are shared by none",
+         same_files({"AGENTS.md", "README.md"}, {"AGENTS.md", "README.md"}), []),
+    ]
+    failed = 0
+    for name, got, wanted in cases:
+        ok = got == wanted
+        failed += not ok
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        if not ok:
+            print(f"         wanted {wanted!r}")
+            print(f"         got    {got!r}")
+    print(f"\n{len(cases) - failed}/{len(cases)} pass")
+    return 1 if failed else 0
+
+
 def main() -> int:
     arguments = sys.argv[1:]
     if not arguments:
         return show_claims()
+    if arguments == ["--self-test"]:
+        return self_test()
     if len(arguments) == 2 and arguments[0] in ("claim", "merge") and arguments[1].lstrip("#").isdigit():
         number = int(arguments[1].lstrip("#"))
         return check_claim(number) if arguments[0] == "claim" else check_merge(number)

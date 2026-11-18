@@ -32,7 +32,7 @@ a row from Open tasks over anything here, take that row.
 WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
 1,792/1,792; `make wpt` 9,538/9,744 subtests across 190 files); JavaScript
 interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
-1,020/1,034 on its recorded corpus and 27,872/47,967 of test262; TrueType
+1,126/1,152 on its recorded corpus and 29,450/47,967 of test262; TrueType
 rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;
 a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
 time, certificate and hostname verified); `fetch()`, `XMLHttpRequest` and
@@ -60,7 +60,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |
 | 5 | **Automatic GC** | 11 | Collection runs only on `gc()`. A long-running page grows. |
 | 6 | **Typed arrays + ES modules** | 8 | `ArrayBuffer` is **not exposed to script**. Blocks `fetch()` bodies, WebSocket binary frames, Canvas `ImageData`. |
-| 7 | **HTTP/1.1 complete + cache** | 21, 35 | Redirects, `Set-Cookie` → jar, chunked, gzip, ETag/`Cache-Control`. |
+| 7 | **HTTP/1.1 complete + cache** | 21, 35 | **Core done (Phase 73):** RFC 6265bis `CookieJar` wired to HTTP `Set-Cookie`/`Cookie` across redirects, bounded RFC 9111 HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304`, `Vary`, unsafe invalidation), CORS `OPTIONS` preflight + `Max-Age` cache, and mixed-content blocking (chunked + `gzip`/`deflate` landed in Phase 36). Still open: `keep-alive` socket pooling, Brotli (`br`). |
 | 8 | **Render conformance** | 38 | **Nothing measures a pixel.** Every layout and font claim on this page is unverified. |
 
 ### Tier 2 — real pages work
@@ -112,7 +112,7 @@ because the last third of it has no oracle to converge on.
 | :--- | :--- | :--- |
 | 7 | **Finish the bytecode VM** (`VM.cpp`, `BytecodeCompiler.cpp` exist) as the single engine; tree-walker stays as a differential oracle. | L |
 | 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt, and array-hole semantics. (Iterative heap-stack RegExp bytecode VM landed in Phase 37; complete RegExp flags `d`/`u`/`v`, ES2025 modifiers `(?ims-ims:...)`, duplicate named capturing groups, `RegExp.escape()`, and `Symbol.{match,matchAll,replace,search,split,species}` landed in Phase 55.) | M |
-| 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. (Async-generator `yield*` delegation — the async protocol, `CreateAsyncFromSyncIterator` fallback, `.return()` through the delegate, and direct-yield operand adoption — landed in Phase 76.) | M |
+| 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. | M |
 | 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): `DateTimeFormat`/`NumberFormat`/`Segmenter`/`Intl.Collator` and locale-specific collation tailorings. (Unicode 17.0 RegExp property escapes — General_Category, Binary Properties, Script, Script_Extensions, Properties of Strings — and Unicode/legacy RegExp case folding landed in Phase 55; Unicode 17.0 `String.prototype.normalize()`, full + locale-sensitive `tr`/`az`/`lt`/`el` case mapping, CLDR 48 / UCA 17.0 root `localeCompare()` with ECMA-402 validation landed in Phase 60, taking `make diff-strings` to **50,580 / 50,580 = 0 diffs**.) | L |
 | 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
 
@@ -135,9 +135,9 @@ because the last third of it has no oracle to converge on.
 
 | # | Phase | Size |
 | :--- | :--- | :--- |
-| 21 | **HTTP/1.1 complete** — redirects, `Set-Cookie` → jar (exists — wire it), auth, chunked, gzip/br decode. | M |
+| 21 | **HTTP/1.1 complete** — redirects, `Set-Cookie` → jar, chunked, `gzip`/`deflate`, cross-origin redirect `Authorization` stripping, and RFC 9111 HTTP cache (`Cache-Control`/`ETag`/`304`/`Vary`) **done (Phases 36 & 73)**. Open: `keep-alive` pooling, HTTP auth challenges, Brotli (`br`). | M |
 | 22 | **HTTPS** — **Done.** `src/net/ResourceLoader.cpp` loads OpenSSL at run time with `dlopen`/`dlsym`, so nothing links `-lssl` and the engine builds without it; then `SSL_CTX_set_default_verify_paths` (system CA store), `SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER)`, `SSL_set1_host` (RFC 6125 hostname check) and `SSL_get_verify_result`, so a certificate that does not verify closes the connection. Port 443 by scheme. Open: no OCSP/CRL revocation, no pinning, no TLS 1.3 resumption, and the failure path is untested — there is no `https://` fixture anywhere in `tests/`. | L–XL |
-| 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
+| 23 | **Fetch/XHR/WebSocket policy** — **Fetch & loader policy done (Phase 73):** same-origin + CORS `OPTIONS` preflight + `Access-Control-Max-Age` cache, `credentials` (`omit`/`same-origin`/`include`), `Access-Control-Expose-Headers`, and W3C mixed-content blocking (`https:` → non-loopback `http:`/`ws:`). Open: `Request` constructor, WebSocket `Origin`/subprotocol policy parity. | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. **Decoding done (Phase 47)**: 40 encodings and 228 labels from `whatwg/encoding`, `<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR and subresources (WPT 7,968/8,009 across 103 files, the XML suite 1,718/1,718). Open: `TextDecoder`/`TextEncoder` in script, encoders, and streaming. | M |
 | 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
 | 25a | **Cross-origin `Window`/`Location` reflection, child navigation and message ports** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal; permitted non-fragment child navigation; same-agent `MessageChannel`/`MessagePort`. **Done (Phases 56 & 61)**. Transfer lists, structured cloning, cross-agent ports and process isolation remain open. | M |

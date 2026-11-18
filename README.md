@@ -29,19 +29,20 @@ suite and two other parsers, and brought in the tests browsers share (see
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1127 / 1152 (97.8%)**; of the 25 that fail, eight were recorded in Phase 34 for what classes still lack and 12 in Phase 63 for the places that still do not ask a value for its iterator (`yield*` in an async generator was the thirteenth, fixed in Phase 76) | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **JavaScript corpus** | **1126 / 1152 (97.7%)**; of the 26 that fail, eight were recorded in Phase 34 for what classes still lack and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **DOM corpus** (what a script sees) | **678 / 678**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 217 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 223 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
 | **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
+| **HTTP/1.1 cookies, RFC 9111 cache & CORS preflight** | Thread-safe RFC 6265bis `CookieJar` (`Domain`/host-only, `Path`, wall-clock `Max-Age`/`Expires`, `Secure`, `HttpOnly` script isolation, `SameSite`, `__Secure-`/`__Host-`) wired to HTTP `Set-Cookie`/`Cookie` across redirects after CORS checks; bounded LRU HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304` merge, `Vary`, unsafe invalidation); WHATWG Fetch CORS `OPTIONS` preflight + `Max-Age` cache, W3C mixed-content blocking, and `HeadersExotic` `fetch()` options (Phase 73) | `make test`, 4 loopback HTTP/1.1 & Fetch suites |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -59,7 +60,8 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 217 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 223 engine suites + 114 cross-origin Window/Location/channel checks
+make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -112,19 +114,16 @@ Read the number for what it is:
   Phase 43: 43 more in the whole suite and none fewer; Phase 59: 43 more in
   those 21 directories and 49 more across 13 TDZ/scope directories, none
   fewer; Phase 63: 10 more in the whole suite and 4 fewer, each of the four
-  a row of the task table; Phase 76: 366 more in the async-generator, yield,
-  generators, class, for-await-of, async-function and async-generator built-in
-  directories this change can move, none fewer).
-- **Five of the 25 failures are whole features that do not exist**: BigInt
-  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 20 were
+  a row of the task table).
+- **Five of the 26 failures are whole features that do not exist**: BigInt
+  (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 21 were
   recorded to fail. Eight are in `prototypes.dat`: what classes still lack
   after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Twelve are in
+  things; ARCHITECTURE.md, Phase 34, section 9). Thirteen are in
   `iteration.dat`: the places that still read an array without asking it
-  for its iterator (array destructuring, `Array.from`), and what the built-in
-  iterators themselves get wrong (Phase 63, section 6; the thirteenth, `yield*`
-  in an async generator, was fixed in Phase 76). Each of the 20 belongs to a
-  row of the task table in
+  for its iterator (array destructuring, `Array.from`), `yield*` in an async
+  generator, and what the built-in iterators themselves get wrong (Phase 63,
+  section 6). Each of the 21 belongs to a row of the task table in
   `AGENTS.md`. `construct.dat` had one until Phase 65: `eval` inside a
   function saw nothing of the function, and now runs in its caller's scope
   ([`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md);
@@ -168,7 +167,7 @@ compile classes. 49 of the 50 pass; the engine before Phase 43 passes 13.
 iterated: an iterator a script put on an array, on a subclass of `Array`, on
 `Array.prototype` or on `String.prototype`, through each construct that
 iterates; the order in which the protocol reads and calls; closing an
-iterator that is left early; and the plain cases, which must not change. 66
+iterator that is left early; and the plain cases, which must not change. 65
 of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
 Every case in the 1,792-case html5lib tree-construction suite passes (**1792 / 1792**);
@@ -180,7 +179,7 @@ selected `<option>`'s children into `<selectedcontent>`.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 669 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 678 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -200,7 +199,8 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
 | Phase 34, with 11 cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
 | Phase 37, with 4 more cases (`forms.dat` date/time inputs, `style.dat` CSSOM `el.style` shorthands) | 644 / 644 |
-| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Phase 43, with 25 more cases (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Now, with the 9 cases of Phase 69 (`upgrades.dat`: what an upgrade's construction is) | 678 / 678 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -728,7 +728,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 217 engine test suites
+# Run the 223 engine test suites
 make test
 ```
 
@@ -796,14 +796,14 @@ make test
 make test
 ```
 
-Output (217 suites; the first and last lines shown):
+Output (223 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 217 engine test suites passed successfully!
+All 223 engine test suites passed successfully!
 ```
 
 ```bash
@@ -949,7 +949,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 217/217 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 218/218 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1140,18 +1140,84 @@ var one = {}; function Single() { return one; } class Child extends Single { con
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
 make js-conformance      # 1124 / 1150; construct.dat 50 / 50
-make dom-conformance     # 669 / 669; compiled.dat 25 / 25
+make dom-conformance     # 678 / 678; compiled.dat 25 / 25, upgrades.dat 9 / 9
 ```
 
-What is still missing: an upgrade still runs the constructor on the element
-itself, where the standard hands the element over when the constructor asks
-for it (a constructor written as a function can tell, and one that never
-reaches `HTMLElement` is accepted); `this` can be used before `super()` has
-run; and a private name is a property that `obj['#p']` reads. Those and what
+What is still missing: a private name is a property that `obj['#p']` reads,
+and `this` in a derived constructor is unbound until `super()` runs but a
+`class` field initializer can still be reached through `eval`. Those and what
 else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
-what.
+what. The upgrade itself stopped being one of them in Phase 69, below.
+
+### An upgrade is an ordinary construction (Phase 69)
+
+A custom element that is already in the page is upgraded when its class is
+defined, and until Phase 69 the engine did that by handing the element's own
+object to the constructor as `this`. The standard does not: it constructs the
+class the ordinary way, on an object of its own, and the element is what
+`HTMLElement` gives out when the constructor asks for it — through
+`super(...)`, or through `Reflect.construct(HTMLElement, [], new.target)` —
+and the upgrade fails unless the constructor comes back with that element. So
+the definition now keeps the standard's construction stack (`run_upgrade`
+pushes the element, `construct_custom_element` takes it and marks the entry),
+and a constructor can tell what it is:
+
+```bash
+cat > up.html <<'HTML'
+<!DOCTYPE html><body><x-e id="e"></x-e></body>
+HTML
+cat > up.js <<'JS'
+class E extends HTMLElement {
+  field = 1;
+  constructor() {
+    var early; try { early = this; } catch (err) { early = err.name; }
+    super();
+    console.log(early, this === document.getElementById('e'), new.target === E);
+  }
+}
+customElements.define('x-e', E);
+var e = document.getElementById('e');
+console.log(e.field, e instanceof E, e.matches(':defined'));
+var Plain = function () { this.touched = true; };
+Plain.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Plain } });
+Object.setPrototypeOf(Plain, HTMLElement);
+document.body.insertAdjacentHTML('beforeend', '<x-p id="p"></x-p>');
+customElements.define('x-p', Plain);
+var p = document.getElementById('p');
+console.log(p.touched === undefined, p.matches(':defined'), Object.getPrototypeOf(p) === HTMLElement.prototype);
+JS
+./build/litebird --run-script up.js up.html
+# ReferenceError true true         `this` is unbound before super(), then the element
+# 1 true true                      a field initializer lands on the element, `:defined`
+# Uncaught TypeError: The custom element constructor returned a different object.
+# true false true                  `this.touched` is on no element; the upgrade failed
+```
+
+What follows from it: a constructor written as a plain function is no longer
+`this === self`, one that never reaches `HTMLElement` has written on an object
+that is not the element and its upgrade fails, `super()` returns the element
+and a second `super()` is a `TypeError`, and a constructor that throws or
+returns something else leaves the element a plain `HTMLElement` that is not
+`:defined` — including a customized built-in, which `Element::is_defined` used
+to call defined. The object a script held before the definition existed stays
+the element's object; the class's prototype is put on it when the interface
+hands it out, and stays there if the upgrade then fails, as it does in a
+browser.
+
+```bash
+make dom-conformance     # 678 / 678; upgrades.dat 9 / 9
+make test                # 218 suites; js_an_upgrade_constructs_the_definition_the_ordinary_way
+```
+
+The five lines that measured this before the fix lived in
+`tests/dom-conformance/open/compiled-custom-elements.js` (4 of 5 differed);
+they are cases in `tests/dom-conformance/upgrades.dat` now.
+[`docs/phases/69-custom-element-construction-stack.md`](docs/phases/69-custom-element-construction-stack.md)
+says how it is built and
+[`docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md`](docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md)
+what was found.
 
 ### Iteration asks the value for its iterator (Phase 63)
 
@@ -1378,49 +1444,3 @@ Unicode/locale suites rise to **152 / 156 (97.4%)** (`Intl.Collator` and
 locale-specific CLDR tailorings remain open). See `ARCHITECTURE.md`, Phase 60,
 and `AUDIT.md`, finding 66.
 
-### `yield*` in an async generator asks for the async iterator (Phase 76)
-
-An async generator's `yield*` ran the *sync* protocol whatever iterator the
-delegate had, so delegating to another async generator — `yield* inner()` —
-threw `… is not iterable`, and delegating to anything at all settled the
-delegate's steps in the wrong order: the value of a step crossed with no
-await at the wrong point and a direct `yield` of a rejected promise settled
-the consumer's promise with the raw promise instead of rejecting the body.
-
-An `yield*` now asks for `Symbol.asyncIterator` first, falls back to the sync
-method wrapped in the spec's `CreateAsyncFromSyncIterator` when the value has
-no async one (a sync iterator's `next` is read once, each result awaited, and
-a rejected yielded value closes the sync iterator before the rejection
-reaches the consumer), and hands `next`, `throw` and `return` on with the
-yield point's completion: a rejection crosses as the delegate's `throw`, an
-early `.return(value)` goes through the delegate's `return` — which may yield
-again (the consumer sees `{ value, done: false }`) instead of closing the
-generator — and a direct `yield` awaits its operand, so a rejected promise is
-raised at the `yield` point where the body's own `try`/`catch` can take it.
-A step's *value* is never adopted: a thenable a delegate yields is passed to
-the consumer untouched, as in the other engines.
-
-```bash
-./build/litebird --run-js 'async function* inner() { yield Promise.resolve("settled"); var v = yield* (async function* g() { return Promise.resolve("done-settled"); })(); console.log("yield* returned", v); } \
-(async () => { var g = inner(); console.log("yielded", (await g.next()).value); await g.next(); })()'
-# yielded settled
-# yield* returned done-settled
-make test262                     # +366 across the twelve async-generator, yield, generators, class, for-await-of and async-function directories this can move, none fewer
-make js-conformance              # 1127 / 1152; iteration.dat 66 / 78 — the async yield* case now passes
-```
-
-What is still open around it: the two `yield-*-then-getter-ticks` cases in
-test262 still fail, because the engine's blocking `eval_await` resolves a
-thenable in-line instead of through the spec's promise jobs, so the getters
-and the ticks interleave in a different order than the spec's queue; the two
-`yield-thenable-create-resolving-functions-*` cases fail because the built-in
-promise resolving functions are constructible here — the same root as the
-open task row on which built-ins are constructors; the
-`yield-star-async-from-sync-iterator-inaccessible.js` case fails because the
-engine has no `%AsyncGeneratorFunction%` global, so
-`async function*(){}.constructor` is `Function` rather than the intrinsic
-whose `.prototype.prototype` is `%AsyncIteratorPrototype%` — the same root as
-the open task row on async and generator functions and their prototypes; and
-`yield-identifier-spread-non-strict` is about spread identity, not delegation.
-See [`docs/phases/76-async-generator-yield-star-asynciterator.md`](docs/phases/76-async-generator-yield-star-asynciterator.md)
-and [`docs/findings/82-yield-star-did-not-ask-for-symbol-asynciterator.md`](docs/findings/82-yield-star-did-not-ask-for-symbol-asynciterator.md).

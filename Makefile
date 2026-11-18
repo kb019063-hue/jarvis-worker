@@ -136,7 +136,7 @@ URL_FLOOR ?= 1188
 JS_ASAN_FLOOR ?= 1121
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 669
+DOM_ASAN_FLOOR ?= 678
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.
@@ -156,7 +156,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-collections check-numbers bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -194,6 +194,12 @@ $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
 	@./$(CROSS_ORIGIN_TARGET)
+
+## The numbers the documents publish: every "A / B (P%)" must divide, the two
+## corpus totals must equal the cases on disk, and "214 suites" must be the
+## suites tests/test_suite.cpp registers. See tools/ci/check_numbers.py.
+check-numbers:
+	@python3 tools/ci/check_numbers.py
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
@@ -457,4 +463,4 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, check-numbers, clean"

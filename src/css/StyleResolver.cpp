@@ -22,6 +22,28 @@ void hash_combine(std::size_t& seed, std::size_t v) {
     seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 }
 
+/// What `font-weight: bolder` and `font-weight: lighter` mean, given the weight
+/// inherited from the parent.
+///
+/// CSS Fonts 4 §5.2.2 gives a table of nine steps, not `+100`. Inside a 700
+/// heading, `bolder` asks for the boldest thing the family has (900) rather
+/// than for 800, and inside a 300 caption, `bolder` asks for regular (400)
+/// rather than for 400-by-arithmetic that happens to be the same number. The
+/// table is the answer; the arithmetic is a coincidence on two of the nine.
+int relative_font_weight(int inherited, bool bolder) {
+    static constexpr int kSteps[] = {100, 200, 300, 400, 500, 600, 700, 800, 900};
+    static constexpr int kBolder[] = {400, 400, 400, 700, 700, 900, 900, 900, 900};
+    static constexpr int kLighter[] = {100, 100, 100, 100, 100, 400, 400, 700, 700};
+    // The nearest step at or below the inherited weight: the table is written
+    // for the nine weights and an inherited 850 is nearer 800 than 900 by CSS's
+    // own reading of the scale (it is the 800 row).
+    int step = 0;
+    for (int i = 0; i < 9; ++i) {
+        if (inherited >= kSteps[i]) step = i;
+    }
+    return bolder ? kBolder[step] : kLighter[step];
+}
+
 std::size_t hash_float(float f) {
     if (f == 0.0f) return 0u;
     if (f != f) return 0x7fc00000u;
@@ -1676,8 +1698,14 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         for (const auto& token : split_tokens(trim(val))) {
             std::string lowered;
             for (char c : token) lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            if (lowered == "bold" || lowered == "bolder") out.emplace_back("font-weight", "700");
-            else if (lowered == "normal" || lowered == "lighter") out.emplace_back("font-weight", "400");
+            // The relative keywords are passed through as themselves: the
+            // longhand knows what they mean and the shorthand does not, and
+            // `font: bolder 16px serif` inside a 700 heading is 900.
+            if (lowered == "bold" || lowered == "bolder" || lowered == "lighter") {
+                out.emplace_back("font-weight", lowered);
+            } else if (lowered == "normal") {
+                out.emplace_back("font-weight", "400");
+            }
             // The shorthand used to throw this token away, so `font: italic
             // 16px serif` set a size and a family and no slant at all -- the
             // one property in the shorthand with no place to be kept. It is
@@ -2162,10 +2190,20 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             } // negative lengths are not a legal line-height; drop the declaration
         }
     } else if (prop == "font-weight") {
-        if (val_lower == "bold" || val_lower == "bolder") style.font_weight = 700;
-        else if (val_lower == "normal" || val_lower == "lighter") style.font_weight = 400;
+        // `bolder` and `lighter` are relative to the inherited weight, which is
+        // already in `style` when a declaration is applied: inheritance runs
+        // first, so this is the parent's weight unless an earlier declaration
+        // in the same rule has set it, which is the cascade working correctly.
+        // They used to be synonyms for `bold` and `normal`, so `bolder` inside
+        // a 300 caption was bold rather than regular.
+        if (val_lower == "bolder") style.font_weight = relative_font_weight(style.font_weight, true);
+        else if (val_lower == "lighter") style.font_weight = relative_font_weight(style.font_weight, false);
+        else if (val_lower == "bold") style.font_weight = 700;
+        else if (val_lower == "normal") style.font_weight = 400;
         else {
-            try { style.font_weight = std::stoi(val); } catch (...) {}
+            // CSS Fonts 4: the scale is 1..1000 and a number outside it is
+            // clamped to it, not taken as written.
+            try { style.font_weight = std::clamp(std::stoi(val), 1, 1000); } catch (...) {}
         }
     } else if (prop == "font-style") {
         // `oblique` is kept apart from `italic` because a face declares which

@@ -84,6 +84,8 @@ SRCS = src/common/Color.cpp \
        src/js/DomWindowBindings.cpp \
        src/js/Generator.cpp \
        src/net/ResourceLoader.cpp \
+       src/net/Brotli.cpp \
+       src/net/BrotliTables.cpp \
        src/net/Deflate.cpp \
        src/net/UrlParser.cpp \
        src/net/DataUrl.cpp \
@@ -104,6 +106,7 @@ TEST_TARGET = $(BUILD_DIR)/test_suite
 CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
+BROTLI_CHECK_TARGET = $(BUILD_DIR)/brotli_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -159,7 +162,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-worker help
 
 all: $(TARGET)
 
@@ -193,6 +196,10 @@ $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
+
+$(BROTLI_CHECK_TARGET): $(BUILD_DIR)/net/Brotli.o $(BUILD_DIR)/net/BrotliTables.o tools/brotli_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/net/Brotli.o $(BUILD_DIR)/net/BrotliTables.o tools/brotli_check.cpp -o $@
 
 test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
@@ -336,6 +343,7 @@ fuzz:
 	@python3 tools/fuzz/fuzz_xml.py
 	@$(MAKE) fuzz-media
 	@$(MAKE) fuzz-color
+	@$(MAKE) fuzz-brotli
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -365,6 +373,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_string_unicode.py --binary build-asan/litebird --fuzz 400 --skip-node --skip-full-sweep
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
@@ -375,7 +384,7 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 $(WPT) --binary build-asan/litebird --quiet --timeout 600 --min-pass $(WPT_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/diff_xml.py --binary build-asan/litebird --count $(XML_ASAN_DIFF_COUNT) --timeout 120 --expat-only
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
 ## memory errors on those pages, not for recursion: that is found at full
@@ -466,9 +475,18 @@ verify-color: $(COLOR_CHECK_TARGET)
 fuzz-color: $(COLOR_CHECK_TARGET)
 	@python3 tools/verify_color.py --binary $(COLOR_CHECK_TARGET) --fuzz 5000
 
+## Verifies pure C++20 RFC 7932 Brotli decoding across RFC edge vectors,
+## bomb/cap boundaries, and Node.js zlib.brotliCompressSync differential streams.
+verify-brotli: $(BROTLI_CHECK_TARGET)
+	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 0 $(BROTLI_VERIFY_FLAGS)
+
+## Seeded truncation, bit-flip, random-byte, and bomb-cap fuzzing of Brotli.
+fuzz-brotli: $(BROTLI_CHECK_TARGET)
+	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 2000 $(BROTLI_VERIFY_FLAGS)
+
 clean:
 	rm -rf build build-asan build-tsan
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-worker, check-numbers, clean"

@@ -14,7 +14,7 @@ SVG's default whitespace mode collapses ASCII whitespace runs across text-node/s
 
 ## Verification
 
-- `make test` — **236/236** engine suites plus 114 cross-origin/channel checks. The new `svg_text_uses_canvas_glyphs_and_svg_positioning` suite compares every pixel with Canvas 2D's rasterization for plain, whitespace-normalized, anchored, transformed, and split painted text; two empty images cannot satisfy the assertion.
+- `make test` — **239/239** engine suites plus 114 cross-origin/channel checks. The new `svg_text_uses_canvas_glyphs_and_svg_positioning` suite compares every pixel with Canvas 2D's rasterization for plain, whitespace-normalized, anchored, transformed, and split painted text; two empty images cannot satisfy the assertion.
 - `make verify-media` — **105** checks, zero failures, including **7** SVG checks. Two added SVG pixel-oracle cases assert an identical alpha mask translated exactly by `(21, 8)` independently of the chosen host font, solid red fill, and a positioned blue tspan against inherited red/group-transform paint.
 - `make wpt` / `make asan` retain their existing floors; no WPT score gain is claimed by this change. (Record the merged-head results in the PR.)
 

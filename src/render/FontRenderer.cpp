@@ -330,18 +330,33 @@ bool TrueTypeFont::read_names(const std::string& path, Names& out) {
     if (sfnt != 0x00010000u && sfnt != 0x74727565u && sfnt != 0x4F54544Fu) return false;
 
     const uint16_t num_tables = (static_cast<uint16_t>(header[4]) << 8) | header[5];
+    // Three tables, one pass over the directory: the name (to be asked for by
+    // name), the weight and slant bits (`OS/2`), and the slant bit older fonts
+    // put in `head` instead. The directory entries are read once and the tables
+    // afterwards, because a file is a stream and this is two seeks cheaper than
+    // walking it twice.
     uint32_t name_off = 0, name_len = 0;
+    uint32_t os2_off = 0, os2_len = 0;
+    uint32_t head_off = 0, head_len = 0;
     for (uint16_t i = 0; i < num_tables; ++i) {
         uint8_t rec[16];
         if (!file.read(reinterpret_cast<char*>(rec), sizeof(rec))) return false;
-        if (std::memcmp(rec, "name", 4) != 0) continue;
-        name_off = (static_cast<uint32_t>(rec[8]) << 24) |
-                   (static_cast<uint32_t>(rec[9]) << 16) |
-                   (static_cast<uint32_t>(rec[10]) << 8) | rec[11];
-        name_len = (static_cast<uint32_t>(rec[12]) << 24) |
-                   (static_cast<uint32_t>(rec[13]) << 16) |
-                   (static_cast<uint32_t>(rec[14]) << 8) | rec[15];
-        break;
+        const uint32_t off = (static_cast<uint32_t>(rec[8]) << 24) |
+                             (static_cast<uint32_t>(rec[9]) << 16) |
+                             (static_cast<uint32_t>(rec[10]) << 8) | rec[11];
+        const uint32_t len = (static_cast<uint32_t>(rec[12]) << 24) |
+                             (static_cast<uint32_t>(rec[13]) << 16) |
+                             (static_cast<uint32_t>(rec[14]) << 8) | rec[15];
+        if (std::memcmp(rec, "name", 4) == 0) {
+            name_off = off;
+            name_len = len;
+        } else if (std::memcmp(rec, "OS/2", 4) == 0) {
+            os2_off = off;
+            os2_len = len;
+        } else if (std::memcmp(rec, "head", 4) == 0) {
+            head_off = off;
+            head_len = len;
+        }
     }
     if (name_len < 6 || name_len > 4u * 1024u * 1024u) return false;
 
@@ -379,6 +394,32 @@ bool TrueTypeFont::read_names(const std::string& path, Names& out) {
 
     out.family = best[kNameTypoFamily].empty() ? best[kNameFamily] : best[kNameTypoFamily];
     out.subfamily = best[kNameTypoSubfamily].empty() ? best[kNameSubfamily] : best[kNameTypoSubfamily];
+
+    // The two bits that say what the face *is*, which its name only claims.
+    // `usWeightClass` is at 4 and `fsSelection` at 62 in every version of the
+    // table (0 through 5), and the shortest table is 78 bytes, so a 64-byte read
+    // is enough for both and short files are refused rather than guessed at.
+    const auto read_table = [&file](uint32_t off, uint32_t len, std::size_t want) {
+        std::vector<uint8_t> bytes;
+        if (len < want) return bytes;
+        bytes.resize(want);
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(off), std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(want))) {
+            bytes.clear();
+        }
+        return bytes;
+    };
+    if (const std::vector<uint8_t> os2 = read_table(os2_off, os2_len, 64); os2.size() == 64) {
+        const uint16_t weight = read_u16_be(os2, 4);
+        // 1..1000 is the scale; anything else is a table this cannot trust.
+        if (weight >= 1 && weight <= 1000) out.weight = weight;
+        if ((read_u16_be(os2, 62) & 0x0001u) != 0) out.italic = true;
+    }
+    if (const std::vector<uint8_t> head = read_table(head_off, head_len, 46); head.size() == 46) {
+        if ((read_u16_be(head, 44) & 0x0002u) != 0) out.italic = true;
+    }
+
     return !out.family.empty();
 }
 
@@ -959,13 +1000,13 @@ std::string family_key(std::string_view name) {
 
 /// What a font file's subfamily says about its weight and its slant.
 ///
-/// CSS asks for a weight as a number, 100 to 900, and a font file answers with
-/// a word in its `name` table: "Book", "Bold", "Condensed Light Italic". There
-/// is no table that turns all of them into numbers — the `OS/2` table's
-/// `usWeightClass` is the right answer and is not parsed here — so the words
-/// CSS itself uses are the ones read, in the order CSS lists them, and
-/// anything else is 400. A font whose subfamily says nothing usable is a
-/// regular face, which is what it almost always is.
+/// This is the *fallback*. A font file answers the weight question properly in
+/// `OS/2.usWeightClass`, which is read; a file with no `OS/2` table answers
+/// with a word in its `name` table, and this reads the words CSS itself uses,
+/// in the order CSS lists them. Anything else is 400 — a font whose subfamily
+/// says nothing usable is a regular face, which is what it almost always is.
+/// A foundry that writes "Halbfett" or "Gras" gets 400 from here and the
+/// right answer from `OS/2`.
 void weight_and_slant(const std::string& subfamily, int& weight_out, bool& italic_out) {
     std::string s;
     for (const char c : subfamily) s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
@@ -1044,10 +1085,18 @@ FontRenderer::FaceEntry FontRenderer::describe(const std::string& path) {
     e.family = names.family;
     e.key = family_key(names.family);
     e.subfamily = names.subfamily;
-    int weight = 400;
-    weight_and_slant(names.subfamily, weight, e.italic);
+    int named_weight = 400;
+    bool named_slant = false;
+    weight_and_slant(names.subfamily, named_weight, named_slant);
+    // The font's own table wins where it has one. `usWeightClass` is the same
+    // 1..1000 scale CSS asks in, so there is no translation to get wrong; the
+    // subfamily name is a word, and a word has to be guessed at. The guess
+    // stays as the fallback because a font with no `OS/2` table is old, and old
+    // is not the same as unnameable.
+    const int weight = names.weight > 0 ? names.weight : named_weight;
     e.weight_min = weight;
     e.weight_max = weight;
+    e.italic = names.italic || named_slant;
     return e;
 }
 
@@ -1168,6 +1217,18 @@ int FontRenderer::register_webfont(std::string family, std::vector<WebfontFetche
     return m_family_by_key[key];
 }
 
+std::vector<FontRenderer::FaceFacts> FontRenderer::family_face_facts(
+    std::string_view css_family_list) const {
+    std::vector<FaceFacts> facts;
+    const int id = family_id_for(css_family_list);
+    if (id < 0 || static_cast<std::size_t>(id) >= m_families.size()) return facts;
+    for (const std::size_t index : m_families[static_cast<std::size_t>(id)].faces) {
+        const FaceEntry& e = m_face_entries[index];
+        facts.push_back(FaceFacts{e.weight_min, e.weight_max, e.italic, e.webfont});
+    }
+    return facts;
+}
+
 std::string FontRenderer::face_path(std::string_view css_family_list) const {
     const int id = family_id_for(css_family_list);
     if (id < 0 || static_cast<std::size_t>(id) >= m_families.size()) return {};
@@ -1246,8 +1307,27 @@ std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold,
     }
 
     const int wanted = bold ? std::max(weight, 600) : weight;
+    // CSS Fonts 4 §5.2.1 does not ask for the *nearest* weight, it asks for a
+    // search in a declared order, and the difference is not academic: asking a
+    // family of 500 and 900 for 600 is a tie by distance and an exact answer by
+    // the spec, which looks at 600 and above first. Getting this wrong is a
+    // page whose semibold headings come out medium.
+    const auto rank_in_search_order = [wanted](int candidate) {
+        if (wanted >= 400 && wanted <= 500) {
+            if (candidate >= wanted && candidate <= 500) return std::pair{0, candidate - wanted};
+            if (candidate < wanted) return std::pair{1, wanted - candidate};
+            return std::pair{2, candidate - 500};
+        }
+        if (wanted < 400) {
+            if (candidate <= wanted) return std::pair{0, wanted - candidate};
+            return std::pair{1, candidate - wanted};
+        }
+        if (candidate >= wanted) return std::pair{0, candidate - wanted};
+        return std::pair{1, wanted - candidate};
+    };
+
     std::size_t best = static_cast<std::size_t>(-1);
-    int best_distance = std::numeric_limits<int>::max();
+    std::pair<int, int> best_rank{std::numeric_limits<int>::max(), std::numeric_limits<int>::max()};
     bool best_is_webfont = false;
     for (const std::size_t index : family.faces) {
         const FaceEntry& e = m_face_entries[index];
@@ -1257,17 +1337,20 @@ std::size_t FontRenderer::pick_face(const Family& family, int weight, bool bold,
         // slanted one to offer -- then the caller shears it.
         if (e.italic && !italic) continue;
         if (!e.italic && italic && family_has_slant) continue;
-        // Distance to the range this face declared, not to one number: a
-        // webfont serving `100 400` is an exact answer for anything in it.
-        const int distance = wanted < e.weight_min   ? e.weight_min - wanted
-                             : wanted > e.weight_max ? wanted - e.weight_max
-                                                     : 0;
+        // A face that declares a range containing the weight asked for is an
+        // exact answer, whatever the range is: a variable font serving
+        // `100 900` answers 600 exactly. Otherwise the nearest end of its range
+        // stands for the face, because a static face is one weight.
+        const int candidate = wanted < e.weight_min   ? e.weight_min
+                              : wanted > e.weight_max ? e.weight_max
+                                                      : wanted;
+        const std::pair<int, int> rank = rank_in_search_order(candidate);
         // A webfont outranks a host family it shares a name with, so it wins
         // ties outright -- and, having won, it is not displaced by a host face
         // that happens to be nearer the weight asked for.
-        const bool better = distance < best_distance || (distance == best_distance && e.webfont && !best_is_webfont);
+        const bool better = rank < best_rank || (rank == best_rank && e.webfont && !best_is_webfont);
         if (better) {
-            best_distance = distance;
+            best_rank = rank;
             best = index;
             best_is_webfont = e.webfont;
         }
@@ -1419,9 +1502,11 @@ void FontRenderer::set_fallbacks(std::vector<std::string> paths) {
     m_cache.clear();
 }
 
-const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int family_id,
+const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, int font_weight, int family_id,
                                            bool italic, bool* synthetic_oblique) const {
     if (synthetic_oblique) *synthetic_oblique = false;
+    const int weight = std::clamp(font_weight, 1, 1000);
+    const bool bold = weight >= 600;
     const TrueTypeFont* primary = (bold && m_bold.is_loaded())
                                       ? &m_bold
                                       : (m_regular.is_loaded() ? &m_regular : nullptr);
@@ -1430,7 +1515,7 @@ const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, bool bold, int fa
     // whole of `font-family`: before it, the primary answered for every element
     // on the page and a `<pre>` was drawn in the same face as a heading.
     bool named_upright = false;
-    if (const TrueTypeFont* named = family_face(family_id, bold ? 700 : 400, bold, italic, &named_upright)) {
+    if (const TrueTypeFont* named = family_face(family_id, weight, bold, italic, &named_upright)) {
         if (named->has_glyph(codepoint)) {
             if (synthetic_oblique) *synthetic_oblique = named_upright;
             return named;
@@ -1501,15 +1586,15 @@ std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int fon
 float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight,
                                      std::string_view css_family, bool italic) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    return advance_in_family(codepoint, font_size, font_weight >= 600, family_id, italic);
+    return advance_in_family(codepoint, font_size, font_weight, family_id, italic);
 }
 
-float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
+float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, int font_weight,
                                       int family_id, bool italic) const {
     // The slant reaches `face_for` because it can change which face answers,
     // and an italic face has advances of its own. A synthesised oblique does
     // not: shear moves the ink, not the pen.
-    const TrueTypeFont* font = face_for(codepoint, want_bold, family_id, italic);
+    const TrueTypeFont* font = face_for(codepoint, font_weight, family_id, italic);
     if (font) return font->glyph_advance(codepoint, font_size);
     return std::max(1.0f, font_size * 0.55f);
 }
@@ -1522,14 +1607,16 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        total += advance_in_family(cp, font_size, font_weight >= 600, family_id, italic);
+        total += advance_in_family(cp, font_size, font_weight, family_id, italic);
     }
     return total;
 }
 
-const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, bool bold,
+const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, int font_weight,
                                            int family_id, bool italic) {
     const int px = std::clamp(pixel_size, 6, 160);
+    const int weight = std::clamp(font_weight, 1, 1000);
+    const bool bold = weight >= 600;
     // The family is part of the key. Without it the cache would answer with a
     // glyph rasterized from one family for an element that asked for another,
     // which is the bug that makes `font-family` look like it works in the
@@ -1537,11 +1624,15 @@ const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, b
     // for the same reason: a sheared bitmap and an upright one are two
     // pictures of one glyph, and whichever was drawn first would otherwise
     // answer for both.
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(family_id)) << 42) |
-                         (static_cast<uint64_t>(bold ? 1u : 0u) << 41) |
-                         (static_cast<uint64_t>(italic ? 1u : 0u) << 40) |
+    // The weight is in the key and not a "bold" bit: a family with a 300 face
+    // and a 500 face draws the same glyph two ways, and one flag cannot hold
+    // that. Bits: codepoint (32), pixel size (8, clamped to 6..160), weight
+    // (10, clamped to 1..1000), slant (1), family (13).
+    const uint64_t key = static_cast<uint64_t>(codepoint) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(px)) << 32) |
-                         static_cast<uint64_t>(codepoint);
+                         (static_cast<uint64_t>(static_cast<uint32_t>(weight)) << 40) |
+                         (static_cast<uint64_t>(italic ? 1u : 0u) << 50) |
+                         (static_cast<uint64_t>(static_cast<uint32_t>(family_id) & 0x1FFFu) << 51);
     auto it = m_cache.find(key);
     if (it != m_cache.end()) return it->second;
 
@@ -1551,7 +1642,7 @@ const GlyphBitmap& FontRenderer::get_glyph(uint32_t codepoint, int pixel_size, b
 
     GlyphBitmap bmp;
     bool shear = false;
-    const TrueTypeFont* face = face_for(codepoint, bold, family_id, italic, &shear);
+    const TrueTypeFont* face = face_for(codepoint, weight, family_id, italic, &shear);
     if (face) {
         bmp = face->rasterize_glyph(codepoint, px);
     } else {
@@ -1605,7 +1696,7 @@ void FontRenderer::draw_text(
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        const GlyphBitmap& g = get_glyph(cp, px_size, bold, family_id, italic);
+        const GlyphBitmap& g = get_glyph(cp, px_size, font_weight, family_id, italic);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;
             const int gy0 = baseline_y - g.bearing_y;
@@ -1626,7 +1717,7 @@ void FontRenderer::draw_text(
         // with the primary is how a `<pre>` measured monospace and drew
         // proportional: every glyph in the right order, packed to the width of
         // a font nobody asked for.
-        pen_x += advance_in_family(cp, font_size, bold, family_id, italic);
+        pen_x += advance_in_family(cp, font_size, font_weight, family_id, italic);
     }
 }
 

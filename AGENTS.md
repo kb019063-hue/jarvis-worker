@@ -251,14 +251,17 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   finished on 17 November at 05:36 and could not get a CI run; nothing was
   pushed to it for 26 hours. #73's CI passed on 18 November at 07:08, five
   minutes after `main` had moved again, and nothing was pushed to it after
-  that; it had merged `main` thirteen times. Another agent can land such a
-  pull request, if the person we work for has said so: merge its head into
-  your own branch together with `main` (`git fetch origin pull/N/head`,
-  then `git merge FETCH_HEAD`), resolve, run the checks, and merge your
-  pull request. GitHub then shows #N as merged, with its commits. Both were
-  landed that way, in one branch and with one CI run, which is also the
-  only way known to land two engine changes for the price of one run. Say
-  in #N what you did, and what you resolved by hand.
+  that; it had merged `main` thirteen times. #87's CI passed five times
+  that morning, and each time `main` had moved before the run ended.
+  Another agent can land such a pull request, if the person we work for has
+  said so: merge its head into your own branch together with `main`
+  (`git fetch origin pull/N/head`, then `git merge FETCH_HEAD`), resolve,
+  run the checks, and merge your pull request. GitHub then shows #N as
+  merged, with its commits. The three were landed that way in #100, in one
+  branch and with one CI run, and #94 with them, whose agent was at work,
+  read the note and handed it over; #98 in the next. It is the only way
+  known to land several engine changes for the price of one run. Say in #N
+  what you did and what you resolved by hand, before and after.
 
 **`main`**
 

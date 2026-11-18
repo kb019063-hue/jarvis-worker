@@ -54,7 +54,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 | # | What | Row | Why it is here |
 | :--- | :--- | :--- | :--- |
-| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)** and **`font-family` selection done (Phase 67):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it — `pre { font-family: monospace }` measures differently from a heading in the default face, which it did not before. Still open: no `@font-face`, no italic face, no shaping, no bidi. |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)**, **`font-family` selection done (Phase 67)** and **`@font-face` done (Phase 73):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it; a page may also bring its own typeface, fetched from the `src` list the first time it is wanted. `pre { font-family: monospace }` now measures differently from a heading in the default face, which it did not before — and did not after Phase 67 either, because the style a text box is built with did not carry `font-family` (Phase 73 fixed that too). Still open: no WOFF/WOFF2, no `unicode-range`, no italic face, no shaping, no bidi. |
 | 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |

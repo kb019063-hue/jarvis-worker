@@ -162,10 +162,33 @@ JsValue iteration_result(const JsValue& value, bool done) {
 
 } // namespace
 
-JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots) {
+namespace {
+
+/// What an iterator keeps: the step, and whether it has finished. The step is a
+/// std::function the collector cannot see into, so the values it captured are
+/// held separately by trace_extra (see js_make_iterator).
+struct IteratorState {
+    std::function<bool(JsValue& value)> step;
+    bool finished{false};
+};
+
+/// The state behind `this`, for the `next` on an iterator's prototype. A
+/// `next` called on anything that is not one of these iterators throws, which
+/// is what the language says a prototype method does with a wrong receiver.
+IteratorState& iterator_state(const JsValue& me) {
+    if (!me.is_object_like() || me.object_val->klass != ObjectClass::Iterator || !me.object_val->internal) {
+        js_throw_type_error("next method called on an object that is not an iterator");
+    }
+    return *static_cast<IteratorState*>(me.object_val->internal.get());
+}
+
+} // namespace
+
+JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots, JsObject* proto) {
     JsObject* cell = Heap::default_heap().allocate_object();
-    cell->prototype = JsIntrinsics::get().iterator_proto;
+    cell->prototype = proto ? proto : JsIntrinsics::get().iterator_proto;
     cell->klass = ObjectClass::Iterator;
+    cell->internal = std::make_shared<IteratorState>(IteratorState{std::move(step), false});
     if (!roots.empty()) {
         // `step` holds these inside a std::function, where the collector cannot see them.
         auto kept = std::make_shared<std::vector<JsValue>>(std::move(roots));
@@ -174,22 +197,37 @@ JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<J
             for (const auto& value : *kept) heap.mark_value(value);
         };
     }
-    auto finished = std::make_shared<bool>(false);
-    js_define_method(cell, "next", 0, [step, finished](Args) {
+    return JsValue::make_object(cell);
+}
+
+void js_install_iterator_prototype(JsObject* proto, const char* tag) {
+    // One `next` for every iterator of the kind: the step is the object's, the
+    // function is the prototype's, and replacing the property here changes
+    // what every loop over one of these iterators does -- which is why the
+    // iteration fast paths ask whether it is still this function.
+    js_define_method(proto, "next", 0, [](Args) {
+        IteratorState& state = iterator_state(self());
         JsValue value;
-        if (!*finished && step(value)) return iteration_result(value, false);
-        *finished = true;
+        if (!state.finished && state.step(value)) return iteration_result(value, false);
+        state.finished = true;
         return iteration_result(JsValue::make_undefined(), true);
     });
-    return JsValue::make_object(cell);
+    if (tag) {
+        auto& entry = proto->properties.entry("@@toStringTag");
+        entry.second = JsValue::make_string(tag);
+        entry.flags = PropertyMap::Configurable;   // { writable: false, enumerable: false, configurable: true }
+    }
 }
 
 void install_array_builtins(JsIntrinsics& realm) {
     JsObject* ap = realm.array_proto;
 
-    // Iterators are themselves iterable.
+    // Iterators are themselves iterable: %IteratorPrototype% carries @@iterator
+    // and nothing else, and each kind of iterator's prototype sits between it
+    // and the iterator (see js_install_iterator_prototype).
     js_define_method(realm.iterator_proto, kIteratorKey, 0, [](Args) { return self(); });
     js_define_method(realm.iterator_proto, "Symbol.iterator", 0, [](Args) { return self(); });
+    js_install_iterator_prototype(realm.array_iterator_proto, "Array Iterator");
 
     // ---- Constructor ------------------------------------------------------
     JsValue array_ctor = js_make_native("Array", 1, [](Args args) {
@@ -603,7 +641,7 @@ void install_array_builtins(JsIntrinsics& realm) {
                         break;
                 }
                 return true;
-            }, {me});
+            }, {me}, JsIntrinsics::get().array_iterator_proto);
         };
     };
     js_define_method(ap, "keys", 0, make_array_iterator(Kind::Keys));

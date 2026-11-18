@@ -18352,6 +18352,105 @@ TEST(js_map_set_constructors_dispatch_to_instance_methods) {
     )js").to_string() == "TypeError|1");
 }
 
+TEST(js_iterators_are_kinds_with_prototypes) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    JsIntrinsics* previous_realm = &JsIntrinsics::get();
+    JsIntrinsics::set_current(&js.intrinsics());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous_realm};
+
+    // One function object under each name a script may read it by: the
+    // language makes `Map.prototype[Symbol.iterator]` the entries method, not
+    // a second method that iterates the same way, and `Set`'s `keys` the
+    // values method.
+    assert(text("Array.prototype[Symbol.iterator] === Array.prototype.values") == "true");
+    assert(text("Array.prototype[Symbol.iterator].name") == "values");
+    assert(text("Map.prototype[Symbol.iterator] === Map.prototype.entries") == "true");
+    assert(text("Map.prototype[Symbol.iterator].name") == "entries");
+    assert(text("Set.prototype[Symbol.iterator] === Set.prototype.values") == "true");
+    assert(text("Set.prototype.keys === Set.prototype.values") == "true");
+    assert(text("Set.prototype.keys.name") == "values");
+    assert(text("String.prototype[Symbol.iterator] === String.prototype.toString") == "false");
+    assert(text("String.prototype[Symbol.iterator].name") == "[Symbol.iterator]");
+
+    // `next` is the prototype's, not the iterator's, and the kind decides
+    // which prototype: an array's `keys()` and `values()` share one, a Map's
+    // another.
+    assert(text("Object.prototype.hasOwnProperty.call([][Symbol.iterator](), 'next')") == "false");
+    assert(text("typeof Object.getPrototypeOf([][Symbol.iterator]()).next") == "function");
+    assert(text("Object.getPrototypeOf([][Symbol.iterator]()) === Object.getPrototypeOf([].keys())") == "true");
+    assert(text("Object.getPrototypeOf([][Symbol.iterator]()) === Object.getPrototypeOf(new Map().keys())") == "false");
+    assert(text("Object.getPrototypeOf(new Set().values()) === Object.getPrototypeOf(new Set().entries())") == "true");
+    assert(text("Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())) === "
+                "Object.getPrototypeOf(Object.getPrototypeOf(new Map().keys()))") == "true");
+
+    // Every kind names itself, and `next` on the wrong receiver throws where
+    // the language says a prototype method does.
+    assert(text("Object.prototype.toString.call([][Symbol.iterator]())") == "[object Array Iterator]");
+    assert(text("Object.prototype.toString.call(new Map().keys())") == "[object Map Iterator]");
+    assert(text("Object.prototype.toString.call(new Set().values())") == "[object Set Iterator]");
+    assert(text("Object.prototype.toString.call('ab'[Symbol.iterator]())") == "[object String Iterator]");
+    assert(text("(function () { try { return Object.getPrototypeOf([][Symbol.iterator]()).next.call({}); }"
+                " catch (e) { return e.name; } })()") == "TypeError");
+
+    // The prototype's `next` is script's to replace, and a loop must then call
+    // it: the direct read of an array's elements is only taken while the
+    // function install() wrote is still there. Six calls are `[...[1, 2, 3]]`
+    // (three values and the step that says done) and `for (x of [1])` (one and
+    // done), which a loop that read the elements would never make.
+    assert(text("var it = [][Symbol.iterator](); var proto = Object.getPrototypeOf(it);"
+                "var original = proto.next, calls = 0;"
+                "proto.next = function () { calls++; return original.call(this); };"
+                "var s = [...[1, 2, 3]]; for (var x of [1]) {}"
+                "var seen = [proto.next === original, calls]; proto.next = original; seen.join()") == "false,6");
+    assert(text("s.join()") == "1,2,3");
+    // Restored: the direct path is taken again.
+    assert(text("var p2 = Object.getPrototypeOf([][Symbol.iterator]()); p2.next.name") == "next");
+
+    // The C++ side agrees: a replaced `next` is what makes the fast path
+    // unsafe, and the values it yields are the ones the loop sees.
+    JsValue array = js.eval("var plain = [1, 2, 3]; plain");
+    assert(js_iterates_as_builtin(array));
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    js.eval("var saved = Object.getPrototypeOf([][Symbol.iterator]()).next;"
+            "Object.getPrototypeOf([][Symbol.iterator]()).next = function () {"
+            "  return { value: 9, done: false }; };");
+    assert(!js_iterates_as_builtin(array));
+    // Only the kind whose prototype was touched: a string still reads its code
+    // points directly, because %StringIteratorPrototype% is another object.
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    std::vector<JsValue> seen;
+    js_iterate(array, [&](const JsValue& item) {
+        seen.push_back(item);
+        return seen.size() < 2;
+    });
+    assert(seen.size() == 2 && seen[0].to_string() == "9" && seen[1].to_string() == "9");
+    js.eval("Object.getPrototypeOf([][Symbol.iterator]()).next = saved;");
+    assert(js_iterates_as_builtin(array));
+
+    // The same question for a string, whose iterator has a prototype of its own.
+    js.eval("var saved_string_next = Object.getPrototypeOf('ab'[Symbol.iterator]()).next;"
+            "Object.getPrototypeOf('ab'[Symbol.iterator]()).next = function () {"
+            "  return { value: 'z', done: false }; };");
+    assert(!js_iterates_as_builtin(JsValue::make_string("abc")));
+    assert(js_iterates_as_builtin(array));
+    seen.clear();
+    js_iterate(JsValue::make_string("abc"), [&](const JsValue& item) {
+        seen.push_back(item);
+        return seen.size() < 2;
+    });
+    assert(seen.size() == 2 && seen[0].to_string() == "z" && seen[1].to_string() == "z");
+    js.eval("Object.getPrototypeOf('ab'[Symbol.iterator]()).next = saved_string_next;");
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+
+    // The Map and Set iterators still read their collections, in order.
+    assert(text("[...new Map([[1, 'a'], [2, 'b']])].join('|')") == "1,a|2,b");
+    assert(text("[...new Set([3, 3, 4])].join()") == "3,4");
+    assert(text("[...new Map([[1, 'a']]).keys()].join()") == "1");
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -20044,6 +20143,9 @@ int main() {
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
+
+    // Phase 91: an iterator is a kind with a prototype a script can reach.
+    RUN_TEST(js_iterators_are_kinds_with_prototypes);
 
     // Phase 75: Map/Set constructor dispatch through set/add.
     RUN_TEST(js_map_set_constructors_dispatch_to_instance_methods);

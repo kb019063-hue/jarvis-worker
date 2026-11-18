@@ -292,7 +292,7 @@ void setup_params(Iface& I) {
                 else if (what == 2) value = str(entry.second);
                 else value = JsValue::make_array({str(entry.first), str(entry.second)});
                 return true;
-            }, {self});
+            }, {self}, JsIntrinsics::get().dom_iterator_proto);
         };
     };
     I.method("entries", 0, make_iterator(0));

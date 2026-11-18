@@ -57,6 +57,22 @@ public:
     struct Names {
         std::string family;     ///< name id 16 (typographic family) when present, else 1
         std::string subfamily;  ///< name id 17 (typographic subfamily) when present, else 2
+
+        /// `OS/2.usWeightClass`, or 0 when the file has no `OS/2` table that
+        /// says. It is the same 1..1000 scale CSS uses, which is the point:
+        /// 400 means 400 on both sides, and no word has to be translated.
+        ///
+        /// The subfamily name is the fallback, not the source. A foundry
+        /// writes whatever it likes there — "Halbfett", "Gras", "Bold
+        /// Condensed Headline" — and matching those words is a guess that
+        /// happens to be right for the fonts on this machine and wrong for
+        /// somebody else's.
+        int weight{0};
+
+        /// The file says it is slanted: `OS/2.fsSelection` bit 0 or
+        /// `head.macStyle` bit 1. Either will do — fonts disagree about which,
+        /// and a face that sets one of them is italic.
+        bool italic{false};
     };
 
     /// Reads `out` from the `name` table of `path`. False when the file is not
@@ -144,7 +160,13 @@ public:
     /// `family_face`. A fallback face that supplies a rare codepoint is upright
     /// however the line was set, but only the named family's slant is the
     /// element's business.
-    const TrueTypeFont* face_for(uint32_t codepoint, bool bold, int family_id = kDefaultFamily,
+    ///
+    /// `font_weight` is the CSS weight, 1..1000 — not "whether it is bold". A
+    /// bool here would mean the registry is only ever asked two questions, and
+    /// it was: every request collapsed to 400 or 700 before a face was chosen,
+    /// so a family with a 300 face could not be asked for it and a page's
+    /// `font-weight: 300` silently got the 400.
+    const TrueTypeFont* face_for(uint32_t codepoint, int font_weight, int family_id = kDefaultFamily,
                                  bool italic = false, bool* synthetic_oblique = nullptr) const;
 
     // --- families -----------------------------------------------------------
@@ -255,6 +277,25 @@ public:
     /// signal to move on to the next source.
     std::string face_path(std::string_view css_family_list) const;
 
+    /// What a face of a family is, as the registry described it: the weight
+    /// range it answers for, and whether it is slanted.
+    ///
+    /// This is the question `pick_face` asks internally, asked out loud. Two
+    /// callers need it: one deciding whether to synthesise a bold or a slant --
+    /// which it cannot decide from the family's name, because a name does not
+    /// say what the family offers -- and a test that has to see which face the
+    /// registry believes a file is.
+    struct FaceFacts {
+        int weight_min{400};
+        int weight_max{400};
+        bool italic{false};
+        bool webfont{false};
+    };
+
+    /// The faces of `css_family_list`, in the order they are considered. Empty
+    /// when the list names no family here.
+    std::vector<FaceFacts> family_face_facts(std::string_view css_family_list) const;
+
     /// Forgets every face registered by `register_webfont`, and releases any of
     /// them already loaded.
     ///
@@ -325,8 +366,11 @@ public:
     /// `italic` reaches the cache key because a synthesised oblique is a
     /// *different bitmap* of the same glyph: keyed without it, whichever of the
     /// two was rasterized first would answer for both, and half the page would
-    /// come out slanted.
-    const GlyphBitmap& get_glyph(uint32_t codepoint, int pixel_size, bool bold,
+    /// come out slanted. The weight is in the key for the same reason and one
+    /// more: a family with a 300 face and a 500 face draws the glyph
+    /// differently at each, so a key that said only "bold" would answer one
+    /// with the other.
+    const GlyphBitmap& get_glyph(uint32_t codepoint, int pixel_size, int font_weight,
                                  int family_id = kDefaultFamily, bool italic = false);
 
 private:
@@ -410,8 +454,9 @@ private:
                                     bool* synthetic_oblique = nullptr) const;
 
     /// `glyph_advance_px` for a family already resolved, so that `measure_text`
-    /// resolves once for the whole string and not once per codepoint.
-    float advance_in_family(uint32_t codepoint, float font_size, bool want_bold,
+    /// resolves once for the whole string and not once per codepoint. Takes the
+    /// weight and not a bool for the reason `face_for` does.
+    float advance_in_family(uint32_t codepoint, float font_size, int font_weight,
                             int family_id, bool italic = false) const;
 
     std::vector<FaceEntry> m_face_entries;

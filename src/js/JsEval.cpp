@@ -453,18 +453,19 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
     }
     EnvScope layer_scope(layer);
 
-    // Everything declared exists before the first statement runs. A `var` of
-    // sloppy eval text is declared in the caller's environment, which is what
-    // leaves it behind afterwards.
+    // Everything declared exists before the first statement runs. A sloppy
+    // direct eval's `var`s skip any lexical loop, catch or block environment
+    // at the call site and land in the caller's variable environment.
     EnvPtr var_target = var_scope_own ? body : target;
+    if (direct_eval && !var_scope_own) var_target = target->var_scope();
     for (const auto& name : program.var_names) {
         if (!var_target->has_own(name)) var_target->define(name, JsValue::make_undefined());
     }
     declare_lexicals(program.lexical_decls, body);
     // A function declaration in sloppy eval text is var-scoped like a `var` is
-    // (ECMA-262 B.3.3.1), so it goes to the caller's environment; in strict
-    // text it is lexical to the eval, like a `let`.
-    hoist_functions(program.functions, var_scope_own ? body : target);
+    // (ECMA-262 B.3.3.1), so it goes to the caller's variable environment; in
+    // strict text it is lexical to the eval, like a `let`.
+    hoist_functions(program.functions, var_target);
 
     Frame frame;
     frame.track_completion = true;
@@ -483,7 +484,11 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     auto text = std::make_shared<const std::string>(source);
     JsLexer lexer(*text);
     auto tokens = lexer.tokenize_all();
-    JsParser parser(std::move(tokens), text);
+    JsParserContext parser_context;
+    parser_context.direct_eval = true;
+    parser_context.allow_super_property = frame.allow_super_property;
+    parser_context.allow_super_call = frame.allow_super_call;
+    JsParser parser(std::move(tokens), text, parser_context);
     auto program = parser.parse_program();
     // The scope has to outlive this call: the bindings its `var`s make belong
     // to the function whose code called it, and are read after it returns.
@@ -590,6 +595,7 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     }
 
     auto env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+    env->mark_var_scope();
     env->strict_mode = node->is_strict ? 1 : 0;
     if (!node->is_arrow) {
         // Arrow functions bind none of these; lookups fall through to the
@@ -2278,7 +2284,8 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     // does not either.
     const bool is_eval = callee->kind == NodeKind::Identifier &&
                          static_cast<const IdentifierExpr*>(callee)->name == "eval";
-    const bool direct = is_eval && m_eval_function.is_function() && strict_equals(m_eval_function, fn);
+    const bool direct = !expr->optional && is_eval && m_eval_function.is_function() &&
+                        strict_equals(m_eval_function, fn);
     // A frame is pushed only where one can matter: for the direct call itself,
     // and -- inside an eval's extent, where the stack is not empty -- for every
     // other call too, so that an indirect eval farther in can mask the direct
@@ -2286,7 +2293,9 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     // expression costs nothing.
     std::vector<EvalFrame>& stack = eval_call_stack();
     if (direct || !stack.empty()) {
-        stack.push_back(EvalFrame{env.get(), direct});
+        stack.push_back(EvalFrame{env.get(), direct,
+                                  direct && expr->direct_eval_allows_super_property,
+                                  direct && expr->direct_eval_allows_super_call});
         struct Pop {
             std::vector<EvalFrame>& stack;
             ~Pop() { stack.pop_back(); }
@@ -2714,9 +2723,11 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
 
         case NodeKind::ArrayLiteral: {
             std::vector<JsValue> elements;
+            std::vector<size_t> holes;      // an elision is a hole, not an element
             for (const auto& element : static_cast<const ArrayLiteralExpr*>(expr)->elements) {
                 if (!element) {
-                    elements.push_back(JsValue::make_undefined());      // hole
+                    holes.push_back(elements.size());
+                    elements.push_back(JsValue::make_undefined());
                 } else if (element->kind == NodeKind::Spread) {
                     JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
                     js_iterate(iterable, [&](const JsValue& item) {
@@ -2727,7 +2738,12 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                     elements.push_back(evaluate(element.get(), env));
                 }
             }
-            return JsValue::make_array(elements);
+            JsValue array = JsValue::make_array(elements);
+            // `[1, , 3]` has three places and two elements. Marked after the
+            // array is made, because a spread in the literal may have added
+            // places that shift the ones after it.
+            for (size_t index : holes) array.set_array_hole(index);
+            return array;
         }
 
         case NodeKind::TemplateLiteral: {
@@ -2760,7 +2776,10 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                 // nothing outside binds that name.
                 auto scope = std::make_shared<JsEnvironment>(env);
                 JsValue fn = make_function(node, scope);
-                scope->define(node->name, fn);
+                // The inner name of a named function expression is an
+                // immutable binding: sloppy writes are ignored and strict
+                // writes throw, including writes made by direct eval.
+                scope->define_readonly(node->name, fn);
                 return fn;
             }
             return make_function(node, env);

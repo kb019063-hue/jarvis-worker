@@ -57,7 +57,7 @@ stays true)") and in `ROADMAP.md` tier 1. A probe against Node.js found 15 of
 ## 3. How it is verified
 
 - `make test` → **235 / 235** suites (`array_holes_are_not_elements` asserts
-  60 facts, all of them compared in the page; the same text run through
+  67 facts, all of them compared in the page; the same text run through
   Node.js 22.22.3 gives the same 28 lines).
 - `make js-conformance` → **1129 / 1152** (was 1128): `arrays.dat`'s *delete
   leaves a hole* now passes.
@@ -67,8 +67,8 @@ stays true)") and in `ROADMAP.md` tier 1. A probe against Node.js found 15 of
 
 ## 4. What is not here
 
-An array **literal** with a hole (`[1, , 3]`) still produces an element:
-`src/js/JsEval.cpp` builds it, and that file is #103's. Everything that does
-not go through the literal — `delete`, `new Array(n)`, a grown `length`, and
-every method — is this work. The gap is named in `AGENTS.md` so that it is a
-row of the table and not a silence.
+Nothing of the ROADMAP row is left. An earlier draft left the array *literal*
+(`[1, , 3]`) out because `src/js/JsEval.cpp` belonged to open pull request #103;
+that merged first, so the literal is in this work as well. `Proxy` and typed
+arrays do not exist yet, so a hole seen through either is not a question this
+engine can be asked.

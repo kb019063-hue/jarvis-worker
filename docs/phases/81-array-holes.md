@@ -84,6 +84,10 @@ need BigInt, `Proxy` or typed arrays first.
   the standard's `IteratorNext` does), and `js_iterable_to_vector` copies
   through `array_snapshot()`. The structured-clone writer reads every place the
   same way.
+- **`src/js/JsEval.cpp`** — `[1, , 3]`: the elision the parser records as a
+  missing element becomes a hole on the array the literal builds, marked after
+  it is made so that a spread in the same literal (which adds places) cannot
+  shift the wrong one.
 - **`src/js/BuiltinsObject.cpp`** — `getOwnPropertyDescriptor` answers
   `undefined` for a hole; `CreateListFromArrayLike` (`apply`, `Reflect.apply`,
   `Function.prototype.call`) reads through `array_snapshot()`; the
@@ -96,10 +100,10 @@ need BigInt, `Proxy` or typed arrays first.
 ## 3. How it is verified
 
 - **`make test`** → **235 / 235** suites. The new one,
-  `array_holes_are_not_elements`, asserts **60** facts, every one of them a
+  `array_holes_are_not_elements`, asserts **67** facts, every one of them a
   comparison made in the page. The same script text was run through this
-  engine and through Node.js 22.22.3 before it was written down: 28 lines, the
-  same 28.
+  engine and through Node.js 22.22.3 before it was written down: the same
+  lines, every time.
 - **`make js-conformance`** → **1129 / 1152** (was 1128), with 0 crashes and 0
   timeouts. The case that flips is `arrays.dat`'s *delete leaves a hole*
   (`a.length, a[1], 1 in a` → `3 undefined false`), which was written for the
@@ -114,17 +118,6 @@ need BigInt, `Proxy` or typed arrays first.
 
 ## 4. What is still open
 
-- **An array *literal* with a hole still makes an element of it.** `[1, , 3]`
-  and `[, ,]` build their elements in `src/js/JsEval.cpp`
-  (`NodeKind::ArrayLiteral`), and that file belongs to an open pull request
-  (#103, direct-eval semantics). The work here is everything else: the
-  representation, `delete`, `new Array(n)`, a grown `length`, `pop`/`shift` past
-  a hole, and every method. The one line that changes in `JsEval.cpp` is that
-  the `elements.push_back(JsValue::make_undefined())` the parser emits for an
-  elision becomes a hole on the array it builds; until it does, `[1, , 3]`
-  reports `1 in a === true`. The write-up and the test say so rather than
-  pretending the phase is complete. This is the one place the probe of §1 still
-  differs from Node.
 - **An array-like is not an array.** `Array.prototype.forEach.call({length: 2,
   0: 'a'}, …)` reads through property access and has no holes to skip, which is
   right — the same code path, `has_property` on the receiver.
@@ -133,3 +126,11 @@ need BigInt, `Proxy` or typed arrays first.
   line of their own. `Object.entries`/`Object.values` call the same helpers.
 - **A hole in a typed array** is not a thing (the standard has no holes there),
   and typed arrays do not exist yet.
+- **A hole a proxy reports**: `Proxy` does not exist yet either. When it does,
+  `Object.keys` on a proxy of an array is the proxy's own `ownKeys` trap, not
+  this bitmap, and the two must not be confused.
+
+An earlier draft of this phase left the array *literal* out, because
+`src/js/JsEval.cpp` belonged to open pull request #103. That pull request merged
+before this one, so the literal is here too and nothing is left of the ROADMAP
+row.

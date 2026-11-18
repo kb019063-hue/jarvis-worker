@@ -22,10 +22,12 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/common/Color.hpp"
 #include "litebird/css/GridGrammar.hpp"
+#include "litebird/js/Promise.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <unordered_set>
 
 namespace litebird {
@@ -2190,14 +2192,55 @@ void apply_declarations(Block& block, const std::string& text, bool inline_mode 
 // The computed style
 // ---------------------------------------------------------------------------
 
+// One style rule of a sheet. A script's CSSOM reads and writes the same
+// object the cascade reads: `rule.style` is a CSSStyleDeclaration over
+// `declarations`, and `selectorText` reparsed into `selector`.
 struct SheetRule {
     SelectorList selector;
+    std::string selector_text;
     std::vector<RawDeclaration> declarations;
+    /// The rule's identity: `cssRules[0] === cssRules.item(0)` holds because
+    /// the object is the one made for this number, wherever the rule now is
+    /// in the list.
+    uint64_t id{0};
+    /// True when the rule came from the element's text. A rule a script
+    /// inserted stays when that text changes; this one goes with it.
+    bool from_text{false};
 };
 
 struct ParsedSheet {
     std::vector<SheetRule> rules;
+    /// Bumped by every CSSOM write, so a style object knows to read again.
+    uint64_t generation{0};
+    /// The number the next rule of this sheet gets.
+    uint64_t next_rule_id{1};
+
+    /// Gives every rule an id, after the text was parsed.
+    void number_rules() {
+        for (auto& rule : rules) {
+            if (rule.id == 0) {
+                rule.id = next_rule_id++;
+                rule.from_text = true;
+            }
+        }
+    }
 };
+
+uint64_t sheet_generation(const std::shared_ptr<ParsedSheet>& sheet) {
+    return sheet ? sheet->generation : 0;
+}
+
+/// Bumped by every CSSOM write in the realm. A computed style is worked out
+/// again when it changes, because `insertRule` changes what the cascade says
+/// without changing the tree.
+uint64_t s_style_generation = 0;
+
+uint64_t style_generation() { return s_style_generation; }
+
+void touch_sheet(const std::shared_ptr<ParsedSheet>& sheet) {
+    if (sheet) ++sheet->generation;
+    ++s_style_generation;
+}
 
 void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRule>& out, bool nested) {
     while (at < css.size()) {
@@ -2259,13 +2302,148 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRule>
         }
         SheetRule rule;
         if (!SelectorList::parse(prelude, rule.selector)) continue;
+        rule.selector_text = prelude;
         rule.declarations = parse_declarations(body);
         out.push_back(std::move(rule));
     }
 }
 
+// ---------------------------------------------------------------------------
+// The CSS Object Model
+// ---------------------------------------------------------------------------
+//
+// A sheet object is made once for a <style> element and lives as long as the
+// element can be read: `style.sheet` is the same object every time, and it is
+// still there once the element has left the tree, as browsers have it.
+//
+// The rules of a live sheet and the rules the cascade applies are one list:
+// a sheet the cascade reads is the same ParsedSheet an `insertRule` writes, so
+// a rule a script adds styles the page on the next `getComputedStyle`.
+
+struct SheetState : JsExotic {
+    Realm* realm{nullptr};
+    /// Null for a sheet no element owns (`new CSSStyleSheet()`).
+    std::shared_ptr<Element> owner;
+    std::shared_ptr<ParsedSheet> sheet;
+    bool own_sheet{false};
+    /// The value `disabled` was given, as written.
+    bool disabled{false};
+    /// Whether the cascade reads this sheet: a <style> element in a tree, and
+    /// not `disabled`.
+    bool applied{false};
+    std::string href;
+
+    /// `disabled` is the cascade's, not this object's: it is stored where
+    /// `compute_block` looks, by the sheet.
+    void set_applied(bool value);
+};
+
+struct RuleState : JsExotic {
+    std::shared_ptr<ParsedSheet> sheet;
+    uint64_t id{0};
+    std::string selector_text;
+    /// The rule once it has been removed from its sheet: it keeps its own
+    /// declarations, which no tree reads any more.
+    std::vector<RawDeclaration> detached;
+};
+
+struct RuleListState : JsExotic {
+    std::shared_ptr<ParsedSheet> sheet;
+
+    bool get(JsObject*, const std::string& name, JsValue& out) override;
+    bool has(JsObject*, const std::string& name) override;
+    void keys(JsObject*, std::vector<std::string>& out) override;
+};
+
+// The rule objects of a realm, one per rule, so that a rule object is the same
+// object every time it is read.
+struct RuleObjectEntry {
+    std::weak_ptr<ParsedSheet> sheet;
+    JsValue object;
+};
+
+struct RuleObjectsPart : RealmPart {
+    std::map<uint64_t, RuleObjectEntry> objects;
+    std::map<const ParsedSheet*, RuleObjectEntry> sheets;
+    void trace(Heap& heap) override {
+        for (auto& entry : objects) heap.mark_value(entry.second.object);
+        for (auto& entry : sheets) heap.mark_value(entry.second.object);
+    }
+};
+
+std::string serialize_selector_list(const SelectorList& list);
+std::string serialize_declarations(const std::vector<RawDeclaration>& declarations);
+std::string rule_block_text(Realm& realm, RuleState& state);
+
+/// Parses `text` as one rule for `sheet.insertRule`: a selector and a block,
+/// or a whole style rule. False when it is not one.
+bool parse_inserted_rule(const std::string& text, SheetRule& out);
+
+/// Where the rule of `state` is in its sheet now, or the end of the list when
+/// it has left it.
+std::size_t rule_index(const RuleState& state) {
+    if (!state.sheet) return SIZE_MAX;
+    const auto& rules = state.sheet->rules;
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        if (rules[i].id == state.id) return i;
+    }
+    return SIZE_MAX;
+}
+
+/// The declarations a rule currently has: its own, or the ones it kept when
+/// it left its sheet.
+std::vector<RawDeclaration>* rule_declarations(RuleState& state) {
+    const std::size_t index = rule_index(state);
+    if (index != SIZE_MAX) return &state.sheet->rules[index].declarations;
+    return &state.detached;
+}
+
+const std::vector<RawDeclaration>* rule_declarations(const RuleState& state) {
+    return rule_declarations(const_cast<RuleState&>(state));
+}
+
+std::string rule_selector_text(const RuleState& state) {
+    const std::size_t index = rule_index(state);
+    if (index != SIZE_MAX) return state.sheet->rules[index].selector_text;
+    return state.selector_text;
+}
+
+JsValue make_sheet(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::shared_ptr<Element> owner,
+                   bool own_sheet, bool applied, std::string href);
+JsValue sheet_object(Realm& realm, Element& element);
+JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet);
+JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::size_t index);
+JsValue make_rule_style(Realm& realm, std::shared_ptr<RuleState> rule);
+
+// One sheet object of a realm, made for a <style> element. `version` is the
+// tree version its `applied` was worked out at.
+struct SheetEntry {
+    JsValue object;
+    std::shared_ptr<Element> owner;
+    std::shared_ptr<ParsedSheet> sheet;
+    /// The element's text the sheet's rules were read from.
+    std::string source;
+    bool applied{false};
+    uint64_t version{0};
+};
+
 struct StylePart : RealmPart {
     std::unordered_map<std::string, std::shared_ptr<ParsedSheet>> sheets;
+    /// The sheet object of each <style> element, so that `sheet` is stable.
+    std::map<const Element*, SheetEntry> sheet_objects;
+    /// A sheet a script has set `disabled` on, by the sheet it is: a sheet's
+    /// text can be replaced by another (an entry made again), and `disabled`
+    /// is what was written on the object, not on the element.
+    std::map<const ParsedSheet*, bool> disabled_sheets;
+
+    bool is_disabled(const ParsedSheet* sheet) const {
+        auto found = disabled_sheets.find(sheet);
+        return found != disabled_sheets.end() && found->second;
+    }
+    void set_disabled(const ParsedSheet* sheet, bool disabled) {
+        if (disabled) disabled_sheets[sheet] = true;
+        else disabled_sheets.erase(sheet);
+    }
     /// The <style> elements of the tree `root`, and their rules, at `version`.
     std::vector<std::shared_ptr<Element>> style_elements;
     std::vector<std::shared_ptr<ParsedSheet>> style_sheets;
@@ -2282,9 +2460,83 @@ std::shared_ptr<ParsedSheet> sheet_for(Realm& realm, const std::string& css) {
     auto sheet = std::make_shared<ParsedSheet>();
     std::size_t at = 0;
     parse_rules(css, at, sheet->rules, false);
+    sheet->number_rules();
     if (part.sheets.size() >= 64) part.sheets.clear();
     part.sheets[css] = sheet;
     return sheet;
+}
+
+/// Whether the cascade reads an element's sheet: it is in a document, and its
+/// `media` is not print.
+bool sheet_is_applied(Element& element) {
+    if (!element.is_connected()) return false;
+    return ascii_lower(element.get_attribute("media")).find("print") == std::string::npos;
+}
+
+// The sheet one element has at this state of the tree: the one it had before
+// while its text has not changed, and a new one when it has. A sheet a script
+// has written to is not thrown away with its text: an `insertRule` survives
+// the next `getComputedStyle`.
+std::shared_ptr<ParsedSheet> sheet_of(Realm& realm, Element& element) {
+    StylePart& part = realm.part<StylePart>();
+    SheetEntry& entry = part.sheet_objects[&element];
+    if (!entry.sheet) {
+        entry.sheet = std::make_shared<ParsedSheet>();
+        entry.owner = shared(element);
+        std::size_t at = 0;
+        parse_rules(element.text_content(), at, entry.sheet->rules, false);
+        entry.sheet->number_rules();
+        entry.applied = sheet_is_applied(element);
+        entry.version = Node::tree_version();
+        entry.source = element.text_content();
+        return entry.sheet;
+    }
+    // The sheet is one object for as long as the element has one: its rules
+    // are the element's text, read again when the text changes, and an
+    // `insertRule` is a rule of the sheet like any other.
+    const std::string text = element.text_content();
+    if (text != entry.source) {
+        std::vector<SheetRule> parsed;
+        std::size_t at = 0;
+        parse_rules(text, at, parsed, false);
+        std::vector<SheetRule> kept;
+        for (auto& rule : entry.sheet->rules) {
+            if (rule.from_text) continue; // it came from the text that has gone
+            kept.push_back(std::move(rule));
+        }
+        entry.sheet->rules = std::move(parsed);
+        entry.sheet->number_rules();
+        // What a script inserted stays, after the rules of the new text, as a
+        // rule inserted at the end would be.
+        for (auto& rule : kept) entry.sheet->rules.push_back(std::move(rule));
+        entry.source = text;
+        touch_sheet(entry.sheet);
+    }
+    return entry.sheet;
+}
+
+JsValue sheet_object(Realm& realm, Element& element) {
+    StylePart& part = realm.part<StylePart>();
+    // Read again first: the element's text is the sheet's rules, and the
+    // object handed back is the one made for it.
+    std::shared_ptr<ParsedSheet> sheet = sheet_of(realm, element);
+    auto found = part.sheet_objects.find(&element);
+    if (found != part.sheet_objects.end() && found->second.object.is_object()) {
+        if (found->second.version != Node::tree_version()) {
+            found->second.applied = sheet_is_applied(element);
+            found->second.version = Node::tree_version();
+        }
+        return found->second.object;
+    }
+    const bool applied = sheet_is_applied(element);
+    JsValue object = make_sheet(realm, sheet, shared(element), false, applied, std::string());
+    SheetEntry& entry = part.sheet_objects[&element];
+    entry.owner = shared(element);
+    entry.sheet = sheet;
+    entry.applied = applied;
+    entry.version = Node::tree_version();
+    entry.object = object;
+    return object;
 }
 
 const std::vector<std::shared_ptr<Element>>& style_elements_of(Realm& realm, const Node& root) {
@@ -2301,7 +2553,7 @@ const std::vector<std::shared_ptr<Element>>& style_elements_of(Realm& realm, con
     });
     // Parsed once for each state of the tree, not once for each element asked about.
     part.style_sheets.clear();
-    for (const auto& style : part.style_elements) part.style_sheets.push_back(sheet_for(realm, style->text_content()));
+    for (const auto& style : part.style_elements) part.style_sheets.push_back(sheet_of(realm, *style));
     part.version = Node::tree_version();
     part.root = &root;
     return part.style_elements;
@@ -2898,7 +3150,21 @@ void compute_block(Realm& realm, const Element& element, Block& block, const Nod
     if (!root) root = tree_root_of(element);
     if (root->is_document() || root->is_document_fragment()) {
         style_elements_of(realm, *root);
-        for (const auto& sheet : part.style_sheets) collect(*sheet, 1);
+        for (std::size_t i = 0; i < part.style_sheets.size(); ++i) {
+            // `sheet.disabled = true` takes a sheet out of the cascade, and
+            // leaves it in `document.styleSheets` and in `cssRules`.
+            const Element* owner = i < part.style_elements.size() ? part.style_elements[i].get() : nullptr;
+            if (owner) {
+                auto found = part.sheet_objects.find(owner);
+                if (found != part.sheet_objects.end() && found->second.object.is_object() &&
+                    found->second.version != Node::tree_version()) {
+                    found->second.applied = sheet_is_applied(*part.style_elements[i]);
+                    found->second.version = Node::tree_version();
+                }
+                if (part.is_disabled(part.style_sheets[i].get())) continue;
+            }
+            collect(*part.style_sheets[i], 1);
+        }
     }
     std::vector<RawDeclaration> inline_declarations;
     if (const std::string* inline_text = element.attribute("style")) {
@@ -3539,14 +3805,33 @@ struct StyleState : JsExotic {
     Realm* realm{nullptr};
     std::shared_ptr<Element> element;
     bool computed{false};
+    /// A style rule's declaration block: the declarations live in the rule,
+    /// which `block` is built from and written back to.
+    std::shared_ptr<RuleState> rule;
     Block block;
     /// Inline: the attribute text `block` was parsed from.
     std::string source;
     bool has_source{false};
-    /// Computed: the tree version `block` was computed at.
+    /// Computed: the tree version `block` was computed at. A rule: the
+    /// sheet's `generation` it was built at.
     uint64_t version{0};
+    /// Computed: the style generation it was computed at.
+    uint64_t style_version{0};
 
     void load() {
+        if (rule) {
+            std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
+            if (version == sheet_generation(rule->sheet) && has_source) return;
+            block.clear();
+            for (const auto& declaration : *declarations) {
+                if (!is_css_property(declaration.name)) continue;
+                block.set(declaration.name, declaration.value, declaration.important, true);
+            }
+            source = block.text(true);
+            has_source = true;
+            version = sheet_generation(rule->sheet);
+            return;
+        }
         if (computed) {
             // An element that is not connected has no computed style: every
             // property, the priority, the length and the cssText read as
@@ -3556,9 +3841,10 @@ struct StyleState : JsExotic {
                 version = Node::tree_version();
                 return;
             }
-            if (version == Node::tree_version() && realm->alive) return;
+            if (version == Node::tree_version() && style_version == style_generation() && realm->alive) return;
             if (realm->alive) compute_block(*realm, *element, block);
             version = Node::tree_version();
+            style_version = style_generation();
             return;
         }
         const std::string* attribute = element->attribute("style");
@@ -3576,6 +3862,19 @@ struct StyleState : JsExotic {
     }
 
     void store() {
+        if (rule) {
+            source = block.text(true);
+            has_source = true;
+            std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
+            declarations->clear();
+            for (const auto& declaration : parse_declarations(source)) {
+                if (!is_css_property(declaration.name)) continue;
+                declarations->push_back(declaration);
+            }
+            touch_sheet(rule->sheet);
+            version = sheet_generation(rule->sheet);
+            return;
+        }
         source = block.text(!computed);
         has_source = true;
         element->set_attribute("style", source);
@@ -3722,6 +4021,403 @@ void setup_style_declaration(Iface& I) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// FontFaceSet
+// ---------------------------------------------------------------------------
+//
+// `document.fonts` exists for one thing in practice: `ready`, a promise that
+// is resolved once the fonts in use have loaded. Every face here is a face
+// the engine found already, so there is never anything to wait for: `ready`
+// is a promise that is already resolved.
+//
+// The faces themselves (`FontFace`, `@font-face`, `load()`) are not
+// implemented: the set is empty, and asking it to load one adds it and
+// leaves it `unloaded`.
+
+struct FontFaceSetState : JsExotic {
+    std::vector<JsValue> faces;
+    JsValue ready;
+
+    void trace(Heap& heap) override {
+        heap.mark_value(ready);
+        for (const auto& face : faces) heap.mark_value(face);
+    }
+};
+
+void setup_font_face_set(Iface& I) {
+    I.getter("status", [](Realm&) {
+        this_state<FontFaceSetState>("FontFaceSet");
+        return str("loaded");
+    });
+    I.getter("ready", [](Realm&) {
+        // Resolved with the set itself, as the standard has it: what a page
+        // uses the promise for is to know when the fonts are there, and the
+        // promise then hands it the set.
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        if (!state.ready.is_object()) state.ready = Promise::make_resolved(JsValue::current_this());
+        return state.ready;
+    });
+    I.getter("size", [](Realm&) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        return num(static_cast<double>(state.faces.size()));
+    });
+    I.method("add", 1, [](Realm&, Args args) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        require_args(args, 1, "FontFaceSet.add");
+        state.faces.push_back(args[0]);
+        return JsValue::current_this();
+    });
+    I.method("delete", 1, [](Realm&, Args args) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        require_args(args, 1, "FontFaceSet.delete");
+        const auto before = state.faces.size();
+        state.faces.erase(std::remove_if(state.faces.begin(), state.faces.end(),
+                                         [&](const JsValue& face) { return strict_equals(face, args[0]); }),
+                          state.faces.end());
+        return boolean(state.faces.size() != before);
+    });
+    I.method("has", 1, [](Realm&, Args args) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        require_args(args, 1, "FontFaceSet.has");
+        return boolean(std::any_of(state.faces.begin(), state.faces.end(),
+                                   [&](const JsValue& face) { return strict_equals(face, args[0]); }));
+    });
+    I.method("clear", 0, [](Realm&, Args) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        state.faces.clear();
+        return undefined();
+    });
+    I.method("forEach", 1, [](Realm& realm, Args args) {
+        FontFaceSetState& state = this_state<FontFaceSetState>("FontFaceSet");
+        require_args(args, 1, "FontFaceSet.forEach");
+        const JsValue callback = args[0];
+        if (!callback.is_function()) js_throw_type_error("FontFaceSet.forEach: the callback is not a function");
+        const JsValue self = JsValue::current_this();
+        for (const auto& face : state.faces) {
+            call_reporting(realm, callback, self, {face, face, self});
+        }
+        return undefined();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The CSS Object Model: the interfaces over the rules above
+// ---------------------------------------------------------------------------
+
+// A style rule's own declaration block. The declarations live in the rule;
+// `StyleState` writes back to them through `rule`.
+JsValue make_rule_style(Realm& realm, std::shared_ptr<RuleState> rule) {
+    auto state = std::make_shared<StyleState>();
+    state->realm = &realm;
+    state->rule = std::move(rule);
+    return realm.make("CSSStyleDeclaration", state);
+}
+
+std::string serialize_selector_list(const SelectorList& list) {
+    (void)list;
+    return std::string();
+}
+
+// The block of a rule, as a browser writes it: through the CSSStyleDeclaration
+// that `rule.style` is, so that a shorthand is one declaration and a length is
+// a computed one — `margin: 0 auto` comes back as `margin: 0px auto;`.
+std::string rule_block_text(Realm& realm, RuleState& state) {
+    JsValue style = make_rule_style(realm, std::make_shared<RuleState>(state));
+    StyleState* style_state = state_of<StyleState>(style);
+    if (!style_state) return serialize_declarations(*rule_declarations(state));
+    style_state->load();
+    return style_state->block.text(true);
+}
+
+std::string serialize_declarations(const std::vector<RawDeclaration>& declarations) {
+    std::string out;
+    for (const auto& declaration : declarations) {
+        if (!out.empty()) out += ' ';
+        out += declaration.name + ": " + declaration.value + (declaration.important ? " !important;" : ";");
+    }
+    return out;
+}
+
+// `sheet.insertRule(text)`: "selector { declarations }", and nothing after the
+// closing brace but whitespace.
+bool parse_inserted_rule(const std::string& text, SheetRule& out) {
+    const std::string trimmed = trim(text);
+    // A style rule ends with its block: "a {" is not one. An at-rule is not
+    // one either: `insertRule` takes a style rule, and the sheet has no
+    // CSSMediaRule to put a block in.
+    if (trimmed.empty() || trimmed.back() != '}' || trimmed.front() == '@') return false;
+    // One block, and nothing after it: "a { b { c {} } }" is not a style rule.
+    int depth = 0;
+    std::size_t closed_at = std::string::npos;
+    char quote = 0;
+    for (std::size_t i = 0; i < trimmed.size(); ++i) {
+        const char c = trimmed[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < trimmed.size()) { ++i; continue; }
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) { closed_at = i; break; }
+    }
+    if (closed_at == std::string::npos) return false;
+    for (std::size_t i = closed_at + 1; i < trimmed.size(); ++i) {
+        if (!is_ascii_space(trimmed[i])) return false;
+    }
+    std::size_t at = 0;
+    std::vector<SheetRule> rules;
+    parse_rules(text, at, rules, false);
+    while (at < text.size() && is_ascii_space(text[at])) ++at;
+    if (rules.size() != 1 || at != text.size()) return false;
+    if (rules.front().selector.empty()) return false;
+    out = std::move(rules.front());
+    return true;
+}
+
+void SheetState::set_applied(bool value) {
+    applied = value;
+    if (realm) realm->part<StylePart>().set_disabled(sheet.get(), !value);
+}
+
+JsValue make_sheet(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::shared_ptr<Element> owner,
+                   bool own_sheet, bool applied, std::string href) {
+    if (!owner) {
+        // `rule.parentStyleSheet`: the sheet object of that sheet, if a <style>
+        // element owns it, and otherwise a sheet object made for it here.
+        auto& by_sheet = realm.part<RuleObjectsPart>().sheets;
+        auto found = by_sheet.find(sheet.get());
+        if (found != by_sheet.end() && found->second.sheet.lock() == sheet) return found->second.object;
+    }
+    auto state = std::make_shared<SheetState>();
+    state->realm = &realm;
+    state->sheet = std::move(sheet);
+    state->owner = std::move(owner);
+    state->own_sheet = own_sheet;
+    state->applied = applied;
+    state->href = std::move(href);
+    return realm.make("CSSStyleSheet", state);
+}
+
+JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet) {
+    auto state = std::make_shared<RuleListState>();
+    state->sheet = std::move(sheet);
+    return realm.make("CSSRuleList", state);
+}
+
+JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::size_t index) {
+    RuleState state;
+    state.sheet = sheet;
+    state.id = sheet->rules[index].id;
+    // One object per rule: `cssRules[0] === cssRules.item(0)`.
+    auto& objects = realm.part<RuleObjectsPart>().objects;
+    auto found = objects.find(state.id);
+    if (found != objects.end() && found->second.sheet.lock() == sheet) return found->second.object;
+    auto shared_state = std::make_shared<RuleState>(state);
+    JsValue object = realm.make("CSSStyleRule", shared_state);
+    objects[state.id] = RuleObjectEntry{sheet, object};
+    return object;
+}
+
+// `cssRules[0]`: the indices are the list's, and live.
+bool RuleListState::get(JsObject*, const std::string& name, JsValue& out) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
+    if (!sheet || index >= sheet->rules.size()) return false;
+    out = make_rule(current_realm(), sheet, index);
+    return true;
+}
+
+bool RuleListState::has(JsObject*, const std::string& name) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
+    return sheet && index < sheet->rules.size();
+}
+
+void RuleListState::keys(JsObject*, std::vector<std::string>& out) {
+    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
+    if (!sheet) return;
+    for (std::size_t i = 0; i < sheet->rules.size(); ++i) out.push_back(std::to_string(i));
+}
+
+void setup_rule(Iface& I) {
+    // CSSRule's type constants. They are on `CSSRule` and on every subclass,
+    // as WebIDL inheritance puts them (CSSRule.STYLE_RULE and CSSStyleRule.STYLE_RULE).
+    static const struct { const char* name; double value; } kTypes[] = {
+        {"STYLE_RULE", 1},         {"CHARSET_RULE", 2},      {"IMPORT_RULE", 3},
+        {"MEDIA_RULE", 4},         {"FONT_FACE_RULE", 5},    {"PAGE_RULE", 6},
+        {"KEYFRAMES_RULE", 7},     {"KEYFRAME_RULE", 8},     {"MARGIN_RULE", 9},
+        {"NAMESPACE_RULE", 10},    {"COUNTER_STYLE_RULE", 11}, {"SUPPORTS_RULE", 12},
+        {"FONT_FEATURE_VALUES_RULE", 14},
+    };
+    for (const auto& type : kTypes) I.constant(type.name, type.value);
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSRule");
+        return num(0);
+    });
+    I.getter("cssText", [](Realm&) {
+        RuleState& state = this_state<RuleState>("CSSRule");
+        return str(rule_selector_text(state) + " { " + serialize_declarations(*rule_declarations(state)) + " }");
+    });
+    I.getter("parentRule", [](Realm&) {
+        this_state<RuleState>("CSSRule");
+        return null();
+    });
+    I.getter("parentStyleSheet", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSRule");
+        if (!state.sheet) return null();
+        return make_sheet(realm, state.sheet, nullptr, false, false, std::string());
+    });
+}
+
+void setup_style_rule(Iface& I) {
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSStyleRule");
+        return num(1); // CSSRule.STYLE_RULE
+    });
+    I.accessor("selectorText",
+        [](Realm&) {
+            RuleState& state = this_state<RuleState>("CSSStyleRule");
+            return str(rule_selector_text(state));
+        },
+        [](Realm& realm, const JsValue& value) {
+            RuleState& state = this_state<RuleState>("CSSStyleRule");
+            const std::size_t index = rule_index(state);
+            if (index == SIZE_MAX) return;
+            const std::string text = trim(to_str(value));
+            SelectorList parsed;
+            if (!SelectorList::parse(text, parsed)) {
+                throw_dom(realm, "SyntaxError",
+                          "Failed to set the 'selectorText' property on 'CSSStyleRule': '" + text +
+                              "' is not a valid selector list.");
+            }
+            SheetRule& rule = state.sheet->rules[index];
+            rule.selector = std::move(parsed);
+            rule.selector_text = text;
+            touch_sheet(state.sheet);
+        });
+    I.getter("style", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSStyleRule");
+        return make_rule_style(realm, std::make_shared<RuleState>(state));
+    });
+    I.getter("cssText", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSStyleRule");
+        const std::string block = rule_block_text(realm, state);
+        return str(rule_selector_text(state) + " { " + block + " }");
+    });
+}
+
+void setup_rule_list(Iface& I) {
+    I.getter("length", [](Realm&) {
+        RuleListState& state = this_state<RuleListState>("CSSRuleList");
+        const std::shared_ptr<ParsedSheet>& sheet = state.sheet;
+        return num(sheet ? static_cast<double>(sheet->rules.size()) : 0.0);
+    });
+    I.method("item", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSRuleList.item");
+        RuleListState& state = this_state<RuleListState>("CSSRuleList");
+        const std::shared_ptr<ParsedSheet>& sheet = state.sheet;
+        if (!sheet) return null();
+        const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
+        if (index >= sheet->rules.size()) return null();
+        return make_rule(realm, sheet, index);
+    });
+}
+
+void setup_style_sheet(Iface& I) {
+    I.getter("cssRules", [](Realm& realm) {
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        return make_rule_list(realm, state.sheet);
+    });
+    I.alias("rules", "cssRules");
+    I.getter("ownerNode", [](Realm& realm) {
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        if (!state.owner) return null();
+        return wrap(realm, state.owner->shared_from_this());
+    });
+    I.getter("ownerRule", [](Realm&) {
+        this_state<SheetState>("CSSStyleSheet");
+        return null();
+    });
+    I.getter("href", [](Realm&) {
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        return state.href.empty() ? null() : str(state.href);
+    });
+    I.getter("type", [](Realm&) {
+        this_state<SheetState>("CSSStyleSheet");
+        return str("text/css");
+    });
+    // A stylesheet has no `disabled` attribute to reflect: the accessor's job
+    // is to give back what was written, so the value is kept.
+    I.accessor("disabled",
+        [](Realm&) {
+            SheetState& state = this_state<SheetState>("CSSStyleSheet");
+            return boolean(state.disabled);
+        },
+        [](Realm&, const JsValue& value) {
+            SheetState& state = this_state<SheetState>("CSSStyleSheet");
+            state.disabled = value.is_truthy();
+            state.set_applied(!state.disabled);
+            touch_sheet(state.sheet);
+        });
+    I.getter("title", [](Realm&) {
+        this_state<SheetState>("CSSStyleSheet");
+        return str("");
+    });
+    I.method("insertRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSStyleSheet.insertRule");
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        const std::string text = trim(to_str(args[0]));
+        std::size_t index = state.sheet->rules.size();
+        if (args.size() > 1 && !args[1].is_undefined()) index = to_ulong(args[1]);
+        if (index > state.sheet->rules.size()) {
+            throw_dom(realm, "IndexSizeError",
+                      "Failed to execute 'insertRule' on 'CSSStyleSheet': the index (" + std::to_string(index) +
+                          ") is larger than the number of rules (" +
+                          std::to_string(state.sheet->rules.size()) + ").");
+        }
+        SheetRule rule;
+        if (!parse_inserted_rule(text, rule)) {
+            throw_dom(realm, "SyntaxError",
+                      "Failed to execute 'insertRule' on 'CSSStyleSheet': the rule '" + text +
+                          "' is not a valid style rule.");
+        }
+        rule.id = state.sheet->next_rule_id++;
+        rule.from_text = false;
+        state.sheet->rules.insert(state.sheet->rules.begin() + static_cast<std::ptrdiff_t>(index), std::move(rule));
+        touch_sheet(state.sheet);
+        return num(static_cast<double>(index));
+    });
+    I.method("deleteRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSStyleSheet.deleteRule");
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
+        if (index >= state.sheet->rules.size()) {
+            throw_dom(realm, "IndexSizeError",
+                      "Failed to execute 'deleteRule' on 'CSSStyleSheet': the index (" + std::to_string(index) +
+                          ") is larger than the number of rules (" +
+                          std::to_string(state.sheet->rules.size()) + ").");
+        }
+        // The object of the rule, if a script has one, keeps its declarations:
+        // a removed rule is the rule it was, out of the tree's reach.
+        const uint64_t id = state.sheet->rules[index].id;
+        auto found = realm.part<RuleObjectsPart>().objects.find(id);
+        if (found != realm.part<RuleObjectsPart>().objects.end()) {
+            auto* rule_state = state_of<RuleState>(found->second.object);
+            if (rule_state) {
+                rule_state->detached = state.sheet->rules[index].declarations;
+                rule_state->selector_text = state.sheet->rules[index].selector_text;
+            }
+        }
+        state.sheet->rules.erase(state.sheet->rules.begin() + static_cast<std::ptrdiff_t>(index));
+        touch_sheet(state.sheet);
+        return undefined();
+    });
+    I.alias("removeRule", "deleteRule");
+}
+
 JsValue make_style(Realm& realm, Element& element, bool computed) {
     auto state = std::make_shared<StyleState>();
     state->realm = &realm;
@@ -3731,6 +4427,27 @@ JsValue make_style(Realm& realm, Element& element, bool computed) {
 }
 
 } // namespace
+
+JsValue style_sheet(Realm& realm, Element& element) {
+    // `sheet` is null while the element is not in a document. The sheet object
+    // itself is kept: an element put back gets the same one, and a script that
+    // held it goes on reading it.
+    if (!element.is_connected()) return null();
+    return sheet_object(realm, element);
+}
+
+JsValue document_style_sheets(Realm& realm, Document& document) {
+    std::vector<JsValue> out;
+    for_each_descendant(document, [&](Node& node) {
+        if (!node.is_element()) return true;
+        Element& element = static_cast<Element&>(node);
+        if (!is_html_element(element, "style")) return true;
+        if (ascii_lower(element.get_attribute("media")).find("print") != std::string::npos) return true;
+        out.push_back(sheet_object(realm, element));
+        return true;
+    });
+    return JsValue::make_array(out);
+}
 
 JsValue inline_style(Realm& realm, Element& element) {
     return cached(wrap(realm, element), "style", [&]() { return make_style(realm, element, false); });
@@ -3750,6 +4467,16 @@ void set_inline_css_text(Realm& realm, Element& element, const std::string& text
 
 void register_style_interfaces() {
     register_interface({"CSSStyleDeclaration", nullptr, setup_style_declaration, nullptr, 0, nullptr});
+    register_interface({"CSSRule", nullptr, setup_rule, nullptr, 0, nullptr});
+    register_interface({"CSSStyleRule", "CSSRule", setup_style_rule, nullptr, 0, nullptr});
+    register_interface({"CSSRuleList", nullptr, setup_rule_list, nullptr, 0, nullptr});
+    register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, nullptr, 0, nullptr});
+    register_interface({"FontFaceSet", nullptr, setup_font_face_set, nullptr, 0, nullptr});
+}
+
+JsValue document_fonts(Realm& realm) {
+    auto state = std::make_shared<FontFaceSetState>();
+    return realm.make("FontFaceSet", state);
 }
 
 } // namespace dom

@@ -38,6 +38,10 @@ Sources, and why each is read
     The live claims. Skipped with a warning if `gh` is missing or fails, in
     which case the answer is a lower bound and the pull requests must be
     checked by hand.
+`main`, as GitHub has it
+    What was merged after the tree this is run in was made: such a number is
+    in no file of that tree and in no open pull request. Skipped with a
+    warning in the same cases.
 
 The answer is `max(every number found, the floor) + 1` for each of the two.
 """
@@ -235,7 +239,52 @@ def scan_open_prs() -> tuple[dict[str, tuple[list[int], list[int]]], str | None]
     return found, None
 
 
-def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int], set[int], dict[str, tuple[int, int]], str | None]:
+def scan_main(sha: str | None = None) -> tuple[str, tuple[set[int], set[int]], str | None]:
+    """`main` as GitHub has it: (what to call it, the numbers it has taken, a warning).
+
+    The tree this is run in was `main` when its session began, and stays
+    that. A number merged since then is in no file of it, and the pull
+    request that took it is no longer open: neither of the other two sources
+    has it. On 18 November, asked from the tree a session had begun with
+    (`--ref ee88b1c`), this answered Phase 74 and finding 80 ten minutes
+    after #90 had put both on `main`.
+
+    So `main` is asked of GitHub (not the clone's branch of that name, which
+    is as old as the tree) and fetched when the clone does not have the
+    commit. When that cannot be done the answer is a lower bound, as it is
+    without the pull requests, and the warning says so. `sha` is for the
+    self-test, which has no network.
+    """
+    if sha is None:
+        try:
+            asked = subprocess.run(["gh", "api", "repos/{owner}/{repo}/commits/main", "--jq", ".sha"],
+                                   cwd=ROOT, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            return "main on GitHub", (set(), set()), f"gh did not run ({e})"
+        sha = asked.stdout.strip()
+        if asked.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return "main on GitHub", (set(), set()), "gh could not say which commit main is"
+
+        def present() -> bool:
+            return subprocess.run(("git", "cat-file", "-e", f"{sha}^{{commit}}"),
+                                  cwd=ROOT, capture_output=True).returncode == 0
+        if not present():
+            subprocess.run(("git", "fetch", "--quiet", "origin", "main"), cwd=ROOT, capture_output=True)
+        if not present():
+            return "main on GitHub", (set(), set()), f"main is at {sha[:7]} on GitHub, and that commit could not be fetched"
+    name = f"main on GitHub ({sha[:7]})"
+    phases: set[int] = set()
+    findings: set[int] = set()
+    for file_phases, file_findings in scan_files(sha).values():
+        phases.update(file_phases)
+        findings.update(file_findings)
+    floor_phase, floor_finding, _floor_name = scan_state(sha)
+    phases.update(range(1, floor_phase + 1))
+    findings.update(range(1, floor_finding + 1))
+    return name, (phases, findings), None
+
+
+def collect_sets(ref: str | None = None, with_prs: bool = True, main: str | None = None) -> tuple[set[int], set[int], dict[str, tuple[int, int]], str | None]:
     """Every phase and finding number taken, and where the highest of each came from.
 
     Returns (phases, findings, per-source maxima, gh warning). `tools/ci/check_pr.py`
@@ -249,6 +298,10 @@ def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int
     is a claim whether or not it has landed — unless `with_prs` is false, which
     `tools/ci/check_pr.py` asks for when it wants what `main` alone has, so
     that it does not tell a pull request that its own number is taken.
+
+    With the pull requests, `main` as GitHub has it is counted too
+    (`scan_main` says why). `main` names a commit to read as that instead,
+    without asking GitHub.
     """
     sources: dict[str, tuple[int, int]] = {}
     phases: set[int] = set()
@@ -265,15 +318,25 @@ def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int
     phases.update(range(1, floor_phase + 1))
     findings.update(range(1, floor_finding + 1))
 
-    warning = None
+    warnings: list[str] = []
     if with_prs:
-        pr_sources, warning = scan_open_prs()
+        pr_sources, pr_warning = scan_open_prs()
+        if pr_warning:
+            warnings.append(f"open pull requests not counted: {pr_warning}")
         for name, (pr_phases, pr_findings) in pr_sources.items():
             phases.update(pr_phases)
             findings.update(pr_findings)
             sources[name] = (max(pr_phases, default=0), max(pr_findings, default=0))
+    if with_prs or main:
+        main_name, (main_phases, main_findings), main_warning = scan_main(main)
+        if main_warning:
+            warnings.append(f"main on GitHub not counted: {main_warning}")
+        else:
+            phases.update(main_phases)
+            findings.update(main_findings)
+            sources[main_name] = (max(main_phases, default=0), max(main_findings, default=0))
 
-    return phases, findings, sources, warning
+    return phases, findings, sources, "; ".join(warnings) or None
 
 
 # The two documents the write-ups were in until they were frozen. Nothing is
@@ -410,6 +473,20 @@ def ref_cases() -> list[tuple[bool, str, str]]:
     cases.append((set(no_prs[0]) <= set(with_prs[0]) and set(no_prs[1]) <= set(with_prs[1]),
                   "--no-prs only ever takes numbers away",
                   "the open pull requests added nothing, which is fine, or took some away"))
+
+    # The oldest commit this clone has stands for the tree a session began
+    # with, and HEAD for `main` as it is now.
+    roots = subprocess.run(("git", "rev-list", "--max-parents=0", "HEAD"),
+                           cwd=ROOT, capture_output=True, text=True).stdout.split()
+    if roots:
+        old = roots[-1]
+        alone = collect_sets(old, with_prs=False)
+        told = collect_sets(old, with_prs=False, main="HEAD")
+        cases.append((set(no_prs[0]) <= set(told[0]) and set(no_prs[1]) <= set(told[1]),
+                      "asked from an older tree, it still counts every number main has",
+                      f"from {old[:7]} alone the next pair is {max(alone[0], default=0) + 1} and "
+                      f"{max(alone[1], default=0) + 1}; with main (here HEAD) counted, "
+                      f"{max(told[0], default=0) + 1} and {max(told[1], default=0) + 1}"))
 
     written_phases, written_findings = written("HEAD")
     missing_p = sorted(written_phases - set(no_prs[0]))
@@ -567,8 +644,7 @@ def main() -> int:
                 print(f"  {name:<{width}}  phase {p:>4}   finding {f:>4}")
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
-        print("warning: the open pull requests were NOT checked, so the numbers "
-              "above are a lower bound.", file=sys.stderr)
+        print("warning: so the numbers above are a lower bound.", file=sys.stderr)
         return 1
     return 0
 

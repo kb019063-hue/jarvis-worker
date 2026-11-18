@@ -9,8 +9,9 @@
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
 is a thing to look up at a moment when the work feels finished. This looks
-them up. It reads; it changes nothing on GitHub, and in the clone it only
-fetches `main` when the clone is behind it.
+them up. It reads; it changes nothing on GitHub. In the clone it fetches
+`main` and the pull request it is asked about, and `merge N` may check a
+tree out into a scratch directory and remove it again; no branch moves.
 
 `claim N` fails (exit 1) when
   - #N does not begin with the `Task:`, `Files:` and `Phase P, finding F`
@@ -25,21 +26,44 @@ fetches `main` when the clone is behind it.
 `merge N` fails when
   - the title still begins with `WIP:`;
   - GitHub does not report the pull request as mergeable;
-  - `main` is not contained in its head commit: `main` has moved since it
-    was merged in, and whatever CI said, it said about another tree;
+  - `main` has moved since it was merged in, by more than documents and the
+    checks that read them: whatever CI said, it said about another tree;
   - CI has not passed on the head commit. A head commit that was pushed with
-    `[skip ci]` is accepted when CI passed on an ancestor that contains
-    `main` too and nothing but documents (`*.md`) changed since;
+    `[skip ci]` is accepted when CI passed on a commit before it and nothing
+    but documents changed since, and a pull request that changes documents
+    only needs no CI run of its own;
+  - the checks that read documents fail on what would be merged (see below);
   - its phase or finding is on `main` already;
   - the number of unit suites README.md states is not the number in
     tests/test_suite.cpp.
 
-Everything is asked of GitHub through `gh` (which has to be logged in), and
-nothing of the local clone: a sandbox's clone is shallow, and a shallow clone
-answers "is `main` in this commit" wrongly. The one exception is the numbers
-`main` has: `tools/next_ids.py` reads them out of git, from the commit that
-GitHub says `main` is at. Run it inside the repository, so that `gh` knows
-which one is meant.
+Documents, and the 28 minutes they used to cost
+------------------------------------------------
+Until 18 November every commit on `main` sent every finished pull request
+back for a whole CI run, a line of README.md like any other. On that morning
+`main` moved eight times in three hours and twenty minutes; #86 merged
+`main` six times after its work was done and #73 thirteen times in all, each
+time for 28 minutes of CI, and the agents that did not wait merged behind
+`main` instead (#76, #77, #84, #91; the last left `main` failing for 25
+minutes).
+
+Nothing in CI reads a document but four quick steps: `make check-numbers`,
+and the three of the job "Documentation shape" (`tools/ci/check_docs.py` and
+the self-tests of `tools/next_ids.py` and of this file). So when the only
+difference between the tree CI passed on and the tree that would be merged
+is in documents (`*.md` at the top of the tree, `docs/`, the `README.md` of
+a test directory) or, on the side of `main`, in those checks themselves
+(`tools/ci/`, `tools/next_ids.py`), every other step of CI would say again
+what it said, and those four are run here instead: on the head commit, or
+on the commit GitHub would make by merging, in a scratch worktree that is
+removed afterwards. They take seconds.
+
+Everything else is asked of GitHub through `gh` (which has to be logged in),
+and nothing of the local clone: a sandbox's clone is shallow, and a shallow
+clone answers "is `main` in this commit" wrongly. The other exception is
+the numbers `main` has: `tools/next_ids.py` reads them out of git, from the
+commit that GitHub says `main` is at. Run it inside the repository, so that
+`gh` knows which one is meant.
 
 The one exception is the set of numbers taken, which comes from
 `tools/next_ids.py --taken --ref main` — that tool reads `main` out of git
@@ -50,9 +74,11 @@ uses, so the two cannot drift apart.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -65,7 +91,21 @@ SHARED = {
     "README.md", "ARCHITECTURE.md", "AUDIT.md", "AGENTS.md", "ROADMAP.md",
     "tests/test_suite.cpp", "Makefile", ".github/workflows/ci.yml",
 }
-DOCUMENT = re.compile(r"\.md$")
+# What no step of CI reads but the four checks named below: the documents at
+# the top of the tree, everything under docs/, and the README.md of a test
+# directory. Not every `.md`: tools/conformance/run_wpt.py fails for any file
+# under tests/wpt/ that its manifest does not list, whatever it is called.
+DOCUMENT = re.compile(r"^(?:[^/]+\.md|docs/.+|tests/[^/]+/README\.md)$")
+# The documents, and the checks that read them.
+QUICK = re.compile(r"^(?:[^/]+\.md|docs/.+|tests/[^/]+/README\.md|tools/ci/.+|tools/next_ids\.py)$")
+# Those checks: the first step of CI's "Build & unit tests" and the three of
+# "Documentation shape". `{main}` is the commit of `main` to compare with.
+QUICK_CHECKS = (
+    ("check_numbers.py", ("tools/ci/check_numbers.py",)),
+    ("check_docs.py", ("tools/ci/check_docs.py", "--base", "{main}")),
+    ("next_ids.py --self-test", ("tools/next_ids.py", "--self-test")),
+    ("check_pr.py --self-test", ("tools/ci/check_pr.py", "--self-test")),
+)
 # "No phase, no finding:", "takes no phase or finding number", "is not a phase".
 # A pull request that claims no numbers has to say that it claims none, rather
 # than merely omit the line: silence is how a number gets forgotten, not how a
@@ -395,9 +435,177 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
     return "failed", bad
 
 
-def behind_main(sha: str) -> int:
-    """How many commits of `main` are not in `sha`."""
-    return gh_json("api", f"{REPO}/compare/main...{sha}")["behind_by"]
+def delta(base: str, tip: str) -> tuple[int, list[str] | None]:
+    """How many commits `tip` has that `base` has not, and the files they
+    change. None for the files when GitHub lists so many that some may be
+    missing: a caller that cannot see every file must not call them harmless.
+    """
+    comparison = gh_json("api", f"{REPO}/compare/{base}...{tip}")
+    files = comparison.get("files") or []
+    names = sorted({name for entry in files
+                    for name in (entry["filename"], entry.get("previous_filename")) if name})
+    return comparison["ahead_by"], (None if len(files) >= 300 else names)
+
+
+def all_of(kind: re.Pattern[str], files: list[str] | None) -> bool:
+    """Every file is of this kind. Not knowing the files is not knowing that."""
+    return files is not None and all(kind.search(name) for name in files)
+
+
+def some(files: list[str] | None, limit: int = 6) -> str:
+    if files is None:
+        return "more files than GitHub lists"
+    if not files:
+        return "nothing"
+    return ", ".join(files[:limit]) + (f" and {len(files) - limit} more" if len(files) > limit else "")
+
+
+class Evidence(NamedTuple):
+    """What `merge N` found out about CI and `main`, before it decides."""
+    head: str
+    behind: int                     # commits of main that are not in the head
+    main_files: list[str] | None    # the files those commits change
+    pr_files: list[str] | None      # the files the pull request changes
+    head_state: str                 # CI on the head: passed, failed, running, none
+    head_bad: list[str]             # ...and the jobs that are not green
+    ran_on: str | None              # the nearest commit of the branch with a CI run: the head, or one before it
+    ran_state: str                  # ...and what that run says
+    since: list[str] | None         # the files changed from that commit to the head
+
+
+def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
+    """(the lines to report, whether the quick checks decide the rest).
+
+    One rule, in three places: a step of CI says again what it said when
+    nothing it reads has changed. So a new run is needed only when both sides
+    of the merge changed something other than documents and the checks that
+    read them. The quick checks are then run on the tree that would be merged,
+    because that tree is not the one CI saw.
+    """
+    head = e.head[:7]
+    lines: list[tuple[bool, str]] = []
+    quick = False
+    documents_only = all_of(DOCUMENT, e.pr_files)
+    quick_only = all_of(QUICK, e.pr_files)
+
+    # main
+    if e.behind == 0:
+        lines.append((True, f"main is in the head commit {head}"))
+    elif all_of(QUICK, e.main_files):
+        quick = True
+        lines.append((True, f"main has moved by {e.behind} commit(s) that change only documents and the checks "
+                            f"that read them ({some(e.main_files)}): no new CI run for that"))
+    elif quick_only:
+        quick = True
+        lines.append((True, f"main has moved by {e.behind} commit(s), and this pull request changes only documents "
+                            f"and the checks that read them ({some(e.pr_files)}): no new CI run for that"))
+    else:
+        lines.append((False, f"main has moved: {e.behind} of its commits are not in {head}, and they change "
+                             f"{some([f for f in e.main_files if not QUICK.search(f)] if e.main_files is not None else None)}. "
+                             "Merge it, build, run the checks, push, and let CI pass on that commit"))
+
+    # CI
+    if e.head_state == "failed":
+        lines.append((False, f"CI on {head}: " + "; ".join(e.head_bad)))
+    elif documents_only:
+        quick = True
+        lines.append((True, f"it changes documents only ({some(e.pr_files)}): it needs no CI run of its own"))
+    elif e.head_state == "passed":
+        lines.append((True, f"CI passed on the head commit {head}"))
+    elif e.head_state == "running":
+        lines.append((False, f"CI on {head}: " + "; ".join(e.head_bad)))
+    elif e.ran_on is None:
+        lines.append((False, f"no CI run on {head} or on the 30 commits before it"))
+    elif e.ran_state != "passed":
+        lines.append((False, f"no CI run on {head}; the last one, on {e.ran_on[:7]}, {e.ran_state}"))
+    elif not all_of(DOCUMENT, e.since):
+        code = None if e.since is None else [f for f in e.since if not DOCUMENT.search(f)]
+        lines.append((False, f"no CI run on {head}; since the last one, on {e.ran_on[:7]}, these changed: {some(code)}"))
+    else:
+        quick = True
+        lines.append((True, f"CI passed on {e.ran_on[:7]}, and since then only documents changed "
+                            f"({some(e.since)}). Say so in the pull request"))
+
+    return lines, quick and all(ok for ok, _text in lines)
+
+
+def fetched(ref: str) -> str | None:
+    """A ref of GitHub's, fetched into the clone: its commit, or None."""
+    done = subprocess.run(("git", "fetch", "--quiet", "origin", ref), cwd=ROOT, capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    found = subprocess.run(("git", "rev-parse", "FETCH_HEAD"), cwd=ROOT, capture_output=True, text=True)
+    return found.stdout.strip() or None
+
+
+def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+    identity = {"GIT_AUTHOR_NAME": "check_pr", "GIT_AUTHOR_EMAIL": "check_pr@localhost",
+                "GIT_COMMITTER_NAME": "check_pr", "GIT_COMMITTER_EMAIL": "check_pr@localhost"}
+    return subprocess.run(("git", *arguments), cwd=ROOT, capture_output=True, text=True,
+                          env={**os.environ, **identity})
+
+
+def tree_to_merge(number: int, head: str, main_sha: str, behind: int) -> tuple[str | None, str, str]:
+    """(a commit with the tree `gh pr merge` would put on main, what to call it, why there is none).
+
+    When `main` is in the head that is the head. Otherwise the two are merged
+    here, with `git merge-tree`, which is what GitHub merges with; nothing is
+    checked out and no branch moves. GitHub's own `refs/pull/N/merge` is not
+    used: twenty minutes after `main` had moved it was still the merge with
+    the `main` of before.
+    """
+    if fetched(f"refs/pull/{number}/head") != head:
+        return None, "", f"could not fetch the head commit {head[:7]} to run the checks on"
+    if behind == 0:
+        return head, f"the head commit {head[:7]}", ""
+    for _ in range(4):      # a sandbox's clone is shallow: go back until the two have an ancestor in common
+        if git("merge-base", main_sha, head).returncode == 0:
+            break
+        if git("rev-parse", "--is-shallow-repository").stdout.strip() != "true":
+            break
+        git("fetch", "--quiet", "--deepen=500", "origin", "main", f"refs/pull/{number}/head")
+    merged = git("merge-tree", "--write-tree", main_sha, head)
+    if merged.returncode == 1:
+        return None, "", "it does not merge with main without conflicts"
+    if merged.returncode != 0 or not merged.stdout.split():
+        return None, "", ("git could not merge it with main here to run the checks on "
+                          "(it takes git 2.38 or later, and a clone that has their common ancestor): "
+                          "merge main into the branch instead")
+    made = git("commit-tree", merged.stdout.split()[0], "-p", main_sha, "-p", head,
+               "-m", f"check_pr: what merging #{number} would put on main")
+    if made.returncode != 0 or not made.stdout.strip():
+        return None, "", "git could not record the merge with main to run the checks on"
+    return made.stdout.strip(), f"the merge with main ({main_sha[:7]})", ""
+
+
+def quick_checks(tree: str, main_sha: str) -> list[str]:
+    """The four steps of CI that read documents, run on a commit: what failed.
+
+    In a scratch worktree, with that tree's own copies of the scripts, which
+    is what CI will run once it is merged. The worktree is removed afterwards.
+    """
+    failures: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="check_pr-") as scratch:
+        where = Path(scratch) / "tree"
+        made = subprocess.run(("git", "worktree", "add", "--detach", "--quiet", str(where), tree),
+                              cwd=ROOT, capture_output=True, text=True)
+        if made.returncode != 0:
+            return [f"could not check out {tree[:7]}: {(made.stderr.strip().splitlines() or ['git worktree add failed'])[-1]}"]
+        try:
+            for name, arguments in QUICK_CHECKS:
+                if not (where / arguments[0]).is_file():
+                    failures.append(f"{arguments[0]} is not in that tree")
+                    continue
+                run = subprocess.run((sys.executable, *(argument.format(main=main_sha) for argument in arguments)),
+                                     cwd=where, capture_output=True, text=True)
+                if run.returncode != 0:
+                    output = (run.stdout + run.stderr).strip().splitlines() or ["no output"]
+                    telling = [line.strip() for line in output if "FAIL" in line] or [output[-1].strip()]
+                    failures.append(f"{name} fails: {telling[0][:200]}")
+        finally:
+            subprocess.run(("git", "worktree", "remove", "--force", str(where)), cwd=ROOT, capture_output=True)
+            subprocess.run(("git", "worktree", "prune"), cwd=ROOT, capture_output=True)
+    return failures
 
 
 def check_merge(number: int) -> int:
@@ -417,23 +625,15 @@ def check_merge(number: int) -> int:
     else:
         report.no(f"GitHub reports {pr['mergeable']} (UNKNOWN right after a push: ask again in a few seconds)")
 
-    behind = behind_main(head)
-    if behind == 0:
-        report.ok(f"main is in the head commit {head[:7]}")
-    else:
-        report.no(f"main has moved: {behind} of its commits are not in {head[:7]}. "
-                  "Merge it, build, run the checks, push, and let CI pass on that commit")
-
-    state, bad = check_runs(head)
-    if state == "passed":
-        report.ok(f"CI passed on the head commit {head[:7]}")
-    elif state in ("failed", "running"):
-        report.no(f"CI on {head[:7]}: " + "; ".join(bad))
-    else:
+    main_sha = main_commit()
+    behind, main_files = delta(head, main_sha)
+    _ahead, pr_files = delta(main_sha, head)
+    head_state, head_bad = check_runs(head)
+    ran_on, ran_state, since = (None, "none", None) if head_state == "none" else (head, head_state, [])
+    if head_state == "none":
         # No run on the head: it was pushed with [skip ci], or the pull request
         # conflicted with main when it was pushed. Walk back along the branch
         # to the last commit that has one.
-        found = None
         sha = head
         for _ in range(30):
             parents = commit(sha)["parents"]
@@ -442,23 +642,23 @@ def check_merge(number: int) -> int:
             sha = parents[0]["sha"]
             ancestor_state, _bad = check_runs(sha)
             if ancestor_state != "none":
-                found = (sha, ancestor_state)
+                ran_on, ran_state, since = sha, ancestor_state, delta(sha, head)[1]
                 break
-        if found is None:
-            report.no(f"no CI run on {head[:7]} or on the 30 commits before it")
+    lines, quick = ci_verdict(Evidence(head, behind, main_files, pr_files, head_state, head_bad,
+                                       ran_on, ran_state, since))
+    for ok, text in lines:
+        (report.ok if ok else report.no)(text)
+    if quick:
+        tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
+        if tree is None:
+            report.no(why_not)
         else:
-            sha, ancestor_state = found
-            changed = [f["filename"] for f in gh_json("api", f"{REPO}/compare/{sha}...{head}").get("files", [])]
-            code = [f for f in changed if not DOCUMENT.search(f)]
-            if ancestor_state != "passed":
-                report.no(f"no CI run on {head[:7]}; the last one, on {sha[:7]}, {ancestor_state}")
-            elif behind_main(sha) != 0:
-                report.no(f"no CI run on {head[:7]}; the last one, on {sha[:7]}, was on a tree without today's main")
-            elif code:
-                report.no(f"no CI run on {head[:7]}; since the last one, on {sha[:7]}, these changed: {', '.join(code[:8])}")
-            else:
-                report.ok(f"CI passed on {sha[:7]}, and since then only documents changed "
-                          f"({', '.join(changed) or 'nothing'}). Say so in the pull request")
+            failures = quick_checks(tree, main_sha)
+            for failure in failures:
+                report.no(f"on {called}: {failure}")
+            if not failures:
+                report.ok(f"on {called}, the checks that read documents pass: "
+                          + ", ".join(name for name, _arguments in QUICK_CHECKS))
 
     claim = claim_of(pr)
     main = on_main()
@@ -550,6 +750,68 @@ def self_test() -> int:
          written, [(True, "Phase 6 is on main already"), (True, "finding 8 is on main already")]),
         ("a number above the floors that has no write-up is free", free, []),
     ]
+    # When a merge needs no new CI run: what is a document, what is a check
+    # that reads documents, and what the two sides of a merge may have changed.
+    def kinds(name: str) -> tuple[bool, bool]:
+        return bool(DOCUMENT.search(name)), bool(QUICK.search(name))
+
+    def verdict(**found) -> tuple[list[bool], bool]:
+        facts = dict(head="a" * 40, behind=0, main_files=[], pr_files=["src/a.cpp", "README.md"],
+                     head_state="passed", head_bad=[], ran_on="a" * 40, ran_state="passed", since=[])
+        facts.update(found)
+        lines, quick = ci_verdict(Evidence(**facts))
+        return [ok for ok, _text in lines], quick
+
+    moved = dict(behind=2)
+    no_run = dict(head_state="none", ran_on="b" * 40)
+    cases += [
+        ("documents: at the top of the tree, under docs/, the README.md of a test directory",
+         [kinds(n) for n in ("README.md", "AGENTS.md", "docs/phases/63-a.md", "docs/state.json", "tests/wpt/README.md")],
+         [(True, True)] * 5),
+        ("the checks that read documents are quick and are not documents",
+         [kinds(n) for n in ("tools/ci/check_docs.py", "tools/ci/check_numbers.py", "tools/next_ids.py")],
+         [(False, True)] * 3),
+        ("neither: a file run_wpt.py would not find in its manifest, another tool, the build, the workflow, a test",
+         [kinds(n) for n in ("tests/wpt/dom/nodes/notes.md", "src/notes.md", "tools/conformance/run_wpt.py",
+                             "Makefile", ".github/workflows/ci.yml", "tests/test_suite.cpp")],
+         [(False, False)] * 6),
+        ("CI passed on a head that has main in it: ready, and nothing more to run",
+         verdict(), ([True, True], False)),
+        ("main moved by a line of README.md: no new CI run, the quick checks decide",
+         verdict(**moved, main_files=["README.md"]), ([True, True], True)),
+        ("main moved by documents and a check that reads them: the same",
+         verdict(**moved, main_files=["README.md", "ROADMAP.md", "tools/ci/check_numbers.py"]), ([True, True], True)),
+        ("main moved by those and by the Makefile and the workflow (#92, which #91 was merged without): a new run",
+         verdict(**moved, main_files=[".github/workflows/ci.yml", "Makefile", "README.md", "tools/ci/check_numbers.py"]),
+         ([False, True], False)),
+        ("main moved by engine code: a new run",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"]), ([False, True], False)),
+        ("main moved by more files than GitHub lists: a new run",
+         verdict(**moved, main_files=None), ([False, True], False)),
+        ("a pull request of documents only needs no CI run of its own, wherever main is (#93, #95)",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], pr_files=["README.md"], head_state="none", ran_on=None),
+         ([True, True], True)),
+        ("...nor has it to wait for the one that is running",
+         verdict(pr_files=["README.md"], head_state="running", head_bad=["Build: in_progress"]), ([True, True], True)),
+        ("...but a run that failed on its head stops it",
+         verdict(pr_files=["README.md"], head_state="failed", head_bad=["Documentation shape: failure"]),
+         ([True, False], False)),
+        ("a pull request that changes a check needs CI on its head once, and no second run when engine code lands",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], pr_files=["AGENTS.md", "tools/ci/check_pr.py"]),
+         ([True, True], True)),
+        ("...the once is not waived",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], pr_files=["AGENTS.md", "tools/ci/check_pr.py"],
+                 head_state="none", ran_on=None), ([True, False], False)),
+        ("a head pushed with [skip ci] after a run that passed, documents changed since: the quick checks decide",
+         verdict(**no_run, since=["AGENTS.md"]), ([True, True], True)),
+        ("...a check changed since: a new run",
+         verdict(**no_run, since=["AGENTS.md", "tools/ci/check_pr.py"]), ([True, False], False)),
+        ("...the run before it failed: not ready",
+         verdict(**no_run, ran_state="failed", since=["AGENTS.md"]), ([True, False], False)),
+        ("CI still running on an engine change: not ready",
+         verdict(head_state="running", head_bad=["Build: in_progress"]), ([True, False], False)),
+    ]
+
     failed = 0
     for name, got, wanted in cases:
         ok = got == wanted

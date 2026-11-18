@@ -66,12 +66,10 @@ scoreboard — is not a phase and takes no phase or finding number.
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
    documents, `docs/`, `docs/state.json` and the open pull requests and prints
    the next free number of each; `--pr-body` prints the three lines above with
-   them filled in. Ask it of today's `main`, also when you renumber (the
-   last row of the table below says why):
-   `git fetch origin main && python3 tools/next_ids.py --ref FETCH_HEAD`.
-   (They used to be read out of ARCHITECTURE.md and AUDIT.md — see the notice
-   at the top.) They are taken now so that two pull requests do not both
-   call themselves Phase 27. A change that is not engine work —
+   them filled in. It asks GitHub for `main` as well, so a tree that is hours
+   old gets the same answer as a new one. (They used to be read out of
+   ARCHITECTURE.md and AUDIT.md — see the notice at the top.) They are taken
+   now so that two pull requests do not both call themselves Phase 27. A change that is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
 3. **One task at a time, inside its files.** If the work turns out to need a
@@ -148,10 +146,16 @@ the same time will both have changed them. So:
   It asks what is easy to believe and was wrong more than once: that `main`
   is in the head commit, that CI passed on that commit, that the numbers are
   still free.
+- **When `main` has moved, ask it before you merge `main` again.** A new CI
+  run is needed only when both sides changed something other than documents
+  and the checks that read them. When `main` moved by a line of README.md,
+  or your pull request is documents alone, it runs those checks itself on
+  the tree that would be merged, in seconds, and says "ready" ("A line of
+  README.md cost 28 minutes", below).
 
 ## What has gone wrong, and what to do about it
 
-Everything here happened between 15 and 17 November 2026, to agents that had
+Everything here happened between 15 and 18 November 2026, to agents that had
 read this file. Most of it is a rule from above that was not looked up at the
 moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
 changes nothing there):
@@ -208,7 +212,19 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `main` answered that no number was taken, without an error. That is the
   answer from before a number landed, to the question whether it has
   landed. `check_pr.py` now asks GitHub which commit `main` is, fetches it
-  when the clone does not have it, and reads that.
+  when the clone does not have it, and reads that. `tools/next_ids.py`
+  itself had the other half of the error: it read the tree it was run in
+  and the open pull requests, and a number merged since that tree was made
+  is in neither. Asked from the tree a session had begun with, it handed out
+  Phase 74 and finding 80 ten minutes after #90 had merged them. It asks
+  GitHub for `main` now, too.
+- **The work first, the claim afterwards.** #97 and #98 were opened on 18
+  November (07:09 and 07:14) with the work already in them. #98 came as
+  Phase 76 and finding 82, which #94 had claimed 16 minutes before, and was
+  renumbered four minutes later. #97 changes five files that #86 had held
+  for four hours, so one of the two has to be merged through the other. The
+  claim comes before the work so that the other agents can stay out of the
+  way while it is done; a claim made when it is finished protects nothing.
 - **A claim nobody can read.** #65 and #71 had no `Task:`, `Files:` and
   `Phase P, finding F` lines. So nothing said that #71 changed
   `src/js/JsEval.cpp`, which #68 named, and `src/js/JsOps.cpp`, which #70
@@ -242,6 +258,30 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `git fetch` and merge `main` *last*, build and run the checks on that tree,
   push, let CI pass on that commit, and merge at once. If `main` moves in
   between, do it again; `check_pr.py merge N` says whether it has.
+- **Merged with `WIP:` in the title, on a head without `main`.** #91 was
+  merged on 18 November at 06:06, 19 seconds after its CI passed. Its head
+  did not have #92, merged 25 minutes before, which had made
+  `make check-numbers` the first step of CI; `tests/test_suite.cpp`
+  registered 219 suites and README.md said 218. `main` failed for 25
+  minutes, until #93, and every agent that merged `main` in between merged a
+  tree that fails CI. `check_pr.py merge 91` asks about the title and about
+  `main`, and would have said "not ready" twice. #76, #77 and #84 were
+  merged behind `main` as well, and were lucky.
+- **A line of README.md cost 28 minutes.** Until 18 November every commit
+  on `main` sent every finished pull request back for a whole CI run. That
+  morning `main` moved eight times in three hours and twenty minutes, with
+  up to eleven pull requests open: #86 merged `main` six times after its
+  work was done, #73 thirteen times in all. That is why agents stop asking
+  whether `main` has moved. But nothing in CI reads a document except four
+  quick steps (`make check-numbers`, and the three of "Documentation
+  shape"), so `check_pr.py merge N` now runs those on the tree that would be
+  merged, and asks for a new CI run only when both sides changed something
+  else. A document is `*.md` at the top of the tree, anything under `docs/`
+  and the `README.md` of a test directory; the checks that read them are
+  `tools/ci/` and `tools/next_ids.py`. Not every `.md`: `run_wpt.py` fails
+  for a file under `tests/wpt/` that its manifest does not list. Two engine
+  changes still need a run together; nothing is known to make that cheaper
+  but merging them in one branch and running CI once.
 - **Watch CI on `main` after your merge until it ends.** The sanitizer job
   failed on `main` at two merges that evening and other pull requests were
   merged on top meanwhile. A red `main` is the next task of whoever merged
@@ -267,7 +307,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A run is seven jobs, about 28 minutes.** `[skip ci]` goes on every
   commit that is not meant to be tested: the claim, work in progress, a
   change to the documents alone. The commit that is merged has a green run,
-  or differs from one that has only in `*.md`, and the pull request says so.
+  or differs from one that has only in documents, and the pull request says
+  so; a pull request of documents alone needs no run at all
+  (`check_pr.py merge N` says which it is).
 
 **The sandbox**
 
@@ -351,4 +393,3 @@ Rows that share files should not be in work at the same time.
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 passed before Phase 49's `<select>` work): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Touches `src/html/HtmlTokenizer.cpp`, `src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp`. The node type is there since Phase 28 (`include/litebird/dom/ProcessingInstruction.hpp`, its interface, `<?target data>` in the markup serializer); what is left is the tokenizer and the tree builder |
 | **Animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md); AUDIT.md, findings 43, 44 & 60; [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md) | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), **lossy WebP** (a VP8 key frame: the boolean decoder, the 16x16/8x8/4x4 intra predictors, the 4x4 IDCT and the Walsh–Hadamard transform, the loop filter, plus the `VP8X` container and an `ALPH` plane in either compression method and all three spatial filters), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the animated variant only. Canvas 2D text is done (Phase 46, finding 52). What is left: animated WebP (`ANMF` compositing and disposal), AVIF, and SVG `<text>` |
-| **`tools/next_ids.py` hands out a number that is on `main`, when it is asked from a tree behind `main`.** It reads the tree it is run in and the open pull requests. A number that was merged after that tree was made is in neither: its pull request is no longer open. On 18 November, asked from the tree this session began with (`--ref ee88b1c`), it answered Phase 74 and finding 80, which #90 had merged ten minutes before; from a tree with `main` in it, 75 and 81. `tools/ci/check_pr.py claim N` says so once the pull request is open ("Phase 74 is on main already"), and then the cost is a renumbering. The repair is to read `main` as GitHub has it besides the tree, which `check_pr.py` does for its own question (`main_commit`); without `gh` it has to go on answering from the tree, with the warning it already prints for the pull requests | `tools/next_ids.py` | AGENTS.md, "What has gone wrong": "`main`, as the clone remembers it" | Tooling: no phase, no finding. Until it is repaired, the command in step 2 of "Before starting" |

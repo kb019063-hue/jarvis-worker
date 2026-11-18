@@ -84,7 +84,7 @@ closes *before* its second glyph goes down. That probe became the third test.
 
 ## Verified
 
-`make test` — **244 suites**, three of them new. The oracle is the file: the
+`make test` — **245 suites**, three of them new. The oracle is the file: the
 test carries its own `cmap`-format-4 and `kern`-format-0 reader, ~120 lines
 written out rather than borrowed from the engine, because a test that asks the
 engine what the font says and then asks the engine whether it listened is not a
@@ -107,13 +107,34 @@ assert that the table the file has is the table the engine found.
 
 ```
 [kern] /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf: 2727 pairs in the `kern` table, 2048 units per em
-[kern] 11 of 11 pairs named by the file, most closed by -16.992 px, most opened by 2.783 px, at 100 px
-[kern] AV: -131 units, engine -6.396 px at 100 px
+[kern] 80 pairs to check, 69 of them taken from the file
+[kern] 80 named by the file (8 of them positive), most closed by -16.992 px, most opened by 5.566 px, at 100 px
 [kern] tests/wpt/fonts/Ahem.ttf: 0 pairs
 [kern] Ahem 'AV' at 100 px = 200.000
-[kern] default 'AV' at 100 px = 130.420, advances sum to 136.816
+[kern] 'sans-serif' 'AV' at 100 px = 130.420, advances sum to 136.816
 [kern] 'AV' at 200 px: kern -12.79, hand-kerned [51..282], engine [51..282], unkerned [51..295]
 ```
+
+Pair selection is the file's, not this host's: the test walks the table's
+records, keeps the ones whose two glyph ids both map to a printable ASCII
+character, and adds up to a bound of them to a handful of the usual suspects. A
+host whose font has different opinions is checked against its own opinions, and
+"kerning opens pairs too" is asserted only where the file names a positive
+value.
+
+## The tests named the wrong face
+
+The first version of these tests read `face_path("sans-serif")` for the oracle
+and then asked the *default* family for the numbers. On the development host
+those are the same file — `sans-serif` resolves to the primary face — so the
+comparison held. On the CI machine it did not, and `make test` went red on a
+tree that was green here, with the job's log unreachable from where the work
+was being done.
+
+Every call names the family now, so "the file says X" and "the engine says X"
+are about one face by construction. A test that reads one face and questions
+another is not measuring the engine; it is measuring how two lookups happened
+to be aliased on one machine.
 
 ## Not done
 

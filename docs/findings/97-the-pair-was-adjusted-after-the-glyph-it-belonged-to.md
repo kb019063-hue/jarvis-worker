@@ -60,6 +60,18 @@ directly, and asserts three things that cannot all hold if the feature is off:
 A test whose oracle is the engine's own output tests that the engine agrees with
 itself. A test whose oracle is the file tests that it agrees with the font.
 
+## The third half: two faces, one test
+
+The rewritten tests then read `face_path("sans-serif")` — the file the oracle
+parses — and asked the *default* family for the numbers. On the machine they
+were written on, `sans-serif` resolves to the primary face, so both were the
+same file and the comparison held. On another machine it did not, and CI went
+red on a tree that was green here.
+
+The fix is one habit: name the family in every call, so the file the oracle
+reads is the face the engine answers with. Otherwise the test is not measuring
+the engine; it is measuring whether two lookups happen to be aliased.
+
 ## The tell
 
 `kerning_px('A','V', 100) == -6.396` and the painter drawing the pair 6.4 px too

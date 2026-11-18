@@ -20303,7 +20303,7 @@ int main() {
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
 
-    // Phase 91: an iterator is a kind with a prototype a script can reach.
+    // Phase 92: an iterator is a kind with a prototype a script can reach.
     RUN_TEST(js_iterators_are_kinds_with_prototypes);
 
     // Phase 75: Map/Set constructor dispatch through set/add.

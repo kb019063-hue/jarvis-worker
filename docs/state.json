@@ -8,8 +8,8 @@
     "this file automatically: bump a floor by hand, in the commit that retires",
     "the numbers below it, when no document or pull request mentions it any more."
   ],
-  "phase_floor": 91,
-  "finding_floor": 97,
+  "phase_floor": 92,
+  "finding_floor": 98,
   "history": [
     {
       "date": "2026-11-18",

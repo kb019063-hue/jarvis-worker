@@ -1,6 +1,6 @@
-# Finding 97 — An iterator was an object with a `next`, and its kind was lost
+# Finding 98 — An iterator was an object with a `next`, and its kind was lost
 
-**Resolved by** `docs/phases/91-an-iterator-is-a-kind.md`.
+**Resolved by** `docs/phases/92-an-iterator-is-a-kind.md`.
 
 ## What was wrong
 

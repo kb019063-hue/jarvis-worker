@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <map>
 #include <unordered_set>
 
@@ -2192,37 +2194,73 @@ void apply_declarations(Block& block, const std::string& text, bool inline_mode 
 // The computed style
 // ---------------------------------------------------------------------------
 
-// One style rule of a sheet. A script's CSSOM reads and writes the same
-// object the cascade reads: `rule.style` is a CSSStyleDeclaration over
-// `declarations`, and `selectorText` reparsed into `selector`.
+// One rule of a sheet: a style rule, or a `CSSMediaRule` and the rules its
+// block holds. A script's CSSOM reads and writes the same object the cascade
+// reads: `rule.style` is a CSSStyleDeclaration over `declarations`, and
+// `selectorText` reparsed into `selector`.
+struct SheetRule;
+using SheetRulePtr = std::shared_ptr<SheetRule>;
+
 struct SheetRule {
+    enum class Kind { Style, Media };
+
+    Kind kind{Kind::Style};
+    /// A style rule: what `selectorText` reads, and the rule the cascade
+    /// matches.
     SelectorList selector;
     std::string selector_text;
+    /// A style rule: its declaration block.
     std::vector<RawDeclaration> declarations;
+    /// A `CSSMediaRule`: its query, as written, and the rules inside it.
+    /// The cascade applies those only when the query matches the window.
+    std::string media_text;
+    std::vector<SheetRulePtr> children;
     /// The rule's identity: `cssRules[0] === cssRules.item(0)` holds because
     /// the object is the one made for this number, wherever the rule now is
-    /// in the list.
+    /// in the list. Children are numbered from the sheet's one counter, so an
+    /// id names a rule anywhere in the sheet.
     uint64_t id{0};
     /// True when the rule came from the element's text. A rule a script
     /// inserted stays when that text changes; this one goes with it.
     bool from_text{false};
+
+    /// The answer `media_text` was last given, and the window it was given
+    /// for: the cascade asks about every element, and the text is parsed once
+    /// per window rather than once per element. -1 is "not asked yet".
+    mutable int cached_match{-1};
+    mutable float cached_width{0.0f};
+    mutable float cached_height{0.0f};
+
+    bool is_media() const { return kind == Kind::Media; }
+
+    void forget_media_answer() {
+        cached_match = -1;
+        cached_width = 0.0f;
+        cached_height = 0.0f;
+    }
 };
 
 struct ParsedSheet {
-    std::vector<SheetRule> rules;
+    std::vector<SheetRulePtr> rules;
     /// Bumped by every CSSOM write, so a style object knows to read again.
     uint64_t generation{0};
     /// The number the next rule of this sheet gets.
     uint64_t next_rule_id{1};
 
-    /// Gives every rule an id, after the text was parsed.
+    /// Gives every rule an id, after the text was parsed — the rules of an
+    /// `@media` block too, so that `media.cssRules[0]` has one of its own.
     void number_rules() {
-        for (auto& rule : rules) {
-            if (rule.id == 0) {
-                rule.id = next_rule_id++;
-                rule.from_text = true;
+        const std::function<void(std::vector<SheetRulePtr>&)> number = [&](std::vector<SheetRulePtr>& list) {
+            for (auto& rule : list) {
+                if (!rule) continue;
+                if (rule->id == 0) {
+                    rule->id = next_rule_id++;
+                    rule->from_text = true;
+                }
+                number(rule->children);
             }
-        }
+        };
+        number(rules);
     }
 };
 
@@ -2242,7 +2280,7 @@ void touch_sheet(const std::shared_ptr<ParsedSheet>& sheet) {
     ++s_style_generation;
 }
 
-void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRule>& out, bool nested) {
+void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRulePtr>& out, bool nested) {
     while (at < css.size()) {
         // The prelude: up to "{", ";" or the "}" that ends the block we are in.
         std::string prelude;
@@ -2277,9 +2315,20 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRule>
         prelude = trim(prelude);
         const std::string lower = ascii_lower(prelude);
         if (!prelude.empty() && prelude[0] == '@') {
-            const bool applies = (lower.compare(0, 6, "@media") == 0 && lower.find("print") == std::string::npos) ||
-                                 lower.compare(0, 9, "@supports") == 0 || lower.compare(0, 6, "@layer") == 0;
-            if (applies) {
+            const bool is_media = lower.compare(0, 6, "@media") == 0;
+            const bool applies = lower.compare(0, 9, "@supports") == 0 || lower.compare(0, 6, "@layer") == 0;
+            if (is_media) {
+                // A `@media` block is a rule of the sheet now, whether its
+                // query matches or not: `cssRules` lists it, and the cascade
+                // asks the query. `@supports` and `@layer` hold rules
+                // unconditionally as far as this sheet is concerned, so their
+                // rules are the sheet's own, as they always were.
+                auto rule = std::make_shared<SheetRule>();
+                rule->kind = SheetRule::Kind::Media;
+                rule->media_text = trim(prelude.substr(6));
+                parse_rules(css, at, rule->children, true);
+                out.push_back(std::move(rule));
+            } else if (applies) {
                 parse_rules(css, at, out, true);
             } else {
                 // Skip the block of a rule that is not understood.
@@ -2300,10 +2349,10 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRule>
             else if (c == '}' && --depth == 0) break;
             body += c;
         }
-        SheetRule rule;
-        if (!SelectorList::parse(prelude, rule.selector)) continue;
-        rule.selector_text = prelude;
-        rule.declarations = parse_declarations(body);
+        auto rule = std::make_shared<SheetRule>();
+        if (!SelectorList::parse(prelude, rule->selector)) continue;
+        rule->selector_text = prelude;
+        rule->declarations = parse_declarations(body);
         out.push_back(std::move(rule));
     }
 }
@@ -2340,15 +2389,33 @@ struct SheetState : JsExotic {
 
 struct RuleState : JsExotic {
     std::shared_ptr<ParsedSheet> sheet;
-    uint64_t id{0};
-    std::string selector_text;
-    /// The rule once it has been removed from its sheet: it keeps its own
-    /// declarations, which no tree reads any more.
-    std::vector<RawDeclaration> detached;
+    /// The rule itself. A rule that leaves its sheet keeps it: it is the rule
+    /// it was, and what it held is still readable, with the tree no longer
+    /// applying it.
+    SheetRulePtr rule;
+    /// The `@media` rule it is inside, for `parentRule`. Null at the top of
+    /// the sheet.
+    SheetRulePtr parent;
 };
 
+/// A list of rules: the sheet's own when `parent` is null, and otherwise the
+/// `cssRules` of a `@media` rule — the sheet's when it is still in the sheet,
+/// and the rule's own after it has left it.
 struct RuleListState : JsExotic {
     std::shared_ptr<ParsedSheet> sheet;
+    SheetRulePtr parent;
+
+    bool get(JsObject*, const std::string& name, JsValue& out) override;
+    bool has(JsObject*, const std::string& name) override;
+    void keys(JsObject*, std::vector<std::string>& out) override;
+};
+
+/// `media.mediaText`, `media.length` and `media.item(i)` over a `@media`
+/// rule's query: the alternatives are its comma-separated parts, each
+/// trimmed, as a browser writes them back.
+struct MediaListState : JsExotic {
+    std::shared_ptr<ParsedSheet> sheet;
+    SheetRulePtr rule;
 
     bool get(JsObject*, const std::string& name, JsValue& out) override;
     bool has(JsObject*, const std::string& name) override;
@@ -2375,27 +2442,20 @@ std::string serialize_selector_list(const SelectorList& list);
 std::string serialize_declarations(const std::vector<RawDeclaration>& declarations);
 std::string rule_block_text(Realm& realm, RuleState& state);
 
-/// Parses `text` as one rule for `sheet.insertRule`: a selector and a block,
-/// or a whole style rule. False when it is not one.
-bool parse_inserted_rule(const std::string& text, SheetRule& out);
+/// Parses `text` as one rule for `insertRule`: a style rule, or an `@media`
+/// rule and the rules in its block. False when it is not one.
+bool parse_inserted_rule(const std::string& text, SheetRulePtr& out);
 
-/// Where the rule of `state` is in its sheet now, or the end of the list when
-/// it has left it.
-std::size_t rule_index(const RuleState& state) {
-    if (!state.sheet) return SIZE_MAX;
-    const auto& rules = state.sheet->rules;
-    for (std::size_t i = 0; i < rules.size(); ++i) {
-        if (rules[i].id == state.id) return i;
-    }
-    return SIZE_MAX;
-}
+/// Gives every rule of `list` its own number from the sheet's counter, and
+/// leaves the ones that already have one alone.
+void number_inserted_rules(ParsedSheet& sheet, std::vector<SheetRulePtr>& list);
 
-/// The declarations a rule currently has: its own, or the ones it kept when
-/// it left its sheet.
+std::string rule_css_text(Realm& realm, RuleState& state);
+
+/// The declarations a rule currently has, or null for a rule that has none.
 std::vector<RawDeclaration>* rule_declarations(RuleState& state) {
-    const std::size_t index = rule_index(state);
-    if (index != SIZE_MAX) return &state.sheet->rules[index].declarations;
-    return &state.detached;
+    if (!state.rule) return nullptr;
+    return &state.rule->declarations;
 }
 
 const std::vector<RawDeclaration>* rule_declarations(const RuleState& state) {
@@ -2403,16 +2463,16 @@ const std::vector<RawDeclaration>* rule_declarations(const RuleState& state) {
 }
 
 std::string rule_selector_text(const RuleState& state) {
-    const std::size_t index = rule_index(state);
-    if (index != SIZE_MAX) return state.sheet->rules[index].selector_text;
-    return state.selector_text;
+    if (!state.rule) return std::string();
+    return state.rule->selector_text;
 }
 
 JsValue make_sheet(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::shared_ptr<Element> owner,
                    bool own_sheet, bool applied, std::string href);
 JsValue sheet_object(Realm& realm, Element& element);
-JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet);
-JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::size_t index);
+JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr parent = nullptr);
+JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr parent, const SheetRulePtr& rule);
+JsValue make_media_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr rule);
 JsValue make_rule_style(Realm& realm, std::shared_ptr<RuleState> rule);
 
 // One sheet object of a realm, made for a <style> element. `version` is the
@@ -2496,12 +2556,12 @@ std::shared_ptr<ParsedSheet> sheet_of(Realm& realm, Element& element) {
     // `insertRule` is a rule of the sheet like any other.
     const std::string text = element.text_content();
     if (text != entry.source) {
-        std::vector<SheetRule> parsed;
+        std::vector<SheetRulePtr> parsed;
         std::size_t at = 0;
         parse_rules(text, at, parsed, false);
-        std::vector<SheetRule> kept;
+        std::vector<SheetRulePtr> kept;
         for (auto& rule : entry.sheet->rules) {
-            if (rule.from_text) continue; // it came from the text that has gone
+            if (!rule || rule->from_text) continue; // it came from the text that has gone
             kept.push_back(std::move(rule));
         }
         entry.sheet->rules = std::move(parsed);
@@ -3115,6 +3175,246 @@ struct Matched {
     const RawDeclaration* declaration{nullptr};
 };
 
+// ---------------------------------------------------------------------------
+// Media queries, as the cascade asks them
+// ---------------------------------------------------------------------------
+
+/// The parts of a media query list: its comma-separated alternatives, each
+/// trimmed, with the empty ones dropped. A query written with a function
+/// (`(width > 100px)` has none here) is split on the top-level commas only.
+std::vector<std::string> media_alternatives(const std::string& query) {
+    std::vector<std::string> out;
+    std::string current;
+    int depth = 0;
+    char quote = 0;
+    for (const char c : query) {
+        if (quote) {
+            current += c;
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+            current += c;
+            continue;
+        }
+        if (c == '(') ++depth;
+        else if (c == ')' && depth > 0) --depth;
+        if (c == ',' && depth == 0) {
+            const std::string part = trim(current);
+            if (!part.empty()) out.push_back(part);
+            current.clear();
+            continue;
+        }
+        current += c;
+    }
+    const std::string part = trim(current);
+    if (!part.empty()) out.push_back(part);
+    return out;
+}
+
+/// The terms of one alternative, split on the top-level ` and `.
+std::vector<std::string> media_terms(const std::string& alternative) {
+    std::vector<std::string> out;
+    std::string current;
+    int depth = 0;
+    std::size_t i = 0;
+    while (i < alternative.size()) {
+        const char c = alternative[i];
+        if (c == '(') {
+            ++depth;
+            current += c;
+            ++i;
+            continue;
+        }
+        if (c == ')') {
+            if (depth > 0) --depth;
+            current += c;
+            ++i;
+            continue;
+        }
+        if (depth == 0 && is_ascii_space(c)) {
+            std::size_t word_start = i;
+            while (word_start < alternative.size() && is_ascii_space(alternative[word_start])) ++word_start;
+            std::size_t word_end = word_start;
+            while (word_end < alternative.size() && !is_ascii_space(alternative[word_end]) &&
+                   alternative[word_end] != '(') {
+                ++word_end;
+            }
+            if (ascii_lower(alternative.substr(word_start, word_end - word_start)) == "and") {
+                const std::string part = trim(current);
+                if (!part.empty()) out.push_back(part);
+                current.clear();
+                i = word_end;
+                continue;
+            }
+            current += alternative.substr(i, word_end - i);
+            i = word_end;
+            continue;
+        }
+        current += c;
+        ++i;
+    }
+    const std::string part = trim(current);
+    if (!part.empty()) out.push_back(part);
+    return out;
+}
+
+/// A length as the window counts it: `px`, `em`/`rem` at 16px, and a bare
+/// number, which a media query takes for px. False when it is not a length.
+bool media_length(const std::string& text, double& out) {
+    const std::string value = trim(text);
+    if (value.empty()) return false;
+    char* end = nullptr;
+    const double number = std::strtod(value.c_str(), &end);
+    if (end == value.c_str()) return false;
+    std::string unit = ascii_lower(trim(std::string(end)));
+    if (unit.empty() || unit == "px") out = number;
+    else if (unit == "em" || unit == "rem") out = number * 16.0;
+    else if (unit == "pt") out = number * (96.0 / 72.0);
+    else if (unit == "in") out = number * 96.0;
+    else return false;
+    return true;
+}
+
+/// One parenthesised feature: `(min-width: 600px)`, `(orientation: landscape)`,
+/// `(hover)`. False when this engine does not know it, which the standard
+/// says is the same answer as a feature that does not match.
+bool media_feature_matches(const std::string& feature, float viewport_width, float viewport_height) {
+    std::string name = feature;
+    std::string value;
+    const auto colon = feature.find(':');
+    if (colon != std::string::npos) {
+        name = feature.substr(0, colon);
+        value = trim(feature.substr(colon + 1));
+        if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') && value.back() == value.front()) {
+            value = value.substr(1, value.size() - 2);
+        }
+    }
+    name = ascii_lower(trim(name));
+    const std::string lower_value = ascii_lower(value);
+
+    if (name == "min-width" || name == "max-width" || name == "width") {
+        double wanted = 0;
+        if (!media_length(value, wanted)) return false;
+        const double actual = viewport_width;
+        if (name == "width") return std::abs(actual - wanted) < 1e-6;
+        return name == "min-width" ? actual >= wanted - 1e-6 : actual <= wanted + 1e-6;
+    }
+    if (name == "min-height" || name == "max-height" || name == "height") {
+        double wanted = 0;
+        if (!media_length(value, wanted)) return false;
+        const double actual = viewport_height;
+        if (name == "height") return std::abs(actual - wanted) < 1e-6;
+        return name == "min-height" ? actual >= wanted - 1e-6 : actual <= wanted + 1e-6;
+    }
+    if (name == "orientation") {
+        const bool landscape = viewport_width >= viewport_height;
+        if (lower_value == "landscape") return landscape;
+        if (lower_value == "portrait") return !landscape;
+        return false;
+    }
+    if (name == "resolution" || name == "min-resolution" || name == "max-resolution") {
+        // The window is a 96 dpi screen, which is 1dppx.
+        double wanted = 0;
+        const std::string trimmed = trim(lower_value);
+        char* end = nullptr;
+        const double number = std::strtod(trimmed.c_str(), &end);
+        if (end == trimmed.c_str()) return false;
+        const std::string unit = trim(std::string(end));
+        if (unit == "dpi") wanted = number / 96.0;
+        else if (unit == "dpcm") wanted = number * (2.54 / 96.0);
+        else if (unit == "dppx" || unit == "x") wanted = number;
+        else return false;
+        if (name == "resolution") return std::abs(wanted - 1.0) < 1e-6;
+        return name == "min-resolution" ? 1.0 >= wanted - 1e-6 : 1.0 <= wanted + 1e-6;
+    }
+    if (name == "prefers-color-scheme") return lower_value == "light";
+    if (name == "prefers-reduced-motion") return lower_value == "no-preference";
+    if (name == "prefers-contrast") return lower_value == "no-preference";
+    if (name == "hover" || name == "any-hover") return lower_value == "hover" || value.empty();
+    if (name == "pointer" || name == "any-pointer") {
+        return lower_value == "fine" || (value.empty() && name == "pointer");
+    }
+    if (name == "scripting") return lower_value == "enabled" || (value.empty());
+    if (name == "color") {
+        double wanted = 0;
+        if (value.empty()) return true; // `(color)`: a colour screen, and it is one
+        if (!media_length(value, wanted)) {
+            char* end = nullptr;
+            wanted = std::strtod(value.c_str(), &end);
+            if (end == value.c_str()) return false;
+        }
+        return wanted >= 8;
+    }
+    return false;
+}
+
+/// Whether a media query list matches this window. The features are the ones
+/// this engine can answer for: the media type, width and height with `min-`
+/// and `max-`, orientation, resolution (a 96 dpi screen, so `1dppx`), the
+/// user preferences the window already answers `matchMedia` with, and
+/// `(color)`. An unknown feature does not match, as the standard has it, and
+/// an empty query matches everything.
+bool media_query_matches(const std::string& query, float viewport_width, float viewport_height) {
+    const std::vector<std::string> alternatives = media_alternatives(query);
+    if (alternatives.empty()) return true;
+    for (const auto& alternative : alternatives) {
+        std::vector<std::string> terms = media_terms(alternative);
+        if (terms.empty()) continue;
+        bool negated = false;
+        const std::string first = ascii_lower(terms.front());
+        if (first.compare(0, 4, "not ") == 0) {
+            negated = true;
+            terms.front() = trim(terms.front().substr(4));
+        } else if (first.compare(0, 5, "only ") == 0) {
+            terms.front() = trim(terms.front().substr(5));
+        }
+        bool matches = true;
+        for (const auto& term : terms) {
+            const std::string text = trim(term);
+            if (text.empty()) continue;
+            if (text.front() == '(') {
+                std::string inside = trim(text.substr(1, text.back() == ')' ? text.size() - 2 : text.size() - 1));
+                if (inside.empty()) {
+                    matches = false;
+                    break;
+                }
+                if (inside.front() == '(') {
+                    // `((min-width: 600px))` is the same question.
+                    inside = trim(inside.substr(1, inside.back() == ')' ? inside.size() - 2 : inside.size() - 1));
+                }
+                if (!media_feature_matches(inside, viewport_width, viewport_height)) {
+                    matches = false;
+                    break;
+                }
+                continue;
+            }
+            // A media type.
+            const std::string type = ascii_lower(text);
+            if (type != "all" && type != "screen") {
+                matches = false;
+                break;
+            }
+        }
+        if (negated) matches = !matches;
+        if (matches) return true;
+    }
+    return false;
+}
+
+/// Whether a `@media` rule's query holds for this window, read once per
+/// window: a sheet's block is asked about by every element the cascade
+/// computes, and its text does not change between them.
+bool media_rule_matches(const SheetRule& rule, float viewport_width, float viewport_height) {
+    if (rule.cached_match < 0 || rule.cached_width != viewport_width || rule.cached_height != viewport_height) {
+        rule.cached_match = media_query_matches(rule.media_text, viewport_width, viewport_height) ? 1 : 0;
+        rule.cached_width = viewport_width;
+        rule.cached_height = viewport_height;
+    }
+    return rule.cached_match == 1;
+}
+
 // What the cascade gives one element: the declarations that apply to it, the
 // last word on each property. In order of weight: the element's defaults,
 // the rules of the document's style elements, the style attribute, and then
@@ -3122,19 +3422,35 @@ struct Matched {
 // then by position.
 void compute_block(Realm& realm, const Element& element, Block& block, const Node* root = nullptr) {
     block.clear();
+    float viewport_width = 1024.0f;
+    float viewport_height = 768.0f;
+    if (auto document = element.owner_document()) {
+        viewport_width = document->viewport_width();
+        viewport_height = document->viewport_height();
+    }
     if (element.has_attribute("hidden") && !element.is_foreign()) block.set("display", "none", false);
     else block.set("display", default_display(element), false);
 
     std::vector<Matched> matched;
-    auto collect = [&](const ParsedSheet& sheet, int layer) {
-        for (const auto& rule : sheet.rules) {
-            const long specificity = rule.selector.matching_specificity(element);
-            if (specificity < 0) continue;
-            for (const auto& declaration : rule.declarations) {
-                matched.push_back({declaration.important ? layer + 3 : layer, specificity, &declaration});
+    // The rules of a sheet, and for a `@media` block whose query matches the
+    // window, the rules inside it: the block is not flattened into the sheet,
+    // so the cascade is where the query is asked.
+    std::function<void(const std::vector<SheetRulePtr>&, int)> walk =
+        [&](const std::vector<SheetRulePtr>& rules, int layer) {
+            for (const auto& rule : rules) {
+                if (!rule) continue;
+                if (rule->is_media()) {
+                    if (media_rule_matches(*rule, viewport_width, viewport_height)) walk(rule->children, layer);
+                    continue;
+                }
+                const long specificity = rule->selector.matching_specificity(element);
+                if (specificity < 0) continue;
+                for (const auto& declaration : rule->declarations) {
+                    matched.push_back({declaration.important ? layer + 3 : layer, specificity, &declaration});
+                }
             }
-        }
-    };
+        };
+    auto collect = [&](const ParsedSheet& sheet, int layer) { walk(sheet.rules, layer); };
     StylePart& part = realm.part<StylePart>();
     if (!element.is_foreign()) {
         if (!part.defaults) {
@@ -3823,6 +4139,7 @@ struct StyleState : JsExotic {
             std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
             if (version == sheet_generation(rule->sheet) && has_source) return;
             block.clear();
+            if (!declarations) return;
             for (const auto& declaration : *declarations) {
                 if (!is_css_property(declaration.name)) continue;
                 block.set(declaration.name, declaration.value, declaration.important, true);
@@ -3866,6 +4183,7 @@ struct StyleState : JsExotic {
             source = block.text(true);
             has_source = true;
             std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
+            if (!declarations) return;
             declarations->clear();
             for (const auto& declaration : parse_declarations(source)) {
                 if (!is_css_property(declaration.name)) continue;
@@ -4124,9 +4442,34 @@ std::string serialize_selector_list(const SelectorList& list) {
 std::string rule_block_text(Realm& realm, RuleState& state) {
     JsValue style = make_rule_style(realm, std::make_shared<RuleState>(state));
     StyleState* style_state = state_of<StyleState>(style);
-    if (!style_state) return serialize_declarations(*rule_declarations(state));
+    if (!style_state || !rule_declarations(state)) {
+        const std::vector<RawDeclaration>* declarations = rule_declarations(state);
+        return declarations ? serialize_declarations(*declarations) : std::string();
+    }
     style_state->load();
     return style_state->block.text(true);
+}
+
+/// A rule as `cssText` writes it: a style rule with its block, and a `@media`
+/// rule with its query and the rules inside it.
+std::string rule_css_text(Realm& realm, RuleState& state) {
+    if (!state.rule) return std::string();
+    if (!state.rule->is_media()) {
+        std::string block;
+        if (rule_declarations(static_cast<const RuleState&>(state))) block = rule_block_text(realm, state);
+        return rule_selector_text(state) + " { " + block + " }";
+    }
+    std::string inner;
+    for (const auto& child : state.rule->children) {
+        if (!child) continue;
+        RuleState child_state;
+        child_state.sheet = state.sheet;
+        child_state.rule = child;
+        child_state.parent = state.rule;
+        if (!inner.empty()) inner += ' ';
+        inner += rule_css_text(realm, child_state);
+    }
+    return "@media " + state.rule->media_text + " { " + inner + " }";
 }
 
 std::string serialize_declarations(const std::vector<RawDeclaration>& declarations) {
@@ -4138,14 +4481,16 @@ std::string serialize_declarations(const std::vector<RawDeclaration>& declaratio
     return out;
 }
 
-// `sheet.insertRule(text)`: "selector { declarations }", and nothing after the
-// closing brace but whitespace.
-bool parse_inserted_rule(const std::string& text, SheetRule& out) {
+// `insertRule(text)`: "selector { declarations }" or "@media <query> { … }",
+// and nothing after the closing brace but whitespace.
+bool parse_inserted_rule(const std::string& text, SheetRulePtr& out) {
     const std::string trimmed = trim(text);
-    // A style rule ends with its block: "a {" is not one. An at-rule is not
-    // one either: `insertRule` takes a style rule, and the sheet has no
-    // CSSMediaRule to put a block in.
-    if (trimmed.empty() || trimmed.back() != '}' || trimmed.front() == '@') return false;
+    // A rule ends with its block: "a {" is not one.
+    if (trimmed.empty() || trimmed.back() != '}') return false;
+    // The at-rule a sheet holds is `@media`; the rest are not rules it can
+    // put a block in yet (a `@supports` block is flattened when the text is
+    // read, and `insertRule` does not take that as one rule).
+    if (trimmed.front() == '@' && ascii_lower(trimmed).compare(0, 6, "@media") != 0) return false;
     // One block, and nothing after it: "a { b { c {} } }" is not a style rule.
     int depth = 0;
     std::size_t closed_at = std::string::npos;
@@ -4166,13 +4511,31 @@ bool parse_inserted_rule(const std::string& text, SheetRule& out) {
         if (!is_ascii_space(trimmed[i])) return false;
     }
     std::size_t at = 0;
-    std::vector<SheetRule> rules;
+    std::vector<SheetRulePtr> rules;
     parse_rules(text, at, rules, false);
     while (at < text.size() && is_ascii_space(text[at])) ++at;
     if (rules.size() != 1 || at != text.size()) return false;
-    if (rules.front().selector.empty()) return false;
+    const SheetRulePtr& rule = rules.front();
+    if (!rule) return false;
+    // A style rule needs a selector; an `@media` rule needs a query.
+    if (rule->is_media()) {
+        if (rule->media_text.empty()) return false;
+    } else if (rule->selector.empty() || rule->selector_text.empty()) {
+        return false;
+    }
     out = std::move(rules.front());
     return true;
+}
+
+void number_inserted_rules(ParsedSheet& sheet, std::vector<SheetRulePtr>& list) {
+    for (auto& rule : list) {
+        if (!rule) continue;
+        if (rule->id == 0) {
+            rule->id = sheet.next_rule_id++;
+            rule->from_text = false;
+        }
+        number_inserted_rules(sheet, rule->children);
+    }
 }
 
 void SheetState::set_applied(bool value) {
@@ -4182,13 +4545,12 @@ void SheetState::set_applied(bool value) {
 
 JsValue make_sheet(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::shared_ptr<Element> owner,
                    bool own_sheet, bool applied, std::string href) {
-    if (!owner) {
-        // `rule.parentStyleSheet`: the sheet object of that sheet, if a <style>
-        // element owns it, and otherwise a sheet object made for it here.
-        auto& by_sheet = realm.part<RuleObjectsPart>().sheets;
-        auto found = by_sheet.find(sheet.get());
-        if (found != by_sheet.end() && found->second.sheet.lock() == sheet) return found->second.object;
-    }
+    // `rule.parentStyleSheet`: the sheet object of that sheet — the one a
+    // <style> element owns when there is one, and otherwise the one made for
+    // it here, which is the same object every time it is asked for.
+    auto& by_sheet = realm.part<RuleObjectsPart>().sheets;
+    auto found = by_sheet.find(sheet.get());
+    if (found != by_sheet.end() && found->second.sheet.lock() == sheet) return found->second.object;
     auto state = std::make_shared<SheetState>();
     state->realm = &realm;
     state->sheet = std::move(sheet);
@@ -4196,50 +4558,97 @@ JsValue make_sheet(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::shared
     state->own_sheet = own_sheet;
     state->applied = applied;
     state->href = std::move(href);
-    return realm.make("CSSStyleSheet", state);
+    JsValue object = realm.make("CSSStyleSheet", state);
+    by_sheet[state->sheet.get()] = RuleObjectEntry{state->sheet, object};
+    return object;
 }
 
-JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet) {
+JsValue make_rule_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr parent) {
     auto state = std::make_shared<RuleListState>();
     state->sheet = std::move(sheet);
+    state->parent = std::move(parent);
     return realm.make("CSSRuleList", state);
 }
 
-JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, std::size_t index) {
+JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr parent, const SheetRulePtr& rule) {
     RuleState state;
     state.sheet = sheet;
-    state.id = sheet->rules[index].id;
+    state.rule = rule;
+    state.parent = std::move(parent);
     // One object per rule: `cssRules[0] === cssRules.item(0)`.
     auto& objects = realm.part<RuleObjectsPart>().objects;
-    auto found = objects.find(state.id);
+    auto found = objects.find(rule->id);
     if (found != objects.end() && found->second.sheet.lock() == sheet) return found->second.object;
     auto shared_state = std::make_shared<RuleState>(state);
-    JsValue object = realm.make("CSSStyleRule", shared_state);
-    objects[state.id] = RuleObjectEntry{sheet, object};
+    JsValue object = realm.make(rule->is_media() ? "CSSMediaRule" : "CSSStyleRule", shared_state);
+    objects[rule->id] = RuleObjectEntry{sheet, object};
     return object;
+}
+
+JsValue make_media_list(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr rule) {
+    auto state = std::make_shared<MediaListState>();
+    state->sheet = std::move(sheet);
+    state->rule = std::move(rule);
+    return realm.make("MediaList", state);
+}
+
+/// The rules of a list: the sheet's own, or the ones inside a `@media` rule —
+/// still in the sheet, or, once the rule has left it, in the rule, which is
+/// still the rule it was.
+std::vector<SheetRulePtr>* rule_list_of(RuleListState& state) {
+    if (state.parent) return &state.parent->children;
+    if (!state.sheet) return nullptr;
+    return &state.sheet->rules;
 }
 
 // `cssRules[0]`: the indices are the list's, and live.
 bool RuleListState::get(JsObject*, const std::string& name, JsValue& out) {
     std::size_t index = 0;
     if (!parse_index(name, index)) return false;
-    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
-    if (!sheet || index >= sheet->rules.size()) return false;
-    out = make_rule(current_realm(), sheet, index);
+    std::vector<SheetRulePtr>* rules = rule_list_of(*this);
+    if (!rules || index >= rules->size() || !(*rules)[index]) return false;
+    out = make_rule(current_realm(), sheet, parent, (*rules)[index]);
     return true;
 }
 
 bool RuleListState::has(JsObject*, const std::string& name) {
     std::size_t index = 0;
     if (!parse_index(name, index)) return false;
-    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
-    return sheet && index < sheet->rules.size();
+    std::vector<SheetRulePtr>* rules = rule_list_of(*this);
+    return rules && index < rules->size();
 }
 
 void RuleListState::keys(JsObject*, std::vector<std::string>& out) {
-    const std::shared_ptr<ParsedSheet>& sheet = this->sheet;
-    if (!sheet) return;
-    for (std::size_t i = 0; i < sheet->rules.size(); ++i) out.push_back(std::to_string(i));
+    std::vector<SheetRulePtr>* rules = rule_list_of(*this);
+    if (!rules) return;
+    for (std::size_t i = 0; i < rules->size(); ++i) out.push_back(std::to_string(i));
+}
+
+/// A media query list as the parts a browser counts: `media.length` is the
+/// number of alternatives, and each is trimmed as it is stored.
+std::vector<std::string> media_list_items(const SheetRulePtr& rule) {
+    if (!rule) return {};
+    return media_alternatives(rule->media_text);
+}
+
+bool MediaListState::get(JsObject*, const std::string& name, JsValue& out) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    const std::vector<std::string> items = media_list_items(rule);
+    if (index >= items.size()) return false;
+    out = str(items[index]);
+    return true;
+}
+
+bool MediaListState::has(JsObject*, const std::string& name) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    return index < media_list_items(rule).size();
+}
+
+void MediaListState::keys(JsObject*, std::vector<std::string>& out) {
+    const std::vector<std::string> items = media_list_items(rule);
+    for (std::size_t i = 0; i < items.size(); ++i) out.push_back(std::to_string(i));
 }
 
 void setup_rule(Iface& I) {
@@ -4257,13 +4666,16 @@ void setup_rule(Iface& I) {
         this_state<RuleState>("CSSRule");
         return num(0);
     });
-    I.getter("cssText", [](Realm&) {
+    I.getter("cssText", [](Realm& realm) {
         RuleState& state = this_state<RuleState>("CSSRule");
-        return str(rule_selector_text(state) + " { " + serialize_declarations(*rule_declarations(state)) + " }");
+        return str(rule_css_text(realm, state));
     });
-    I.getter("parentRule", [](Realm&) {
-        this_state<RuleState>("CSSRule");
-        return null();
+    I.getter("parentRule", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSRule");
+        if (!state.parent) return null();
+        // The rule it is inside. A `@media` rule inside a `@media` rule is not
+        // what this engine writes, so the parent of a parent is not asked for.
+        return make_rule(realm, state.sheet, nullptr, state.parent);
     });
     I.getter("parentStyleSheet", [](Realm& realm) {
         RuleState& state = this_state<RuleState>("CSSRule");
@@ -4284,8 +4696,7 @@ void setup_style_rule(Iface& I) {
         },
         [](Realm& realm, const JsValue& value) {
             RuleState& state = this_state<RuleState>("CSSStyleRule");
-            const std::size_t index = rule_index(state);
-            if (index == SIZE_MAX) return;
+            if (!state.rule) return;
             const std::string text = trim(to_str(value));
             SelectorList parsed;
             if (!SelectorList::parse(text, parsed)) {
@@ -4293,9 +4704,8 @@ void setup_style_rule(Iface& I) {
                           "Failed to set the 'selectorText' property on 'CSSStyleRule': '" + text +
                               "' is not a valid selector list.");
             }
-            SheetRule& rule = state.sheet->rules[index];
-            rule.selector = std::move(parsed);
-            rule.selector_text = text;
+            state.rule->selector = std::move(parsed);
+            state.rule->selector_text = text;
             touch_sheet(state.sheet);
         });
     I.getter("style", [](Realm& realm) {
@@ -4312,17 +4722,163 @@ void setup_style_rule(Iface& I) {
 void setup_rule_list(Iface& I) {
     I.getter("length", [](Realm&) {
         RuleListState& state = this_state<RuleListState>("CSSRuleList");
-        const std::shared_ptr<ParsedSheet>& sheet = state.sheet;
-        return num(sheet ? static_cast<double>(sheet->rules.size()) : 0.0);
+        std::vector<SheetRulePtr>* rules = rule_list_of(state);
+        return num(rules ? static_cast<double>(rules->size()) : 0.0);
     });
     I.method("item", 1, [](Realm& realm, Args args) {
         require_args(args, 1, "CSSRuleList.item");
         RuleListState& state = this_state<RuleListState>("CSSRuleList");
-        const std::shared_ptr<ParsedSheet>& sheet = state.sheet;
-        if (!sheet) return null();
+        std::vector<SheetRulePtr>* rules = rule_list_of(state);
+        if (!rules) return null();
         const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
-        if (index >= sheet->rules.size()) return null();
-        return make_rule(realm, sheet, index);
+        if (index >= rules->size() || !(*rules)[index]) return null();
+        return make_rule(realm, state.sheet, state.parent, (*rules)[index]);
+    });
+}
+
+// A `@media` rule: `type` 4, its query as a `MediaList`, and the rules of its
+// block as a `CSSRuleList` a script can add to and take from.
+void setup_media_rule(Iface& I) {
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSMediaRule");
+        return num(4); // CSSRule.MEDIA_RULE
+    });
+    I.getter("media", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSMediaRule");
+        return make_media_list(realm, state.sheet, state.rule);
+    });
+    I.getter("cssRules", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSMediaRule");
+        return make_rule_list(realm, state.sheet, state.rule);
+    });
+    I.alias("rules", "cssRules");
+    I.method("insertRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSMediaRule.insertRule");
+        RuleState& state = this_state<RuleState>("CSSMediaRule");
+        if (!state.rule) return num(0);
+        const std::string text = trim(to_str(args[0]));
+        std::vector<SheetRulePtr>& rules = state.rule->children;
+        std::size_t index = 0;
+        if (args.size() > 1 && !args[1].is_undefined()) index = to_ulong(args[1]);
+        if (index > rules.size()) {
+            throw_dom(realm, "IndexSizeError",
+                      "Failed to execute 'insertRule' on 'CSSMediaRule': the index (" + std::to_string(index) +
+                          ") is larger than the number of rules (" + std::to_string(rules.size()) + ").");
+        }
+        SheetRulePtr rule;
+        if (!parse_inserted_rule(text, rule)) {
+            throw_dom(realm, "SyntaxError",
+                      "Failed to execute 'insertRule' on 'CSSMediaRule': the rule '" + text +
+                          "' is not a valid style rule.");
+        }
+        if (state.sheet) {
+            std::vector<SheetRulePtr> one{rule};
+            number_inserted_rules(*state.sheet, one);
+        }
+        rules.insert(rules.begin() + static_cast<std::ptrdiff_t>(index), rule);
+        touch_sheet(state.sheet);
+        return num(static_cast<double>(index));
+    });
+    I.method("deleteRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSMediaRule.deleteRule");
+        RuleState& state = this_state<RuleState>("CSSMediaRule");
+        if (!state.rule) return undefined();
+        std::vector<SheetRulePtr>& rules = state.rule->children;
+        const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
+        if (index >= rules.size()) {
+            throw_dom(realm, "IndexSizeError",
+                      "Failed to execute 'deleteRule' on 'CSSMediaRule': the index (" + std::to_string(index) +
+                          ") is larger than the number of rules (" + std::to_string(rules.size()) + ").");
+        }
+        rules.erase(rules.begin() + static_cast<std::ptrdiff_t>(index));
+        touch_sheet(state.sheet);
+        return undefined();
+    });
+    I.getter("cssText", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSMediaRule");
+        return str(rule_css_text(realm, state));
+    });
+}
+
+// `MediaList`: the query a `@media` rule holds, as `mediaText` and as the
+// alternatives `length` and `item(i)` count.
+void setup_media_list(Iface& I) {
+    I.accessor("mediaText",
+        [](Realm&) {
+            MediaListState& state = this_state<MediaListState>("MediaList");
+            if (!state.rule) return str("");
+            return str(state.rule->media_text);
+        },
+        [](Realm&, const JsValue& value) {
+            MediaListState& state = this_state<MediaListState>("MediaList");
+            if (!state.rule) return;
+            state.rule->media_text = trim(to_str(value));
+            state.rule->forget_media_answer();
+            touch_sheet(state.sheet);
+        });
+    I.getter("length", [](Realm&) {
+        MediaListState& state = this_state<MediaListState>("MediaList");
+        return num(static_cast<double>(media_list_items(state.rule).size()));
+    });
+    I.method("item", 1, [](Realm&, Args args) {
+        require_args(args, 1, "MediaList.item");
+        MediaListState& state = this_state<MediaListState>("MediaList");
+        const std::vector<std::string> items = media_list_items(state.rule);
+        const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
+        if (index >= items.size()) return null();
+        return str(items[index]);
+    });
+    I.method("appendMedium", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "MediaList.appendMedium");
+        MediaListState& state = this_state<MediaListState>("MediaList");
+        if (!state.rule) return undefined();
+        const std::string medium = trim(to_str(args[0]));
+        if (medium.empty()) return undefined();
+        std::vector<std::string> items = media_list_items(state.rule);
+        const std::string lower = ascii_lower(medium);
+        for (const auto& item : items) {
+            if (ascii_lower(item) == lower) return undefined();
+        }
+        if (items.empty()) {
+            state.rule->media_text = medium;
+        } else {
+            state.rule->media_text = state.rule->media_text + ", " + medium;
+        }
+        state.rule->forget_media_answer();
+        touch_sheet(state.sheet);
+        (void)realm;
+        return undefined();
+    });
+    I.method("deleteMedium", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "MediaList.deleteMedium");
+        MediaListState& state = this_state<MediaListState>("MediaList");
+        if (!state.rule) return undefined();
+        const std::string medium = trim(to_str(args[0]));
+        std::vector<std::string> items = media_list_items(state.rule);
+        const std::string lower = ascii_lower(medium);
+        std::vector<std::string> kept;
+        bool found = false;
+        for (const auto& item : items) {
+            if (ascii_lower(item) == lower) {
+                found = true;
+                continue;
+            }
+            kept.push_back(item);
+        }
+        if (!found) {
+            throw_dom(realm, "NotFoundError",
+                      "Failed to execute 'deleteMedium' on 'MediaList': '" + medium +
+                          "' is not in the list of media queries.");
+        }
+        std::string text;
+        for (std::size_t i = 0; i < kept.size(); ++i) {
+            if (i) text += ", ";
+            text += kept[i];
+        }
+        state.rule->media_text = text;
+        state.rule->forget_media_answer();
+        touch_sheet(state.sheet);
+        return undefined();
     });
 }
 
@@ -4378,14 +4934,14 @@ void setup_style_sheet(Iface& I) {
                           ") is larger than the number of rules (" +
                           std::to_string(state.sheet->rules.size()) + ").");
         }
-        SheetRule rule;
+        SheetRulePtr rule;
         if (!parse_inserted_rule(text, rule)) {
             throw_dom(realm, "SyntaxError",
                       "Failed to execute 'insertRule' on 'CSSStyleSheet': the rule '" + text +
                           "' is not a valid style rule.");
         }
-        rule.id = state.sheet->next_rule_id++;
-        rule.from_text = false;
+        std::vector<SheetRulePtr> one{rule};
+        number_inserted_rules(*state.sheet, one);
         state.sheet->rules.insert(state.sheet->rules.begin() + static_cast<std::ptrdiff_t>(index), std::move(rule));
         touch_sheet(state.sheet);
         return num(static_cast<double>(index));
@@ -4400,17 +4956,8 @@ void setup_style_sheet(Iface& I) {
                           ") is larger than the number of rules (" +
                           std::to_string(state.sheet->rules.size()) + ").");
         }
-        // The object of the rule, if a script has one, keeps its declarations:
+        // The object of the rule, if a script has one, holds the rule itself:
         // a removed rule is the rule it was, out of the tree's reach.
-        const uint64_t id = state.sheet->rules[index].id;
-        auto found = realm.part<RuleObjectsPart>().objects.find(id);
-        if (found != realm.part<RuleObjectsPart>().objects.end()) {
-            auto* rule_state = state_of<RuleState>(found->second.object);
-            if (rule_state) {
-                rule_state->detached = state.sheet->rules[index].declarations;
-                rule_state->selector_text = state.sheet->rules[index].selector_text;
-            }
-        }
         state.sheet->rules.erase(state.sheet->rules.begin() + static_cast<std::ptrdiff_t>(index));
         touch_sheet(state.sheet);
         return undefined();
@@ -4469,7 +5016,9 @@ void register_style_interfaces() {
     register_interface({"CSSStyleDeclaration", nullptr, setup_style_declaration, nullptr, 0, nullptr});
     register_interface({"CSSRule", nullptr, setup_rule, nullptr, 0, nullptr});
     register_interface({"CSSStyleRule", "CSSRule", setup_style_rule, nullptr, 0, nullptr});
+    register_interface({"CSSMediaRule", "CSSRule", setup_media_rule, nullptr, 0, nullptr});
     register_interface({"CSSRuleList", nullptr, setup_rule_list, nullptr, 0, nullptr});
+    register_interface({"MediaList", nullptr, setup_media_list, nullptr, 0, nullptr});
     register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, nullptr, 0, nullptr});
     register_interface({"FontFaceSet", nullptr, setup_font_face_set, nullptr, 0, nullptr});
 }

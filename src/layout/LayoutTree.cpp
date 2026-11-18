@@ -63,6 +63,13 @@ ComputedStyle inherited_only_style(const ComputedStyle& parent) {
     s.color = parent.color;
     s.font_size = parent.font_size;
     s.font_weight = parent.font_weight;
+    // `font-family` inherits (CSS Fonts §5.1) and this is the style every text
+    // box is built with -- so leaving it out meant a text node was measured
+    // and drawn in the default face whatever its element asked for. `font-size`
+    // and `font-weight` were carried and `font-family` was not, and the two
+    // facts together are why a `<pre>` came out proportional: the size was
+    // right, the face was not.
+    s.font_family = parent.font_family;
     s.line_height = parent.line_height;
     s.line_height_number = parent.line_height_number;
     s.text_align = parent.text_align;

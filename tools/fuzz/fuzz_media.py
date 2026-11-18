@@ -92,8 +92,43 @@ def minimal_webp_seeds(tmpdir: str) -> list[bytes]:
             subprocess.run([convert_bin] + args + extra + [p], check=True, capture_output=True)
             with open(p, "rb") as f:
                 seeds.append(f.read())
+        # Animations: the frame walker, the compositor and the frame cap get real
+        # ones, with transparency, disposal and loop counts, and then mutations
+        # of them (a frame's rectangle, its image and its timing all come out of
+        # the same bytes a mutation touches).
+        for idx, args in enumerate([
+            ["-delay", "10", "-loop", "0", "(", "-size", "16x16", "xc:red", ")",
+             "(", "-size", "16x16", "xc:blue", ")"],
+            ["-delay", "7", "-loop", "3", "-dispose", "Background",
+             "(", "-size", "20x16", "xc:none", "-fill", "rgba(255,0,0,0.5)", "-draw", "rectangle 2,2 12,12", ")",
+             "(", "-size", "20x16", "xc:none", "-fill", "rgba(0,0,255,0.5)", "-draw", "rectangle 6,6 18,14", ")"],
+            ["-delay", "4", "(", "-size", "12x9", "gradient:red-blue", ")",
+             "(", "-size", "12x9", "gradient:green-yellow", ")",
+             "(", "-size", "12x9", "plasma:aqua-black", "-seed", "2", ")"],
+        ]):
+            p = os.path.join(tmpdir, f"seed_anim{idx}.webp")
+            subprocess.run([convert_bin] + args + ["-define", "webp:lossless=true", p],
+                           check=True, capture_output=True)
+            with open(p, "rb") as f:
+                seeds.append(f.read())
+
     # A hand-built `VP8X` + `ALPH` + `VP8 ` container: the alpha header byte is
     # the only thing between the fuzzer and the plane decoder.
+    # And a hand-built animation: a canvas, a background colour and a loop
+    # count, with one frame that carries a rectangle and no image at all, so the
+    # frame walker's own refusals are seeded too.
+    anim_body = bytearray(b"RIFF\0\0\0\0WEBP")
+    anim_frame = (bytes([0, 0, 0]) + bytes([0, 0, 0]) + bytes([3, 0, 0]) + bytes([3, 0, 0]) +
+                  bytes([10, 0, 0]) + bytes([0]))
+    for fourcc, payload in ((b"VP8X", bytes([0x02, 0, 0, 0, 3, 0, 0, 3, 0, 0])),
+                            (b"ANIM", bytes([0, 0, 0, 0, 2, 0])),
+                            (b"ANMF", anim_frame)):
+        anim_body += fourcc + len(payload).to_bytes(4, "little") + payload
+        if len(payload) & 1:
+            anim_body += b"\0"
+    anim_body[4:8] = (len(anim_body) - 8).to_bytes(4, "little")
+    seeds.append(bytes(anim_body))
+
     vp8_payload = b"\x30\x01\x00\x9d\x01\x2a\x00\x00"
     vp8x = bytes([0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
     for hdr, plane in [(0x00, bytes(1)), (0x01, b"\x07"), (0x04, bytes(1)), (0x0C, bytes(1)),

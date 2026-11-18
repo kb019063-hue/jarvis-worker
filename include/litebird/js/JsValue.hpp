@@ -355,12 +355,10 @@ public:
     /// it stands in, and `Reflect.construct(F, args, NewTarget)` names one.
     /// It has to stay alive for the duration of the call.
     ///
-    /// A `this_val` that is a platform object already (an element) makes this
-    /// a construction in place: the constructor is to turn that object into
-    /// what it constructs. However the interface's constructor is reached
-    /// from there, with `super(...)` or with `Reflect.construct(Native, [],
-    /// new.target)`, it is given that object when it asks, once, found by
-    /// new.target (see "Constructions in place" in JsValue.cpp).
+    /// `this_val` is the object the constructor is given: the object `new`
+    /// made, or — from the standard's upgrade of a custom element — an object
+    /// of its own, which is not the element (DomObserverBindings.cpp,
+    /// run_upgrade).
     JsValue construct(const std::vector<JsValue>& args, const JsValue* this_val = nullptr,
                       const JsValue* new_target = nullptr) const;
     /// `super(...args)` in a class whose parent is a native constructor.
@@ -370,20 +368,15 @@ public:
     /// subclass instance and the native object are one; the others build
     /// their own and the caller takes over its state.
     ///
-    /// When `new_target` is being constructed in place (see construct()),
-    /// the native may build on another object than `derived_this`, and that
-    /// object is left in `in_place`: it is what this construction makes. It
-    /// is the element under construction when a class was constructed with
-    /// `Reflect.construct(Class, args, NewTarget)` while an element is being
-    /// upgraded to NewTarget, and a new object when the native is not the
-    /// element's interface and `derived_this` is the element.
+    /// The native may also hand back an object of its own, and then that is
+    /// what this construction makes: `in_place` is left with it. An element's
+    /// interface does, while an upgrade is building the element — the element
+    /// is the object, not `derived_this` (see hand_back_constructed_object).
     JsValue construct_as_super(const std::vector<JsValue>& args, const JsValue& derived_this,
                                const JsValue* new_target = nullptr, JsValue* in_place = nullptr) const;
     /// `Reflect.construct(Native, args, NewTarget)`: a native constructor,
     /// another function as new.target, and no object to hand it yet. A native
-    /// that asks for current_derived_this() gets the object `new_target` is
-    /// being constructed in place on, if it is (once: a second request
-    /// throws); otherwise one with the prototype
+    /// that asks for current_derived_this() gets one with the prototype
     /// `new_target` has at that moment. Either is left in `made`; when
     /// `new_target` has no object for a prototype the native gets none and
     /// `made` is null. A native that never asks builds its own, `made` stays
@@ -403,16 +396,21 @@ public:
     /// For a native constructor reached through `super()`: the subclass's
     /// object, which should become the thing constructed. Null otherwise.
     /// Under construct_for() the object is made by this call, the first time,
-    /// which can run a getter of the script's. Either way, when new.target is
-    /// being constructed in place on an element of the interface that asks,
-    /// the answer is that element, and asking for it a second time while the
-    /// construction runs throws a TypeError.
+    /// which can run a getter of the script's. It is one object per call,
+    /// however often the interface asks: the answer is kept in the context and
+    /// given again.
     static const JsValue* current_derived_this();
     /// For a native function invoked with `new`: the function `new` was
     /// applied to, when that is not the native itself (it was reached through
     /// `super(...)` or named by `Reflect.construct`). Null otherwise. Read it
     /// before calling anything: the next call has a context of its own.
     static const JsValue* current_new_target();
+    /// Hands `super(...)` an object of its own to make `this`: the element an
+    /// upgrade is building, which is not the object `new` made and is not to be
+    /// copied into it. The interface has to have been asked for it already
+    /// (current_derived_this). Called by construct_custom_element; does nothing
+    /// when the parent was reached without `super(...)`.
+    static void hand_back_constructed_object(const JsValue& object);
     /// For script functions: consumes the pending call context. Returns false
     /// (and leaves `this_out` undefined) when the function was entered without
     /// going through call_with_this()/construct(). `new_target_out` gets the

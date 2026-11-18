@@ -12636,6 +12636,30 @@ static const uint8_t kWebpAnimated[] = {
     0x2F, 0x07, 0xC0, 0x01, 0x00, 0x07, 0x10, 0xFD, 0x8F, 0xFE, 0x07, 0x22, 0xA2, 0xFF, 0x01, 0x00,
 };
 
+// kWebpAnimation: 244 bytes, a four-frame 8x8 animation muxed from three
+// lossless stills, with every field chosen by hand: a red frame drawn without
+// blending, a half-transparent blue frame blended onto it, a green frame that
+// clears its rectangle afterwards, and the blue frame again over the cleared
+// area. Every frame is byte-identical to libwebp 1.5's animation decoder.
+static const uint8_t kWebpAnimation[] = {
+    0x52, 0x49, 0x46, 0x46, 0xEC, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58,
+    0x0A, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00, 0x41, 0x4E,
+    0x49, 0x4D, 0x06, 0x00, 0x00, 0x00, 0x33, 0x22, 0x11, 0x44, 0x03, 0x00, 0x41, 0x4E, 0x4D, 0x46,
+    0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x32, 0x00, 0x00, 0x02, 0x56, 0x50, 0x38, 0x4C, 0x11, 0x00, 0x00, 0x00, 0x2F, 0x07, 0xC0, 0x01,
+    0x00, 0x07, 0x50, 0x88, 0x22, 0x17, 0xA2, 0xFF, 0x81, 0x88, 0xE8, 0x7F, 0x00, 0x00, 0x41, 0x4E,
+    0x4D, 0x46, 0x2A, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x46, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C, 0x11, 0x00, 0x00, 0x00, 0x2F, 0x03,
+    0xC0, 0x00, 0x10, 0x07, 0x50, 0x88, 0x42, 0x14, 0xB9, 0x80, 0x81, 0x88, 0xE8, 0x7F, 0x00, 0x00,
+    0x41, 0x4E, 0x4D, 0x46, 0x2A, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00,
+    0x00, 0x03, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x03, 0x56, 0x50, 0x38, 0x4C, 0x11, 0x00, 0x00, 0x00,
+    0x2F, 0x03, 0xC0, 0x00, 0x00, 0x07, 0x50, 0xE4, 0x42, 0x14, 0xA2, 0xFF, 0x81, 0x88, 0xE8, 0x7F,
+    0x00, 0x00, 0x41, 0x4E, 0x4D, 0x46, 0x2A, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C, 0x11, 0x00,
+    0x00, 0x00, 0x2F, 0x03, 0xC0, 0x00, 0x10, 0x07, 0x50, 0x88, 0x42, 0x14, 0xB9, 0x80, 0x81, 0x88,
+    0xE8, 0x7F, 0x00, 0x00,
+};
+
 // kWebpLossy: 62 bytes, a VP8L file written by libwebp 1.2.4 through ImageMagick.
 static const uint8_t kWebpLossy[] = {
     0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
@@ -12867,13 +12891,66 @@ TEST(webp_unsupported_and_malformed_input_is_refused) {
         assert(res.error.find("inter-coded") != std::string::npos);
     }
 
-    // Animated WebP: the frames are VP8/VP8L images on a canvas, which is a
-    // compositing job this decoder does not do.
-    auto animated = WebPDecoder::decode_detailed(kWebpAnimated, sizeof(kWebpAnimated));
-    assert(!animated.ok());
-    assert(animated.status == WebPDecoder::Status::UnsupportedAnimation);
-    assert(WebPDecoder::probe(kWebpAnimated, sizeof(kWebpAnimated)) ==
-           WebPDecoder::Status::UnsupportedAnimation);
+    // An animation whose second frame is cut off is reported, not drawn: the
+    // walk stops at the frame that runs past the end rather than handing back a
+    // sequence with a hole in it.
+    {
+        auto cut = WebPDecoder::decode_frames(kWebpAnimated, sizeof(kWebpAnimated) - 40);
+        assert(!cut.ok());
+        assert(cut.error.find("truncat") != std::string::npos);
+        assert(cut.frames.empty());
+
+        // A frame that is whole in the container but broken inside is the same
+        // kind of stop, one frame later: the first frame is drawn, the second
+        // is not attempted, and the error says which part of the image failed.
+        std::vector<uint8_t> broken(kWebpAnimated, kWebpAnimated + sizeof(kWebpAnimated));
+        broken[133] ^= 0xFFu;  // inside the second frame's `VP8L` payload
+        auto part_way = WebPDecoder::decode_frames(broken.data(), broken.size());
+        assert(!part_way.ok());
+        assert(part_way.error.find("prefix code") != std::string::npos);
+        assert(part_way.frames.size() == 1);
+        assert(part_way.frames[0].image->pixels ==
+               WebPDecoder::decode_frames(kWebpAnimated, sizeof(kWebpAnimated)).frames[0].image->pixels);
+        // The same file whole is a two-frame animation, so the cut above is
+        // cutting a frame and not the trailing bytes after the container.
+        auto whole = WebPDecoder::decode_frames(kWebpAnimated, sizeof(kWebpAnimated));
+        assert(whole.ok() && whole.animated && whole.frames.size() == 2);
+    }
+
+    // An animation with a frame outside its canvas, and one with a frame whose
+    // image is another size, are refused rather than clipped into place.
+    {
+        std::vector<uint8_t> outside(kWebpAnimation, kWebpAnimation + sizeof(kWebpAnimation));
+        // The first ANMF's payload starts at byte 52, where its x offset sits,
+        // stored halved: 60 means 120 pixels across an 8-pixel canvas.
+        outside[52] = 60;
+        auto res = WebPDecoder::decode_frames(outside.data(), outside.size());
+        assert(!res.ok());
+        assert(res.error.find("not inside the canvas") != std::string::npos);
+
+        std::vector<uint8_t> wrong_size(kWebpAnimation, kWebpAnimation + sizeof(kWebpAnimation));
+        wrong_size[58] = 3;  // the first frame's width, stored minus one: 4 x 4
+        auto res2 = WebPDecoder::decode_frames(wrong_size.data(), wrong_size.size());
+        assert(!res2.ok());
+        assert(res2.error.find("not the size of its rectangle") != std::string::npos);
+    }
+
+    // An animated canvas larger than the pixel budget: 36001 x 36001 is 1.3
+    // thousand million pixels, which no frame here could fill, and the canvas
+    // fields are the first thing the walk reads.
+    {
+        std::vector<uint8_t> huge(kWebpAnimation, kWebpAnimation + sizeof(kWebpAnimation));
+        // The VP8X canvas, stored minus one, at bytes 24..29.
+        huge[24] = 0x9F;
+        huge[25] = 0x8C;
+        huge[26] = 0x00;
+        huge[27] = 0x9F;
+        huge[28] = 0x8C;
+        huge[29] = 0x00;
+        auto res = WebPDecoder::decode_frames(huge.data(), huge.size());
+        assert(!res.ok());
+        assert(res.error.find("canvas is too large") != std::string::npos);
+    }
 
     // A truncated file must not decode to a partial or garbage image.
     auto truncated = WebPDecoder::decode_detailed(kWebpGradient8x8, 20);
@@ -12919,6 +12996,112 @@ TEST(webp_unsupported_and_malformed_input_is_refused) {
     auto empty_stream = WebPDecoder::decode_detailed(header_only, sizeof(header_only));
     assert(!empty_stream.ok());
     assert(empty_stream.status == WebPDecoder::Status::Truncated);
+}
+
+TEST(webp_animated_frames_are_composited) {
+    using namespace litebird;
+
+    auto anim = WebPDecoder::decode_frames(kWebpAnimation, sizeof(kWebpAnimation));
+    assert(anim.ok());
+    assert(anim.animated);
+    assert(anim.canvas_width == 8 && anim.canvas_height == 8);
+    assert(anim.loop_count == 3);
+    assert(anim.background == 0x44112233u);  // alpha, red, green, blue
+    assert(anim.frames.size() == 4);
+
+    struct Expected {
+        int duration_ms;
+        int x, y, width, height;
+        bool blend;
+        bool dispose;
+        uint64_t hash;  // FNV-1a over the frame's 0xAARRGGBB pixels, as stored
+    };
+    const Expected expected[] = {
+        {50, 0, 0, 8, 8, false, false, 0xa4b9fad54e398f25ull},
+        {70, 2, 2, 4, 4, true, false, 0x13b98cad4b0626e5ull},
+        {30, 4, 4, 4, 4, false, true, 0x269a21981682bed5ull},
+        {10, 4, 4, 4, 4, true, false, 0x3c8caa67a0ec04d5ull},
+    };
+    for (size_t i = 0; i < anim.frames.size(); ++i) {
+        const auto& frame = anim.frames[i];
+        assert(frame.image != nullptr);
+        assert(frame.image->width == anim.canvas_width && frame.image->height == anim.canvas_height);
+        assert(frame.duration_ms == expected[i].duration_ms);
+        assert(frame.x == expected[i].x && frame.y == expected[i].y);
+        assert(frame.width == expected[i].width && frame.height == expected[i].height);
+        assert(frame.blend == expected[i].blend);
+        assert(frame.dispose_to_background == expected[i].dispose);
+        uint64_t hash = 0xcbf29ce484222325ull;
+        for (uint32_t pixel : frame.image->pixels) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                hash ^= (pixel >> shift) & 0xffu;
+                hash *= 0x100000001b3ull;
+            }
+        }
+        assert(hash == expected[i].hash);
+    }
+
+    // The pixels themselves, one from each thing the compositor does: the red
+    // key frame, the half-transparent blue frame blended onto it (128 of the
+    // destination's alpha survives the blend: 200 * 128 / 255 = 15 for green,
+    // and the red and blue channels meet in the middle), and the blue frame
+    // over the rectangle the green one cleared, which comes out exactly as the
+    // frame's own pixels.
+    auto pixel = [](const ImageData& image, int x, int y) { return image.pixels[static_cast<size_t>(y) * image.width + x]; };
+    const auto red = 0xFFC81010u;      // 200, 16, 16
+    const auto blended = 0xFF6B0F6Cu;  // 107, 15, 108
+    const auto blue = 0x801010C8u;     // 16, 16, 200 at alpha 128
+    const auto green = 0xFF10C810u;    // 16, 200, 16
+    assert(pixel(*anim.frames[0].image, 0, 0) == red);
+    assert(pixel(*anim.frames[0].image, 7, 7) == red);
+    assert(pixel(*anim.frames[1].image, 2, 2) == blended);
+    assert(pixel(*anim.frames[1].image, 4, 4) == blended);
+    assert(pixel(*anim.frames[1].image, 7, 7) == red);  // outside the frame's rectangle
+    assert(pixel(*anim.frames[2].image, 4, 4) == green);
+    assert(pixel(*anim.frames[2].image, 3, 3) == blended);  // disposal comes after the frame
+    assert(pixel(*anim.frames[3].image, 4, 4) == blue);
+    assert(pixel(*anim.frames[3].image, 2, 2) == blended);
+
+    // decode() — what an <img> gets — is the first frame, whole.
+    auto first = WebPDecoder::decode(kWebpAnimation, sizeof(kWebpAnimation));
+    assert(first != nullptr);
+    assert(first->width == 8 && first->height == 8);
+    assert(first->pixels == anim.frames.front().image->pixels);
+    auto via_detail = WebPDecoder::decode_detailed(kWebpAnimation, sizeof(kWebpAnimation));
+    assert(via_detail.ok() && via_detail.image->pixels == first->pixels);
+    assert(WebPDecoder::first_frame(kWebpAnimation, sizeof(kWebpAnimation))->pixels == first->pixels);
+    assert(WebPDecoder::probe(kWebpAnimation, sizeof(kWebpAnimation)) == WebPDecoder::Status::Ok);
+
+    // The frame cap stops the walk and hands back what it has.
+    auto capped = WebPDecoder::decode_frames(kWebpAnimation, sizeof(kWebpAnimation), 2);
+    assert(capped.ok() && capped.frames.size() == 2);
+    auto none = WebPDecoder::decode_frames(kWebpAnimation, sizeof(kWebpAnimation), 0);
+    assert(!none.ok() && none.frames.empty());
+
+    // A still image asked for its frames is one frame with no duration, and it
+    // is not an animation.
+    auto still = WebPDecoder::decode_frames(kWebpGradient8x8, sizeof(kWebpGradient8x8));
+    assert(still.ok());
+    assert(!still.animated);
+    assert(still.frames.size() == 1);
+    assert(still.frames[0].duration_ms == 0);
+    assert(still.frames[0].x == 0 && still.frames[0].y == 0);
+    assert(still.frames[0].width == 8 && still.frames[0].height == 8);
+    assert(!still.first_is_lossy);
+    assert(still.frames[0].image->pixels == WebPDecoder::decode(kWebpGradient8x8, sizeof(kWebpGradient8x8))->pixels);
+
+    // Each frame's image comes out of the same codec its still counterpart
+    // does, so a mixed animation reports the first frame's compression and
+    // draws every frame with the same pixels a still would.
+    std::vector<uint8_t> bytes(kWebpAnimation, kWebpAnimation + sizeof(kWebpAnimation));
+    auto via_decoder = ImageDecoder::decode(bytes, "image/webp");
+    assert(via_decoder != nullptr && via_decoder->pixels == first->pixels);
+
+    // Nothing here is a WebP file: an empty buffer and a bare header.
+    assert(!WebPDecoder::decode_frames(nullptr, 0).ok());
+    const uint8_t junk[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+    assert(!WebPDecoder::decode_frames(junk, sizeof(junk)).ok());
+    assert(WebPDecoder::first_frame(junk, sizeof(junk)) == nullptr);
 }
 
 TEST(webp_lossy_vp8_decodes_bit_exactly) {
@@ -18435,6 +18618,7 @@ int main() {
     RUN_TEST(gif_decoder_87a_89a_interlaced_and_animation);
     RUN_TEST(webp_lossless_decodes_every_transform);
     RUN_TEST(webp_unsupported_and_malformed_input_is_refused);
+    RUN_TEST(webp_animated_frames_are_composited);
     // Phase 57: lossy WebP, bit-exact against libwebp.
     RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
     RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);

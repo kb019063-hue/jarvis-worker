@@ -13,8 +13,15 @@ Tests:
      LZ77), and all four self-similarity transforms (predictor, cross-colour,
      subtract-green, colour-indexing with 2/4/16/256-entry palettes and pixel
      bundling) — bit-exact against libwebp, since lossless has no tolerance.
-     Refusals are checked too: lossy `VP8`, animated `ANIM`/`ANMF`, truncated
-     and non-WebP input must be reported, not drawn.
+     Refusals are checked too: truncated and non-WebP input must be reported,
+     not drawn.
+  3b. Animated WebP (`VP8X` canvas, `ANIM`, one `ANMF` per frame): every frame
+     composited and compared, with its rectangle, duration, blending method and
+     disposal method, against ImageMagick where it can be the oracle (opaque
+     frames, which it coalesces itself) and against `composite_frames` where it
+     cannot (it blends frames that ask not to be blended), whose frame images
+     come from ImageMagick. Metadata, the frame cap, `decode()`'s first frame,
+     and the refusals are checked here.
   4. Real-world SVG vector rendering (viewBox, preserveAspectRatio, full path
      grammar including W3C F.6.5/F.6.6 elliptical arcs and compact flags,
      transforms, evenodd/nonzero fill rules, linear/radial gradients, <use>,
@@ -414,12 +421,20 @@ def verify_webp_decoding(binary, convert_bin, tmpdir):
     subprocess.run([convert_bin, "-size", "8x8", "xc:#3366cc", "-quality", "70", lossy_path],
                    check=True, capture_output=True)
 
+    # An animation is not a refusal any more: `decode()` draws its first frame,
+    # and the animation itself is covered by verify_animated_webp().
     anim_path = os.path.join(tmpdir, "animated.webp")
     subprocess.run([convert_bin, "-delay", "10", "-loop", "0",
                     "(", "-size", "8x8", "xc:red", ")", "(", "-size", "8x8", "xc:blue", ")",
                     "-define", "webp:lossless=true", anim_path],
                    check=True, capture_output=True)
-    expect_refusal("animated", anim_path, "animat")
+    anim_first = os.path.join(tmpdir, "animated_first.rgba")
+    meta = run_media_check(binary, ["--decode-webp", anim_path,
+                                    os.path.join(tmpdir, "animated_first.ppm"), anim_first]).strip()
+    if meta.split()[:2] != ["8", "8"]:
+        raise AssertionError(f"[WebP animated] --decode-webp returned {meta!r} for an animation")
+    print("  [PASS] WebP animated              8x8 first frame, not a refusal")
+    passed += 1
 
     truncated_path = os.path.join(tmpdir, "truncated.webp")
     with open(truncated_path, "wb") as f:
@@ -440,7 +455,7 @@ def verify_webp_decoding(binary, convert_bin, tmpdir):
     for name, path, expected in [
         ("probe_lossless", vp8x_path, "ok"),
         ("probe_lossy", lossy_path, "ok"),
-        ("probe_animated", anim_path, "animated WebP is not supported"),
+        ("probe_animated", anim_path, "ok"),
         ("probe_truncated", truncated_path, "truncated WebP file"),
     ]:
         res = subprocess.run([binary, "--probe-webp", path], capture_output=True)
@@ -738,6 +753,443 @@ def verify_lossy_webp(binary, convert_bin, tmpdir):
     return passed
 
 
+
+def read_rgba_file(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def split_riff_chunks(blob):
+    """The chunks of a RIFF file, in order: (fourcc, payload) pairs."""
+    chunks = []
+    pos = 12
+    while pos + 8 <= len(blob):
+        fourcc = blob[pos:pos + 4]
+        size = int.from_bytes(blob[pos + 4:pos + 8], "little")
+        chunks.append((fourcc, blob[pos + 8:pos + 8 + size]))
+        pos += 8 + size + (size & 1)
+    return chunks
+
+
+def build_riff(chunks):
+    body = b"WEBP"
+    for fourcc, payload in chunks:
+        body += fourcc + len(payload).to_bytes(4, "little") + payload
+        if len(payload) & 1:
+            body += b"\0"
+    return b"RIFF" + (len(body)).to_bytes(4, "little") + body
+
+
+def u24(value):
+    return value.to_bytes(3, "little")
+
+
+def build_animation(stills, canvas, loop=0, background=(0, 0, 0, 0)):
+    """Mux still WebP blobs into an animation, choosing every field by hand.
+
+    `stills` is a list of dicts with `blob`, `x`, `y`, `duration`, `blend` and
+    `dispose`. The bytes are a valid animated WebP, so `webpmux` and libwebp's
+    decoder accept them (checked against both while the decoder was written);
+    ImageMagick reads them too, which is what lets it be the oracle below.
+    """
+    alpha = False
+    inner = []
+    for frame in stills:
+        chunks = [(fourcc, payload) for fourcc, payload in split_riff_chunks(frame["blob"])
+                  if fourcc in (b"ALPH", b"VP8 ", b"VP8L")]
+        for fourcc, payload in chunks:
+            if fourcc == b"ALPH":
+                alpha = True
+            elif fourcc == b"VP8L" and len(payload) >= 5 and (int.from_bytes(payload[1:5], "little") >> 28) & 1:
+                alpha = True
+        inner.append(chunks)
+
+    width, height = canvas
+    flags = 0x02 | (0x10 if alpha else 0x00)
+    body = [(b"VP8X", bytes([flags, 0, 0, 0]) + u24(width - 1) + u24(height - 1)),
+            (b"ANIM", bytes([background[2], background[1], background[0], background[3]]) +
+             int(loop).to_bytes(2, "little"))]
+    for frame, chunks in zip(stills, inner):
+        picture_width = frame.get("w", 0)
+        picture_height = frame.get("h", 0)
+        # The format stores offsets in units of two pixels, so an odd one cannot
+        # be written down (and would be read back as the one below it).
+        assert frame["x"] % 2 == 0 and frame["y"] % 2 == 0, (frame["x"], frame["y"])
+        # Bit 1 of the flags byte is the blending method: 1 = do not blend.
+        method = (0x00 if frame["blend"] else 0x02) | (0x01 if frame["dispose"] else 0x00)
+        payload = (u24(frame["x"] // 2) + u24(frame["y"] // 2) + u24(picture_width - 1) +
+                   u24(picture_height - 1) + u24(frame["duration"]) + bytes([method]))
+        for fourcc, chunk_payload in chunks:
+            payload += fourcc + len(chunk_payload).to_bytes(4, "little") + chunk_payload
+            if len(chunk_payload) & 1:
+                payload += b"\0"
+        body.append((b"ANMF", payload))
+    return build_riff(body)
+
+
+def still_from_frame(blob, index):
+    """The still WebP a frame's `ANMF` payload wraps."""
+    frames = [payload for fourcc, payload in split_riff_chunks(blob) if fourcc == b"ANMF"]
+    payload = frames[index][16:]
+    chunks = []
+    pos = 0
+    while pos + 8 <= len(payload):
+        fourcc = payload[pos:pos + 4]
+        size = int.from_bytes(payload[pos + 4:pos + 8], "little")
+        chunk_payload = payload[pos + 8:pos + 8 + size]
+        chunks.append((fourcc, chunk_payload))
+        pos += 8 + size + (size & 1)
+    return build_riff(chunks)
+
+
+def blend_channelwise(src, dst):
+    """One straight-alpha pixel over another, libwebp's arithmetic.
+
+    `src` and `dst` are (r, g, b, a) tuples. An opaque source replaces the
+    destination; a fully transparent one leaves it; anything between scales the
+    destination's alpha by 256 - src_alpha and divides once by the result's
+    alpha, so two decoders that draw the same frames agree byte for byte.
+    """
+    src_alpha = src[3]
+    if src_alpha == 0xFF:
+        return src
+    if src_alpha == 0:
+        return dst
+    dst_factor_alpha = (dst[3] * (256 - src_alpha)) >> 8
+    blend_alpha = src_alpha + dst_factor_alpha
+    scale = (1 << 24) // blend_alpha
+    return tuple((((src[c] * src_alpha + dst[c] * dst_factor_alpha) * scale) >> 24) & 0xFF
+                 for c in range(3)) + (blend_alpha,)
+
+
+def composite_frames(frames, canvas_size, decoded):
+    """The canvas after each frame, from the frame images and their methods.
+
+    This is the reference the decoder is compared with for the cases where
+    ImageMagick cannot be the oracle (it blends every frame, so a frame that
+    says "do not blend" comes out wrong there). `decoded` holds each frame's own
+    pixels, decoded from its `ANMF` payload by ImageMagick, so the image data
+    still comes from outside this repository.
+    """
+    canvas_width, canvas_height = canvas_size
+    canvas = bytearray(canvas_width * canvas_height * 4)
+    previous = bytearray(canvas_width * canvas_height * 4)
+    previous_rect = None
+    previous_disposed = False
+    previous_was_key_frame = False
+    out = []
+    for index, (frame, image) in enumerate(zip(frames, decoded)):
+        width, height = frame["w"], frame["h"]
+        full_canvas = width == canvas_width and height == canvas_height
+        previous_full = previous_rect is not None and previous_rect["w"] == canvas_width and \
+            previous_rect["h"] == canvas_height
+        has_alpha = any(image[i * 4 + 3] != 0xFF for i in range(width * height))
+        key_frame = (index == 0 or ((not has_alpha or not frame["blend"]) and full_canvas) or
+                     (previous_disposed and (previous_full or previous_was_key_frame)))
+        canvas = bytearray(canvas_width * canvas_height * 4) if key_frame else bytearray(previous)
+        for row in range(height):
+            dst = ((frame["y"] + row) * canvas_width + frame["x"]) * 4
+            src = row * width * 4
+            canvas[dst:dst + width * 4] = image[src:src + width * 4]
+        if index > 0 and frame["blend"] and not key_frame:
+            for row in range(height):
+                canvas_row = frame["y"] + row
+                ranges = [(frame["x"], width)]
+                if previous_disposed:
+                    previous_max_x = previous_rect["x"] + previous_rect["w"]
+                    previous_max_y = previous_rect["y"] + previous_rect["h"]
+                    if (canvas_row < previous_rect["y"] or canvas_row >= previous_max_y or
+                            frame["x"] >= previous_max_x or frame["x"] + width <= previous_rect["x"]):
+                        ranges = [(frame["x"], width)]
+                    else:
+                        ranges = []
+                        if frame["x"] < previous_rect["x"]:
+                            ranges.append((frame["x"], previous_rect["x"] - frame["x"]))
+                        if frame["x"] + width > previous_max_x:
+                            ranges.append((previous_max_x, frame["x"] + width - previous_max_x))
+                for left, span in ranges:
+                    for column in range(left, left + span):
+                        offset = (canvas_row * canvas_width + column) * 4
+                        src_pixel = tuple(canvas[offset:offset + 4])
+                        dst_pixel = tuple(previous[offset:offset + 4])
+                        canvas[offset:offset + 4] = bytes(blend_channelwise(src_pixel, dst_pixel))
+        out.append(bytes(canvas))
+        previous = bytearray(canvas)
+        if frame["dispose"]:
+            for row in range(height):
+                start = ((frame["y"] + row) * canvas_width + frame["x"]) * 4
+                previous[start:start + width * 4] = bytes(width * 4)
+        previous_rect = frame
+        previous_disposed = frame["dispose"]
+        previous_was_key_frame = key_frame
+    return out
+
+
+def verify_animated_webp(binary, convert_bin, tmpdir):
+    """Animated WebP: the container, the compositor, and the refusals.
+
+    A frame is an `ANMF` chunk holding a rectangle, a duration, a blending
+    method and a disposal method around a still `VP8`/`VP8L` image (with `ALPH`
+    when it is lossy and translucent). Decoding one means compositing every
+    frame on the `VP8X` canvas; the numbers below come from libwebp's own
+    animation decoder, which `verify-media` cannot link against, so the
+    comparison is: pixels of every frame's *image* from ImageMagick (exact — the
+    still-image tests above prove that decode), compositing in `composite_frames`
+    above, and the whole thing cross-checked against libwebp 1.5 while the
+    decoder was written (658 animations, every frame byte-identical).
+    """
+    passed = 0
+
+    def still(name, size, source, alpha=False):
+        path = os.path.join(tmpdir, f"still_{name}.webp")
+        subprocess.run([convert_bin, "-size", size] + list(source) +
+                       ["-define", "webp:lossless=true", path], check=True, capture_output=True)
+        with open(path, "rb") as f:
+            return f.read()
+
+    def decode_animation(path, prefix, max_frames=None):
+        args = ["--decode-webp-anim", path, prefix]
+        if max_frames is not None:
+            args.append(str(max_frames))
+        meta = run_media_check(binary, args).strip().splitlines()
+        head = meta[0].split()
+        info = dict(canvas=(int(head[0]), int(head[1])), frames=int(head[2]), loop=int(head[3]),
+                    background=head[4], animated=head[5] == "animated")
+        frames = []
+        for index, line in enumerate(meta[1:]):
+            parts = line.split()
+            frames.append(dict(duration=int(parts[0]), x=int(parts[1]), y=int(parts[2]),
+                               w=int(parts[3]), h=int(parts[4]), blend=parts[5] == "blend",
+                               dispose=parts[6] == "dispose",
+                               pixels=read_rgba_file(f"{prefix}_{index}.rgba")))
+        return info, frames
+
+    def check_composite(name, path, frames_spec, canvas, expected_frames, needle_note=""):
+        nonlocal passed
+        info, frames = decode_animation(path, os.path.join(tmpdir, f"{name}_out"))
+        if info["canvas"] != canvas:
+            raise AssertionError(f"[WebP anim {name}] canvas {info['canvas']}, expected {canvas}")
+        if len(frames) != len(expected_frames):
+            raise AssertionError(f"[WebP anim {name}] {len(frames)} frames, expected {len(expected_frames)}")
+        for index, (got, want) in enumerate(zip(frames, expected_frames)):
+            if got["pixels"] != want:
+                differing = sum(1 for a, b in zip(got["pixels"], want) if a != b)
+                where = next(i for i in range(len(want)) if got["pixels"][i] != want[i])
+                pixel = where // 4
+                raise AssertionError(
+                    f"[WebP anim {name}] frame {index} differs from the reference in {differing} bytes; "
+                    f"first at pixel {pixel} ({pixel % canvas[0]},{pixel // canvas[0]}): "
+                    f"got {list(got['pixels'][pixel * 4:pixel * 4 + 4])}, "
+                    f"expected {list(want[pixel * 4:pixel * 4 + 4])}")
+        print(f"  [PASS] WebP anim {name:22s} {len(frames)} frame(s) {canvas[0]}x{canvas[1]} "
+              f"{needle_note}exact")
+        passed += 1
+
+    # Two stills to draw frames with: an opaque one and one with transparency.
+    opaque_20x16 = still("opaque_20x16", "20x16", ["xc:#2f6fd0", "-fill", "#d0a020",
+                                                   "-draw", "rectangle 0,0 9,15"])
+    alpha_12x10 = still("alpha_12x10", "12x10",
+                        ["xc:none", "-fill", "rgba(220,40,60,0.5)", "-draw", "rectangle 0,0 5,9",
+                         "-fill", "rgba(40,90,220,0.25)", "-draw", "rectangle 6,0 11,9"])
+    ramp_8x8 = still("ramp_8x8", "8x8", ["gradient:rgba(0,0,0,0)-rgba(0,0,0,1)"])
+
+    # The metadata: canvas, loop count, background colour, and every frame's
+    # rectangle, duration and methods, all of which the muxer set by hand.
+    frames_spec = [
+        dict(blob=opaque_20x16, x=0, y=0, w=20, h=16, duration=100, blend=False, dispose=False),
+        dict(blob=alpha_12x10, x=4, y=2, w=12, h=10, duration=40, blend=True, dispose=False),
+        dict(blob=ramp_8x8, x=12, y=8, w=8, h=8, duration=7, blend=True, dispose=True),
+        dict(blob=opaque_20x16, x=0, y=0, w=20, h=16, duration=0, blend=False, dispose=True),
+    ]
+    blob = build_animation(frames_spec, (20, 16), loop=5, background=(16, 32, 48, 255))
+    path = os.path.join(tmpdir, "metadata.webp")
+    with open(path, "wb") as f:
+        f.write(blob)
+    info, frames = decode_animation(path, os.path.join(tmpdir, "metadata_out"))
+    expected_meta = dict(canvas=(20, 16), loop=5, background="ff102030",
+                         frames=[(0, 0, 20, 16, 100, False, False),
+                                 (4, 2, 12, 10, 40, True, False),
+                                 (12, 8, 8, 8, 7, True, True),
+                                 (0, 0, 20, 16, 0, False, True)])
+    got_meta = dict(canvas=info["canvas"], loop=info["loop"], background=info["background"],
+                    frames=[(f["x"], f["y"], f["w"], f["h"], f["duration"], f["blend"], f["dispose"])
+                            for f in frames])
+    if got_meta != expected_meta:
+        raise AssertionError(f"[WebP anim metadata] got {got_meta}, expected {expected_meta}")
+    if not info["animated"]:
+        raise AssertionError("[WebP anim metadata] an animation was not reported as one")
+    print(f"  [PASS] WebP anim metadata              canvas 20x16, loop 5, background "
+          f"0x{info['background']}, 4 frames with their own rectangles, durations and methods")
+    passed += 1
+
+    # The frames themselves, from the composited canvases.
+    decoded = []
+    for index, frame in enumerate(frames_spec):
+        frame_still = still_from_frame(blob, index)
+        frame_path = os.path.join(tmpdir, f"metadata_frame{index}.webp")
+        with open(frame_path, "wb") as f:
+            f.write(frame_still)
+        width, height, rgba = decode_webp_with_imagemagick(convert_bin, frame_path)
+        if (width, height) != (frame["w"], frame["h"]):
+            raise AssertionError(f"[WebP anim metadata] frame {index} is {width}x{height}")
+        decoded.append(rgba)
+    check_composite("composited", path, frames_spec, (20, 16),
+                    composite_frames(frames_spec, (20, 16), decoded),
+                    "offsets, blending and disposal ")
+
+    # A full-canvas animation of opaque frames is what ImageMagick itself
+    # composites, so here it can be the oracle directly: `-coalesce` writes each
+    # frame as it is shown.
+    opaque_frames = [
+        dict(blob=opaque_20x16, x=0, y=0, w=20, h=16, duration=100, blend=True, dispose=False),
+        dict(blob=still("opaque_b", "20x16", ["plasma:red-blue", "-seed", "4"]),
+             x=0, y=0, w=20, h=16, duration=50, blend=True, dispose=False),
+    ]
+    opaque_blob = build_animation(opaque_frames, (20, 16), loop=0, background=(0, 0, 0, 0))
+    opaque_path = os.path.join(tmpdir, "opaque_anim.webp")
+    with open(opaque_path, "wb") as f:
+        f.write(opaque_blob)
+    coalesced = os.path.join(tmpdir, "coalesced_%02d.rgba")
+    subprocess.run([convert_bin, opaque_path, "-coalesce", "-depth", "8", coalesced],
+                   check=True, capture_output=True)
+    expected = [read_rgba_file(coalesced % 0), read_rgba_file(coalesced % 1)]
+    check_composite("imagemagick_oracle", opaque_path, opaque_frames, (20, 16), expected,
+                    "matches ImageMagick -coalesce ")
+
+    # Transparency, blending and disposal, which ImageMagick composites
+    # differently (it blends frames that say not to), so the reference comes
+    # from the still decodes above.
+    alpha_frames = [
+        dict(blob=alpha_12x10, x=0, y=0, w=12, h=10, duration=60, blend=True, dispose=False),
+        dict(blob=ramp_8x8, x=2, y=2, w=8, h=8, duration=60, blend=True, dispose=False),
+        dict(blob=opaque_20x16, x=0, y=0, w=20, h=16, duration=60, blend=False, dispose=True),
+        dict(blob=alpha_12x10, x=8, y=6, w=12, h=10, duration=60, blend=False, dispose=False),
+        dict(blob=ramp_8x8, x=0, y=0, w=8, h=8, duration=60, blend=True, dispose=True),
+        dict(blob=ramp_8x8, x=6, y=4, w=8, h=8, duration=60, blend=True, dispose=False),
+    ]
+    alpha_blob = build_animation(alpha_frames, (20, 16), loop=1, background=(9, 8, 7, 6))
+    alpha_path = os.path.join(tmpdir, "alpha_anim.webp")
+    with open(alpha_path, "wb") as f:
+        f.write(alpha_blob)
+    alpha_decoded = []
+    for index, frame in enumerate(alpha_frames):
+        frame_path = os.path.join(tmpdir, f"alpha_frame{index}.webp")
+        with open(frame_path, "wb") as f:
+            f.write(still_from_frame(alpha_blob, index))
+        alpha_decoded.append(decode_webp_with_imagemagick(convert_bin, frame_path)[2])
+    alpha_expected = composite_frames(alpha_frames, (20, 16), alpha_decoded)
+    check_composite("alpha_blend_dispose", alpha_path, alpha_frames, (20, 16), alpha_expected,
+                    "transparency, blending, disposal ")
+
+    # A still image asked for its frames, and a one-frame animation: the same
+    # pixels through both routes, and `decode()` takes the first frame of a real
+    # animation without needing the compositor.
+    still_path = os.path.join(tmpdir, "still_only.webp")
+    with open(still_path, "wb") as f:
+        f.write(ramp_8x8)
+    info, frames = decode_animation(still_path, os.path.join(tmpdir, "still_out"))
+    if info["animated"] or len(frames) != 1 or frames[0]["duration"] != 0:
+        raise AssertionError(f"[WebP anim still] a still image came back as {info}, {len(frames)} frame(s)")
+    plain = os.path.join(tmpdir, "still_plain.rgba")
+    run_media_check(binary, ["--decode-webp", still_path, os.path.join(tmpdir, "still_plain.ppm"), plain])
+    if frames[0]["pixels"] != read_rgba_file(plain):
+        raise AssertionError("[WebP anim still] the single frame differs from --decode-webp")
+    print("  [PASS] WebP anim still_image           one frame, no duration, same pixels as --decode-webp")
+    passed += 1
+
+    first = os.path.join(tmpdir, "alpha_first.rgba")
+    run_media_check(binary, ["--decode-webp", alpha_path, os.path.join(tmpdir, "alpha_first.ppm"), first])
+    if read_rgba_file(first) != alpha_expected[0]:
+        raise AssertionError("[WebP anim first_frame] --decode-webp did not return the first frame")
+    print("  [PASS] WebP anim first_frame           --decode-webp draws the first composited frame")
+    passed += 1
+
+    # The frame cap: the caller can stop after N frames, and never gets more.
+    info, frames = decode_animation(alpha_path, os.path.join(tmpdir, "capped_out"), max_frames=3)
+    if len(frames) != 3:
+        raise AssertionError(f"[WebP anim cap] asked for 3 frames, got {len(frames)}")
+    print("  [PASS] WebP anim frame_cap             3 of 6 frames when capped at 3")
+    passed += 1
+
+    # Two decodes of the same animation agree.
+    first_out = os.path.join(tmpdir, "anim_repeat1")
+    second_out = os.path.join(tmpdir, "anim_repeat2")
+    decode_animation(alpha_path, first_out)
+    decode_animation(alpha_path, second_out)
+    for index in range(len(alpha_frames)):
+        if read_rgba_file(f"{first_out}_{index}.rgba") != read_rgba_file(f"{second_out}_{index}.rgba"):
+            raise AssertionError(f"[WebP anim determinism] frame {index} differs between two decodes")
+    print("  [PASS] WebP anim determinism           two decodes byte-identical")
+    passed += 1
+
+    # Refusals: a frame outside the canvas, a frame whose image is another size,
+    # a truncated frame, an animation with no `VP8X` canvas, a canvas over the
+    # limit, and an animation that holds no frames. None may be drawn.
+    def expect_anim_refusal(name, blob_bytes, needle):
+        nonlocal passed
+        bad_path = os.path.join(tmpdir, f"refuse_{name}.webp")
+        with open(bad_path, "wb") as f:
+            f.write(blob_bytes)
+        res = subprocess.run([binary, "--decode-webp-anim", bad_path, os.path.join(tmpdir, "refuse")],
+                             capture_output=True)
+        message = res.stderr.decode("utf-8", errors="replace")
+        if res.returncode == 0:
+            raise AssertionError(f"[WebP anim {name}] decoded, but must be refused")
+        if needle.lower() not in message.lower():
+            raise AssertionError(f"[WebP anim {name}] message {message.strip()!r} does not mention {needle!r}")
+        print(f"  [PASS] WebP anim {name:22s} refused: {message.strip().splitlines()[0][:60]}")
+        passed += 1
+
+    outside = [dict(frames_spec[0], x=2, y=0)]
+    expect_anim_refusal("outside_canvas",
+                        build_animation(outside, (20, 16)), "not inside the canvas")
+
+    mismatched = [dict(frames_spec[0], w=8, h=8, x=0, y=0)]
+    expect_anim_refusal("size_mismatch",
+                        build_animation(mismatched, (20, 16)), "not the size of its rectangle")
+
+    expect_anim_refusal("truncated_frame", blob[:len(blob) - 30], "truncated")
+
+    without_vp8x = b"RIFF" + (len(blob) + 4).to_bytes(4, "little") + b"WEBP" + b"".join(
+        fourcc + len(payload).to_bytes(4, "little") + payload + (b"\0" if len(payload) & 1 else b"")
+        for fourcc, payload in split_riff_chunks(blob) if fourcc != b"VP8X")
+    expect_anim_refusal("no_vp8x_canvas", without_vp8x, "without a vp8x canvas")
+
+    tiny_frame = split_riff_chunks(blob)
+    huge = [(b"VP8X", bytes([0x02, 0, 0, 0]) + u24(20000 - 1) + u24(20000 - 1)),
+            (b"ANIM", bytes([0, 0, 0, 0, 1, 0])),
+            ([payload for fourcc, payload in tiny_frame if fourcc == b"ANMF"][0])]
+    huge = [(b"VP8X", huge[0][1]), (b"ANIM", huge[1][1]), (b"ANMF", huge[2])]
+    expect_anim_refusal("canvas_too_large", build_riff(huge), "too large")
+
+    no_frames = [(b"VP8X", bytes([0x02, 0, 0, 0]) + u24(20 - 1) + u24(16 - 1)),
+                 (b"ANIM", bytes([0, 0, 0, 0, 1, 0]))]
+    expect_anim_refusal("no_frames", build_riff(no_frames), "no vp8l or vp8")
+
+    # One animation as ImageMagick writes it, end to end: the frames it reports
+    # are the frames ImageMagick coalesces to, since its encoder writes opaque
+    # full-canvas frames.
+    encoded = os.path.join(tmpdir, "im_encoded.webp")
+    subprocess.run([convert_bin, "-delay", "12", "-loop", "3",
+                    "(", "-size", "16x12", "xc:#c03040", ")",
+                    "(", "-size", "16x12", "plasma:navy-lime", "-seed", "3", ")",
+                    "-define", "webp:lossless=true", encoded], check=True, capture_output=True)
+    coalesced = os.path.join(tmpdir, "im_encoded_%02d.rgba")
+    subprocess.run([convert_bin, encoded, "-coalesce", "-depth", "8", coalesced],
+                   check=True, capture_output=True)
+    info, frames = decode_animation(encoded, os.path.join(tmpdir, "im_encoded_out"))
+    if info["canvas"] != (16, 12) or len(frames) != 2 or not info["animated"]:
+        raise AssertionError(f"[WebP anim encoder] got {info} with {len(frames)} frames")
+    for index, frame in enumerate(frames):
+        reference = read_rgba_file(coalesced % index)
+        if frame["pixels"] != reference:
+            raise AssertionError(f"[WebP anim encoder] frame {index} differs from ImageMagick -coalesce")
+    print(f"  [PASS] WebP anim encoder_round_trip     {len(frames)} frames from ImageMagick, "
+          f"loop {info['loop']}, 0x{info['background']}, exact")
+    passed += 1
+
+    return passed
+
 def verify_svg_rendering(binary, tmpdir):
     passed = 0
 
@@ -905,6 +1357,7 @@ def main():
             total_passed += verify_gifs_with_oracle(args.binary, convert_bin, tmpdir)
             total_passed += verify_webp_decoding(args.binary, convert_bin, tmpdir)
             total_passed += verify_lossy_webp(args.binary, convert_bin, tmpdir)
+            total_passed += verify_animated_webp(args.binary, convert_bin, tmpdir)
         else:
             print("WARNING: ImageMagick 'convert' not found; skipping libjpeg/GIF/WebP differential oracle.")
 

@@ -5,6 +5,7 @@
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/html/HtmlParser.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -61,14 +62,15 @@ bool write_rgba(const std::string& path, const litebird::ImageData& img) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--decode-vp8|--render-svg|"
+        std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--decode-webp-anim|--decode-vp8|"
+                     "--render-svg|"
                      "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-vp8|--fuzz-svg> <in> [out]\n";
         return 2;
     }
     const std::string mode = argv[1];
 
     if (mode == "--fuzz-batch") {
-        // Usage: media_check --fuzz-batch <jpeg|gif|svg> <file1> [file2 ...]
+        // Usage: media_check --fuzz-batch <jpeg|gif|webp|vp8|svg> <file1> [file2 ...]
         if (argc < 4) return 2;
         const std::string kind = argv[2];
         for (int i = 3; i < argc; ++i) {
@@ -80,6 +82,7 @@ int main(int argc, char** argv) {
                 (void)litebird::GifDecoder::decode_frames(b.data(), b.size(), 16);
             } else if (kind == "webp") {
                 (void)litebird::WebPDecoder::decode_detailed(b.data(), b.size());
+                (void)litebird::WebPDecoder::decode_frames(b.data(), b.size(), 16);
             } else if (kind == "vp8") {
                 litebird::Vp8Decoder::Frame frame;
                 std::string error;
@@ -164,6 +167,37 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (mode == "--decode-webp-anim") {
+        // Every frame of an animation, composited on the canvas, one `.rgba`
+        // per frame: `<prefix>_<n>.rgba`. The first line is the canvas size,
+        // the frame count, the loop count, the background colour and whether
+        // the file is an animation at all or a still image asked for its
+        // frames; then one line per frame with its geometry and its methods.
+        if (argc < 4) return 2;
+        const size_t max_frames = argc >= 5 ? static_cast<size_t>(std::strtoul(argv[4], nullptr, 10))
+                                           : litebird::WebPDecoder::kMaxFrames;
+        auto anim = litebird::WebPDecoder::decode_frames(bytes.data(), bytes.size(), max_frames);
+        if (!anim.ok()) {
+            std::cerr << "WebP animation error: " << anim.error << "\n";
+            return 1;
+        }
+        const std::string prefix = argv[3];
+        char background[16];
+        std::snprintf(background, sizeof(background), "%08x", anim.background);
+        std::cout << anim.canvas_width << " " << anim.canvas_height << " " << anim.frames.size() << " "
+                  << anim.loop_count << " " << background << " " << (anim.animated ? "animated" : "still")
+                  << "\n";
+        for (size_t i = 0; i < anim.frames.size(); ++i) {
+            const auto& frame = anim.frames[i];
+            const std::string out_file = prefix + "_" + std::to_string(i) + ".rgba";
+            if (!write_rgba(out_file, *frame.image)) return 2;
+            std::cout << frame.duration_ms << " " << frame.x << " " << frame.y << " " << frame.width << " "
+                      << frame.height << " " << (frame.blend ? "blend" : "noblend") << " "
+                      << (frame.dispose_to_background ? "dispose" : "keep") << "\n";
+        }
+        return 0;
+    }
+
     if (mode == "--decode-vp8") {
         // The bytes a `VP8 ` chunk carries: the frame tag and everything after
         // it, with no RIFF around it.
@@ -212,6 +246,7 @@ int main(int argc, char** argv) {
 
     if (mode == "--fuzz-webp") {
         (void)litebird::WebPDecoder::decode_detailed(bytes.data(), bytes.size());
+        (void)litebird::WebPDecoder::decode_frames(bytes.data(), bytes.size(), 16);
         return 0;
     }
 

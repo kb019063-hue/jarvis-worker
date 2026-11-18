@@ -191,14 +191,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   20:18) `check_pr.py` asked `tools/next_ids.py` what is taken and reported
   the answer as "on main already": to #73 for Phase 58 and finding 64 and to
   #63 for Phase 62 and finding 68, both open since before the floors passed
-  them, with numbers that have no write-up. A pull request can raise the floors to
-  its own numbers when it merges (#75 and #83 did), so any open one that a
-  later one overtakes would have been told the same. `check_pr.py` now stops
-  a pull request only for a number that has a write-up on `main`: a file
-  `docs/phases/NN-…` or `docs/findings/NN-…`, or a place in one of the two
-  frozen documents. For one at or below a floor it remarks. What a document
-  says *about* a number is not a write-up of it: this paragraph names four,
-  and read as one it would have told #63 and #73 the same thing again.
+  them, with numbers that have no write-up. A pull request can raise the
+  floors to its own numbers when it merges (#75 and #83 did), so any open
+  one that a later one overtakes would have been told the same.
+  `check_pr.py` now stops a pull request only for a number that has a
+  write-up on `main`: a file `docs/phases/NN-…` or `docs/findings/NN-…`, or
+  a place in one of the two frozen documents. For one at or below a floor
+  it remarks. What a document says *about* a number is not a write-up of
+  it: this paragraph names four, and read as one it would have told #63 and
+  #73 the same thing again.
 - **`main`, as the clone remembers it.** From #80 the same question was put
   to the clone's own branch `main`, which is where the clone was made and
   which `git fetch` of `origin` does not move. Twenty minutes after #83 had
@@ -217,7 +218,7 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   open for almost 28 hours, until another agent was asked to close it. It
   was opened from #62's branch 75 seconds after #62 was merged; #67 came 52
   minutes later from another branch, with the same task and much of the same
-  text. #81 and #82, on the next day, are the same pair (#81 from #80's
+  text. #81 and #82, that evening, are the same pair (#81 from #80's
   branch, two minutes after #80 was merged), and the comment that closed #81
   says what happened: "#81's branch cannot be pushed to from here". After a
   merge the next message puts a session on a new branch, and a claim opened

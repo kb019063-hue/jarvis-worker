@@ -17053,6 +17053,36 @@ TEST(js_map_set_constructors_dispatch_to_instance_methods) {
            "throw-set:iterator,throw-set:next,throw-set:add:20,throw-set:next,throw-set:add:21,throw-set:close,set boom");
     assert(js.global_env()->get("reflectSummary").to_string() ==
            "true|true|9|true|true|true|reflect-map:set:r,reflect-set:add:8");
+
+    // The ordinary constructors keep their intrinsic prototypes and normal
+    // collection behavior after the instance-method dispatch path above.
+    assert(js.eval("var directMap = new Map([['one', 1], ['two', 2], ['one', 3]]);"
+                   "var directSet = new Set(['a', 'b', 'a']);"
+                   "[directMap instanceof Map, Object.getPrototypeOf(directMap) === Map.prototype,"
+                   " directMap.size, directMap.get('one'), directMap.get('two'),"
+                   " directSet instanceof Set, Object.getPrototypeOf(directSet) === Set.prototype,"
+                   " directSet.size, directSet.has('a'), directSet.has('b')].join('|')").to_string() ==
+           "true|true|2|3|2|true|true|2|true|true");
+
+    // AddEntriesFromIterable rejects a primitive entry and closes the outer
+    // iterator while unwinding the TypeError.
+    assert(js.eval(R"js(
+        var malformedClosed = 0;
+        var malformedEntries = {};
+        malformedEntries[Symbol.iterator] = function () {
+            var emitted = false;
+            return {
+                next: function () {
+                    if (emitted) return { done: true };
+                    emitted = true;
+                    return { value: 7, done: false };
+                },
+                return: function () { malformedClosed++; return {}; }
+            };
+        };
+        try { new Map(malformedEntries); 'no error'; }
+        catch (error) { error.name + '|' + malformedClosed; }
+    )js").to_string() == "TypeError|1");
 }
 
 TEST(js_iteration_of_another_realms_array) {

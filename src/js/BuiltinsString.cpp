@@ -1805,6 +1805,8 @@ void install_string_builtins(JsIntrinsics& realm) {
         return invoke_symbol(rx, kSymbolSearchKey, s);
     });
 
+    js_install_iterator_prototype(JsIntrinsics::get().string_iterator_proto, "String Iterator");
+
     // Strings iterate by code point.
     auto string_iterator = [](Args) {
         const JsString text = this_string("[Symbol.iterator]");
@@ -1819,7 +1821,7 @@ void install_string_builtins(JsIntrinsics& realm) {
             value = len == 1 ? JsValue::make_string(JsString::from_unit(c)) : JsValue::make_string(s.substr(i, len));
             *offset = i + len;
             return true;
-        });
+        }, {}, JsIntrinsics::get().string_iterator_proto);
     };
     {
         JsValue iter_fn = js_make_native("[Symbol.iterator]", 0, string_iterator);
